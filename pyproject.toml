@@ -10,6 +10,7 @@ dependencies = [
 	"mss",
 	"pyyaml",
 	"pyautogui",
+	"keyboard>=0.13.5",
 ]
 
 [tool.uv]

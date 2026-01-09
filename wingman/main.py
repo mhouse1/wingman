@@ -2,6 +2,11 @@ import argparse
 import yaml
 import time
 import logging
+import threading
+try:
+    import keyboard as keyboard_module
+except Exception:
+    keyboard_module = None
 
 from .capture import Capture
 from .vision import Vision
@@ -52,7 +57,66 @@ def main():
     ai = SimpleAI(region, smoothing=cfg.get("aim", {}).get("smoothing", 0.25), fire_cooldown=cfg.get("aim", {}).get("fire_cooldown", 0.2))
 
     try:
+        # Toggle start/pause of the main loop with the 'm' key.
+        # Uses `keyboard` if available, otherwise falls back to OS-specific listeners.
+        running = threading.Event()
+        running.clear()  # start paused until first 'm'
+
+        def toggle_running():
+            if running.is_set():
+                running.clear()
+                logger.info("Paused — press 'm' to resume")
+            else:
+                running.set()
+                logger.info("Running — press 'm' to pause")
+
+        # Try keyboard global hook first
+        keyboard_avail = keyboard_module is not None
+        if keyboard_avail:
+            logger.info("Press 'm' to toggle start/pause of main loop")
+            try:
+                keyboard_module.on_press_key('m', lambda e: toggle_running())
+            except Exception:
+                logger.warning("keyboard.on_press_key failed; falling back to console listener")
+                keyboard_avail = False
+
+        # Fallbacks: Windows console listener via msvcrt, otherwise input()
+        if not keyboard_avail:
+            try:
+                import msvcrt
+
+                def msvcrt_listener():
+                    while True:
+                        try:
+                            if msvcrt.kbhit():
+                                ch = msvcrt.getwch()
+                                if ch.lower() == 'm':
+                                    toggle_running()
+                        except Exception:
+                            pass
+                        time.sleep(0.05)
+
+                t = threading.Thread(target=msvcrt_listener, daemon=True)
+                t.start()
+                logger.info("Press 'm' in the console to toggle start/pause")
+            except Exception:
+                def input_listener():
+                    while True:
+                        try:
+                            s = input()
+                        except EOFError:
+                            break
+                        if s.strip().lower() == 'm':
+                            toggle_running()
+
+                t = threading.Thread(target=input_listener, daemon=True)
+                t.start()
+                logger.info("Type 'm' + Enter to toggle start/pause")
+
         while True:
+            if not running.is_set():
+                time.sleep(0.05)
+                continue
             frame = cap.get_frame()
             enemies = vis.find_enemies(frame)
             logger.debug("Detected %d enemies", len(enemies))
@@ -67,7 +131,7 @@ def main():
                 ctrl.fire()
             logger.info("Firing")
             ctrl.fire()
-            time.sleep(3)
+            time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:

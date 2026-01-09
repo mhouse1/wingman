@@ -39,7 +39,7 @@ class Controller:
             except RuntimeError:
                 pass
 
-    def fire(self, hold_seconds: float = 1.0):
+    def fire(self, hold_seconds: float = 3.0):
         """Fire the weapon.
 
         By default this click-and-hold lasts `hold_seconds` (default 1.0s).
