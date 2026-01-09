@@ -1,0 +1,16 @@
+[project]
+name = "metalstorm-wingman"
+version = "0.1.0"
+description = "Autonomous wingman prototype for MetalStorm"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+	"opencv-python",
+	"numpy",
+	"mss",
+	"pyyaml",
+	"pyautogui",
+]
+
+[tool.uv]
+# optional uv-specific configuration can go here

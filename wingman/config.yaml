@@ -1,0 +1,27 @@
+# Screen capture region (left, top, width, height)
+region:
+  left: 0
+  top: 0
+  width: 1920
+  height: 1080
+
+# HSV color range for enemy HUD marker (example for red markers)
+enemy_hsv:
+  lower: [0, 120, 120]
+  upper: [10, 255, 255]
+
+aim:
+  smoothing: 0.25    # fraction toward target each frame (0..1)
+  fire_cooldown: 0.2 # seconds between shots
+
+controls:
+  # Preferred boolean option: set to true to fire with the left mouse button.
+  left_mouse_button: true
+  # Backwards-compatible: you can still set `fire_button: <key>` for keyboard/mouse mapping
+  fire_button: left  # 'left' for left-click; can be mapped to keys later
+  # How long to hold the fire button (seconds). Set to 0 for instant click.
+  fire_hold: 2.0
+
+debug:
+  show_window: false
+  draw_markers: true
