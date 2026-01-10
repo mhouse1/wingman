@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 NOSE_UP_KEY = 'e'
 NOSE_DOWN_KEY = 'd'
 AFTERBURNER_KEY = 'a'
+AIRBRAKE_KEY = 'g'
+ROLL_LEFT_KEY = 's'
+ROLL_RIGHT_KEY = 'f'
+DEPLOY_FLARES_KEY = 'x'
 
 
 class Controller:
