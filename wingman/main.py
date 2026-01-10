@@ -134,9 +134,10 @@ def main():
         # Try keyboard global hook first
         keyboard_avail = keyboard_module is not None
         if keyboard_avail:
-            logger.info("Press 'm' to toggle start/pause of main loop")
+            logger.info("Press 'm' to toggle start/pause of main loop; 'k' to cancel mission")
             try:
                 keyboard_module.on_press_key('m', lambda e: toggle_running())
+                keyboard_module.on_press_key('k', lambda e: (ctrl.cancel_mission() if 'ctrl' in locals() else None))
             except Exception:
                 logger.warning("keyboard.on_press_key failed; falling back to console listener")
                 keyboard_avail = False
@@ -153,6 +154,11 @@ def main():
                                 ch = msvcrt.getwch()
                                 if ch.lower() == 'm':
                                     toggle_running()
+                                elif ch.lower() == 'k':
+                                    try:
+                                        ctrl.cancel_mission()
+                                    except Exception:
+                                        logger.debug("Controller not ready to cancel mission")
                         except Exception:
                             pass
                         time.sleep(0.05)
@@ -167,8 +173,14 @@ def main():
                             s = input()
                         except EOFError:
                             break
-                        if s.strip().lower() == 'm':
+                        v = s.strip().lower()
+                        if v == 'm':
                             toggle_running()
+                        elif v == 'k':
+                            try:
+                                ctrl.cancel_mission()
+                            except Exception:
+                                logger.debug("Controller not ready to cancel mission")
 
                 t = threading.Thread(target=input_listener, daemon=True)
                 t.start()
