@@ -180,7 +180,7 @@ def main():
                 continue
             frame = cap.get_frame()
             enemies = vis.find_enemies(frame)
-            logger.debug("Detected %d enemies", len(enemies))
+            # logger.debug("Detected %d enemies", len(enemies))
             # action = ai.decide(enemies)
             # logger.debug("AI action: %s", action)
             # target = action.get("target")
@@ -190,7 +190,7 @@ def main():
 
             #screen_numbers = scan_screen_for_numbers(frame)
             #print("Detected numbers:", screen_numbers)
-            logger.info("Firing")
+            #logger.info("Firing")
             #ctrl.fire()
             #ctrl.nose_up()
             ctrl.begin_mission()

@@ -108,22 +108,22 @@ class Controller:
             t = threading.Thread(target=_do_press, daemon=True)
             t.start()
     
-    def node_down(self, hold_seconds: float = 2.5, block: bool = True):
+    def nose_down(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-down maneuver: presses and holds 's' key.
 
         Args:
             hold_seconds: How long to hold the 's' key (default 2.5 seconds)
         """
-        logger.debug("Controller: node_down - pressing 's' key for %s seconds", hold_seconds)
+        logger.debug("Controller: nose_down - pressing 's' key for %s seconds", hold_seconds)
         def _do_press():
             try:
                 logger.debug("Controller: using keyboard library for 's' press")
                 keyboard_module.press('s')
                 time.sleep(hold_seconds)
                 keyboard_module.release('s')
-                logger.debug("Controller: node_down complete")
+                logger.debug("Controller: nose_down complete")
             except Exception:
-                logger.exception("Controller: node_down failed")
+                logger.exception("Controller: nose_down failed")
 
         if block:
             _do_press()
@@ -173,7 +173,7 @@ class Controller:
                 # Execute mission maneuvers (maneuvers log their own activity)
                 self.nose_up(2.0)
                 self.afterburner(20.0)
-                self.node_down(4.0)
+                self.nose_down(4.0)
                 time.sleep(10.0)  # additional wait time to stabilize
                 logger.info("Controller: begin_mission - sequence complete")
             except Exception:
