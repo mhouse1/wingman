@@ -137,7 +137,14 @@ def main():
             logger.info("Press 'm' to toggle start/pause of main loop; 'k' to cancel mission")
             try:
                 keyboard_module.on_press_key('m', lambda e: toggle_running())
-                keyboard_module.on_press_key('k', lambda e: (ctrl.cancel_mission() if 'ctrl' in locals() else None))
+                def _on_k(e):
+                    try:
+                        ctrl.cancel_mission()
+                    except Exception:
+                        logger.debug("Controller not ready to cancel mission")
+                    toggle_running()
+
+                keyboard_module.on_press_key('k', _on_k)
             except Exception:
                 logger.warning("keyboard.on_press_key failed; falling back to console listener")
                 keyboard_avail = False
@@ -159,6 +166,7 @@ def main():
                                         ctrl.cancel_mission()
                                     except Exception:
                                         logger.debug("Controller not ready to cancel mission")
+                                    toggle_running()
                         except Exception:
                             pass
                         time.sleep(0.05)
@@ -181,6 +189,7 @@ def main():
                                 ctrl.cancel_mission()
                             except Exception:
                                 logger.debug("Controller not ready to cancel mission")
+                            toggle_running()
 
                 t = threading.Thread(target=input_listener, daemon=True)
                 t.start()
