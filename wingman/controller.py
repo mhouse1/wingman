@@ -10,6 +10,11 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+# Key bindings (change these to remap controls)
+NOSE_UP_KEY = 'e'
+NOSE_DOWN_KEY = 'd'
+AFTERBURNER_KEY = 'a'
+
 
 class Controller:
     def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0):
@@ -20,6 +25,7 @@ class Controller:
         self._firing_lock = threading.Lock()
         self._mission_lock = threading.Lock()
         self._mission_complete = threading.Event()
+        self._mission_cancel = threading.Event()
 
     def fire(self, hold_seconds: float = 1.0):
         """Fire the weapon.
@@ -86,18 +92,29 @@ class Controller:
         self.continuous_move(0.0, -abs(speed_px_per_sec), duration)
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
-        """Nose-up maneuver: presses and holds 'w' key.
+        """Nose-up maneuver: presses and holds the configured nose-up key.
 
         Args:
-            hold_seconds: How long to hold the 'w' key (default 2.5 seconds)
+            hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: nose_up - pressing 'w' key for %s seconds", hold_seconds)
+        logger.debug("Controller: nose_up - pressing '%s' key for %s seconds", NOSE_UP_KEY, hold_seconds)
         def _do_press():
             try:
-                logger.debug("Controller: using keyboard library for 'w' press")
-                keyboard_module.press('w')
-                time.sleep(hold_seconds)
-                keyboard_module.release('w')
+                if not keyboard_module:
+                    logger.error("Controller: keyboard library not available for nose_up")
+                    return
+                logger.debug("Controller: using keyboard library for '%s' press", NOSE_UP_KEY)
+                keyboard_module.press(NOSE_UP_KEY)
+                start = time.time()
+                while (time.time() - start) < hold_seconds:
+                    if self._mission_cancel.is_set():
+                        logger.debug("Controller: nose_up cancelled")
+                        break
+                    time.sleep(0.05)
+                try:
+                    keyboard_module.release(NOSE_UP_KEY)
+                except Exception:
+                    logger.exception("Controller: failed to release '%s' key", NOSE_UP_KEY)
                 logger.debug("Controller: nose_up complete")
             except Exception:
                 logger.exception("Controller: nose_up failed")
@@ -108,22 +125,33 @@ class Controller:
             t = threading.Thread(target=_do_press, daemon=True)
             t.start()
     
-    def node_down(self, hold_seconds: float = 2.5, block: bool = True):
-        """Nose-down maneuver: presses and holds 's' key.
+    def nose_down(self, hold_seconds: float = 2.5, block: bool = True):
+        """Nose-down maneuver: presses and holds the configured nose-down key.
 
         Args:
-            hold_seconds: How long to hold the 's' key (default 2.5 seconds)
+            hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: node_down - pressing 's' key for %s seconds", hold_seconds)
+        logger.debug("Controller: nose_down - pressing '%s' key for %s seconds", NOSE_DOWN_KEY, hold_seconds)
         def _do_press():
             try:
-                logger.debug("Controller: using keyboard library for 's' press")
-                keyboard_module.press('s')
-                time.sleep(hold_seconds)
-                keyboard_module.release('s')
-                logger.debug("Controller: node_down complete")
+                if not keyboard_module:
+                    logger.error("Controller: keyboard library not available for nose_down")
+                    return
+                logger.debug("Controller: using keyboard library for '%s' press", NOSE_DOWN_KEY)
+                keyboard_module.press(NOSE_DOWN_KEY)
+                start = time.time()
+                while (time.time() - start) < hold_seconds:
+                    if self._mission_cancel.is_set():
+                        logger.debug("Controller: nose_down cancelled")
+                        break
+                    time.sleep(0.05)
+                try:
+                    keyboard_module.release(NOSE_DOWN_KEY)
+                except Exception:
+                    logger.exception("Controller: failed to release '%s' key", NOSE_DOWN_KEY)
+                logger.debug("Controller: nose_down complete")
             except Exception:
-                logger.exception("Controller: node_down failed")
+                logger.exception("Controller: nose_down failed")
 
         if block:
             _do_press()
@@ -132,18 +160,29 @@ class Controller:
             t.start()
 
     def afterburner(self, hold_seconds: float = 2.5, block: bool = True):
-        """Afterburner: presses and holds the 'e' key.
+        """Afterburner: presses and holds the configured afterburner key.
 
         Args:
-            hold_seconds: How long to hold the 'e' key (default 2.5 seconds)
+            hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: afterburner - pressing 'e' for %s seconds", hold_seconds)
+        logger.debug("Controller: afterburner - pressing '%s' for %s seconds", AFTERBURNER_KEY, hold_seconds)
         def _do_press():
             try:
-                logger.debug("Controller: using keyboard library for 'e' press")
-                keyboard_module.press('e')
-                time.sleep(hold_seconds)
-                keyboard_module.release('e')
+                if not keyboard_module:
+                    logger.error("Controller: keyboard library not available for afterburner")
+                    return
+                logger.debug("Controller: using keyboard library for '%s' press", AFTERBURNER_KEY)
+                keyboard_module.press(AFTERBURNER_KEY)
+                start = time.time()
+                while (time.time() - start) < hold_seconds:
+                    if self._mission_cancel.is_set():
+                        logger.debug("Controller: afterburner cancelled")
+                        break
+                    time.sleep(0.05)
+                try:
+                    keyboard_module.release(AFTERBURNER_KEY)
+                except Exception:
+                    logger.exception("Controller: failed to release '%s' key", AFTERBURNER_KEY)
                 logger.debug("Controller: afterburner complete")
             except Exception:
                 logger.exception("Controller: afterburner failed")
@@ -167,13 +206,14 @@ class Controller:
 
         logger.info("Controller: begin_mission - starting mission sequence")
         self._mission_complete.clear()
+        self._mission_cancel.clear()
 
         def _mission_runner():
             try:
                 # Execute mission maneuvers (maneuvers log their own activity)
                 self.nose_up(2.0)
                 self.afterburner(20.0)
-                self.node_down(4.0)
+                self.nose_down(4.0)
                 time.sleep(10.0)  # additional wait time to stabilize
                 logger.info("Controller: begin_mission - sequence complete")
             except Exception:
@@ -185,8 +225,21 @@ class Controller:
                 except RuntimeError:
                     pass
 
-        t = threading.Thread(target=_mission_runner, daemon=True)
-        t.start()
+        mission_a = threading.Thread(target=_mission_runner, daemon=True)
+        mission_a.start()
         
         # Wait for mission to complete
         self._mission_complete.wait()
+
+    def cancel_mission(self):
+        """Request cancellation of any running mission.
+
+        Sets the cancel flag which maneuvers poll; also sets the mission-complete
+        event so callers waiting on completion will unblock.
+        """
+        logger.info("Controller: cancel_mission called")
+        self._mission_cancel.set()
+        try:
+            self._mission_complete.set()
+        except Exception:
+            logger.exception("Controller: failed to set mission_complete during cancel")

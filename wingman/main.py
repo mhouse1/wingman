@@ -134,9 +134,17 @@ def main():
         # Try keyboard global hook first
         keyboard_avail = keyboard_module is not None
         if keyboard_avail:
-            logger.info("Press 'm' to toggle start/pause of main loop")
+            logger.info("Press 'm' to toggle start/pause of main loop; 'k' to cancel mission")
             try:
                 keyboard_module.on_press_key('m', lambda e: toggle_running())
+                def _on_k(e):
+                    try:
+                        ctrl.cancel_mission()
+                    except Exception:
+                        logger.debug("Controller not ready to cancel mission")
+                    toggle_running()
+
+                keyboard_module.on_press_key('k', _on_k)
             except Exception:
                 logger.warning("keyboard.on_press_key failed; falling back to console listener")
                 keyboard_avail = False
@@ -153,6 +161,12 @@ def main():
                                 ch = msvcrt.getwch()
                                 if ch.lower() == 'm':
                                     toggle_running()
+                                elif ch.lower() == 'k':
+                                    try:
+                                        ctrl.cancel_mission()
+                                    except Exception:
+                                        logger.debug("Controller not ready to cancel mission")
+                                    toggle_running()
                         except Exception:
                             pass
                         time.sleep(0.05)
@@ -167,7 +181,14 @@ def main():
                             s = input()
                         except EOFError:
                             break
-                        if s.strip().lower() == 'm':
+                        v = s.strip().lower()
+                        if v == 'm':
+                            toggle_running()
+                        elif v == 'k':
+                            try:
+                                ctrl.cancel_mission()
+                            except Exception:
+                                logger.debug("Controller not ready to cancel mission")
                             toggle_running()
 
                 t = threading.Thread(target=input_listener, daemon=True)
@@ -180,7 +201,7 @@ def main():
                 continue
             frame = cap.get_frame()
             enemies = vis.find_enemies(frame)
-            logger.debug("Detected %d enemies", len(enemies))
+            # logger.debug("Detected %d enemies", len(enemies))
             # action = ai.decide(enemies)
             # logger.debug("AI action: %s", action)
             # target = action.get("target")
@@ -190,7 +211,7 @@ def main():
 
             #screen_numbers = scan_screen_for_numbers(frame)
             #print("Detected numbers:", screen_numbers)
-            logger.info("Firing")
+            #logger.info("Firing")
             #ctrl.fire()
             #ctrl.nose_up()
             ctrl.begin_mission()
