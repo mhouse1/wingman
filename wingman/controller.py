@@ -3,6 +3,11 @@ import logging
 import threading
 import pyautogui
 
+try:
+    import keyboard as keyboard_module
+except Exception:
+    keyboard_module = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,32 +19,7 @@ class Controller:
         self.fire_hold_seconds = float(fire_hold_seconds or 0.0)
         self._firing_lock = threading.Lock()
 
-    def move_toward(self, target_xy, smoothing=1.0):
-        """Move mouse toward target_xy (frame coordinates). smoothing in (0..1)."""
-        tx, ty = target_xy
-        # convert to absolute screen coords
-        abs_x = self.region[0] + int(tx)
-        abs_y = self.region[1] + int(ty)
-        cur_x, cur_y = pyautogui.position()
-        nx = cur_x + (abs_x - cur_x) * smoothing
-        ny = cur_y + (abs_y - cur_y) * smoothing
-        logger.debug("Controller: moving mouse to (%d, %d) from (%d, %d)", abs_x, abs_y, cur_x, cur_y)
-        pyautogui.moveTo(int(nx), int(ny), duration=0)
-
-    def _hold_and_release(self):
-        try:
-            pyautogui.mouseDown(button='left')
-            logger.debug("Controller: mouseDown (holding for %s seconds)", self.fire_hold_seconds)
-            time.sleep(self.fire_hold_seconds)
-            pyautogui.mouseUp(button='left')
-            logger.debug("Controller: mouseUp")
-        finally:
-            try:
-                self._firing_lock.release()
-            except RuntimeError:
-                pass
-
-    def fire(self, hold_seconds: float = 3.0):
+    def fire(self, hold_seconds: float = 1.0):
         """Fire the weapon.
 
         By default this click-and-hold lasts `hold_seconds` (default 1.0s).
@@ -102,3 +82,32 @@ class Controller:
     def continuous_move_up(self, speed_px_per_sec: float, duration: float):
         # negative y for upward movement
         self.continuous_move(0.0, -abs(speed_px_per_sec), duration)
+
+    def loiter(self, hold_seconds: float = 2.5):
+        """Loiter maneuver: presses and holds 'w' key.
+        
+        Args:
+            hold_seconds: How long to hold the 'w' key (default 2.5 seconds)
+        """
+        logger.debug("Controller: loiter - pressing 'w' key for %s seconds", hold_seconds)
+        
+        def _hold_runner():
+            try:
+                # Try keyboard library first (works better with games)
+                if keyboard_module:
+                    logger.debug("Controller: using keyboard library for 'w' press")
+                    keyboard_module.press('w')
+                    time.sleep(hold_seconds)
+                    keyboard_module.release('w')
+                else:
+                    # Fallback to pyautogui
+                    logger.debug("Controller: using pyautogui for 'w' press")
+                    pyautogui.keyDown('w')
+                    time.sleep(hold_seconds)
+                    pyautogui.keyUp('w')
+                logger.debug("Controller: loiter complete")
+            except Exception as e:
+                logger.exception("Controller: loiter failed")
+        
+        t = threading.Thread(target=_hold_runner, daemon=True)
+        t.start()
