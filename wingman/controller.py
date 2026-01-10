@@ -10,6 +10,11 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+# Key bindings (change these to remap controls)
+NOSE_UP_KEY = 'e'
+NOSE_DOWN_KEY = 'd'
+AFTERBURNER_KEY = 'a'
+
 
 class Controller:
     def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0):
@@ -86,18 +91,18 @@ class Controller:
         self.continuous_move(0.0, -abs(speed_px_per_sec), duration)
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
-        """Nose-up maneuver: presses and holds 'w' key.
+        """Nose-up maneuver: presses and holds the configured nose-up key.
 
         Args:
-            hold_seconds: How long to hold the 'w' key (default 2.5 seconds)
+            hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: nose_up - pressing 'w' key for %s seconds", hold_seconds)
+        logger.debug("Controller: nose_up - pressing '%s' key for %s seconds", NOSE_UP_KEY, hold_seconds)
         def _do_press():
             try:
-                logger.debug("Controller: using keyboard library for 'w' press")
-                keyboard_module.press('w')
+                logger.debug("Controller: using keyboard library for '%s' press", NOSE_UP_KEY)
+                keyboard_module.press(NOSE_UP_KEY)
                 time.sleep(hold_seconds)
-                keyboard_module.release('w')
+                keyboard_module.release(NOSE_UP_KEY)
                 logger.debug("Controller: nose_up complete")
             except Exception:
                 logger.exception("Controller: nose_up failed")
@@ -109,18 +114,18 @@ class Controller:
             t.start()
     
     def nose_down(self, hold_seconds: float = 2.5, block: bool = True):
-        """Nose-down maneuver: presses and holds 's' key.
+        """Nose-down maneuver: presses and holds the configured nose-down key.
 
         Args:
-            hold_seconds: How long to hold the 's' key (default 2.5 seconds)
+            hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: nose_down - pressing 's' key for %s seconds", hold_seconds)
+        logger.debug("Controller: nose_down - pressing '%s' key for %s seconds", NOSE_DOWN_KEY, hold_seconds)
         def _do_press():
             try:
-                logger.debug("Controller: using keyboard library for 's' press")
-                keyboard_module.press('s')
+                logger.debug("Controller: using keyboard library for '%s' press", NOSE_DOWN_KEY)
+                keyboard_module.press(NOSE_DOWN_KEY)
                 time.sleep(hold_seconds)
-                keyboard_module.release('s')
+                keyboard_module.release(NOSE_DOWN_KEY)
                 logger.debug("Controller: nose_down complete")
             except Exception:
                 logger.exception("Controller: nose_down failed")
@@ -132,18 +137,18 @@ class Controller:
             t.start()
 
     def afterburner(self, hold_seconds: float = 2.5, block: bool = True):
-        """Afterburner: presses and holds the 'e' key.
+        """Afterburner: presses and holds the configured afterburner key.
 
         Args:
-            hold_seconds: How long to hold the 'e' key (default 2.5 seconds)
+            hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: afterburner - pressing 'e' for %s seconds", hold_seconds)
+        logger.debug("Controller: afterburner - pressing '%s' for %s seconds", AFTERBURNER_KEY, hold_seconds)
         def _do_press():
             try:
-                logger.debug("Controller: using keyboard library for 'e' press")
-                keyboard_module.press('e')
+                logger.debug("Controller: using keyboard library for '%s' press", AFTERBURNER_KEY)
+                keyboard_module.press(AFTERBURNER_KEY)
                 time.sleep(hold_seconds)
-                keyboard_module.release('e')
+                keyboard_module.release(AFTERBURNER_KEY)
                 logger.debug("Controller: afterburner complete")
             except Exception:
                 logger.exception("Controller: afterburner failed")
