@@ -3,10 +3,15 @@ import yaml
 import time
 import logging
 import threading
+import re
 try:
     import keyboard as keyboard_module
 except Exception:
     keyboard_module = None
+try:
+    import easyocr
+except Exception:
+    easyocr = None
 
 from .capture import Capture
 from .vision import Vision
@@ -17,6 +22,83 @@ from .ai import SimpleAI
 def load_config(path):
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def scan_screen_for_numbers(frame, reader=None):
+    """
+    Scan a screen frame for numbers using EasyOCR.
+    
+    Args:
+        frame: numpy array (BGR image) from screen capture
+        reader: optional EasyOCR Reader instance (will create if None)
+    
+    Returns:
+        dict: Dictionary with detected text as keys and extracted numbers as values.
+              Format: {"label_text": "123", "position_x_y": "456", ...}
+    """
+    if easyocr is None:
+        return {"error": "easyocr not installed"}
+    
+    # Initialize reader if not provided
+    if reader is None:
+        try:
+            reader = easyocr.Reader(['en'], gpu=True)
+        except Exception as e:
+            return {"error": f"Failed to initialize EasyOCR: {e}"}
+    
+    try:
+        # Detect all text with bounding boxes and confidence
+        results = reader.readtext(frame, detail=1, paragraph=False)
+    except Exception as e:
+        return {"error": f"EasyOCR read error: {e}"}
+    
+    # Extract numbers and associated text
+    number_dict = {}
+    
+    for bbox, text, confidence in results:
+        # Extract numbers from the detected text
+        numbers = re.findall(r'\d+', text)
+        
+        if numbers:
+            # Get position for labeling
+            x_center = int(sum([p[0] for p in bbox]) / 4)
+            y_center = int(sum([p[1] for p in bbox]) / 4)
+            
+            # Create key: use the full text if it contains non-digits, otherwise use position
+            if re.search(r'[^\d\s]', text):
+                # Text contains letters/labels
+                key = text.strip()
+            else:
+                # Pure numbers, use position as key
+                key = f"pos_{x_center}_{y_center}"
+            
+            # Join multiple numbers found in the same text region
+            value = ' '.join(numbers)
+            number_dict[key] = value
+    
+    return number_dict
+
+
+def loiter(ctrl, logger):
+    """
+    Loiter maneuver: slides mouse up equivalent of 1 inch (96 pixels at standard DPI).
+    
+    Args:
+        ctrl: Controller instance for mouse movement
+        logger: Logger instance for debug output
+    """
+    import pyautogui
+    
+    # 1 inch = 96 pixels at standard 96 DPI
+    pixels_up = 96
+    
+    logger.info("Loiter: Moving mouse up %d pixels", pixels_up)
+    
+    # Move relative to current position
+    current_x, current_y = pyautogui.position()
+    pyautogui.moveTo(current_x, current_y - pixels_up, duration=0.3)
+    
+    logger.debug("Loiter complete")
 
 
 def main():
@@ -74,8 +156,10 @@ def main():
         keyboard_avail = keyboard_module is not None
         if keyboard_avail:
             logger.info("Press 'm' to toggle start/pause of main loop")
+            logger.info("Press 'l' to perform loiter maneuver (move mouse up)")
             try:
                 keyboard_module.on_press_key('m', lambda e: toggle_running())
+                keyboard_module.on_press_key('l', lambda e: loiter(ctrl, logger))
             except Exception:
                 logger.warning("keyboard.on_press_key failed; falling back to console listener")
                 keyboard_avail = False
@@ -92,6 +176,8 @@ def main():
                                 ch = msvcrt.getwch()
                                 if ch.lower() == 'm':
                                     toggle_running()
+                                elif ch.lower() == 'l':
+                                    loiter(ctrl, logger)
                         except Exception:
                             pass
                         time.sleep(0.05)
@@ -99,6 +185,7 @@ def main():
                 t = threading.Thread(target=msvcrt_listener, daemon=True)
                 t.start()
                 logger.info("Press 'm' in the console to toggle start/pause")
+                logger.info("Press 'l' in the console for loiter maneuver")
             except Exception:
                 def input_listener():
                     while True:
@@ -129,9 +216,12 @@ def main():
             if action.get("fire"):
                 logger.info("Firing")
                 ctrl.fire()
+
+            #screen_numbers = scan_screen_for_numbers(frame)
+            #print("Detected numbers:", screen_numbers)
             logger.info("Firing")
             ctrl.fire()
-            time.sleep(1)
+            time.sleep(3)
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:
