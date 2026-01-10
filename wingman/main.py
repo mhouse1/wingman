@@ -80,29 +80,6 @@ def scan_screen_for_numbers(frame, reader=None):
     
     return number_dict
 
-
-def loiter(ctrl, logger):
-    """
-    Loiter maneuver: slides mouse up equivalent of 1 inch (96 pixels at standard DPI).
-    
-    Args:
-        ctrl: Controller instance for mouse movement
-        logger: Logger instance for debug output
-    """
-    import pyautogui
-    
-    # 1 inch = 96 pixels at standard 96 DPI
-    pixels_up = 96
-    
-    logger.info("Loiter: Moving mouse up %d pixels", pixels_up)
-    
-    # Move relative to current position
-    current_x, current_y = pyautogui.position()
-    pyautogui.moveTo(current_x, current_y - pixels_up, duration=0.3)
-    
-    logger.debug("Loiter complete")
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="wingman/config.yaml")
@@ -158,10 +135,8 @@ def main():
         keyboard_avail = keyboard_module is not None
         if keyboard_avail:
             logger.info("Press 'm' to toggle start/pause of main loop")
-            logger.info("Press 'l' to perform loiter maneuver (move mouse up)")
             try:
                 keyboard_module.on_press_key('m', lambda e: toggle_running())
-                keyboard_module.on_press_key('l', lambda e: loiter(ctrl, logger))
             except Exception:
                 logger.warning("keyboard.on_press_key failed; falling back to console listener")
                 keyboard_avail = False
@@ -178,8 +153,6 @@ def main():
                                 ch = msvcrt.getwch()
                                 if ch.lower() == 'm':
                                     toggle_running()
-                                elif ch.lower() == 'l':
-                                    loiter(ctrl, logger)
                         except Exception:
                             pass
                         time.sleep(0.05)
@@ -187,7 +160,6 @@ def main():
                 t = threading.Thread(target=msvcrt_listener, daemon=True)
                 t.start()
                 logger.info("Press 'm' in the console to toggle start/pause")
-                logger.info("Press 'l' in the console for loiter maneuver")
             except Exception:
                 def input_listener():
                     while True:
@@ -209,21 +181,22 @@ def main():
             frame = cap.get_frame()
             enemies = vis.find_enemies(frame)
             logger.debug("Detected %d enemies", len(enemies))
-            action = ai.decide(enemies)
-            logger.debug("AI action: %s", action)
-            target = action.get("target")
-            if target:
-                logger.info("Moving to target %s (smoothing=%s)", target, action.get("smoothing", 1.0))
-                ctrl.move_toward(target, smoothing=action.get("smoothing", 1.0))
-            if action.get("fire"):
-                logger.info("Firing")
-                ctrl.fire()
+            # action = ai.decide(enemies)
+            # logger.debug("AI action: %s", action)
+            # target = action.get("target")
+            # if action.get("fire"):
+            #     logger.info("Firing")
+            #     ctrl.fire()
 
             #screen_numbers = scan_screen_for_numbers(frame)
             #print("Detected numbers:", screen_numbers)
             logger.info("Firing")
             ctrl.fire()
+            ctrl.loiter()
             time.sleep(3)
+
+            # 
+            
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:
