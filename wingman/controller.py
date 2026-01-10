@@ -18,6 +18,8 @@ AIRBRAKE_KEY = 'g'
 ROLL_LEFT_KEY = 's'
 ROLL_RIGHT_KEY = 'f'
 DEPLOY_FLARES_KEY = 'x'
+FIRE_MACHINIE_GUN = 'w'
+FIRE_ACTIVE_WEAPON = 'r'
 
 
 class Controller:
@@ -31,103 +33,14 @@ class Controller:
         self._mission_complete = threading.Event()
         self._mission_cancel = threading.Event()
 
-    def fire(self, hold_seconds: float = 1.0):
-        """Fire the weapon.
-
-        By default this click-and-hold lasts `hold_seconds` (default 1.0s).
-        If `hold_seconds` is None or 0, an instant click/press is performed.
-        """
-        chosen_hold = hold_seconds if hold_seconds is not None else self.fire_hold_seconds
-        logger.debug("Controller: firing (%s) hold=%s", self.fire_button, chosen_hold)
-        # if using left mouse and hold is requested, perform hold in background to avoid blocking
-        if self.fire_button == "left" and chosen_hold and chosen_hold > 0:
-            acquired = self._firing_lock.acquire(blocking=False)
-            if not acquired:
-                logger.debug("Controller: already firing, skipping overlapping fire")
-                return
-
-            def _hold_runner():
-                try:
-                    pyautogui.mouseDown(button='left')
-                    logger.debug("Controller: mouseDown (holding for %s seconds)", chosen_hold)
-                    time.sleep(chosen_hold)
-                    pyautogui.mouseUp(button='left')
-                    logger.debug("Controller: mouseUp")
-                finally:
-                    try:
-                        self._firing_lock.release()
-                    except RuntimeError:
-                        pass
-
-            t = threading.Thread(target=_hold_runner, daemon=True)
-            t.start()
-            return
-
-        # fallback: instant click or keyboard key
-        if self.fire_button == "left":
-            pyautogui.click()
-        else:
-            pyautogui.press(self.fire_button)
-
-    def continuous_move(self, dx_per_sec: float, dy_per_sec: float, duration: float, interval: float = 0.02):
-        """Move the mouse continuously by (dx_per_sec, dy_per_sec) for `duration` seconds.
-        Runs in a background thread so it doesn't block the main loop.
-        """
-        def _runner():
-            end = time.time() + duration
-            logger.info("Controller: starting continuous move dx=%s dy=%s for %ss", dx_per_sec, dy_per_sec, duration)
-            while time.time() < end:
-                # move by per-interval amount
-                step_x = dx_per_sec * interval
-                step_y = dy_per_sec * interval
-                try:
-                    pyautogui.moveRel(int(step_x), int(step_y), duration=0)
-                except Exception:
-                    logger.exception("Controller: continuous move failed")
-                    break
-                time.sleep(interval)
-            logger.info("Controller: finished continuous move")
-
-        t = threading.Thread(target=_runner, daemon=True)
-        t.start()
-
-    def continuous_move_up(self, speed_px_per_sec: float, duration: float):
-        # negative y for upward movement
-        self.continuous_move(0.0, -abs(speed_px_per_sec), duration)
-
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
 
         Args:
             hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: nose_up - pressing '%s' key for %s seconds", NOSE_UP_KEY, hold_seconds)
-        def _do_press():
-            try:
-                if not keyboard_module:
-                    logger.error("Controller: keyboard library not available for nose_up")
-                    return
-                logger.debug("Controller: using keyboard library for '%s' press", NOSE_UP_KEY)
-                keyboard_module.press(NOSE_UP_KEY)
-                start = time.time()
-                while (time.time() - start) < hold_seconds:
-                    if self._mission_cancel.is_set():
-                        logger.debug("Controller: nose_up cancelled")
-                        break
-                    time.sleep(0.05)
-                try:
-                    keyboard_module.release(NOSE_UP_KEY)
-                except Exception:
-                    logger.exception("Controller: failed to release '%s' key", NOSE_UP_KEY)
-                logger.debug("Controller: nose_up complete")
-            except Exception:
-                logger.exception("Controller: nose_up failed")
-
-        if block:
-            _do_press()
-        else:
-            t = threading.Thread(target=_do_press, daemon=True)
-            t.start()
+        # Use generic executor to perform the key press
+        self._execute_key_press(NOSE_UP_KEY, hold_seconds=hold_seconds, block=block, action_name='nose_up')
     
     def nose_down(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-down maneuver: presses and holds the configured nose-down key.
@@ -135,33 +48,8 @@ class Controller:
         Args:
             hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: nose_down - pressing '%s' key for %s seconds", NOSE_DOWN_KEY, hold_seconds)
-        def _do_press():
-            try:
-                if not keyboard_module:
-                    logger.error("Controller: keyboard library not available for nose_down")
-                    return
-                logger.debug("Controller: using keyboard library for '%s' press", NOSE_DOWN_KEY)
-                keyboard_module.press(NOSE_DOWN_KEY)
-                start = time.time()
-                while (time.time() - start) < hold_seconds:
-                    if self._mission_cancel.is_set():
-                        logger.debug("Controller: nose_down cancelled")
-                        break
-                    time.sleep(0.05)
-                try:
-                    keyboard_module.release(NOSE_DOWN_KEY)
-                except Exception:
-                    logger.exception("Controller: failed to release '%s' key", NOSE_DOWN_KEY)
-                logger.debug("Controller: nose_down complete")
-            except Exception:
-                logger.exception("Controller: nose_down failed")
-
-        if block:
-            _do_press()
-        else:
-            t = threading.Thread(target=_do_press, daemon=True)
-            t.start()
+        # Use generic executor to perform the key press
+        self._execute_key_press(NOSE_DOWN_KEY, hold_seconds=hold_seconds, block=block, action_name='nose_down')
 
     def afterburner(self, hold_seconds: float = 2.5, block: bool = True):
         """Afterburner: presses and holds the configured afterburner key.
@@ -169,33 +57,71 @@ class Controller:
         Args:
             hold_seconds: How long to hold the key (default 2.5 seconds)
         """
-        logger.debug("Controller: afterburner - pressing '%s' for %s seconds", AFTERBURNER_KEY, hold_seconds)
+        # Use generic executor to perform the key press
+        self._execute_key_press(AFTERBURNER_KEY, hold_seconds=hold_seconds, block=block, action_name='afterburner')
+
+    def _execute_key_press(self, key: str, hold_seconds: float = 2.5, block: bool = True, action_name: str | None = None):
+        """Generic key press executor used by maneuvers.
+
+        Args:
+            key: key name to press/release
+            hold_seconds: duration to hold the key
+            block: if True, run in current thread; otherwise spawn a daemon thread
+            action_name: optional label for logging
+        """
+        label = action_name or key
+        logger.debug("Controller: %s - pressing '%s' key for %s seconds", label, key, hold_seconds)
+
         def _do_press():
             try:
                 if not keyboard_module:
-                    logger.error("Controller: keyboard library not available for afterburner")
+                    logger.error("Controller: keyboard library not available for %s", label)
                     return
-                logger.debug("Controller: using keyboard library for '%s' press", AFTERBURNER_KEY)
-                keyboard_module.press(AFTERBURNER_KEY)
+                logger.debug("Controller: using keyboard library for '%s' press", key)
+                keyboard_module.press(key)
                 start = time.time()
                 while (time.time() - start) < hold_seconds:
                     if self._mission_cancel.is_set():
-                        logger.debug("Controller: afterburner cancelled")
+                        logger.debug("Controller: %s cancelled", label)
                         break
                     time.sleep(0.05)
                 try:
-                    keyboard_module.release(AFTERBURNER_KEY)
+                    keyboard_module.release(key)
                 except Exception:
-                    logger.exception("Controller: failed to release '%s' key", AFTERBURNER_KEY)
-                logger.debug("Controller: afterburner complete")
+                    logger.exception("Controller: failed to release '%s' key", key)
+                logger.debug("Controller: %s complete", label)
             except Exception:
-                logger.exception("Controller: afterburner failed")
+                logger.exception("Controller: %s failed", label)
 
         if block:
             _do_press()
         else:
             t = threading.Thread(target=_do_press, daemon=True)
             t.start()
+
+    def airbrake(self, hold_seconds: float = 1.0, block: bool = True):
+        """Apply airbrake by holding the configured airbrake key."""
+        self._execute_key_press(AIRBRAKE_KEY, hold_seconds=hold_seconds, block=block, action_name='airbrake')
+
+    def roll_left(self, hold_seconds: float = 0.3, block: bool = True):
+        """Roll left by holding the configured roll-left key."""
+        self._execute_key_press(ROLL_LEFT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_left')
+
+    def roll_right(self, hold_seconds: float = 0.3, block: bool = True):
+        """Roll right by holding the configured roll-right key."""
+        self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_right')
+
+    def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True):
+        """Deploy flares (short press of the configured flares key)."""
+        self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares')
+
+    def fire_machine_gun(self, hold_seconds: float = 1.0, block: bool = True):
+        """Fire machine gun by holding the configured machine-gun key."""
+        self._execute_key_press(FIRE_MACHINIE_GUN, hold_seconds=hold_seconds, block=block, action_name='fire_machine_gun')
+
+    def fire_active_weapon(self, hold_seconds: float = 0.1, block: bool = True):
+        """Activate the currently selected weapon (short press)."""
+        self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=hold_seconds, block=block, action_name='fire_active_weapon')
 
     def begin_mission(self):
         """Run mission sequence: nose up 4s, afterburner 2s, nose down 3s.
@@ -216,9 +142,16 @@ class Controller:
             try:
                 # Execute mission maneuvers (maneuvers log their own activity)
                 self.nose_up(2.0)
-                self.afterburner(20.0)
-                self.nose_down(4.0)
-                time.sleep(10.0)  # additional wait time to stabilize
+                self.afterburner(10.0)
+                self.deploy_flares()
+                self.afterburner(10.0)
+                self.roll_right(4)
+                self.afterburner(10)
+                self.deploy_flares()
+                self.roll_left(10)
+                self.deploy_flares()
+                #self.nose_down(4.0)
+                #time.sleep(10.0)  # additional wait time to stabilize
                 logger.info("Controller: begin_mission - sequence complete")
             except Exception:
                 logger.exception("Controller: begin_mission failed")
