@@ -8,10 +8,12 @@ try:
     import keyboard as keyboard_module
 except Exception:
     keyboard_module = None
-try:
-    import easyocr
-except Exception:
-    easyocr = None
+
+# Note: enabling this will slow down startup by 10seconds due to easyocr/tensorflow init
+# try:
+#     import easyocr
+# except Exception:
+#     easyocr = None
 
 from .capture import Capture
 from .vision import Vision
