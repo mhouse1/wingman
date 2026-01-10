@@ -18,6 +18,8 @@ class Controller:
         self.fire_button = fire_button
         self.fire_hold_seconds = float(fire_hold_seconds or 0.0)
         self._firing_lock = threading.Lock()
+        self._mission_lock = threading.Lock()
+        self._mission_complete = threading.Event()
 
     def fire(self, hold_seconds: float = 1.0):
         """Fire the weapon.
@@ -83,31 +85,108 @@ class Controller:
         # negative y for upward movement
         self.continuous_move(0.0, -abs(speed_px_per_sec), duration)
 
-    def loiter(self, hold_seconds: float = 2.5):
-        """Loiter maneuver: presses and holds 'w' key.
-        
+    def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
+        """Nose-up maneuver: presses and holds 'w' key.
+
         Args:
             hold_seconds: How long to hold the 'w' key (default 2.5 seconds)
         """
-        logger.debug("Controller: loiter - pressing 'w' key for %s seconds", hold_seconds)
-        
-        def _hold_runner():
+        logger.debug("Controller: nose_up - pressing 'w' key for %s seconds", hold_seconds)
+        def _do_press():
             try:
-                # Try keyboard library first (works better with games)
-                if keyboard_module:
-                    logger.debug("Controller: using keyboard library for 'w' press")
-                    keyboard_module.press('w')
-                    time.sleep(hold_seconds)
-                    keyboard_module.release('w')
-                else:
-                    # Fallback to pyautogui
-                    logger.debug("Controller: using pyautogui for 'w' press")
-                    pyautogui.keyDown('w')
-                    time.sleep(hold_seconds)
-                    pyautogui.keyUp('w')
-                logger.debug("Controller: loiter complete")
-            except Exception as e:
-                logger.exception("Controller: loiter failed")
-        
-        t = threading.Thread(target=_hold_runner, daemon=True)
+                logger.debug("Controller: using keyboard library for 'w' press")
+                keyboard_module.press('w')
+                time.sleep(hold_seconds)
+                keyboard_module.release('w')
+                logger.debug("Controller: nose_up complete")
+            except Exception:
+                logger.exception("Controller: nose_up failed")
+
+        if block:
+            _do_press()
+        else:
+            t = threading.Thread(target=_do_press, daemon=True)
+            t.start()
+    
+    def node_down(self, hold_seconds: float = 2.5, block: bool = True):
+        """Nose-down maneuver: presses and holds 's' key.
+
+        Args:
+            hold_seconds: How long to hold the 's' key (default 2.5 seconds)
+        """
+        logger.debug("Controller: node_down - pressing 's' key for %s seconds", hold_seconds)
+        def _do_press():
+            try:
+                logger.debug("Controller: using keyboard library for 's' press")
+                keyboard_module.press('s')
+                time.sleep(hold_seconds)
+                keyboard_module.release('s')
+                logger.debug("Controller: node_down complete")
+            except Exception:
+                logger.exception("Controller: node_down failed")
+
+        if block:
+            _do_press()
+        else:
+            t = threading.Thread(target=_do_press, daemon=True)
+            t.start()
+
+    def afterburner(self, hold_seconds: float = 2.5, block: bool = True):
+        """Afterburner: presses and holds the 'e' key.
+
+        Args:
+            hold_seconds: How long to hold the 'e' key (default 2.5 seconds)
+        """
+        logger.debug("Controller: afterburner - pressing 'e' for %s seconds", hold_seconds)
+        def _do_press():
+            try:
+                logger.debug("Controller: using keyboard library for 'e' press")
+                keyboard_module.press('e')
+                time.sleep(hold_seconds)
+                keyboard_module.release('e')
+                logger.debug("Controller: afterburner complete")
+            except Exception:
+                logger.exception("Controller: afterburner failed")
+
+        if block:
+            _do_press()
+        else:
+            t = threading.Thread(target=_do_press, daemon=True)
+            t.start()
+
+    def begin_mission(self):
+        """Run mission sequence: nose up 4s, afterburner 2s, nose down 3s.
+
+        Blocks until mission completes to prevent overlapping missions.
+        """
+        # Check if mission is already running
+        acquired = self._mission_lock.acquire(blocking=False)
+        if not acquired:
+            logger.debug("Controller: mission already in progress, skipping")
+            return
+
+        logger.info("Controller: begin_mission - starting mission sequence")
+        self._mission_complete.clear()
+
+        def _mission_runner():
+            try:
+                # Execute mission maneuvers (maneuvers log their own activity)
+                self.nose_up(2.0)
+                self.afterburner(20.0)
+                self.node_down(4.0)
+                time.sleep(10.0)  # additional wait time to stabilize
+                logger.info("Controller: begin_mission - sequence complete")
+            except Exception:
+                logger.exception("Controller: begin_mission failed")
+            finally:
+                self._mission_complete.set()
+                try:
+                    self._mission_lock.release()
+                except RuntimeError:
+                    pass
+
+        t = threading.Thread(target=_mission_runner, daemon=True)
         t.start()
+        
+        # Wait for mission to complete
+        self._mission_complete.wait()

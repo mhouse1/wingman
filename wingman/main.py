@@ -191,11 +191,12 @@ def main():
             #screen_numbers = scan_screen_for_numbers(frame)
             #print("Detected numbers:", screen_numbers)
             logger.info("Firing")
-            ctrl.fire()
-            ctrl.loiter()
+            #ctrl.fire()
+            #ctrl.nose_up()
+            ctrl.begin_mission()
             time.sleep(3)
 
-            # 
+             
             
     except KeyboardInterrupt:
         logger.info("Exiting")
