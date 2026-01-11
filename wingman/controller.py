@@ -17,9 +17,12 @@ AFTERBURNER_KEY = 'a'
 AIRBRAKE_KEY = 'g'
 ROLL_LEFT_KEY = 's'
 ROLL_RIGHT_KEY = 'f'
-DEPLOY_FLARES_KEY = 'x'
+DEPLOY_FLARES_KEY = 'space'
 FIRE_MACHINIE_GUN = 'w'
 FIRE_ACTIVE_WEAPON = 'r'
+WINGSWEEP_KEY = '3'
+SWITCH_WEAPON = 'b'
+SPECIAL_ABILITY = 'q'
 
 
 class Controller:
@@ -115,6 +118,10 @@ class Controller:
         """Deploy flares (short press of the configured flares key)."""
         self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares')
 
+    def wingsweep(self, hold_seconds: float = 0.5, block: bool = True):
+        """Perform a wingsweep maneuver by pressing the configured wingsweep key."""
+        self._execute_key_press(WINGSWEEP_KEY, hold_seconds=hold_seconds, block=block, action_name='wingsweep')
+
     def fire_machine_gun(self, hold_seconds: float = 1.0, block: bool = True):
         """Fire machine gun by holding the configured machine-gun key."""
         self._execute_key_press(FIRE_MACHINIE_GUN, hold_seconds=hold_seconds, block=block, action_name='fire_machine_gun')
@@ -124,9 +131,8 @@ class Controller:
         self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=hold_seconds, block=block, action_name='fire_active_weapon')
 
     def begin_mission(self):
-        """Run mission sequence: nose up 4s, afterburner 2s, nose down 3s.
-
-        Blocks until mission completes to prevent overlapping missions.
+        """This mission sequence performs a predefined set of maneuvers for the Aaarvark, it flies up and tries to stay up
+        Compatible Jets: F111, F-14, Mig-23, J20
         """
         # Check if mission is already running
         acquired = self._mission_lock.acquire(blocking=False)
@@ -142,14 +148,17 @@ class Controller:
             try:
                 # Execute mission maneuvers (maneuvers log their own activity)
                 self.nose_up(2.0)
+                self.wingsweep()
                 self.afterburner(10.0)
-                self.deploy_flares()
                 self.afterburner(10.0)
+                self.wingsweep()
                 self.roll_right(4)
                 self.afterburner(10)
                 self.deploy_flares()
                 self.roll_left(10)
                 self.deploy_flares()
+                self.roll_right(30)
+                self.roll_left(30)
                 #self.nose_down(4.0)
                 #time.sleep(10.0)  # additional wait time to stabilize
                 logger.info("Controller: begin_mission - sequence complete")
