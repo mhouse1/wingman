@@ -9,6 +9,10 @@ try:
 except Exception:
     keyboard_module = None
 
+# Key controls (change these to remap start/pause and cancel)
+TOGGLE_RUN_KEY = 'enter'
+CANCEL_MISSION_KEY = 'end'
+
 # Note: enabling this will slow down startup by 10seconds due to easyocr/tensorflow init
 # try:
 #     import easyocr
@@ -134,17 +138,17 @@ def main():
         # Try keyboard global hook first
         keyboard_avail = keyboard_module is not None
         if keyboard_avail:
-            logger.info("Press 'm' to toggle start/pause of main loop; 'k' to cancel mission")
+            logger.info("Press '%s' to toggle start/pause of main loop; '%s' to cancel mission", TOGGLE_RUN_KEY, CANCEL_MISSION_KEY)
             try:
-                keyboard_module.on_press_key('m', lambda e: toggle_running())
-                def _on_k(e):
+                keyboard_module.on_press_key(TOGGLE_RUN_KEY, lambda e: toggle_running())
+                def _on_cancel(e):
                     try:
                         ctrl.cancel_mission()
                     except Exception:
                         logger.debug("Controller not ready to cancel mission")
                     toggle_running()
 
-                keyboard_module.on_press_key('k', _on_k)
+                keyboard_module.on_press_key(CANCEL_MISSION_KEY, _on_cancel)
             except Exception:
                 logger.warning("keyboard.on_press_key failed; falling back to console listener")
                 keyboard_avail = False
@@ -159,9 +163,9 @@ def main():
                         try:
                             if msvcrt.kbhit():
                                 ch = msvcrt.getwch()
-                                if ch.lower() == 'm':
+                                if ch.lower() == TOGGLE_RUN_KEY:
                                     toggle_running()
-                                elif ch.lower() == 'k':
+                                elif ch.lower() == CANCEL_MISSION_KEY:
                                     try:
                                         ctrl.cancel_mission()
                                     except Exception:
@@ -182,9 +186,9 @@ def main():
                         except EOFError:
                             break
                         v = s.strip().lower()
-                        if v == 'm':
+                        if v == TOGGLE_RUN_KEY:
                             toggle_running()
-                        elif v == 'k':
+                        elif v == CANCEL_MISSION_KEY:
                             try:
                                 ctrl.cancel_mission()
                             except Exception:
@@ -193,7 +197,7 @@ def main():
 
                 t = threading.Thread(target=input_listener, daemon=True)
                 t.start()
-                logger.info("Type 'm' + Enter to toggle start/pause")
+                logger.info("Type '%s' + Enter to toggle start/pause", TOGGLE_RUN_KEY)
 
         while True:
             if not running.is_set():

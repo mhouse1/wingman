@@ -2,6 +2,8 @@ import time
 import logging
 import threading
 import pyautogui
+import sys
+import ctypes
 
 try:
     import keyboard as keyboard_module
@@ -11,18 +13,45 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 # Key bindings (change these to remap controls)
-NOSE_UP_KEY = 'e'
-NOSE_DOWN_KEY = 'd'
-AFTERBURNER_KEY = 'a'
-AIRBRAKE_KEY = 'g'
-ROLL_LEFT_KEY = 's'
-ROLL_RIGHT_KEY = 'f'
+NOSE_UP_KEY = 'i'
+NOSE_DOWN_KEY = 'k'
+AFTERBURNER_KEY = 'e' #or numpad 8
+AIRBRAKE_KEY = 'd' # or numpad 2
+ROLL_LEFT_KEY = 'j'
+ROLL_RIGHT_KEY = 'l'
 DEPLOY_FLARES_KEY = 'space'
-FIRE_MACHINIE_GUN = 'w'
-FIRE_ACTIVE_WEAPON = 'r'
-WINGSWEEP_KEY = '3'
-SWITCH_WEAPON = 'b'
+FIRE_MACHINIE_GUN = 'a'
+FIRE_ACTIVE_WEAPON = 'f'
+WINGSWEEP_KEY = 'w'
+SWITCH_WEAPON = 'g'
 SPECIAL_ABILITY = 'q'
+
+"""
+EMOTE1 # Moving to
+EMOTE2 # Help!
+EMOTE3 # Defend
+EMOTE4 # Attack
+EMOTE5 # Goodluck
+EMOTE6 # Well Played  
+EMOTE7 # Wow!
+EMOTE8 # Thanks!
+EMOTE9 # Good Game!
+EMOTE10 # Oops!
+"""
+
+
+# Windows virtual-key mapping for special keys that games sometimes only
+# accept via native SendInput/keybd_event instead of high-level libraries.
+WINDOWS_VK_MAP = {
+    'num 8': 0x68,
+    'num_8': 0x68,
+    'numpad 8': 0x68,
+    'num8': 0x68,
+    'numpad8': 0x68,
+}
+
+KEYEVENTF_KEYUP = 0x0002
+USER32 = ctypes.windll.user32 if sys.platform == 'win32' else None
 
 
 class Controller:
@@ -77,22 +106,41 @@ class Controller:
 
         def _do_press():
             try:
-                if not keyboard_module:
-                    logger.error("Controller: keyboard library not available for %s", label)
-                    return
-                logger.debug("Controller: using keyboard library for '%s' press", key)
-                keyboard_module.press(key)
-                start = time.time()
-                while (time.time() - start) < hold_seconds:
-                    if self._mission_cancel.is_set():
-                        logger.debug("Controller: %s cancelled", label)
-                        break
-                    time.sleep(0.05)
-                try:
-                    keyboard_module.release(key)
-                except Exception:
-                    logger.exception("Controller: failed to release '%s' key", key)
-                logger.debug("Controller: %s complete", label)
+                # If this is a mapped Windows numpad key, use native API
+                # because many fullscreen games ignore high-level synthetic
+                # events from libraries like `keyboard`.
+                if sys.platform == 'win32' and key in WINDOWS_VK_MAP and USER32 is not None:
+                    vk = WINDOWS_VK_MAP[key]
+                    try:
+                        logger.debug("Controller: using Win32 keybd_event for VK 0x%X ('%s')", vk, key)
+                        USER32.keybd_event(vk, 0, 0, 0)
+                        start = time.time()
+                        while (time.time() - start) < hold_seconds:
+                            if self._mission_cancel.is_set():
+                                logger.debug("Controller: %s cancelled", label)
+                                break
+                            time.sleep(0.05)
+                        USER32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                        logger.debug("Controller: %s complete (winapi)", label)
+                    except Exception:
+                        logger.exception("Controller: Win32 key press failed for '%s'", key)
+                else:
+                    if not keyboard_module:
+                        logger.error("Controller: keyboard library not available for %s", label)
+                        return
+                    logger.debug("Controller: using keyboard library for '%s' press", key)
+                    keyboard_module.press(key)
+                    start = time.time()
+                    while (time.time() - start) < hold_seconds:
+                        if self._mission_cancel.is_set():
+                            logger.debug("Controller: %s cancelled", label)
+                            break
+                        time.sleep(0.05)
+                    try:
+                        keyboard_module.release(key)
+                    except Exception:
+                        logger.exception("Controller: failed to release '%s' key", key)
+                    logger.debug("Controller: %s complete", label)
             except Exception:
                 logger.exception("Controller: %s failed", label)
 
