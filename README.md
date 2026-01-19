@@ -71,3 +71,12 @@ The prototype supports a boolean `left_mouse_button` option and a legacy `fire_b
 - `controls.fire_button: <key>` — legacy; use `left` for left-click or a keyboard key name to send presses.
 
 If both are present, `left_mouse_button` takes precedence.
+
+
+
+# how to quick run
+
+Using powershell
+```
+powershell -ExecutionPolicy Bypass -File .\run-wingman.ps1
+```

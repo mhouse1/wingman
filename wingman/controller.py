@@ -24,6 +24,7 @@ FIRE_ACTIVE_WEAPON = 'f'
 WINGSWEEP_KEY = 'w'
 SWITCH_WEAPON = 'g'
 SPECIAL_ABILITY = 'q'
+TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 
 """
 EMOTE1 # Moving to
@@ -48,6 +49,19 @@ class Controller:
         self._mission_lock = threading.Lock()
         self._mission_complete = threading.Event()
         self._mission_cancel = threading.Event()
+        
+        # Weapon loop state
+        self._weapon_loop_active = False
+        self._weapon_loop_thread = None
+        self._weapon_loop_interval = 1.1  # Fire every 0.2 seconds
+        
+        # Register hotkey for weapon loop toggle
+        if keyboard_module:
+            try:
+                keyboard_module.add_hotkey(TOGGLE_WEAPON_LOOP_KEY, self.toggle_weapon_loop)
+                logger.info("Controller: registered hotkey '%s' to toggle weapon loop", TOGGLE_WEAPON_LOOP_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register weapon loop hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
@@ -143,7 +157,58 @@ class Controller:
         """Activate the currently selected weapon (short press)."""
         self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=hold_seconds, block=block, action_name='fire_active_weapon')
 
-    def begin_mission(self):
+    def start_weapon_loop(self, interval: float | None = None):
+        """Start continuously firing the active weapon in a loop.
+        
+        Args:
+            interval: Time between shots in seconds (default 0.2)
+        """
+        if self._weapon_loop_active:
+            logger.debug("Controller: weapon loop already running")
+            return
+        
+        if interval is not None:
+            self._weapon_loop_interval = float(interval)
+        
+        self._weapon_loop_active = True
+        
+        def _loop():
+            logger.info("Controller: weapon loop started (interval=%.2fs)", self._weapon_loop_interval)
+            try:
+                while self._weapon_loop_active:
+                    self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=0.05, block=True, action_name='weapon_loop_fire')
+                    time.sleep(self._weapon_loop_interval)
+            except Exception:
+                logger.exception("Controller: weapon loop error")
+            finally:
+                self._weapon_loop_active = False
+                logger.info("Controller: weapon loop stopped")
+        
+        self._weapon_loop_thread = threading.Thread(target=_loop, daemon=True)
+        self._weapon_loop_thread.start()
+
+    def stop_weapon_loop(self):
+        """Stop the continuous weapon firing loop."""
+        if not self._weapon_loop_active:
+            logger.debug("Controller: weapon loop not running")
+            return
+        
+        logger.info("Controller: stopping weapon loop")
+        self._weapon_loop_active = False
+        if self._weapon_loop_thread:
+            self._weapon_loop_thread.join(timeout=1.0)
+            self._weapon_loop_thread = None
+
+    def toggle_weapon_loop(self):
+        """Toggle the weapon loop on/off. Bound to hotkey 'x'."""
+        if self._weapon_loop_active:
+            logger.info("Controller: toggling weapon loop OFF")
+            self.stop_weapon_loop()
+        else:
+            logger.info("Controller: toggling weapon loop ON")
+            self.start_weapon_loop()
+
+    def mission_loiter(self):
         """This mission sequence performs a predefined set of maneuvers for the Aaarvark, it flies up and tries to stay up
         Compatible Jets: F111, F-14, Mig-23, J20
         """
@@ -153,7 +218,7 @@ class Controller:
             logger.debug("Controller: mission already in progress, skipping")
             return
 
-        logger.info("Controller: begin_mission - starting mission sequence")
+        logger.info("Controller: mission_loiter - starting mission sequence")
         self._mission_complete.clear()
         self._mission_cancel.clear()
 
@@ -174,9 +239,9 @@ class Controller:
                 self.roll_left(30)
                 #self.nose_down(4.0)
                 #time.sleep(10.0)  # additional wait time to stabilize
-                logger.info("Controller: begin_mission - sequence complete")
+                logger.info("Controller: mission_loiter - sequence complete")
             except Exception:
-                logger.exception("Controller: begin_mission failed")
+                logger.exception("Controller: mission_loiter failed")
             finally:
                 self._mission_complete.set()
                 try:
@@ -198,6 +263,7 @@ class Controller:
         """
         logger.info("Controller: cancel_mission called")
         self._mission_cancel.set()
+        self.stop_weapon_loop()  # Stop weapon loop when mission is cancelled
         try:
             self._mission_complete.set()
         except Exception:

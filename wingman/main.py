@@ -218,7 +218,7 @@ def main():
             #logger.info("Firing")
             #ctrl.fire()
             #ctrl.nose_up()
-            ctrl.begin_mission()
+            ctrl.mission_loiter()
             time.sleep(3)
 
              
