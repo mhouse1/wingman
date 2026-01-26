@@ -9,6 +9,11 @@ try:
 except Exception:
     keyboard_module = None
 
+# Key controls (change these to remap start/pause and cancel)
+BEGIN_MISSION_KEY = 'enter'
+CANCEL_MISSION_KEY = 'end'
+EXIT_KEY = 'backspace'
+
 # Note: enabling this will slow down startup by 10seconds due to easyocr/tensorflow init
 # try:
 #     import easyocr
@@ -114,7 +119,12 @@ def main():
         fire_button = "left"
     else:
         fire_button = controls_cfg.get("fire_button", "left")
-    ctrl = Controller(region, fire_button=fire_button)
+    
+    # Create exit event before controller
+    exit_requested = threading.Event()
+    exit_requested.clear()
+    
+    ctrl = Controller(region, fire_button=fire_button, exit_event=exit_requested)
     ai = SimpleAI(region, smoothing=cfg.get("aim", {}).get("smoothing", 0.25), fire_cooldown=cfg.get("aim", {}).get("fire_cooldown", 0.2))
 
     try:
@@ -134,17 +144,25 @@ def main():
         # Try keyboard global hook first
         keyboard_avail = keyboard_module is not None
         if keyboard_avail:
-            logger.info("Press 'm' to toggle start/pause of main loop; 'k' to cancel mission")
+            logger.info("Press '%s' to toggle start/pause of main loop; '%s' to cancel mission; '%s' to exit", BEGIN_MISSION_KEY, CANCEL_MISSION_KEY, EXIT_KEY)
             try:
-                keyboard_module.on_press_key('m', lambda e: toggle_running())
-                def _on_k(e):
+                keyboard_module.on_press_key(BEGIN_MISSION_KEY, lambda e: toggle_running())
+                def _on_cancel(e):
                     try:
                         ctrl.cancel_mission()
                     except Exception:
                         logger.debug("Controller not ready to cancel mission")
-                    toggle_running()
+                    if running.is_set():
+                        running.clear()
+                        logger.info("Mission cancelled and paused")
 
-                keyboard_module.on_press_key('k', _on_k)
+                keyboard_module.on_press_key(CANCEL_MISSION_KEY, _on_cancel)
+                
+                def _on_exit(e):
+                    logger.info("Exiting...")
+                    exit_requested.set()
+                
+                keyboard_module.on_press_key(EXIT_KEY, _on_exit)
             except Exception:
                 logger.warning("keyboard.on_press_key failed; falling back to console listener")
                 keyboard_avail = False
@@ -159,14 +177,19 @@ def main():
                         try:
                             if msvcrt.kbhit():
                                 ch = msvcrt.getwch()
-                                if ch.lower() == 'm':
+                                if ch.lower() == BEGIN_MISSION_KEY:
                                     toggle_running()
-                                elif ch.lower() == 'k':
+                                elif ch.lower() == CANCEL_MISSION_KEY:
                                     try:
                                         ctrl.cancel_mission()
                                     except Exception:
                                         logger.debug("Controller not ready to cancel mission")
-                                    toggle_running()
+                                    if running.is_set():
+                                        running.clear()
+                                        logger.info("Mission cancelled and paused")
+                                elif ch == '\x08':  # backspace character
+                                    logger.info("Exiting...")
+                                    exit_requested.set()
                         except Exception:
                             pass
                         time.sleep(0.05)
@@ -182,20 +205,28 @@ def main():
                         except EOFError:
                             break
                         v = s.strip().lower()
-                        if v == 'm':
+                        if v == BEGIN_MISSION_KEY:
                             toggle_running()
-                        elif v == 'k':
+                        elif v == CANCEL_MISSION_KEY:
                             try:
                                 ctrl.cancel_mission()
                             except Exception:
                                 logger.debug("Controller not ready to cancel mission")
-                            toggle_running()
+                            if running.is_set():
+                                running.clear()
+                                logger.info("Mission cancelled and paused")
+                        elif v == EXIT_KEY:
+                            logger.info("Exiting...")
+                            exit_requested.set()
 
                 t = threading.Thread(target=input_listener, daemon=True)
                 t.start()
-                logger.info("Type 'm' + Enter to toggle start/pause")
+                logger.info("Type '%s' + Enter to toggle start/pause", BEGIN_MISSION_KEY)
 
         while True:
+            if exit_requested.is_set():
+                logger.info("Exit requested, shutting down")
+                break
             if not running.is_set():
                 time.sleep(0.05)
                 continue
@@ -214,7 +245,7 @@ def main():
             #logger.info("Firing")
             #ctrl.fire()
             #ctrl.nose_up()
-            ctrl.begin_mission()
+            ctrl.mission_loiter()
             time.sleep(3)
 
              

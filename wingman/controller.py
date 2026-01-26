@@ -2,6 +2,7 @@ import time
 import logging
 import threading
 import pyautogui
+import sys
 
 try:
     import keyboard as keyboard_module
@@ -11,22 +12,35 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 # Key bindings (change these to remap controls)
-NOSE_UP_KEY = 'e'
-NOSE_DOWN_KEY = 'd'
-AFTERBURNER_KEY = 'a'
-AIRBRAKE_KEY = 'g'
-ROLL_LEFT_KEY = 's'
-ROLL_RIGHT_KEY = 'f'
+NOSE_UP_KEY = 'i'
+NOSE_DOWN_KEY = 'k'
+AFTERBURNER_KEY = 'e'
+AIRBRAKE_KEY = 'd'
+ROLL_LEFT_KEY = 'j'
+ROLL_RIGHT_KEY = 'l'
 DEPLOY_FLARES_KEY = 'space'
-FIRE_MACHINIE_GUN = 'w'
-FIRE_ACTIVE_WEAPON = 'r'
-WINGSWEEP_KEY = '3'
-SWITCH_WEAPON = 'b'
+FIRE_MACHINIE_GUN = 'a'
+FIRE_ACTIVE_WEAPON = 'f'
+WINGSWEEP_KEY = 'w'
+SWITCH_WEAPON = 'g'
 SPECIAL_ABILITY = 'q'
+TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 
+"""
+EMOTE1 # Moving to
+EMOTE2 # Help!
+EMOTE3 # Defend
+EMOTE4 # Attack
+EMOTE5 # Goodluck
+EMOTE6 # Well Played  
+EMOTE7 # Wow!
+EMOTE8 # Thanks!
+EMOTE9 # Good Game!
+EMOTE10 # Oops!
+"""
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -35,6 +49,20 @@ class Controller:
         self._mission_lock = threading.Lock()
         self._mission_complete = threading.Event()
         self._mission_cancel = threading.Event()
+        self._exit_event = exit_event  # Event to signal program exit
+        
+        # Weapon loop state
+        self._weapon_loop_active = False
+        self._weapon_loop_thread = None
+        self._weapon_loop_interval = 0.5  # Fire every 0.5 seconds
+        
+        # Register hotkey for weapon loop toggle
+        if keyboard_module:
+            try:
+                keyboard_module.add_hotkey(TOGGLE_WEAPON_LOOP_KEY, self.toggle_weapon_loop)
+                logger.info("Controller: registered hotkey '%s' to toggle weapon loop", TOGGLE_WEAPON_LOOP_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register weapon loop hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
@@ -130,7 +158,63 @@ class Controller:
         """Activate the currently selected weapon (short press)."""
         self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=hold_seconds, block=block, action_name='fire_active_weapon')
 
-    def begin_mission(self):
+    def start_weapon_loop(self, interval: float | None = None):
+        """Start continuously firing the active weapon in a loop.
+        
+        Args:
+            interval: Time between shots in seconds (default 0.2)
+        """
+        if self._weapon_loop_active:
+            logger.debug("Controller: weapon loop already running")
+            return
+        
+        if interval is not None:
+            self._weapon_loop_interval = float(interval)
+        
+        self._weapon_loop_active = True
+        
+        def _loop():
+            logger.info("Controller: weapon loop started (interval=%.2fs)", self._weapon_loop_interval)
+            try:
+                while self._weapon_loop_active:
+                    try:
+                        # Use shorter hold time for better game responsiveness
+                        self.fire_active_weapon(hold_seconds=0.1, block=True)
+                    except Exception as e:
+                        logger.warning("Controller: weapon loop fire failed: %s", e)
+                    time.sleep(self._weapon_loop_interval)
+            except Exception:
+                logger.exception("Controller: weapon loop error")
+            finally:
+                self._weapon_loop_active = False
+                logger.info("Controller: weapon loop stopped")
+        
+        self._weapon_loop_thread = threading.Thread(target=_loop, daemon=True)
+        self._weapon_loop_thread.start()
+
+    def stop_weapon_loop(self):
+        """Stop the continuous weapon firing loop."""
+        if not self._weapon_loop_active:
+            logger.debug("Controller: weapon loop not running")
+            return
+        
+        logger.info("Controller: stopping weapon loop")
+        self._weapon_loop_active = False
+        if self._weapon_loop_thread:
+            self._weapon_loop_thread.join(timeout=1.0)
+            self._weapon_loop_thread = None
+
+    def toggle_weapon_loop(self):
+        """Toggle the weapon loop on/off. Bound to hotkey 'x'."""
+        logger.debug("Controller: toggle_weapon_loop called (current state: %s)", self._weapon_loop_active)
+        if self._weapon_loop_active:
+            logger.info("Controller: toggling weapon loop OFF")
+            self.stop_weapon_loop()
+        else:
+            logger.info("Controller: toggling weapon loop ON")
+            self.start_weapon_loop()
+
+    def mission_loiter(self):
         """This mission sequence performs a predefined set of maneuvers for the Aaarvark, it flies up and tries to stay up
         Compatible Jets: F111, F-14, Mig-23, J20
         """
@@ -140,7 +224,7 @@ class Controller:
             logger.debug("Controller: mission already in progress, skipping")
             return
 
-        logger.info("Controller: begin_mission - starting mission sequence")
+        logger.info("Controller: mission_loiter - starting mission sequence")
         self._mission_complete.clear()
         self._mission_cancel.clear()
 
@@ -148,22 +232,58 @@ class Controller:
             try:
                 # Execute mission maneuvers (maneuvers log their own activity)
                 self.nose_up(2.0)
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after nose_up")
+                    return
                 self.wingsweep()
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after wingsweep")
+                    return
                 self.afterburner(10.0)
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after afterburner")
+                    return
                 self.afterburner(10.0)
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after afterburner")
+                    return
                 self.wingsweep()
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after wingsweep")
+                    return
                 self.roll_right(4)
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after roll_right")
+                    return
                 self.afterburner(10)
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after afterburner")
+                    return
                 self.deploy_flares()
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after deploy_flares")
+                    return
                 self.roll_left(10)
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after roll_left")
+                    return
                 self.deploy_flares()
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after deploy_flares")
+                    return
                 self.roll_right(30)
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled after roll_right")
+                    return
                 self.roll_left(30)
+                if self._mission_cancel.is_set():
+                    logger.info("Controller: mission cancelled")
+                    return
                 #self.nose_down(4.0)
                 #time.sleep(10.0)  # additional wait time to stabilize
-                logger.info("Controller: begin_mission - sequence complete")
+                logger.info("Controller: mission_loiter - sequence complete")
             except Exception:
-                logger.exception("Controller: begin_mission failed")
+                logger.exception("Controller: mission_loiter failed")
             finally:
                 self._mission_complete.set()
                 try:
@@ -174,8 +294,13 @@ class Controller:
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
         
-        # Wait for mission to complete
-        self._mission_complete.wait()
+        # Wait for mission to complete or exit requested
+        while not self._mission_complete.is_set():
+            if self._exit_event and self._exit_event.is_set():
+                logger.info("Controller: exit requested, aborting mission wait")
+                self.cancel_mission()
+                break
+            time.sleep(0.05)
 
     def cancel_mission(self):
         """Request cancellation of any running mission.
@@ -185,6 +310,7 @@ class Controller:
         """
         logger.info("Controller: cancel_mission called")
         self._mission_cancel.set()
+        self.stop_weapon_loop()  # Stop weapon loop when mission is cancelled
         try:
             self._mission_complete.set()
         except Exception:
