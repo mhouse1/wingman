@@ -351,17 +351,19 @@ class Controller:
         # Background loop flags and thread references
         padlock_loop_active = threading.Event()
         weapon_loop_active = threading.Event()
+        flares_loop_active = threading.Event()
         padlock_thread = None
         weapon_thread = None
+        flares_thread = None
 
         def _padlock_loop():
-            """Background loop to press padlock camera every 5 seconds"""
+            """Background loop to press padlock camera every 6 seconds"""
             logger.info("Controller: mission_j20 padlock loop started")
             try:
                 while padlock_loop_active.is_set() and not self._mission_cancel.is_set():
                     self.padlock_camera(hold_seconds=0.1, block=True)
                     # Interruptible sleep - check for cancellation every 0.1 seconds
-                    for _ in range(50):  # 50 * 0.1 = 5 seconds
+                    for _ in range(60):  # 60 * 0.1 = 6 seconds
                         if not padlock_loop_active.is_set() or self._mission_cancel.is_set():
                             break
                         time.sleep(0.1)
@@ -386,6 +388,22 @@ class Controller:
             finally:
                 logger.info("Controller: mission_j20 weapon fire loop stopped")
 
+        def _flares_loop():
+            """Background loop to deploy flares every 15 seconds"""
+            logger.info("Controller: mission_j20 flares loop started")
+            try:
+                while flares_loop_active.is_set() and not self._mission_cancel.is_set():
+                    self.deploy_flares(hold_seconds=0.05, block=True)
+                    # Interruptible sleep - check for cancellation every 0.1 seconds
+                    for _ in range(150):  # 150 * 0.1 = 15 seconds
+                        if not flares_loop_active.is_set() or self._mission_cancel.is_set():
+                            break
+                        time.sleep(0.1)
+            except Exception:
+                logger.exception("Controller: mission_j20 flares loop error")
+            finally:
+                logger.info("Controller: mission_j20 flares loop stopped")
+
         def _mission_runner():
             try:
                 # Execute mission maneuvers (maneuvers log their own activity)
@@ -393,11 +411,7 @@ class Controller:
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after nose_up")
                     return
-                self.wingsweep()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after wingsweep")
-                    return
-                
+
                 # Start background loops after first wingsweep
                 padlock_loop_active.set()
                 weapon_loop_active.set()
@@ -407,76 +421,80 @@ class Controller:
                 weapon_thread.start()
                 logger.info("Controller: mission_j20 background loops started")
                 
-                self.afterburner(10.0)
+                self.afterburner(20.0)
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after afterburner")
                     padlock_loop_active.clear()
                     weapon_loop_active.clear()
                     return
-                self.afterburner(10.0)
+
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after afterburner")
                     padlock_loop_active.clear()
                     weapon_loop_active.clear()
                     return
-                self.wingsweep()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after wingsweep")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
-                    return
-                self.roll_right(4)
+                # Roll right, afterburner, and flares at the same time
+                flares_loop_active.set()
+                flares_thread = threading.Thread(target=_flares_loop, daemon=True)
+                flares_thread.start()
+                self.roll_right(70, block=False)
+                self.afterburner(70)
+                flares_loop_active.clear()
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after roll_right")
                     padlock_loop_active.clear()
                     weapon_loop_active.clear()
+                    flares_loop_active.clear()
                     return
-                self.afterburner(10)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after afterburner")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
-                    return
-                self.deploy_flares()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after deploy_flares")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
-                    return
-                self.roll_left(10)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_left")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
-                    return
-                self.deploy_flares()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after deploy_flares")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
-                    return
-                self.roll_right(30)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_right")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
-                    return
-                self.roll_left(30)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
-                    return
+                # self.afterburner(10)
+                # if self._mission_cancel.is_set():
+                #     logger.info("Controller: mission cancelled after afterburner")
+                #     padlock_loop_active.clear()
+                #     weapon_loop_active.clear()
+                #     return
+                # self.deploy_flares()
+                # if self._mission_cancel.is_set():
+                #     logger.info("Controller: mission cancelled after deploy_flares")
+                #     padlock_loop_active.clear()
+                #     weapon_loop_active.clear()
+                #     return
+                # self.roll_left(10)
+                # if self._mission_cancel.is_set():
+                #     logger.info("Controller: mission cancelled after roll_left")
+                #     padlock_loop_active.clear()
+                #     weapon_loop_active.clear()
+                #     return
+                # self.deploy_flares()
+                # if self._mission_cancel.is_set():
+                #     logger.info("Controller: mission cancelled after deploy_flares")
+                #     padlock_loop_active.clear()
+                #     weapon_loop_active.clear()
+                #     return
+                # self.roll_right(30)
+                # if self._mission_cancel.is_set():
+                #     logger.info("Controller: mission cancelled after roll_right")
+                #     padlock_loop_active.clear()
+                #     weapon_loop_active.clear()
+                #     return
+                # self.roll_left(30)
+                # if self._mission_cancel.is_set():
+                #     logger.info("Controller: mission cancelled")
+                #     padlock_loop_active.clear()
+                #     weapon_loop_active.clear()
+                #     return
                 
                 # Stop background loops
                 padlock_loop_active.clear()
                 weapon_loop_active.clear()
+                flares_loop_active.clear()
                 
                 # Wait for background threads to fully stop
                 if padlock_thread is not None:
                     padlock_thread.join(timeout=1.0)
                 if weapon_thread is not None:
                     weapon_thread.join(timeout=1.0)
+                if flares_thread is not None:
+                    flares_thread.join(timeout=1.0)
                 
                 #self.nose_down(4.0)
                 #time.sleep(10.0)  # additional wait time to stabilize
@@ -485,11 +503,14 @@ class Controller:
                 logger.exception("Controller: mission_j20 failed")
                 padlock_loop_active.clear()
                 weapon_loop_active.clear()
+                flares_loop_active.clear()
                 # Wait for background threads to stop
                 if padlock_thread is not None:
                     padlock_thread.join(timeout=1.0)
                 if weapon_thread is not None:
                     weapon_thread.join(timeout=1.0)
+                if flares_thread is not None:
+                    flares_thread.join(timeout=1.0)
             finally:
                 self._mission_complete.set()
                 try:
