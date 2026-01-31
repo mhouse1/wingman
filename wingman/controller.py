@@ -67,10 +67,11 @@ class Controller:
                 logger.exception("Controller: failed to register weapon loop hotkey")
             
             try:
-                def start_j20_mission():
+                def start_j20_mission(e):
+                    logger.info("Controller: U key pressed - starting J20 mission")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
                 
-                keyboard_module.add_hotkey(MISSION_J20_KEY, start_j20_mission)
+                keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to start J20 mission", MISSION_J20_KEY)
             except Exception:
                 logger.exception("Controller: failed to register J20 mission hotkey")
@@ -354,13 +355,13 @@ class Controller:
         weapon_thread = None
 
         def _padlock_loop():
-            """Background loop to press padlock camera every 10 seconds"""
+            """Background loop to press padlock camera every 5 seconds"""
             logger.info("Controller: mission_j20 padlock loop started")
             try:
                 while padlock_loop_active.is_set() and not self._mission_cancel.is_set():
                     self.padlock_camera(hold_seconds=0.1, block=True)
                     # Interruptible sleep - check for cancellation every 0.1 seconds
-                    for _ in range(100):  # 100 * 0.1 = 10 seconds
+                    for _ in range(50):  # 50 * 0.1 = 5 seconds
                         if not padlock_loop_active.is_set() or self._mission_cancel.is_set():
                             break
                         time.sleep(0.1)
@@ -511,6 +512,10 @@ class Controller:
         
         # Wait for the mission runner thread to fully exit
         mission_a.join(timeout=2.0)
+        
+        # Small delay to let keyboard library settle after key presses
+        time.sleep(0.2)
+        
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
     def cancel_mission(self):
