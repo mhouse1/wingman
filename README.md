@@ -38,19 +38,17 @@ uv add -r requirements.txt   # import existing requirements
 uv sync    # create .venv and install deps per lockfile
 ```
 
-Run the prototype inside the uv-managed environment without activating:
+Run the prototype:
 
-With the game running windowed, adjust `config.yaml` control settings and region, then run:
+With the game running windowed, adjust `config.yaml` control settings and region, then:
 
-```bash
-uv run python -m wingman.main --dry-run
-uv run python -m wingman.main
-uv run python -m wingman.main --log-level DEBUG
-```
+**Recommended: Double-click `wingman.bat` to launch with debug logging.**
+
+(For manual run options, see comments in `wingman.bat`)
 
 Press the begin mission key (default: Enter) to start executing the mission steps. Press it again to pause.
 
-Or activate the `.venv` created by `uv`:
+Optional - activate the `.venv` created by `uv`:
 
 macOS / Linux / WSL:
 ```bash
@@ -79,12 +77,3 @@ The `controls` section in `wingman/config.yaml` supports fire button configurati
 - `controls.fire_button: <key>` — legacy; use `left` for left-click or a keyboard key name to send presses.
 
 If both are present, `left_mouse_button` takes precedence.
-
-
-
-# how to quick run
-
-Using powershell
-```
-powershell -ExecutionPolicy Bypass -File .\run-wingman.ps1
-```
