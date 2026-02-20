@@ -437,8 +437,12 @@ class Controller:
                 flares_loop_active.set()
                 flares_thread = threading.Thread(target=_flares_loop, daemon=True)
                 flares_thread.start()
-                self.roll_right(70, block=False)
-                self.afterburner(70)
+                self.roll_right(1000, block=False)
+                self.afterburner(10)
+                time.sleep(10) # allow after burner to recharge
+                self.afterburner(10)
+                time.sleep(10) # allow after burner to recharge
+                self.afterburner(10)
                 flares_loop_active.clear()
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after roll_right")
