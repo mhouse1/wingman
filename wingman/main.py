@@ -157,11 +157,9 @@ def main():
                 def _on_cancel(e):
                     try:
                         ctrl.cancel_mission()
+                        logger.info("Mission cancelled")
                     except Exception:
                         logger.debug("Controller not ready to cancel mission")
-                    if running.is_set():
-                        running.clear()
-                        logger.info("Mission cancelled and paused")
 
                 keyboard_module.on_press_key(CANCEL_MISSION_KEY, _on_cancel)
                 
@@ -189,11 +187,9 @@ def main():
                                 elif ch.lower() == CANCEL_MISSION_KEY:
                                     try:
                                         ctrl.cancel_mission()
+                                        logger.info("Mission cancelled")
                                     except Exception:
                                         logger.debug("Controller not ready to cancel mission")
-                                    if running.is_set():
-                                        running.clear()
-                                        logger.info("Mission cancelled and paused")
                                 elif ch == '\x08':  # backspace character
                                     logger.info("Exiting...")
                                     exit_requested.set()
@@ -217,11 +213,9 @@ def main():
                         elif v == CANCEL_MISSION_KEY:
                             try:
                                 ctrl.cancel_mission()
+                                logger.info("Mission cancelled")
                             except Exception:
                                 logger.debug("Controller not ready to cancel mission")
-                            if running.is_set():
-                                running.clear()
-                                logger.info("Mission cancelled and paused")
                         elif v == EXIT_KEY:
                             logger.info("Exiting...")
                             exit_requested.set()
@@ -232,6 +226,7 @@ def main():
 
         # Track previous game state to detect respawn transitions
         was_respawning = False
+        pending_restart_at = None
 
         while True:
             if exit_requested.is_set():
@@ -252,6 +247,7 @@ def main():
                 if not was_respawning:
                     logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
                     ctrl.cancel_mission()
+                    pending_restart_at = time.time() + 5
                     was_respawning = True
                 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", 
@@ -263,9 +259,14 @@ def main():
             if was_respawning:
                 logger.info("\033[92m✓ Gameplay resumed - ready for missions\033[0m")
                 was_respawning = False
+
+            if pending_restart_at and time.time() >= pending_restart_at:
+                if ctrl.restart_last_mission():
+                    logger.info("Restarted last mission after respawn")
+                pending_restart_at = None
             
             # Normal gameplay - ready for missions
-            time.sleep(1)  # Check every second
+            #time.sleep(1)  # Check every second
 
              
             

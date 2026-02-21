@@ -36,7 +36,7 @@ class GameStateAnalyzer:
         self._ocr_cache = {
             'result': (False, 0.0, None),  # (is_respawning, confidence, method)
             'timestamp': 0.0,
-            'cooldown': respawn_cfg.get("ocr_cooldown", 0.5)  # Seconds between OCR runs
+            'cooldown': respawn_cfg.get("ocr_cooldown", 0.1)  # Seconds between OCR runs
         }
         
         # Fallback HSV detection (if OCR unavailable)
