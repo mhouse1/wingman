@@ -22,10 +22,6 @@ class GameStateAnalyzer:
         Args:
             config: Dict with HSV ranges and detection thresholds
         """
-        # Enemy detection (existing functionality)
-        self.enemy_hsv_lower = np.array(config["enemy_hsv"]["lower"], dtype=np.uint8)
-        self.enemy_hsv_upper = np.array(config["enemy_hsv"]["upper"], dtype=np.uint8)
-        
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
         
@@ -35,6 +31,13 @@ class GameStateAnalyzer:
         
         # EasyOCR reader (lazy initialization on first use)
         self._ocr_reader = None
+        
+        # OCR result caching for performance (avoid running OCR every frame)
+        self._ocr_cache = {
+            'result': (False, 0.0, None),  # (is_respawning, confidence, method)
+            'timestamp': 0.0,
+            'cooldown': respawn_cfg.get("ocr_cooldown", 0.5)  # Seconds between OCR runs
+        }
         
         # Fallback HSV detection (if OCR unavailable)
         self.respawn_text_hsv_lower = np.array(
@@ -89,8 +92,7 @@ class GameStateAnalyzer:
             dict: Game state with keys:
                 - is_respawning: bool
                 - respawn_confidence: float (0.0-1.0)
-                - enemies: list of (x, y, area) tuples
-                - enemy_count: int
+                - respawn_method: str or None
         """
         if frame is None or frame.size == 0:
             logger.warning("Analyzer: received invalid frame")
@@ -106,8 +108,6 @@ class GameStateAnalyzer:
             'is_respawning': False,
             'respawn_confidence': 0.0,
             'respawn_method': None,
-            'enemies': [],
-            'enemy_count': 0,
         }
         
         # Detect respawn screen - only check configured respawn_region where RESPAWN text appears
@@ -125,11 +125,6 @@ class GameStateAnalyzer:
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
-        
-        # Find enemies (skip if respawning to save processing)
-        if not respawn_detected:
-            state['enemies'] = self._find_enemies(analysis_frame)
-            state['enemy_count'] = len(state['enemies'])
         
         return state
     
@@ -151,14 +146,28 @@ class GameStateAnalyzer:
     def _detect_respawn_ocr(self, frame):
         """
         Use EasyOCR to detect "RESPAWN" text in the frame.
+        Uses caching to avoid running OCR every frame (massive performance gain).
         
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
+        import time
+        
         reader = self.ocr_reader
         if reader is None:
             logger.warning("OCR reader not initialized")
             return False, 0.0, None
+        
+        # Check if we can use cached result (throttle OCR)
+        current_time = time.time()
+        time_since_last_ocr = current_time - self._ocr_cache['timestamp']
+        
+        if time_since_last_ocr < self._ocr_cache['cooldown']:
+            # Use cached result
+            cached_result = self._ocr_cache['result']
+            if self.debug:
+                logger.debug("Using cached OCR result (%.2fs old)", time_since_last_ocr)
+            return cached_result
         
         try:
             # Convert to grayscale for better OCR
@@ -193,46 +202,21 @@ class GameStateAnalyzer:
                 # Match "RESPA" (lenient - allows OCR misreads like RE$PA! → RESPA)
                 if 'RESPA' in text_clean:
                     logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
-                    return True, 1.0, "ocr"  # 100% confidence when found
+                    result = (True, 1.0, "ocr")  # 100% confidence when found
+                    # Cache the result
+                    self._ocr_cache['result'] = result
+                    self._ocr_cache['timestamp'] = current_time
+                    return result
             
-            return False, 0.0, None
+            # Not found - cache negative result
+            result = (False, 0.0, None)
+            self._ocr_cache['result'] = result
+            self._ocr_cache['timestamp'] = current_time
+            return result
             
         except Exception as e:
             logger.warning("Analyzer: OCR detection failed: %s", e)
             return False, 0.0, None
-    
-    def _find_enemies(self, frame):
-        """
-        Find enemy positions in frame using HSV color detection.
-        
-        Returns:
-            list: List of (x, y, area) tuples for each detected enemy
-        """
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.enemy_hsv_lower, self.enemy_hsv_upper)
-        
-        # Morphological operations to reduce noise
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        enemies = []
-        
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < 20:  # Filter out noise
-                continue
-            
-            M = cv2.moments(c)
-            if M["m00"] == 0:
-                continue
-            
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-            enemies.append((cx, cy, area))
-        
-        logger.debug("Analyzer: found %d enemies", len(enemies))
-        return enemies
     
     def _empty_state(self):
         """Return empty game state for error cases."""
@@ -240,9 +224,13 @@ class GameStateAnalyzer:
             'is_respawning': False,
             'respawn_confidence': 0.0,
             'respawn_method': None,
-            'enemies': [],
-            'enemy_count': 0,
         }
+    
+    def reset_cache(self):
+        """Reset OCR cache - useful when switching between different images/scenes."""
+        self._ocr_cache['timestamp'] = 0.0
+        self._ocr_cache['result'] = (False, 0.0, None)
+        logger.debug("OCR cache reset")
     
     def get_region(self, frame, region_num):
         """

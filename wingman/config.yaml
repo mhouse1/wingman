@@ -15,6 +15,11 @@ respawn_detection:
   # Use OCR to detect "RESPAWN" text
   use_ocr: true
   
+  # OCR performance: only run OCR every N seconds (use cached result otherwise)
+  # Respawn screens stay visible for seconds, no need to check every frame
+  # Recommended: 0.5-1.0 seconds for good responsiveness with minimal CPU usage
+  ocr_cooldown: 0.5  # Seconds between OCR runs (20-50x speedup!)
+  
   # Grid region where RESPAWN text appears (6x6 grid = 36 regions)
   # Grid layout:
   #   1  2  3  4  5  6
@@ -52,5 +57,5 @@ controls:
   fire_hold: 2.0
 
 debug:
-  show_window: true
+  show_window: false
   draw_markers: true

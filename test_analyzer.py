@@ -70,14 +70,6 @@ def test_respawn_detection(image_path="RESPAWN.png", calibrate=False):
         print(f"  Is Respawning: {state['is_respawning']}")
         print(f"  Confidence: {state['respawn_confidence']:.2%}")
         print(f"  Detection Method: {state['respawn_method']}")
-        print(f"  Enemy Count: {state['enemy_count']}")
-        
-        if state['enemies']:
-            print(f"  Enemies detected at:")
-            for i, (x, y, area) in enumerate(state['enemies'][:5], 1):
-                print(f"    {i}. Position: ({x}, {y}), Area: {area}")
-            if len(state['enemies']) > 5:
-                print(f"    ... and {len(state['enemies']) - 5} more")
         
         print("\n" + "=" * 60)
         if state['is_respawning']:
@@ -116,12 +108,14 @@ def test_multiple_images():
             print(f"⊘ {img_path.name}: Failed to load")
             continue
         
+        # Reset cache between images to avoid cached results from previous image
+        analyzer.reset_cache()
+        
         state = analyzer.analyze_frame(frame)
         status = "RESPAWN" if state['is_respawning'] else "GAMEPLAY"
         confidence = state['respawn_confidence']
-        enemies = state['enemy_count']
         
-        print(f"✓ {img_path.name:40s} | {status:8s} | Conf: {confidence:.2%} | Enemies: {enemies}")
+        print(f"✓ {img_path.name:40s} | {status:8s} | Conf: {confidence:.2%}")
     
     print("=" * 60)
 
