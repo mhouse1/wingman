@@ -239,15 +239,18 @@ def main():
             
             # Capture and analyze frame
             frame = cap.get_frame()
-            analysis_start_time = time.time()
-            frame_timestamp = datetime.now().strftime("%H_%M_%S_%f")[:-3]
-            frame_name = f"frame_{frame_timestamp}"
-            logger.info("\033[94m▶ Starting analysis of %s\033[0m", frame_name)
+
+            # print start analysis timestamp for debugging
+            # analysis_start_time = time.time()
+            # frame_timestamp = datetime.now().strftime("%H_%M_%S_%f")[:-3]
+            # frame_name = f"frame_{frame_timestamp}"
+            # logger.info("\033[94m▶ Starting analysis of %s\033[0m", frame_name)
             
             game_state = analyzer.analyze_frame(frame)
             
-            analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
-            logger.info("\033[92m✓ Analysis complete for %s (%.1fms)\033[0m", frame_name, analysis_duration)
+            # print end analysis timestamp for debugging
+            # analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
+            # logger.info("\033[92m✓ Analysis complete for %s (%.1fms)\033[0m", frame_name, analysis_duration)
             
             # Check if respawning - cancel missions and wait
             if game_state['is_respawning']:

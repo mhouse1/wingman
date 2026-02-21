@@ -3,6 +3,8 @@
 import logging
 import cv2
 import numpy as np
+import threading
+import time
 
 try:
     import easyocr
@@ -38,6 +40,12 @@ class GameStateAnalyzer:
             'timestamp': 0.0,
             'cooldown': respawn_cfg.get("ocr_cooldown", 0.1)  # Seconds between OCR runs
         }
+        self._ocr_cache_lock = threading.Lock()  # Thread-safe cache updates
+        
+        # Background OCR thread for non-blocking analysis
+        self._background_ocr_frame = None
+        self._background_ocr_running = False
+        self._background_ocr_thread = None
         
         # Fallback HSV detection (if OCR unavailable)
         self.respawn_text_hsv_lower = np.array(
@@ -158,77 +166,101 @@ class GameStateAnalyzer:
     def _detect_respawn_ocr(self, frame):
         """
         Use EasyOCR to detect "RESPAWN" text in the frame.
-        Uses caching to avoid running OCR every frame (massive performance gain).
+        Non-blocking: uses caching + background thread to avoid blocking main loop.
         
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
-        import time
-        
-        reader = self.ocr_reader
-        if reader is None:
-            logger.warning("OCR reader not initialized")
-            return False, 0.0, None
-        
         # Check if we can use cached result (throttle OCR)
         current_time = time.time()
-        time_since_last_ocr = current_time - self._ocr_cache['timestamp']
-        
-        if time_since_last_ocr < self._ocr_cache['cooldown']:
-            # Use cached result
+        with self._ocr_cache_lock:
+            time_since_last_ocr = current_time - self._ocr_cache['timestamp']
             cached_result = self._ocr_cache['result']
-            if self.debug:
-                logger.debug("Using cached OCR result (%.2fs old)", time_since_last_ocr)
-            return cached_result
-        
-        try:
-            # Convert to grayscale for better OCR
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
-            # Try binary thresholding for clearer text (works better than CLAHE for clean text)
-            # Otsu's method automatically finds optimal threshold
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
-            # Downscale for faster OCR (OCR works better on smaller images)
-            small = cv2.resize(binary, None, fx=0.8, fy=0.8, interpolation=cv2.INTER_AREA)
-            
-            # Debug: save preprocessed images
-            if self.debug:
-                cv2.imwrite("debug_ocr_grayscale.png", gray)
-                cv2.imwrite("debug_ocr_binary.png", binary)
-                cv2.imwrite("debug_ocr_downscaled.png", small)
-                logger.debug("Saved OCR preprocessing debug images")
-            
-            # Run EasyOCR - returns list of (bbox, text, confidence)
-            results = reader.readtext(small, detail=1, paragraph=False)
-            
-            # Search for "RESPAWN" in detected text
-            for (bbox, text, conf) in results:
-                # Clean text: uppercase, remove spaces and non-alphabetic characters
-                text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
-                
-                # Debug: always print what OCR detected
+            # Cache still valid - return immediately (non-blocking)
+            if time_since_last_ocr < self._ocr_cache['cooldown']:
                 if self.debug:
-                    print('text clean:', text_clean, '(original:', text, ')')
+                    logger.debug("Using cached OCR result (%.2fs old)", time_since_last_ocr)
+                return cached_result
+        
+        # Cache expired - schedule background OCR (non-blocking)
+        if not self._background_ocr_running:
+            self._background_ocr_frame = frame
+            self._background_ocr_thread = threading.Thread(
+                target=self._run_ocr_in_background,
+                daemon=True
+            )
+            self._background_ocr_thread.start()
+            logger.debug("Background OCR scheduled")
+        
+        # Return cached result (may be stale) while background OCR runs
+        return cached_result
+    
+    def _run_ocr_in_background(self):
+        """Run OCR in background thread and update cache."""
+        try:
+            self._background_ocr_running = True
+            current_time = time.time()
+            frame = self._background_ocr_frame
+            
+            if frame is None:
+                return
+            
+            reader = self.ocr_reader
+            if reader is None:
+                logger.warning("OCR reader not initialized")
+                return
+            
+            try:
+                # Convert to grayscale for better OCR
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 
-                # Match "RESPA" (lenient - allows OCR misreads like RE$PA! → RESPA)
-                if 'RESPA' in text_clean:
-                    logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
-                    result = (True, 1.0, "ocr")  # 100% confidence when found
-                    # Cache the result
+                # Try binary thresholding for clearer text (works better than CLAHE for clean text)
+                # Otsu's method automatically finds optimal threshold
+                _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                
+                # Downscale for faster OCR (OCR works better on smaller images)
+                small = cv2.resize(binary, None, fx=0.8, fy=0.8, interpolation=cv2.INTER_AREA)
+                
+                # Debug: save preprocessed images
+                if self.debug:
+                    cv2.imwrite("debug_ocr_grayscale.png", gray)
+                    cv2.imwrite("debug_ocr_binary.png", binary)
+                    cv2.imwrite("debug_ocr_downscaled.png", small)
+                    logger.debug("Saved OCR preprocessing debug images")
+                
+                # Run EasyOCR - returns list of (bbox, text, confidence)
+                results = reader.readtext(small, detail=1, paragraph=False)
+                
+                # Search for "RESPAWN" in detected text
+                for (bbox, text, conf) in results:
+                    # Clean text: uppercase, remove spaces and non-alphabetic characters
+                    text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
+                    
+                    # Debug: always print what OCR detected
+                    if self.debug:
+                        print('text clean:', text_clean, '(original:', text, ')')
+                    
+                    # Match "RESPA" (lenient - allows OCR misreads like RE$PA! → RESPA)
+                    if 'RESPA' in text_clean:
+                        logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
+                        result = (True, 1.0, "ocr")  # 100% confidence when found
+                        # Thread-safe cache update
+                        with self._ocr_cache_lock:
+                            self._ocr_cache['result'] = result
+                            self._ocr_cache['timestamp'] = current_time
+                        return
+                
+                # Not found - cache negative result
+                result = (False, 0.0, None)
+                with self._ocr_cache_lock:
                     self._ocr_cache['result'] = result
                     self._ocr_cache['timestamp'] = current_time
-                    return result
-            
-            # Not found - cache negative result
-            result = (False, 0.0, None)
-            self._ocr_cache['result'] = result
-            self._ocr_cache['timestamp'] = current_time
-            return result
-            
-        except Exception as e:
-            logger.warning("Analyzer: OCR detection failed: %s", e)
-            return False, 0.0, None
+                    
+            except Exception as e:
+                logger.warning("Analyzer: OCR detection failed: %s", e)
+        finally:
+            self._background_ocr_running = False
     
     def _empty_state(self):
         """Return empty game state for error cases."""
