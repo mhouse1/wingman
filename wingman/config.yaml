@@ -52,5 +52,5 @@ controls:
   fire_hold: 2.0
 
 debug:
-  show_window: false
+  show_window: true
   draw_markers: true
