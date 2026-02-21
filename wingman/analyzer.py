@@ -50,6 +50,7 @@ class GameStateAnalyzer:
         )
         
         self.debug = config.get("debug", {}).get("show_window", False)
+        self.show_grid_highlighted = config.get("debug", {}).get("show_grid_highlighted", False)
         
         # Grid configuration (6x6 = 36 regions)
         self.grid_rows = 6
@@ -125,6 +126,17 @@ class GameStateAnalyzer:
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
+        
+        # Save highlighted grid if enabled (every frame)
+        if self.show_grid_highlighted:
+            try:
+                highlight = self.respawn_region if respawn_detected else None
+                self.draw_grid(frame, highlight_region=highlight, 
+                              output_path="output_grid_highlighted.png")
+                logger.debug("Saved highlighted grid to output_grid_highlighted.png (respawn: %s, region: %s)", 
+                           respawn_detected, highlight)
+            except Exception as e:
+                logger.warning("Failed to save highlighted grid: %s", e)
         
         return state
     

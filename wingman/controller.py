@@ -27,6 +27,7 @@ SPECIAL_ABILITY = 'q'
 PADLOCK_CAMERA = 'p'
 TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 MISSION_J20_KEY = 'u'  # Press U to start J20 mission
+MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
 
 """
 EMOTE1 # Moving to
@@ -75,6 +76,16 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to start J20 mission", MISSION_J20_KEY)
             except Exception:
                 logger.exception("Controller: failed to register J20 mission hotkey")
+            
+            try:
+                def start_loiter_mission(e):
+                    logger.info("Controller: Y key pressed - starting loiter mission")
+                    threading.Thread(target=self.mission_loiter, daemon=True).start()
+                
+                keyboard_module.on_press_key(MISSION_LOITER_KEY, start_loiter_mission, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to start loiter mission", MISSION_LOITER_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register loiter mission hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
