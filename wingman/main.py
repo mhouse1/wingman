@@ -10,6 +10,7 @@ try:
 except Exception:
     keyboard_module = None
 
+WINGMAN_VERSION = "1.0.0"
 # Key controls (change these to remap start/pause and cancel)
 BEGIN_MISSION_KEY = 'enter'
 CANCEL_MISSION_KEY = 'end'
@@ -100,12 +101,14 @@ def main():
     cfg = load_config(args.config)
     logger.info("Configuration loaded from %s", args.config)
     
+
     region = (
         cfg["region"]["left"],
         cfg["region"]["top"],
         cfg["region"]["width"],
         cfg["region"]["height"],
     )
+    monitor_index = cfg["region"].get("monitor", 1)
 
     hsv_lower = cfg["enemy_hsv"]["lower"]
     hsv_upper = cfg["enemy_hsv"]["upper"]
@@ -115,7 +118,7 @@ def main():
         logger.info("HSV lower/upper: %s %s", hsv_lower, hsv_upper)
         return
 
-    cap = Capture(region)
+    cap = Capture(region, monitor_index=monitor_index)
     vis = Vision(hsv_lower, hsv_upper, debug=cfg.get("debug", {}).get("show_window", False))
     analyzer = GameStateAnalyzer(cfg)
     logger.info("GameStateAnalyzer initialized - respawn detection enabled")

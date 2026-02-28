@@ -1,8 +1,11 @@
-"""Test script for GameStateAnalyzer with saved screenshots."""
-
+"""
+Test script for GameStateAnalyzer with saved screenshots.
+Example usage: uv run python test_analyzer.py test_screenshots/RESPAWN.png --grid
+"""
 import cv2
 import yaml
 import sys
+import time
 from pathlib import Path
 
 # Add wingman to path
@@ -10,6 +13,57 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from wingman.analyzer import GameStateAnalyzer
 
+def test_run_ocr_in_background(image_path="RESPAWN.png"):
+    """
+    Directly test the GameStateAnalyzer._run_ocr_in_background method for OCR detection.
+    Loads an image, sets it as the background frame, runs OCR in background, and prints the result from cache.
+    uv run python test_analyzer.py --unit-ocr
+    """
+    # Default to test_screenshots/RESPAWN.png if no path or default is given
+    if image_path == "RESPAWN.png":
+        image_path = str(Path("test_screenshots") / "RESPAWN.png")
+    cfg = load_config()
+    analyzer = GameStateAnalyzer(cfg)
+    frame = cv2.imread(image_path)
+    if frame is None:
+        print(f"ERROR: Could not load image: {image_path}")
+        return
+    start_time = time.time()
+    analyzer._background_ocr_frame = frame
+    analyzer._run_ocr_in_background()
+    elapsed = time.time() - start_time
+    # Read result from cache
+    with analyzer._ocr_cache_lock:
+        result = analyzer._ocr_cache['result']
+    print(f"[UnitTest] _run_ocr_in_background result: is_respawning={result[0]}, confidence={result[1]:.2%}, method={result[2]}")
+    print(f"[UnitTest] OCR runtime: {elapsed:.2f} seconds")
+
+
+def capture_and_test_with_visualization():
+    """
+    Capture a new screenshot using the configured region and monitor, then run grid visualization analysis on it.
+    The screenshot is saved as 'live_capture.png' and used for analysis instead of RESPAWN.png.
+    """
+    from wingman.capture import Capture
+    import time
+
+    cfg = load_config()
+    region = (
+        cfg["region"]["left"],
+        cfg["region"]["top"],
+        cfg["region"]["width"],
+        cfg["region"]["height"],
+    )
+    monitor_index = cfg["region"].get("monitor", 1)
+    cap = Capture(region, monitor_index=monitor_index)
+    print(f"Capturing screenshot from monitor {monitor_index} region {region}...")
+    frame = cap.get_frame()
+    # Save the screenshot
+    screenshot_path = "live_capture.png"
+    cv2.imwrite(screenshot_path, frame)
+    print(f"✓ Screenshot saved to {screenshot_path}")
+    # Run grid visualization on the captured screenshot
+    test_with_visualization(screenshot_path)
 
 def load_config(path="wingman/config.yaml"):
     """Load configuration file."""
@@ -120,58 +174,64 @@ def test_multiple_images():
     print("=" * 60)
 
 
+
+
 def test_with_visualization(image_path="RESPAWN.png"):
     """Test with visual grid overlay to identify regions."""
+    start_time = time.time()
     print(f"Loading {image_path}...")
-    
+
     cfg = load_config()
     analyzer = GameStateAnalyzer(cfg)
-    
+
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"ERROR: Could not load {image_path}")
         return
-    
+
     print(f"Image size: {frame.shape[1]}x{frame.shape[0]}")
-    
+
     # Analyze full frame
     state = analyzer.analyze_frame(frame)
     print(f"\nFull frame analysis:")
     print(f"  Respawning: {state['is_respawning']}")
     print(f"  Confidence: {state['respawn_confidence']:.2%}")
     print(f"  Method: {state['respawn_method']}")
-    
+
     # Draw grid and save
     grid_img = analyzer.draw_grid(frame, output_path="output_grid.png")
     print(f"\n✓ Saved grid visualization to output_grid.png")
-    
+
     # Test each region
     print(f"\nTesting individual regions (1-36):")
     print("-" * 60)
     respawn_regions = []
-    
+
     for region in range(1, 37):
         region_state = analyzer.analyze_frame(frame, region=region)
         status = "✓ RESPAWN" if region_state['is_respawning'] else "  gameplay"
         confidence = region_state['respawn_confidence']
         print(f"  Region {region:2d}: {status} | Conf: {confidence:.2%}")
-        
+
         if region_state['is_respawning']:
             respawn_regions.append((region, confidence))
-    
+
     print("-" * 60)
     if respawn_regions:
         print(f"\n✓ Respawn detected in region(s): {[r[0] for r in respawn_regions]}")
         best_region = max(respawn_regions, key=lambda x: x[1])
         print(f"  Best match: Region {best_region[0]} (confidence: {best_region[1]:.2%})")
         print(f"\nRecommendation: Use region={best_region[0]} for faster analysis")
-        
+
         # Save grid with best region highlighted
         highlighted_grid = analyzer.draw_grid(frame, highlight_region=best_region[0], 
                                              output_path="output_grid_highlighted.png")
         print(f"✓ Saved highlighted grid to output_grid_highlighted.png")
     else:
         print("\n✗ Respawn NOT detected in any region")
+
+    elapsed = time.time() - start_time
+    print(f"\nTotal runtime: {elapsed:.2f} seconds")
 
 
 
@@ -188,10 +248,18 @@ def main():
                        help="Test multiple images from test_screenshots/")
     parser.add_argument("--grid", action="store_true",
                        help="Test with grid visualization and per-region analysis")
+    parser.add_argument("--capture", action="store_true",
+                       help="Capture a new screenshot and run grid visualization on it")
+    parser.add_argument("--unit-ocr", action="store_true",
+                        help="Directly test _run_ocr_in_background on the given image")
     
     args = parser.parse_args()
     
-    if args.multiple:
+    if args.unit_ocr:
+        test_run_ocr_in_background(args.image)
+    elif args.capture:
+        capture_and_test_with_visualization()
+    elif args.multiple:
         test_multiple_images()
     elif args.grid:
         test_with_visualization(args.image)

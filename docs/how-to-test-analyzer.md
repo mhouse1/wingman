@@ -21,6 +21,12 @@ Test respawn detection on one screenshot:
 
 ```bash
 python test_analyzer.py path/to/screenshot.png
+
+(Recommended) using uv
+
+micha@impulse MINGW64 /c/dev-tools/github/wingman (analysis_b)
+$ uv run python test_analyzer.py test_screenshots/RESPAWN.png --grid
+
 ```
 
 Example:
