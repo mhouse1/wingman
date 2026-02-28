@@ -12,8 +12,6 @@ except Exception:
 
 WINGMAN_VERSION = "1.0.1"
 # Key controls (change these to remap start/pause and cancel)
-BEGIN_MISSION_KEY = 'enter'
-CANCEL_MISSION_KEY = 'end'
 EXIT_KEY = 'backspace'
 
 # Note: enabling this will slow down startup by 10seconds due to easyocr/tensorflow init
@@ -65,61 +63,6 @@ def main():
     running.set()  # start running immediately with analyzer active
     exit_requested = threading.Event()
 
-    def toggle_running():
-        if running.is_set():
-            running.clear()
-            logger.info("Paused — press '%s' to resume", BEGIN_MISSION_KEY)
-        else:
-            running.set()
-            logger.info("Resumed — press '%s' to pause", BEGIN_MISSION_KEY)
-
-    # Setup input listeners (keyboard or fallback)
-    try:
-        import msvcrt
-        def msvcrt_listener():
-            while True:
-                try:
-                    if msvcrt.kbhit():
-                        ch = msvcrt.getwch()
-                        if ch.lower() == BEGIN_MISSION_KEY:
-                            toggle_running()
-                        elif ch.lower() == CANCEL_MISSION_KEY:
-                            try:
-                                ctrl.cancel_mission()
-                                logger.info("Mission cancelled")
-                            except Exception:
-                                logger.debug("Controller not ready to cancel mission")
-                        elif ch == '\x08':  # backspace character
-                            logger.info("Exiting...")
-                            exit_requested.set()
-                except Exception:
-                    pass
-                time.sleep(0.05)
-        t = threading.Thread(target=msvcrt_listener, daemon=True)
-        t.start()
-        logger.info("Analyzer ACTIVE - Hotkeys: U=J20 | Y=Loiter | X=Weapon loop")
-    except Exception:
-        def input_listener():
-            while True:
-                try:
-                    s = input()
-                except EOFError:
-                    break
-                v = s.strip().lower()
-                if v == BEGIN_MISSION_KEY:
-                    toggle_running()
-                elif v == CANCEL_MISSION_KEY:
-                    try:
-                        ctrl.cancel_mission()
-                        logger.info("Mission cancelled")
-                    except Exception:
-                        logger.debug("Controller not ready to cancel mission")
-                elif v == EXIT_KEY:
-                    logger.info("Exiting...")
-                    exit_requested.set()
-        t = threading.Thread(target=input_listener, daemon=True)
-        t.start()
-        logger.info("Analyzer ACTIVE - Hotkeys: U=J20 | Y=Loiter | X=Weapon loop")
 
     # Initialize main components
     cap = Capture(region, monitor_index)
