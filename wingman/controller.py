@@ -27,6 +27,7 @@ SPECIAL_ABILITY = 'q'
 PADLOCK_CAMERA = 'p'
 TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 MISSION_J20_KEY = 'u'  # Press U to start J20 mission
+MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
 
 """
 EMOTE1 # Moving to
@@ -52,6 +53,8 @@ class Controller:
         self._mission_complete = threading.Event()
         self._mission_cancel = threading.Event()
         self._exit_event = exit_event  # Event to signal program exit
+        self._last_mission = None
+        self._last_mission_lock = threading.Lock()
         
         # Weapon loop state
         self._weapon_loop_active = False
@@ -69,12 +72,24 @@ class Controller:
             try:
                 def start_j20_mission(e):
                     logger.info("Controller: U key pressed - starting J20 mission")
+                    self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
                 
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to start J20 mission", MISSION_J20_KEY)
             except Exception:
                 logger.exception("Controller: failed to register J20 mission hotkey")
+            
+            try:
+                def start_loiter_mission(e):
+                    logger.info("Controller: Y key pressed - starting loiter mission")
+                    self._set_last_mission("loiter")
+                    threading.Thread(target=self.mission_loiter, daemon=True).start()
+                
+                keyboard_module.on_press_key(MISSION_LOITER_KEY, start_loiter_mission, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to start loiter mission", MISSION_LOITER_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register loiter mission hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
@@ -556,3 +571,23 @@ class Controller:
             self._mission_complete.set()
         except Exception:
             logger.exception("Controller: failed to set mission_complete during cancel")
+
+    def _set_last_mission(self, mission_name: str):
+        with self._last_mission_lock:
+            self._last_mission = mission_name
+
+    def restart_last_mission(self):
+        with self._last_mission_lock:
+            mission = self._last_mission
+
+        if mission == "j20":
+            logger.info("Controller: restarting last mission (J20)")
+            threading.Thread(target=self.mission_j20, daemon=True).start()
+            return True
+        if mission == "loiter":
+            logger.info("Controller: restarting last mission (loiter)")
+            threading.Thread(target=self.mission_loiter, daemon=True).start()
+            return True
+
+        logger.info("Controller: no last mission to restart")
+        return False

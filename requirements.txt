@@ -4,3 +4,5 @@ mss
 pyyaml
 pyautogui
 keyboard
+pytest
+pytest-html
