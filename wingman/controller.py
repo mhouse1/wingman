@@ -28,7 +28,7 @@ PADLOCK_CAMERA = 'p'
 TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 MISSION_J20_KEY = 'u'  # Press U to start J20 mission
 MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
-
+CANCEL_MISSION_KEY = 'end' # Press End to cancel active mission
 """
 EMOTE1 # Moving to
 EMOTE2 # Help!
@@ -43,7 +43,7 @@ EMOTE10 # Oops!
 """
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -55,41 +55,58 @@ class Controller:
         self._exit_event = exit_event  # Event to signal program exit
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
+        self._analyzer = analyzer
         
         # Weapon loop state
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
         self._weapon_loop_interval = 0.5  # Fire every 0.5 seconds
         
-        # Register hotkey for weapon loop toggle
+        # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
             try:
                 keyboard_module.add_hotkey(TOGGLE_WEAPON_LOOP_KEY, self.toggle_weapon_loop)
                 logger.info("Controller: registered hotkey '%s' to toggle weapon loop", TOGGLE_WEAPON_LOOP_KEY)
             except Exception:
                 logger.exception("Controller: failed to register weapon loop hotkey")
-            
+
             try:
                 def start_j20_mission(e):
                     logger.info("Controller: U key pressed - starting J20 mission")
                     self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
-                
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to start J20 mission", MISSION_J20_KEY)
             except Exception:
                 logger.exception("Controller: failed to register J20 mission hotkey")
-            
+
             try:
                 def start_loiter_mission(e):
                     logger.info("Controller: Y key pressed - starting loiter mission")
                     self._set_last_mission("loiter")
                     threading.Thread(target=self.mission_loiter, daemon=True).start()
-                
                 keyboard_module.on_press_key(MISSION_LOITER_KEY, start_loiter_mission, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to start loiter mission", MISSION_LOITER_KEY)
             except Exception:
                 logger.exception("Controller: failed to register loiter mission hotkey")
+
+            # Register hotkey for simulating respawn detected (for testing)
+            try:
+                self._simulate_respawn_flag = threading.Event()
+                def simulate_respawn(e):
+                    logger.info("Controller: B key pressed - simulating respawn detected (as if OCR detected 'RESPAWN')")
+                    if self._analyzer is not None:
+                        with self._analyzer._ocr_cache_lock:
+                            self._analyzer._ocr_cache['result'] = (True, 1.0, "ocr")
+                            self._analyzer._ocr_cache['timestamp'] = time.time()
+                        logger.info("Controller: Injected fake OCR respawn result into analyzer cache.")
+                    else:
+                        logger.warning("Controller: No analyzer reference to inject fake OCR respawn result.")
+                    self._simulate_respawn_flag.set()
+                keyboard_module.on_press_key('b', simulate_respawn, suppress=False)
+                logger.info("Controller: registered hotkey 'b' to simulate respawn detected")
+            except Exception:
+                logger.exception("Controller: failed to register simulate respawn hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.

@@ -124,7 +124,7 @@ def main():
     # Initialize main components
     cap = Capture(region, monitor_index)
     analyzer = GameStateAnalyzer(cfg)
-    ctrl = Controller(cfg, logger)
+    ctrl = Controller(cfg, logger, analyzer=analyzer)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
