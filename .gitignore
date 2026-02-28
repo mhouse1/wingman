@@ -1,0 +1,6 @@
+# Ignore Python bytecode cache directories and compiled files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+untrack_todo.md
