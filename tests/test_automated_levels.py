@@ -1,3 +1,9 @@
+'''
+Usage, run in bash:  uv run pytest tests/test_automated_levels.py --html=tests/test-output/report.html --self-contained-html
+
+uv run pytest tests/test_automated_levels.py -k test_level3_unit_ocr --html=tests/test-output/report.html --self-contained-html
+
+'''
 import subprocess
 import time
 import os
@@ -51,9 +57,22 @@ def test_level2_live_capture():
 
 def test_level3_unit_ocr():
     assert TEST_SCREENSHOT.exists(), f"Test screenshot not found: {TEST_SCREENSHOT}"
+
+    stage_times = {}
+
+    t0 = time.time()
     cmd = f"uv run python {SCRIPT} --unit-ocr"
+    t1 = time.time()
     code, out, err, elapsed = run_command(cmd)
+    t2 = time.time()
+
+    stage_times['command_build'] = t1 - t0
+    stage_times['command_run'] = t2 - t1
+    stage_times['total'] = t2 - t0
+
     print("\n[Level 3 Output]\n", out)
+    print(f"[Timing] Command build: {stage_times['command_build']:.2f}s, Command run: {stage_times['command_run']:.2f}s, Total: {stage_times['total']:.2f}s")
+
     assert code == 0, f"Level 3 failed: {err}"
     assert "_run_ocr_in_background result" in out, "OCR unit test did not run"
     assert "OCR runtime" in out, "OCR runtime not reported"

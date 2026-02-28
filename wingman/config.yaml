@@ -1,3 +1,8 @@
+# Main loop interval (seconds between each screen capture, this should not be faster than the OCR rate
+# Data From automated test will show OCR rate
+# [UnitTest] OCR Stage Timings:
+#   Setup: 0.00s, Reader: 1.17s, Grayscale: 0.00s, Threshold: 0.00s, Resize: 0.00s, OCR: 3.61s, Total: 4.82s
+loop_interval_sec: 3.0
 # Screen capture region (left, top, width, height)
 region:
   left: 0
@@ -24,7 +29,7 @@ respawn_detection:
   # OCR performance: only run OCR every N seconds (use cached result otherwise)
   # Non-blocking background thread: main loop NEVER blocks on OCR!
   # Respawn screens visible for 5+ seconds, so checking every 5s is plenty
-  ocr_cooldown: 3.5  # Seconds between OCR runs
+  ocr_cooldown: 2.5  # Seconds between OCR runs
   
   # Grid region where RESPAWN text appears (6x6 grid = 36 regions)
   # Grid layout:
@@ -63,6 +68,6 @@ controls:
   fire_hold: 2.0
 
 debug:
-  show_window: true 
+  show_window: true
   show_grid_highlighted: true  # Auto-save grid visualization when respawn detected
   draw_markers: true
