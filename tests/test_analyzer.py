@@ -46,6 +46,9 @@ def test_run_ocr_in_background(image_path="RESPAWN.png"):
         result = analyzer._ocr_cache['result']
         print(f"[UnitTest] _run_ocr_in_background result: is_respawning={result[0]}, confidence={result[1]:.2%}, method={result[2]}")
         print(f"[UnitTest] OCR runtime: {elapsed:.2f} seconds")
+        # Fail the test if confidence is not 100%
+        if result[1] < 1.0:
+            raise AssertionError(f"[UnitTest] FAIL: OCR confidence is not 100% (confidence={result[1]:.2%})")
 
 
 def capture_and_test_with_visualization():

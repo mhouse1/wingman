@@ -197,66 +197,69 @@ class GameStateAnalyzer:
         return cached_result
     
     def _run_ocr_in_background(self):
-        """Run OCR in background thread and update cache."""
+        """Run OCR in background thread and update cache, with detailed timing."""
+        import time
         try:
             self._background_ocr_running = True
-            current_time = time.time()
+            stage_times = {}
+            t0 = time.time()
+            current_time = t0
             frame = self._background_ocr_frame
-            
             if frame is None:
                 return
-            
+            t1 = time.time()
             reader = self.ocr_reader
+            t2 = time.time()
             if reader is None:
                 logger.warning("OCR reader not initialized")
                 return
-            
             try:
                 # Convert to grayscale for better OCR
+                t3 = time.time()
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                
+                t4 = time.time()
                 # Try binary thresholding for clearer text (works better than CLAHE for clean text)
                 # Otsu's method automatically finds optimal threshold
                 _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                
+                t5 = time.time()
                 # Downscale for faster OCR (OCR works better on smaller images)
-                small = cv2.resize(binary, None, fx=0.8, fy=0.8, interpolation=cv2.INTER_AREA)
-                
+                small = cv2.resize(binary, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
+                t6 = time.time()
                 # Debug: save preprocessed images
                 if self.debug:
                     cv2.imwrite("debug_ocr_grayscale.png", gray)
                     cv2.imwrite("debug_ocr_binary.png", binary)
                     cv2.imwrite("debug_ocr_downscaled.png", small)
                     logger.debug("Saved OCR preprocessing debug images")
-                
                 # Run EasyOCR - returns list of (bbox, text, confidence)
+                t7 = time.time()
                 results = reader.readtext(small, detail=1, paragraph=False)
-                
+                t8 = time.time()
                 # Search for "RESPAWN" in detected text
                 for (bbox, text, conf) in results:
                     # Clean text: uppercase, remove spaces and non-alphabetic characters
                     text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
-                    
                     # Debug: always print what OCR detected
                     if self.debug:
                         print('text clean:', text_clean, '(original:', text, ')')
-                    
                     # Match "RESPA" (lenient - allows OCR misreads like RE$PA! → RESPA)
-                    if 'RESPA' in text_clean:
+                    if 'RESP' in text_clean:
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
                         result = (True, 1.0, "ocr")  # 100% confidence when found
                         # Thread-safe cache update
                         with self._ocr_cache_lock:
                             self._ocr_cache['result'] = result
                             self._ocr_cache['timestamp'] = current_time
-                        return
-                
-                # Not found - cache negative result
-                result = (False, 0.0, None)
-                with self._ocr_cache_lock:
-                    self._ocr_cache['result'] = result
-                    self._ocr_cache['timestamp'] = current_time
-                    
+                        break
+                else:
+                    # Not found - cache negative result
+                    result = (False, 0.0, None)
+                    with self._ocr_cache_lock:
+                        self._ocr_cache['result'] = result
+                        self._ocr_cache['timestamp'] = current_time
+                # Print timing for each stage
+                print("[UnitTest] OCR Stage Timings:")
+                print(f"  Setup: {t1-t0:.2f}s, Reader: {t2-t1:.2f}s, Grayscale: {t4-t3:.2f}s, Threshold: {t5-t4:.2f}s, Resize: {t6-t5:.2f}s, OCR: {t8-t7:.2f}s, Total: {t8-t0:.2f}s")
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
         finally:

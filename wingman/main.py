@@ -12,8 +12,6 @@ except Exception:
 
 WINGMAN_VERSION = "1.0.1"
 # Key controls (change these to remap start/pause and cancel)
-BEGIN_MISSION_KEY = 'enter'
-CANCEL_MISSION_KEY = 'end'
 EXIT_KEY = 'backspace'
 
 # Note: enabling this will slow down startup by 10seconds due to easyocr/tensorflow init
@@ -34,59 +32,6 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def scan_screen_for_numbers(frame, reader=None):
-    """
-    Scan a screen frame for numbers using EasyOCR.
-    
-    Args:
-        frame: numpy array (BGR image) from screen capture
-        reader: optional EasyOCR Reader instance (will create if None)
-    
-    Returns:
-        dict: Dictionary with detected text as keys and extracted numbers as values.
-              Format: {"label_text": "123", "position_x_y": "456", ...}
-    """
-    if easyocr is None:
-        return {"error": "easyocr not installed"}
-    
-    # Initialize reader if not provided
-    if reader is None:
-        try:
-            reader = easyocr.Reader(['en'], gpu=True)
-        except Exception as e:
-            return {"error": f"Failed to initialize EasyOCR: {e}"}
-    
-    try:
-        # Detect all text with bounding boxes and confidence
-        results = reader.readtext(frame, detail=1, paragraph=False)
-    except Exception as e:
-        return {"error": f"EasyOCR read error: {e}"}
-    
-    # Extract numbers and associated text
-    number_dict = {}
-    
-    for bbox, text, confidence in results:
-        # Extract numbers from the detected text
-        numbers = re.findall(r'\d+', text)
-        
-        if numbers:
-            # Get position for labeling
-            x_center = int(sum([p[0] for p in bbox]) / 4)
-            y_center = int(sum([p[1] for p in bbox]) / 4)
-            
-            # Create key: use the full text if it contains non-digits, otherwise use position
-            if re.search(r'[^\d\s]', text):
-                # Text contains letters/labels
-                key = text.strip()
-            else:
-                # Pure numbers, use position as key
-                key = f"pos_{x_center}_{y_center}"
-            
-            # Join multiple numbers found in the same text region
-            value = ' '.join(numbers)
-            number_dict[key] = value
-    
-    return number_dict
 
 def main():
     parser = argparse.ArgumentParser()
@@ -112,178 +57,96 @@ def main():
 
     hsv_lower = cfg["enemy_hsv"]["lower"]
     hsv_upper = cfg["enemy_hsv"]["upper"]
-
-    if args.dry_run:
-        logger.info("Config loaded. Region: %s", region)
-        logger.info("HSV lower/upper: %s %s", hsv_lower, hsv_upper)
-        return
-
-    cap = Capture(region, monitor_index=monitor_index)
-    vis = Vision(hsv_lower, hsv_upper, debug=cfg.get("debug", {}).get("show_window", False))
-    analyzer = GameStateAnalyzer(cfg)
-    logger.info("GameStateAnalyzer initialized - respawn detection enabled")
-    
-    # Determine fire control: prefer boolean `left_mouse_button`, fall back to `fire_button` string
-    controls_cfg = cfg.get("controls", {})
-    if controls_cfg.get("left_mouse_button") is True:
-        fire_button = "left"
-    else:
-        fire_button = controls_cfg.get("fire_button", "left")
-    
-    # Create exit event before controller
+    # Toggle start/pause of the main loop with the 'm' key.
+    # Uses `keyboard` if available, otherwise falls back to OS-specific listeners.
+    running = threading.Event()
+    running.set()  # start running immediately with analyzer active
     exit_requested = threading.Event()
-    exit_requested.clear()
-    
-    ctrl = Controller(region, fire_button=fire_button, exit_event=exit_requested)
-    ai = SimpleAI(region, smoothing=cfg.get("aim", {}).get("smoothing", 0.25), fire_cooldown=cfg.get("aim", {}).get("fire_cooldown", 0.2))
+
+
+    # Initialize main components
+    cap = Capture(region, monitor_index)
+    analyzer = GameStateAnalyzer(cfg)
+    ctrl = Controller(cfg, logger, analyzer=analyzer)
+
+    # Load loop interval from config
+    loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
+
+    # Robust mission restart logic
+    was_respawning = False
+    mission_active = False
+    mission_started_at = None
+    pending_mission_restart = False
+    restart_retry_interval = 2.0  # seconds between restart attempts
+    last_restart_attempt = 0.0
 
     try:
-        # Toggle start/pause of the main loop with the 'm' key.
-        # Uses `keyboard` if available, otherwise falls back to OS-specific listeners.
-        running = threading.Event()
-        running.set()  # start running immediately with analyzer active
-
-        def toggle_running():
-            if running.is_set():
-                running.clear()
-                logger.info("Paused — press '%s' to resume", BEGIN_MISSION_KEY)
-            else:
-                running.set()
-                logger.info("Resumed — press '%s' to pause", BEGIN_MISSION_KEY)
-
-        # Try keyboard global hook first
-        keyboard_avail = keyboard_module is not None
-        if keyboard_avail:
-            logger.info("Analyzer ACTIVE - Monitoring respawn state")
-            logger.info("Hotkeys: U=J20 mission | Y=Loiter mission | X=Toggle weapon loop | '%s'=Pause | '%s'=Cancel | '%s'=Exit", BEGIN_MISSION_KEY, CANCEL_MISSION_KEY, EXIT_KEY)
-            try:
-                keyboard_module.on_press_key(BEGIN_MISSION_KEY, lambda e: toggle_running())
-                def _on_cancel(e):
-                    try:
-                        ctrl.cancel_mission()
-                        logger.info("Mission cancelled")
-                    except Exception:
-                        logger.debug("Controller not ready to cancel mission")
-
-                keyboard_module.on_press_key(CANCEL_MISSION_KEY, _on_cancel)
-                
-                def _on_exit(e):
-                    logger.info("Exiting...")
-                    exit_requested.set()
-                
-                keyboard_module.on_press_key(EXIT_KEY, _on_exit)
-            except Exception:
-                logger.warning("keyboard.on_press_key failed; falling back to console listener")
-                keyboard_avail = False
-
-        # Fallbacks: Windows console listener via msvcrt, otherwise input()
-        if not keyboard_avail:
-            try:
-                import msvcrt
-
-                def msvcrt_listener():
-                    while True:
-                        try:
-                            if msvcrt.kbhit():
-                                ch = msvcrt.getwch()
-                                if ch.lower() == BEGIN_MISSION_KEY:
-                                    toggle_running()
-                                elif ch.lower() == CANCEL_MISSION_KEY:
-                                    try:
-                                        ctrl.cancel_mission()
-                                        logger.info("Mission cancelled")
-                                    except Exception:
-                                        logger.debug("Controller not ready to cancel mission")
-                                elif ch == '\x08':  # backspace character
-                                    logger.info("Exiting...")
-                                    exit_requested.set()
-                        except Exception:
-                            pass
-                        time.sleep(0.05)
-
-                t = threading.Thread(target=msvcrt_listener, daemon=True)
-                t.start()
-                logger.info("Analyzer ACTIVE - Hotkeys: U=J20 | Y=Loiter | X=Weapon loop")
-            except Exception:
-                def input_listener():
-                    while True:
-                        try:
-                            s = input()
-                        except EOFError:
-                            break
-                        v = s.strip().lower()
-                        if v == BEGIN_MISSION_KEY:
-                            toggle_running()
-                        elif v == CANCEL_MISSION_KEY:
-                            try:
-                                ctrl.cancel_mission()
-                                logger.info("Mission cancelled")
-                            except Exception:
-                                logger.debug("Controller not ready to cancel mission")
-                        elif v == EXIT_KEY:
-                            logger.info("Exiting...")
-                            exit_requested.set()
-
-                t = threading.Thread(target=input_listener, daemon=True)
-                t.start()
-                logger.info("Analyzer ACTIVE - Hotkeys: U=J20 | Y=Loiter | X=Weapon loop")
-
-        # Track previous game state to detect respawn transitions
-        was_respawning = False
-        pending_restart_at = None
-
         while True:
+            loop_start = time.time()
             if exit_requested.is_set():
                 logger.info("Exit requested, shutting down")
                 break
             if not running.is_set():
                 time.sleep(0.05)
                 continue
-            
+
             # Capture and analyze frame
             frame = cap.get_frame()
-
-            # print start analysis timestamp for debugging
-            # analysis_start_time = time.time()
-            # frame_timestamp = datetime.now().strftime("%H_%M_%S_%f")[:-3]
-            # frame_name = f"frame_{frame_timestamp}"
-            # logger.info("\033[94m▶ Starting analysis of %s\033[0m", frame_name)
-            
             game_state = analyzer.analyze_frame(frame)
-            
-            # print end analysis timestamp for debugging
-            # analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
-            # logger.info("\033[92m✓ Analysis complete for %s (%.1fms)\033[0m", frame_name, analysis_duration)
-            
-            # Check if respawning - cancel missions and wait
-            if game_state['is_respawning']:
-                # Cancel mission on first detection of respawn (transition from gameplay to respawn)
+
+            # Detect respawn
+            if game_state.get('is_respawning'):
                 if not was_respawning:
                     logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
                     ctrl.cancel_mission()
-                    pending_restart_at = time.time() + 5
+                    # Wait for mission to fully complete (lock released)
+                    if hasattr(ctrl, '_mission_complete'):
+                        logger.info("Waiting for mission to fully cancel before restart...")
+                        # Wait up to 5 seconds for mission to complete
+                        for _ in range(50):
+                            if ctrl._mission_complete.is_set():
+                                break
+                            time.sleep(0.1)
+                        else:
+                            logger.warning("Timeout waiting for mission to complete; will attempt restart anyway.")
+                    pending_mission_restart = True
                     was_respawning = True
-                
-                logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", 
-                           game_state['respawn_confidence'] * 100)
-                time.sleep(1)  # Wait while respawning
+                    mission_active = False
+
+                logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
+
+                # Try to restart mission if needed
+                if pending_mission_restart and (time.time() - last_restart_attempt > restart_retry_interval):
+                    logger.info("Attempting to restart mission after respawn...")
+                    if ctrl.restart_last_mission():
+                        logger.info("Restarted last mission after respawn")
+                        mission_active = True
+                        mission_started_at = time.time()
+                        pending_mission_restart = False
+                    else:
+                        logger.info("Mission restart attempt failed, will retry")
+                    last_restart_attempt = time.time()
+
+                time.sleep(1)
                 continue
-            
+
             # Gameplay resumed after respawn
             if was_respawning:
                 logger.info("\033[92m✓ Gameplay resumed - ready for missions\033[0m")
                 was_respawning = False
-
-            if pending_restart_at and time.time() >= pending_restart_at:
+                # Immediately restart the last mission when gameplay resumes
+                logger.info("Attempting to restart mission after gameplay resumes...")
                 if ctrl.restart_last_mission():
-                    logger.info("Restarted last mission after respawn")
-                pending_restart_at = None
-            
-            # Normal gameplay - ready for missions
-            #time.sleep(1)  # Check every second
+                    logger.info("Restarted last mission after respawn (on resume)")
+                    mission_active = True
+                    mission_started_at = time.time()
+                else:
+                    logger.info("Mission restart attempt failed after resume; will retry on next loop if needed.")
 
-             
-            
+            # Enforce configurable loop interval
+            elapsed = time.time() - loop_start
+            if elapsed < loop_interval_sec:
+                time.sleep(loop_interval_sec - elapsed)
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:

@@ -1,3 +1,5 @@
+# Ignore test output directory
+tests/test-output/
 # Ignore Python bytecode cache directories and compiled files
 __pycache__/
 **/__pycache__/
