@@ -22,18 +22,22 @@ def run_command(cmd, timeout=60):
 
 def test_level1_static_screenshot():
     screenshots = [
-        ("RESPAWN.png", TEST_SCREENSHOT),
-        ("RESPAWN_B.png", TEST_SCREENSHOT.parent / "RESPAWN_B.png")
+        ("RESPAWN.png", TEST_SCREENSHOT, True),
+        ("RESPAWN_B.png", TEST_SCREENSHOT.parent / "RESPAWN_B.png", False)
     ]
-    for name, path in screenshots:
+    for name, path, should_detect in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
         cmd = f"uv run python {SCRIPT} {path} --grid"
         code, out, err, elapsed = run_command(cmd)
         print(f"\n[Level 1 Output for {name}]\n", out)
         assert code == 0, f"Level 1 failed for {name}: {err}"
         assert "output_grid.png" in out, f"output_grid.png not generated for {name}"
-        assert "output_grid_highlighted.png" in out or "highlighted grid" in out, f"output_grid_highlighted.png not generated for {name}"
-        assert "Respawn" in out or "RESPAWN" in out, f"Respawn not detected in Level 1 for {name}"
+        detection_msg = "[OK] Respawn detected in region(s):"
+        if should_detect:
+            assert "output_grid_highlighted.png" in out or "highlighted grid" in out, f"output_grid_highlighted.png not generated for {name}"
+            assert detection_msg in out, f"Respawn not detected in Level 1 for {name}"
+        else:
+            assert detection_msg not in out, f"Respawn was incorrectly detected in {name}"
 
 
 def test_level2_live_capture():

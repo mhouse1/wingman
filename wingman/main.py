@@ -10,7 +10,7 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.0.0"
+WINGMAN_VERSION = "1.0.1"
 # Key controls (change these to remap start/pause and cancel)
 BEGIN_MISSION_KEY = 'enter'
 CANCEL_MISSION_KEY = 'end'

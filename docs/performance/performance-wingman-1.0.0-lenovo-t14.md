@@ -1,17 +1,21 @@
+
 # Wingman Performance Report
 
-**Version:** 1.0.0
-**Date:** 2026-02-28
+## Manual Test Results (Wingman Version: 1.0.0)
 
-## Test Environment
+**Test Date:** 2026-02-28
+**Test Runner:** Manual
+**Wingman Version:** 1.0.0
+
+### Test Environment
 - Device: Lenovo T14 laptop
 - Display: Laptop built-in display
 - OS: Windows
 - Python environment: .venv (no GPU acceleration)
 
-## Results
+### Results
 
-### Level 1: Static Screenshot Test
+#### Level 1: Static Screenshot Test
 - **Command:**
   ```bash
   uv run python test_analyzer.py test_screenshots/RESPAWN.png --grid
@@ -27,8 +31,7 @@
   - output_grid_highlighted.png
 - **Total runtime:** 15.39 seconds
 
-
-### Level 2: Live Capture Test
+#### Level 2: Live Capture Test
 - **Command:**
   ```bash
   uv run python test_analyzer.py --capture
@@ -51,7 +54,7 @@
   - output_grid_highlighted.png (not highlighted, since no respawn detected)
 - **Total runtime:** 6.87 seconds
 
-### Level 3: Direct OCR Background Test
+#### Level 3: Direct OCR Background Test
 - **Command:**
   ```bash
   uv run python test_analyzer.py --unit-ocr
@@ -83,7 +86,7 @@
   [UnitTest] OCR runtime: 8.91 seconds
   ```
 
-## Notes
+### Notes
 - No GPU acceleration was available; performance may improve with CUDA or MPS.
 - The analyzer correctly identified the respawn region with high confidence in Level 1.
 - In Level 2, no respawn was detected in the live capture (expected if not on respawn screen).
@@ -91,4 +94,45 @@
 
 ---
 
-For future performance tracking, update this document with new version numbers, hardware, and runtime results.
+## Automated Test Results (Wingman Version: 1.0.1)
+
+**Test Date:** 2026-02-28
+**Test Runner:** pytest + pytest-html
+**Wingman Version:** 1.0.1
+
+### Test Environment
+- Device: Lenovo T14 laptop
+- Display: Laptop built-in display
+- OS: Windows
+- Python environment: .venv (no GPU acceleration)
+
+### Results
+
+#### Summary
+- 3 tests run, all passed
+- Total runtime: 29 seconds
+
+#### Level 1: Static Screenshot Test
+- **Input:** RESPAWN.png
+  - Respawn detected in region(s): [27]
+  - Best match: Region 27 (confidence: 100.00%)
+  - Output files: output_grid.png, output_grid_highlighted.png
+  - Runtime: 2.99 seconds
+- **Input:** RESPAWN_B.png
+  - Respawn NOT detected in any region
+  - Output files: output_grid.png
+  - Runtime: 5.88 seconds
+
+#### Level 2: Live Capture Test
+- Respawn NOT detected in any region
+- Output files: output_grid.png
+- Runtime: 0.61 seconds
+
+#### Level 3: Direct OCR Background Test
+- is_respawning=True, confidence=100.00%, method=ocr
+- OCR runtime: 9.40 seconds
+
+### Notes
+- These results were generated automatically by the pytest suite and are consistent with manual runs.
+- For details, see tests/test-output/report.html.
+
