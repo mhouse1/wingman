@@ -2,14 +2,23 @@
 Test script for GameStateAnalyzer with saved screenshots.
 Example usage: uv run python test_analyzer.py test_screenshots/RESPAWN.png --grid
 """
+
 import cv2
 import yaml
 import sys
 import time
+import os
 from pathlib import Path
 
-# Add wingman to path
-sys.path.insert(0, str(Path(__file__).parent))
+
+
+# Add project root to sys.path so 'wingman' can be imported regardless of working directory
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# Project root for absolute paths
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 from wingman.analyzer import GameStateAnalyzer
 
@@ -21,7 +30,7 @@ def test_run_ocr_in_background(image_path="RESPAWN.png"):
     """
     # Default to test_screenshots/RESPAWN.png if no path or default is given
     if image_path == "RESPAWN.png":
-        image_path = str(Path("test_screenshots") / "RESPAWN.png")
+        image_path = os.path.join(PROJECT_ROOT, "test_screenshots", "RESPAWN.png")
     cfg = load_config()
     analyzer = GameStateAnalyzer(cfg)
     frame = cv2.imread(image_path)
@@ -35,8 +44,8 @@ def test_run_ocr_in_background(image_path="RESPAWN.png"):
     # Read result from cache
     with analyzer._ocr_cache_lock:
         result = analyzer._ocr_cache['result']
-    print(f"[UnitTest] _run_ocr_in_background result: is_respawning={result[0]}, confidence={result[1]:.2%}, method={result[2]}")
-    print(f"[UnitTest] OCR runtime: {elapsed:.2f} seconds")
+        print(f"[UnitTest] _run_ocr_in_background result: is_respawning={result[0]}, confidence={result[1]:.2%}, method={result[2]}")
+        print(f"[UnitTest] OCR runtime: {elapsed:.2f} seconds")
 
 
 def capture_and_test_with_visualization():
@@ -61,12 +70,14 @@ def capture_and_test_with_visualization():
     # Save the screenshot
     screenshot_path = "live_capture.png"
     cv2.imwrite(screenshot_path, frame)
-    print(f"✓ Screenshot saved to {screenshot_path}")
+    print(f"[OK] Screenshot saved to {screenshot_path}")
     # Run grid visualization on the captured screenshot
     test_with_visualization(screenshot_path)
 
-def load_config(path="wingman/config.yaml"):
+def load_config(path=None):
     """Load configuration file."""
+    if path is None:
+        path = os.path.join(PROJECT_ROOT, "wingman", "config.yaml")
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
@@ -88,10 +99,12 @@ def test_respawn_detection(image_path="RESPAWN.png", calibrate=False):
     analyzer = GameStateAnalyzer(cfg)
     
     # Load screenshot
+    if image_path == "RESPAWN.png":
+        image_path = os.path.join(PROJECT_ROOT, "test_screenshots", "RESPAWN.png")
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"ERROR: Could not load image: {image_path}")
-        print("Make sure RESPAWN.png is in the current directory")
+        print("Make sure RESPAWN.png is in the test_screenshots directory at the project root")
         return
     
     print(f"Image loaded: {frame.shape[1]}x{frame.shape[0]} pixels")
@@ -109,11 +122,11 @@ def test_respawn_detection(image_path="RESPAWN.png", calibrate=False):
         print(f"  Text Detection:")
         print(f"    Pixels detected: {stats['text_pixels']}")
         print(f"    Ratio: {stats['text_ratio']:.6f} (threshold: {stats['text_threshold']:.6f})")
-        print(f"    Status: {'✓ DETECTED' if stats['text_detected'] else '✗ NOT DETECTED'}")
+        print(f"    Status: {'[OK] DETECTED' if stats['text_detected'] else '[FAIL] NOT DETECTED'}")
         print(f"\n  Progress Bar Detection:")
         print(f"    Pixels detected: {stats['bar_pixels']}")
         print(f"    Ratio: {stats['bar_ratio']:.6f} (threshold: {stats['bar_threshold']:.6f})")
-        print(f"    Status: {'✓ DETECTED' if stats['bar_detected'] else '✗ NOT DETECTED'}")
+        print(f"    Status: {'[OK] DETECTED' if stats['bar_detected'] else '[FAIL] NOT DETECTED'}")
         
     else:
         # Normal test mode
@@ -127,9 +140,9 @@ def test_respawn_detection(image_path="RESPAWN.png", calibrate=False):
         
         print("\n" + "=" * 60)
         if state['is_respawning']:
-            print("✓ RESPAWN SCREEN DETECTED!")
+            print("[OK] RESPAWN SCREEN DETECTED!")
         else:
-            print("✗ Respawn screen NOT detected")
+            print("[FAIL] Respawn screen NOT detected")
             print("\nTry running with --calibrate flag to debug:")
             print("  python test_analyzer.py RESPAWN.png --calibrate")
         print("=" * 60)
@@ -137,7 +150,7 @@ def test_respawn_detection(image_path="RESPAWN.png", calibrate=False):
 
 def test_multiple_images():
     """Test analyzer on multiple screenshots if available."""
-    test_dir = Path("test_screenshots")
+    test_dir = Path(os.path.join(PROJECT_ROOT, "test_screenshots"))
     
     if not test_dir.exists():
         print(f"ERROR: {test_dir} directory not found")
@@ -169,7 +182,7 @@ def test_multiple_images():
         status = "RESPAWN" if state['is_respawning'] else "GAMEPLAY"
         confidence = state['respawn_confidence']
         
-        print(f"✓ {img_path.name:40s} | {status:8s} | Conf: {confidence:.2%}")
+        print(f"[OK] {img_path.name:40s} | {status:8s} | Conf: {confidence:.2%}")
     
     print("=" * 60)
 
@@ -200,16 +213,17 @@ def test_with_visualization(image_path="RESPAWN.png"):
 
     # Draw grid and save
     grid_img = analyzer.draw_grid(frame, output_path="output_grid.png")
-    print(f"\n✓ Saved grid visualization to output_grid.png")
+    print(f"\n[OK] Saved grid visualization to output_grid.png")
 
     # Test each region
     print(f"\nTesting individual regions (1-36):")
     print("-" * 60)
     respawn_regions = []
 
+
     for region in range(1, 37):
         region_state = analyzer.analyze_frame(frame, region=region)
-        status = "✓ RESPAWN" if region_state['is_respawning'] else "  gameplay"
+        status = "[OK] RESPAWN" if region_state['is_respawning'] else "  gameplay"
         confidence = region_state['respawn_confidence']
         print(f"  Region {region:2d}: {status} | Conf: {confidence:.2%}")
 
@@ -218,17 +232,17 @@ def test_with_visualization(image_path="RESPAWN.png"):
 
     print("-" * 60)
     if respawn_regions:
-        print(f"\n✓ Respawn detected in region(s): {[r[0] for r in respawn_regions]}")
+        print(f"\n[OK] Respawn detected in region(s): {[r[0] for r in respawn_regions]}")
         best_region = max(respawn_regions, key=lambda x: x[1])
         print(f"  Best match: Region {best_region[0]} (confidence: {best_region[1]:.2%})")
         print(f"\nRecommendation: Use region={best_region[0]} for faster analysis")
 
         # Save grid with best region highlighted
         highlighted_grid = analyzer.draw_grid(frame, highlight_region=best_region[0], 
-                                             output_path="output_grid_highlighted.png")
-        print(f"✓ Saved highlighted grid to output_grid_highlighted.png")
+                             output_path="output_grid_highlighted.png")
+        print(f"[OK] Saved highlighted grid to output_grid_highlighted.png")
     else:
-        print("\n✗ Respawn NOT detected in any region")
+        print("\n[FAIL] Respawn NOT detected in any region")
 
     elapsed = time.time() - start_time
     print(f"\nTotal runtime: {elapsed:.2f} seconds")
