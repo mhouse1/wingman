@@ -13,5 +13,12 @@ dependencies = [
 	"keyboard>=0.13.5",
 ]
 
+[dependency-groups]
+dev = [
+	"pytest",
+	"pytest-html",
+	"easyocr",
+]
+
 [tool.uv]
 # optional uv-specific configuration can go here

@@ -10,14 +10,13 @@ import os
 from pathlib import Path
 
 # Paths
-SCRIPT = "test_analyzer.py"
+SCRIPT = "analyzer_cli.py"
 
 import os
 from pathlib import Path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TEST_SCREENSHOT = Path(PROJECT_ROOT) / "test_screenshots" / "RESPAWN.png"
-SCRIPT = str(Path(PROJECT_ROOT) / "tests" / "test_analyzer.py")
-
+SCRIPT = str(Path(PROJECT_ROOT) / "tests" / "analyzer_cli.py")
 
 def run_command(cmd, timeout=60):
     start = time.time()
@@ -27,6 +26,15 @@ def run_command(cmd, timeout=60):
 
 
 def test_level1_static_screenshot():
+    """
+    Level 1: Respawn detection on saved screenshots with grid visualization.
+    
+    Validates that the analyzer can:
+    - Load and analyze saved RESPAWN.png (positive case)
+    - Correctly identify respawn regions and generate grid overlays
+    - Handle non-respawn screenshots (RESPAWN_B.png negative case)
+    - Generate output_grid.png and output_grid_highlighted.png when respawn detected
+    """
     screenshots = [
         ("RESPAWN.png", TEST_SCREENSHOT, True),
         ("RESPAWN_B.png", TEST_SCREENSHOT.parent / "RESPAWN_B.png", False)
@@ -47,6 +55,14 @@ def test_level1_static_screenshot():
 
 
 def test_level2_live_capture():
+    """
+    Level 2: Live screen capture and real-time game state analysis.
+    
+    Validates that the analyzer can:
+    - Capture a live screenshot from the configured monitor/region
+    - Perform grid-based region analysis on captured frame
+    - Generate grid visualization even when respawn is not detected
+    """
     cmd = f"uv run python {SCRIPT} --capture"
     code, out, err, elapsed = run_command(cmd)
     print("\n[Level 2 Output]\n", out)
@@ -56,6 +72,15 @@ def test_level2_live_capture():
 
 
 def test_level3_unit_ocr():
+    """
+    Level 3: OCR background worker performance and accuracy test.
+    
+    Validates that the background OCR thread:
+    - Correctly runs EasyOCR on RESPAWN.png without blocking main loop
+    - Detects 'RESPAWN' text with 100% confidence
+    - Reports preprocessing and recognition timing metrics
+    - Completes reliably on CPU (no GPU acceleration required)
+    """
     assert TEST_SCREENSHOT.exists(), f"Test screenshot not found: {TEST_SCREENSHOT}"
 
     stage_times = {}
