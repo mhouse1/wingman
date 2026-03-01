@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import threading
 import time
+from pathlib import Path
+import os
 
 try:
     import easyocr
@@ -59,6 +61,12 @@ class GameStateAnalyzer:
         
         self.debug = config.get("debug", {}).get("show_window", False)
         self.show_grid_highlighted = config.get("debug", {}).get("show_grid_highlighted", False)
+        
+        # Debug output directory for OCR preprocessing images
+        debug_output_dir = config.get("debug", {}).get("debug_output_dir", "tests/test-output")
+        self.debug_output_dir = Path(debug_output_dir)
+        if not self.debug_output_dir.exists():
+            self.debug_output_dir.mkdir(parents=True, exist_ok=True)
         
         # Grid configuration (6x6 = 36 regions)
         self.grid_rows = 6
@@ -227,10 +235,10 @@ class GameStateAnalyzer:
                 t6 = time.time()
                 # Debug: save preprocessed images
                 if self.debug:
-                    cv2.imwrite("debug_ocr_grayscale.png", gray)
-                    cv2.imwrite("debug_ocr_binary.png", binary)
-                    cv2.imwrite("debug_ocr_downscaled.png", small)
-                    logger.debug("Saved OCR preprocessing debug images")
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_grayscale.png"), gray)
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_binary.png"), binary)
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_downscaled.png"), small)
+                    logger.debug("Saved OCR preprocessing debug images to %s", self.debug_output_dir)
                 # Run EasyOCR - returns list of (bbox, text, confidence)
                 t7 = time.time()
                 results = reader.readtext(small, detail=1, paragraph=False)

@@ -71,3 +71,4 @@ debug:
   show_window: true
   show_grid_highlighted: true  # Auto-save grid visualization when respawn detected
   draw_markers: true
+  debug_output_dir: tests/test-output  # Directory for OCR preprocessing debug images
