@@ -79,6 +79,8 @@ def main():
     pending_mission_restart = False
     restart_retry_interval = 2.0  # seconds between restart attempts
     last_restart_attempt = 0.0
+    restart_delay_after_unlock = 3.0  # seconds to wait after lock release before restart
+    restart_not_before = 0.0
 
     try:
         while True:
@@ -99,17 +101,17 @@ def main():
                 if not was_respawning:
                     logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
                     ctrl.cancel_mission()
-                    # Wait for mission to fully complete (lock released)
-                    if hasattr(ctrl, '_mission_complete'):
-                        logger.info("Waiting for mission to fully cancel before restart...")
-                        # Wait up to 5 seconds for mission to complete
-                        for _ in range(50):
-                            if ctrl._mission_complete.is_set():
-                                break
-                            time.sleep(0.1)
-                        else:
-                            logger.warning("Timeout waiting for mission to complete; will attempt restart anyway.")
+                    # Wait for mission lock to release before restart
+                    logger.info("Waiting for mission lock to release before restart...")
+                    for _ in range(50):
+                        if not ctrl.is_mission_running():
+                            break
+                        time.sleep(0.1)
+                    else:
+                        logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
                     pending_mission_restart = True
+                    restart_not_before = time.time() + restart_delay_after_unlock
+                    logger.info("Mission lock released (or release pending); delaying restart by %.1f seconds", restart_delay_after_unlock)
                     was_respawning = True
                     mission_active = False
 
@@ -117,6 +119,14 @@ def main():
 
                 # Try to restart mission if needed
                 if pending_mission_restart and (time.time() - last_restart_attempt > restart_retry_interval):
+                    now = time.time()
+                    if ctrl.is_mission_running():
+                        last_restart_attempt = now
+                        time.sleep(1)
+                        continue
+                    if now < restart_not_before:
+                        time.sleep(1)
+                        continue
                     logger.info("Attempting to restart mission after respawn...")
                     if ctrl.restart_last_mission():
                         logger.info("Restarted last mission after respawn")
@@ -134,14 +144,17 @@ def main():
             if was_respawning:
                 logger.info("\033[92m✓ Gameplay resumed - ready for missions\033[0m")
                 was_respawning = False
-                # Immediately restart the last mission when gameplay resumes
-                logger.info("Attempting to restart mission after gameplay resumes...")
-                if ctrl.restart_last_mission():
-                    logger.info("Restarted last mission after respawn (on resume)")
-                    mission_active = True
-                    mission_started_at = time.time()
-                else:
-                    logger.info("Mission restart attempt failed after resume; will retry on next loop if needed.")
+                if pending_mission_restart:
+                    # Immediately restart the last mission when gameplay resumes
+                    if not ctrl.is_mission_running() and time.time() >= restart_not_before:
+                        logger.info("Attempting to restart mission after gameplay resumes...")
+                        if ctrl.restart_last_mission():
+                            logger.info("Restarted last mission after respawn (on resume)")
+                            mission_active = True
+                            mission_started_at = time.time()
+                            pending_mission_restart = False
+                        else:
+                            logger.info("Mission restart attempt failed after resume; will retry on next loop if needed.")
 
             # Enforce configurable loop interval
             elapsed = time.time() - loop_start

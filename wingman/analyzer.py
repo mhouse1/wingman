@@ -243,7 +243,8 @@ class GameStateAnalyzer:
                     if self.debug:
                         print('text clean:', text_clean, '(original:', text, ')')
                     # Match "RESPA" (lenient - allows OCR misreads like RE$PA! → RESPA)
-                    if 'RESP' in text_clean:
+                    # use partial text detection to allow for OCR errors (e.g. "RESPAWN" misread as "RE$PAWN" or "RE5PAWN")
+                    if 'RE' in text_clean:
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
                         result = (True, 1.0, "ocr")  # 100% confidence when found
                         # Thread-safe cache update

@@ -178,6 +178,12 @@ class Controller:
         elif action_name == "fire_active_weapon":
             color_start = "\033[95m"  # Magenta
             color_end = "\033[0m"
+
+        complete_color_start = color_start
+        complete_color_end = color_end
+        if action_name == "fire_active_weapon":
+            complete_color_start = ""
+            complete_color_end = ""
         
         logger.debug("%sController: %s - pressing '%s' key for %s seconds%s", color_start, label, key, hold_seconds, color_end)
 
@@ -198,7 +204,7 @@ class Controller:
                     keyboard_module.release(key)
                 except Exception:
                     logger.exception("Controller: failed to release '%s' key", key)
-                logger.debug("%sController: %s complete%s", color_start, label, color_end)
+                logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
             except Exception:
                 logger.exception("Controller: %s failed", label)
 
@@ -393,7 +399,7 @@ class Controller:
         # Check if mission is already running
         acquired = self._mission_lock.acquire(blocking=False)
         if not acquired:
-            logger.warning("Controller: mission_j20 already in progress, skipping (lock held)")
+            logger.warning("\033[91mController: mission_j20 already in progress, skipping (lock held)\033[0m")
             return
 
         logger.info("\033[92mController: mission_j20 - starting mission sequence (lock acquired)\033[0m")
@@ -567,22 +573,27 @@ class Controller:
     def cancel_mission(self):
         """Request cancellation of any running mission.
 
-        Sets the cancel flag which maneuvers poll; also sets the mission-complete
-        event so callers waiting on completion will unblock.
+        Sets the cancel flag which maneuvers poll and stops the standalone
+        weapon loop. Mission completion/lock release are finalized by the
+        mission runner thread.
         """
         logger.info("\033[91mController: cancel_mission called\033[0m")
         self._mission_cancel.set()
         self.stop_weapon_loop()  # Stop weapon loop when mission is cancelled
-        try:
-            self._mission_complete.set()
-        except Exception:
-            logger.exception("Controller: failed to set mission_complete during cancel")
+
+    def is_mission_running(self) -> bool:
+        """Return True when a mission thread currently holds the mission lock."""
+        return self._mission_lock.locked()
 
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:
             self._last_mission = mission_name
 
     def restart_last_mission(self):
+        if self.is_mission_running():
+            logger.warning("\033[91mController: cannot restart mission - previous mission still in progress (lock held)\033[0m")
+            return False
+
         with self._last_mission_lock:
             mission = self._last_mission
 
