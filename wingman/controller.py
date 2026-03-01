@@ -43,7 +43,7 @@ EMOTE10 # Oops!
 """
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -57,10 +57,10 @@ class Controller:
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
         
-        # Weapon loop state
+        # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
-        self._weapon_loop_interval = 0.5  # Fire every 0.5 seconds
+        self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:

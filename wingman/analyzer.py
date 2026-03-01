@@ -247,9 +247,9 @@ class GameStateAnalyzer:
                 for (bbox, text, conf) in results:
                     # Clean text: uppercase, remove spaces and non-alphabetic characters
                     text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
-                    # Debug: always print what OCR detected
+                    # Debug: log what OCR detected
                     if self.debug:
-                        print('text clean:', text_clean, '(original:', text, ')')
+                        logger.debug("Analyzer: OCR text detected - clean: %s, original: %s", text_clean, text)
                     # Match "RESPA" (lenient - allows OCR misreads like RE$PA! → RESPA)
                     # use partial text detection to allow for OCR errors (e.g. "RESPAWN" misread as "RE$PAWN" or "RE5PAWN")
                     if 'RE' in text_clean:
@@ -266,9 +266,12 @@ class GameStateAnalyzer:
                     with self._ocr_cache_lock:
                         self._ocr_cache['result'] = result
                         self._ocr_cache['timestamp'] = current_time
-                # Print timing for each stage
-                print("[UnitTest] OCR Stage Timings:")
-                print(f"  Setup: {t1-t0:.2f}s, Reader: {t2-t1:.2f}s, Grayscale: {t4-t3:.2f}s, Threshold: {t5-t4:.2f}s, Resize: {t6-t5:.2f}s, OCR: {t8-t7:.2f}s, Total: {t8-t0:.2f}s")
+                # Log timing for each stage
+                logger.debug(
+                    "Analyzer: OCR Stage Timings - Setup: %.2fs, Reader: %.2fs, Grayscale: %.2fs, Threshold: %.2fs, "
+                    "Resize: %.2fs, OCR: %.2fs, Total: %.2fs",
+                    t1-t0, t2-t1, t4-t3, t5-t4, t6-t5, t8-t7, t8-t0
+                )
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
         finally:

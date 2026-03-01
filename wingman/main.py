@@ -67,7 +67,15 @@ def main():
     # Initialize main components
     cap = Capture(region, monitor_index)
     analyzer = GameStateAnalyzer(cfg)
-    ctrl = Controller(cfg, logger, analyzer=analyzer)
+    
+    # Load mission restart timing from config
+    mission_cfg = cfg.get("mission", {})
+    weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
+    restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
+    restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
+    
+    # Initialize controller with config-driven weapon loop interval
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -77,9 +85,7 @@ def main():
     mission_active = False
     mission_started_at = None
     pending_mission_restart = False
-    restart_retry_interval = 2.0  # seconds between restart attempts
     last_restart_attempt = 0.0
-    restart_delay_after_unlock = 4.0  # seconds to wait after lock release before restart
     restart_not_before = 0.0
 
     try:
