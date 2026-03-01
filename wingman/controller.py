@@ -43,7 +43,7 @@ EMOTE10 # Oops!
 """
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -57,10 +57,10 @@ class Controller:
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
         
-        # Weapon loop state
+        # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
-        self._weapon_loop_interval = 0.5  # Fire every 0.5 seconds
+        self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
@@ -178,6 +178,12 @@ class Controller:
         elif action_name == "fire_active_weapon":
             color_start = "\033[95m"  # Magenta
             color_end = "\033[0m"
+
+        complete_color_start = color_start
+        complete_color_end = color_end
+        if action_name == "fire_active_weapon":
+            complete_color_start = ""
+            complete_color_end = ""
         
         logger.debug("%sController: %s - pressing '%s' key for %s seconds%s", color_start, label, key, hold_seconds, color_end)
 
@@ -198,7 +204,7 @@ class Controller:
                     keyboard_module.release(key)
                 except Exception:
                     logger.exception("Controller: failed to release '%s' key", key)
-                logger.debug("%sController: %s complete%s", color_start, label, color_end)
+                logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
             except Exception:
                 logger.exception("Controller: %s failed", label)
 
@@ -298,6 +304,21 @@ class Controller:
             logger.info("Controller: toggling weapon loop ON")
             self.start_weapon_loop()
 
+    def _interruptible_sleep(self, seconds: float, check_interval: float = 1.0) -> bool:
+        """Sleep in intervals and exit early when mission cancellation is requested.
+
+        Returns:
+            True if full duration elapsed, False if interrupted by cancellation.
+        """
+        remaining = float(seconds)
+        while remaining > 0:
+            if self._mission_cancel.is_set():
+                return False
+            interval = min(check_interval, remaining)
+            time.sleep(interval)
+            remaining -= interval
+        return True
+
     def mission_loiter(self):
         """This mission sequence performs a predefined set of maneuvers for the Aaarvark, it flies up and tries to stay up
         Compatible Jets: F111, F-14, Mig-23, J20
@@ -393,7 +414,7 @@ class Controller:
         # Check if mission is already running
         acquired = self._mission_lock.acquire(blocking=False)
         if not acquired:
-            logger.warning("Controller: mission_j20 already in progress, skipping (lock held)")
+            logger.warning("\033[91mController: mission_j20 already in progress, skipping (lock held)\033[0m")
             return
 
         logger.info("\033[92mController: mission_j20 - starting mission sequence (lock acquired)\033[0m")
@@ -492,10 +513,20 @@ class Controller:
                 self.roll_right(50, block=False)
                 logger.info("\033[91mController:initiated roll_right while afterburner and flares loops are active\033[0m")
                 self.afterburner(10)
-                time.sleep(10) # allow after burner to recharge
+                if not self._interruptible_sleep(10, check_interval=1.0):
+                    logger.info("Controller: mission cancelled during afterburner recharge")
+                    padlock_loop_active.clear()
+                    weapon_loop_active.clear()
+                    flares_loop_active.clear()
+                    return
                 logger.info("\033[94mController:  initiated second afterburner while flares loop is active\033[0m")
                 self.afterburner(10)
-                time.sleep(10) # allow after burner to recharge
+                if not self._interruptible_sleep(10, check_interval=1.0):
+                    logger.info("Controller: mission cancelled during afterburner recharge")
+                    padlock_loop_active.clear()
+                    weapon_loop_active.clear()
+                    flares_loop_active.clear()
+                    return
                 self.afterburner(10)
                 logger.info("\033[91mController: initiating finall roll right 300sec \033[0m")
 
@@ -567,22 +598,27 @@ class Controller:
     def cancel_mission(self):
         """Request cancellation of any running mission.
 
-        Sets the cancel flag which maneuvers poll; also sets the mission-complete
-        event so callers waiting on completion will unblock.
+        Sets the cancel flag which maneuvers poll and stops the standalone
+        weapon loop. Mission completion/lock release are finalized by the
+        mission runner thread.
         """
         logger.info("\033[91mController: cancel_mission called\033[0m")
         self._mission_cancel.set()
         self.stop_weapon_loop()  # Stop weapon loop when mission is cancelled
-        try:
-            self._mission_complete.set()
-        except Exception:
-            logger.exception("Controller: failed to set mission_complete during cancel")
+
+    def is_mission_running(self) -> bool:
+        """Return True when a mission thread currently holds the mission lock."""
+        return self._mission_lock.locked()
 
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:
             self._last_mission = mission_name
 
     def restart_last_mission(self):
+        if self.is_mission_running():
+            logger.warning("\033[91mController: cannot restart mission - previous mission still in progress (lock held)\033[0m")
+            return False
+
         with self._last_mission_lock:
             mission = self._last_mission
 

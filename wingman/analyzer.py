@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import threading
 import time
+from pathlib import Path
+import os
 
 try:
     import easyocr
@@ -59,6 +61,12 @@ class GameStateAnalyzer:
         
         self.debug = config.get("debug", {}).get("show_window", False)
         self.show_grid_highlighted = config.get("debug", {}).get("show_grid_highlighted", False)
+        
+        # Debug output directory for OCR preprocessing images
+        debug_output_dir = config.get("debug", {}).get("debug_output_dir", "tests/test-output")
+        self.debug_output_dir = Path(debug_output_dir)
+        if not self.debug_output_dir.exists():
+            self.debug_output_dir.mkdir(parents=True, exist_ok=True)
         
         # Grid configuration (6x6 = 36 regions)
         self.grid_rows = 6
@@ -227,10 +235,10 @@ class GameStateAnalyzer:
                 t6 = time.time()
                 # Debug: save preprocessed images
                 if self.debug:
-                    cv2.imwrite("debug_ocr_grayscale.png", gray)
-                    cv2.imwrite("debug_ocr_binary.png", binary)
-                    cv2.imwrite("debug_ocr_downscaled.png", small)
-                    logger.debug("Saved OCR preprocessing debug images")
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_grayscale.png"), gray)
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_binary.png"), binary)
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_downscaled.png"), small)
+                    logger.debug("Saved OCR preprocessing debug images to %s", self.debug_output_dir)
                 # Run EasyOCR - returns list of (bbox, text, confidence)
                 t7 = time.time()
                 results = reader.readtext(small, detail=1, paragraph=False)
@@ -239,11 +247,12 @@ class GameStateAnalyzer:
                 for (bbox, text, conf) in results:
                     # Clean text: uppercase, remove spaces and non-alphabetic characters
                     text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
-                    # Debug: always print what OCR detected
+                    # Debug: log what OCR detected
                     if self.debug:
-                        print('text clean:', text_clean, '(original:', text, ')')
+                        logger.debug("Analyzer: OCR text detected - clean: %s, original: %s", text_clean, text)
                     # Match "RESPA" (lenient - allows OCR misreads like RE$PA! → RESPA)
-                    if 'RESP' in text_clean:
+                    # use partial text detection to allow for OCR errors (e.g. "RESPAWN" misread as "RE$PAWN" or "RE5PAWN")
+                    if 'RE' in text_clean:
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
                         result = (True, 1.0, "ocr")  # 100% confidence when found
                         # Thread-safe cache update
@@ -257,9 +266,12 @@ class GameStateAnalyzer:
                     with self._ocr_cache_lock:
                         self._ocr_cache['result'] = result
                         self._ocr_cache['timestamp'] = current_time
-                # Print timing for each stage
-                print("[UnitTest] OCR Stage Timings:")
-                print(f"  Setup: {t1-t0:.2f}s, Reader: {t2-t1:.2f}s, Grayscale: {t4-t3:.2f}s, Threshold: {t5-t4:.2f}s, Resize: {t6-t5:.2f}s, OCR: {t8-t7:.2f}s, Total: {t8-t0:.2f}s")
+                # Log timing for each stage
+                logger.debug(
+                    "Analyzer: OCR Stage Timings - Setup: %.2fs, Reader: %.2fs, Grayscale: %.2fs, Threshold: %.2fs, "
+                    "Resize: %.2fs, OCR: %.2fs, Total: %.2fs",
+                    t1-t0, t2-t1, t4-t3, t5-t4, t6-t5, t8-t7, t8-t0
+                )
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
         finally:

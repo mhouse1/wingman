@@ -55,6 +55,15 @@ respawn_detection:
   bar_hsv_upper: [100, 255, 255]
   bar_threshold: 0.0005  # 0.05% of screen pixels
 
+# Mission timing and restart parameters
+mission:
+  # Delay (seconds) after mission lock release before attempting restart
+  restart_delay_after_unlock: 4.0
+  # Interval (seconds) between restart attempts during respawn
+  restart_retry_interval: 2.0
+  # Default weapon loop firing interval (seconds between shots)
+  weapon_loop_interval: 0.5
+
 aim:
   smoothing: 0.25    # fraction toward target each frame (0..1)
   fire_cooldown: 0.2 # seconds between shots
@@ -71,3 +80,4 @@ debug:
   show_window: true
   show_grid_highlighted: true  # Auto-save grid visualization when respawn detected
   draw_markers: true
+  debug_output_dir: tests/test-output  # Directory for OCR preprocessing debug images
