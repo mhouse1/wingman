@@ -304,6 +304,21 @@ class Controller:
             logger.info("Controller: toggling weapon loop ON")
             self.start_weapon_loop()
 
+    def _interruptible_sleep(self, seconds: float, check_interval: float = 1.0) -> bool:
+        """Sleep in intervals and exit early when mission cancellation is requested.
+
+        Returns:
+            True if full duration elapsed, False if interrupted by cancellation.
+        """
+        remaining = float(seconds)
+        while remaining > 0:
+            if self._mission_cancel.is_set():
+                return False
+            interval = min(check_interval, remaining)
+            time.sleep(interval)
+            remaining -= interval
+        return True
+
     def mission_loiter(self):
         """This mission sequence performs a predefined set of maneuvers for the Aaarvark, it flies up and tries to stay up
         Compatible Jets: F111, F-14, Mig-23, J20
@@ -498,10 +513,20 @@ class Controller:
                 self.roll_right(50, block=False)
                 logger.info("\033[91mController:initiated roll_right while afterburner and flares loops are active\033[0m")
                 self.afterburner(10)
-                time.sleep(10) # allow after burner to recharge
+                if not self._interruptible_sleep(10, check_interval=1.0):
+                    logger.info("Controller: mission cancelled during afterburner recharge")
+                    padlock_loop_active.clear()
+                    weapon_loop_active.clear()
+                    flares_loop_active.clear()
+                    return
                 logger.info("\033[94mController:  initiated second afterburner while flares loop is active\033[0m")
                 self.afterburner(10)
-                time.sleep(10) # allow after burner to recharge
+                if not self._interruptible_sleep(10, check_interval=1.0):
+                    logger.info("Controller: mission cancelled during afterburner recharge")
+                    padlock_loop_active.clear()
+                    weapon_loop_active.clear()
+                    flares_loop_active.clear()
+                    return
                 self.afterburner(10)
                 logger.info("\033[91mController: initiating finall roll right 300sec \033[0m")
 
