@@ -11,14 +11,7 @@ import pytest
 import yaml
 
 from wingman.analyzer import GameStateAnalyzer
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "wingman" / "config.yaml"
-RESPAWN_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWN.png"
-RESPAWN_B_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWNB.png"
-RESPAWNC_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWNC.png"
-RESPAWND_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWND.png"
+from constants import CONFIG_PATH, TEST_SCREENSHOT, TEST_SCREENSHOT_B, TEST_SCREENSHOT_C, TEST_SCREENSHOT_D
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
@@ -43,7 +36,7 @@ def _load_image(image_path: Path):
 
 
 def test_run_ocr_in_background(analyzer: GameStateAnalyzer, require_easyocr):
-    frame = _load_image(RESPAWN_IMAGE)
+    frame = _load_image(TEST_SCREENSHOT)
 
     start_time = time.time()
     analyzer._background_ocr_frame = frame
@@ -62,8 +55,8 @@ def test_run_ocr_in_background(analyzer: GameStateAnalyzer, require_easyocr):
 @pytest.mark.parametrize(
     "image_path, description",
     [
-        (RESPAWN_IMAGE, "normal quality"),
-        (RESPAWNC_IMAGE, "discolored - tests OCR robustness"),
+        (TEST_SCREENSHOT, "normal quality"),
+        (TEST_SCREENSHOT_C, "discolored - tests OCR robustness"),
     ],
 )
 def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_easyocr, image_path: Path, description: str):
@@ -87,8 +80,8 @@ def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_easyocr
 @pytest.mark.parametrize(
     "image_path",
     [
-        RESPAWN_B_IMAGE,  # No respawn text
-        RESPAWND_IMAGE,   # Contains "natethegreat" text, should fail Levenshtein matching
+        TEST_SCREENSHOT_B,  # No respawn text
+        TEST_SCREENSHOT_D,  # Contains "natethegreat" text, should fail Levenshtein matching
     ],
 )
 def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr, image_path: Path):

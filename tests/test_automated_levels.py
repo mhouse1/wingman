@@ -9,14 +9,9 @@ import time
 import os
 from pathlib import Path
 
-# Paths
-SCRIPT = "analyzer_cli.py"
+from constants import TEST_SCREENSHOT, TEST_SCREENSHOT_B, TEST_SCREENSHOT_C, TEST_SCREENSHOT_D
 
-import os
-from pathlib import Path
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TEST_SCREENSHOT = Path(PROJECT_ROOT) / "test_screenshots" / "RESPAWN.png"
-SCRIPT = str(Path(PROJECT_ROOT) / "tests" / "analyzer_cli.py")
+SCRIPT = str(Path(__file__).resolve().parent / "analyzer_cli.py")
 
 def run_command(cmd, timeout=60):
     start = time.time()
@@ -37,7 +32,7 @@ def test_level1_static_screenshot():
     """
     screenshots = [
         ("RESPAWN.png", TEST_SCREENSHOT, True),
-        ("RESPAWNB.png", TEST_SCREENSHOT.parent / "RESPAWNB.png", False)
+        ("RESPAWNB.png", TEST_SCREENSHOT_B, False)
     ]
     for name, path, should_detect in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
@@ -52,6 +47,48 @@ def test_level1_static_screenshot():
             assert detection_msg in out, f"Respawn not detected in Level 1 for {name}"
         else:
             assert detection_msg not in out, f"Respawn was incorrectly detected in {name}"
+
+
+def test_respawn_detection_positive():
+    """
+    Respawn detection positive test: Verify correct detection of RESPAWN text.
+    
+    Validates that the analyzer correctly detects RESPAWN text in:
+    - RESPAWN.png (normal quality image)
+    - RESPAWNC.png (discolored image - tests OCR robustness)
+    """
+    screenshots = [
+        ("RESPAWN.png", TEST_SCREENSHOT, "normal quality"),
+        ("RESPAWNC.png", TEST_SCREENSHOT_C, "discolored - tests OCR robustness"),
+    ]
+    for name, path, description in screenshots:
+        assert path.exists(), f"Test screenshot not found: {path}"
+        cmd = f"uv run python {SCRIPT} {path} --grid"
+        code, out, err, elapsed = run_command(cmd)
+        print(f"\n[Respawn Detection Positive - {name} ({description})]\n", out)
+        assert code == 0, f"Positive detection failed for {name}: {err}"
+        assert "[OK] Respawn detected in region(s):" in out, f"Respawn not detected in {name} ({description})"
+
+
+def test_respawn_detection_negative():
+    """
+    Respawn detection negative test: Verify correct rejection of non-RESPAWN text.
+    
+    Validates that the analyzer correctly rejects:
+    - RESPAWNB.png (no respawn text)
+    - RESPAWND.png (contains "natethegreat" text - should fail Levenshtein matching)
+    """
+    screenshots = [
+        ("RESPAWNB.png", TEST_SCREENSHOT_B, "no respawn text"),
+        ("RESPAWND.png", TEST_SCREENSHOT_D, "contains 'natethegreat' - Levenshtein distance too high"),
+    ]
+    for name, path, description in screenshots:
+        assert path.exists(), f"Test screenshot not found: {path}"
+        cmd = f"uv run python {SCRIPT} {path} --grid"
+        code, out, err, elapsed = run_command(cmd)
+        print(f"\n[Respawn Detection Negative - {name} ({description})]\n", out)
+        assert code == 0, f"Negative detection failed for {name}: {err}"
+        assert "[OK] Respawn detected in region(s):" not in out, f"Respawn was incorrectly detected in {name} ({description})"
 
 
 def test_level2_live_capture():
