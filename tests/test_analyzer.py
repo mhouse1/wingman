@@ -90,3 +90,20 @@ def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr
     state = analyzer.analyze_frame(frame)
 
     assert state["is_respawning"] is False
+
+
+@pytest.mark.parametrize(
+    "text_clean, expected",
+    [
+        ("RESPA", True),      # Exact match (actual in-game text)
+        ("RESP", True),       # Partial match
+        ("REPA", True),       # Common OCR error (missing 'S')
+        ("RESPTA", True),     # Levenshtein distance 1
+        ("RESLA", True),      # Levenshtein distance 2
+        ("NATETHEGREAT", False),
+        ("GREAT", False),
+        ("", False),
+    ],
+)
+def test_is_respawn_text_matching(text_clean: str, expected: bool):
+    assert GameStateAnalyzer._is_respawn_text(text_clean) is expected

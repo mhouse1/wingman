@@ -5,6 +5,7 @@ Example:
 """
 
 import argparse
+import logging
 import os
 import sys
 import time
@@ -12,6 +13,9 @@ from pathlib import Path
 
 import cv2
 import yaml
+
+# Enable debug logging to see what OCR detects
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -117,6 +121,14 @@ def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = Fa
 
     print("Analyzing frame...")
     state = analyzer.analyze_frame(frame)
+    
+    # Wait for background OCR thread to complete
+    if analyzer._background_ocr_thread and analyzer._background_ocr_thread.is_alive():
+        print("Waiting for OCR to complete...")
+        analyzer._background_ocr_thread.join(timeout=30)
+    
+    # Re-analyze to get updated cache result
+    state = analyzer.analyze_frame(frame)
 
     print("\nGame State Analysis:")
     print(f"  Is Respawning: {state['is_respawning']}")
@@ -177,7 +189,17 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
 
     print(f"Image size: {frame.shape[1]}x{frame.shape[0]}")
 
+    # First call schedules background OCR
     state = analyzer.analyze_frame(frame)
+    
+    # Wait for background OCR thread to complete
+    if analyzer._background_ocr_thread and analyzer._background_ocr_thread.is_alive():
+        print("\nWaiting for OCR to complete...")
+        analyzer._background_ocr_thread.join(timeout=30)
+    
+    # Re-analyze to get updated cache result
+    state = analyzer.analyze_frame(frame)
+    
     print("\nFull frame analysis:")
     print(f"  Respawning: {state['is_respawning']}")
     print(f"  Confidence: {state['respawn_confidence']:.2%}")
