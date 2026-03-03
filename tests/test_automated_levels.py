@@ -8,6 +8,7 @@ import subprocess
 import time
 import os
 from pathlib import Path
+import pytest
 
 from constants import TEST_SCREENSHOT, TEST_SCREENSHOT_B, TEST_SCREENSHOT_C, TEST_SCREENSHOT_D
 
@@ -18,6 +19,19 @@ def run_command(cmd, timeout=60):
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     elapsed = time.time() - start
     return result.returncode, result.stdout, result.stderr, elapsed
+
+
+def test_wingman_smoke_launch():
+    """
+    Smoke test: Verify wingman main module imports without errors.
+    
+    Catches import errors, missing dependencies, threading initialization issues,
+    and other startup problems. This is a quick sanity check, not a full integration test.
+    """
+    try:
+        from wingman import main
+    except Exception as e:
+        pytest.fail(f"wingman.main failed to import: {e}")
 
 
 def test_level1_static_screenshot():
