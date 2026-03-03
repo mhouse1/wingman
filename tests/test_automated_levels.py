@@ -32,12 +32,12 @@ def test_level1_static_screenshot():
     Validates that the analyzer can:
     - Load and analyze saved RESPAWN.png (positive case)
     - Correctly identify respawn regions and generate grid overlays
-    - Handle non-respawn screenshots (RESPAWN_B.png negative case)
+    - Handle non-respawn screenshots (RESPAWNB.png negative case)
     - Generate output_grid.png and output_grid_highlighted.png when respawn detected
     """
     screenshots = [
         ("RESPAWN.png", TEST_SCREENSHOT, True),
-        ("RESPAWN_B.png", TEST_SCREENSHOT.parent / "RESPAWN_B.png", False)
+        ("RESPAWNB.png", TEST_SCREENSHOT.parent / "RESPAWNB.png", False)
     ]
     for name, path, should_detect in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"

@@ -16,7 +16,9 @@ from wingman.analyzer import GameStateAnalyzer
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "wingman" / "config.yaml"
 RESPAWN_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWN.png"
-RESPAWN_B_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWN_B.png"
+RESPAWN_B_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWNB.png"
+RESPAWNC_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWNC.png"
+RESPAWND_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWND.png"
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
@@ -57,8 +59,15 @@ def test_run_ocr_in_background(analyzer: GameStateAnalyzer, require_easyocr):
     assert elapsed >= 0.0
 
 
-def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_easyocr):
-    frame = _load_image(RESPAWN_IMAGE)
+@pytest.mark.parametrize(
+    "image_path, description",
+    [
+        (RESPAWN_IMAGE, "normal quality"),
+        (RESPAWNC_IMAGE, "discolored - tests OCR robustness"),
+    ],
+)
+def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_easyocr, image_path: Path, description: str):
+    frame = _load_image(image_path)
     
     # First call schedules background OCR
     state = analyzer.analyze_frame(frame)
@@ -70,13 +79,20 @@ def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_easyocr
     # Re-analyze to get updated cache result
     state = analyzer.analyze_frame(frame)
 
-    assert state["is_respawning"] is True
+    assert state["is_respawning"] is True, f"Failed to detect RESPA in {description} image"
     assert state["respawn_method"] == "ocr"
     assert state["respawn_confidence"] > 0.0
 
 
-def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr):
-    frame = _load_image(RESPAWN_B_IMAGE)
+@pytest.mark.parametrize(
+    "image_path",
+    [
+        RESPAWN_B_IMAGE,  # No respawn text
+        RESPAWND_IMAGE,   # Contains "natethegreat" text, should fail Levenshtein matching
+    ],
+)
+def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr, image_path: Path):
+    frame = _load_image(image_path)
     analyzer.reset_cache()
     
     # First call schedules background OCR

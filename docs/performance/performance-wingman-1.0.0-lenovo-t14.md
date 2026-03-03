@@ -118,7 +118,7 @@
   - Best match: Region 27 (confidence: 100.00%)
   - Output files: output_grid.png, output_grid_highlighted.png
   - Runtime: 2.99 seconds
-- **Input:** RESPAWN_B.png
+- **Input:** RESPAWNB.png
   - Respawn NOT detected in any region
   - Output files: output_grid.png
   - Runtime: 5.88 seconds
