@@ -71,6 +71,64 @@ class GameStateAnalyzer:
         # Grid configuration (6x6 = 36 regions)
         self.grid_rows = 6
         self.grid_cols = 6
+
+    @staticmethod
+    def _levenshtein_distance(a: str, b: str) -> int:
+        """Compute Levenshtein distance between two strings."""
+        if a == b:
+            return 0
+        if not a:
+            return len(b)
+        if not b:
+            return len(a)
+
+        prev_row = list(range(len(b) + 1))
+        for i, char_a in enumerate(a, start=1):
+            curr_row = [i]
+            for j, char_b in enumerate(b, start=1):
+                insertions = prev_row[j] + 1
+                deletions = curr_row[j - 1] + 1
+                substitutions = prev_row[j - 1] + (char_a != char_b)
+                curr_row.append(min(insertions, deletions, substitutions))
+            prev_row = curr_row
+        return prev_row[-1]
+
+    @classmethod
+    def _is_respawn_text(cls, text_clean: str) -> bool:
+        """Return True when OCR text is a plausible match for respawn label.
+        
+        The actual in-game text is 'RESPA' (not 'RESPAWN'), so we match that
+        with tolerance for OCR errors.
+        """
+        if not text_clean:
+            return False
+
+        # Primary target: match what's actually displayed in-game
+        target = "RESPA"
+        if target in text_clean:
+            return True
+
+        # Fallback: Check for common OCR partial matches (handles severe OCR errors)
+        # OCR often misreads characters, so check for partial matches
+        if "RESP" in text_clean or "REPA" in text_clean:
+            return True
+        
+        # Levenshtein distance for near-matches (typos with 1-2 character errors)
+        # Compare same-length windows for near-matches.
+        window_len = len(target)
+        candidates = []
+        if len(text_clean) < window_len:
+            candidates.append(text_clean)
+        else:
+            for index in range(0, len(text_clean) - window_len + 1):
+                candidates.append(text_clean[index:index + window_len])
+
+        for candidate in candidates:
+            distance = cls._levenshtein_distance(candidate, target)
+            if distance <= 2:
+                return True
+
+        return False
     
     @property
     def ocr_reader(self):
@@ -250,9 +308,8 @@ class GameStateAnalyzer:
                     # Debug: log what OCR detected
                     if self.debug:
                         logger.debug("Analyzer: OCR text detected - clean: %s, original: %s", text_clean, text)
-                    # Match "RESPA" (lenient - allows OCR misreads like RE$PA! → RESPA)
-                    # use partial text detection to allow for OCR errors (e.g. "RESPAWN" misread as "RE$PAWN" or "RE5PAWN")
-                    if 'RE' in text_clean:
+                    # Match actual "RESPAWN" text with tolerance for OCR errors.
+                    if self._is_respawn_text(text_clean):
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
                         result = (True, 1.0, "ocr")  # 100% confidence when found
                         # Thread-safe cache update

@@ -11,12 +11,7 @@ import pytest
 import yaml
 
 from wingman.analyzer import GameStateAnalyzer
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "wingman" / "config.yaml"
-RESPAWN_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWN.png"
-RESPAWN_B_IMAGE = PROJECT_ROOT / "test_screenshots" / "RESPAWN_B.png"
+from constants import CONFIG_PATH, TEST_SCREENSHOT, TEST_SCREENSHOT_B, TEST_SCREENSHOT_C, TEST_SCREENSHOT_D
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
@@ -41,7 +36,7 @@ def _load_image(image_path: Path):
 
 
 def test_run_ocr_in_background(analyzer: GameStateAnalyzer, require_easyocr):
-    frame = _load_image(RESPAWN_IMAGE)
+    frame = _load_image(TEST_SCREENSHOT)
 
     start_time = time.time()
     analyzer._background_ocr_frame = frame
@@ -57,8 +52,15 @@ def test_run_ocr_in_background(analyzer: GameStateAnalyzer, require_easyocr):
     assert elapsed >= 0.0
 
 
-def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_easyocr):
-    frame = _load_image(RESPAWN_IMAGE)
+@pytest.mark.parametrize(
+    "image_path, description",
+    [
+        (TEST_SCREENSHOT, "normal quality"),
+        (TEST_SCREENSHOT_C, "discolored - tests OCR robustness"),
+    ],
+)
+def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_easyocr, image_path: Path, description: str):
+    frame = _load_image(image_path)
     
     # First call schedules background OCR
     state = analyzer.analyze_frame(frame)
@@ -70,13 +72,20 @@ def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_easyocr
     # Re-analyze to get updated cache result
     state = analyzer.analyze_frame(frame)
 
-    assert state["is_respawning"] is True
+    assert state["is_respawning"] is True, f"Failed to detect RESPA in {description} image"
     assert state["respawn_method"] == "ocr"
     assert state["respawn_confidence"] > 0.0
 
 
-def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr):
-    frame = _load_image(RESPAWN_B_IMAGE)
+@pytest.mark.parametrize(
+    "image_path",
+    [
+        TEST_SCREENSHOT_B,  # No respawn text
+        TEST_SCREENSHOT_D,  # Contains "natethegreat" text, should fail Levenshtein matching
+    ],
+)
+def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr, image_path: Path):
+    frame = _load_image(image_path)
     analyzer.reset_cache()
     
     # First call schedules background OCR
@@ -90,3 +99,20 @@ def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr
     state = analyzer.analyze_frame(frame)
 
     assert state["is_respawning"] is False
+
+
+@pytest.mark.parametrize(
+    "text_clean, expected",
+    [
+        ("RESPA", True),      # Exact match (actual in-game text)
+        ("RESP", True),       # Partial match
+        ("REPA", True),       # Common OCR error (missing 'S')
+        ("RESPTA", True),     # Levenshtein distance 1
+        ("RESLA", True),      # Levenshtein distance 2
+        ("NATETHEGREAT", False),
+        ("GREAT", False),
+        ("", False),
+    ],
+)
+def test_is_respawn_text_matching(text_clean: str, expected: bool):
+    assert GameStateAnalyzer._is_respawn_text(text_clean) is expected

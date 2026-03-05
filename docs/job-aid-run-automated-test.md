@@ -21,7 +21,7 @@ uv run pytest tests/test_automated_levels.py --html=tests/test-output/report.htm
 - If any test fails, review the error message for details.
 
 ## 5. Troubleshooting
-- Ensure all required test images (e.g., `RESPAWN.png`, `RESPAWN_B.png`) are in the `test_screenshots/` folder.
+- Ensure all required test images (e.g., `RESPAWN.png`, `RESPAWNB.png`) are in the `test_screenshots/` folder.
 - If you see import errors, make sure you are running from the correct directory and your environment is activated.
 - For missing dependencies, run:
 ```
