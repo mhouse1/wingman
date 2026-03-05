@@ -10,7 +10,7 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.1.0"
+WINGMAN_VERSION = "1.2.0"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'
 
@@ -74,8 +74,8 @@ def main():
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
     
-    # Initialize controller with config-driven weapon loop interval
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval)
+    # Initialize controller with config-driven weapon loop interval and exit event
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
