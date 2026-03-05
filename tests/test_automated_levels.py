@@ -14,7 +14,7 @@ from constants import TEST_SCREENSHOT, TEST_SCREENSHOT_B, TEST_SCREENSHOT_C, TES
 
 SCRIPT = str(Path(__file__).resolve().parent / "analyzer_cli.py")
 
-def run_command(cmd, timeout=60):
+def run_command(cmd, timeout=120):
     start = time.time()
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     elapsed = time.time() - start

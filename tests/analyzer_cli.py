@@ -40,7 +40,9 @@ def test_run_ocr_in_background(image_path: str = "RESPAWN.png"):
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"ERROR: Could not load image: {image_path}")
-        return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
     start_time = time.time()
     analyzer._background_ocr_frame = frame
@@ -55,9 +57,15 @@ def test_run_ocr_in_background(image_path: str = "RESPAWN.png"):
         )
         print(f"[UnitTest] OCR runtime: {elapsed:.2f} seconds")
         if result[1] < 1.0:
-            raise AssertionError(
-                f"[UnitTest] FAIL: OCR confidence is not 100% (confidence={result[1]:.2%})"
-            )
+            print(f"[UnitTest] FAIL: OCR confidence is not 100% (confidence={result[1]:.2%})")
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
+    
+    # Force exit to avoid hanging on EasyOCR threads
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def capture_and_test_with_visualization():
@@ -78,6 +86,11 @@ def capture_and_test_with_visualization():
     print(f"[OK] Screenshot saved to {screenshot_path}")
 
     test_with_visualization(screenshot_path)
+    
+    # Force exit to avoid hanging on EasyOCR threads (called by test_with_visualization)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = False):
@@ -90,7 +103,9 @@ def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = Fa
     if frame is None:
         print(f"ERROR: Could not load image: {image_path}")
         print("Make sure RESPAWN.png is in the test_screenshots directory at the project root")
-        return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
     print(f"Image loaded: {frame.shape[1]}x{frame.shape[0]} pixels")
     print("-" * 60)
@@ -117,7 +132,10 @@ def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = Fa
             f"(threshold: {stats['bar_threshold']:.6f})"
         )
         print(f"    Status: {'[OK] DETECTED' if stats['bar_detected'] else '[FAIL] NOT DETECTED'}")
-        return
+        # Force exit to avoid hanging on EasyOCR threads
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     print("Analyzing frame...")
     state = analyzer.analyze_frame(frame)
@@ -142,20 +160,27 @@ def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = Fa
         print("[FAIL] Respawn screen NOT detected")
         print("\nTry running with --calibrate flag to debug:")
         print("  python tests/analyzer_cli.py RESPAWN.png --calibrate")
-    print("=" * 60)
-
+    print("=" * 60)    
+    # Force exit to avoid hanging on EasyOCR threads
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 def test_multiple_images():
     test_dir = PROJECT_ROOT / "test_screenshots"
 
     if not test_dir.exists():
         print(f"ERROR: {test_dir} directory not found")
-        return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
     test_images = sorted(test_dir.glob("*.png"))
     if not test_images:
         print(f"No PNG files found in {test_dir}")
-        return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
     analyzer = GameStateAnalyzer(load_config())
 
@@ -175,6 +200,11 @@ def test_multiple_images():
         print(f"[OK] {img_path.name:40s} | {status:8s} | Conf: {confidence:.2%}")
 
     print("=" * 60)
+    
+    # Force exit to avoid hanging on EasyOCR threads
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def test_with_visualization(image_path: str = "RESPAWN.png"):
@@ -185,7 +215,9 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"ERROR: Could not load {image_path}")
-        return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
     print(f"Image size: {frame.shape[1]}x{frame.shape[0]}")
 
@@ -235,6 +267,11 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
 
     elapsed = time.time() - start_time
     print(f"\nTotal runtime: {elapsed:.2f} seconds")
+    
+    # Force exit to avoid hanging on EasyOCR threads
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def main():

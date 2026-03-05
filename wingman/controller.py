@@ -4,6 +4,11 @@ import threading
 import pyautogui
 import sys
 import os
+import cv2
+import numpy as np
+from datetime import datetime
+from pathlib import Path
+from mss import mss
 
 try:
     import keyboard as keyboard_module
@@ -30,6 +35,7 @@ TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 MISSION_J20_KEY = 'u'  # Press U to start J20 mission
 MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
 CANCEL_MISSION_KEY = 'end'   # Press End to cancel active mission
+CAPTURE_SCREEN_SHOT = 'v'  # Press V to capture a screenshot (for testing/debugging)
 """
 EMOTE1 # Moving to
 EMOTE2 # Help!
@@ -44,7 +50,7 @@ EMOTE10 # Oops!
 """
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -57,6 +63,7 @@ class Controller:
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
+        self._capture = capture
         
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
@@ -129,6 +136,44 @@ class Controller:
                 logger.info("Controller: registered hotkey 'b' to simulate respawn detected")
             except Exception:
                 logger.exception("Controller: failed to register simulate respawn hotkey")
+
+            # Register hotkey for capturing screenshots (for testing/debugging)
+            try:
+                def capture_screenshot(e):
+                    logger.info("Controller: V key pressed - capturing screenshot")
+                    if self._capture is not None and self._analyzer is not None:
+                        try:
+                            # Create new mss instance for thread-safety (mss uses thread-local storage)
+                            with mss() as sct:
+                                # Get monitor rect from capture instance
+                                monitor = self._capture.get_monitor_rect()
+                                s = sct.grab(monitor)
+                                frame = np.array(s)
+                                # mss returns BGRA, convert to BGR
+                                frame = frame[:, :, :3]
+                            
+                            # Add grid overlay using analyzer's draw_grid method
+                            frame_with_grid = self._analyzer.draw_grid(frame)
+                            
+                            # Create output directory if it doesn't exist
+                            output_dir = Path("tests/test-output")
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            # Generate timestamp filename
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filename = output_dir / f"screenshot_{timestamp}.png"
+                            
+                            # Save screenshot with grid overlay
+                            cv2.imwrite(str(filename), frame_with_grid)
+                            logger.info("Controller: Screenshot saved to %s", filename)
+                        except Exception as e:
+                            logger.exception("Controller: Failed to capture screenshot: %s", e)
+                    else:
+                        logger.warning("Controller: No capture or analyzer reference to take screenshot.")
+                keyboard_module.on_press_key(CAPTURE_SCREEN_SHOT, capture_screenshot, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to capture screenshot", CAPTURE_SCREEN_SHOT)
+            except Exception:
+                logger.exception("Controller: failed to register capture screenshot hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
