@@ -30,7 +30,6 @@ d:
 c:
 	git add .
 	git commit -am "clean up"
-	git commit --fixup HEAD
 
 t:
 	git add .
