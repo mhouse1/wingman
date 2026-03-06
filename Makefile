@@ -34,17 +34,14 @@ c:
 t:
 	git add .
 	git commit -am "temporary commit"
-	git commit --fixup HEAD
 
 f:
 	git add .
-	git commit -am "bug fix"
 	git commit --fixup HEAD
 
 n:
 	git add .
 	git commit -am "new feature"
-	git commit --fixup HEAD
 
 p:
 	git push
