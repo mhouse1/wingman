@@ -81,7 +81,9 @@ def capture_and_test_with_visualization():
 
     print(f"Capturing screenshot from monitor {monitor_index} region {region}...")
     frame = cap.get_frame()
-    screenshot_path = "live_capture.png"
+    output_dir = Path("tests") / "test-output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = str(output_dir / "live_capture.png")
     cv2.imwrite(screenshot_path, frame)
     print(f"[OK] Screenshot saved to {screenshot_path}")
 
@@ -237,8 +239,10 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
     print(f"  Confidence: {state['respawn_confidence']:.2%}")
     print(f"  Method: {state['respawn_method']}")
 
-    analyzer.draw_grid(frame, output_path="output_grid.png")
-    print("\n[OK] Saved grid visualization to output_grid.png")
+    output_dir = Path("tests") / "test-output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    analyzer.draw_grid(frame, output_path=str(output_dir / "output_grid.png"))
+    print(f"\n[OK] Saved grid visualization to {output_dir / 'output_grid.png'}")
 
     print("\nTesting individual regions (1-36):")
     print("-" * 60)
@@ -260,8 +264,9 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
         print(f"  Best match: Region {best_region[0]} (confidence: {best_region[1]:.2%})")
         print(f"\nRecommendation: Use region={best_region[0]} for faster analysis")
 
-        analyzer.draw_grid(frame, highlight_region=best_region[0], output_path="output_grid_highlighted.png")
-        print("[OK] Saved highlighted grid to output_grid_highlighted.png")
+        output_dir = Path("tests") / "test-output"
+        analyzer.draw_grid(frame, highlight_region=best_region[0], output_path=str(output_dir / "output_grid_highlighted.png"))
+        print(f"[OK] Saved highlighted grid to {output_dir / 'output_grid_highlighted.png'}")
     else:
         print("\n[FAIL] Respawn NOT detected in any region")
 

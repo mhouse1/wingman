@@ -205,10 +205,13 @@ class GameStateAnalyzer:
         if self.show_grid_highlighted:
             try:
                 highlight = self.respawn_region if respawn_detected else None
+                output_dir = Path("tests") / "test-output"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output_path = str(output_dir / "output_grid_highlighted.png")
                 self.draw_grid(frame, highlight_region=highlight, 
-                              output_path="output_grid_highlighted.png")
-                logger.debug("Saved highlighted grid to output_grid_highlighted.png (respawn: %s, region: %s)", 
-                           respawn_detected, highlight)
+                              output_path=output_path)
+                logger.debug("Saved highlighted grid to %s (respawn: %s, region: %s)", 
+                           output_path, respawn_detected, highlight)
             except Exception as e:
                 logger.warning("Failed to save highlighted grid: %s", e)
         
