@@ -28,6 +28,8 @@ class GameStateAnalyzer:
         """
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
+        incoming_cfg = config.get("incoming_detection", {})
+        continue_cfg = config.get("continue_detection", {})
         
         # OCR-based respawn detection (looks for "RESPAWN" text)
         self.use_ocr = respawn_cfg.get("use_ocr", True)
@@ -43,6 +45,27 @@ class GameStateAnalyzer:
             'cooldown': respawn_cfg.get("ocr_cooldown", 0.1)  # Seconds between OCR runs
         }
         self._ocr_cache_lock = threading.Lock()  # Thread-safe cache updates
+
+        # Runtime OCR detection for additional prompts.
+        self.incoming_region = incoming_cfg.get("region", 10)
+        self.incoming_target = incoming_cfg.get("target", "MING")
+        self.incoming_use_ocr = incoming_cfg.get("use_ocr", True)
+        self._incoming_cache = {
+            'result': (False, 0.0, None),  # (is_incoming, confidence, method)
+            'timestamp': 0.0,
+            'cooldown': incoming_cfg.get("ocr_cooldown", 0.25),
+        }
+        self._incoming_cache_lock = threading.Lock()
+
+        self.continue_region = continue_cfg.get("region", 33)
+        self.continue_target = continue_cfg.get("target", "LICK TO C")
+        self.continue_use_ocr = continue_cfg.get("use_ocr", True)
+        self._continue_cache = {
+            'result': (False, 0.0, None),  # (is_continue_prompt, confidence, method)
+            'timestamp': 0.0,
+            'cooldown': continue_cfg.get("ocr_cooldown", 0.25),
+        }
+        self._continue_cache_lock = threading.Lock()
         
         # Background OCR thread for non-blocking analysis
         self._background_ocr_frame = None
@@ -168,6 +191,12 @@ class GameStateAnalyzer:
                 - is_respawning: bool
                 - respawn_confidence: float (0.0-1.0)
                 - respawn_method: str or None
+                - is_incoming: bool
+                - incoming_confidence: float (0.0-1.0)
+                - incoming_method: str or None
+                - is_continue_prompt: bool
+                - continue_confidence: float (0.0-1.0)
+                - continue_method: str or None
         """
         if frame is None or frame.size == 0:
             logger.warning("Analyzer: received invalid frame")
@@ -183,6 +212,12 @@ class GameStateAnalyzer:
             'is_respawning': False,
             'respawn_confidence': 0.0,
             'respawn_method': None,
+            'is_incoming': False,
+            'incoming_confidence': 0.0,
+            'incoming_method': None,
+            'is_continue_prompt': False,
+            'continue_confidence': 0.0,
+            'continue_method': None,
         }
         
         # Detect respawn screen - only check configured respawn_region where RESPAWN text appears
@@ -200,6 +235,60 @@ class GameStateAnalyzer:
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
+
+        # Detect incoming prompt in configured region (10 by default).
+        if region is None:
+            incoming_region_frame = self.get_region(frame, self.incoming_region)
+            incoming_detected, incoming_conf, incoming_method = self._detect_label_ocr_cached(
+                incoming_region_frame,
+                target_text=self.incoming_target,
+                cache=self._incoming_cache,
+                cache_lock=self._incoming_cache_lock,
+                use_ocr=self.incoming_use_ocr,
+                debug_prefix="incoming",
+            )
+        elif region == self.incoming_region:
+            incoming_detected, incoming_conf, incoming_method = self._detect_label_ocr_cached(
+                analysis_frame,
+                target_text=self.incoming_target,
+                cache=self._incoming_cache,
+                cache_lock=self._incoming_cache_lock,
+                use_ocr=self.incoming_use_ocr,
+                debug_prefix="incoming",
+            )
+        else:
+            incoming_detected, incoming_conf, incoming_method = False, 0.0, None
+
+        state['is_incoming'] = incoming_detected
+        state['incoming_confidence'] = incoming_conf
+        state['incoming_method'] = incoming_method
+
+        # Detect click-to-continue prompt in configured region (33 by default).
+        if region is None:
+            continue_region_frame = self.get_region(frame, self.continue_region)
+            continue_detected, continue_conf, continue_method = self._detect_label_ocr_cached(
+                continue_region_frame,
+                target_text=self.continue_target,
+                cache=self._continue_cache,
+                cache_lock=self._continue_cache_lock,
+                use_ocr=self.continue_use_ocr,
+                debug_prefix="continue",
+            )
+        elif region == self.continue_region:
+            continue_detected, continue_conf, continue_method = self._detect_label_ocr_cached(
+                analysis_frame,
+                target_text=self.continue_target,
+                cache=self._continue_cache,
+                cache_lock=self._continue_cache_lock,
+                use_ocr=self.continue_use_ocr,
+                debug_prefix="continue",
+            )
+        else:
+            continue_detected, continue_conf, continue_method = False, 0.0, None
+
+        state['is_continue_prompt'] = continue_detected
+        state['continue_confidence'] = continue_conf
+        state['continue_method'] = continue_method
         
         # Save highlighted grid if enabled (every frame)
         if self.show_grid_highlighted:
@@ -216,6 +305,60 @@ class GameStateAnalyzer:
                 logger.warning("Failed to save highlighted grid: %s", e)
         
         return state
+
+    def _detect_label_ocr_cached(self, frame, target_text, cache, cache_lock, use_ocr, debug_prefix):
+        """Detect a target OCR label with cooldown caching and variant preprocessing."""
+        if not use_ocr or not easyocr:
+            return False, 0.0, None
+
+        current_time = time.time()
+        with cache_lock:
+            time_since_last_ocr = current_time - cache['timestamp']
+            cached_result = cache['result']
+            if time_since_last_ocr < cache['cooldown']:
+                return cached_result
+
+        reader = self.ocr_reader
+        if reader is None:
+            return False, 0.0, None
+
+        target_norm = "".join(target_text.upper().split())
+
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            # Keep variant set small for runtime performance.
+            variants = [
+                ("binary_otsu_1p0", binary_otsu),
+                ("binary_otsu_up_1p4", cv2.resize(binary_otsu, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)),
+                ("binary_otsu_inv_1p4", cv2.bitwise_not(cv2.resize(binary_otsu, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC))),
+            ]
+
+            for variant_name, img in variants:
+                results = reader.readtext(img, detail=0, paragraph=True)
+                extracted = " ".join(str(result) for result in results)
+                normalized = "".join(extracted.upper().split())
+                if target_norm in normalized:
+                    result = (True, 1.0, f"ocr:{variant_name}")
+                    with cache_lock:
+                        cache['result'] = result
+                        cache['timestamp'] = current_time
+
+                    if self.debug:
+                        cv2.imwrite(str(self.debug_output_dir / f"debug_ocr_{debug_prefix}_grayscale.png"), gray)
+                        cv2.imwrite(str(self.debug_output_dir / f"debug_ocr_{debug_prefix}_binary.png"), binary_otsu)
+                        cv2.imwrite(str(self.debug_output_dir / f"debug_ocr_{debug_prefix}_{variant_name}.png"), img)
+                    return result
+
+            result = (False, 0.0, None)
+            with cache_lock:
+                cache['result'] = result
+                cache['timestamp'] = current_time
+            return result
+        except Exception as error:
+            logger.warning("OCR %s label detection failed: %s", debug_prefix, error)
+            return False, 0.0, None
     
     def _detect_respawn(self, frame):
         """
@@ -343,13 +486,35 @@ class GameStateAnalyzer:
             'is_respawning': False,
             'respawn_confidence': 0.0,
             'respawn_method': None,
+            'is_incoming': False,
+            'incoming_confidence': 0.0,
+            'incoming_method': None,
+            'is_continue_prompt': False,
+            'continue_confidence': 0.0,
+            'continue_method': None,
         }
     
     def reset_cache(self):
         """Reset OCR cache - useful when switching between different images/scenes."""
         self._ocr_cache['timestamp'] = 0.0
         self._ocr_cache['result'] = (False, 0.0, None)
+        self._incoming_cache['timestamp'] = 0.0
+        self._incoming_cache['result'] = (False, 0.0, None)
+        self._continue_cache['timestamp'] = 0.0
+        self._continue_cache['result'] = (False, 0.0, None)
         logger.debug("OCR cache reset")
+    
+    def get_cached_incoming_state(self):
+        """
+        Return the cached incoming detection state without capturing/analyzing new frames.
+        Thread-safe method for background threads to check incoming state.
+        
+        Returns:
+            bool: True if INCOMING was detected in the most recent analysis
+        """
+        with self._incoming_cache_lock:
+            is_incoming, confidence, method = self._incoming_cache['result']
+            return bool(is_incoming)
     
     def get_region(self, frame, region_num):
         """

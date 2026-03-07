@@ -73,15 +73,25 @@ def main():
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
+    incoming_flares_cooldown = mission_cfg.get("incoming_flares_cooldown", 2.0)
     
-    # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap)
+    # Initialize controller with config-driven timing values and exit event
+    ctrl = Controller(
+        region,
+        analyzer=analyzer,
+        weapon_loop_interval=weapon_loop_interval,
+        incoming_flares_cooldown=incoming_flares_cooldown,
+        exit_event=exit_requested,
+        capture=cap,
+    )
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
 
     # Robust mission restart logic
     was_respawning = False
+    was_incoming = False
+    was_continue_prompt = False
     mission_active = False
     mission_started_at = None
     pending_mission_restart = False
@@ -101,6 +111,21 @@ def main():
             # Capture and analyze frame
             frame = cap.get_frame()
             game_state = analyzer.analyze_frame(frame)
+
+            # Informational runtime prompt detection state changes.
+            is_incoming = game_state.get('is_incoming', False)
+            if is_incoming and not was_incoming:
+                logger.info("[PROMPT] INCOMING detected (region 10, method=%s)", game_state.get('incoming_method'))
+            elif was_incoming and not is_incoming:
+                logger.info("[PROMPT] INCOMING cleared")
+            was_incoming = is_incoming
+
+            is_continue_prompt = game_state.get('is_continue_prompt', False)
+            if is_continue_prompt and not was_continue_prompt:
+                logger.info("[PROMPT] CLICK TO CONTINUE detected (region 33, method=%s)", game_state.get('continue_method'))
+            elif was_continue_prompt and not is_continue_prompt:
+                logger.info("[PROMPT] CLICK TO CONTINUE cleared")
+            was_continue_prompt = is_continue_prompt
 
             # Detect respawn
             if game_state.get('is_respawning'):

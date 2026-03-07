@@ -50,7 +50,7 @@ EMOTE10 # Oops!
 """
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, incoming_flares_cooldown: float = 2.0):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -64,6 +64,7 @@ class Controller:
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
         self._capture = capture
+        self._incoming_flares_cooldown = float(incoming_flares_cooldown or 2.0)
         
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
@@ -471,10 +472,10 @@ class Controller:
         # Background loop flags and thread references
         padlock_loop_active = threading.Event()
         weapon_loop_active = threading.Event()
-        flares_loop_active = threading.Event()
+        incoming_loop_active = threading.Event()
         self._padlock_thread = None
         self._weapon_thread = None
-        self._flares_thread = None
+        self._incoming_thread = None
 
         def _padlock_loop():
             """Background loop to press padlock camera every 6 seconds"""
@@ -508,21 +509,45 @@ class Controller:
             finally:
                 logger.info("Controller: mission_j20 weapon fire loop stopped")
 
-        def _flares_loop():
-            """Background loop to deploy flares every 15 seconds"""
-            logger.info("Controller: mission_j20 flares loop started")
+        def _incoming_flares_loop():
+            """Deploy flares when INCOMING is detected in analyzer state."""
+            logger.info("Controller: mission_j20 incoming monitor started")
+            if self._analyzer is None:
+                logger.warning("Controller: incoming-triggered flares disabled (analyzer unavailable)")
+                return
+
+            was_incoming = False
+            last_flares_at = 0.0
             try:
-                while flares_loop_active.is_set() and not self._mission_cancel.is_set():
-                    self.deploy_flares(hold_seconds=0.05, block=True)
-                    # Interruptible sleep - check for cancellation every 0.1 seconds
-                    for _ in range(150):  # 150 * 0.1 = 15 seconds
-                        if not flares_loop_active.is_set() or self._mission_cancel.is_set():
-                            break
-                        time.sleep(0.1)
+                while incoming_loop_active.is_set() and not self._mission_cancel.is_set():
+                    try:
+                        # Read cached state from analyzer (updated by main loop).
+                        # Don't capture frames here - avoids thread-local storage issues.
+                        is_incoming = self._analyzer.get_cached_incoming_state()
+
+                        # Fire once on edge transition (False -> True), guarded by cooldown.
+                        if is_incoming and not was_incoming:
+                            now = time.time()
+                            if (now - last_flares_at) >= self._incoming_flares_cooldown:
+                                logger.info("\033[93mController: INCOMING detected - deploying flares\033[0m")
+                                self.deploy_flares(hold_seconds=0.05, block=True)
+                                last_flares_at = now
+                            else:
+                                logger.debug(
+                                    "Controller: incoming detected but flares cooldown active (%.2fs remaining)",
+                                    self._incoming_flares_cooldown - (now - last_flares_at),
+                                )
+
+                        was_incoming = is_incoming
+                    except Exception as error:
+                        logger.warning("Controller: incoming monitor iteration failed: %s", error)
+
+                    # Poll quickly but keep CPU usage reasonable.
+                    time.sleep(0.1)
             except Exception:
-                logger.exception("Controller: mission_j20 flares loop error")
+                logger.exception("Controller: mission_j20 incoming monitor error")
             finally:
-                logger.info("Controller: mission_j20 flares loop stopped")
+                logger.info("Controller: mission_j20 incoming monitor stopped")
 
         def _mission_runner():
             try:
@@ -535,10 +560,13 @@ class Controller:
                 # Start background loops after first wingsweep
                 padlock_loop_active.set()
                 weapon_loop_active.set()
+                incoming_loop_active.set()
                 self._padlock_thread = threading.Thread(target=_padlock_loop, daemon=True)
                 self._weapon_thread = threading.Thread(target=_weapon_fire_loop, daemon=True)
+                self._incoming_thread = threading.Thread(target=_incoming_flares_loop, daemon=True)
                 self._padlock_thread.start()
                 self._weapon_thread.start()
+                self._incoming_thread.start()
                 logger.info("Controller: mission_j20 background loops started")
                 
                 self.afterburner(20.0)
@@ -546,52 +574,49 @@ class Controller:
                     logger.info("Controller: mission cancelled after afterburner")
                     padlock_loop_active.clear()
                     weapon_loop_active.clear()
+                    incoming_loop_active.clear()
                     return
-                # Roll right, afterburner, and flares at the same time
-                flares_loop_active.set()
-                self._flares_thread = threading.Thread(target=_flares_loop, daemon=True)
-                self._flares_thread.start()
+                # Roll right while afterburner and incoming monitor are active
                 self.roll_right(50, block=False)
-                logger.info("\033[91mController:initiated roll_right while afterburner and flares loops are active\033[0m")
+                logger.info("\033[91mController: initiated roll_right while afterburner and incoming monitor are active\033[0m")
                 self.afterburner(10)
                 if not self._interruptible_sleep(10, check_interval=1.0):
                     logger.info("Controller: mission cancelled during afterburner recharge")
                     padlock_loop_active.clear()
                     weapon_loop_active.clear()
-                    flares_loop_active.clear()
+                    incoming_loop_active.clear()
                     return
-                logger.info("\033[94mController:  initiated second afterburner while flares loop is active\033[0m")
+                logger.info("\033[94mController: initiated second afterburner while incoming monitor is active\033[0m")
                 self.afterburner(10)
                 if not self._interruptible_sleep(10, check_interval=1.0):
                     logger.info("Controller: mission cancelled during afterburner recharge")
                     padlock_loop_active.clear()
                     weapon_loop_active.clear()
-                    flares_loop_active.clear()
+                    incoming_loop_active.clear()
                     return
                 self.afterburner(10)
                 logger.info("\033[91mController: initiating finall roll right 300sec \033[0m")
 
                 self.roll_right(300)
-                flares_loop_active.clear()
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after roll_right")
                     padlock_loop_active.clear()
                     weapon_loop_active.clear()
-                    flares_loop_active.clear()
+                    incoming_loop_active.clear()
                     return
 
                 # Stop background loops
                 padlock_loop_active.clear()
                 weapon_loop_active.clear()
-                flares_loop_active.clear()
+                incoming_loop_active.clear()
                 
                 # Wait for background threads to fully stop
                 if self._padlock_thread is not None:
                     self._padlock_thread.join(timeout=1.0)
                 if self._weapon_thread is not None:
                     self._weapon_thread.join(timeout=1.0)
-                if self._flares_thread is not None:
-                    self._flares_thread.join(timeout=1.0)
+                if self._incoming_thread is not None:
+                    self._incoming_thread.join(timeout=1.0)
                 
                 #self.nose_down(4.0)
                 #time.sleep(10.0)  # additional wait time to stabilize
@@ -600,14 +625,14 @@ class Controller:
                 logger.exception("Controller: mission_j20 failed")
                 padlock_loop_active.clear()
                 weapon_loop_active.clear()
-                flares_loop_active.clear()
+                incoming_loop_active.clear()
                 # Wait for background threads to stop
                 if self._padlock_thread is not None:
                     self._padlock_thread.join(timeout=1.0)
                 if self._weapon_thread is not None:
                     self._weapon_thread.join(timeout=1.0)
-                if self._flares_thread is not None:
-                    self._flares_thread.join(timeout=1.0)
+                if self._incoming_thread is not None:
+                    self._incoming_thread.join(timeout=1.0)
             finally:
                 self._mission_complete.set()
                 try:

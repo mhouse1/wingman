@@ -55,6 +55,20 @@ respawn_detection:
   bar_hsv_upper: [100, 255, 255]
   bar_threshold: 0.0005  # 0.05% of screen pixels
 
+# Runtime OCR detection for incoming warning text.
+incoming_detection:
+  use_ocr: true
+  region: 10
+  target: "MING"
+  ocr_cooldown: 0.25
+
+# Runtime OCR detection for click-to-continue prompt text.
+continue_detection:
+  use_ocr: true
+  region: 33
+  target: "LICK TO C"
+  ocr_cooldown: 0.25
+
 # Mission timing and restart parameters
 mission:
   # Delay (seconds) after mission lock release before attempting restart
@@ -63,6 +77,8 @@ mission:
   restart_retry_interval: 2.0
   # Default weapon loop firing interval (seconds between shots)
   weapon_loop_interval: 0.5
+  # Minimum seconds between flare deploys from INCOMING detections in mission_j20
+  incoming_flares_cooldown: 2.0
 
 aim:
   smoothing: 0.25    # fraction toward target each frame (0..1)
