@@ -20,6 +20,9 @@ from constants import (
     TEST_SCREENSHOT_D,
     TEST_SCREENSHOT_CONTINUE,
     TEST_SCREENSHOT_CONTINUE_1,
+    TEST_SCREENSHOT_INCOMING,
+    TEST_SCREENSHOT_INCOMING_1,
+    TEST_SCREENSHOT_INCOMING_2,
 )
 from wingman.analyzer import GameStateAnalyzer
 
@@ -207,6 +210,65 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
 
     assert "LICK TO C" in normalized, (
         f"Expected 'lick to C' in region 33 for {image_path.name}; OCR output was: {ocr_results}"
+    )
+
+
+@pytest.mark.parametrize(
+    "image_path",
+    [
+        TEST_SCREENSHOT_INCOMING,
+        TEST_SCREENSHOT_INCOMING_1,
+        TEST_SCREENSHOT_INCOMING_2,
+    ],
+)
+def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
+    """Validate region 10 OCR includes 'MING' on INCOMING screenshots."""
+    analyzer = GameStateAnalyzer(load_config())
+    frame = _load_image(image_path)
+    region_frame = analyzer.get_region(frame, 10)
+
+    reader = analyzer.ocr_reader
+    assert reader is not None, "EasyOCR reader failed to initialize"
+
+    gray = cv2.cvtColor(region_frame, cv2.COLOR_BGR2GRAY)
+    _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Try multiple preprocessing variants to avoid losing thin glyphs on downscale.
+    variants = {
+        "binary_otsu_1p0": binary_otsu,
+        "binary_otsu_up_1p4": cv2.resize(binary_otsu, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
+        "binary_otsu_up_1p8": cv2.resize(binary_otsu, None, fx=1.8, fy=1.8, interpolation=cv2.INTER_CUBIC),
+        "binary_otsu_inv_1p4": cv2.bitwise_not(cv2.resize(binary_otsu, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)),
+        "gray_up_1p4": cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
+    }
+
+    debug_dir = Path(__file__).parent / "test-output"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    stem = image_path.stem
+    cv2.imwrite(str(debug_dir / f"debug_ocr_region10_{stem}_grayscale.png"), gray)
+    cv2.imwrite(str(debug_dir / f"debug_ocr_region10_{stem}_binary.png"), binary_otsu)
+
+    target = "MING"
+    matched_variant = None
+    variant_outputs = {}
+
+    for variant_name, img in variants.items():
+        cv2.imwrite(str(debug_dir / f"debug_ocr_region10_{stem}_{variant_name}.png"), img)
+        ocr_results = reader.readtext(img, detail=0, paragraph=True)
+        extracted_text = " ".join(str(result) for result in ocr_results)
+        normalized = " ".join(extracted_text.upper().split())
+        variant_outputs[variant_name] = {"raw": ocr_results, "normalized": normalized}
+        if target in normalized:
+            matched_variant = variant_name
+            # Keep legacy debug filenames for pytest-html hook compatibility.
+            cv2.imwrite(str(debug_dir / "debug_ocr_grayscale.png"), gray)
+            cv2.imwrite(str(debug_dir / "debug_ocr_binary.png"), binary_otsu)
+            cv2.imwrite(str(debug_dir / "debug_ocr_downscaled.png"), img)
+            break
+
+    assert matched_variant is not None, (
+        f"Expected '{target}' in region 10 for {image_path.name}; no preprocessing variant matched. "
+        f"Variant outputs: {variant_outputs}"
     )
 
 
