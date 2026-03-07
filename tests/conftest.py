@@ -11,10 +11,46 @@ try:
 except Exception:
     WINGMAN_VERSION = "unknown"
 
+# Session-scoped dictionary to collect test timing data
+_test_timings = {}
+
+def pytest_addoption(parser):
+    """Add custom pytest options."""
+    parser.addoption(
+        "--strict-timing",
+        action="store_true",
+        default=False,
+        help="Fail tests on timing violations (default: warnings only)"
+    )
+
 def pytest_configure(config):
     # Add WINGMAN_VERSION to the pytest-html report metadata
     if hasattr(config, '_metadata'):
         config._metadata['Wingman Version'] = WINGMAN_VERSION
+
+@pytest.fixture(scope='session')
+def strict_timing(request):
+    """Fixture to provide strict timing mode flag."""
+    return request.config.getoption("--strict-timing")
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Collect test timing data for performance validation."""
+    outcome = yield
+    report = outcome.get_result()
+    
+    # Collect timing for the actual test call (not setup/teardown)
+    if call.when == "call":
+        test_name = item.name.split('[')[0]  # Remove parametrize suffix
+        if test_name not in _test_timings:
+            _test_timings[test_name] = []
+        _test_timings[test_name].append(call.duration)
+
+@pytest.fixture(scope='session')
+def test_timings():
+    """Provide access to collected test timing data."""
+    return _test_timings
+
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_html_results_summary(prefix, summary, postfix):

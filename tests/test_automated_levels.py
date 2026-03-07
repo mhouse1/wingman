@@ -209,3 +209,88 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
         f"Expected 'lick to C' in region 33 for {image_path.name}; OCR output was: {ocr_results}"
     )
 
+
+def test_level5_performance_validation(test_timings, strict_timing):
+    """
+    Level 5: Performance validation against baseline.
+    
+    Validates that test execution times are within expected ranges.
+    - Warning mode (default): Reports deviations but doesn't fail
+    - Strict mode (--strict-timing): Fails on timing violations
+    
+    This test runs last to validate all previous test timings.
+    """
+    baseline_path = Path(__file__).resolve().parent / "test_timing_baseline.yaml"
+    
+    if not baseline_path.exists():
+        print("\n[Level 5] No timing baseline found - skipping performance validation")
+        print(f"  Create {baseline_path} to enable performance validation")
+        return
+    
+    # Load baseline
+    with baseline_path.open('r') as f:
+        baseline_data = yaml.safe_load(f)
+    
+    baseline_durations = baseline_data.get('test_durations', {})
+    tolerance = baseline_data.get('tolerance', 5)
+    strict_mode = strict_timing
+    
+    print("\n" + "=" * 60)
+    print("[Level 5] Performance Validation")
+    print("=" * 60)
+    print(f"Mode: {'STRICT (fails on violations)' if strict_mode else 'WARNING (reports only)'}")
+    print(f"Tolerance: ±{tolerance}s")
+    print("-" * 60)
+    
+    violations = []
+    all_ok = []
+    
+    for test_name, durations in sorted(test_timings.items()):
+        if test_name == 'test_level5_performance_validation':
+            continue  # Skip self
+        
+        # For parametrized tests, use average duration
+        avg_duration = sum(durations) / len(durations)
+        
+        if test_name in baseline_durations:
+            expected = baseline_durations[test_name]
+            deviation = abs(avg_duration - expected)
+            
+            if deviation > tolerance:
+                status = "⚠️  VIOLATION"
+                violations.append({
+                    'test': test_name,
+                    'expected': expected,
+                    'actual': avg_duration,
+                    'deviation': deviation,
+                    'tolerance': tolerance
+                })
+            else:
+                status = "✓ OK"
+                all_ok.append(test_name)
+            
+            print(f"{status:12s} {test_name:45s} Expected: {expected:5.1f}s  Actual: {avg_duration:5.1f}s  Δ {deviation:+5.1f}s")
+        else:
+            print(f"{'ℹ️  NEW':12s} {test_name:45s} Duration: {avg_duration:5.1f}s (no baseline)")
+    
+    print("-" * 60)
+    
+    if violations:
+        print(f"\n⚠️  {len(violations)} timing violation(s) detected:")
+        for v in violations:
+            print(f"  • {v['test']}")
+            print(f"    Expected: {v['expected']:.1f}s ± {v['tolerance']}s")
+            print(f"    Actual:   {v['actual']:.1f}s")
+            print(f"    Deviation: {v['deviation']:.1f}s over tolerance")
+        
+        if strict_mode:
+            print("\n❌ --strict-timing: Failing due to timing violations")
+            pytest.fail(f"{len(violations)} test(s) exceeded timing tolerance of ±{tolerance}s")
+        else:
+            print("\n💡 Tip: Use pytest --strict-timing to fail on timing violations (useful for CI)")
+    else:
+        print(f"\n✓ All {len(all_ok)} tests within expected timing ranges")
+    
+    print("=" * 60)
+
+
