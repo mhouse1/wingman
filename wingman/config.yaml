@@ -2,7 +2,7 @@
 # Data From automated test will show OCR rate
 # [UnitTest] OCR Stage Timings:
 #   Setup: 0.00s, Reader: 1.17s, Grayscale: 0.00s, Threshold: 0.00s, Resize: 0.00s, OCR: 3.61s, Total: 4.82s
-loop_interval_sec: 3.0
+loop_interval_sec: 0.2
 # Screen capture region (left, top, width, height)
 region:
   left: 0
@@ -29,7 +29,7 @@ respawn_detection:
   # OCR performance: only run OCR every N seconds (use cached result otherwise)
   # Non-blocking background thread: main loop NEVER blocks on OCR!
   # Respawn screens visible for 5+ seconds, so checking every 5s is plenty
-  ocr_cooldown: 2.5  # Seconds between OCR runs
+  ocr_cooldown: 4.0  # Respawn is long-lived; lower OCR frequency improves runtime performance
   
   # Grid region where RESPAWN text appears (6x6 grid = 36 regions)
   # Grid layout:
@@ -60,14 +60,14 @@ incoming_detection:
   use_ocr: true
   region: 10
   target: "MING"
-  ocr_cooldown: 0.25
+  ocr_cooldown: 1.0
 
 # Runtime OCR detection for click-to-continue prompt text.
 continue_detection:
   use_ocr: true
   region: 33
   target: "LICK TO C"
-  ocr_cooldown: 0.25
+  ocr_cooldown: 2.0
 
 # Mission timing and restart parameters
 mission:
@@ -93,7 +93,7 @@ controls:
   fire_hold: 2.0
 
 debug:
-  show_window: true
-  show_grid_highlighted: true  # Auto-save grid visualization when respawn detected
+  show_window: false
+  show_grid_highlighted: false  # Disable per-loop image writes for faster runtime
   draw_markers: true
   debug_output_dir: tests/test-output  # Directory for OCR preprocessing debug images

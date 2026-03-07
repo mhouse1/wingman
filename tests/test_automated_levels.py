@@ -135,6 +135,173 @@ def test_respawn_detection_negative():
         assert "[OK] Respawn detected in region(s):" not in out, f"Respawn was incorrectly detected in {name} ({description})"
 
 
+def test_incoming_detection_positive(require_easyocr):
+    """
+    Incoming detection positive test: Verify correct detection of INCOMING text.
+    
+    Validates that the analyzer correctly detects INCOMING text in region 10 across
+    multiple screenshots with varying quality and positioning:
+    - INCOMING.png (primary test image)
+    - INCOMING1.png (variant positioning)
+    - INCOMING2.png (variant quality)
+    """
+    screenshots = [
+        ("INCOMING.png", TEST_SCREENSHOT_INCOMING, "primary incoming screenshot"),
+        ("INCOMING1.png", TEST_SCREENSHOT_INCOMING_1, "variant positioning"),
+        ("INCOMING2.png", TEST_SCREENSHOT_INCOMING_2, "variant quality"),
+    ]
+    
+    for name, path, description in screenshots:
+        assert path.exists(), f"Test screenshot not found: {path}"
+        
+        # Load image and analyze with GameStateAnalyzer
+        analyzer = GameStateAnalyzer(load_config())
+        frame = _load_image(path)
+        
+        # First analysis schedules background OCR
+        state = analyzer.analyze_frame(frame)
+        
+        # Wait for OCR to complete
+        time.sleep(3.0)  # Allow time for OCR processing
+        
+        # Second analysis retrieves cached result
+        state = analyzer.analyze_frame(frame)
+        
+        print(f"\n[Incoming Detection Positive - {name} ({description})]")
+        print(f"  is_incoming: {state['is_incoming']}")
+        print(f"  incoming_confidence: {state['incoming_confidence']:.2f}")
+        print(f"  incoming_method: {state['incoming_method']}")
+        
+        assert state['is_incoming'] is True, f"Incoming not detected in {name} ({description})"
+        assert state['incoming_confidence'] > 0.0, f"Incoming confidence is zero in {name}"
+        assert state['incoming_method'] is not None, f"Incoming method is None in {name}"
+        assert "ocr" in state['incoming_method'], f"Incoming not detected via OCR in {name}"
+
+
+def test_incoming_detection_negative(require_easyocr):
+    """
+    Incoming detection negative test: Verify correct rejection when INCOMING absent.
+    
+    Validates that the analyzer correctly rejects screenshots without INCOMING text:
+    - RESPAWN.png (contains RESPAWN text, not INCOMING)
+    - RESPAWNB.png (gameplay screenshot with no prompts)
+    """
+    screenshots = [
+        ("RESPAWN.png", TEST_SCREENSHOT, "respawn screen - no incoming"),
+        ("RESPAWNB.png", TEST_SCREENSHOT_B, "gameplay - no incoming"),
+    ]
+    
+    for name, path, description in screenshots:
+        assert path.exists(), f"Test screenshot not found: {path}"
+        
+        analyzer = GameStateAnalyzer(load_config())
+        frame = _load_image(path)
+        
+        # First analysis schedules background OCR
+        state = analyzer.analyze_frame(frame)
+        
+        # Wait for OCR to complete
+        time.sleep(3.0)
+        
+        # Second analysis retrieves cached result
+        state = analyzer.analyze_frame(frame)
+        
+        print(f"\n[Incoming Detection Negative - {name} ({description})]")
+        print(f"  is_incoming: {state['is_incoming']}")
+        print(f"  incoming_confidence: {state['incoming_confidence']:.2f}")
+        
+        assert state['is_incoming'] is False, f"Incoming was incorrectly detected in {name} ({description})"
+
+
+def test_incoming_runtime_injection(require_easyocr):
+    """
+    Runtime simulation: Inject INCOMING.png during analyzer loop execution.
+    
+    Validates real-world detection behavior:
+    - Analyzer runs in loop processing frames
+    - INCOMING.png is injected mid-execution (simulating screen capture)
+    - Detection occurs within expected latency window (2-5 seconds)
+    - Tests full pipeline: loop timing + OCR caching + prioritization
+    
+    This test simulates what happens during actual gameplay when an
+    incoming missile warning appears on screen.
+    """
+    config = load_config()
+    analyzer = GameStateAnalyzer(config)
+    
+    # Load the INCOMING screenshot that we'll inject
+    incoming_frame = _load_image(TEST_SCREENSHOT_INCOMING)
+    
+    # Load a normal gameplay frame (no incoming) for baseline loops
+    baseline_frame = _load_image(TEST_SCREENSHOT_B)
+    
+    print("\n[Runtime Injection - Simulating incoming detection during gameplay]")
+    
+    # Simulate runtime: Run several baseline frames, then inject INCOMING
+    detection_time = None
+    max_loops = 15
+    loop_interval = config.get("loop_interval_sec", 0.2)
+    
+    print(f"  Loop interval: {loop_interval}s")
+    print(f"  Starting baseline loops (no incoming)...")
+    
+    start_time = time.time()
+    injection_time = None
+    
+    for loop_num in range(max_loops):
+        loop_start = time.time()
+        
+        # Inject INCOMING.png at loop 3 (simulates incoming appearing on screen)
+        if loop_num == 3:
+            frame = incoming_frame
+            injection_time = time.time() - start_time
+            print(f"\n  [INJECTION] Loop {loop_num}: INCOMING.png injected at t={injection_time:.2f}s")
+        else:
+            frame = baseline_frame
+        
+        # Analyze frame (same as runtime main loop)
+        state = analyzer.analyze_frame(frame)
+        
+        loop_elapsed = time.time() - loop_start
+        
+        # Check if incoming detected
+        if state['is_incoming']:
+            detection_time = time.time() - start_time
+            detection_latency = detection_time - injection_time if injection_time else 0
+            print(f"  [DETECTED] Loop {loop_num}: Incoming detected!")
+            print(f"    Detection time: t={detection_time:.2f}s")
+            print(f"    Detection latency: {detection_latency:.2f}s (from injection)")
+            print(f"    Confidence: {state['incoming_confidence']:.2f}")
+            print(f"    Method: {state['incoming_method']}")
+            break
+        else:
+            if loop_num < 3:
+                print(f"  Loop {loop_num}: Baseline (no incoming) - OK")
+        
+        # Respect loop interval to simulate real timing
+        sleep_time = max(0, loop_interval - loop_elapsed)
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+    
+    total_runtime = time.time() - start_time
+    
+    # Assertions
+    assert injection_time is not None, "INCOMING.png was not injected (test bug)"
+    assert detection_time is not None, f"Incoming NOT detected within {max_loops} loops ({total_runtime:.1f}s runtime)"
+    
+    # Validate detection latency is within expected range
+    detection_latency = detection_time - injection_time
+    print(f"\n  Total runtime: {total_runtime:.2f}s")
+    print(f"  Detection latency: {detection_latency:.2f}s")
+    
+    # Expected: 2-6 seconds (OCR time + loop interval + cooldown)
+    # Allowing up to 8s for slow CPUs
+    assert detection_latency <= 8.0, \
+        f"Detection took too long: {detection_latency:.2f}s (expected <= 8.0s)"
+    
+    print(f"\n  ✓ Detection latency within acceptable range")
+
+
 def test_level2_live_capture():
     """
     Level 2: Live screen capture and real-time game state analysis.

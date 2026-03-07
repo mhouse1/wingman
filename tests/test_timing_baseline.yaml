@@ -6,6 +6,9 @@ test_durations:
   test_level1_static_screenshot: 17
   test_respawn_detection_positive: 13
   test_respawn_detection_negative: 21
+  test_incoming_detection_positive: 60
+  test_incoming_detection_negative: 78
+  test_incoming_runtime_injection: 10
   test_level2_live_capture: 6
   test_level3_unit_ocr: 14
   test_level4_region33_contains_lick_to_c: 2

@@ -138,6 +138,24 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register simulate respawn hotkey")
 
+            # Register hotkey for simulating incoming detected (for testing)
+            try:
+                self._simulate_incoming_flag = threading.Event()
+                def simulate_incoming(e):
+                    logger.info("Controller: N key pressed - simulating INCOMING detected (as if OCR detected 'INCOMING')")
+                    if self._analyzer is not None:
+                        with self._analyzer._incoming_cache_lock:
+                            self._analyzer._incoming_cache['result'] = (True, 1.0, "ocr:simulated")
+                            self._analyzer._incoming_cache['timestamp'] = time.time()
+                        logger.info("Controller: Injected fake OCR incoming result into analyzer cache.")
+                    else:
+                        logger.warning("Controller: No analyzer reference to inject fake OCR incoming result.")
+                    self._simulate_incoming_flag.set()
+                keyboard_module.on_press_key('n', simulate_incoming, suppress=False)
+                logger.info("Controller: registered hotkey 'n' to simulate incoming detected")
+            except Exception:
+                logger.exception("Controller: failed to register simulate incoming hotkey")
+
             # Register hotkey for capturing screenshots (for testing/debugging)
             try:
                 def capture_screenshot(e):
@@ -525,18 +543,13 @@ class Controller:
                         # Don't capture frames here - avoids thread-local storage issues.
                         is_incoming = self._analyzer.get_cached_incoming_state()
 
-                        # Fire once on edge transition (False -> True), guarded by cooldown.
-                        if is_incoming and not was_incoming:
+                        # Fire flares continuously while INCOMING is detected, guarded by cooldown.
+                        if is_incoming:
                             now = time.time()
                             if (now - last_flares_at) >= self._incoming_flares_cooldown:
                                 logger.info("\033[93mController: INCOMING detected - deploying flares\033[0m")
                                 self.deploy_flares(hold_seconds=0.05, block=True)
                                 last_flares_at = now
-                            else:
-                                logger.debug(
-                                    "Controller: incoming detected but flares cooldown active (%.2fs remaining)",
-                                    self._incoming_flares_cooldown - (now - last_flares_at),
-                                )
 
                         was_incoming = is_incoming
                     except Exception as error:

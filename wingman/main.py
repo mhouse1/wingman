@@ -114,8 +114,8 @@ def main():
 
             # Informational runtime prompt detection state changes.
             is_incoming = game_state.get('is_incoming', False)
-            if is_incoming and not was_incoming:
-                logger.info("[PROMPT] INCOMING detected (region 10, method=%s)", game_state.get('incoming_method'))
+            if is_incoming:
+                logger.info("\033[91m[PROMPT] INCOMING detected (region 10, method=%s)\033[0m", game_state.get('incoming_method'))
             elif was_incoming and not is_incoming:
                 logger.info("[PROMPT] INCOMING cleared")
             was_incoming = is_incoming
@@ -196,6 +196,10 @@ def main():
         logger.info("Exiting")
     except Exception:
         logger.exception("Unhandled exception in main loop")
+    finally:
+        # Clean up thread pool resources
+        if 'analyzer' in locals():
+            analyzer.shutdown()
 
 
 if __name__ == "__main__":
