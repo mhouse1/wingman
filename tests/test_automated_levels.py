@@ -8,11 +8,38 @@ import subprocess
 import time
 import os
 from pathlib import Path
+import cv2
 import pytest
+import yaml
 
-from constants import TEST_SCREENSHOT, TEST_SCREENSHOT_B, TEST_SCREENSHOT_C, TEST_SCREENSHOT_D
+from constants import (
+    CONFIG_PATH,
+    TEST_SCREENSHOT,
+    TEST_SCREENSHOT_B,
+    TEST_SCREENSHOT_C,
+    TEST_SCREENSHOT_D,
+    TEST_SCREENSHOT_CONTINUE,
+    TEST_SCREENSHOT_CONTINUE_1,
+)
+from wingman.analyzer import GameStateAnalyzer
 
 SCRIPT = str(Path(__file__).resolve().parent / "analyzer_cli.py")
+
+
+def load_config(path: Path = CONFIG_PATH) -> dict:
+    with path.open("r", encoding="utf-8") as file_handle:
+        return yaml.safe_load(file_handle)
+
+
+def _load_image(image_path: Path):
+    frame = cv2.imread(str(image_path))
+    assert frame is not None, f"Could not load image: {image_path}"
+    return frame
+
+
+@pytest.fixture
+def require_easyocr():
+    pytest.importorskip("easyocr", reason="EasyOCR not installed")
 
 def run_command(cmd, timeout=120):
     start = time.time()
@@ -152,4 +179,33 @@ def test_level3_unit_ocr():
     assert code == 0, f"Level 3 failed: {err}"
     assert "_run_ocr_in_background result" in out, "OCR unit test did not run"
     assert "OCR runtime" in out, "OCR runtime not reported"
+
+
+@pytest.mark.parametrize(
+    "image_path",
+    [
+        TEST_SCREENSHOT_CONTINUE,
+        TEST_SCREENSHOT_CONTINUE_1,
+    ],
+)
+def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
+    """Validate region 33 OCR includes 'lick to C' on continue screenshots."""
+    analyzer = GameStateAnalyzer(load_config())
+    frame = _load_image(image_path)
+    region_frame = analyzer.get_region(frame, 33)
+
+    gray = cv2.cvtColor(region_frame, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    preprocessed = cv2.resize(binary, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
+
+    reader = analyzer.ocr_reader
+    assert reader is not None, "EasyOCR reader failed to initialize"
+
+    ocr_results = reader.readtext(preprocessed, detail=0, paragraph=True)
+    extracted_text = " ".join(str(result) for result in ocr_results)
+    normalized = " ".join(extracted_text.upper().split())
+
+    assert "LICK TO C" in normalized, (
+        f"Expected 'lick to C' in region 33 for {image_path.name}; OCR output was: {ocr_results}"
+    )
 
