@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 try:
     import easyocr
@@ -51,6 +51,19 @@ class GameStateAnalyzer:
         self.incoming_region = incoming_cfg.get("region", 10)
         self.incoming_target = incoming_cfg.get("target", "MING")
         self.incoming_use_ocr = incoming_cfg.get("use_ocr", True)
+        self.incoming_fast_enabled = incoming_cfg.get("fast_template_enabled", True)
+        self.incoming_fast_threshold = float(incoming_cfg.get("fast_template_threshold", 0.72))
+        self.incoming_fast_cooldown = float(incoming_cfg.get("fast_template_cooldown", 0.1))
+        self._incoming_fast_templates = self._load_incoming_fast_templates(
+            incoming_cfg.get(
+                "fast_template_paths",
+                [
+                    "test_screenshots/INCOMING.png",
+                    "test_screenshots/INCOMING1.png",
+                    "test_screenshots/INCOMING2.png",
+                ],
+            )
+        )
         self._incoming_cache = {
             'result': (False, 0.0, None),  # (is_incoming, confidence, method)
             'timestamp': 0.0,
@@ -224,7 +237,7 @@ class GameStateAnalyzer:
             'continue_method': None,
         }
         
-        # When analyzing full frame, process all regions in parallel for speed
+        # When analyzing full frame, prioritize incoming response time.
         if region is None:
             def detect_respawn_task():
                 respawn_region_frame = self.get_region(frame, self.respawn_region)
@@ -232,14 +245,7 @@ class GameStateAnalyzer:
             
             def detect_incoming_task():
                 incoming_region_frame = self.get_region(frame, self.incoming_region)
-                return self._detect_label_ocr_cached(
-                    incoming_region_frame,
-                    target_text=self.incoming_target,
-                    cache=self._incoming_cache,
-                    cache_lock=self._incoming_cache_lock,
-                    use_ocr=self.incoming_use_ocr,
-                    debug_prefix="incoming",
-                )
+                return self._detect_incoming_cached(incoming_region_frame)
             
             def detect_continue_task():
                 continue_region_frame = self.get_region(frame, self.continue_region)
@@ -251,17 +257,29 @@ class GameStateAnalyzer:
                     use_ocr=self.continue_use_ocr,
                     debug_prefix="continue",
                 )
-            
-            # Submit all three detection tasks in parallel, but prioritize INCOMING
-            # by enqueueing and resolving it first.
-            incoming_future = self._executor.submit(detect_incoming_task)
-            respawn_future = self._executor.submit(detect_respawn_task)
-            continue_future = self._executor.submit(detect_continue_task)
 
-            # Resolve INCOMING first so its cache/state is available with minimal latency.
-            incoming_detected, incoming_conf, incoming_method = incoming_future.result()
-            respawn_detected, confidence, method = respawn_future.result()
-            continue_detected, continue_conf, continue_method = continue_future.result()
+            # Resolve INCOMING first and return quickly when detected.
+            # This prevents lower-priority OCR work from delaying reaction to missiles.
+            incoming_detected, incoming_conf, incoming_method = detect_incoming_task()
+            if incoming_detected:
+                respawn_detected, confidence, method = self._get_cached_detection(self._ocr_cache, self._ocr_cache_lock)
+                continue_detected, continue_conf, continue_method = self._get_cached_detection(self._continue_cache, self._continue_cache_lock)
+            else:
+                # Keep incoming loop responsive by bounding wait time for lower-priority detectors.
+                respawn_future = self._executor.submit(detect_respawn_task)
+                continue_future = self._executor.submit(detect_continue_task)
+                respawn_detected, confidence, method = self._resolve_future_or_cached(
+                    respawn_future,
+                    self._ocr_cache,
+                    self._ocr_cache_lock,
+                    timeout_sec=0.02,
+                )
+                continue_detected, continue_conf, continue_method = self._resolve_future_or_cached(
+                    continue_future,
+                    self._continue_cache,
+                    self._continue_cache_lock,
+                    timeout_sec=0.02,
+                )
         
         # When analyzing single region, process only that region
         elif region == self.respawn_region:
@@ -270,14 +288,7 @@ class GameStateAnalyzer:
             continue_detected, continue_conf, continue_method = False, 0.0, None
         elif region == self.incoming_region:
             respawn_detected, confidence, method = False, 0.0, None
-            incoming_detected, incoming_conf, incoming_method = self._detect_label_ocr_cached(
-                analysis_frame,
-                target_text=self.incoming_target,
-                cache=self._incoming_cache,
-                cache_lock=self._incoming_cache_lock,
-                use_ocr=self.incoming_use_ocr,
-                debug_prefix="incoming",
-            )
+            incoming_detected, incoming_conf, incoming_method = self._detect_incoming_cached(analysis_frame)
             continue_detected, continue_conf, continue_method = False, 0.0, None
         elif region == self.continue_region:
             respawn_detected, confidence, method = False, 0.0, None
@@ -371,7 +382,8 @@ class GameStateAnalyzer:
                     result = (True, 1.0, f"ocr:{variant_name}")
                     with cache_lock:
                         cache['result'] = result
-                        cache['timestamp'] = current_time
+                        # Timestamp at completion time so cooldown starts after OCR finishes.
+                        cache['timestamp'] = time.time()
 
                     if self.debug:
                         cv2.imwrite(str(self.debug_output_dir / f"debug_ocr_{debug_prefix}_grayscale.png"), gray)
@@ -382,11 +394,118 @@ class GameStateAnalyzer:
             result = (False, 0.0, None)
             with cache_lock:
                 cache['result'] = result
-                cache['timestamp'] = current_time
+                # Timestamp at completion time so cooldown starts after OCR finishes.
+                cache['timestamp'] = time.time()
             return result
         except Exception as error:
             logger.warning("OCR %s label detection failed: %s", debug_prefix, error)
             return False, 0.0, None
+
+    def _load_incoming_fast_templates(self, template_paths):
+        """Load and preprocess template images used for fast CPU incoming detection."""
+        templates = []
+        for raw_path in template_paths:
+            try:
+                path = Path(raw_path)
+                if not path.is_absolute():
+                    path = (Path(__file__).resolve().parent.parent / path).resolve()
+                image = cv2.imread(str(path))
+                if image is None:
+                    continue
+                region = self.get_region(image, self.incoming_region)
+                processed = self._preprocess_incoming_fast(region)
+                if processed is not None:
+                    templates.append(processed)
+            except Exception:
+                # Best-effort loading: fast detector simply stays disabled if templates fail.
+                continue
+
+        if templates:
+            logger.info("Loaded %d incoming fast templates", len(templates))
+        else:
+            logger.info("No incoming fast templates loaded; using OCR-only incoming detection")
+        return templates
+
+    @staticmethod
+    def _preprocess_incoming_fast(frame):
+        """Preprocess region for fast binary template matching."""
+        if frame is None or frame.size == 0:
+            return None
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return binary
+
+    def _detect_incoming_fast(self, frame):
+        """Cheap CPU-first incoming detector using preloaded templates."""
+        if not self.incoming_fast_enabled or not self._incoming_fast_templates:
+            return False, 0.0, None
+
+        processed = self._preprocess_incoming_fast(frame)
+        if processed is None:
+            return False, 0.0, None
+
+        best_score = -1.0
+        for template in self._incoming_fast_templates:
+            if template.shape != processed.shape:
+                resized = cv2.resize(
+                    template,
+                    (processed.shape[1], processed.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            else:
+                resized = template
+
+            score = float(cv2.matchTemplate(processed, resized, cv2.TM_CCOEFF_NORMED)[0][0])
+            if score > best_score:
+                best_score = score
+
+        if best_score >= self.incoming_fast_threshold:
+            return True, min(max(best_score, 0.0), 1.0), "fast:template"
+        return False, max(best_score, 0.0), None
+
+    def _detect_incoming_cached(self, frame):
+        """Incoming detector with fast CPU path first, OCR fallback second."""
+        current_time = time.time()
+        with self._incoming_cache_lock:
+            cached_result = self._incoming_cache['result']
+            time_since_last = current_time - self._incoming_cache['timestamp']
+
+        # Fast cache cadence for quick reaction loops.
+        if time_since_last < self.incoming_fast_cooldown:
+            return cached_result
+
+        fast_detected, fast_conf, fast_method = self._detect_incoming_fast(frame)
+        if fast_detected:
+            result = (True, fast_conf, fast_method)
+            with self._incoming_cache_lock:
+                self._incoming_cache['result'] = result
+                self._incoming_cache['timestamp'] = time.time()
+            return result
+
+        # Fall back to existing OCR-based detector and its cooldown behavior.
+        return self._detect_label_ocr_cached(
+            frame,
+            target_text=self.incoming_target,
+            cache=self._incoming_cache,
+            cache_lock=self._incoming_cache_lock,
+            use_ocr=self.incoming_use_ocr,
+            debug_prefix="incoming",
+        )
+
+    @staticmethod
+    def _get_cached_detection(cache, cache_lock):
+        """Thread-safe helper to return cached detection tuple."""
+        with cache_lock:
+            return cache['result']
+
+    @staticmethod
+    def _resolve_future_or_cached(future, cache, cache_lock, timeout_sec: float):
+        """Return future result quickly, otherwise fall back to cached detection state."""
+        try:
+            return future.result(timeout=timeout_sec)
+        except FuturesTimeoutError:
+            with cache_lock:
+                return cache['result']
     
     def _detect_respawn(self, frame):
         """
@@ -497,14 +616,16 @@ class GameStateAnalyzer:
                         # Thread-safe cache update
                         with self._ocr_cache_lock:
                             self._ocr_cache['result'] = result
-                            self._ocr_cache['timestamp'] = current_time
+                            # Timestamp at completion time so cooldown starts after OCR finishes.
+                            self._ocr_cache['timestamp'] = time.time()
                         break
                 else:
                     # Not found - cache negative result
                     result = (False, 0.0, None)
                     with self._ocr_cache_lock:
                         self._ocr_cache['result'] = result
-                        self._ocr_cache['timestamp'] = current_time
+                        # Timestamp at completion time so cooldown starts after OCR finishes.
+                        self._ocr_cache['timestamp'] = time.time()
                 # Log timing for each stage
                 logger.debug(
                     "Analyzer: OCR Stage Timings - Setup: %.2fs, Reader: %.2fs, Grayscale: %.2fs, Threshold: %.2fs, "
@@ -557,6 +678,18 @@ class GameStateAnalyzer:
         with self._incoming_cache_lock:
             is_incoming, confidence, method = self._incoming_cache['result']
             return bool(is_incoming)
+
+    def get_cached_incoming_snapshot(self):
+        """
+        Return cached incoming details and cache update timestamp.
+
+        Returns:
+            tuple: (is_incoming: bool, confidence: float, method: str|None, timestamp: float)
+        """
+        with self._incoming_cache_lock:
+            is_incoming, confidence, method = self._incoming_cache['result']
+            timestamp = float(self._incoming_cache['timestamp'])
+            return bool(is_incoming), float(confidence), method, timestamp
     
     def get_region(self, frame, region_num):
         """

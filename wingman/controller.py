@@ -487,6 +487,14 @@ class Controller:
         self._mission_complete.clear()
         self._mission_cancel.clear()
 
+        # Clear analyzer OCR caches so mission does not inherit stale INCOMING state.
+        if self._analyzer is not None:
+            try:
+                self._analyzer.reset_cache()
+                logger.debug("Controller: analyzer OCR cache reset at mission start")
+            except Exception:
+                logger.exception("Controller: failed to reset analyzer cache at mission start")
+
         # Background loop flags and thread references
         padlock_loop_active = threading.Event()
         weapon_loop_active = threading.Event()
@@ -534,24 +542,24 @@ class Controller:
                 logger.warning("Controller: incoming-triggered flares disabled (analyzer unavailable)")
                 return
 
-            was_incoming = False
-            last_flares_at = 0.0
+            last_incoming_detection_ts = 0.0
             try:
                 while incoming_loop_active.is_set() and not self._mission_cancel.is_set():
                     try:
                         # Read cached state from analyzer (updated by main loop).
                         # Don't capture frames here - avoids thread-local storage issues.
-                        is_incoming = self._analyzer.get_cached_incoming_state()
+                        is_incoming, confidence, method, detection_ts = self._analyzer.get_cached_incoming_snapshot()
 
-                        # Fire flares continuously while INCOMING is detected, guarded by cooldown.
-                        if is_incoming:
-                            now = time.time()
-                            if (now - last_flares_at) >= self._incoming_flares_cooldown:
-                                logger.info("\033[93mController: INCOMING detected - deploying flares\033[0m")
-                                self.deploy_flares(hold_seconds=0.05, block=True)
-                                last_flares_at = now
+                        # Fire once for each new incoming detection update.
+                        # Cached True values no longer retrigger until analyzer posts a fresh detection.
+                        if is_incoming and detection_ts > last_incoming_detection_ts:
+                            logger.info(
+                                "\033[93mController: INCOMING detected - deploying flares (method=%s)\033[0m",
+                                method,
+                            )
+                            self.deploy_flares(hold_seconds=0.05, block=True)
+                            last_incoming_detection_ts = detection_ts
 
-                        was_incoming = is_incoming
                     except Exception as error:
                         logger.warning("Controller: incoming monitor iteration failed: %s", error)
 
@@ -692,6 +700,11 @@ class Controller:
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:
             self._last_mission = mission_name
+
+    def has_last_mission(self) -> bool:
+        """Return True when a mission has been launched and can be restarted."""
+        with self._last_mission_lock:
+            return self._last_mission in {"j20", "loiter"}
 
     def restart_last_mission(self):
         if self.is_mission_running():

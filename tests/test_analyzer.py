@@ -7,10 +7,12 @@ from pathlib import Path
 import time
 
 import cv2
+import numpy as np
 import pytest
 import yaml
 
 from wingman.analyzer import GameStateAnalyzer
+import wingman.analyzer as analyzer_module
 from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
@@ -122,3 +124,66 @@ def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr
 )
 def test_is_respawn_text_matching(text_clean: str, expected: bool):
     assert GameStateAnalyzer._is_respawn_text(text_clean) is expected
+
+
+def test_incoming_cache_cooldown_starts_after_ocr_completion(monkeypatch):
+    """Ensure incoming OCR cooldown uses completion timestamp, not start timestamp."""
+    config = load_config()
+    analyzer = GameStateAnalyzer(config)
+
+    # Force OCR path to be active for this unit test without depending on easyocr import state.
+    monkeypatch.setattr(analyzer_module, "easyocr", object())
+
+    class FakeReader:
+        def __init__(self):
+            self.calls = 0
+
+        def readtext(self, *args, **kwargs):
+            self.calls += 1
+            return ["MING"]
+
+    fake_reader = FakeReader()
+    analyzer._ocr_reader = fake_reader
+
+    # Cooldown intentionally short for deterministic checks.
+    analyzer._incoming_cache["cooldown"] = 1.0
+
+    # Simulated clock:
+    # - 100.0: first call start
+    # - 102.0: first call completion timestamp
+    # - 102.1: immediate second call start (should hit cache)
+    times = iter([100.0, 102.0, 102.1])
+
+    def fake_time():
+        try:
+            return next(times)
+        except StopIteration:
+            return 102.1
+
+    monkeypatch.setattr(analyzer_module.time, "time", fake_time)
+
+    frame = np.zeros((120, 320, 3), dtype=np.uint8)
+
+    # First call performs OCR and populates cache.
+    first = analyzer._detect_label_ocr_cached(
+        frame,
+        target_text="MING",
+        cache=analyzer._incoming_cache,
+        cache_lock=analyzer._incoming_cache_lock,
+        use_ocr=True,
+        debug_prefix="incoming",
+    )
+
+    # Immediate second call should reuse cache (no second OCR invocation).
+    second = analyzer._detect_label_ocr_cached(
+        frame,
+        target_text="MING",
+        cache=analyzer._incoming_cache,
+        cache_lock=analyzer._incoming_cache_lock,
+        use_ocr=True,
+        debug_prefix="incoming",
+    )
+
+    assert first[0] is True
+    assert second[0] is True
+    assert fake_reader.calls == 1, "Expected cache hit; OCR should run once"

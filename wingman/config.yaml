@@ -60,6 +60,14 @@ incoming_detection:
   use_ocr: true
   region: 10
   target: "MING"
+  # Fast CPU path: template match on region 10 before OCR fallback.
+  fast_template_enabled: true
+  fast_template_threshold: 0.72
+  fast_template_cooldown: 0.1
+  fast_template_paths:
+    - test_screenshots/INCOMING.png
+    - test_screenshots/INCOMING1.png
+    - test_screenshots/INCOMING2.png
   ocr_cooldown: 1.0
 
 # Runtime OCR detection for click-to-continue prompt text.

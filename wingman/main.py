@@ -97,6 +97,7 @@ def main():
     pending_mission_restart = False
     last_restart_attempt = 0.0
     restart_not_before = 0.0
+    respawn_region = cfg.get("respawn_detection", {}).get("region", 27)
 
     try:
         while True:
@@ -108,13 +109,18 @@ def main():
                 time.sleep(0.05)
                 continue
 
-            # Capture and analyze frame
+            # Capture and analyze frame.
+            # While waiting for respawn recovery/restart, analyze only respawn region
+            # so incoming/continue OCR does not slow restart responsiveness.
             frame = cap.get_frame()
-            game_state = analyzer.analyze_frame(frame)
+            if pending_mission_restart or was_respawning:
+                game_state = analyzer.analyze_frame(frame, region=respawn_region)
+            else:
+                game_state = analyzer.analyze_frame(frame)
 
             # Informational runtime prompt detection state changes.
             is_incoming = game_state.get('is_incoming', False)
-            if is_incoming:
+            if is_incoming and not was_incoming:
                 logger.info("\033[91m[PROMPT] INCOMING detected (region 10, method=%s)\033[0m", game_state.get('incoming_method'))
             elif was_incoming and not is_incoming:
                 logger.info("[PROMPT] INCOMING cleared")
@@ -158,6 +164,12 @@ def main():
                     if now < restart_not_before:
                         time.sleep(1)
                         continue
+                    if not ctrl.has_last_mission():
+                        logger.info("No last mission recorded; disabling auto-restart until a mission is started.")
+                        pending_mission_restart = False
+                        last_restart_attempt = now
+                        time.sleep(1)
+                        continue
                     logger.info("Attempting to restart mission after respawn...")
                     if ctrl.restart_last_mission():
                         logger.info("Restarted last mission after respawn")
@@ -177,16 +189,22 @@ def main():
                 was_respawning = False
             
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)
-            if pending_mission_restart and time.time() >= restart_not_before:
+            if pending_mission_restart and (time.time() - last_restart_attempt > restart_retry_interval) and time.time() >= restart_not_before:
                 if not ctrl.is_mission_running():
-                    logger.info("Attempting to restart mission (delay expired)...")
-                    if ctrl.restart_last_mission():
-                        logger.info("Restarted last mission after respawn")
-                        mission_active = True
-                        mission_started_at = time.time()
+                    if not ctrl.has_last_mission():
+                        logger.info("No last mission recorded; disabling auto-restart until a mission is started.")
                         pending_mission_restart = False
+                        last_restart_attempt = time.time()
                     else:
-                        logger.info("Mission restart attempt failed; will retry on next loop if needed.")
+                        logger.info("Attempting to restart mission (delay expired)...")
+                        if ctrl.restart_last_mission():
+                            logger.info("Restarted last mission after respawn")
+                            mission_active = True
+                            mission_started_at = time.time()
+                            pending_mission_restart = False
+                        else:
+                            logger.info("Mission restart attempt failed; will retry.")
+                        last_restart_attempt = time.time()
 
             # Enforce configurable loop interval
             elapsed = time.time() - loop_start

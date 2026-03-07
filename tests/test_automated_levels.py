@@ -213,6 +213,36 @@ def test_incoming_detection_negative(require_easyocr):
         assert state['is_incoming'] is False, f"Incoming was incorrectly detected in {name} ({description})"
 
 
+def test_incoming_fast_template_detector():
+    """Validate fast CPU template detector finds incoming without OCR and rejects non-incoming."""
+    analyzer = GameStateAnalyzer(load_config())
+
+    positives = [
+        ("INCOMING.png", TEST_SCREENSHOT_INCOMING),
+        ("INCOMING1.png", TEST_SCREENSHOT_INCOMING_1),
+        ("INCOMING2.png", TEST_SCREENSHOT_INCOMING_2),
+    ]
+
+    for name, image_path in positives:
+        frame = _load_image(image_path)
+        region_frame = analyzer.get_region(frame, analyzer.incoming_region)
+        detected, confidence, method = analyzer._detect_incoming_fast(region_frame)
+        print(f"\n[Incoming Fast Template Positive - {name}]")
+        print(f"  detected: {detected}")
+        print(f"  confidence: {confidence:.2f}")
+        print(f"  method: {method}")
+        assert detected is True, f"Fast incoming template detector missed {name}"
+
+    negative_frame = _load_image(TEST_SCREENSHOT_B)
+    negative_region = analyzer.get_region(negative_frame, analyzer.incoming_region)
+    detected, confidence, method = analyzer._detect_incoming_fast(negative_region)
+    print("\n[Incoming Fast Template Negative - RESPAWNB.png]")
+    print(f"  detected: {detected}")
+    print(f"  confidence: {confidence:.2f}")
+    print(f"  method: {method}")
+    assert detected is False, "Fast incoming template detector produced a false positive on non-incoming frame"
+
+
 def test_incoming_runtime_injection(require_easyocr):
     """
     Runtime simulation: Inject INCOMING.png during analyzer loop execution.
