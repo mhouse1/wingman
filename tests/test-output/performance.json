@@ -1,0 +1,54 @@
+{
+  "timestamp": "2026-03-07T03:21:36.128924",
+  "version": "1.2.0",
+  "tests": {
+    "test_wingman_smoke_launch": {
+      "duration": 0.00020700000459328294,
+      "runs": 1,
+      "min": 0.00020700000459328294,
+      "max": 0.00020700000459328294
+    },
+    "test_level1_static_screenshot": {
+      "duration": 21.199807500001043,
+      "runs": 1,
+      "min": 21.199807500001043,
+      "max": 21.199807500001043
+    },
+    "test_respawn_detection_positive": {
+      "duration": 12.473334299982525,
+      "runs": 1,
+      "min": 12.473334299982525,
+      "max": 12.473334299982525
+    },
+    "test_respawn_detection_negative": {
+      "duration": 17.4434312999947,
+      "runs": 1,
+      "min": 17.4434312999947,
+      "max": 17.4434312999947
+    },
+    "test_level2_live_capture": {
+      "duration": 4.97171100002015,
+      "runs": 1,
+      "min": 4.97171100002015,
+      "max": 4.97171100002015
+    },
+    "test_level3_unit_ocr": {
+      "duration": 11.523292099998798,
+      "runs": 1,
+      "min": 11.523292099998798,
+      "max": 11.523292099998798
+    },
+    "test_level4_region33_contains_lick_to_c": {
+      "duration": 1.3914997999963816,
+      "runs": 2,
+      "min": 1.3853059000102803,
+      "max": 1.397693699982483
+    },
+    "test_level5_performance_validation": {
+      "duration": 0.0025326000177301466,
+      "runs": 1,
+      "min": 0.0025326000177301466,
+      "max": 0.0025326000177301466
+    }
+  }
+}
