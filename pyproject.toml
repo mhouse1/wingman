@@ -11,6 +11,8 @@ dependencies = [
 	"pyyaml",
 	"pyautogui",
 	"keyboard>=0.13.5",
+	"plotly>=6.6.0",
+	"pandas>=2.3.3",
 ]
 
 [dependency-groups]

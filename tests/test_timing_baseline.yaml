@@ -1,0 +1,14 @@
+# Test timing baseline - extracted from report.html 2026-03-07
+# Tests that deviate by more than 1 second from these baselines will be reported
+
+test_durations:
+  test_wingman_smoke_launch: 0
+  test_level1_static_screenshot: 17
+  test_respawn_detection_positive: 13
+  test_respawn_detection_negative: 21
+  test_level2_live_capture: 6
+  test_level3_unit_ocr: 14
+  test_level4_region33_contains_lick_to_c: 2
+
+# Tolerance in seconds - tests deviating beyond this will be reported
+tolerance: 1
