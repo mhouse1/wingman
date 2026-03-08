@@ -163,6 +163,12 @@ def main():
                     else:
                         logger.info("Mission restart attempt failed; will retry on next loop if needed.")
 
+            # Deploy flares whenever incoming missile warning is detected.
+            incoming_detected = game_state.get('is_incoming', False)
+            if incoming_detected:
+                logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
+                ctrl.deploy_flares(hold_seconds=0.05, block=False)
+
             # Enforce configurable loop interval
             elapsed = time.time() - loop_start
             if elapsed < loop_interval_sec:
