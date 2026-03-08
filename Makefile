@@ -2,18 +2,19 @@
 # Usage:
 #   make test        -> run all tests
 #   make test1       -> run region 33 continue-text OCR test
-#   make test2       -> run region 10 MING-text OCR test
+#   make test2       -> run region 9 INCO-text OCR test
 #   make test-perf   -> run tests + generate CSV + chart
 #   make test-perf-csv   -> generate performance CSV from git history
 #   make test-perf-chart -> generate performance visualization chart
 #   make report      -> run tests and generate HTML report
 #   make clean       -> remove test output and screenshots
+#   make add-perf-json -> force add performance.json and commit with current version
 #   make status      -> git status
 #   make diff        -> git diff
 #   make commit      -> commit all changes with a default message
 #   make push        -> push current branch
 
-.PHONY: test test1 test2 test-perf test-perf-csv test-perf-chart clean s d c t f n p squash run
+.PHONY: test test1 test2 test-perf test-perf-csv test-perf-chart clean add-perf-json s d c t f n p squash run
 
 # Generate HTML report for automated levels test
 test:
@@ -23,9 +24,9 @@ test:
 test1:
 	uv run pytest tests/test_automated_levels.py -k level4_region33_contains_lick_to_c -q
 
-# Run region 10 OCR check for "MING" on INCOMING screenshots
+# Run region 9 OCR check for "INCO" on INCOMING screenshots
 test2:
-	uv run pytest tests/test_automated_levels.py -k level4_region10_contains_ming -q
+	uv run pytest tests/test_automated_levels.py -k level4_region9_contains_inco -q
 
 # Generate CSV with performance trends from git history
 test-perf-csv:
@@ -52,6 +53,13 @@ clean:
 	rm -rf tests/test-output
 	rm -f tests/test-output/*.png
 	rm -rf test_screenshots
+
+# Force add ignored performance history file and commit with current version
+add-perf-json:
+	git add -f tests/test-output/performance.json
+	version=$$(sed -n 's/^WINGMAN_VERSION = "\([^"]*\)"/\1/p' wingman/main.py); \
+	test -n "$$version" || (echo "Could not parse WINGMAN_VERSION from wingman/main.py" && exit 1); \
+	git diff --cached --quiet -- tests/test-output/performance.json && echo "No staged changes for tests/test-output/performance.json" || git commit -m "v$${version}: update performance baseline" -- tests/test-output/performance.json
 
 # Git helpers
 s:
