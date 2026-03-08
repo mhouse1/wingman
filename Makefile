@@ -58,8 +58,10 @@ clean:
 wrelease:
 	git add -f tests/test-output/performance.json
 	version=$$(sed -n 's/^WINGMAN_VERSION = "\([^"]*\)"/\1/p' wingman/main.py); \
+	details=$$(sed -n 's/^WINGMAN_VERSION_DETAILS = "\([^"]*\)"/\1/p' wingman/main.py); \
 	test -n "$$version" || (echo "Could not parse WINGMAN_VERSION from wingman/main.py" && exit 1); \
-	git diff --cached --quiet -- tests/test-output/performance.json && echo "No staged changes for tests/test-output/performance.json" || git commit -m "v$${version}: update performance baseline" -- tests/test-output/performance.json
+	test -n "$$details" || (echo "Could not parse WINGMAN_VERSION_DETAILS from wingman/main.py" && exit 1); \
+	git diff --cached --quiet -- tests/test-output/performance.json && echo "No staged changes for tests/test-output/performance.json" || git commit -m "v$${version}: $${details}" -- tests/test-output/performance.json
 
 # Git helpers
 s:
