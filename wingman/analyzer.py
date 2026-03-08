@@ -32,6 +32,7 @@ class GameStateAnalyzer:
         # OCR-based respawn detection (looks for "RESPAWN" text)
         self.use_ocr = respawn_cfg.get("use_ocr", True)
         self.respawn_region = respawn_cfg.get("region", 32)  # Region 32 is bottom row, center-left (6x6 grid)
+        self.incoming_region = respawn_cfg.get("incoming_region", 10)  # Region 10 for INCOMING missile warning
         
         # EasyOCR reader (lazy initialization on first use)
         self._ocr_reader = None
@@ -44,7 +45,14 @@ class GameStateAnalyzer:
         }
         self._ocr_cache_lock = threading.Lock()  # Thread-safe cache updates
         
-        # Background OCR thread for non-blocking analysis
+        # Incoming missile cache (separate from respawn)
+        self._incoming_cache = {
+            'result': (False, 0.0, None),  # (is_incoming, confidence, method)
+            'timestamp': 0.0,
+        }
+        self._incoming_cache_lock = threading.Lock()
+        
+        # Background OCR thread for non-blocking analysis (scans both respawn and incoming)
         self._background_ocr_frame = None
         self._background_ocr_running = False
         self._background_ocr_thread = None
@@ -130,6 +138,41 @@ class GameStateAnalyzer:
 
         return False
     
+    @classmethod
+    def _is_incoming_text(cls, text_clean: str) -> bool:
+        """Return True when OCR text matches incoming missile warning.
+        
+        The actual in-game text shows 'MING' (from 'INCOMING'), so we match that
+        with tolerance for OCR errors.
+        """
+        if not text_clean:
+            return False
+
+        # Primary target: 'MING' visible in game
+        target = "MING"
+        if target in text_clean:
+            return True
+        
+        # Also check for partial 'INCOMING' text
+        if "INCOM" in text_clean or "NCOMING" in text_clean:
+            return True
+        
+        # Levenshtein distance for near-matches (OCR errors)
+        window_len = len(target)
+        candidates = []
+        if len(text_clean) < window_len:
+            candidates.append(text_clean)
+        else:
+            for index in range(0, len(text_clean) - window_len + 1):
+                candidates.append(text_clean[index:index + window_len])
+
+        for candidate in candidates:
+            distance = cls._levenshtein_distance(candidate, target)
+            if distance <= 1:  # Stricter tolerance for MING (shorter word)
+                return True
+
+        return False
+    
     @property
     def ocr_reader(self):
         """Lazy initialization of EasyOCR reader (10s startup delay)."""
@@ -183,13 +226,15 @@ class GameStateAnalyzer:
             'is_respawning': False,
             'respawn_confidence': 0.0,
             'respawn_method': None,
+            'is_incoming': False,
+            'incoming_confidence': 0.0,
+            'incoming_method': None,
         }
         
         # Detect respawn screen - only check configured respawn_region where RESPAWN text appears
         if region is None:
-            # Full frame: extract respawn region and check for respawn
-            respawn_region_frame = self.get_region(frame, self.respawn_region)
-            respawn_detected, confidence, method = self._detect_respawn(respawn_region_frame)
+            # Full frame: pass full frame to OCR (it will extract regions internally)
+            respawn_detected, confidence, method = self._detect_respawn(frame)
         elif region == self.respawn_region:
             # Already in respawn region: check for respawn
             respawn_detected, confidence, method = self._detect_respawn(analysis_frame)
@@ -200,6 +245,14 @@ class GameStateAnalyzer:
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
+        
+        # Detect incoming missiles - use cached result from background OCR
+        with self._incoming_cache_lock:
+            incoming_detected, incoming_conf, incoming_method = self._incoming_cache['result']
+        
+        state['is_incoming'] = incoming_detected
+        state['incoming_confidence'] = incoming_conf
+        state['incoming_method'] = incoming_method
         
         # Save highlighted grid if enabled (every frame)
         if self.show_grid_highlighted:
@@ -266,71 +319,109 @@ class GameStateAnalyzer:
         return cached_result
     
     def _run_ocr_in_background(self):
-        """Run OCR in background thread and update cache, with detailed timing."""
+        """Run OCR in background thread and update both respawn and incoming caches."""
         import time
         try:
             self._background_ocr_running = True
-            stage_times = {}
             t0 = time.time()
             current_time = t0
-            frame = self._background_ocr_frame
-            if frame is None:
+            full_frame = self._background_ocr_frame
+            if full_frame is None:
                 return
-            t1 = time.time()
+            
             reader = self.ocr_reader
-            t2 = time.time()
             if reader is None:
                 logger.warning("OCR reader not initialized")
                 return
+            
             try:
-                # Convert to grayscale for better OCR
+                # === RESPAWN DETECTION (Region configured in config) ===
+                respawn_frame = self.get_region(full_frame, self.respawn_region)
+                t1 = time.time()
+                
+                # Preprocess respawn region
+                gray_respawn = cv2.cvtColor(respawn_frame, cv2.COLOR_BGR2GRAY)
+                _, binary_respawn = cv2.threshold(gray_respawn, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                small_respawn = cv2.resize(binary_respawn, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
+                t2 = time.time()
+                
+                # Run OCR on respawn region
+                results_respawn = reader.readtext(small_respawn, detail=1, paragraph=False)
                 t3 = time.time()
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                t4 = time.time()
-                # Try binary thresholding for clearer text (works better than CLAHE for clean text)
-                # Otsu's method automatically finds optimal threshold
-                _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                t5 = time.time()
-                # Downscale for faster OCR (OCR works better on smaller images)
-                small = cv2.resize(binary, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
-                t6 = time.time()
-                # Debug: save preprocessed images
-                if self.debug:
-                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_grayscale.png"), gray)
-                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_binary.png"), binary)
-                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_downscaled.png"), small)
-                    logger.debug("Saved OCR preprocessing debug images to %s", self.debug_output_dir)
-                # Run EasyOCR - returns list of (bbox, text, confidence)
-                t7 = time.time()
-                results = reader.readtext(small, detail=1, paragraph=False)
-                t8 = time.time()
-                # Search for "RESPAWN" in detected text
-                for (bbox, text, conf) in results:
-                    # Clean text: uppercase, remove spaces and non-alphabetic characters
+                
+                # Check for RESPAWN text
+                respawn_detected = False
+                for (bbox, text, conf) in results_respawn:
                     text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
-                    # Debug: log what OCR detected
                     if self.debug:
-                        logger.debug("Analyzer: OCR text detected - clean: %s, original: %s", text_clean, text)
-                    # Match actual "RESPAWN" text with tolerance for OCR errors.
+                        logger.debug("Analyzer: Respawn OCR - clean: %s, original: %s", text_clean, text)
                     if self._is_respawn_text(text_clean):
-                        logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
-                        result = (True, 1.0, "ocr")  # 100% confidence when found
-                        # Thread-safe cache update
-                        with self._ocr_cache_lock:
-                            self._ocr_cache['result'] = result
-                            self._ocr_cache['timestamp'] = current_time
+                        logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s' from OCR: '%s')", text_clean, text)
+                        respawn_detected = True
                         break
-                else:
-                    # Not found - cache negative result
-                    result = (False, 0.0, None)
-                    with self._ocr_cache_lock:
-                        self._ocr_cache['result'] = result
-                        self._ocr_cache['timestamp'] = current_time
-                # Log timing for each stage
+                
+                # Update respawn cache
+                respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
+                with self._ocr_cache_lock:
+                    self._ocr_cache['result'] = respawn_result
+                    self._ocr_cache['timestamp'] = current_time
+                
+                # === INCOMING MISSILE DETECTION (Region 10) ===
+                incoming_frame = self.get_region(full_frame, self.incoming_region)
+                t4 = time.time()
+                
+                # Preprocess incoming region and try the same variants used in tests.
+                gray_incoming = cv2.cvtColor(incoming_frame, cv2.COLOR_BGR2GRAY)
+                _, binary_incoming = cv2.threshold(gray_incoming, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                variants = {
+                    "binary_otsu_1p0": binary_incoming,
+                    "binary_otsu_up_1p4": cv2.resize(binary_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
+                    "binary_otsu_inv_1p4": cv2.bitwise_not(cv2.resize(binary_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)),
+                    "gray_up_1p4": cv2.resize(gray_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
+                }
+                t5 = time.time()
+
+                # Run OCR on incoming region with test-proven settings.
+                incoming_detected = False
+                matched_variant = None
+                last_results_incoming = []
+                for variant_name, variant_img in variants.items():
+                    results_incoming = reader.readtext(variant_img, detail=0, paragraph=True)
+                    last_results_incoming = results_incoming
+                    extracted_text = " ".join(str(result) for result in results_incoming)
+                    normalized = " ".join(extracted_text.upper().split())
+                    logger.debug("Analyzer: Incoming OCR variant=%s normalized='%s' raw=%s", variant_name, normalized, results_incoming)
+                    if self._is_incoming_text(normalized.replace(" ", "")):
+                        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, normalized)
+                        incoming_detected = True
+                        matched_variant = variant_name
+                        break
+
+                t6 = time.time()
+                if not last_results_incoming:
+                    logger.debug("Analyzer: No text detected in incoming region 10")
+                
+                # Update incoming cache
+                incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
+                with self._incoming_cache_lock:
+                    self._incoming_cache['result'] = incoming_result
+                    self._incoming_cache['timestamp'] = current_time
+                
+                # Debug: save preprocessed images if enabled
+                if self.debug:
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_respawn_region.png"), respawn_frame)
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_respawn_preprocessed.png"), small_respawn)
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_region.png"), incoming_frame)
+                    if matched_variant:
+                        cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_preprocessed.png"), variants[matched_variant])
+                    else:
+                        cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_preprocessed.png"), variants["binary_otsu_up_1p4"])
+                
+                # Log timing
                 logger.debug(
-                    "Analyzer: OCR Stage Timings - Setup: %.2fs, Reader: %.2fs, Grayscale: %.2fs, Threshold: %.2fs, "
-                    "Resize: %.2fs, OCR: %.2fs, Total: %.2fs",
-                    t1-t0, t2-t1, t4-t3, t5-t4, t6-t5, t8-t7, t8-t0
+                    "Analyzer: Dual OCR Timings - Respawn extract: %.2fs, preprocess: %.2fs, OCR: %.2fs | "
+                    "Incoming extract: %.2fs, preprocess: %.2fs, OCR: %.2fs | Total: %.2fs",
+                    t1-t0, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t6-t0
                 )
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
@@ -343,13 +434,18 @@ class GameStateAnalyzer:
             'is_respawning': False,
             'respawn_confidence': 0.0,
             'respawn_method': None,
+            'is_incoming': False,
+            'incoming_confidence': 0.0,
+            'incoming_method': None,
         }
     
     def reset_cache(self):
-        """Reset OCR cache - useful when switching between different images/scenes."""
+        """Reset OCR caches - useful when switching between different images/scenes."""
         self._ocr_cache['timestamp'] = 0.0
         self._ocr_cache['result'] = (False, 0.0, None)
-        logger.debug("OCR cache reset")
+        self._incoming_cache['timestamp'] = 0.0
+        self._incoming_cache['result'] = (False, 0.0, None)
+        logger.debug("OCR caches reset")
     
     def get_region(self, frame, region_num):
         """

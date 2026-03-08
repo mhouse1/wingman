@@ -42,6 +42,9 @@ respawn_detection:
   # Run test_analyzer.py with --grid to find the correct region
   region: 27  # 5th row, center (where RESPAWN text appears)
   
+  # Also scan region 10 for INCOMING missile warning ("MING" visible)
+  incoming_region: 10
+  
   # Fallback HSV detection (if OCR unavailable)
   # White text detection (for "RESPAWN" text)
   # HSV: High Value (brightness), Low Saturation
