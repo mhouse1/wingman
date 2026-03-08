@@ -34,6 +34,16 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         return yaml.safe_load(file_handle)
 
 
+def _grid_meta(cfg: dict) -> tuple[int, int, int, int]:
+    """Return (grid_size, total_regions, incoming_region, respawn_region)."""
+    respawn_cfg = cfg.get("respawn_detection", {})
+    grid_size = int(respawn_cfg.get("grid_size", 6))
+    total_regions = grid_size * grid_size
+    incoming_region = int(respawn_cfg.get("incoming_region", 10))
+    respawn_region = int(respawn_cfg.get("region", 27))
+    return grid_size, total_regions, incoming_region, respawn_region
+
+
 def _load_image(image_path: Path):
     frame = cv2.imread(str(image_path))
     assert frame is not None, f"Could not load image: {image_path}"
@@ -192,24 +202,36 @@ def test_level3_unit_ocr():
     ],
 )
 def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
-    """Validate region 33 OCR includes 'lick to C' on continue screenshots."""
-    analyzer = GameStateAnalyzer(load_config())
+    """Validate continue text OCR includes 'LICK TO C' in at least one grid region."""
+    cfg = load_config()
+    analyzer = GameStateAnalyzer(cfg)
+    _, total_regions, _, _ = _grid_meta(cfg)
     frame = _load_image(image_path)
-    region_frame = analyzer.get_region(frame, 33)
-
-    gray = cv2.cvtColor(region_frame, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    preprocessed = cv2.resize(binary, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
 
     reader = analyzer.ocr_reader
     assert reader is not None, "EasyOCR reader failed to initialize"
 
-    ocr_results = reader.readtext(preprocessed, detail=0, paragraph=True)
-    extracted_text = " ".join(str(result) for result in ocr_results)
-    normalized = " ".join(extracted_text.upper().split())
+    matched_region = None
+    region_outputs = {}
 
-    assert "LICK TO C" in normalized, (
-        f"Expected 'lick to C' in region 33 for {image_path.name}; OCR output was: {ocr_results}"
+    for region in range(1, total_regions + 1):
+        region_frame = analyzer.get_region(frame, region)
+        gray = cv2.cvtColor(region_frame, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        preprocessed = cv2.resize(binary, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
+
+        ocr_results = reader.readtext(preprocessed, detail=0, paragraph=True)
+        extracted_text = " ".join(str(result) for result in ocr_results)
+        normalized = " ".join(extracted_text.upper().split())
+        region_outputs[region] = normalized
+
+        if "LICK TO C" in normalized:
+            matched_region = region
+            break
+
+    assert matched_region is not None, (
+        f"Expected 'LICK TO C' in one of {total_regions} regions for {image_path.name}; "
+        f"sample outputs: {dict(list(region_outputs.items())[:10])}"
     )
 
 
@@ -222,10 +244,12 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
     ],
 )
 def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
-    """Validate region 10 OCR includes 'MING' on INCOMING screenshots."""
-    analyzer = GameStateAnalyzer(load_config())
+    """Validate configured incoming region OCR includes 'MING' on INCOMING screenshots."""
+    cfg = load_config()
+    analyzer = GameStateAnalyzer(cfg)
+    _, _, incoming_region, _ = _grid_meta(cfg)
     frame = _load_image(image_path)
-    region_frame = analyzer.get_region(frame, 10)
+    region_frame = analyzer.get_region(frame, incoming_region)
 
     reader = analyzer.ocr_reader
     assert reader is not None, "EasyOCR reader failed to initialize"
@@ -245,15 +269,15 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
     debug_dir = Path(__file__).parent / "test-output"
     debug_dir.mkdir(parents=True, exist_ok=True)
     stem = image_path.stem
-    cv2.imwrite(str(debug_dir / f"debug_ocr_region10_{stem}_grayscale.png"), gray)
-    cv2.imwrite(str(debug_dir / f"debug_ocr_region10_{stem}_binary.png"), binary_otsu)
+    cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_grayscale.png"), gray)
+    cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_binary.png"), binary_otsu)
 
     target = "MING"
     matched_variant = None
     variant_outputs = {}
 
     for variant_name, img in variants.items():
-        cv2.imwrite(str(debug_dir / f"debug_ocr_region10_{stem}_{variant_name}.png"), img)
+        cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_{variant_name}.png"), img)
         ocr_results = reader.readtext(img, detail=0, paragraph=True)
         extracted_text = " ".join(str(result) for result in ocr_results)
         normalized = " ".join(extracted_text.upper().split())
@@ -267,7 +291,7 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
             break
 
     assert matched_variant is not None, (
-        f"Expected '{target}' in region 10 for {image_path.name}; no preprocessing variant matched. "
+        f"Expected '{target}' in region {incoming_region} for {image_path.name}; no preprocessing variant matched. "
         f"Variant outputs: {variant_outputs}"
     )
 

@@ -244,11 +244,12 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
     analyzer.draw_grid(frame, output_path=str(output_dir / "output_grid.png"))
     print(f"\n[OK] Saved grid visualization to {output_dir / 'output_grid.png'}")
 
-    print("\nTesting individual regions (1-36):")
+    total_regions = analyzer.grid_rows * analyzer.grid_cols
+    print(f"\nTesting individual regions (1-{total_regions}):")
     print("-" * 60)
     respawn_regions = []
 
-    for region in range(1, 37):
+    for region in range(1, total_regions + 1):
         region_state = analyzer.analyze_frame(frame, region=region)
         status = "[OK] RESPAWN" if region_state["is_respawning"] else "  gameplay"
         confidence = region_state["respawn_confidence"]

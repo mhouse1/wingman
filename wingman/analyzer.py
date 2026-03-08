@@ -29,9 +29,20 @@ class GameStateAnalyzer:
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
         
+        # Grid configuration for region extraction (default 8x8 = 64 regions)
+        grid_size = respawn_cfg.get("grid_size", 8)
+        try:
+            grid_size = int(grid_size)
+        except (TypeError, ValueError):
+            logger.warning("Invalid respawn_detection.grid_size=%r, defaulting to 8", grid_size)
+            grid_size = 8
+        self.grid_rows = max(2, grid_size)
+        self.grid_cols = max(2, grid_size)
+
         # OCR-based respawn detection (looks for "RESPAWN" text)
         self.use_ocr = respawn_cfg.get("use_ocr", True)
-        self.respawn_region = respawn_cfg.get("region", 32)  # Region 32 is bottom row, center-left (6x6 grid)
+        self.respawn_region = respawn_cfg.get("region", 44)  # Region 44 for RESPA in 8x8 mapping
+        self.incoming_region = respawn_cfg.get("incoming_region", 21)  # Region 21 for MING in 8x8 mapping
         
         # EasyOCR reader (lazy initialization on first use)
         self._ocr_reader = None
@@ -44,7 +55,14 @@ class GameStateAnalyzer:
         }
         self._ocr_cache_lock = threading.Lock()  # Thread-safe cache updates
         
-        # Background OCR thread for non-blocking analysis
+        # Incoming missile cache (separate from respawn)
+        self._incoming_cache = {
+            'result': (False, 0.0, None),  # (is_incoming, confidence, method)
+            'timestamp': 0.0,
+        }
+        self._incoming_cache_lock = threading.Lock()
+        
+        # Background OCR thread for non-blocking analysis (scans both respawn and incoming)
         self._background_ocr_frame = None
         self._background_ocr_running = False
         self._background_ocr_thread = None
@@ -59,18 +77,25 @@ class GameStateAnalyzer:
             dtype=np.uint8
         )
         
-        self.debug = config.get("debug", {}).get("show_window", False)
-        self.show_grid_highlighted = config.get("debug", {}).get("show_grid_highlighted", False)
+        debug_cfg = config.get("debug", {})
+        self.debug = debug_cfg.get("show_window", False)
+        self.show_grid_highlighted = debug_cfg.get("show_grid_highlighted", False)
         
         # Debug output directory for OCR preprocessing images
-        debug_output_dir = config.get("debug", {}).get("debug_output_dir", "tests/test-output")
+        debug_output_dir = debug_cfg.get("debug_output_dir", "tests/test-output")
         self.debug_output_dir = Path(debug_output_dir)
         if not self.debug_output_dir.exists():
             self.debug_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Grid configuration (6x6 = 36 regions)
-        self.grid_rows = 6
-        self.grid_cols = 6
+        # Screenshot capture overlay grid size (independent from detection grid).
+        # Example: 6 -> 6x6, 8 -> 8x8.
+        capture_grid_size = debug_cfg.get("capture_grid_size", 6)
+        try:
+            capture_grid_size = int(capture_grid_size)
+        except (TypeError, ValueError):
+            logger.warning("Invalid debug.capture_grid_size=%r, defaulting to 6", capture_grid_size)
+            capture_grid_size = 6
+        self.capture_grid_size = max(2, capture_grid_size)
 
     @staticmethod
     def _levenshtein_distance(a: str, b: str) -> int:
@@ -130,6 +155,41 @@ class GameStateAnalyzer:
 
         return False
     
+    @classmethod
+    def _is_incoming_text(cls, text_clean: str) -> bool:
+        """Return True when OCR text matches incoming missile warning.
+        
+        The actual in-game text shows 'MING' (from 'INCOMING'), so we match that
+        with tolerance for OCR errors.
+        """
+        if not text_clean:
+            return False
+
+        # Primary target: 'MING' visible in game
+        target = "MING"
+        if target in text_clean:
+            return True
+        
+        # Also check for partial 'INCOMING' text
+        if "INCOM" in text_clean or "NCOMING" in text_clean:
+            return True
+        
+        # Levenshtein distance for near-matches (OCR errors)
+        window_len = len(target)
+        candidates = []
+        if len(text_clean) < window_len:
+            candidates.append(text_clean)
+        else:
+            for index in range(0, len(text_clean) - window_len + 1):
+                candidates.append(text_clean[index:index + window_len])
+
+        for candidate in candidates:
+            distance = cls._levenshtein_distance(candidate, target)
+            if distance <= 1:  # Stricter tolerance for MING (shorter word)
+                return True
+
+        return False
+    
     @property
     def ocr_reader(self):
         """Lazy initialization of EasyOCR reader (10s startup delay)."""
@@ -154,13 +214,8 @@ class GameStateAnalyzer:
         
         Args:
             frame: numpy array (BGR image from screen capture)
-            region: Optional grid region 1-36 to analyze (6x6 grid):
-                     1  2  3  4  5  6
-                     7  8  9 10 11 12
-                    13 14 15 16 17 18
-                    19 20 21 22 23 24
-                    25 26 27 28 29 30
-                    31 32 33 34 35 36
+                region: Optional grid region index to analyze (1..N*N).
+                    N is respawn_detection.grid_size (default 8).
                     If None, analyzes full frame.
             
         Returns:
@@ -175,7 +230,8 @@ class GameStateAnalyzer:
         
         # Extract region if specified
         analysis_frame = frame
-        if region and 1 <= region <= 36:
+        total_regions = self.grid_rows * self.grid_cols
+        if region and 1 <= region <= total_regions:
             analysis_frame = self.get_region(frame, region)
             logger.debug("Analyzing region %d (%dx%d)", region, analysis_frame.shape[1], analysis_frame.shape[0])
         
@@ -183,13 +239,15 @@ class GameStateAnalyzer:
             'is_respawning': False,
             'respawn_confidence': 0.0,
             'respawn_method': None,
+            'is_incoming': False,
+            'incoming_confidence': 0.0,
+            'incoming_method': None,
         }
         
         # Detect respawn screen - only check configured respawn_region where RESPAWN text appears
         if region is None:
-            # Full frame: extract respawn region and check for respawn
-            respawn_region_frame = self.get_region(frame, self.respawn_region)
-            respawn_detected, confidence, method = self._detect_respawn(respawn_region_frame)
+            # Full frame: pass full frame to OCR (it will extract regions internally)
+            respawn_detected, confidence, method = self._detect_respawn(frame)
         elif region == self.respawn_region:
             # Already in respawn region: check for respawn
             respawn_detected, confidence, method = self._detect_respawn(analysis_frame)
@@ -200,6 +258,14 @@ class GameStateAnalyzer:
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
+        
+        # Detect incoming missiles - use cached result from background OCR
+        with self._incoming_cache_lock:
+            incoming_detected, incoming_conf, incoming_method = self._incoming_cache['result']
+        
+        state['is_incoming'] = incoming_detected
+        state['incoming_confidence'] = incoming_conf
+        state['incoming_method'] = incoming_method
         
         # Save highlighted grid if enabled (every frame)
         if self.show_grid_highlighted:
@@ -266,71 +332,107 @@ class GameStateAnalyzer:
         return cached_result
     
     def _run_ocr_in_background(self):
-        """Run OCR in background thread and update cache, with detailed timing."""
+        """Run OCR in background thread and update both respawn and incoming caches."""
         import time
         try:
             self._background_ocr_running = True
-            stage_times = {}
             t0 = time.time()
             current_time = t0
-            frame = self._background_ocr_frame
-            if frame is None:
+            full_frame = self._background_ocr_frame
+            if full_frame is None:
                 return
-            t1 = time.time()
+            
             reader = self.ocr_reader
-            t2 = time.time()
             if reader is None:
                 logger.warning("OCR reader not initialized")
                 return
+            
             try:
-                # Convert to grayscale for better OCR
+                # === RESPAWN DETECTION (Region configured in config) ===
+                respawn_frame = self.get_region(full_frame, self.respawn_region)
+                t1 = time.time()
+                
+                # Preprocess respawn region
+                gray_respawn = cv2.cvtColor(respawn_frame, cv2.COLOR_BGR2GRAY)
+                _, binary_respawn = cv2.threshold(gray_respawn, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                small_respawn = cv2.resize(binary_respawn, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
+                t2 = time.time()
+                
+                # Run OCR on respawn region
+                results_respawn = reader.readtext(small_respawn, detail=1, paragraph=False)
                 t3 = time.time()
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                t4 = time.time()
-                # Try binary thresholding for clearer text (works better than CLAHE for clean text)
-                # Otsu's method automatically finds optimal threshold
-                _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                t5 = time.time()
-                # Downscale for faster OCR (OCR works better on smaller images)
-                small = cv2.resize(binary, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
-                t6 = time.time()
-                # Debug: save preprocessed images
-                if self.debug:
-                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_grayscale.png"), gray)
-                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_binary.png"), binary)
-                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_downscaled.png"), small)
-                    logger.debug("Saved OCR preprocessing debug images to %s", self.debug_output_dir)
-                # Run EasyOCR - returns list of (bbox, text, confidence)
-                t7 = time.time()
-                results = reader.readtext(small, detail=1, paragraph=False)
-                t8 = time.time()
-                # Search for "RESPAWN" in detected text
-                for (bbox, text, conf) in results:
-                    # Clean text: uppercase, remove spaces and non-alphabetic characters
+                
+                # Check for RESPAWN text
+                respawn_detected = False
+                for (bbox, text, conf) in results_respawn:
                     text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
-                    # Debug: log what OCR detected
                     if self.debug:
-                        logger.debug("Analyzer: OCR text detected - clean: %s, original: %s", text_clean, text)
-                    # Match actual "RESPAWN" text with tolerance for OCR errors.
+                        logger.debug("Analyzer: Respawn OCR - clean: %s, original: %s", text_clean, text)
                     if self._is_respawn_text(text_clean):
-                        logger.debug("Analyzer: detected 'RESPAWN' text (matched text: '%s' from OCR: '%s')", text_clean, text)
-                        result = (True, 1.0, "ocr")  # 100% confidence when found
-                        # Thread-safe cache update
-                        with self._ocr_cache_lock:
-                            self._ocr_cache['result'] = result
-                            self._ocr_cache['timestamp'] = current_time
+                        logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s' from OCR: '%s')", text_clean, text)
+                        respawn_detected = True
                         break
-                else:
-                    # Not found - cache negative result
-                    result = (False, 0.0, None)
-                    with self._ocr_cache_lock:
-                        self._ocr_cache['result'] = result
-                        self._ocr_cache['timestamp'] = current_time
-                # Log timing for each stage
+                
+                # Update respawn cache
+                respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
+                with self._ocr_cache_lock:
+                    self._ocr_cache['result'] = respawn_result
+                    self._ocr_cache['timestamp'] = current_time
+                
+                # === INCOMING MISSILE DETECTION (configured region) ===
+                incoming_frame = self.get_region(full_frame, self.incoming_region)
+                t4 = time.time()
+                
+                # Preprocess incoming region with a small best-first variant set for runtime speed.
+                gray_incoming = cv2.cvtColor(incoming_frame, cv2.COLOR_BGR2GRAY)
+                _, binary_incoming = cv2.threshold(gray_incoming, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                variants = {
+                    "gray_up_1p4": cv2.resize(gray_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
+                    "binary_otsu_up_1p4": cv2.resize(binary_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
+                }
+                t5 = time.time()
+
+                # Run OCR on incoming region with test-proven settings.
+                incoming_detected = False
+                matched_variant = None
+                last_results_incoming = []
+                for variant_name, variant_img in variants.items():
+                    results_incoming = reader.readtext(variant_img, detail=0, paragraph=True)
+                    last_results_incoming = results_incoming
+                    extracted_text = " ".join(str(result) for result in results_incoming)
+                    normalized = " ".join(extracted_text.upper().split())
+                    logger.debug("Analyzer: Incoming OCR variant=%s normalized='%s' raw=%s", variant_name, normalized, results_incoming)
+                    if self._is_incoming_text(normalized.replace(" ", "")):
+                        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, normalized)
+                        incoming_detected = True
+                        matched_variant = variant_name
+                        break
+
+                t6 = time.time()
+                if not last_results_incoming:
+                    logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
+                
+                # Update incoming cache
+                incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
+                with self._incoming_cache_lock:
+                    self._incoming_cache['result'] = incoming_result
+                    self._incoming_cache['timestamp'] = current_time
+                
+                # Debug: save preprocessed images if enabled
+                if self.debug:
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_respawn_region.png"), respawn_frame)
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_respawn_preprocessed.png"), small_respawn)
+                    cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_region.png"), incoming_frame)
+                    if matched_variant:
+                        cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_preprocessed.png"), variants[matched_variant])
+                    else:
+                        cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_preprocessed.png"), variants["gray_up_1p4"])
+                
+                # Log timing
                 logger.debug(
-                    "Analyzer: OCR Stage Timings - Setup: %.2fs, Reader: %.2fs, Grayscale: %.2fs, Threshold: %.2fs, "
-                    "Resize: %.2fs, OCR: %.2fs, Total: %.2fs",
-                    t1-t0, t2-t1, t4-t3, t5-t4, t6-t5, t8-t7, t8-t0
+                    "Analyzer: Dual OCR Timings - Respawn extract: %.2fs, preprocess: %.2fs, OCR: %.2fs | "
+                    "Incoming extract: %.2fs, preprocess: %.2fs, OCR: %.2fs | Total: %.2fs",
+                    t1-t0, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t6-t0
                 )
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
@@ -343,34 +445,33 @@ class GameStateAnalyzer:
             'is_respawning': False,
             'respawn_confidence': 0.0,
             'respawn_method': None,
+            'is_incoming': False,
+            'incoming_confidence': 0.0,
+            'incoming_method': None,
         }
     
     def reset_cache(self):
-        """Reset OCR cache - useful when switching between different images/scenes."""
+        """Reset OCR caches - useful when switching between different images/scenes."""
         self._ocr_cache['timestamp'] = 0.0
         self._ocr_cache['result'] = (False, 0.0, None)
-        logger.debug("OCR cache reset")
+        self._incoming_cache['timestamp'] = 0.0
+        self._incoming_cache['result'] = (False, 0.0, None)
+        logger.debug("OCR caches reset")
     
     def get_region(self, frame, region_num):
         """
-        Extract a grid region from the frame (1-36, left-to-right, top-to-bottom).
-        
-        Grid layout (6x6):
-             1  2  3  4  5  6
-             7  8  9 10 11 12
-            13 14 15 16 17 18
-            19 20 21 22 23 24
-            25 26 27 28 29 30
-            31 32 33 34 35 36
+        Extract a grid region from the frame (left-to-right, top-to-bottom).
+        Grid size is NxN where N is respawn_detection.grid_size.
         
         Args:
             frame: numpy array
-            region_num: int from 1 to 36
+            region_num: int from 1 to N*N
             
         Returns:
             numpy array: Cropped region
         """
-        if not 1 <= region_num <= 36:
+        total_regions = self.grid_rows * self.grid_cols
+        if not 1 <= region_num <= total_regions:
             logger.warning("Invalid region %d, returning full frame", region_num)
             return frame
         
@@ -389,39 +490,51 @@ class GameStateAnalyzer:
         
         return frame[y1:y2, x1:x2]
     
-    def draw_grid(self, frame, highlight_region=None, output_path=None):
+    def draw_grid(self, frame, highlight_region=None, output_path=None, grid_size=None):
         """
-        Draw 6x6 grid with region numbers on frame.
+        Draw a grid with region numbers on frame.
         
         Args:
             frame: numpy array
-            highlight_region: int 1-36 to highlight a specific region (green border)
+            highlight_region: int 1..N*N to highlight a specific region (green border)
             output_path: if provided, save annotated frame to this path
+            grid_size: optional NxN override for drawing (e.g., 6 or 8)
             
         Returns:
             numpy array: Frame with grid overlay
         """
         frame_copy = frame.copy()
         h, w = frame.shape[:2]
+
+        rows = self.grid_rows
+        cols = self.grid_cols
+        if grid_size is not None:
+            try:
+                size = max(2, int(grid_size))
+                rows = size
+                cols = size
+            except (TypeError, ValueError):
+                logger.warning("Invalid grid_size=%r; using default %dx%d", grid_size, rows, cols)
         
-        region_h = h // self.grid_rows
-        region_w = w // self.grid_cols
+        region_h = h // rows
+        region_w = w // cols
         
         # Draw grid lines (cyan dotted lines)
-        for i in range(1, self.grid_cols):
-            x = w * i // self.grid_cols
+        for i in range(1, cols):
+            x = w * i // cols
             for y in range(0, h, 10):
                 cv2.line(frame_copy, (x, y), (x, min(y + 5, h)), (255, 255, 0), 1)
         
-        for i in range(1, self.grid_rows):
-            y = h * i // self.grid_rows
+        for i in range(1, rows):
+            y = h * i // rows
             for x in range(0, w, 10):
                 cv2.line(frame_copy, (x, y), (min(x + 5, w), y), (255, 255, 0), 1)
         
         # Add region numbers
-        for region in range(1, 37):
-            row = (region - 1) // self.grid_cols
-            col = (region - 1) % self.grid_cols
+        total_regions = rows * cols
+        for region in range(1, total_regions + 1):
+            row = (region - 1) // cols
+            col = (region - 1) % cols
             x = col * region_w + region_w // 2 - 15
             y = row * region_h + region_h // 2 + 10
             # Smaller text for more regions
@@ -429,9 +542,9 @@ class GameStateAnalyzer:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         
         # Highlight specific region if requested
-        if highlight_region and 1 <= highlight_region <= 36:
-            row = (highlight_region - 1) // self.grid_cols
-            col = (highlight_region - 1) % self.grid_cols
+        if highlight_region and 1 <= highlight_region <= total_regions:
+            row = (highlight_region - 1) // cols
+            col = (highlight_region - 1) % cols
             x1 = col * region_w
             y1 = row * region_h
             x2 = x1 + region_w

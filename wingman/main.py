@@ -10,7 +10,8 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.3.1"
+WINGMAN_VERSION = "1.4.0"
+WINGMAN_VERSION_DETAILS = "Automated flare deployment on missile incoming detection"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'
 
@@ -87,6 +88,22 @@ def main():
     pending_mission_restart = False
     last_restart_attempt = 0.0
     restart_not_before = 0.0
+    last_incoming_alert_ts = 0.0
+
+    def _deploy_flares_on_new_incoming() -> bool:
+        """Deploy flares once per new incoming OCR cache update."""
+        nonlocal last_incoming_alert_ts
+        with analyzer._incoming_cache_lock:
+            incoming_detected, _, _ = analyzer._incoming_cache['result']
+            incoming_ts = analyzer._incoming_cache['timestamp']
+
+        if incoming_detected and incoming_ts > last_incoming_alert_ts:
+            logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
+            ctrl.deploy_flares(hold_seconds=0.05, block=False)
+            last_incoming_alert_ts = incoming_ts
+            return True
+
+        return False
 
     try:
         while True:
@@ -163,10 +180,20 @@ def main():
                     else:
                         logger.info("Mission restart attempt failed; will retry on next loop if needed.")
 
+            # Deploy flares immediately when a new incoming OCR result arrives.
+            _deploy_flares_on_new_incoming()
+
             # Enforce configurable loop interval
             elapsed = time.time() - loop_start
             if elapsed < loop_interval_sec:
-                time.sleep(loop_interval_sec - elapsed)
+                sleep_end = loop_start + loop_interval_sec
+                while True:
+                    now = time.time()
+                    if now >= sleep_end:
+                        break
+                    # Poll incoming cache during sleep so flare deploy is not delayed until next loop.
+                    _deploy_flares_on_new_incoming()
+                    time.sleep(min(0.05, sleep_end - now))
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:

@@ -64,6 +64,9 @@ Notes:
  - `uv` will create a `.python-version` file to pin the Python version and a `uv.lock` file to lock dependencies.
  - See the Astral `uv` docs at https://docs.astral.sh/uv/ for more on `uv run`, `uv add`, and `uv sync`.
 
+Architecture docs:
+ - `docs/dual-region-ocr-architecture.md` - how one screenshot is processed for both RESPAWN (region 27) and INCOMING/MING (region 10) detection.
+
 Controls configuration
 
 The prototype currently executes preplanned mission steps (defined in the controller) when activated. Key bindings can be customized in `wingman/main.py`:

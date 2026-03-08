@@ -8,13 +8,13 @@
 #   make test-perf-chart -> generate performance visualization chart
 #   make report      -> run tests and generate HTML report
 #   make clean       -> remove test output and screenshots
-#   make add-perf-json -> force add performance.json and commit with current version
+#   make wrelease    -> force add performance.json and commit with current version
 #   make status      -> git status
 #   make diff        -> git diff
 #   make commit      -> commit all changes with a default message
 #   make push        -> push current branch
 
-.PHONY: test test1 test2 test-perf test-perf-csv test-perf-chart clean add-perf-json s d c t f n p squash run
+.PHONY: test test1 test2 test-perf test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run
 
 # Generate HTML report for automated levels test
 test:
@@ -55,11 +55,13 @@ clean:
 	rm -rf test_screenshots
 
 # Force add ignored performance history file and commit with current version
-add-perf-json:
+wrelease:
 	git add -f tests/test-output/performance.json
 	version=$$(sed -n 's/^WINGMAN_VERSION = "\([^"]*\)"/\1/p' wingman/main.py); \
+	details=$$(sed -n 's/^WINGMAN_VERSION_DETAILS = "\([^"]*\)"/\1/p' wingman/main.py); \
 	test -n "$$version" || (echo "Could not parse WINGMAN_VERSION from wingman/main.py" && exit 1); \
-	git diff --cached --quiet -- tests/test-output/performance.json && echo "No staged changes for tests/test-output/performance.json" || git commit -m "v$${version}: update performance baseline" -- tests/test-output/performance.json
+	test -n "$$details" || (echo "Could not parse WINGMAN_VERSION_DETAILS from wingman/main.py" && exit 1); \
+	git diff --cached --quiet -- tests/test-output/performance.json && echo "No staged changes for tests/test-output/performance.json" || git commit -m "v$${version}: $${details}" -- tests/test-output/performance.json
 
 # Git helpers
 s:
