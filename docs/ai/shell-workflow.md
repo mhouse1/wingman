@@ -1,0 +1,1 @@
+- In this repo on Windows, run Makefile targets that call `uv` from bash (MINGW/Git Bash); PowerShell may not resolve `uv` the same way.

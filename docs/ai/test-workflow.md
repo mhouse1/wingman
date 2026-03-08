@@ -1,0 +1,4 @@
+- Region 33 continue prompt OCR test lives in `tests/test_automated_levels.py` as `test_level4_region33_contains_lick_to_c`.
+- It validates text variant `LICK TO C` using `test_screenshots/continue.png` and `test_screenshots/continue1.png`.
+- Make target `test1` runs this test: `uv run pytest tests/test_automated_levels.py -k level4_region33_contains_lick_to_c -q`.
+- On Windows in this repo, run Make/uv commands from bash (MINGW/Git Bash) for consistent command resolution.

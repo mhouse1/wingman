@@ -11,7 +11,13 @@ import pytest
 import yaml
 
 from wingman.analyzer import GameStateAnalyzer
-from constants import CONFIG_PATH, TEST_SCREENSHOT, TEST_SCREENSHOT_B, TEST_SCREENSHOT_C, TEST_SCREENSHOT_D
+from constants import (
+    CONFIG_PATH,
+    TEST_SCREENSHOT,
+    TEST_SCREENSHOT_B,
+    TEST_SCREENSHOT_C,
+    TEST_SCREENSHOT_D,
+)
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
