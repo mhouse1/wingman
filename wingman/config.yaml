@@ -25,25 +25,21 @@ enemy_hsv:
 respawn_detection:
   # Use OCR to detect "RESPAWN" text
   use_ocr: true
+
+  # Detection grid size (NxN). 8 means regions are numbered on an 8x8 grid.
+  grid_size: 8
   
   # OCR performance: only run OCR every N seconds (use cached result otherwise)
   # Non-blocking background thread: main loop NEVER blocks on OCR!
   # Respawn screens visible for 5+ seconds, so checking every 5s is plenty
   ocr_cooldown: 2.5  # Seconds between OCR runs
   
-  # Grid region where RESPAWN text appears (6x6 grid = 36 regions)
-  # Grid layout:
-  #   1  2  3  4  5  6
-  #   7  8  9 10 11 12
-  #  13 14 15 16 17 18
-  #  19 20 21 22 23 24
-  #  25 26 27 28 29 30
-  #  31 32 33 34 35 36
+  # Grid region where RESPA text appears (8x8 grid = 64 regions)
   # Run test_analyzer.py with --grid to find the correct region
-  region: 27  # 5th row, center (where RESPAWN text appears)
+  region: 44
   
-  # Also scan region 10 for INCOMING missile warning ("MING" visible)
-  incoming_region: 10
+  # Also scan region 21 for INCOMING missile warning ("MING" visible)
+  incoming_region: 21
   
   # Fallback HSV detection (if OCR unavailable)
   # White text detection (for "RESPAWN" text)
@@ -82,5 +78,6 @@ controls:
 debug:
   show_window: false
   show_grid_highlighted: false  # Auto-save grid visualization when respawn detected
+  capture_grid_size: 8  # Grid size for V screenshot overlay: 6 => 6x6, 8 => 8x8
   draw_markers: true
   debug_output_dir: tests/test-output  # Directory for OCR preprocessing debug images

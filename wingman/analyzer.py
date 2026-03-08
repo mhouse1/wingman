@@ -29,10 +29,20 @@ class GameStateAnalyzer:
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
         
+        # Grid configuration for region extraction (default 8x8 = 64 regions)
+        grid_size = respawn_cfg.get("grid_size", 8)
+        try:
+            grid_size = int(grid_size)
+        except (TypeError, ValueError):
+            logger.warning("Invalid respawn_detection.grid_size=%r, defaulting to 8", grid_size)
+            grid_size = 8
+        self.grid_rows = max(2, grid_size)
+        self.grid_cols = max(2, grid_size)
+
         # OCR-based respawn detection (looks for "RESPAWN" text)
         self.use_ocr = respawn_cfg.get("use_ocr", True)
-        self.respawn_region = respawn_cfg.get("region", 32)  # Region 32 is bottom row, center-left (6x6 grid)
-        self.incoming_region = respawn_cfg.get("incoming_region", 10)  # Region 10 for INCOMING missile warning
+        self.respawn_region = respawn_cfg.get("region", 44)  # Region 44 for RESPA in 8x8 mapping
+        self.incoming_region = respawn_cfg.get("incoming_region", 21)  # Region 21 for MING in 8x8 mapping
         
         # EasyOCR reader (lazy initialization on first use)
         self._ocr_reader = None
@@ -67,18 +77,25 @@ class GameStateAnalyzer:
             dtype=np.uint8
         )
         
-        self.debug = config.get("debug", {}).get("show_window", False)
-        self.show_grid_highlighted = config.get("debug", {}).get("show_grid_highlighted", False)
+        debug_cfg = config.get("debug", {})
+        self.debug = debug_cfg.get("show_window", False)
+        self.show_grid_highlighted = debug_cfg.get("show_grid_highlighted", False)
         
         # Debug output directory for OCR preprocessing images
-        debug_output_dir = config.get("debug", {}).get("debug_output_dir", "tests/test-output")
+        debug_output_dir = debug_cfg.get("debug_output_dir", "tests/test-output")
         self.debug_output_dir = Path(debug_output_dir)
         if not self.debug_output_dir.exists():
             self.debug_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Grid configuration (6x6 = 36 regions)
-        self.grid_rows = 6
-        self.grid_cols = 6
+        # Screenshot capture overlay grid size (independent from detection grid).
+        # Example: 6 -> 6x6, 8 -> 8x8.
+        capture_grid_size = debug_cfg.get("capture_grid_size", 6)
+        try:
+            capture_grid_size = int(capture_grid_size)
+        except (TypeError, ValueError):
+            logger.warning("Invalid debug.capture_grid_size=%r, defaulting to 6", capture_grid_size)
+            capture_grid_size = 6
+        self.capture_grid_size = max(2, capture_grid_size)
 
     @staticmethod
     def _levenshtein_distance(a: str, b: str) -> int:
@@ -197,13 +214,8 @@ class GameStateAnalyzer:
         
         Args:
             frame: numpy array (BGR image from screen capture)
-            region: Optional grid region 1-36 to analyze (6x6 grid):
-                     1  2  3  4  5  6
-                     7  8  9 10 11 12
-                    13 14 15 16 17 18
-                    19 20 21 22 23 24
-                    25 26 27 28 29 30
-                    31 32 33 34 35 36
+                region: Optional grid region index to analyze (1..N*N).
+                    N is respawn_detection.grid_size (default 8).
                     If None, analyzes full frame.
             
         Returns:
@@ -218,7 +230,8 @@ class GameStateAnalyzer:
         
         # Extract region if specified
         analysis_frame = frame
-        if region and 1 <= region <= 36:
+        total_regions = self.grid_rows * self.grid_cols
+        if region and 1 <= region <= total_regions:
             analysis_frame = self.get_region(frame, region)
             logger.debug("Analyzing region %d (%dx%d)", region, analysis_frame.shape[1], analysis_frame.shape[0])
         
@@ -366,7 +379,7 @@ class GameStateAnalyzer:
                     self._ocr_cache['result'] = respawn_result
                     self._ocr_cache['timestamp'] = current_time
                 
-                # === INCOMING MISSILE DETECTION (Region 10) ===
+                # === INCOMING MISSILE DETECTION (configured region) ===
                 incoming_frame = self.get_region(full_frame, self.incoming_region)
                 t4 = time.time()
                 
@@ -397,7 +410,7 @@ class GameStateAnalyzer:
 
                 t6 = time.time()
                 if not last_results_incoming:
-                    logger.debug("Analyzer: No text detected in incoming region 10")
+                    logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
                 
                 # Update incoming cache
                 incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
@@ -447,24 +460,18 @@ class GameStateAnalyzer:
     
     def get_region(self, frame, region_num):
         """
-        Extract a grid region from the frame (1-36, left-to-right, top-to-bottom).
-        
-        Grid layout (6x6):
-             1  2  3  4  5  6
-             7  8  9 10 11 12
-            13 14 15 16 17 18
-            19 20 21 22 23 24
-            25 26 27 28 29 30
-            31 32 33 34 35 36
+        Extract a grid region from the frame (left-to-right, top-to-bottom).
+        Grid size is NxN where N is respawn_detection.grid_size.
         
         Args:
             frame: numpy array
-            region_num: int from 1 to 36
+            region_num: int from 1 to N*N
             
         Returns:
             numpy array: Cropped region
         """
-        if not 1 <= region_num <= 36:
+        total_regions = self.grid_rows * self.grid_cols
+        if not 1 <= region_num <= total_regions:
             logger.warning("Invalid region %d, returning full frame", region_num)
             return frame
         
@@ -483,39 +490,51 @@ class GameStateAnalyzer:
         
         return frame[y1:y2, x1:x2]
     
-    def draw_grid(self, frame, highlight_region=None, output_path=None):
+    def draw_grid(self, frame, highlight_region=None, output_path=None, grid_size=None):
         """
-        Draw 6x6 grid with region numbers on frame.
+        Draw a grid with region numbers on frame.
         
         Args:
             frame: numpy array
-            highlight_region: int 1-36 to highlight a specific region (green border)
+            highlight_region: int 1..N*N to highlight a specific region (green border)
             output_path: if provided, save annotated frame to this path
+            grid_size: optional NxN override for drawing (e.g., 6 or 8)
             
         Returns:
             numpy array: Frame with grid overlay
         """
         frame_copy = frame.copy()
         h, w = frame.shape[:2]
+
+        rows = self.grid_rows
+        cols = self.grid_cols
+        if grid_size is not None:
+            try:
+                size = max(2, int(grid_size))
+                rows = size
+                cols = size
+            except (TypeError, ValueError):
+                logger.warning("Invalid grid_size=%r; using default %dx%d", grid_size, rows, cols)
         
-        region_h = h // self.grid_rows
-        region_w = w // self.grid_cols
+        region_h = h // rows
+        region_w = w // cols
         
         # Draw grid lines (cyan dotted lines)
-        for i in range(1, self.grid_cols):
-            x = w * i // self.grid_cols
+        for i in range(1, cols):
+            x = w * i // cols
             for y in range(0, h, 10):
                 cv2.line(frame_copy, (x, y), (x, min(y + 5, h)), (255, 255, 0), 1)
         
-        for i in range(1, self.grid_rows):
-            y = h * i // self.grid_rows
+        for i in range(1, rows):
+            y = h * i // rows
             for x in range(0, w, 10):
                 cv2.line(frame_copy, (x, y), (min(x + 5, w), y), (255, 255, 0), 1)
         
         # Add region numbers
-        for region in range(1, 37):
-            row = (region - 1) // self.grid_cols
-            col = (region - 1) % self.grid_cols
+        total_regions = rows * cols
+        for region in range(1, total_regions + 1):
+            row = (region - 1) // cols
+            col = (region - 1) % cols
             x = col * region_w + region_w // 2 - 15
             y = row * region_h + region_h // 2 + 10
             # Smaller text for more regions
@@ -523,9 +542,9 @@ class GameStateAnalyzer:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         
         # Highlight specific region if requested
-        if highlight_region and 1 <= highlight_region <= 36:
-            row = (highlight_region - 1) // self.grid_cols
-            col = (highlight_region - 1) % self.grid_cols
+        if highlight_region and 1 <= highlight_region <= total_regions:
+            row = (highlight_region - 1) // cols
+            col = (highlight_region - 1) % cols
             x1 = col * region_w
             y1 = row * region_h
             x2 = x1 + region_w

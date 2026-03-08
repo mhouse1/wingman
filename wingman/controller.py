@@ -152,8 +152,9 @@ class Controller:
                                 # mss returns BGRA, convert to BGR
                                 frame = frame[:, :, :3]
                             
-                            # Add grid overlay using analyzer's draw_grid method
-                            frame_with_grid = self._analyzer.draw_grid(frame)
+                            # Add configurable grid overlay (e.g., 6x6 or 8x8) for screenshot capture.
+                            capture_grid_size = getattr(self._analyzer, "capture_grid_size", 6)
+                            frame_with_grid = self._analyzer.draw_grid(frame, grid_size=capture_grid_size)
                             
                             # Create output directory if it doesn't exist
                             output_dir = Path("tests/test-output")
@@ -165,7 +166,7 @@ class Controller:
                             
                             # Save screenshot with grid overlay
                             cv2.imwrite(str(filename), frame_with_grid)
-                            logger.info("Controller: Screenshot saved to %s", filename)
+                            logger.info("Controller: Screenshot saved to %s with %dx%d grid overlay", filename, capture_grid_size, capture_grid_size)
                         except Exception as e:
                             logger.exception("Controller: Failed to capture screenshot: %s", e)
                     else:
