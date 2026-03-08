@@ -370,14 +370,12 @@ class GameStateAnalyzer:
                 incoming_frame = self.get_region(full_frame, self.incoming_region)
                 t4 = time.time()
                 
-                # Preprocess incoming region and try the same variants used in tests.
+                # Preprocess incoming region with a small best-first variant set for runtime speed.
                 gray_incoming = cv2.cvtColor(incoming_frame, cv2.COLOR_BGR2GRAY)
                 _, binary_incoming = cv2.threshold(gray_incoming, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                 variants = {
-                    "binary_otsu_1p0": binary_incoming,
-                    "binary_otsu_up_1p4": cv2.resize(binary_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
-                    "binary_otsu_inv_1p4": cv2.bitwise_not(cv2.resize(binary_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)),
                     "gray_up_1p4": cv2.resize(gray_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
+                    "binary_otsu_up_1p4": cv2.resize(binary_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
                 }
                 t5 = time.time()
 
@@ -415,7 +413,7 @@ class GameStateAnalyzer:
                     if matched_variant:
                         cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_preprocessed.png"), variants[matched_variant])
                     else:
-                        cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_preprocessed.png"), variants["binary_otsu_up_1p4"])
+                        cv2.imwrite(str(self.debug_output_dir / "debug_ocr_incoming_preprocessed.png"), variants["gray_up_1p4"])
                 
                 # Log timing
                 logger.debug(
