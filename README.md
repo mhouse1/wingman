@@ -1,82 +1,117 @@
-# MetalStorm Wingman (prototype)
+# MetalStorm Wingman
 
-Prototype mission automation tool for MetalStorm (PC). Currently supports keyboard input control with preplanned execution steps.
+Prototype automation assistant for MetalStorm (PC) with mission hotkeys, respawn handling, and OCR-based incoming missile detection.
 
-Notes
-- This is a prototype that executes predefined mission steps when activated with the begin mission key
-- Screen capture and vision-based enemy detection are commented out and planned for future phases
-- Tweak `config.yaml` for your display resolution and control settings
+## What This Project Does
 
-Setup a Python virtual environment
+- Captures a game region from your screen.
+- Runs OCR-based analysis for:
+	- `RESPAWN` detection
+	- `INCOMING`/`MING` missile warning detection
+- Executes scripted mission actions with keyboard hotkeys.
+- Auto-deploys flares when incoming text is detected.
+- Supports mission restart flow after respawn.
 
-Using Astral `uv` (recommended)
+## Current Status
 
-If you prefer `uv` (Astral) for reproducible environments, install `uv` then initialize/sync the project:
+This is an active prototype. Controls, timings, and OCR behavior are still being tuned.
 
-Install `uv` (examples):
+## Requirements
 
-```bash
-# recommended: pipx
-pipx install uv
-# or pip
-pip install uv
-# or use the standalone installer
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+- Windows 10/11
+- Python `>=3.10`
+- Game running in a predictable display layout
+- Astral `uv` package manager (recommended)
 
-Install a Python version via `uv` (example):
+## Quick Start (Windows)
 
-```bash
-uv python install 3.12
-```
+1. Install `uv` if needed:
 
-Initialize or convert the project (if you haven't already):
-
-```bash
-uv init    # creates pyproject.toml, .python-version, README, etc.
-uv add -r requirements.txt   # import existing requirements
-uv sync    # create .venv and install deps per lockfile
-```
-
-Run the prototype:
-
-With the game running windowed, adjust `config.yaml` control settings and region, then:
-
-**Recommended: Double-click `wingman.bat` to launch with debug logging.**
-
-(For manual run options, see comments in `wingman.bat`)
-
-Press the begin mission key (default: Enter) to start executing the mission steps. Press it again to pause.
-
-Optional - activate the `.venv` created by `uv`:
-
-macOS / Linux / WSL:
-```bash
-source .venv/bin/activate
-```
-
-Windows (PowerShell):
 ```powershell
-.\.venv\Scripts\Activate.ps1
+pipx install uv
 ```
 
-Notes:
- - `uv` will create a `.python-version` file to pin the Python version and a `uv.lock` file to lock dependencies.
- - See the Astral `uv` docs at https://docs.astral.sh/uv/ for more on `uv run`, `uv add`, and `uv sync`.
+2. From the repository root, sync dependencies:
 
-Architecture docs:
- - `docs/dual-region-ocr-architecture.md` - how one screenshot is processed for both RESPAWN (region 27) and INCOMING/MING (region 10) detection.
+```powershell
+uv sync --all-groups
+```
 
-Controls configuration
+3. Launch Wingman:
 
-The prototype currently executes preplanned mission steps (defined in the controller) when activated. Key bindings can be customized in `wingman/main.py`:
+- Easiest: double-click `wingman.bat`
+- Or run manually:
 
-- `BEGIN_MISSION_KEY` — toggle mission execution on/off (default: 'enter')
-- `CANCEL_MISSION_KEY` — cancel current mission (default: 'end')
+```powershell
+uv run python -m wingman.main --log-level DEBUG
+```
 
-The `controls` section in `wingman/config.yaml` supports fire button configuration for future use:
+## Runtime Hotkeys
 
-- `controls.left_mouse_button: true` — preferred; fires using left mouse button.
-- `controls.fire_button: <key>` — legacy; use `left` for left-click or a keyboard key name to send presses.
+Default hotkeys are defined in `wingman/controller.py`.
 
-If both are present, `left_mouse_button` takes precedence.
+- `u`: Start J20 mission
+- `y`: Start loiter mission
+- `end`: Cancel current mission
+- `backspace`: Exit script
+- `x`: Toggle weapon loop
+- `v`: Capture screenshot with grid overlay (saved to `tests/test-output`)
+- `b`: Simulate respawn detection (testing)
+
+## Configuration
+
+Main config file: `wingman/config.yaml`
+
+Important settings:
+
+- `loop_interval_sec`: main loop cadence
+- `region.left/top/width/height`: capture region
+- `region.monitor`: monitor index
+- `respawn_detection.grid_size`: OCR grid size
+- `respawn_detection.region`: region index for `RESPAWN`
+- `respawn_detection.incoming_region`: region index for `INCOMING`
+- `respawn_detection.ocr_cooldown`: OCR scheduling interval
+- `mission.restart_delay_after_unlock`: delay before mission restart after respawn
+- `mission.weapon_loop_interval`: firing loop interval
+
+If detection is unstable, verify the capture region and grid indices first.
+
+## Testing
+
+Common commands:
+
+```bash
+make test
+make test1
+make test2
+make test-perf
+```
+
+Direct pytest example:
+
+```bash
+uv run pytest tests/test_automated_levels.py --html=tests/test-output/report.html --self-contained-html
+```
+
+## Performance and OCR Docs
+
+- `docs/performance/`
+- `docs/dual-region-ocr-architecture.md`
+- `docs/how-to-test-analyzer.md`
+- `docs/job-aid-enable-gpu-ocr.md`
+
+## Troubleshooting
+
+- If hotkeys do not respond, run terminal/editor with sufficient keyboard hook permissions.
+- If OCR is slow, use `--log-level DEBUG` and check `Analyzer: Parallel OCR Timings` in logs.
+- If no detection occurs, validate capture region and incoming/respawn grid regions in `config.yaml`.
+- If launcher fails to find `uv`, use manual command: `uv run python -m wingman.main`.
+
+## Safety Notes
+
+- Use responsibly and follow the game terms/policies applicable to your account.
+- This project sends keyboard/mouse inputs automatically; test in controlled scenarios first.
+
+## Contributing
+
+Please see `CONTRIBUTING.md` for development workflow, testing expectations, and PR guidance.
