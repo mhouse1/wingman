@@ -11,7 +11,6 @@ import json
 import csv
 import subprocess
 import sys
-import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
@@ -71,33 +70,15 @@ class PerformanceTracker:
         except Exception as e:
             print(f"Error reading performance data: {e}", file=sys.stderr)
             return None
-
-    def get_wingman_version_at_commit(self, commit_hash: str) -> Optional[str]:
-        """Extract WINGMAN_VERSION from wingman/main.py at a specific commit."""
-        try:
-            result = subprocess.run(
-                ["git", "show", f"{commit_hash}:wingman/main.py"],
-                cwd=self.repo_root,
-                capture_output=True,
-                text=True,
-                check=False
-            )
-
-            if result.returncode != 0:
-                return None
-
-            match = re.search(r'^WINGMAN_VERSION\s*=\s*["\']([^"\']+)["\']', result.stdout, re.MULTILINE)
-            if match:
-                return match.group(1)
-            return None
-        except Exception as e:
-            print(f"Error reading WINGMAN_VERSION at commit {commit_hash[:8]}: {e}", file=sys.stderr)
-            return None
     
-    def generate_csv_trends(self, output_file: Path = None) -> Path:
+    def generate_csv_trends(self, output_file: Path = None, include_current: bool = False) -> Path:
         """
         Generate CSV with performance trends over commits.
         Format: timestamp, version, test_name, duration, min, max, runs
+        
+        Args:
+            output_file: Path to output CSV file
+            include_current: If True, append current uncommitted performance.json data
         """
         if output_file is None:
             output_file = Path(__file__).parent / "test-output" / "performance-history.csv"
@@ -115,8 +96,7 @@ class PerformanceTracker:
             if not perf_data:
                 continue
             
-            # Use code version from wingman/main.py as source of truth for chart x-axis.
-            version = self.get_wingman_version_at_commit(commit_hash) or perf_data.get('version', 'unknown')
+            version = perf_data.get('version', 'unknown')
             perf_timestamp = perf_data.get('timestamp', timestamp)
             
             for test_name, metrics in perf_data.get('tests', {}).items():
@@ -130,6 +110,32 @@ class PerformanceTracker:
                     'max': metrics.get('max', 0),
                     'runs': metrics.get('runs', 1)
                 })
+        
+        # Optionally include current uncommitted data
+        if include_current:
+            current_perf_file = self.repo_root / self.perf_file_path
+            if current_perf_file.exists():
+                try:
+                    with open(current_perf_file, 'r') as f:
+                        current_data = json.load(f)
+                    
+                    version = current_data.get('version', 'uncommitted')
+                    perf_timestamp = current_data.get('timestamp', datetime.now().isoformat())
+                    
+                    for test_name, metrics in current_data.get('tests', {}).items():
+                        rows.append({
+                            'timestamp': perf_timestamp,
+                            'commit': 'current',
+                            'version': version,
+                            'test': test_name,
+                            'duration': metrics.get('duration', 0),
+                            'min': metrics.get('min', 0),
+                            'max': metrics.get('max', 0),
+                            'runs': metrics.get('runs', 1)
+                        })
+                    print(f"✓ Included current uncommitted data (v{version})")
+                except Exception as e:
+                    print(f"Warning: Could not read current performance.json: {e}", file=sys.stderr)
         
         # Write CSV
         if rows:
@@ -174,17 +180,6 @@ class PerformanceTracker:
         if df.empty:
             print("No performance data found")
             return output_html
-
-        # Use versions on the x-axis (not timestamps).
-        # Aggregate multiple commits for the same version into a single point per test.
-        def _version_key(version_value: str):
-            try:
-                parts = str(version_value).strip().split('.')
-                return tuple(int(p) for p in parts)
-            except Exception:
-                return (0,)
-
-        version_order = sorted(df['version'].astype(str).unique().tolist(), key=_version_key)
         
         # Group by test name and create subplots
         test_names = df['test'].unique()
@@ -198,24 +193,7 @@ class PerformanceTracker:
         )
         
         for idx, test_name in enumerate(sorted(test_names)):
-            test_data = df[df['test'] == test_name].copy()
-            test_data['version'] = test_data['version'].astype(str)
-
-            # Collapse multiple rows per version into one summary point for readability.
-            test_data = (
-                test_data
-                .groupby('version', as_index=False)
-                .agg({
-                    'duration': 'mean',
-                    'min': 'min',
-                    'max': 'max',
-                    'runs': 'sum'
-                })
-            )
-
-            # Keep versions in semantic order across all subplots.
-            test_data['version'] = pd.Categorical(test_data['version'], categories=version_order, ordered=True)
-            test_data = test_data.sort_values('version')
+            test_data = df[df['test'] == test_name].sort_values('timestamp')
             
             row = (idx // 2) + 1
             col = (idx % 2) + 1
@@ -223,12 +201,12 @@ class PerformanceTracker:
             # Add line trace for duration
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['version'],
+                    x=test_data['timestamp'],
                     y=test_data['duration'],
                     name=test_name,
                     mode='lines+markers',
                     line=dict(width=2),
-                    hovertemplate='<b>Version %{x}</b><br>Avg duration: %{y:.2f}s<extra></extra>'
+                    hovertemplate='<b>%{x|%Y-%m-%d %H:%M}</b><br>Duration: %{y:.2f}s<extra></extra>'
                 ),
                 row=row, col=col
             )
@@ -236,7 +214,7 @@ class PerformanceTracker:
             # Add min/max range
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['version'],
+                    x=test_data['timestamp'],
                     y=test_data['min'],
                     fill=None,
                     mode='lines',
@@ -249,7 +227,7 @@ class PerformanceTracker:
             
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['version'],
+                    x=test_data['timestamp'],
                     y=test_data['max'],
                     fill='tonexty',
                     mode='lines',
@@ -263,7 +241,7 @@ class PerformanceTracker:
         
         # Update layout
         fig.update_layout(
-            title_text="Test Performance Trends by Version",
+            title_text="Test Performance Trends Over Time",
             height=300 * ((n_tests + 1) // 2),
             showlegend=True,
             hovermode='x unified'
@@ -271,7 +249,6 @@ class PerformanceTracker:
         
         # Update y-axes
         fig.update_yaxes(title_text="Duration (seconds)", row=1, col=1)
-        fig.update_xaxes(title_text="Version", type='category')
         
         # Save HTML
         fig.write_html(str(output_html))
@@ -300,6 +277,11 @@ def main():
         action='store_true',
         help='Generate both CSV and chart'
     )
+    parser.add_argument(
+        '--include-current',
+        action='store_true',
+        help='Include current uncommitted performance.json data in output'
+    )
     
     args = parser.parse_args()
     
@@ -307,11 +289,11 @@ def main():
     
     if args.all or (not args.csv and not args.chart):
         # Default: generate both
-        tracker.generate_csv_trends()
+        tracker.generate_csv_trends(include_current=args.include_current)
         tracker.generate_visualization()
     else:
         if args.csv:
-            tracker.generate_csv_trends()
+            tracker.generate_csv_trends(include_current=args.include_current)
         if args.chart:
             tracker.generate_visualization()
 

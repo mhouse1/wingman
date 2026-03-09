@@ -269,15 +269,15 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
     debug_dir = Path(__file__).parent / "test-output"
     debug_dir.mkdir(parents=True, exist_ok=True)
     stem = image_path.stem
-    cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_grayscale.png"), gray)
-    cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_binary.png"), binary_otsu)
+    # cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_grayscale.png"), gray)
+    # cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_binary.png"), binary_otsu)
 
     target = "MING"
     matched_variant = None
     variant_outputs = {}
 
     for variant_name, img in variants.items():
-        cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_{variant_name}.png"), img)
+        # cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_{variant_name}.png"), img)
         ocr_results = reader.readtext(img, detail=0, paragraph=True)
         extracted_text = " ".join(str(result) for result in ocr_results)
         normalized = " ".join(extracted_text.upper().split())
