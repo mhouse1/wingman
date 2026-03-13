@@ -224,8 +224,10 @@ class GameStateAnalyzer:
         self._ocr_pool = None
         self._ocr_pool_initialized = False
         self._background_ocr_frame = None
+        self._background_ocr_pending_frame = None
         self._background_ocr_running = False
         self._background_ocr_thread = None  # Still use a thread to coordinate async results
+        self._background_ocr_lock = threading.Lock()
         
         # Fallback HSV detection (if OCR unavailable)
         self.respawn_text_hsv_lower = np.array(
@@ -508,15 +510,22 @@ class GameStateAnalyzer:
                     logger.debug("Using cached OCR result (%.2fs old)", time_since_last_ocr)
                 return cached_result
         
-        # Cache expired - schedule background OCR (non-blocking)
-        if not self._background_ocr_running:
-            self._background_ocr_frame = frame
-            self._background_ocr_thread = threading.Thread(
-                target=self._run_ocr_in_background,
-                daemon=True
-            )
-            self._background_ocr_thread.start()
-            logger.debug("Background OCR scheduled")
+        # Cache expired - schedule background OCR (non-blocking).
+        # If OCR is already running, update pending frame; otherwise, start thread.
+        with self._background_ocr_lock:
+            if self._background_ocr_running:
+                self._background_ocr_pending_frame = frame
+                logger.debug("Background OCR busy; will process latest pending frame next")
+            else:
+                self._background_ocr_frame = frame
+                self._background_ocr_pending_frame = None
+                self._background_ocr_running = True
+                self._background_ocr_thread = threading.Thread(
+                    target=self._run_ocr_in_background,
+                    daemon=True
+                )
+                self._background_ocr_thread.start()
+                logger.debug("Background OCR scheduled")
         
         # Return cached result (may be stale) while background OCR runs
         return cached_result
@@ -524,35 +533,39 @@ class GameStateAnalyzer:
     def _run_ocr_in_background(self):
         """Run OCR in background using multiprocessing for parallel region processing."""
         import time
-        try:
-            self._background_ocr_running = True
-            t0 = time.time()
-            current_time = t0
-            full_frame = self._background_ocr_frame
+        while True:
+            with self._background_ocr_lock:
+                full_frame = self._background_ocr_frame
+
             if full_frame is None:
+                with self._background_ocr_lock:
+                    self._background_ocr_running = False
                 return
-            
-            pool = self.ocr_pool
-            if pool is None:
-                logger.warning("OCR pool not initialized")
-                return
-            
+
             try:
+                t0 = time.time()
+                current_time = t0
+
+                pool = self.ocr_pool
+                if pool is None:
+                    logger.warning("OCR pool not initialized")
+                    return
+
                 # Extract both regions
                 respawn_frame = self.get_region(full_frame, self.respawn_region)
                 incoming_frame = self.get_region(full_frame, self.incoming_region)
                 t1 = time.time()
-                
+
                 # Convert frames to bytes for pickling (multiprocessing requirement)
                 respawn_bytes = respawn_frame.tobytes()
                 respawn_shape = respawn_frame.shape
                 respawn_dtype = str(respawn_frame.dtype)
-                
+
                 incoming_bytes = incoming_frame.tobytes()
                 incoming_shape = incoming_frame.shape
                 incoming_dtype = str(incoming_frame.dtype)
                 t2 = time.time()
-                
+
                 # Submit both tasks to pool for parallel processing
                 respawn_async = pool.apply_async(
                     _process_respawn_region,
@@ -563,32 +576,32 @@ class GameStateAnalyzer:
                     (incoming_bytes, incoming_shape, incoming_dtype)
                 )
                 t3 = time.time()
-                
+
                 # Wait for results (blocks until both complete)
                 respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=10)
                 incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=10)
                 t4 = time.time()
-                
+
                 # Log results
                 if respawn_detected:
                     logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
-                
+
                 if incoming_detected:
                     logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
                 else:
                     logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
-                
+
                 # Update caches
                 respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
                 with self._ocr_cache_lock:
                     self._ocr_cache['result'] = respawn_result
                     self._ocr_cache['timestamp'] = current_time
-                
+
                 incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
                 with self._incoming_cache_lock:
                     self._incoming_cache['result'] = incoming_result
                     self._incoming_cache['timestamp'] = current_time
-                
+
                 # Log timing
                 logger.debug(
                     "Analyzer: Parallel OCR Timings - Extract: %.2fs, Serialize: %.2fs, Submit: %.2fs | "
@@ -599,8 +612,18 @@ class GameStateAnalyzer:
                 logger.warning("Analyzer: OCR pool timeout")
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
-        finally:
-            self._background_ocr_running = False
+
+            with self._background_ocr_lock:
+                if self._background_ocr_pending_frame is not None:
+                    # Process the most recent pending frame immediately
+                    self._background_ocr_frame = self._background_ocr_pending_frame
+                    self._background_ocr_pending_frame = None
+                    logger.debug("Background OCR processing latest pending frame")
+                    continue
+
+                self._background_ocr_frame = None
+                self._background_ocr_running = False
+                return
     
     def _empty_state(self):
         """Return empty game state for error cases."""

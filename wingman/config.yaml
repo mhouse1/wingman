@@ -32,7 +32,7 @@ respawn_detection:
   # OCR performance: only run OCR every N seconds (use cached result otherwise)
   # Non-blocking background thread: main loop NEVER blocks on OCR!
   # Respawn screens visible for 5+ seconds, so checking every 5s is plenty
-  ocr_cooldown: 2.5  # Seconds between OCR runs
+  ocr_cooldown: 1.5  # Seconds between OCR runs
   
   # Grid region where RESPA text appears (8x8 grid = 64 regions)
   # Run test_analyzer.py with --grid to find the correct region
