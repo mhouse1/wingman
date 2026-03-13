@@ -30,10 +30,15 @@ def _init_ocr_reader():
     global _process_ocr_reader
     if _process_ocr_reader is None and easyocr:
         try:
-            _process_ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-            logger.debug("Initialized EasyOCR reader in worker process PID=%d", os.getpid())
+            _process_ocr_reader = easyocr.Reader(['en'], gpu=True, verbose=False)
+            logger.debug("Initialized EasyOCR reader (GPU) in worker process PID=%d", os.getpid())
         except Exception as e:
-            logger.warning("Failed to initialize EasyOCR in worker: %s", e)
+            logger.warning("Failed to initialize EasyOCR GPU in worker: %s", e)
+            try:
+                _process_ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+                logger.debug("Initialized EasyOCR reader (CPU) in worker process PID=%d", os.getpid())
+            except Exception as e:
+                logger.warning("Failed to initialize EasyOCR in worker: %s", e)
     return _process_ocr_reader
 
 
@@ -66,34 +71,43 @@ def _process_respawn_region(respawn_frame_bytes, shape, dtype_str):
     # Preprocess respawn region
     gray_respawn = cv2.cvtColor(respawn_frame, cv2.COLOR_BGR2GRAY)
     _, binary_respawn = cv2.threshold(gray_respawn, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    small_respawn = cv2.resize(binary_respawn, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
-    
-    # Run OCR
-    results_respawn = reader.readtext(small_respawn, detail=1, paragraph=False)
-    
+    small_gray = cv2.resize(gray_respawn, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
+    small_binary = cv2.resize(binary_respawn, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
+
+    # Run OCR on both grayscale and thresholded images
+    results = []
+    for img, label in [(small_gray, 'gray'), (small_binary, 'binary')]:
+        ocr_results = reader.readtext(img, detail=1, paragraph=False)
+        for (bbox, text, conf) in ocr_results:
+            text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
+            results.append((label, text_clean, conf))
+
     ocr_time = time.time() - t_start
-    
-    # Check for RESPAWN text
-    for (bbox, text, conf) in results_respawn:
-        text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
-        # Simple RESPAWN matching (similar to _is_respawn_text)
+
+    # Log all OCR results for debugging
+    logger.debug(f"Respawn OCR results: {results}")
+
+    # Check for RESPAWN text (relaxed matching)
+    target = "RESPAWN"
+    for label, text_clean, conf in results:
         if len(text_clean) >= 4:
-            target = "RESPAWN"
             # Levenshtein distance check
             if len(text_clean) <= 6:
                 # Short text: check for RESPA variants
-                max_dist = 1
+                max_dist = 2  # Relaxed tolerance
                 for i in range(len(target) - 4):
                     substring = target[i:i+5]
                     dist = _levenshtein_distance_simple(text_clean, substring)
                     if dist <= max_dist:
+                        logger.debug(f"Respawn detected (variant: {label}, text: {text_clean}, dist: {dist})")
                         return (True, ocr_time, text_clean)
             else:
                 # Longer text: full match
                 dist = _levenshtein_distance_simple(text_clean, target)
                 if dist <= 2:
+                    logger.debug(f"Respawn detected (variant: {label}, text: {text_clean}, dist: {dist})")
                     return (True, ocr_time, text_clean)
-    
+
     return (False, ocr_time, None)
 
 
@@ -378,11 +392,11 @@ class GameStateAnalyzer:
                 # Use spawn method for clean process initialization (especially on Windows)
                 ctx = mp.get_context('spawn')
                 self._ocr_pool = ctx.Pool(
-                    processes=2,
+                    processes=4,
                     initializer=_init_ocr_reader,
                 )
                 self._ocr_pool_initialized = True
-                logger.info("Initialized multiprocessing pool with 2 workers for parallel OCR")
+                logger.info("Initialized multiprocessing pool with 4 workers for parallel OCR (GPU enabled if available)")
             except Exception as e:
                 logger.error("Failed to initialize multiprocessing pool: %s", e)
                 self._ocr_pool_initialized = True  # Prevent retries
