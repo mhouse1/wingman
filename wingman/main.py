@@ -10,8 +10,8 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.4.1"
-WINGMAN_VERSION_DETAILS = "use multiprocessing for OCR and mission restart, improved respawn detection logic, added config options for timing and mission restart behavior"
+WINGMAN_VERSION = "1.4.2"
+WINGMAN_VERSION_DETAILS = "improved incoming missile detection and mission restart robustness"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'
 

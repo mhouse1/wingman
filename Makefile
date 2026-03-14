@@ -4,6 +4,7 @@
 #   make test1       -> run region 33 continue-text OCR test
 #   make test2       -> run region 9 INCO-text OCR test
 #   make test-perf   -> run tests + generate CSV + chart
+#   make test-perf-preview -> run tests + preview chart with uncommitted data
 #   make test-perf-csv   -> generate performance CSV from git history
 #   make test-perf-chart -> generate performance visualization chart
 #   make report      -> run tests and generate HTML report
@@ -14,7 +15,7 @@
 #   make commit      -> commit all changes with a default message
 #   make push        -> push current branch
 
-.PHONY: test test1 test2 test-perf test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run
+.PHONY: test test1 test2 test-perf test-perf-preview test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run
 
 # Generate HTML report for automated levels test
 test:
@@ -48,20 +49,36 @@ test-perf: test test-perf-csv test-perf-chart
 	@echo "📈 CSV data: tests/test-output/performance-history.csv"
 	@echo ""
 
+# Preview performance trends including current uncommitted data
+test-perf-preview: test
+	uv run python tests/performance_tracking.py --include-current --chart
+	@echo ""
+	@echo "✅ Performance preview complete (includes uncommitted data)!"
+	@echo "📊 View trends: tests/test-output/performance-trends.html"
+	@echo "📈 CSV data: tests/test-output/performance-history.csv"
+	@echo ""
+	@echo "⚠️  Chart includes UNCOMMITTED data - run 'make wrelease' to commit and finalize"
+	@echo ""
+
 # Clean test artifacts
 clean:
 	rm -rf tests/test-output
 	rm -f tests/test-output/*.png
 	rm -rf test_screenshots
 
-# Force add ignored performance history file and commit with current version
+# Force add ignored performance history file and commit with current version, then regenerate chart
 wrelease:
+	git add wingman/main.py
 	git add -f tests/test-output/performance.json
 	version=$$(sed -n 's/^WINGMAN_VERSION = "\([^"]*\)"/\1/p' wingman/main.py); \
 	details=$$(sed -n 's/^WINGMAN_VERSION_DETAILS = "\([^"]*\)"/\1/p' wingman/main.py); \
 	test -n "$$version" || (echo "Could not parse WINGMAN_VERSION from wingman/main.py" && exit 1); \
 	test -n "$$details" || (echo "Could not parse WINGMAN_VERSION_DETAILS from wingman/main.py" && exit 1); \
-	git diff --cached --quiet -- tests/test-output/performance.json && echo "No staged changes for tests/test-output/performance.json" || git commit -m "v$${version}: $${details}" -- tests/test-output/performance.json
+	git diff --cached --quiet && echo "No staged changes to commit" || git commit -m "v$${version}: $${details}"
+	@$(MAKE) test-perf-chart
+	@echo ""
+	@echo "✅ Version committed and chart updated!"
+	@echo ""
 
 # Git helpers
 s:
