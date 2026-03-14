@@ -270,6 +270,6 @@ python test_analyzer.py --multiple
 
 ## See Also
 
-- [ADR 003: Grid-Based Screen Scanning Architecture](adr/003-grid-based-screen-scanning-architecture.md)
-- [wingman/config.yaml](../wingman/config.yaml) - Configuration settings
-- [wingman/analyzer.py](../wingman/analyzer.py) - Source code
+- [ADR 003: Grid-Based Screen Scanning Architecture](../adr/003-grid-based-screen-scanning-architecture.md)
+- [wingman/config.yaml](../../wingman/config.yaml) - Configuration settings
+- [wingman/analyzer.py](../../wingman/analyzer.py) - Source code

@@ -194,27 +194,30 @@ class PerformanceTracker:
         
         for idx, test_name in enumerate(sorted(test_names)):
             test_data = df[df['test'] == test_name].sort_values('timestamp')
-            
+
+            # Use version only for x-axis
+            x_labels = test_data['version']
+
             row = (idx // 2) + 1
             col = (idx % 2) + 1
-            
+
             # Add line trace for duration
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['timestamp'],
+                    x=x_labels,
                     y=test_data['duration'],
                     name=test_name,
                     mode='lines+markers',
                     line=dict(width=2),
-                    hovertemplate='<b>%{x|%Y-%m-%d %H:%M}</b><br>Duration: %{y:.2f}s<extra></extra>'
+                    hovertemplate='<b>Version: %{x}<br>Duration: %{y:.2f}s</b><extra></extra>'
                 ),
                 row=row, col=col
             )
-            
+
             # Add min/max range
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['timestamp'],
+                    x=x_labels,
                     y=test_data['min'],
                     fill=None,
                     mode='lines',
@@ -224,10 +227,10 @@ class PerformanceTracker:
                 ),
                 row=row, col=col
             )
-            
+
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['timestamp'],
+                    x=x_labels,
                     y=test_data['max'],
                     fill='tonexty',
                     mode='lines',
