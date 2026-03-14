@@ -1,7 +1,7 @@
 # ADR 010: Respawn & Incoming Detection Threading Fix
 
-## Status
-Accepted
+**Status:** Accepted  
+**Date:** 2026-03-13  
 
 ## Context
 Respawn detection became unreliable after threading and worker pool changes. Incoming missile detection remained fast, but respawn detection was delayed or missed. The system uses background threading and multiprocessing for non-blocking OCR analysis.

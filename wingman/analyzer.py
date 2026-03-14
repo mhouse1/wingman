@@ -592,8 +592,8 @@ class GameStateAnalyzer:
                 t3 = time.time()
 
                 # Wait for results (blocks until both complete)
-                respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=10)
-                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=10)
+                respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=30)
+                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=30)
                 t4 = time.time()
 
                 # Log results
