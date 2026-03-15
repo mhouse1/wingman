@@ -13,13 +13,13 @@ dependencies = [
 	"keyboard>=0.13.5",
 	"plotly>=6.6.0",
 	"pandas>=2.3.3",
+	"easyocr",
 ]
 
 [dependency-groups]
 dev = [
 	"pytest",
 	"pytest-html",
-	"easyocr",
 ]
 
 [tool.uv]

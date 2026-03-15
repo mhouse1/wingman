@@ -122,7 +122,12 @@ class Controller:
             # Register hotkey for simulating respawn detected (for testing)
             try:
                 self._simulate_respawn_flag = threading.Event()
+                self._last_b_press_time = 0.0
                 def simulate_respawn(e):
+                    now = time.time()
+                    if now - self._last_b_press_time < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_b_press_time = now
                     logger.info("Controller: B key pressed - simulating respawn detected (as if OCR detected 'RESPAWN')")
                     if self._analyzer is not None:
                         with self._analyzer._ocr_cache_lock:
@@ -643,4 +648,4 @@ class Controller:
             return True
 
         logger.info("Controller: no last mission to restart")
-        return False
+        return None  # None = no previous mission (distinct from False = failed/locked)

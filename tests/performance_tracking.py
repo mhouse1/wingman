@@ -147,16 +147,16 @@ class PerformanceTracker:
         
         return output_file
     
-    def generate_visualization(self, output_html: Path = None) -> Path:
+    def generate_visualization(self, output_html: Path = None, include_current: bool = False) -> Path:
         """
         Generate HTML visualization of performance trends.
         Requires matplotlib and plotly.
         """
         if output_html is None:
             output_html = Path(__file__).parent / "test-output" / "performance-trends.html"
-        
+
         output_html.parent.mkdir(parents=True, exist_ok=True)
-        
+
         try:
             import plotly.graph_objects as go
             import plotly.express as px
@@ -165,9 +165,9 @@ class PerformanceTracker:
             print("❌ plotly not installed. Install with: pip install plotly")
             print("   For now, view trends in CSV: tests/test-output/performance-history.csv")
             return output_html
-        
+
         # Generate CSV first
-        csv_file = self.generate_csv_trends()
+        csv_file = self.generate_csv_trends(include_current=include_current)
         
         # Read CSV data
         try:
@@ -293,12 +293,12 @@ def main():
     if args.all or (not args.csv and not args.chart):
         # Default: generate both
         tracker.generate_csv_trends(include_current=args.include_current)
-        tracker.generate_visualization()
+        tracker.generate_visualization(include_current=args.include_current)
     else:
         if args.csv:
             tracker.generate_csv_trends(include_current=args.include_current)
         if args.chart:
-            tracker.generate_visualization()
+            tracker.generate_visualization(include_current=args.include_current)
 
 
 if __name__ == "__main__":

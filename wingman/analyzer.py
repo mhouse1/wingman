@@ -214,6 +214,16 @@ class GameStateAnalyzer:
         self.use_ocr = respawn_cfg.get("use_ocr", True)
         self.respawn_region = respawn_cfg.get("region", 44)  # Region 44 for RESPA in 8x8 mapping
         self.incoming_region = respawn_cfg.get("incoming_region", 21)  # Region 21 for MING in 8x8 mapping
+
+        # Validate region numbers against the configured grid at startup
+        total_regions = self.grid_rows * self.grid_cols
+        for name, value in [("respawn_detection.region", self.respawn_region),
+                             ("respawn_detection.incoming_region", self.incoming_region)]:
+            if not isinstance(value, int) or not (1 <= value <= total_regions):
+                raise ValueError(
+                    f"Config error: {name}={value!r} is out of range for a "
+                    f"{self.grid_rows}x{self.grid_cols} grid (valid: 1–{total_regions})"
+                )
         
         # EasyOCR reader (lazy initialization on first use)
         self._ocr_reader = None
@@ -591,9 +601,11 @@ class GameStateAnalyzer:
                 )
                 t3 = time.time()
 
-                # Wait for results (blocks until both complete)
-                respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=30)
-                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=30)
+                # Wait for results (blocks until both complete).
+                # Timeout must cover cold-start pool worker init (~10s per worker × 4 workers)
+                # in addition to actual OCR time (~4s). 120s is safe; normal runs complete in <10s.
+                respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=120)
+                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=120)
                 t4 = time.time()
 
                 # Log results
