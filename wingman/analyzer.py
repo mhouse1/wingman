@@ -619,6 +619,11 @@ class GameStateAnalyzer:
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
+        # Skip OCR entirely in GAME_LOBBY — no battle events possible and the
+        # transition back to GAME_BATTLE is driven by _set_last_mission, not OCR.
+        if self.game_state == GameState.GAME_LOBBY:
+            return (False, 0.0, None)
+
         # Check if we can use cached result (throttle OCR)
         current_time = time.time()
         with self._ocr_cache_lock:
