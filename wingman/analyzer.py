@@ -13,7 +13,9 @@ import os
 
 class GameState(Enum):
     GAME_BATTLE = auto()  # Active gameplay: respawn or incoming missiles possible
-    GAME_END = auto()     # Post-match: "Click to Continue" screen shown
+    GAME_END_A  = auto()  # Post-match quiet: scanning for "Click to Continue"
+    GAME_END_B  = auto()  # "Click to Continue" detected; clicking in progress
+    GAME_LOBBY  = auto()  # Final continue (region 64) clicked; waiting in lobby
 
 try:
     import easyocr
@@ -300,6 +302,8 @@ class GameStateAnalyzer:
         # Game state: track last battle event to gate click_to OCR
         self._last_battle_event_ts = 0.0
         self._battle_quiet_period = respawn_cfg.get("battle_quiet_period", 5.0)
+        self._game_end_b = False   # Set when "Click to Continue" is detected
+        self._game_lobby = False   # Set when region 64 (final continue) is clicked
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
         self._prev_incoming_frame = None
         self._static_incoming_count = 0
@@ -480,7 +484,11 @@ class GameStateAnalyzer:
         """Current high-level game state based on recent battle event activity."""
         if time.time() - self._last_battle_event_ts < self._battle_quiet_period:
             return GameState.GAME_BATTLE
-        return GameState.GAME_END
+        if self._game_lobby:
+            return GameState.GAME_LOBBY
+        if self._game_end_b:
+            return GameState.GAME_END_B
+        return GameState.GAME_END_A
 
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
@@ -616,7 +624,7 @@ class GameStateAnalyzer:
         with self._ocr_cache_lock:
             time_since_last_ocr = current_time - self._ocr_cache['timestamp']
             cached_result = self._ocr_cache['result']
-            
+
             # Cache still valid - return immediately (non-blocking)
             if time_since_last_ocr < self._ocr_cache['cooldown']:
                 if self.debug:
@@ -731,6 +739,8 @@ class GameStateAnalyzer:
                 # battle_quiet_period at the moment it is written.
                 if respawn_detected or incoming_detected:
                     self._last_battle_event_ts = time.time()
+                    self._game_end_b = False
+                    self._game_lobby = False
 
                 # Update caches
                 respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
@@ -776,8 +786,9 @@ class GameStateAnalyzer:
         interval = 5.0
         while True:
             time.sleep(interval)
-            if self.game_state == GameState.GAME_BATTLE:
-                logger.debug("Click-to OCR skipped: GAME_BATTLE state active")
+            state = self.game_state
+            if state != GameState.GAME_END_A:
+                logger.debug("Click-to OCR skipped: %s state active", state.name)
                 continue
             with self._click_to_frame_lock:
                 frame = self._click_to_latest_frame
@@ -800,7 +811,8 @@ class GameStateAnalyzer:
                     self._click_to_cache['result'] = result
                     self._click_to_cache['timestamp'] = time.time()
                 if click_to_detected:
-                    logger.debug("Analyzer: detected 'Click to' text (matched: '%s')", click_to_text)
+                    self._game_end_b = True
+                    logger.debug("Analyzer: detected 'Click to' text (matched: '%s') → GAME_END_B", click_to_text)
             except Exception as e:
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
 
@@ -815,7 +827,7 @@ class GameStateAnalyzer:
             'incoming_method': None,
             'is_click_to': False,
             'click_to_method': None,
-            'game_state': GameState.GAME_END,
+            'game_state': GameState.GAME_END_A,
         }
     
     def reset_cache(self):

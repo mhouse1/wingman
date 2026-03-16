@@ -645,13 +645,30 @@ class Controller:
                 col = (region_num - 1) % grid_cols
                 abs_x = int(abs_left + (col + 0.5) * cell_w)
                 abs_y = int(abs_top + (row + 0.5) * cell_h)
-                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d]\033[0m",
+                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d] x6\033[0m",
                             region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"])
-                ctypes.windll.user32.SetCursorPos(abs_x, abs_y)
-                time.sleep(0.05)
-                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
-                time.sleep(0.05)
-                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+                def _raw_click(x, y):
+                    ctypes.windll.user32.SetCursorPos(x, y)
+                    time.sleep(0.05)
+                    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+                    time.sleep(0.05)
+                    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+
+                for i in range(6):
+                    _raw_click(abs_x, abs_y)
+                    if i < 5:
+                        time.sleep(0.5)
+
+                # Final click on region 64 (lobby/continue button)
+                row64 = (64 - 1) // grid_cols
+                col64 = (64 - 1) % grid_cols
+                x64 = int(abs_left + (col64 + 0.5) * cell_w)
+                y64 = int(abs_top + (row64 + 0.5) * cell_h)
+                logger.info("\033[93m📋 Clicking grid region 64 at (%d, %d)\033[0m", x64, y64)
+                _raw_click(x64, y64)
+                if self._analyzer is not None:
+                    self._analyzer._game_lobby = True
+                    logger.info("\033[93m📋 Region 64 clicked → GAME_LOBBY\033[0m")
             except Exception:
                 logger.exception("Controller: click_grid_region failed")
 
@@ -678,6 +695,11 @@ class Controller:
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:
             self._last_mission = mission_name
+        if self._analyzer is not None:
+            self._analyzer._last_battle_event_ts = time.time()
+            self._analyzer._game_end_b = False
+            self._analyzer._game_lobby = False
+            logger.info("Controller: mission '%s' started → GAME_BATTLE", mission_name)
 
     def restart_last_mission(self):
         if self.is_mission_running():
