@@ -154,14 +154,21 @@ def main():
                 respawn_state = RespawnState.PENDING_RESTART
 
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)
-            if respawn_state == RespawnState.PENDING_RESTART and time.time() >= restart_not_before:
+            if (respawn_state == RespawnState.PENDING_RESTART
+                    and time.time() >= restart_not_before
+                    and time.time() - last_restart_attempt > restart_retry_interval):
                 if not ctrl.is_mission_running():
                     logger.info("Attempting to restart mission (delay expired)...")
-                    if ctrl.restart_last_mission():
+                    result = ctrl.restart_last_mission()
+                    if result is True:
                         logger.info("Restarted last mission after respawn")
                         respawn_state = RespawnState.IDLE
+                    elif result is None:
+                        logger.info("No previous mission to restart; clearing pending restart")
+                        respawn_state = RespawnState.IDLE
                     else:
-                        logger.info("Mission restart attempt failed; will retry on next loop if needed.")
+                        logger.info("Mission restart attempt failed; will retry in %.1fs", restart_retry_interval)
+                    last_restart_attempt = time.time()
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             _deploy_flares_on_new_incoming()

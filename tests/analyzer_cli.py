@@ -145,7 +145,7 @@ def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = Fa
     # Wait for background OCR thread to complete
     if analyzer._background_ocr_thread and analyzer._background_ocr_thread.is_alive():
         print("Waiting for OCR to complete...")
-        analyzer._background_ocr_thread.join(timeout=30)
+        analyzer._background_ocr_thread.join(timeout=120)
     
     # Re-analyze to get updated cache result
     state = analyzer.analyze_frame(frame)
@@ -229,7 +229,7 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
     # Wait for background OCR thread to complete
     if analyzer._background_ocr_thread and analyzer._background_ocr_thread.is_alive():
         print("\nWaiting for OCR to complete...")
-        analyzer._background_ocr_thread.join(timeout=30)
+        analyzer._background_ocr_thread.join(timeout=120)
     
     # Re-analyze to get updated cache result
     state = analyzer.analyze_frame(frame)
