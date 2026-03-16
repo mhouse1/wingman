@@ -1,7 +1,7 @@
 import time
 import logging
 import threading
-import pyautogui
+import ctypes
 import sys
 import os
 import cv2
@@ -645,9 +645,13 @@ class Controller:
                 col = (region_num - 1) % grid_cols
                 abs_x = int(abs_left + (col + 0.5) * cell_w)
                 abs_y = int(abs_top + (row + 0.5) * cell_h)
-                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d)\033[0m", region_num, abs_x, abs_y)
-                pyautogui.moveTo(abs_x, abs_y, duration=0.1)
-                pyautogui.click()
+                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d]\033[0m",
+                            region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"])
+                ctypes.windll.user32.SetCursorPos(abs_x, abs_y)
+                time.sleep(0.05)
+                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+                time.sleep(0.05)
+                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
             except Exception:
                 logger.exception("Controller: click_grid_region failed")
 
