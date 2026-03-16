@@ -16,7 +16,7 @@ EXIT_KEY = 'backspace'
 
 from .capture import Capture
 from .controller import Controller
-from .analyzer import GameStateAnalyzer
+from .analyzer import GameStateAnalyzer, GameState
 
 
 class RespawnState(Enum):
@@ -78,6 +78,8 @@ def main():
     last_restart_attempt = 0.0
     restart_not_before = 0.0
     last_incoming_alert_ts = 0.0
+    last_click_to_alert_ts = 0.0
+    last_game_state = None
 
     def _deploy_flares_on_new_incoming() -> bool:
         """Deploy flares once per new incoming OCR cache update."""
@@ -107,6 +109,14 @@ def main():
             # Capture and analyze frame
             frame = cap.get_frame()
             game_state = analyzer.analyze_frame(frame)
+
+            # Log game state transitions
+            current_game_state = game_state.get('game_state')
+            if current_game_state != last_game_state:
+                logger.info("\033[96m🎮 Game state: %s → %s\033[0m",
+                            last_game_state.name if last_game_state else "UNKNOWN",
+                            current_game_state.name if current_game_state else "UNKNOWN")
+                last_game_state = current_game_state
 
             # Detect respawn
             if game_state.get('is_respawning'):
@@ -172,6 +182,16 @@ def main():
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             _deploy_flares_on_new_incoming()
+
+            # Log "Click to Continue" prompt when newly detected (informational only).
+            with analyzer._click_to_cache_lock:
+                click_to_detected, _, _ = analyzer._click_to_cache['result']
+                click_to_ts = analyzer._click_to_cache['timestamp']
+            if click_to_detected and click_to_ts > last_click_to_alert_ts:
+                logger.info("\033[93m📋 CLICK TO CONTINUE detected in region %d\033[0m", analyzer.click_to_region)
+                last_click_to_alert_ts = click_to_ts
+                ctrl.cancel_mission()
+                ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False)
 
             # Enforce configurable loop interval
             elapsed = time.time() - loop_start
