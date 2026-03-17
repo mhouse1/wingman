@@ -147,16 +147,16 @@ class PerformanceTracker:
         
         return output_file
     
-    def generate_visualization(self, output_html: Path = None) -> Path:
+    def generate_visualization(self, output_html: Path = None, include_current: bool = False) -> Path:
         """
         Generate HTML visualization of performance trends.
         Requires matplotlib and plotly.
         """
         if output_html is None:
             output_html = Path(__file__).parent / "test-output" / "performance-trends.html"
-        
+
         output_html.parent.mkdir(parents=True, exist_ok=True)
-        
+
         try:
             import plotly.graph_objects as go
             import plotly.express as px
@@ -165,9 +165,9 @@ class PerformanceTracker:
             print("❌ plotly not installed. Install with: pip install plotly")
             print("   For now, view trends in CSV: tests/test-output/performance-history.csv")
             return output_html
-        
+
         # Generate CSV first
-        csv_file = self.generate_csv_trends()
+        csv_file = self.generate_csv_trends(include_current=include_current)
         
         # Read CSV data
         try:
@@ -194,27 +194,30 @@ class PerformanceTracker:
         
         for idx, test_name in enumerate(sorted(test_names)):
             test_data = df[df['test'] == test_name].sort_values('timestamp')
-            
+
+            # Use version only for x-axis
+            x_labels = test_data['version']
+
             row = (idx // 2) + 1
             col = (idx % 2) + 1
-            
+
             # Add line trace for duration
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['timestamp'],
+                    x=x_labels,
                     y=test_data['duration'],
                     name=test_name,
                     mode='lines+markers',
                     line=dict(width=2),
-                    hovertemplate='<b>%{x|%Y-%m-%d %H:%M}</b><br>Duration: %{y:.2f}s<extra></extra>'
+                    hovertemplate='<b>Version: %{x}<br>Duration: %{y:.2f}s</b><extra></extra>'
                 ),
                 row=row, col=col
             )
-            
+
             # Add min/max range
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['timestamp'],
+                    x=x_labels,
                     y=test_data['min'],
                     fill=None,
                     mode='lines',
@@ -224,10 +227,10 @@ class PerformanceTracker:
                 ),
                 row=row, col=col
             )
-            
+
             fig.add_trace(
                 go.Scatter(
-                    x=test_data['timestamp'],
+                    x=x_labels,
                     y=test_data['max'],
                     fill='tonexty',
                     mode='lines',
@@ -290,12 +293,12 @@ def main():
     if args.all or (not args.csv and not args.chart):
         # Default: generate both
         tracker.generate_csv_trends(include_current=args.include_current)
-        tracker.generate_visualization()
+        tracker.generate_visualization(include_current=args.include_current)
     else:
         if args.csv:
             tracker.generate_csv_trends(include_current=args.include_current)
         if args.chart:
-            tracker.generate_visualization()
+            tracker.generate_visualization(include_current=args.include_current)
 
 
 if __name__ == "__main__":

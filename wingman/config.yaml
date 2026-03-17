@@ -40,7 +40,10 @@ respawn_detection:
   
   # Also scan region 21 for INCOMING missile warning ("MING" visible)
   incoming_region: 21
-  
+
+  # Scan region 60 for "Click to Continue" prompt (lower priority - informational only)
+  click_to_region: 60
+
   # Fallback HSV detection (if OCR unavailable)
   # White text detection (for "RESPAWN" text)
   # HSV: High Value (brightness), Low Saturation

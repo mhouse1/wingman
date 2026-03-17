@@ -6,8 +6,15 @@ import numpy as np
 import threading
 import multiprocessing as mp
 import time
+from enum import Enum, auto
 from pathlib import Path
 import os
+
+
+class GameState(Enum):
+    GAME_BATTLE = auto()  # Active gameplay (default); respawn/incoming scanning active
+    GAME_END_B  = auto()  # "Click to Continue" detected; clicking in progress
+    GAME_LOBBY  = auto()  # Final continue (region 64) clicked; waiting in lobby
 
 try:
     import easyocr
@@ -161,6 +168,41 @@ def _process_incoming_region(incoming_frame_bytes, shape, dtype_str):
     return (False, ocr_time, None, None)
 
 
+def _process_click_to_region(click_to_frame_bytes, shape, dtype_str):
+    """
+    Worker function to process "Click to Continue" region in separate process.
+
+    Returns:
+        tuple: (detected: bool, ocr_time: float, text_found: str or None)
+    """
+    import time
+    import cv2
+    import numpy as np
+
+    reader = _init_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+
+    dtype = np.dtype(dtype_str)
+    click_to_frame = np.frombuffer(click_to_frame_bytes, dtype=dtype).reshape(shape)
+
+    t_start = time.time()
+
+    gray = cv2.cvtColor(click_to_frame, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "CLICKTO" in text or "LICKTO" in text or "CLICK" in text:
+            ocr_time = time.time() - t_start
+            return (True, ocr_time, text)
+
+    ocr_time = time.time() - t_start
+    return (False, ocr_time, None)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -214,6 +256,18 @@ class GameStateAnalyzer:
         self.use_ocr = respawn_cfg.get("use_ocr", True)
         self.respawn_region = respawn_cfg.get("region", 44)  # Region 44 for RESPA in 8x8 mapping
         self.incoming_region = respawn_cfg.get("incoming_region", 21)  # Region 21 for MING in 8x8 mapping
+        self.click_to_region = respawn_cfg.get("click_to_region", 60)  # Region 60 for "Click to Continue"
+
+        # Validate region numbers against the configured grid at startup
+        total_regions = self.grid_rows * self.grid_cols
+        for name, value in [("respawn_detection.region", self.respawn_region),
+                             ("respawn_detection.incoming_region", self.incoming_region),
+                             ("respawn_detection.click_to_region", self.click_to_region)]:
+            if not isinstance(value, int) or not (1 <= value <= total_regions):
+                raise ValueError(
+                    f"Config error: {name}={value!r} is out of range for a "
+                    f"{self.grid_rows}x{self.grid_cols} grid (valid: 1–{total_regions})"
+                )
         
         # EasyOCR reader (lazy initialization on first use)
         self._ocr_reader = None
@@ -232,7 +286,22 @@ class GameStateAnalyzer:
             'timestamp': 0.0,
         }
         self._incoming_cache_lock = threading.Lock()
-        
+
+        # "Click to Continue" cache (lower priority than respawn/incoming)
+        self._click_to_cache = {
+            'result': (False, 0.0, None),  # (is_click_to, confidence, method)
+            'timestamp': 0.0,
+        }
+        self._click_to_cache_lock = threading.Lock()
+        # Click-to runs on its own low-frequency thread; track latest frame separately
+        self._click_to_latest_frame = None
+        self._click_to_frame_lock = threading.Lock()
+        self._click_to_thread_started = False
+
+        self._game_end_b = False   # Set when "Click to Continue" is detected
+        self._game_lobby = False   # Set when region 64 (final continue) is clicked
+        # Static frame detection: two consecutive identical incoming_region frames → GAME_END
+
         # Multiprocessing pool for parallel OCR processing
         # Use 2 workers: one for respawn, one for incoming detection
         self._ocr_pool = None
@@ -392,17 +461,26 @@ class GameStateAnalyzer:
                 # Use spawn method for clean process initialization (especially on Windows)
                 ctx = mp.get_context('spawn')
                 self._ocr_pool = ctx.Pool(
-                    processes=4,
+                    processes=3,  # one worker per OCR task (respawn, incoming, click_to)
                     initializer=_init_ocr_reader,
                 )
                 self._ocr_pool_initialized = True
-                logger.info("Initialized multiprocessing pool with 4 workers for parallel OCR (GPU enabled if available)")
+                logger.info("Initialized multiprocessing pool with 3 workers for parallel OCR (GPU enabled if available)")
             except Exception as e:
                 logger.error("Failed to initialize multiprocessing pool: %s", e)
                 self._ocr_pool_initialized = True  # Prevent retries
                 return None
         return self._ocr_pool
     
+    @property
+    def game_state(self) -> GameState:
+        """Current high-level game state."""
+        if self._game_lobby:
+            return GameState.GAME_LOBBY
+        if self._game_end_b:
+            return GameState.GAME_END_B
+        return GameState.GAME_BATTLE
+
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
         if self._ocr_pool is not None:
@@ -434,6 +512,16 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: received invalid frame")
             return self._empty_state()
         
+        # Keep latest full frame available for the click_to background thread
+        with self._click_to_frame_lock:
+            self._click_to_latest_frame = frame
+
+        # Start the click_to background thread once on first frame
+        if not self._click_to_thread_started:
+            self._click_to_thread_started = True
+            threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
+            logger.debug("Click-to background thread started")
+
         # Extract region if specified
         analysis_frame = frame
         total_regions = self.grid_rows * self.grid_cols
@@ -448,6 +536,9 @@ class GameStateAnalyzer:
             'is_incoming': False,
             'incoming_confidence': 0.0,
             'incoming_method': None,
+            'is_click_to': False,
+            'click_to_method': None,
+            'game_state': self.game_state,
         }
         
         # Detect respawn screen - only check configured respawn_region where RESPAWN text appears
@@ -468,10 +559,17 @@ class GameStateAnalyzer:
         # Detect incoming missiles - use cached result from background OCR
         with self._incoming_cache_lock:
             incoming_detected, incoming_conf, incoming_method = self._incoming_cache['result']
-        
+
         state['is_incoming'] = incoming_detected
         state['incoming_confidence'] = incoming_conf
         state['incoming_method'] = incoming_method
+
+        # Detect "Click to Continue" - use cached result from background OCR (lower priority)
+        with self._click_to_cache_lock:
+            click_to_detected, _, click_to_method = self._click_to_cache['result']
+
+        state['is_click_to'] = click_to_detected
+        state['click_to_method'] = click_to_method
         
         # Save highlighted grid if enabled (every frame)
         if self.show_grid_highlighted:
@@ -512,12 +610,17 @@ class GameStateAnalyzer:
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
+        # Skip OCR entirely in GAME_LOBBY — no battle events possible and the
+        # transition back to GAME_BATTLE is driven by _set_last_mission, not OCR.
+        if self.game_state == GameState.GAME_LOBBY:
+            return (False, 0.0, None)
+
         # Check if we can use cached result (throttle OCR)
         current_time = time.time()
         with self._ocr_cache_lock:
             time_since_last_ocr = current_time - self._ocr_cache['timestamp']
             cached_result = self._ocr_cache['result']
-            
+
             # Cache still valid - return immediately (non-blocking)
             if time_since_last_ocr < self._ocr_cache['cooldown']:
                 if self.debug:
@@ -565,9 +668,11 @@ class GameStateAnalyzer:
                     logger.warning("OCR pool not initialized")
                     return
 
-                # Extract both regions
+                # Extract respawn and incoming regions (click_to has its own thread)
                 respawn_frame = self.get_region(full_frame, self.respawn_region)
                 incoming_frame = self.get_region(full_frame, self.incoming_region)
+
+
                 t1 = time.time()
 
                 # Convert frames to bytes for pickling (multiprocessing requirement)
@@ -591,9 +696,11 @@ class GameStateAnalyzer:
                 )
                 t3 = time.time()
 
-                # Wait for results (blocks until both complete)
-                respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=30)
-                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=30)
+                # Wait for results (blocks until both complete).
+                # Timeout must cover cold-start pool worker init (~10s per worker × 3 workers)
+                # in addition to actual OCR time (~4s). 120s is safe; normal runs complete in <10s.
+                respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=120)
+                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=120)
                 t4 = time.time()
 
                 # Log results
@@ -604,6 +711,13 @@ class GameStateAnalyzer:
                     logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
                 else:
                     logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
+
+                # Keep battle timestamp fresh whenever a battle event is active.
+                # Use time.time() here (not current_time/t0) because OCR runs can
+                # take 4-12s; using t0 would make the timestamp already expired by
+                if respawn_detected or incoming_detected:
+                    self._game_end_b = False
+                    self._game_lobby = False
 
                 # Update caches
                 respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
@@ -639,6 +753,46 @@ class GameStateAnalyzer:
                 self._background_ocr_running = False
                 return
     
+    def _run_click_to_in_background(self):
+        """Poll for 'Click to Continue' on a low-frequency independent schedule.
+
+        Runs every 5 seconds in its own daemon thread so it never delays the
+        high-priority respawn/incoming OCR cycle.
+        """
+        import time
+        interval = 5.0
+        while True:
+            time.sleep(interval)
+            state = self.game_state
+            if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
+                logger.debug("Click-to OCR skipped: %s state active", state.name)
+                continue
+            with self._click_to_frame_lock:
+                frame = self._click_to_latest_frame
+            if frame is None:
+                continue
+            pool = self.ocr_pool
+            if pool is None:
+                continue
+            try:
+                click_to_frame = self.get_region(frame, self.click_to_region)
+                click_to_bytes = click_to_frame.tobytes()
+                click_to_shape = click_to_frame.shape
+                click_to_dtype = str(click_to_frame.dtype)
+                click_to_detected, _, click_to_text = pool.apply_async(
+                    _process_click_to_region,
+                    (click_to_bytes, click_to_shape, click_to_dtype)
+                ).get(timeout=120)
+                result = (True, 1.0, "ocr") if click_to_detected else (False, 0.0, None)
+                with self._click_to_cache_lock:
+                    self._click_to_cache['result'] = result
+                    self._click_to_cache['timestamp'] = time.time()
+                if click_to_detected:
+                    self._game_end_b = True
+                    logger.debug("Analyzer: detected 'Click to' text (matched: '%s') → GAME_END_B", click_to_text)
+            except Exception as e:
+                logger.warning("Analyzer: click_to OCR failed: %s", e)
+
     def _empty_state(self):
         """Return empty game state for error cases."""
         return {
@@ -648,6 +802,9 @@ class GameStateAnalyzer:
             'is_incoming': False,
             'incoming_confidence': 0.0,
             'incoming_method': None,
+            'is_click_to': False,
+            'click_to_method': None,
+            'game_state': GameState.GAME_BATTLE,
         }
     
     def reset_cache(self):
@@ -656,6 +813,8 @@ class GameStateAnalyzer:
         self._ocr_cache['result'] = (False, 0.0, None)
         self._incoming_cache['timestamp'] = 0.0
         self._incoming_cache['result'] = (False, 0.0, None)
+        self._click_to_cache['timestamp'] = 0.0
+        self._click_to_cache['result'] = (False, 0.0, None)
         logger.debug("OCR caches reset")
     
     def get_region(self, frame, region_num):

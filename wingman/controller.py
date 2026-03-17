@@ -1,7 +1,7 @@
 import time
 import logging
 import threading
-import pyautogui
+import ctypes
 import sys
 import os
 import cv2
@@ -122,7 +122,12 @@ class Controller:
             # Register hotkey for simulating respawn detected (for testing)
             try:
                 self._simulate_respawn_flag = threading.Event()
+                self._last_b_press_time = 0.0
                 def simulate_respawn(e):
+                    now = time.time()
+                    if now - self._last_b_press_time < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_b_press_time = now
                     logger.info("Controller: B key pressed - simulating respawn detected (as if OCR detected 'RESPAWN')")
                     if self._analyzer is not None:
                         with self._analyzer._ocr_cache_lock:
@@ -606,6 +611,72 @@ class Controller:
         
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
+    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False):
+        """Move the mouse to the center of a grid region and left-click it.
+
+        Args:
+            region_num: 1-based region number (row-major, left-to-right top-to-bottom).
+            grid_rows: Number of grid rows (default 8).
+            grid_cols: Number of grid columns (default 8).
+            block: If True run in the calling thread; otherwise spawn a daemon thread.
+        """
+        def _do_click():
+            try:
+                if self._capture is None:
+                    logger.error("Controller: click_grid_region - no capture reference")
+                    return
+                # Create a new mss instance — mss uses thread-local storage so the
+                # main-thread instance cannot be used from a daemon thread.
+                with mss() as sct:
+                    monitors = sct.monitors
+                    monitor_index = self._capture.monitor_index
+                    if monitor_index < 1 or monitor_index >= len(monitors):
+                        logger.error("Controller: click_grid_region - monitor index %d out of range", monitor_index)
+                        return
+                    mon = monitors[monitor_index]
+                    region = self._capture.region
+                    abs_left = mon["left"] + region[0]
+                    abs_top = mon["top"] + region[1]
+                    cap_w = region[2]
+                    cap_h = region[3]
+                cell_w = cap_w / grid_cols
+                cell_h = cap_h / grid_rows
+                row = (region_num - 1) // grid_cols
+                col = (region_num - 1) % grid_cols
+                abs_x = int(abs_left + (col + 0.5) * cell_w)
+                abs_y = int(abs_top + (row + 0.5) * cell_h)
+                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d] x6\033[0m",
+                            region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"])
+                def _raw_click(x, y):
+                    ctypes.windll.user32.SetCursorPos(x, y)
+                    time.sleep(0.05)
+                    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+                    time.sleep(0.05)
+                    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+
+                for i in range(6):
+                    _raw_click(abs_x, abs_y)
+                    if i < 5:
+                        time.sleep(0.5)
+
+                # Final click on region 64 (lobby/continue button)
+                row64 = (64 - 1) // grid_cols
+                col64 = (64 - 1) % grid_cols
+                x64 = int(abs_left + (col64 + 0.5) * cell_w)
+                y64 = int(abs_top + (row64 + 0.5) * cell_h)
+                logger.info("\033[93m📋 Clicking grid region 64 at (%d, %d)\033[0m", x64, y64)
+                _raw_click(x64, y64)
+                if self._analyzer is not None:
+                    self._analyzer._game_lobby = True
+                    logger.info("\033[93m📋 Region 64 clicked → GAME_LOBBY\033[0m")
+            except Exception:
+                logger.exception("Controller: click_grid_region failed")
+
+        if block:
+            _do_click()
+        else:
+            threading.Thread(target=_do_click, daemon=True).start()
+
     def cancel_mission(self):
         """Request cancellation of any running mission.
 
@@ -624,6 +695,11 @@ class Controller:
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:
             self._last_mission = mission_name
+        if self._analyzer is not None:
+            self._analyzer._last_battle_event_ts = time.time()
+            self._analyzer._game_end_b = False
+            self._analyzer._game_lobby = False
+            logger.info("Controller: mission '%s' started → GAME_BATTLE", mission_name)
 
     def restart_last_mission(self):
         if self.is_mission_running():
@@ -643,4 +719,4 @@ class Controller:
             return True
 
         logger.info("Controller: no last mission to restart")
-        return False
+        return None  # None = no previous mission (distinct from False = failed/locked)

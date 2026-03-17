@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/dev-tools/github/wingman/tests/*.py)"
+    ]
+  }
+}

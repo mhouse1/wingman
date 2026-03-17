@@ -3,29 +3,26 @@ import yaml
 import time
 import logging
 import threading
-import re
-from datetime import datetime
+from enum import Enum, auto
 try:
     import keyboard as keyboard_module
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.4.2"
-WINGMAN_VERSION_DETAILS = "improved incoming missile detection and mission restart robustness"
+WINGMAN_VERSION = "1.4.4"
+WINGMAN_VERSION_DETAILS = "more automated control"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'
 
-# Note: enabling this will slow down startup by 10seconds due to easyocr/tensorflow init
-# try:
-#     import easyocr
-# except Exception:
-#     easyocr = None
-
 from .capture import Capture
-from .vision import Vision
 from .controller import Controller
-from .ai import SimpleAI
-from .analyzer import GameStateAnalyzer
+from .analyzer import GameStateAnalyzer, GameState
+
+
+class RespawnState(Enum):
+    IDLE = auto()            # Normal gameplay
+    RESPAWNING = auto()      # Respawn screen active; mission being cancelled
+    PENDING_RESTART = auto() # Respawn gone; waiting for delay before restarting
 
 
 def load_config(path):
@@ -56,39 +53,33 @@ def main():
     )
     monitor_index = cfg["region"].get("monitor", 1)
 
-    hsv_lower = cfg["enemy_hsv"]["lower"]
-    hsv_upper = cfg["enemy_hsv"]["upper"]
-    # Toggle start/pause of the main loop with the 'm' key.
-    # Uses `keyboard` if available, otherwise falls back to OS-specific listeners.
     running = threading.Event()
     running.set()  # start running immediately with analyzer active
     exit_requested = threading.Event()
 
-
     # Initialize main components
     cap = Capture(region, monitor_index)
     analyzer = GameStateAnalyzer(cfg)
-    
+
     # Load mission restart timing from config
     mission_cfg = cfg.get("mission", {})
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
-    
+
     # Initialize controller with config-driven weapon loop interval and exit event
     ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
 
-    # Robust mission restart logic
-    was_respawning = False
-    mission_active = False
-    mission_started_at = None
-    pending_mission_restart = False
+    # Mission restart state machine
+    respawn_state = RespawnState.IDLE
     last_restart_attempt = 0.0
     restart_not_before = 0.0
     last_incoming_alert_ts = 0.0
+    last_click_to_alert_ts = 0.0
+    last_game_state = None
 
     def _deploy_flares_on_new_incoming() -> bool:
         """Deploy flares once per new incoming OCR cache update."""
@@ -119,9 +110,17 @@ def main():
             frame = cap.get_frame()
             game_state = analyzer.analyze_frame(frame)
 
+            # Log game state transitions
+            current_game_state = game_state.get('game_state')
+            if current_game_state != last_game_state:
+                logger.info("\033[96m🎮 Game state: %s → %s\033[0m",
+                            last_game_state.name if last_game_state else "UNKNOWN",
+                            current_game_state.name if current_game_state else "UNKNOWN")
+                last_game_state = current_game_state
+
             # Detect respawn
             if game_state.get('is_respawning'):
-                if not was_respawning:
+                if respawn_state == RespawnState.IDLE:
                     logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
                     ctrl.cancel_mission()
                     # Wait for mission lock to release before restart
@@ -132,16 +131,14 @@ def main():
                         time.sleep(0.1)
                     else:
                         logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
-                    pending_mission_restart = True
                     restart_not_before = time.time() + restart_delay_after_unlock
                     logger.info("Mission lock released (or release pending); delaying restart by %.1f seconds", restart_delay_after_unlock)
-                    was_respawning = True
-                    mission_active = False
+                    respawn_state = RespawnState.RESPAWNING
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
-                # Try to restart mission if needed
-                if pending_mission_restart and (time.time() - last_restart_attempt > restart_retry_interval):
+                # Try to restart mission while respawn screen is showing (after delay)
+                if time.time() - last_restart_attempt > restart_retry_interval:
                     now = time.time()
                     if ctrl.is_mission_running():
                         last_restart_attempt = now
@@ -153,9 +150,7 @@ def main():
                     logger.info("Attempting to restart mission after respawn...")
                     if ctrl.restart_last_mission():
                         logger.info("Restarted last mission after respawn")
-                        mission_active = True
-                        mission_started_at = time.time()
-                        pending_mission_restart = False
+                        respawn_state = RespawnState.IDLE
                     else:
                         logger.info("Mission restart attempt failed, will retry")
                     last_restart_attempt = time.time()
@@ -164,24 +159,39 @@ def main():
                 continue
 
             # Gameplay resumed after respawn
-            if was_respawning:
+            if respawn_state == RespawnState.RESPAWNING:
                 logger.info("\033[92m✓ Gameplay resumed - ready for missions\033[0m")
-                was_respawning = False
-            
+                respawn_state = RespawnState.PENDING_RESTART
+
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)
-            if pending_mission_restart and time.time() >= restart_not_before:
+            if (respawn_state == RespawnState.PENDING_RESTART
+                    and time.time() >= restart_not_before
+                    and time.time() - last_restart_attempt > restart_retry_interval):
                 if not ctrl.is_mission_running():
                     logger.info("Attempting to restart mission (delay expired)...")
-                    if ctrl.restart_last_mission():
+                    result = ctrl.restart_last_mission()
+                    if result is True:
                         logger.info("Restarted last mission after respawn")
-                        mission_active = True
-                        mission_started_at = time.time()
-                        pending_mission_restart = False
+                        respawn_state = RespawnState.IDLE
+                    elif result is None:
+                        logger.info("No previous mission to restart; clearing pending restart")
+                        respawn_state = RespawnState.IDLE
                     else:
-                        logger.info("Mission restart attempt failed; will retry on next loop if needed.")
+                        logger.info("Mission restart attempt failed; will retry in %.1fs", restart_retry_interval)
+                    last_restart_attempt = time.time()
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             _deploy_flares_on_new_incoming()
+
+            # Log "Click to Continue" prompt when newly detected (informational only).
+            with analyzer._click_to_cache_lock:
+                click_to_detected, _, _ = analyzer._click_to_cache['result']
+                click_to_ts = analyzer._click_to_cache['timestamp']
+            if click_to_detected and click_to_ts > last_click_to_alert_ts:
+                logger.info("\033[93m📋 CLICK TO CONTINUE detected in region %d\033[0m", analyzer.click_to_region)
+                last_click_to_alert_ts = click_to_ts
+                ctrl.cancel_mission()
+                ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False)
 
             # Enforce configurable loop interval
             elapsed = time.time() - loop_start
@@ -198,6 +208,8 @@ def main():
         logger.info("Exiting")
     except Exception:
         logger.exception("Unhandled exception in main loop")
+    finally:
+        analyzer.cleanup()
 
 
 if __name__ == "__main__":
