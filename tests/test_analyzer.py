@@ -27,7 +27,9 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 @pytest.fixture
 def analyzer() -> GameStateAnalyzer:
-    return GameStateAnalyzer(load_config())
+    a = GameStateAnalyzer(load_config())
+    a._game_lobby = False  # Tests use static screenshots; force GAME_BATTLE
+    return a
 
 
 @pytest.fixture
