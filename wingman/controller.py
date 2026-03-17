@@ -105,6 +105,9 @@ class Controller:
 
             try:
                 def start_j20_mission(e):
+                    if self._analyzer is not None and self._analyzer._game_starting:
+                        logger.debug("Controller: U key pressed but in GAME_STARTING - ignoring hotkey (loop controls mission launch)")
+                        return
                     logger.info("Controller: U key pressed - starting J20 mission")
                     self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
@@ -745,42 +748,56 @@ class Controller:
         Every 5 seconds: press MISSION_J20_KEY and scan region 16 for 'Good Luck'.
         Once detected, wait 10 seconds then launch mission_j20.
         """
+        good_luck_event = threading.Event()
+        ocr_running = threading.Event()
+
+        def _do_ocr_scan():
+            """Run Good Luck OCR in background; sets good_luck_event on detection."""
+            try:
+                with mss() as sct:
+                    s = sct.grab(self._capture.get_monitor_rect())
+                    frame = np.array(s)[:, :, :3]
+                if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame, region_num=16):
+                    good_luck_event.set()
+            except Exception:
+                logger.exception("Controller: game_starting OCR scan error")
+            finally:
+                ocr_running.clear()
+
         def _loop():
             logger.info("Controller: game_starting loop started - pressing J20 key every 5s until 'Good Luck' detected")
             try:
                 while self._analyzer is not None and self._analyzer._game_starting:
-                    # Press MISSION_J20_KEY to cycle through the lobby screen
+                    # Press MISSION_J20_KEY every interval
                     if keyboard_module:
                         keyboard_module.press_and_release(MISSION_J20_KEY)
-                        logger.info("Controller: game_starting - pressed J20 key, scanning region 16 for 'Good Luck'")
+                        logger.info("Controller: game_starting - pressed J20 key")
 
-                    # Capture a fresh screenshot and scan region 16
-                    if self._capture is not None and self._analyzer is not None:
-                        try:
-                            with mss() as sct:
-                                monitor = self._capture.get_monitor_rect()
-                                s = sct.grab(monitor)
-                                frame = np.array(s)[:, :, :3]
-                            if self._analyzer.scan_region_for_good_luck(frame, region_num=16):
-                                logger.info("\033[92mController: 'Good Luck' detected - waiting 10 seconds before starting J20 mission\033[0m")
-                                # Interruptible 10-second wait
-                                for _ in range(100):  # 100 * 0.1s = 10s
-                                    if self._analyzer is None or not self._analyzer._game_starting:
-                                        return
-                                    time.sleep(0.1)
-                                if self._analyzer is not None and self._analyzer._game_starting:
-                                    logger.info("Controller: game_starting - launching J20 mission")
-                                    self._set_last_mission("j20")
-                                    threading.Thread(target=self.mission_j20, daemon=True).start()
-                                return
-                        except Exception:
-                            logger.exception("Controller: game_starting scan error")
+                    # Start async OCR scan if one isn't already running
+                    if self._capture is not None and not ocr_running.is_set():
+                        ocr_running.set()
+                        threading.Thread(target=_do_ocr_scan, daemon=True).start()
 
-                    # Wait 5 seconds before next press
+                    # 5-second interruptible wait; breaks early on Good Luck detection
                     for _ in range(50):  # 50 * 0.1s = 5s
-                        if self._analyzer is None or not self._analyzer._game_starting:
-                            return
+                        if good_luck_event.is_set() or self._analyzer is None or not self._analyzer._game_starting:
+                            break
                         time.sleep(0.1)
+
+                    if not (self._analyzer is not None and self._analyzer._game_starting):
+                        return
+
+                    if good_luck_event.is_set():
+                        logger.info("\033[92mController: 'Good Luck' detected - waiting 10 seconds before starting J20 mission\033[0m")
+                        for _ in range(100):  # 100 * 0.1s = 10s
+                            if self._analyzer is None or not self._analyzer._game_starting:
+                                return
+                            time.sleep(0.1)
+                        if self._analyzer is not None and self._analyzer._game_starting:
+                            logger.info("Controller: game_starting - launching J20 mission")
+                            self._set_last_mission("j20")
+                            threading.Thread(target=self.mission_j20, daemon=True).start()
+                        return
             except Exception:
                 logger.exception("Controller: game_starting loop error")
             finally:
