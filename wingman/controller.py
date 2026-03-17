@@ -65,6 +65,9 @@ class Controller:
         self._analyzer = analyzer
         self._capture = capture
         
+        # Padlock camera cooldown: set when the key is pressed manually
+        self._padlock_cooldown_until = 0.0
+
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
@@ -180,6 +183,17 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to capture screenshot", CAPTURE_SCREEN_SHOT)
             except Exception:
                 logger.exception("Controller: failed to register capture screenshot hotkey")
+
+            # Padlock camera cooldown hotkey: when P is pressed manually, suppress
+            # the padlock loop for 10 seconds so it doesn't immediately re-lock.
+            try:
+                def padlock_key_pressed(e):
+                    self._padlock_cooldown_until = time.time() + 10.0
+                    logger.info("Controller: P key pressed manually - padlock loop cooldown set for 10 seconds")
+                keyboard_module.on_press_key(PADLOCK_CAMERA, padlock_key_pressed, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to set padlock loop cooldown", PADLOCK_CAMERA)
+            except Exception:
+                logger.exception("Controller: failed to register padlock camera cooldown hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
@@ -485,7 +499,10 @@ class Controller:
             logger.info("Controller: mission_j20 padlock loop started")
             try:
                 while padlock_loop_active.is_set() and not self._mission_cancel.is_set():
-                    self.padlock_camera(hold_seconds=0.1, block=True)
+                    if time.time() < self._padlock_cooldown_until:
+                        logger.debug("Controller: padlock loop skipping press - manual cooldown active")
+                    else:
+                        self.padlock_camera(hold_seconds=0.1, block=True)
                     # Interruptible sleep - check for cancellation every 0.1 seconds
                     for _ in range(60):  # 60 * 0.1 = 6 seconds
                         if not padlock_loop_active.is_set() or self._mission_cancel.is_set():
