@@ -44,15 +44,6 @@ respawn_detection:
   # Scan region 60 for "Click to Continue" prompt (lower priority - informational only)
   click_to_region: 60
 
-  # Seconds with no respawn/incoming before switching from GAME_BATTLE to GAME_END
-  # (enables click_to OCR only when the game is actually at the end screen)
-  battle_quiet_period: 5.0
-
-  # Mean absolute pixel difference below which incoming_region is considered a static frame.
-  # Two consecutive static frames immediately triggers GAME_END (faster than battle_quiet_period).
-  # Lower = stricter match. Typical active gameplay diff >> 10; static end screen diff ≈ 0-2.
-  static_frame_threshold: 3.0
-  
   # Fallback HSV detection (if OCR unavailable)
   # White text detection (for "RESPAWN" text)
   # HSV: High Value (brightness), Low Saturation

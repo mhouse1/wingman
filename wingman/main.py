@@ -9,7 +9,7 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.4.3"
+WINGMAN_VERSION = "1.4.4"
 WINGMAN_VERSION_DETAILS = "more automated control"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'

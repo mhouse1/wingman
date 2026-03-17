@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-03-16
+**Version:** 1.4.3 (more automated control)
 
 ## Context
 

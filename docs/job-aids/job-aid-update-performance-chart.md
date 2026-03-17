@@ -58,17 +58,33 @@ All points will appear under the same version on the chart.
 
    The x-axis will show the `WINGMAN_VERSION` for each data point. Multiple points for the same version are supported.
 
+## Previewing Before Committing
+
+Use `perf-preview` to see how the chart will look with the latest test results before committing them to history:
+
+```sh
+make test-perf-preview
+```
+
+This will:
+- Run the full test suite
+- Generate the chart with the current (uncommitted) `performance.json` included as a preview point
+- Print the path to open: `tests/test-output/performance-trends.html`
+
+> **Note:** The preview point is not added to history. Run `make wrelease` when you are satisfied with the results to commit it permanently.
+
+Typical workflow when evaluating a change:
+
+```sh
+make test-perf-preview   # check results look right
+make wrelease            # commit to history once satisfied
+```
+
 ## Troubleshooting
 
 - **New data point not showing up?**
-  - Make sure you committed `performance.json` (step 2).
+  - Make sure you committed `performance.json` via `make wrelease` (step 2).
   - Refresh the HTML file in your browser.
-- **Want to preview uncommitted data?**
-  - Run:
-    ```sh
-    make test-perf-preview
-    ```
-  - This includes the current (uncommitted) `performance.json` in the chart, but does not add it to history until you commit.
 
 ## Summary
 - Use `make test-perf` to generate new results.

@@ -12,8 +12,7 @@ import os
 
 
 class GameState(Enum):
-    GAME_BATTLE = auto()  # Active gameplay: respawn or incoming missiles possible
-    GAME_END_A  = auto()  # Post-match quiet: scanning for "Click to Continue"
+    GAME_BATTLE = auto()  # Active gameplay (default); respawn/incoming scanning active
     GAME_END_B  = auto()  # "Click to Continue" detected; clicking in progress
     GAME_LOBBY  = auto()  # Final continue (region 64) clicked; waiting in lobby
 
@@ -299,15 +298,9 @@ class GameStateAnalyzer:
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
 
-        # Game state: track last battle event to gate click_to OCR
-        self._last_battle_event_ts = 0.0
-        self._battle_quiet_period = respawn_cfg.get("battle_quiet_period", 5.0)
         self._game_end_b = False   # Set when "Click to Continue" is detected
         self._game_lobby = False   # Set when region 64 (final continue) is clicked
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
-        self._prev_incoming_frame = None
-        self._static_incoming_count = 0
-        self._static_frame_threshold = respawn_cfg.get("static_frame_threshold", 3.0)  # mean abs pixel diff
 
         # Multiprocessing pool for parallel OCR processing
         # Use 2 workers: one for respawn, one for incoming detection
@@ -481,14 +474,12 @@ class GameStateAnalyzer:
     
     @property
     def game_state(self) -> GameState:
-        """Current high-level game state based on recent battle event activity."""
-        if time.time() - self._last_battle_event_ts < self._battle_quiet_period:
-            return GameState.GAME_BATTLE
+        """Current high-level game state."""
         if self._game_lobby:
             return GameState.GAME_LOBBY
         if self._game_end_b:
             return GameState.GAME_END_B
-        return GameState.GAME_END_A
+        return GameState.GAME_BATTLE
 
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
@@ -681,23 +672,6 @@ class GameStateAnalyzer:
                 respawn_frame = self.get_region(full_frame, self.respawn_region)
                 incoming_frame = self.get_region(full_frame, self.incoming_region)
 
-                # Static frame detection: two consecutive identical incoming frames → force GAME_END
-                if (self._prev_incoming_frame is not None
-                        and self._prev_incoming_frame.shape == incoming_frame.shape):
-                    diff = np.mean(np.abs(incoming_frame.astype(np.int16)
-                                         - self._prev_incoming_frame.astype(np.int16)))
-                    if diff < self._static_frame_threshold:
-                        self._static_incoming_count += 1
-                        logger.debug("Analyzer: incoming_region static frame count=%d (diff=%.2f)",
-                                     self._static_incoming_count, diff)
-                        if self._static_incoming_count >= 2:
-                            self._last_battle_event_ts = 0.0  # force GAME_END immediately
-                            logger.debug("Analyzer: incoming_region static for 2 frames → GAME_END")
-                    else:
-                        self._static_incoming_count = 0
-                else:
-                    self._static_incoming_count = 0
-                self._prev_incoming_frame = incoming_frame.copy()
 
                 t1 = time.time()
 
@@ -741,9 +715,7 @@ class GameStateAnalyzer:
                 # Keep battle timestamp fresh whenever a battle event is active.
                 # Use time.time() here (not current_time/t0) because OCR runs can
                 # take 4-12s; using t0 would make the timestamp already expired by
-                # battle_quiet_period at the moment it is written.
                 if respawn_detected or incoming_detected:
-                    self._last_battle_event_ts = time.time()
                     self._game_end_b = False
                     self._game_lobby = False
 
@@ -792,7 +764,7 @@ class GameStateAnalyzer:
         while True:
             time.sleep(interval)
             state = self.game_state
-            if state != GameState.GAME_END_A:
+            if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
                 logger.debug("Click-to OCR skipped: %s state active", state.name)
                 continue
             with self._click_to_frame_lock:
@@ -832,7 +804,7 @@ class GameStateAnalyzer:
             'incoming_method': None,
             'is_click_to': False,
             'click_to_method': None,
-            'game_state': GameState.GAME_END_A,
+            'game_state': GameState.GAME_BATTLE,
         }
     
     def reset_cache(self):
