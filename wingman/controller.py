@@ -200,8 +200,11 @@ class Controller:
             try:
                 def auto_mission_key_pressed(_e):
                     if self._analyzer is not None and self._analyzer._game_lobby:
-                        logger.info("Controller: M key pressed in GAME_LOBBY - clicking play button (region 64)")
+                        logger.info("Controller: M key pressed in GAME_LOBBY - clicking play button and entering GAME_STARTING")
+                        self._analyzer._game_lobby = False
+                        self._analyzer._game_starting = True
                         self.click_grid_region(64, block=False, count=1)
+                        self._start_game_starting_loop()
                     else:
                         logger.debug("Controller: M key pressed but not in GAME_LOBBY - ignoring")
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
@@ -733,7 +736,57 @@ class Controller:
             self._analyzer._last_battle_event_ts = time.time()
             self._analyzer._game_end_b = False
             self._analyzer._game_lobby = False
+            self._analyzer._game_starting = False
             logger.info("Controller: mission '%s' started → GAME_BATTLE", mission_name)
+
+    def _start_game_starting_loop(self):
+        """Background loop active in GAME_STARTING state.
+
+        Every 5 seconds: press MISSION_J20_KEY and scan region 16 for 'Good Luck'.
+        Once detected, wait 10 seconds then launch mission_j20.
+        """
+        def _loop():
+            logger.info("Controller: game_starting loop started - pressing J20 key every 5s until 'Good Luck' detected")
+            try:
+                while self._analyzer is not None and self._analyzer._game_starting:
+                    # Press MISSION_J20_KEY to cycle through the lobby screen
+                    if keyboard_module:
+                        keyboard_module.press_and_release(MISSION_J20_KEY)
+                        logger.info("Controller: game_starting - pressed J20 key, scanning region 16 for 'Good Luck'")
+
+                    # Capture a fresh screenshot and scan region 16
+                    if self._capture is not None and self._analyzer is not None:
+                        try:
+                            with mss() as sct:
+                                monitor = self._capture.get_monitor_rect()
+                                s = sct.grab(monitor)
+                                frame = np.array(s)[:, :, :3]
+                            if self._analyzer.scan_region_for_good_luck(frame, region_num=16):
+                                logger.info("\033[92mController: 'Good Luck' detected - waiting 10 seconds before starting J20 mission\033[0m")
+                                # Interruptible 10-second wait
+                                for _ in range(100):  # 100 * 0.1s = 10s
+                                    if self._analyzer is None or not self._analyzer._game_starting:
+                                        return
+                                    time.sleep(0.1)
+                                if self._analyzer is not None and self._analyzer._game_starting:
+                                    logger.info("Controller: game_starting - launching J20 mission")
+                                    self._set_last_mission("j20")
+                                    threading.Thread(target=self.mission_j20, daemon=True).start()
+                                return
+                        except Exception:
+                            logger.exception("Controller: game_starting scan error")
+
+                    # Wait 5 seconds before next press
+                    for _ in range(50):  # 50 * 0.1s = 5s
+                        if self._analyzer is None or not self._analyzer._game_starting:
+                            return
+                        time.sleep(0.1)
+            except Exception:
+                logger.exception("Controller: game_starting loop error")
+            finally:
+                logger.info("Controller: game_starting loop stopped")
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def restart_last_mission(self):
         if self.is_mission_running():

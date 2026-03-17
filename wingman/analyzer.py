@@ -12,9 +12,10 @@ import os
 
 
 class GameState(Enum):
-    GAME_BATTLE = auto()  # Active gameplay (default); respawn/incoming scanning active
-    GAME_END_B  = auto()  # "Click to Continue" detected; clicking in progress
-    GAME_LOBBY  = auto()  # Final continue (region 64) clicked; waiting in lobby
+    GAME_BATTLE   = auto()  # Active gameplay (default); respawn/incoming scanning active
+    GAME_END_B    = auto()  # "Click to Continue" detected; clicking in progress
+    GAME_LOBBY    = auto()  # Final continue (region 64) clicked; waiting in lobby
+    GAME_STARTING = auto()  # Play pressed; waiting for "Good Luck" before launching mission
 
 try:
     import easyocr
@@ -203,6 +204,41 @@ def _process_click_to_region(click_to_frame_bytes, shape, dtype_str):
     return (False, ocr_time, None)
 
 
+def _process_good_luck_region(frame_bytes, shape, dtype_str):
+    """
+    Worker function to detect 'Good Luck' text in a region.
+
+    Returns:
+        tuple: (detected: bool, ocr_time: float, text_found: str or None)
+    """
+    import time
+    import cv2
+    import numpy as np
+
+    reader = _init_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+
+    dtype = np.dtype(dtype_str)
+    frame = np.frombuffer(frame_bytes, dtype=dtype).reshape(shape)
+
+    t_start = time.time()
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "GOODLUCK" in text or "GOOD" in text or "LUCK" in text:
+            ocr_time = time.time() - t_start
+            return (True, ocr_time, text)
+
+    ocr_time = time.time() - t_start
+    return (False, ocr_time, None)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -298,8 +334,9 @@ class GameStateAnalyzer:
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
 
-        self._game_end_b = False   # Set when "Click to Continue" is detected
-        self._game_lobby = True    # Start in GAME_LOBBY; cleared when a mission begins
+        self._game_end_b = False    # Set when "Click to Continue" is detected
+        self._game_lobby = True     # Start in GAME_LOBBY; cleared when a mission begins
+        self._game_starting = False # Set when play is pressed; waiting for "Good Luck"
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
         # Multiprocessing pool for parallel OCR processing
@@ -475,6 +512,8 @@ class GameStateAnalyzer:
     @property
     def game_state(self) -> GameState:
         """Current high-level game state."""
+        if self._game_starting:
+            return GameState.GAME_STARTING
         if self._game_lobby:
             return GameState.GAME_LOBBY
         if self._game_end_b:
@@ -610,9 +649,9 @@ class GameStateAnalyzer:
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
-        # Skip OCR entirely in GAME_LOBBY — no battle events possible and the
-        # transition back to GAME_BATTLE is driven by _set_last_mission, not OCR.
-        if self.game_state == GameState.GAME_LOBBY:
+        # Skip OCR entirely in GAME_LOBBY / GAME_STARTING — no battle events possible
+        # and the transition to GAME_BATTLE is driven by _set_last_mission, not OCR.
+        if self.game_state in (GameState.GAME_LOBBY, GameState.GAME_STARTING):
             return (False, 0.0, None)
 
         # Check if we can use cached result (throttle OCR)
@@ -764,7 +803,7 @@ class GameStateAnalyzer:
         while True:
             time.sleep(interval)
             state = self.game_state
-            if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
+            if state in (GameState.GAME_END_B, GameState.GAME_LOBBY, GameState.GAME_STARTING):
                 logger.debug("Click-to OCR skipped: %s state active", state.name)
                 continue
             with self._click_to_frame_lock:
@@ -816,7 +855,39 @@ class GameStateAnalyzer:
         self._click_to_cache['timestamp'] = 0.0
         self._click_to_cache['result'] = (False, 0.0, None)
         logger.debug("OCR caches reset")
-    
+
+    def scan_region_for_good_luck(self, frame, region_num: int = 16) -> bool:
+        """Synchronously scan a region for 'Good Luck' text via OCR pool.
+
+        Args:
+            frame: Full BGR frame from screen capture.
+            region_num: Grid region to scan (default 16).
+
+        Returns:
+            True if 'Good Luck' text is detected.
+        """
+        pool = self.ocr_pool
+        if pool is None:
+            logger.warning("Analyzer: OCR pool not available for Good Luck scan")
+            return False
+        try:
+            region_frame = self.get_region(frame, region_num)
+            frame_bytes = region_frame.tobytes()
+            shape = region_frame.shape
+            dtype_str = str(region_frame.dtype)
+            detected, _, text = pool.apply_async(
+                _process_good_luck_region,
+                (frame_bytes, shape, dtype_str)
+            ).get(timeout=30)
+            if detected:
+                logger.info("Analyzer: 'Good Luck' detected in region %d (text='%s')", region_num, text)
+            else:
+                logger.debug("Analyzer: 'Good Luck' not found in region %d", region_num)
+            return detected
+        except Exception as e:
+            logger.warning("Analyzer: Good Luck scan failed: %s", e)
+            return False
+
     def get_region(self, frame, region_num):
         """
         Extract a grid region from the frame (left-to-right, top-to-bottom).
