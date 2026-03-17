@@ -36,6 +36,7 @@ MISSION_J20_KEY = 'u'  # Press U to start J20 mission
 MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
 CANCEL_MISSION_KEY = 'end'   # Press End to cancel active mission
 CAPTURE_SCREEN_SHOT = 'v'  # Press V to capture a screenshot (for testing/debugging)
+AUTO_MISSION_KEY = 'm'  # Press M to start an automatic mission based on detected game state (not implemented yet)
 """
 EMOTE1 # Moving to
 EMOTE2 # Help!
@@ -194,6 +195,19 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to set padlock loop cooldown", PADLOCK_CAMERA)
             except Exception:
                 logger.exception("Controller: failed to register padlock camera cooldown hotkey")
+
+            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the play button (region 64)
+            try:
+                def auto_mission_key_pressed(_e):
+                    if self._analyzer is not None and self._analyzer._game_lobby:
+                        logger.info("Controller: M key pressed in GAME_LOBBY - clicking play button (region 64)")
+                        self.click_grid_region(64, block=False, count=1)
+                    else:
+                        logger.debug("Controller: M key pressed but not in GAME_LOBBY - ignoring")
+                keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to click play button in GAME_LOBBY", AUTO_MISSION_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register auto mission hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
@@ -628,7 +642,7 @@ class Controller:
         
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
-    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False):
+    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6):
         """Move the mouse to the center of a grid region and left-click it.
 
         Args:
@@ -636,6 +650,8 @@ class Controller:
             grid_rows: Number of grid rows (default 8).
             grid_cols: Number of grid columns (default 8).
             block: If True run in the calling thread; otherwise spawn a daemon thread.
+            count: Number of times to click the region. When count > 1 a final click on
+                   region 64 (lobby/continue button) is also performed.
         """
         def _do_click():
             try:
@@ -662,8 +678,8 @@ class Controller:
                 col = (region_num - 1) % grid_cols
                 abs_x = int(abs_left + (col + 0.5) * cell_w)
                 abs_y = int(abs_top + (row + 0.5) * cell_h)
-                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d] x6\033[0m",
-                            region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"])
+                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
+                            region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
                 def _raw_click(x, y):
                     ctypes.windll.user32.SetCursorPos(x, y)
                     time.sleep(0.05)
@@ -671,18 +687,19 @@ class Controller:
                     time.sleep(0.05)
                     ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
 
-                for i in range(6):
+                for i in range(count):
                     _raw_click(abs_x, abs_y)
-                    if i < 5:
+                    if i < count - 1:
                         time.sleep(0.5)
 
-                # Final click on region 64 (lobby/continue button)
-                row64 = (64 - 1) // grid_cols
-                col64 = (64 - 1) % grid_cols
-                x64 = int(abs_left + (col64 + 0.5) * cell_w)
-                y64 = int(abs_top + (row64 + 0.5) * cell_h)
-                logger.info("\033[93m📋 Clicking grid region 64 at (%d, %d)\033[0m", x64, y64)
-                _raw_click(x64, y64)
+                if count > 1:
+                    # Final click on region 64 (lobby/continue button)
+                    row64 = (64 - 1) // grid_cols
+                    col64 = (64 - 1) % grid_cols
+                    x64 = int(abs_left + (col64 + 0.5) * cell_w)
+                    y64 = int(abs_top + (row64 + 0.5) * cell_h)
+                    logger.info("\033[93m📋 Clicking grid region 64 at (%d, %d)\033[0m", x64, y64)
+                    _raw_click(x64, y64)
                 if self._analyzer is not None:
                     self._analyzer._game_lobby = True
                     logger.info("\033[93m📋 Region 64 clicked → GAME_LOBBY\033[0m")

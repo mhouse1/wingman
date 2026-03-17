@@ -299,7 +299,7 @@ class GameStateAnalyzer:
         self._click_to_thread_started = False
 
         self._game_end_b = False   # Set when "Click to Continue" is detected
-        self._game_lobby = False   # Set when region 64 (final continue) is clicked
+        self._game_lobby = True    # Start in GAME_LOBBY; cleared when a mission begins
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
         # Multiprocessing pool for parallel OCR processing
