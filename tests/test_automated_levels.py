@@ -162,6 +162,57 @@ def test_level2_live_capture():
     assert "output_grid_highlighted.png" in out or "highlighted grid" in out or "NOT detected" in out, "output_grid_highlighted.png not generated"
 
 
+def test_get_frame_and_analyze_frame():
+    """
+    Measures the time for one main-loop capture+analyze iteration:
+
+        frame = cap.get_frame()
+        game_state = analyzer.analyze_frame(frame)
+
+    analyze_frame() is non-blocking — it returns the cached OCR result
+    immediately and schedules background work. Only that synchronous
+    return path is timed here (no OCR wait).
+    """
+    from wingman.capture import Capture
+
+    cfg = load_config()
+    region = (
+        cfg["region"]["left"],
+        cfg["region"]["top"],
+        cfg["region"]["width"],
+        cfg["region"]["height"],
+    )
+    cap = Capture(region, monitor_index=cfg["region"].get("monitor", 1))
+    analyzer = GameStateAnalyzer(cfg)
+    analyzer._game_lobby = False  # force GAME_BATTLE so analyze_frame runs
+
+    # Seed the cache so analyze_frame returns immediately without scheduling OCR
+    with analyzer._ocr_cache_lock:
+        analyzer._ocr_cache['result'] = (True, 1.0, 'test')
+        analyzer._ocr_cache['timestamp'] = time.time()
+
+    t0 = time.perf_counter()
+    frame = cap.get_frame()
+    t1 = time.perf_counter()
+    game_state = analyzer.analyze_frame(frame)
+    t2 = time.perf_counter()
+
+    get_frame_ms  = (t1 - t0) * 1000
+    analyze_ms    = (t2 - t1) * 1000
+    total_ms      = (t2 - t0) * 1000
+
+    print(
+        f"\n[get_frame + analyze_frame]"
+        f"\n  get_frame()     : {get_frame_ms:.2f} ms"
+        f"\n  analyze_frame() : {analyze_ms:.2f} ms"
+        f"\n  total           : {total_ms:.2f} ms"
+    )
+
+    assert frame is not None, "get_frame() returned no frame"
+    assert game_state.get('is_respawning') is True, "Expected respawning from seeded cache"
+    assert total_ms < 1000, f"Took {total_ms:.0f} ms — expected under 1000 ms"
+
+
 def test_level3_unit_ocr():
     """
     Level 3: OCR background worker performance and accuracy test.
