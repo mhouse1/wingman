@@ -766,6 +766,8 @@ class Controller:
 
         def _loop():
             logger.info("Controller: game_starting loop started - pressing J20 key every 5s until 'Good Luck' detected")
+            loop_start = time.time()
+            max_wait = 120  # safety timeout: clear _game_starting if Good Luck never detected
             try:
                 while self._analyzer is not None and self._analyzer._game_starting:
                     # Press MISSION_J20_KEY every interval
@@ -785,6 +787,12 @@ class Controller:
                         time.sleep(0.1)
 
                     if not (self._analyzer is not None and self._analyzer._game_starting):
+                        return
+
+                    if time.time() - loop_start > max_wait:
+                        logger.warning("Controller: game_starting timed out after %ds without 'Good Luck' - clearing state", max_wait)
+                        if self._analyzer is not None:
+                            self._analyzer._game_starting = False
                         return
 
                     if good_luck_event.is_set():

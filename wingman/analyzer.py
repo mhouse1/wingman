@@ -86,7 +86,7 @@ def _process_respawn_region(respawn_frame_bytes, shape, dtype_str):
     results = []
     for img, label in [(small_gray, 'gray'), (small_binary, 'binary')]:
         ocr_results = reader.readtext(img, detail=1, paragraph=False)
-        for (bbox, text, conf) in ocr_results:
+        for (_, text, conf) in ocr_results:
             text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
             results.append((label, text_clean, conf))
 
@@ -417,7 +417,9 @@ class GameStateAnalyzer:
 
         # Fallback: Check for common OCR partial matches (handles severe OCR errors)
         # OCR often misreads characters, so check for partial matches
-        if "RESP" in text_clean or "REPA" in text_clean:
+        # Note: "REPA" is intentionally excluded — it's too short and causes false positives;
+        # the Levenshtein check below handles "REPA"-type misreads (distance 1 from "RESPA").
+        if "RESP" in text_clean:
             return True
         
         # Levenshtein distance for near-matches (typos with 1-2 character errors)
