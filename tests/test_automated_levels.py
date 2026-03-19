@@ -212,7 +212,7 @@ def test_get_frame_and_analyze_frame():
     assert game_state.get('is_respawning') is True, "Expected respawning from seeded cache"
     assert total_ms < 1000, f"Took {total_ms:.0f} ms — expected under 1000 ms"
 
-    analyzer.cleanup()  # shut down OCR pool so worker processes don't outlive this test
+    analyzer.cleanup()  # shut down OCR executor so threads don't outlive this test
 
 
 def test_level3_unit_ocr():
