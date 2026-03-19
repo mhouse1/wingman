@@ -67,6 +67,10 @@ clean:
 	rm -rf test_screenshots
 
 # Force add ignored performance history file and commit with current version, then regenerate chart
+# Assumes you've already updated the version in wingman/main.py and ran make test-perf or make test-perf-preview
+# otherwise the performance.json file won't be updated with the latest performance data and the chart won't reflect the latest changes
+# and there will be no performance history to commit if you haven't generated the performance.json file with the latest data
+# once you ran wrelease you can then run make p to push the commit with the new version and performance data to GitHub
 wrelease:
 	git add wingman/main.py
 	git add -f tests/test-output/performance.json
