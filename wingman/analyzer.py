@@ -33,22 +33,30 @@ logger = logging.getLogger(__name__)
 # (no IPC serialization, and CUDA context is shared across threads on Windows).
 _thread_local = threading.local()
 
+# Serializes EasyOCR reader initialization across threads.
+# EasyOCR downloads model files to a shared temp path on first run; if two threads
+# initialize concurrently they race on the same temp.zip, causing FileNotFoundError.
+# The lock ensures only one thread downloads at a time — subsequent threads find the
+# model already on disk and initialize instantly.
+_ocr_init_lock = threading.Lock()
+
 
 def _get_thread_ocr_reader():
     """Return the EasyOCR reader for the current thread, initializing it on first call."""
     if not hasattr(_thread_local, 'reader'):
-        _thread_local.reader = None
-        if easyocr:
-            try:
-                _thread_local.reader = easyocr.Reader(['en'], gpu=True, verbose=False)
-                logger.info("OCR thread %d: initialized EasyOCR reader (GPU)", threading.get_ident())
-            except Exception as e:
-                logger.warning("OCR thread %d: GPU init failed (%s), falling back to CPU", threading.get_ident(), e)
+        with _ocr_init_lock:
+            _thread_local.reader = None
+            if easyocr:
                 try:
-                    _thread_local.reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-                    logger.info("OCR thread %d: initialized EasyOCR reader (CPU)", threading.get_ident())
+                    _thread_local.reader = easyocr.Reader(['en'], gpu=True, verbose=False)
+                    logger.info("OCR thread %d: initialized EasyOCR reader (GPU)", threading.get_ident())
                 except Exception as e:
-                    logger.warning("OCR thread %d: EasyOCR init failed: %s", threading.get_ident(), e)
+                    logger.warning("OCR thread %d: GPU init failed (%s), falling back to CPU", threading.get_ident(), e)
+                    try:
+                        _thread_local.reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+                        logger.info("OCR thread %d: initialized EasyOCR reader (CPU)", threading.get_ident())
+                    except Exception as e:
+                        logger.warning("OCR thread %d: EasyOCR init failed: %s", threading.get_ident(), e)
     return _thread_local.reader
 
 
@@ -781,6 +789,8 @@ class GameStateAnalyzer:
                 if click_to_detected:
                     self._game_end_b = True
                     logger.debug("Analyzer: detected 'Click to' text (matched: '%s') → GAME_END_B", click_to_text)
+            except RuntimeError:
+                return  # executor shut down — exit the loop cleanly
             except Exception as e:
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
 
