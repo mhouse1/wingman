@@ -182,9 +182,9 @@ class PerformanceTracker:
             return output_html
         
         # Group by test name and create subplots
-        test_names = df['test'].unique()
+        test_names = sorted(df['test'].unique())
         n_tests = len(test_names)
-        
+
         fig = make_subplots(
             rows=(n_tests + 1) // 2,
             cols=2,
@@ -192,7 +192,7 @@ class PerformanceTracker:
             specs=[[{'secondary_y': False}] * 2 for _ in range((n_tests + 1) // 2)]
         )
         
-        for idx, test_name in enumerate(sorted(test_names)):
+        for idx, test_name in enumerate(test_names):
             test_data = df[df['test'] == test_name].sort_values('timestamp')
 
             # Use version only for x-axis

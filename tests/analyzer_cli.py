@@ -37,6 +37,7 @@ def test_run_ocr_in_background(image_path: str = "RESPAWN.png"):
         image_path = str(PROJECT_ROOT / "test_screenshots" / "RESPAWN.png")
 
     analyzer = GameStateAnalyzer(load_config())
+    analyzer._game_lobby = False  # CLI tests static screenshots; force GAME_BATTLE
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"ERROR: Could not load image: {image_path}")
@@ -98,6 +99,7 @@ def capture_and_test_with_visualization():
 def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = False):
     print(f"Loading config and image: {image_path}")
     analyzer = GameStateAnalyzer(load_config())
+    analyzer._game_lobby = False  # CLI tests static screenshots; force GAME_BATTLE
 
     if image_path == "RESPAWN.png":
         image_path = str(PROJECT_ROOT / "test_screenshots" / "RESPAWN.png")
@@ -185,6 +187,7 @@ def test_multiple_images():
         os._exit(1)
 
     analyzer = GameStateAnalyzer(load_config())
+    analyzer._game_lobby = False  # CLI tests static screenshots; force GAME_BATTLE
 
     print(f"Testing {len(test_images)} images from {test_dir}:")
     print("=" * 60)
@@ -214,6 +217,7 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
     print(f"Loading {image_path}...")
 
     analyzer = GameStateAnalyzer(load_config())
+    analyzer._game_lobby = False  # CLI tests static screenshots; force GAME_BATTLE
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"ERROR: Could not load {image_path}")

@@ -10,7 +10,7 @@ import cv2
 import pytest
 import yaml
 
-from wingman.analyzer import GameStateAnalyzer
+from wingman.analyzer import GameStateAnalyzer, GameState, _respawn_text_matches
 from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
@@ -27,7 +27,9 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 @pytest.fixture
 def analyzer() -> GameStateAnalyzer:
-    return GameStateAnalyzer(load_config())
+    a = GameStateAnalyzer(load_config())
+    a._game_lobby = False  # Tests use static screenshots; force GAME_BATTLE
+    return a
 
 
 @pytest.fixture
@@ -122,3 +124,75 @@ def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_easyocr
 )
 def test_is_respawn_text_matching(text_clean: str, expected: bool):
     assert GameStateAnalyzer._is_respawn_text(text_clean) is expected
+
+
+# ---------------------------------------------------------------------------
+# _respawn_text_matches — tests for the function actually used in detection
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "text_clean, expected",
+    [
+        # --- must detect (real OCR outputs from the respawn screen) ---
+        ("REPA",   True),   # EasyOCR at 0.7x scale reads this from RESPAWN.png;
+                            # raising min-length to 5 would silently break detection
+        ("RESPA",  True),   # Exact in-game label
+        ("RESP",   True),   # 4-char read, last char dropped
+        ("RESPAW", True),   # 6-char read within tolerance
+        ("RESPAWN", True),  # Full word
+        # --- must NOT detect (unrelated text) ---
+        ("GREAT",  False),
+        ("NATETHEGREAT", False),
+        ("RPA",    False),  # Too short (< 4 chars)
+        ("",       False),
+    ],
+)
+def test_respawn_text_matches(text_clean: str, expected: bool):
+    """Guards the actual detection logic used by _process_respawn_region.
+
+    _is_respawn_text is dead code; this test covers _respawn_text_matches which
+    is the function that runs inside the OCR worker process.
+    """
+    assert _respawn_text_matches(text_clean) is expected
+
+
+# ---------------------------------------------------------------------------
+# _game_starting state blocks respawn OCR
+# ---------------------------------------------------------------------------
+
+def test_game_starting_blocks_respawn_detection(analyzer: GameStateAnalyzer):
+    """Respawn must not be reported while in GAME_STARTING state.
+
+    Regression guard: commit 8ba01c9 added GAME_STARTING but there was no
+    timeout on the loop.  If Good Luck detection fails, _game_starting stays
+    True forever and all respawn OCR is silently skipped.
+    """
+    analyzer._game_starting = True
+    assert analyzer.game_state == GameState.GAME_STARTING
+
+    # Seed the OCR cache as if a respawn was previously detected
+    with analyzer._ocr_cache_lock:
+        analyzer._ocr_cache["result"] = (True, 1.0, "ocr")
+        analyzer._ocr_cache["timestamp"] = time.time()
+
+    frame = _load_image(TEST_SCREENSHOT)
+    state = analyzer.analyze_frame(frame)
+
+    assert state["is_respawning"] is False, (
+        "Respawn should be suppressed in GAME_STARTING — "
+        "if this fails, _game_starting is no longer blocking OCR"
+    )
+
+
+def test_game_battle_does_not_block_respawn_detection(analyzer: GameStateAnalyzer):
+    """Respawn cache result must be surfaced normally in GAME_BATTLE state."""
+    assert analyzer.game_state == GameState.GAME_BATTLE
+
+    with analyzer._ocr_cache_lock:
+        analyzer._ocr_cache["result"] = (True, 1.0, "ocr")
+        analyzer._ocr_cache["timestamp"] = time.time()
+
+    frame = _load_image(TEST_SCREENSHOT)
+    state = analyzer.analyze_frame(frame)
+
+    assert state["is_respawning"] is True

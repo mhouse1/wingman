@@ -12,9 +12,10 @@ import os
 
 
 class GameState(Enum):
-    GAME_BATTLE = auto()  # Active gameplay (default); respawn/incoming scanning active
-    GAME_END_B  = auto()  # "Click to Continue" detected; clicking in progress
-    GAME_LOBBY  = auto()  # Final continue (region 64) clicked; waiting in lobby
+    GAME_BATTLE   = auto()  # Active gameplay (default); respawn/incoming scanning active
+    GAME_END_B    = auto()  # "Click to Continue" detected; clicking in progress
+    GAME_LOBBY    = auto()  # Final continue (region 64) clicked; waiting in lobby
+    GAME_STARTING = auto()  # Play pressed; waiting for "Good Luck" before launching mission
 
 try:
     import easyocr
@@ -85,7 +86,7 @@ def _process_respawn_region(respawn_frame_bytes, shape, dtype_str):
     results = []
     for img, label in [(small_gray, 'gray'), (small_binary, 'binary')]:
         ocr_results = reader.readtext(img, detail=1, paragraph=False)
-        for (bbox, text, conf) in ocr_results:
+        for (_, text, conf) in ocr_results:
             text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
             results.append((label, text_clean, conf))
 
@@ -94,26 +95,10 @@ def _process_respawn_region(respawn_frame_bytes, shape, dtype_str):
     # Log all OCR results for debugging
     logger.debug(f"Respawn OCR results: {results}")
 
-    # Check for RESPAWN text (relaxed matching)
-    target = "RESPAWN"
     for label, text_clean, conf in results:
-        if len(text_clean) >= 4:
-            # Levenshtein distance check
-            if len(text_clean) <= 6:
-                # Short text: check for RESPA variants
-                max_dist = 2  # Relaxed tolerance
-                for i in range(len(target) - 4):
-                    substring = target[i:i+5]
-                    dist = _levenshtein_distance_simple(text_clean, substring)
-                    if dist <= max_dist:
-                        logger.debug(f"Respawn detected (variant: {label}, text: {text_clean}, dist: {dist})")
-                        return (True, ocr_time, text_clean)
-            else:
-                # Longer text: full match
-                dist = _levenshtein_distance_simple(text_clean, target)
-                if dist <= 2:
-                    logger.debug(f"Respawn detected (variant: {label}, text: {text_clean}, dist: {dist})")
-                    return (True, ocr_time, text_clean)
+        if _respawn_text_matches(text_clean):
+            logger.debug(f"Respawn detected (variant: {label}, text: {text_clean})")
+            return (True, ocr_time, text_clean)
 
     return (False, ocr_time, None)
 
@@ -203,6 +188,41 @@ def _process_click_to_region(click_to_frame_bytes, shape, dtype_str):
     return (False, ocr_time, None)
 
 
+def _process_good_luck_region(frame_bytes, shape, dtype_str):
+    """
+    Worker function to detect 'Good Luck' text in a region.
+
+    Returns:
+        tuple: (detected: bool, ocr_time: float, text_found: str or None)
+    """
+    import time
+    import cv2
+    import numpy as np
+
+    reader = _init_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+
+    dtype = np.dtype(dtype_str)
+    frame = np.frombuffer(frame_bytes, dtype=dtype).reshape(shape)
+
+    t_start = time.time()
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "GOODLUCK" in text or "GOOD" in text or "LUCK" in text:
+            ocr_time = time.time() - t_start
+            return (True, ocr_time, text)
+
+    ocr_time = time.time() - t_start
+    return (False, ocr_time, None)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -222,6 +242,33 @@ def _levenshtein_distance_simple(a: str, b: str) -> int:
             curr_row.append(min(insertions, deletions, substitutions))
         prev_row = curr_row
     return prev_row[-1]
+
+
+def _respawn_text_matches(text_clean: str) -> bool:
+    """Return True if text_clean is a plausible OCR read of the respawn label.
+
+    This is the authoritative matching logic used by _process_respawn_region.
+    Keeping it as a standalone function makes it directly unit-testable without
+    needing to spin up EasyOCR or a multiprocessing pool.
+
+    The in-game label is 'RESPA'; EasyOCR at 0.7x scale typically returns the
+    4-char string 'REPA' (missing the 'S').  That read has Levenshtein distance 1
+    from 'RESPA' so it must be accepted; raising the min-length to 5 would
+    silently break detection.  max_dist=2 is intentional: it tolerates two-char
+    OCR errors while remaining tight enough to reject unrelated words.
+    """
+    target = "RESPAWN"
+    if not text_clean or len(text_clean) < 4:
+        return False
+    if len(text_clean) <= 6:
+        max_dist = 2
+        for i in range(len(target) - 4):  # substrings: RESPA, ESPAW, SPAWN
+            if _levenshtein_distance_simple(text_clean, target[i:i + 5]) <= max_dist:
+                return True
+    else:
+        if _levenshtein_distance_simple(text_clean, target) <= 2:
+            return True
+    return False
 
 
 # ============================================================================
@@ -298,8 +345,9 @@ class GameStateAnalyzer:
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
 
-        self._game_end_b = False   # Set when "Click to Continue" is detected
-        self._game_lobby = False   # Set when region 64 (final continue) is clicked
+        self._game_end_b = False    # Set when "Click to Continue" is detected
+        self._game_lobby = True     # Start in GAME_LOBBY; cleared when a mission begins
+        self._game_starting = False # Set when play is pressed; waiting for "Good Luck"
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
         # Multiprocessing pool for parallel OCR processing
@@ -380,7 +428,9 @@ class GameStateAnalyzer:
 
         # Fallback: Check for common OCR partial matches (handles severe OCR errors)
         # OCR often misreads characters, so check for partial matches
-        if "RESP" in text_clean or "REPA" in text_clean:
+        # Note: "REPA" is intentionally excluded — it's too short and causes false positives;
+        # the Levenshtein check below handles "REPA"-type misreads (distance 1 from "RESPA").
+        if "RESP" in text_clean:
             return True
         
         # Levenshtein distance for near-matches (typos with 1-2 character errors)
@@ -475,6 +525,8 @@ class GameStateAnalyzer:
     @property
     def game_state(self) -> GameState:
         """Current high-level game state."""
+        if self._game_starting:
+            return GameState.GAME_STARTING
         if self._game_lobby:
             return GameState.GAME_LOBBY
         if self._game_end_b:
@@ -610,9 +662,9 @@ class GameStateAnalyzer:
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
-        # Skip OCR entirely in GAME_LOBBY — no battle events possible and the
-        # transition back to GAME_BATTLE is driven by _set_last_mission, not OCR.
-        if self.game_state == GameState.GAME_LOBBY:
+        # Skip OCR entirely in GAME_LOBBY / GAME_STARTING — no battle events possible
+        # and the transition to GAME_BATTLE is driven by _set_last_mission, not OCR.
+        if self.game_state in (GameState.GAME_LOBBY, GameState.GAME_STARTING):
             return (False, 0.0, None)
 
         # Check if we can use cached result (throttle OCR)
@@ -696,34 +748,30 @@ class GameStateAnalyzer:
                 )
                 t3 = time.time()
 
-                # Wait for results (blocks until both complete).
-                # Timeout must cover cold-start pool worker init (~10s per worker × 3 workers)
-                # in addition to actual OCR time (~4s). 120s is safe; normal runs complete in <10s.
+                # Wait for respawn result first — update its cache immediately so the
+                # main loop can react without waiting for the (often slower) incoming OCR.
                 respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=120)
-                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=120)
-                t4 = time.time()
 
-                # Log results
                 if respawn_detected:
                     logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
-
-                if incoming_detected:
-                    logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
-                else:
-                    logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
-
-                # Keep battle timestamp fresh whenever a battle event is active.
-                # Use time.time() here (not current_time/t0) because OCR runs can
-                # take 4-12s; using t0 would make the timestamp already expired by
-                if respawn_detected or incoming_detected:
                     self._game_end_b = False
                     self._game_lobby = False
 
-                # Update caches
                 respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
                 with self._ocr_cache_lock:
                     self._ocr_cache['result'] = respawn_result
                     self._ocr_cache['timestamp'] = current_time
+
+                # Now wait for incoming — its result is independent of respawn.
+                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=120)
+                t4 = time.time()
+
+                if incoming_detected:
+                    logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
+                    self._game_end_b = False
+                    self._game_lobby = False
+                else:
+                    logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
 
                 incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
                 with self._incoming_cache_lock:
@@ -764,7 +812,7 @@ class GameStateAnalyzer:
         while True:
             time.sleep(interval)
             state = self.game_state
-            if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
+            if state in (GameState.GAME_END_B, GameState.GAME_LOBBY, GameState.GAME_STARTING):
                 logger.debug("Click-to OCR skipped: %s state active", state.name)
                 continue
             with self._click_to_frame_lock:
@@ -816,7 +864,39 @@ class GameStateAnalyzer:
         self._click_to_cache['timestamp'] = 0.0
         self._click_to_cache['result'] = (False, 0.0, None)
         logger.debug("OCR caches reset")
-    
+
+    def scan_region_for_good_luck(self, frame, region_num: int = 16) -> bool:
+        """Synchronously scan a region for 'Good Luck' text via OCR pool.
+
+        Args:
+            frame: Full BGR frame from screen capture.
+            region_num: Grid region to scan (default 16).
+
+        Returns:
+            True if 'Good Luck' text is detected.
+        """
+        pool = self.ocr_pool
+        if pool is None:
+            logger.warning("Analyzer: OCR pool not available for Good Luck scan")
+            return False
+        try:
+            region_frame = self.get_region(frame, region_num)
+            frame_bytes = region_frame.tobytes()
+            shape = region_frame.shape
+            dtype_str = str(region_frame.dtype)
+            detected, _, text = pool.apply_async(
+                _process_good_luck_region,
+                (frame_bytes, shape, dtype_str)
+            ).get(timeout=30)
+            if detected:
+                logger.info("Analyzer: 'Good Luck' detected in region %d (text='%s')", region_num, text)
+            else:
+                logger.debug("Analyzer: 'Good Luck' not found in region %d", region_num)
+            return detected
+        except Exception as e:
+            logger.warning("Analyzer: Good Luck scan failed: %s", e)
+            return False
+
     def get_region(self, frame, region_num):
         """
         Extract a grid region from the frame (left-to-right, top-to-bottom).

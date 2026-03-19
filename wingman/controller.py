@@ -36,6 +36,7 @@ MISSION_J20_KEY = 'u'  # Press U to start J20 mission
 MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
 CANCEL_MISSION_KEY = 'end'   # Press End to cancel active mission
 CAPTURE_SCREEN_SHOT = 'v'  # Press V to capture a screenshot (for testing/debugging)
+AUTO_MISSION_KEY = 'm'  # Press M to start an automatic mission based on detected game state (not implemented yet)
 """
 EMOTE1 # Moving to
 EMOTE2 # Help!
@@ -65,6 +66,9 @@ class Controller:
         self._analyzer = analyzer
         self._capture = capture
         
+        # Padlock camera cooldown: set when the key is pressed manually
+        self._padlock_cooldown_until = 0.0
+
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
@@ -101,6 +105,9 @@ class Controller:
 
             try:
                 def start_j20_mission(e):
+                    if self._analyzer is not None and self._analyzer._game_starting:
+                        logger.debug("Controller: U key pressed but in GAME_STARTING - ignoring hotkey (loop controls mission launch)")
+                        return
                     logger.info("Controller: U key pressed - starting J20 mission")
                     self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
@@ -180,6 +187,33 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to capture screenshot", CAPTURE_SCREEN_SHOT)
             except Exception:
                 logger.exception("Controller: failed to register capture screenshot hotkey")
+
+            # Padlock camera cooldown hotkey: when P is pressed manually, suppress
+            # the padlock loop for 10 seconds so it doesn't immediately re-lock.
+            try:
+                def padlock_key_pressed(e):
+                    self._padlock_cooldown_until = time.time() + 10.0
+                    logger.info("Controller: P key pressed manually - padlock loop cooldown set for 10 seconds")
+                keyboard_module.on_press_key(PADLOCK_CAMERA, padlock_key_pressed, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to set padlock loop cooldown", PADLOCK_CAMERA)
+            except Exception:
+                logger.exception("Controller: failed to register padlock camera cooldown hotkey")
+
+            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the play button (region 64)
+            try:
+                def auto_mission_key_pressed(_e):
+                    if self._analyzer is not None and self._analyzer._game_lobby:
+                        logger.info("Controller: M key pressed in GAME_LOBBY - clicking play button and entering GAME_STARTING")
+                        self._analyzer._game_lobby = False
+                        self._analyzer._game_starting = True
+                        self.click_grid_region(64, block=False, count=1)
+                        self._start_game_starting_loop()
+                    else:
+                        logger.debug("Controller: M key pressed but not in GAME_LOBBY - ignoring")
+                keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to click play button in GAME_LOBBY", AUTO_MISSION_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register auto mission hotkey")
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
@@ -485,7 +519,10 @@ class Controller:
             logger.info("Controller: mission_j20 padlock loop started")
             try:
                 while padlock_loop_active.is_set() and not self._mission_cancel.is_set():
-                    self.padlock_camera(hold_seconds=0.1, block=True)
+                    if time.time() < self._padlock_cooldown_until:
+                        logger.debug("Controller: padlock loop skipping press - manual cooldown active")
+                    else:
+                        self.padlock_camera(hold_seconds=0.1, block=True)
                     # Interruptible sleep - check for cancellation every 0.1 seconds
                     for _ in range(60):  # 60 * 0.1 = 6 seconds
                         if not padlock_loop_active.is_set() or self._mission_cancel.is_set():
@@ -611,7 +648,7 @@ class Controller:
         
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
-    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False):
+    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6):
         """Move the mouse to the center of a grid region and left-click it.
 
         Args:
@@ -619,6 +656,8 @@ class Controller:
             grid_rows: Number of grid rows (default 8).
             grid_cols: Number of grid columns (default 8).
             block: If True run in the calling thread; otherwise spawn a daemon thread.
+            count: Number of times to click the region. When count > 1 a final click on
+                   region 64 (lobby/continue button) is also performed.
         """
         def _do_click():
             try:
@@ -645,8 +684,8 @@ class Controller:
                 col = (region_num - 1) % grid_cols
                 abs_x = int(abs_left + (col + 0.5) * cell_w)
                 abs_y = int(abs_top + (row + 0.5) * cell_h)
-                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d] x6\033[0m",
-                            region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"])
+                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
+                            region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
                 def _raw_click(x, y):
                     ctypes.windll.user32.SetCursorPos(x, y)
                     time.sleep(0.05)
@@ -654,18 +693,19 @@ class Controller:
                     time.sleep(0.05)
                     ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
 
-                for i in range(6):
+                for i in range(count):
                     _raw_click(abs_x, abs_y)
-                    if i < 5:
+                    if i < count - 1:
                         time.sleep(0.5)
 
-                # Final click on region 64 (lobby/continue button)
-                row64 = (64 - 1) // grid_cols
-                col64 = (64 - 1) % grid_cols
-                x64 = int(abs_left + (col64 + 0.5) * cell_w)
-                y64 = int(abs_top + (row64 + 0.5) * cell_h)
-                logger.info("\033[93m📋 Clicking grid region 64 at (%d, %d)\033[0m", x64, y64)
-                _raw_click(x64, y64)
+                if count > 1:
+                    # Final click on region 64 (lobby/continue button)
+                    row64 = (64 - 1) // grid_cols
+                    col64 = (64 - 1) % grid_cols
+                    x64 = int(abs_left + (col64 + 0.5) * cell_w)
+                    y64 = int(abs_top + (row64 + 0.5) * cell_h)
+                    logger.info("\033[93m📋 Clicking grid region 64 at (%d, %d)\033[0m", x64, y64)
+                    _raw_click(x64, y64)
                 if self._analyzer is not None:
                     self._analyzer._game_lobby = True
                     logger.info("\033[93m📋 Region 64 clicked → GAME_LOBBY\033[0m")
@@ -699,7 +739,80 @@ class Controller:
             self._analyzer._last_battle_event_ts = time.time()
             self._analyzer._game_end_b = False
             self._analyzer._game_lobby = False
+            self._analyzer._game_starting = False
             logger.info("Controller: mission '%s' started → GAME_BATTLE", mission_name)
+
+    def _start_game_starting_loop(self):
+        """Background loop active in GAME_STARTING state.
+
+        Every 5 seconds: press MISSION_J20_KEY and scan region 16 for 'Good Luck'.
+        Once detected, wait 10 seconds then launch mission_j20.
+        """
+        good_luck_event = threading.Event()
+        ocr_running = threading.Event()
+
+        def _do_ocr_scan():
+            """Run Good Luck OCR in background; sets good_luck_event on detection."""
+            try:
+                time.sleep(0.5)  # Allow 'Good Luck' screen to appear before capturing
+                with mss() as sct:
+                    s = sct.grab(self._capture.get_monitor_rect())
+                    frame = np.array(s)[:, :, :3]
+                if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame, region_num=16):
+                    good_luck_event.set()
+            except Exception:
+                logger.exception("Controller: game_starting OCR scan error")
+            finally:
+                ocr_running.clear()
+
+        def _loop():
+            logger.info("Controller: game_starting loop started - pressing J20 key every 5s until 'Good Luck' detected")
+            loop_start = time.time()
+            max_wait = 120  # safety timeout: clear _game_starting if Good Luck never detected
+            try:
+                while self._analyzer is not None and self._analyzer._game_starting:
+                    # Press MISSION_J20_KEY every interval
+                    if keyboard_module:
+                        keyboard_module.press_and_release(MISSION_J20_KEY)
+                        logger.info("Controller: game_starting - pressed J20 key")
+
+                    # Start async OCR scan if one isn't already running
+                    if self._capture is not None and not ocr_running.is_set():
+                        ocr_running.set()
+                        threading.Thread(target=_do_ocr_scan, daemon=True).start()
+
+                    # 5-second interruptible wait; breaks early on Good Luck detection
+                    for _ in range(50):  # 50 * 0.1s = 5s
+                        if good_luck_event.is_set() or self._analyzer is None or not self._analyzer._game_starting:
+                            break
+                        time.sleep(0.1)
+
+                    if not (self._analyzer is not None and self._analyzer._game_starting):
+                        return
+
+                    if time.time() - loop_start > max_wait:
+                        logger.warning("Controller: game_starting timed out after %ds without 'Good Luck' - clearing state", max_wait)
+                        if self._analyzer is not None:
+                            self._analyzer._game_starting = False
+                        return
+
+                    if good_luck_event.is_set():
+                        logger.info("\033[92mController: 'Good Luck' detected - waiting 10 seconds before starting J20 mission\033[0m")
+                        for _ in range(100):  # 100 * 0.1s = 10s
+                            if self._analyzer is None or not self._analyzer._game_starting:
+                                return
+                            time.sleep(0.1)
+                        if self._analyzer is not None and self._analyzer._game_starting:
+                            logger.info("Controller: game_starting - launching J20 mission")
+                            self._set_last_mission("j20")
+                            threading.Thread(target=self.mission_j20, daemon=True).start()
+                        return
+            except Exception:
+                logger.exception("Controller: game_starting loop error")
+            finally:
+                logger.info("Controller: game_starting loop stopped")
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def restart_last_mission(self):
         if self.is_mission_running():

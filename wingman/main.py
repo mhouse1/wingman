@@ -9,7 +9,7 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.4.4"
+WINGMAN_VERSION = "1.4.5"
 WINGMAN_VERSION_DETAILS = "more automated control"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'
@@ -75,6 +75,7 @@ def main():
 
     # Mission restart state machine
     respawn_state = RespawnState.IDLE
+    respawn_cooldown_until = 0.0  # suppress re-detection for 10s after first trigger
     last_restart_attempt = 0.0
     restart_not_before = 0.0
     last_incoming_alert_ts = 0.0
@@ -121,19 +122,24 @@ def main():
             # Detect respawn
             if game_state.get('is_respawning'):
                 if respawn_state == RespawnState.IDLE:
-                    logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
-                    ctrl.cancel_mission()
-                    # Wait for mission lock to release before restart
-                    logger.info("Waiting for mission lock to release before restart...")
-                    for _ in range(50):
-                        if not ctrl.is_mission_running():
-                            break
-                        time.sleep(0.1)
+                    if time.time() < respawn_cooldown_until:
+                        logger.debug("RESPAWN seen but suppressed by cooldown (%.1fs remaining)",
+                                     respawn_cooldown_until - time.time())
                     else:
-                        logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
-                    restart_not_before = time.time() + restart_delay_after_unlock
-                    logger.info("Mission lock released (or release pending); delaying restart by %.1f seconds", restart_delay_after_unlock)
-                    respawn_state = RespawnState.RESPAWNING
+                        logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
+                        respawn_cooldown_until = time.time() + 10.0
+                        ctrl.cancel_mission()
+                        # Wait for mission lock to release before restart
+                        logger.info("Waiting for mission lock to release before restart...")
+                        for _ in range(50):
+                            if not ctrl.is_mission_running():
+                                break
+                            time.sleep(0.1)
+                        else:
+                            logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
+                        restart_not_before = time.time() + restart_delay_after_unlock
+                        logger.info("Mission lock released (or release pending); delaying restart by %.1f seconds", restart_delay_after_unlock)
+                        respawn_state = RespawnState.RESPAWNING
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
