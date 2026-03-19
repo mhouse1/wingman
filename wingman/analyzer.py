@@ -4,11 +4,10 @@ import logging
 import cv2
 import numpy as np
 import threading
-import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
 import time
 from enum import Enum, auto
 from pathlib import Path
-import os
 
 
 class GameState(Enum):
@@ -26,54 +25,46 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Multiprocessing Worker Functions (must be at module level for pickling)
+# OCR Worker Functions (called from thread pool — numpy arrays passed directly)
 # ============================================================================
 
-# Process-local OCR readers (initialized once per worker process)
-_process_ocr_reader = None
+# Thread-local EasyOCR readers: each pool thread owns one reader, so calls run
+# concurrently without locking while still sharing the process address space
+# (no IPC serialization, and CUDA context is shared across threads on Windows).
+_thread_local = threading.local()
 
 
-def _init_ocr_reader():
-    """Initialize EasyOCR reader in worker process (called once)."""
-    global _process_ocr_reader
-    if _process_ocr_reader is None and easyocr:
-        try:
-            _process_ocr_reader = easyocr.Reader(['en'], gpu=True, verbose=False)
-            logger.debug("Initialized EasyOCR reader (GPU) in worker process PID=%d", os.getpid())
-        except Exception as e:
-            logger.warning("Failed to initialize EasyOCR GPU in worker: %s", e)
+def _get_thread_ocr_reader():
+    """Return the EasyOCR reader for the current thread, initializing it on first call."""
+    if not hasattr(_thread_local, 'reader'):
+        _thread_local.reader = None
+        if easyocr:
             try:
-                _process_ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-                logger.debug("Initialized EasyOCR reader (CPU) in worker process PID=%d", os.getpid())
+                _thread_local.reader = easyocr.Reader(['en'], gpu=True, verbose=False)
+                logger.info("OCR thread %d: initialized EasyOCR reader (GPU)", threading.get_ident())
             except Exception as e:
-                logger.warning("Failed to initialize EasyOCR in worker: %s", e)
-    return _process_ocr_reader
+                logger.warning("OCR thread %d: GPU init failed (%s), falling back to CPU", threading.get_ident(), e)
+                try:
+                    _thread_local.reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+                    logger.info("OCR thread %d: initialized EasyOCR reader (CPU)", threading.get_ident())
+                except Exception as e:
+                    logger.warning("OCR thread %d: EasyOCR init failed: %s", threading.get_ident(), e)
+    return _thread_local.reader
 
 
-def _process_respawn_region(respawn_frame_bytes, shape, dtype_str):
-    """
-    Worker function to process respawn region in separate process.
-    
+def _process_respawn_region(respawn_frame):
+    """Detect RESPAWN text in a pre-extracted region frame.
+
     Args:
-        respawn_frame_bytes: bytes representation of numpy array
-        shape: tuple of array shape
-        dtype_str: string representation of dtype
-    
+        respawn_frame: numpy BGR array of the respawn grid region.
+
     Returns:
         tuple: (detected: bool, ocr_time: float, text_found: str or None)
     """
-    import time
-    import cv2
-    import numpy as np
-    
-    reader = _init_ocr_reader()
+    reader = _get_thread_ocr_reader()
     if reader is None:
         return (False, 0.0, None)
-    
-    # Reconstruct numpy array from bytes
-    dtype = np.dtype(dtype_str)
-    respawn_frame = np.frombuffer(respawn_frame_bytes, dtype=dtype).reshape(shape)
-    
+
     t_start = time.time()
     
     # Preprocess respawn region
@@ -103,30 +94,20 @@ def _process_respawn_region(respawn_frame_bytes, shape, dtype_str):
     return (False, ocr_time, None)
 
 
-def _process_incoming_region(incoming_frame_bytes, shape, dtype_str):
+def _process_incoming_region(incoming_frame):
     """
-    Worker function to process incoming missile region in separate process.
-    
+    Worker function to process incoming missile region in a thread pool thread.
+
     Args:
-        incoming_frame_bytes: bytes representation of numpy array
-        shape: tuple of array shape
-        dtype_str: string representation of dtype
-    
+        incoming_frame: numpy array (BGR) of the incoming region — passed by reference, no copy
+
     Returns:
         tuple: (detected: bool, ocr_time: float, variant_name: str or None, text_found: str or None)
     """
-    import time
-    import cv2
-    import numpy as np
-    
-    reader = _init_ocr_reader()
+    reader = _get_thread_ocr_reader()
     if reader is None:
         return (False, 0.0, None, None)
-    
-    # Reconstruct numpy array from bytes
-    dtype = np.dtype(dtype_str)
-    incoming_frame = np.frombuffer(incoming_frame_bytes, dtype=dtype).reshape(shape)
-    
+
     t_start = time.time()
     
     # Preprocess incoming region
@@ -153,23 +134,19 @@ def _process_incoming_region(incoming_frame_bytes, shape, dtype_str):
     return (False, ocr_time, None, None)
 
 
-def _process_click_to_region(click_to_frame_bytes, shape, dtype_str):
+def _process_click_to_region(click_to_frame):
     """
-    Worker function to process "Click to Continue" region in separate process.
+    Worker function to process "Click to Continue" region in a thread pool thread.
+
+    Args:
+        click_to_frame: numpy array (BGR) — passed by reference, no copy
 
     Returns:
         tuple: (detected: bool, ocr_time: float, text_found: str or None)
     """
-    import time
-    import cv2
-    import numpy as np
-
-    reader = _init_ocr_reader()
+    reader = _get_thread_ocr_reader()
     if reader is None:
         return (False, 0.0, None)
-
-    dtype = np.dtype(dtype_str)
-    click_to_frame = np.frombuffer(click_to_frame_bytes, dtype=dtype).reshape(shape)
 
     t_start = time.time()
 
@@ -188,23 +165,19 @@ def _process_click_to_region(click_to_frame_bytes, shape, dtype_str):
     return (False, ocr_time, None)
 
 
-def _process_good_luck_region(frame_bytes, shape, dtype_str):
+def _process_good_luck_region(frame):
     """
-    Worker function to detect 'Good Luck' text in a region.
+    Worker function to detect 'Good Luck' text in a region in a thread pool thread.
+
+    Args:
+        frame: numpy array (BGR) — passed by reference, no copy
 
     Returns:
         tuple: (detected: bool, ocr_time: float, text_found: str or None)
     """
-    import time
-    import cv2
-    import numpy as np
-
-    reader = _init_ocr_reader()
+    reader = _get_thread_ocr_reader()
     if reader is None:
         return (False, 0.0, None)
-
-    dtype = np.dtype(dtype_str)
-    frame = np.frombuffer(frame_bytes, dtype=dtype).reshape(shape)
 
     t_start = time.time()
 
@@ -350,10 +323,10 @@ class GameStateAnalyzer:
         self._game_starting = False # Set when play is pressed; waiting for "Good Luck"
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
-        # Multiprocessing pool for parallel OCR processing
-        # Use 2 workers: one for respawn, one for incoming detection
-        self._ocr_pool = None
-        self._ocr_pool_initialized = False
+        # Thread pool executor for parallel OCR processing
+        # Use 3 workers: one each for respawn, incoming, and click_to detection
+        self._ocr_executor = None
+        self._ocr_executor_initialized = False
         self._background_ocr_frame = None
         self._background_ocr_pending_frame = None
         self._background_ocr_running = False
@@ -504,23 +477,18 @@ class GameStateAnalyzer:
         return self._ocr_reader
     
     @property
-    def ocr_pool(self):
-        """Lazy initialization of multiprocessing pool for parallel OCR."""
-        if self._ocr_pool is None and easyocr and not self._ocr_pool_initialized:
+    def ocr_executor(self):
+        """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
+        if self._ocr_executor is None and easyocr and not self._ocr_executor_initialized:
             try:
-                # Use spawn method for clean process initialization (especially on Windows)
-                ctx = mp.get_context('spawn')
-                self._ocr_pool = ctx.Pool(
-                    processes=3,  # one worker per OCR task (respawn, incoming, click_to)
-                    initializer=_init_ocr_reader,
-                )
-                self._ocr_pool_initialized = True
-                logger.info("Initialized multiprocessing pool with 3 workers for parallel OCR (GPU enabled if available)")
+                self._ocr_executor = ThreadPoolExecutor(max_workers=3)
+                self._ocr_executor_initialized = True
+                logger.info("Initialized ThreadPoolExecutor with 3 workers for parallel OCR")
             except Exception as e:
-                logger.error("Failed to initialize multiprocessing pool: %s", e)
-                self._ocr_pool_initialized = True  # Prevent retries
+                logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
+                self._ocr_executor_initialized = True  # Prevent retries
                 return None
-        return self._ocr_pool
+        return self._ocr_executor
     
     @property
     def game_state(self) -> GameState:
@@ -535,14 +503,13 @@ class GameStateAnalyzer:
 
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
-        if self._ocr_pool is not None:
+        if self._ocr_executor is not None:
             try:
-                self._ocr_pool.close()
-                self._ocr_pool.join()
-                logger.info("Multiprocessing pool shut down successfully")
+                self._ocr_executor.shutdown(wait=False)
+                logger.info("ThreadPoolExecutor shut down successfully")
             except Exception as e:
-                logger.warning("Error shutting down multiprocessing pool: %s", e)
-            self._ocr_pool = None
+                logger.warning("Error shutting down ThreadPoolExecutor: %s", e)
+            self._ocr_executor = None
     
     def analyze_frame(self, frame, region=None):
         """
@@ -700,8 +667,7 @@ class GameStateAnalyzer:
         return cached_result
     
     def _run_ocr_in_background(self):
-        """Run OCR in background using multiprocessing for parallel region processing."""
-        import time
+        """Run OCR in background using thread pool for parallel region processing."""
         while True:
             with self._background_ocr_lock:
                 full_frame = self._background_ocr_frame
@@ -715,42 +681,25 @@ class GameStateAnalyzer:
                 t0 = time.time()
                 current_time = t0
 
-                pool = self.ocr_pool
-                if pool is None:
-                    logger.warning("OCR pool not initialized")
+                executor = self.ocr_executor
+                if executor is None:
+                    logger.warning("OCR executor not initialized")
                     return
 
                 # Extract respawn and incoming regions (click_to has its own thread)
                 respawn_frame = self.get_region(full_frame, self.respawn_region)
                 incoming_frame = self.get_region(full_frame, self.incoming_region)
-
-
                 t1 = time.time()
 
-                # Convert frames to bytes for pickling (multiprocessing requirement)
-                respawn_bytes = respawn_frame.tobytes()
-                respawn_shape = respawn_frame.shape
-                respawn_dtype = str(respawn_frame.dtype)
-
-                incoming_bytes = incoming_frame.tobytes()
-                incoming_shape = incoming_frame.shape
-                incoming_dtype = str(incoming_frame.dtype)
+                # Submit both tasks to thread pool for parallel processing
+                # Numpy arrays are passed by reference — no serialization needed
+                respawn_future = executor.submit(_process_respawn_region, respawn_frame)
+                incoming_future = executor.submit(_process_incoming_region, incoming_frame)
                 t2 = time.time()
-
-                # Submit both tasks to pool for parallel processing
-                respawn_async = pool.apply_async(
-                    _process_respawn_region,
-                    (respawn_bytes, respawn_shape, respawn_dtype)
-                )
-                incoming_async = pool.apply_async(
-                    _process_incoming_region,
-                    (incoming_bytes, incoming_shape, incoming_dtype)
-                )
-                t3 = time.time()
 
                 # Wait for respawn result first — update its cache immediately so the
                 # main loop can react without waiting for the (often slower) incoming OCR.
-                respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=120)
+                respawn_detected, respawn_ocr_time, respawn_text = respawn_future.result(timeout=120)
 
                 if respawn_detected:
                     logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
@@ -763,8 +712,8 @@ class GameStateAnalyzer:
                     self._ocr_cache['timestamp'] = current_time
 
                 # Now wait for incoming — its result is independent of respawn.
-                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=120)
-                t4 = time.time()
+                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_future.result(timeout=120)
+                t3 = time.time()
 
                 if incoming_detected:
                     logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
@@ -780,12 +729,10 @@ class GameStateAnalyzer:
 
                 # Log timing
                 logger.debug(
-                    "Analyzer: Parallel OCR Timings - Extract: %.2fs, Serialize: %.2fs, Submit: %.2fs | "
+                    "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
                     "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Total: %.2fs",
-                    t1-t0, t2-t1, t3-t2, respawn_ocr_time, incoming_ocr_time, t4-t0
+                    t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, t3-t0
                 )
-            except mp.TimeoutError:
-                logger.warning("Analyzer: OCR pool timeout")
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
 
@@ -819,18 +766,14 @@ class GameStateAnalyzer:
                 frame = self._click_to_latest_frame
             if frame is None:
                 continue
-            pool = self.ocr_pool
-            if pool is None:
+            executor = self.ocr_executor
+            if executor is None:
                 continue
             try:
                 click_to_frame = self.get_region(frame, self.click_to_region)
-                click_to_bytes = click_to_frame.tobytes()
-                click_to_shape = click_to_frame.shape
-                click_to_dtype = str(click_to_frame.dtype)
-                click_to_detected, _, click_to_text = pool.apply_async(
-                    _process_click_to_region,
-                    (click_to_bytes, click_to_shape, click_to_dtype)
-                ).get(timeout=120)
+                click_to_detected, _, click_to_text = executor.submit(
+                    _process_click_to_region, click_to_frame
+                ).result(timeout=120)
                 result = (True, 1.0, "ocr") if click_to_detected else (False, 0.0, None)
                 with self._click_to_cache_lock:
                     self._click_to_cache['result'] = result
@@ -875,19 +818,15 @@ class GameStateAnalyzer:
         Returns:
             True if 'Good Luck' text is detected.
         """
-        pool = self.ocr_pool
-        if pool is None:
-            logger.warning("Analyzer: OCR pool not available for Good Luck scan")
+        executor = self.ocr_executor
+        if executor is None:
+            logger.warning("Analyzer: OCR executor not available for Good Luck scan")
             return False
         try:
             region_frame = self.get_region(frame, region_num)
-            frame_bytes = region_frame.tobytes()
-            shape = region_frame.shape
-            dtype_str = str(region_frame.dtype)
-            detected, _, text = pool.apply_async(
-                _process_good_luck_region,
-                (frame_bytes, shape, dtype_str)
-            ).get(timeout=30)
+            detected, _, text = executor.submit(
+                _process_good_luck_region, region_frame
+            ).result(timeout=30)
             if detected:
                 logger.info("Analyzer: 'Good Luck' detected in region %d (text='%s')", region_num, text)
             else:

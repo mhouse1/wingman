@@ -202,14 +202,13 @@ class Controller:
             # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the play button (region 64)
             try:
                 def auto_mission_key_pressed(_e):
-                    if self._analyzer is not None and self._analyzer._game_lobby:
-                        logger.info("Controller: M key pressed in GAME_LOBBY - clicking play button and entering GAME_STARTING")
+                    if self._analyzer is not None:
+                        logger.info("Controller: M key pressed - assuming GAME_LOBBY, clicking play button and entering GAME_STARTING")
                         self._analyzer._game_lobby = False
+                        self._analyzer._game_end_b = False
                         self._analyzer._game_starting = True
                         self.click_grid_region(64, block=False, count=1)
                         self._start_game_starting_loop()
-                    else:
-                        logger.debug("Controller: M key pressed but not in GAME_LOBBY - ignoring")
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click play button in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
