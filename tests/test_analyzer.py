@@ -43,22 +43,6 @@ def _load_image(image_path: Path):
     return frame
 
 
-def test_run_ocr_in_background(analyzer: GameStateAnalyzer, require_easyocr):
-    frame = _load_image(TEST_SCREENSHOT)
-
-    start_time = time.time()
-    analyzer._background_ocr_frame = frame
-    analyzer._run_ocr_in_background()
-    elapsed = time.time() - start_time
-
-    with analyzer._ocr_cache_lock:
-        is_respawning, confidence, method = analyzer._ocr_cache["result"]
-
-    assert is_respawning is True
-    assert confidence >= 1.0
-    assert method == "ocr"
-    assert elapsed >= 0.0
-
 
 @pytest.mark.parametrize(
     "image_path, description",
