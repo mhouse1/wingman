@@ -748,34 +748,30 @@ class GameStateAnalyzer:
                 )
                 t3 = time.time()
 
-                # Wait for results (blocks until both complete).
-                # Timeout must cover cold-start pool worker init (~10s per worker × 3 workers)
-                # in addition to actual OCR time (~4s). 120s is safe; normal runs complete in <10s.
+                # Wait for respawn result first — update its cache immediately so the
+                # main loop can react without waiting for the (often slower) incoming OCR.
                 respawn_detected, respawn_ocr_time, respawn_text = respawn_async.get(timeout=120)
-                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=120)
-                t4 = time.time()
 
-                # Log results
                 if respawn_detected:
                     logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
-
-                if incoming_detected:
-                    logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
-                else:
-                    logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
-
-                # Keep battle timestamp fresh whenever a battle event is active.
-                # Use time.time() here (not current_time/t0) because OCR runs can
-                # take 4-12s; using t0 would make the timestamp already expired by
-                if respawn_detected or incoming_detected:
                     self._game_end_b = False
                     self._game_lobby = False
 
-                # Update caches
                 respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
                 with self._ocr_cache_lock:
                     self._ocr_cache['result'] = respawn_result
                     self._ocr_cache['timestamp'] = current_time
+
+                # Now wait for incoming — its result is independent of respawn.
+                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_async.get(timeout=120)
+                t4 = time.time()
+
+                if incoming_detected:
+                    logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
+                    self._game_end_b = False
+                    self._game_lobby = False
+                else:
+                    logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
 
                 incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
                 with self._incoming_cache_lock:
