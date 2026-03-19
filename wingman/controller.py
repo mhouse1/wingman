@@ -754,6 +754,7 @@ class Controller:
         def _do_ocr_scan():
             """Run Good Luck OCR in background; sets good_luck_event on detection."""
             try:
+                time.sleep(0.5)  # Allow 'Good Luck' screen to appear before capturing
                 with mss() as sct:
                     s = sct.grab(self._capture.get_monitor_rect())
                     frame = np.array(s)[:, :, :3]

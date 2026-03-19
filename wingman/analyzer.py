@@ -95,26 +95,10 @@ def _process_respawn_region(respawn_frame_bytes, shape, dtype_str):
     # Log all OCR results for debugging
     logger.debug(f"Respawn OCR results: {results}")
 
-    # Check for RESPAWN text (relaxed matching)
-    target = "RESPAWN"
     for label, text_clean, conf in results:
-        if len(text_clean) >= 4:
-            # Levenshtein distance check
-            if len(text_clean) <= 6:
-                # Short text: check for RESPA variants
-                max_dist = 2  # Relaxed tolerance
-                for i in range(len(target) - 4):
-                    substring = target[i:i+5]
-                    dist = _levenshtein_distance_simple(text_clean, substring)
-                    if dist <= max_dist:
-                        logger.debug(f"Respawn detected (variant: {label}, text: {text_clean}, dist: {dist})")
-                        return (True, ocr_time, text_clean)
-            else:
-                # Longer text: full match
-                dist = _levenshtein_distance_simple(text_clean, target)
-                if dist <= 2:
-                    logger.debug(f"Respawn detected (variant: {label}, text: {text_clean}, dist: {dist})")
-                    return (True, ocr_time, text_clean)
+        if _respawn_text_matches(text_clean):
+            logger.debug(f"Respawn detected (variant: {label}, text: {text_clean})")
+            return (True, ocr_time, text_clean)
 
     return (False, ocr_time, None)
 
@@ -258,6 +242,33 @@ def _levenshtein_distance_simple(a: str, b: str) -> int:
             curr_row.append(min(insertions, deletions, substitutions))
         prev_row = curr_row
     return prev_row[-1]
+
+
+def _respawn_text_matches(text_clean: str) -> bool:
+    """Return True if text_clean is a plausible OCR read of the respawn label.
+
+    This is the authoritative matching logic used by _process_respawn_region.
+    Keeping it as a standalone function makes it directly unit-testable without
+    needing to spin up EasyOCR or a multiprocessing pool.
+
+    The in-game label is 'RESPA'; EasyOCR at 0.7x scale typically returns the
+    4-char string 'REPA' (missing the 'S').  That read has Levenshtein distance 1
+    from 'RESPA' so it must be accepted; raising the min-length to 5 would
+    silently break detection.  max_dist=2 is intentional: it tolerates two-char
+    OCR errors while remaining tight enough to reject unrelated words.
+    """
+    target = "RESPAWN"
+    if not text_clean or len(text_clean) < 4:
+        return False
+    if len(text_clean) <= 6:
+        max_dist = 2
+        for i in range(len(target) - 4):  # substrings: RESPA, ESPAW, SPAWN
+            if _levenshtein_distance_simple(text_clean, target[i:i + 5]) <= max_dist:
+                return True
+    else:
+        if _levenshtein_distance_simple(text_clean, target) <= 2:
+            return True
+    return False
 
 
 # ============================================================================
