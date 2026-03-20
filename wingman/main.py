@@ -9,8 +9,8 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.5.0"
-WINGMAN_VERSION_DETAILS = "Switched from multiprocessing to threading see adr-016 for details."
+WINGMAN_VERSION = "1.5.1"
+WINGMAN_VERSION_DETAILS = "Enable full unattended operation"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'
 
