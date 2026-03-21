@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls c:/dev-tools/github/wingman/ --ignore=.venv*)"
+    ]
+  }
+}
