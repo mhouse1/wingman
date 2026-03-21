@@ -7,7 +7,7 @@ unattended_mode: true
 # Data From automated test will show OCR rate
 # [UnitTest] OCR Stage Timings:
 #   Setup: 0.00s, Reader: 1.17s, Grayscale: 0.00s, Threshold: 0.00s, Resize: 0.00s, OCR: 3.61s, Total: 4.82s
-loop_interval_sec: 3.0
+loop_interval_sec: 1.5
 # Screen capture region (left, top, width, height)
 region:
   left: 0
