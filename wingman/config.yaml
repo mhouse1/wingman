@@ -42,6 +42,13 @@ respawn_detection:
   # Grid region where RESPA text appears (8x8 grid = 64 regions)
   # Run test_analyzer.py with --grid to find the correct region
   region: 44
+  # Sub-divide respawn region into a rows×cols sub-grid and only scan one cell.
+  # Set both to 1 to disable (scan the full region).
+  # 2x1 grid: region 2 = bottom half where full "RESPA" text appears.
+  # "RESPA" spans both right cells of a 2x3 split — use 2x1 to keep it in one crop.
+  respawn_subgrid_rows: 2
+  respawn_subgrid_cols: 1
+  respawn_subregion: 2
   
   # Also scan region 21 for INCOMING missile warning ("MING" visible)
   incoming_region: 21

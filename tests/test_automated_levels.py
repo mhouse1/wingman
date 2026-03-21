@@ -304,7 +304,7 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
     frame = _load_image(image_path)
     region_frame = analyzer.get_region(frame, incoming_region)
     if analyzer.incoming_subgrid_size > 1:
-        region_frame = analyzer._crop_subregion(region_frame, analyzer.incoming_subgrid_size, analyzer.incoming_subregion)
+        region_frame = analyzer._crop_subregion(region_frame, analyzer.incoming_subgrid_size, analyzer.incoming_subgrid_size, analyzer.incoming_subregion)
 
     reader = analyzer.ocr_reader
     assert reader is not None, "EasyOCR reader failed to initialize"

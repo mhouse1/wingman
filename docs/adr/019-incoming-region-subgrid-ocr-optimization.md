@@ -4,6 +4,8 @@
 |----------|------------|-----------------|
 | Accepted | 2026-03-21 | 1.5.2           |
 
+> **Update 2026-03-21:** Respawn sub-grid added (see below). ADR extended to cover both regions.
+
 ## Context
 
 Wingman scans a region of the game HUD every OCR cycle to detect the "INCOMING" missile warning text (matched via substring `MING` or `ARNING`). The region is defined in the 8x8 main grid as region 21.
@@ -99,6 +101,69 @@ To disable (scan full region 21):
 ```yaml
   incoming_subgrid_size: 1
 ```
+
+## Respawn Region Sub-Grid (follow-up, 2026-03-21)
+
+The same sub-grid technique was subsequently applied to the respawn region (region 44).
+
+### Problem
+
+The respawn region (region 44, 8×8 main grid) was being passed to EasyOCR in full. The "RESPA" text only appears in the lower portion of the cell. Visual inspection via the `--subgrid` overlay tool confirmed the text spans the bottom half of the region.
+
+An initial 2×3 sub-grid was configured but the "RESPA" text was found to span two cells (regions 5 and 6), meaning neither cell alone captured a matchable string. The sub-grid was changed to 2×1 (top/bottom halves), with sub-region 2 (bottom half) containing the complete word.
+
+Config:
+
+```yaml
+respawn_detection:
+  respawn_subgrid_rows: 2
+  respawn_subgrid_cols: 1
+  respawn_subregion: 2      # bottom half — contains full "RESPA" text
+```
+
+### Performance (2×1 respawn sub-grid, production log)
+
+| Metric | Before (full region 44) | After (2×1 sub-region 2) |
+|---|---|---|
+| Respawn OCR — typical steady state | 1.0s – 4.0s | **0.17s – 0.45s** |
+| Respawn OCR — fast floor | ~1.0s | **0.16s** |
+| Respawn OCR — peak spike | 4s+ | 2.02s |
+| Overall improvement | — | **~5–8× faster typical case** |
+
+Log samples (steady state after model warmup):
+
+```
+Respawn OCR: 0.26s | Incoming OCR: 0.26s | Total: 0.26s
+Respawn OCR: 0.39s | Incoming OCR: 0.39s | Total: 0.40s
+Respawn OCR: 0.17s | Incoming OCR: 0.16s | Total: 0.17s
+Respawn OCR: 0.19s | Incoming OCR: 0.19s | Total: 0.19s
+Respawn OCR: 0.23s | Incoming OCR: 0.23s | Total: 0.23s
+```
+
+Occasional spikes to 1.5–2.0s remain — these occur when EasyOCR processes complex image content (the GPU inference time is not strictly proportional to pixel count). They are infrequent and do not block the main loop.
+
+### Detection quality
+
+Respawn correctly detected with the 2×1 crop:
+
+```
+Respawn OCR results: [('gray', 'REPA', 0.749), ('binary', 'JSPAL', 0.136)]
+Respawn detected (variant: gray, text: REPA)
+Analyzer: detected 'RESPAWN' text (matched: 'REPA')
+Analyzer: Parallel OCR Timings - Respawn OCR: 0.39s | Incoming OCR: 0.17s | Total: 0.39s
+```
+
+`REPA` (Levenshtein distance 1 from `RESPA`) is accepted by `_respawn_text_matches`. Two incoming detections in the same session also fired correctly with clean 3-flare bursts.
+
+### `--subgrid` diagnostic tool
+
+A `--subgrid` flag was added to `tests/analyzer_cli.py` to visualize sub-grid overlays on any screenshot:
+
+```
+uv run python tests/analyzer_cli.py test_screenshots/RESPAWNE.png --subgrid
+```
+
+Outputs `tests/test-output/subgrid_respawn.png` and `subgrid_incoming.png` showing the sub-grid cells with the configured sub-region highlighted. Used to confirm the 2×1 split captures the full "RESPA" text and to diagnose the initial 2×3 misconfiguration.
 
 ## Related ADRs
 - ADR 007: OCR Time Reduction via Image Downscaling

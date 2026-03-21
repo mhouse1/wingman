@@ -284,6 +284,79 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
     os._exit(0)
 
 
+def draw_subgrid_overlay(image_path: str):
+    """Draw the respawn and incoming sub-grid overlays on their extracted regions.
+
+    Outputs:
+      tests/test-output/subgrid_respawn.png   — region 44 with rows×cols sub-grid
+      tests/test-output/subgrid_incoming.png  — region 21 with NxN sub-grid
+    """
+    config = load_config()
+    analyzer = GameStateAnalyzer(config)
+
+    frame = cv2.imread(image_path)
+    if frame is None:
+        print(f"ERROR: Could not load {image_path}")
+        sys.exit(1)
+
+    output_dir = Path("tests") / "test-output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _draw_subgrid(cell_frame, grid_rows, grid_cols, highlight_cell):
+        """Return a copy of cell_frame with a rows×cols numbered grid drawn on it."""
+        out = cell_frame.copy()
+        h, w = out.shape[:2]
+        cell_h = h // grid_rows
+        cell_w = w // grid_cols
+
+        # Draw grid lines
+        for c in range(1, grid_cols):
+            x = w * c // grid_cols
+            cv2.line(out, (x, 0), (x, h), (0, 255, 255), 2)
+        for r in range(1, grid_rows):
+            y = h * r // grid_rows
+            cv2.line(out, (0, y), (w, y), (0, 255, 255), 2)
+
+        # Number each cell
+        for idx in range(1, grid_rows * grid_cols + 1):
+            row = (idx - 1) // grid_cols
+            col = (idx - 1) % grid_cols
+            cx = col * cell_w + cell_w // 2 - 10
+            cy = row * cell_h + cell_h // 2 + 10
+            cv2.putText(out, str(idx), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 2)
+
+        # Highlight configured sub-region
+        if 1 <= highlight_cell <= grid_rows * grid_cols:
+            row = (highlight_cell - 1) // grid_cols
+            col = (highlight_cell - 1) % grid_cols
+            x1 = col * cell_w
+            y1 = row * cell_h
+            cv2.rectangle(out, (x1, y1), (x1 + cell_w, y1 + cell_h), (0, 255, 0), 4)
+
+        return out
+
+    # --- Respawn region sub-grid ---
+    respawn_cell = analyzer.get_region(frame, analyzer.respawn_region)
+    respawn_overlay = _draw_subgrid(
+        respawn_cell,
+        analyzer.respawn_subgrid_rows,
+        analyzer.respawn_subgrid_cols,
+        analyzer.respawn_subregion,
+    )
+    respawn_out = str(output_dir / "subgrid_respawn.png")
+    cv2.imwrite(respawn_out, respawn_overlay)
+    print(f"[OK] Respawn sub-grid ({analyzer.respawn_subgrid_rows}x{analyzer.respawn_subgrid_cols}, "
+          f"highlight={analyzer.respawn_subregion}) -> {respawn_out}")
+
+    # --- Incoming region sub-grid ---
+    incoming_cell = analyzer.get_region(frame, analyzer.incoming_region)
+    n = analyzer.incoming_subgrid_size
+    incoming_overlay = _draw_subgrid(incoming_cell, n, n, analyzer.incoming_subregion)
+    incoming_out = str(output_dir / "subgrid_incoming.png")
+    cv2.imwrite(incoming_out, incoming_overlay)
+    print(f"[OK] Incoming sub-grid ({n}x{n}, highlight={analyzer.incoming_subregion}) -> {incoming_out}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test GameStateAnalyzer")
     parser.add_argument("image", nargs="?", default="RESPAWN.png", help="Path to screenshot")
@@ -292,6 +365,7 @@ def main():
     parser.add_argument("--grid", action="store_true", help="Run grid visualization")
     parser.add_argument("--capture", action="store_true", help="Capture screenshot then analyze")
     parser.add_argument("--unit-ocr", action="store_true", help="Directly test _run_ocr_in_background")
+    parser.add_argument("--subgrid", action="store_true", help="Draw sub-grid overlays for respawn and incoming regions")
     args = parser.parse_args()
 
     if args.unit_ocr:
@@ -302,6 +376,8 @@ def main():
         test_multiple_images()
     elif args.grid:
         test_with_visualization(args.image)
+    elif args.subgrid:
+        draw_subgrid_overlay(args.image)
     else:
         test_respawn_detection(args.image, args.calibrate)
 
