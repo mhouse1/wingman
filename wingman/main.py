@@ -61,14 +61,26 @@ def main():
     cap = Capture(region, monitor_index)
     analyzer = GameStateAnalyzer(cfg)
 
+    unattended_mode = cfg.get("unattended_mode", False)
+    unattended_active = threading.Event()
+    if unattended_mode:
+        unattended_active.set()
+        logger.info("Unattended mode enabled from config")
+
     # Load mission restart timing from config
     mission_cfg = cfg.get("mission", {})
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
 
+    def _on_auto_mission_key():
+        """Called when AUTO_MISSION_KEY is pressed. Activates unattended mode for the session."""
+        if unattended_mode and not unattended_active.is_set():
+            unattended_active.set()
+            logger.info("Unattended mode activated by M key press")
+
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -125,6 +137,9 @@ def main():
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
                 last_game_state = current_game_state
+                if current_game_state == GameState.GAME_LOBBY and unattended_active.is_set():
+                    logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
+                    ctrl.start_auto_mission()
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             # Higher priority than respawn — must run before the respawn continue.
