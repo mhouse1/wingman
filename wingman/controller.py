@@ -241,7 +241,7 @@ class Controller:
         # Use generic executor to perform the key press
         self._execute_key_press(AFTERBURNER_KEY, hold_seconds=hold_seconds, block=block, action_name='afterburner')
 
-    def _execute_key_press(self, key: str, hold_seconds: float = 2.5, block: bool = True, action_name: str | None = None):
+    def _execute_key_press(self, key: str, hold_seconds: float = 2.5, block: bool = True, action_name: str | None = None, ignore_cancel: bool = False):
         """Generic key press executor used by maneuvers.
 
         Args:
@@ -282,7 +282,7 @@ class Controller:
                 keyboard_module.press(key)
                 start = time.time()
                 while (time.time() - start) < hold_seconds:
-                    if self._mission_cancel.is_set():
+                    if not ignore_cancel and self._mission_cancel.is_set():
                         logger.debug("Controller: %s cancelled", label)
                         break
                     time.sleep(0.05)
@@ -312,9 +312,9 @@ class Controller:
         """Roll right by holding the configured roll-right key."""
         self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_right')
 
-    def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True):
+    def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
-        self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares')
+        self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares', ignore_cancel=ignore_cancel)
 
     def wingsweep(self, hold_seconds: float = 0.5, block: bool = True):
         """Perform a wingsweep maneuver by pressing the configured wingsweep key."""

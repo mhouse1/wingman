@@ -83,7 +83,7 @@ def main():
     last_game_state = None
 
     def _deploy_flares_on_new_incoming() -> bool:
-        """Deploy flares once per new incoming OCR cache update."""
+        """Deploy flares in a burst when a new incoming OCR detection arrives."""
         nonlocal last_incoming_alert_ts
         with analyzer._incoming_cache_lock:
             incoming_detected, _, _ = analyzer._incoming_cache['result']
@@ -91,8 +91,15 @@ def main():
 
         if incoming_detected and incoming_ts > last_incoming_alert_ts:
             logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
-            ctrl.deploy_flares(hold_seconds=0.05, block=False)
             last_incoming_alert_ts = incoming_ts
+
+            def _flare_burst():
+                for _ in range(3):
+                    ctrl.deploy_flares(hold_seconds=0.05, block=True, ignore_cancel=True)
+                    time.sleep(0.3)
+                logger.info("\033[95m🚀 Flare burst complete\033[0m")
+
+            threading.Thread(target=_flare_burst, daemon=True).start()
             return True
 
         return False
@@ -118,6 +125,10 @@ def main():
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
                 last_game_state = current_game_state
+
+            # Deploy flares immediately when a new incoming OCR result arrives.
+            # Higher priority than respawn — must run before the respawn continue.
+            _deploy_flares_on_new_incoming()
 
             # Detect respawn
             if game_state.get('is_respawning'):
@@ -185,9 +196,6 @@ def main():
                     else:
                         logger.info("Mission restart attempt failed; will retry in %.1fs", restart_retry_interval)
                     last_restart_attempt = time.time()
-
-            # Deploy flares immediately when a new incoming OCR result arrives.
-            _deploy_flares_on_new_incoming()
 
             # Log "Click to Continue" prompt when newly detected (informational only).
             with analyzer._click_to_cache_lock:
