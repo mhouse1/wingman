@@ -1,117 +1,82 @@
 # MetalStorm Wingman
 
-Prototype automation assistant for MetalStorm (PC) with mission hotkeys, respawn handling, and OCR-based incoming missile detection.
+Game automation assistant for MetalStorm (PC). Runs fully unattended across multiple matches — launches missions, detects threats, deploys flares, handles respawns, and restarts the next match automatically.
 
-## What This Project Does
+**Current version:** v1.5.1 | **Phase:** 1-2 (Automation + Text-Based Perception)
 
-- Captures a game region from your screen.
-- Runs OCR-based analysis for:
-	- `RESPAWN` detection
-	- `INCOMING`/`MING` missile warning detection
-- Executes scripted mission actions with keyboard hotkeys.
-- Auto-deploys flares when incoming text is detected.
-- Supports mission restart flow after respawn.
+---
 
-## Current Status
+## What It Does Today
 
-This is an active prototype. Controls, timings, and OCR behavior are still being tuned.
+Once started with a single keypress (`m`), Wingman runs the full match loop without user input:
 
-## Requirements
-
-- Windows 10/11
-- Python `>=3.10`
-- Game running in a predictable display layout
-- Astral `uv` package manager (recommended)
-
-## Quick Start (Windows)
-
-1. Install `uv` if needed:
-
-```powershell
-pipx install uv
+```
+Press M
+  → Click play button
+  → Wait for "Good Luck" → launch J20 mission
+  → Detect INCOMING missile → deploy flares automatically
+  → Detect RESPAWN → cancel mission → restart after 4s
+  → Detect match end → click play → loop
 ```
 
-2. From the repository root, sync dependencies:
+### Current Capabilities
 
-```powershell
-uv sync --all-groups
-```
+| Feature | Status |
+|---------|--------|
+| J20 and Loiter missions | ✅ Working |
+| Full unattended match loop (M key) | ✅ Working |
+| Respawn detection + auto-restart | ✅ Working |
+| Incoming missile detection + auto-flare | ✅ Working |
+| "Click to Continue" auto-click | ✅ Working |
+| Game state machine (LOBBY / BATTLE / END / STARTING) | ✅ Working |
+| Padlock camera loop + weapon fire loop | ✅ Working |
 
-3. Launch Wingman:
+### How It Works
 
-- Easiest: double-click `wingman.bat`
-- Or run manually:
+Wingman uses EasyOCR to read four text regions from the screen via an 8×8 grid:
 
-```powershell
-uv run python -m wingman.main --log-level DEBUG
-```
+| Region | Detects | Action |
+|--------|---------|--------|
+| 44 | `RESPAWN` | Cancel mission → restart after 4s |
+| 21 | `INCOMING` | Deploy flares |
+| 60 | `CLICK TO CONTINUE` | Auto-click play button |
+| 16 | `GOOD LUCK` | Launch J20 after 10s delay |
 
-## Runtime Hotkeys
+Three OCR threads run in parallel on a background thread pool. The main mission loop is never blocked.
 
-Default hotkeys are defined in `wingman/controller.py`.
+**Current OCR performance (CPU-only):** avg 3.25s/cycle, worst case 4.6s.
+Enabling GPU (CUDA) drops this to <200ms — see [GPU setup guide](docs/TODO-enable-gpu-ocr.md).
 
-- `u`: Start J20 mission
-- `y`: Start loiter mission
-- `end`: Cancel current mission
-- `backspace`: Exit script
-- `x`: Toggle weapon loop
-- `v`: Capture screenshot with grid overlay (saved to `tests/test-output`)
-- `b`: Simulate respawn detection (testing)
+---
 
-## Configuration
+## Where It's Going
 
-Main config file: `wingman/config.yaml`
+Wingman is an evolving prototype. The current text-based perception is Phase 1-2. Future phases add visual game state awareness and adaptive tactics:
 
-Important settings:
+| Phase | Goal | Status |
+|-------|------|--------|
+| 1-2 | Automation + text perception (respawn, incoming, state machine) | ✅ Done |
+| 2 (remainder) | Health, ammo, enemy distance detection | Planned |
+| 3 | Behavior trees — adaptive tactics based on game state | Planned |
+| 4 | Reinforcement learning — bot learns from experience | Future |
+| 5-6 | Deep RL + vision, multi-agent swarm tactics | Research |
 
-- `loop_interval_sec`: main loop cadence
-- `region.left/top/width/height`: capture region
-- `region.monitor`: monitor index
-- `respawn_detection.grid_size`: OCR grid size
-- `respawn_detection.region`: region index for `RESPAWN`
-- `respawn_detection.incoming_region`: region index for `INCOMING`
-- `respawn_detection.ocr_cooldown`: OCR scheduling interval
-- `mission.restart_delay_after_unlock`: delay before mission restart after respawn
-- `mission.weapon_loop_interval`: firing loop interval
+See [docs/PROJECT_AI_ROADMAP.md](docs/PROJECT_AI_ROADMAP.md) for the full roadmap with implementation details and cost-benefit analysis.
 
-If detection is unstable, verify the capture region and grid indices first.
+---
 
-## Testing
+## Getting Started
 
-Common commands:
+See [docs/job-aids/job-aid-setup-and-usage.md](docs/job-aids/job-aid-setup-and-usage.md) for:
+- Requirements and installation
+- Quick start steps
+- Full hotkey reference
+- Configuration options
+- Testing commands
+- Troubleshooting
 
-```bash
-make test
-make test1
-make test2
-make test-perf
-```
-
-Direct pytest example:
-
-```bash
-uv run pytest tests/test_automated_levels.py --html=tests/test-output/report.html --self-contained-html
-```
-
-## Performance and OCR Docs
-
-- `docs/performance/`
-- `docs/dual-region-ocr-architecture.md`
-- `docs/how-to-test-analyzer.md`
-- `docs/job-aid-enable-gpu-ocr.md`
-
-## Troubleshooting
-
-- If hotkeys do not respond, run terminal/editor with sufficient keyboard hook permissions.
-- If OCR is slow, use `--log-level DEBUG` and check `Analyzer: Parallel OCR Timings` in logs.
-- If no detection occurs, validate capture region and incoming/respawn grid regions in `config.yaml`.
-- If launcher fails to find `uv`, use manual command: `uv run python -m wingman.main`.
-
-## Safety Notes
-
-- Use responsibly and follow the game terms/policies applicable to your account.
-- This project sends keyboard/mouse inputs automatically; test in controlled scenarios first.
+---
 
 ## Contributing
 
-Please see `CONTRIBUTING.md` for development workflow, testing expectations, and PR guidance.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, testing expectations, and PR guidance.

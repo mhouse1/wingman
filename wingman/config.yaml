@@ -1,3 +1,8 @@
+# Unattended mode: when true, automatically transitions game_end → game_lobby → game_battle
+# without requiring a manual 'm' key press. CANCEL_MISSION_KEY and EXIT_KEY still apply.
+# Pressing AUTO_MISSION_KEY ('m') at runtime while this is true also activates the full cycle.
+unattended_mode: true
+
 # Main loop interval (seconds between each screen capture, this should not be faster than the OCR rate
 # Data From automated test will show OCR rate
 # [UnitTest] OCR Stage Timings:

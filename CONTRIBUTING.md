@@ -6,17 +6,13 @@ This project is still a prototype, so clear changes, reproducible tests, and con
 
 ## Development Setup
 
-1. Clone and enter the repo.
-2. Install dependencies:
+See [docs/job-aids/job-aid-setup-and-usage.md](docs/job-aids/job-aid-setup-and-usage.md) for full requirements, install steps, hotkey reference, and config options.
+
+Quick start:
 
 ```bash
 uv sync --all-groups
-```
-
-3. Run the app locally:
-
-```bash
-uv run python -m wingman.main --log-level DEBUG
+make run
 ```
 
 ## Branch and Commit Guidelines
@@ -74,7 +70,7 @@ Include these items in the PR description:
 
 If you add or change settings in `wingman/config.yaml`:
 - Document defaults and expected ranges
-- Update `README.md` if behavior changes for users
+- Update [docs/job-aids/job-aid-setup-and-usage.md](docs/job-aids/job-aid-setup-and-usage.md) for any new or changed config keys
 
 ## Performance-Sensitive Changes
 
@@ -86,9 +82,11 @@ For OCR/performance work:
 ## Documentation
 
 Update docs when behavior changes:
-- `README.md` for user-facing changes
-- `docs/` for architecture and workflow details
-- Job aids for repeatable operational tasks
+- [README.md](README.md) — what the bot does, current capabilities, where the project is going
+- [docs/job-aids/job-aid-setup-and-usage.md](docs/job-aids/job-aid-setup-and-usage.md) — install, config, hotkeys, testing, troubleshooting
+- [docs/PROJECT_AI_ROADMAP.md](docs/PROJECT_AI_ROADMAP.md) — current phase, implemented features, future phases
+- `docs/adr/` — architecture decisions (add a new ADR for significant design choices)
+- `docs/job-aids/` — repeatable operational tasks
 
 ## Reporting Issues
 

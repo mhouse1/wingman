@@ -9,8 +9,8 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.5.0"
-WINGMAN_VERSION_DETAILS = "Switched from multiprocessing to threading see adr-016 for details."
+WINGMAN_VERSION = "1.5.1"
+WINGMAN_VERSION_DETAILS = "Enable full unattended operation"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'
 
@@ -61,14 +61,26 @@ def main():
     cap = Capture(region, monitor_index)
     analyzer = GameStateAnalyzer(cfg)
 
+    unattended_mode = cfg.get("unattended_mode", False)
+    unattended_active = threading.Event()
+    if unattended_mode:
+        unattended_active.set()
+        logger.info("Unattended mode enabled from config")
+
     # Load mission restart timing from config
     mission_cfg = cfg.get("mission", {})
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
 
+    def _on_auto_mission_key():
+        """Called when AUTO_MISSION_KEY is pressed. Activates unattended mode for the session."""
+        if unattended_mode and not unattended_active.is_set():
+            unattended_active.set()
+            logger.info("Unattended mode activated by M key press")
+
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -83,7 +95,7 @@ def main():
     last_game_state = None
 
     def _deploy_flares_on_new_incoming() -> bool:
-        """Deploy flares once per new incoming OCR cache update."""
+        """Deploy flares in a burst when a new incoming OCR detection arrives."""
         nonlocal last_incoming_alert_ts
         with analyzer._incoming_cache_lock:
             incoming_detected, _, _ = analyzer._incoming_cache['result']
@@ -91,8 +103,15 @@ def main():
 
         if incoming_detected and incoming_ts > last_incoming_alert_ts:
             logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
-            ctrl.deploy_flares(hold_seconds=0.05, block=False)
             last_incoming_alert_ts = incoming_ts
+
+            def _flare_burst():
+                for _ in range(3):
+                    ctrl.deploy_flares(hold_seconds=0.05, block=True, ignore_cancel=True)
+                    time.sleep(0.3)
+                logger.info("\033[95m🚀 Flare burst complete\033[0m")
+
+            threading.Thread(target=_flare_burst, daemon=True).start()
             return True
 
         return False
@@ -118,6 +137,13 @@ def main():
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
                 last_game_state = current_game_state
+                if current_game_state == GameState.GAME_LOBBY and unattended_active.is_set():
+                    logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
+                    ctrl.start_auto_mission()
+
+            # Deploy flares immediately when a new incoming OCR result arrives.
+            # Higher priority than respawn — must run before the respawn continue.
+            _deploy_flares_on_new_incoming()
 
             # Detect respawn
             if game_state.get('is_respawning'):
@@ -185,9 +211,6 @@ def main():
                     else:
                         logger.info("Mission restart attempt failed; will retry in %.1fs", restart_retry_interval)
                     last_restart_attempt = time.time()
-
-            # Deploy flares immediately when a new incoming OCR result arrives.
-            _deploy_flares_on_new_incoming()
 
             # Log "Click to Continue" prompt when newly detected (informational only).
             with analyzer._click_to_cache_lock:

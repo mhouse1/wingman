@@ -51,7 +51,7 @@ EMOTE10 # Oops!
 """
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -65,6 +65,7 @@ class Controller:
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
         self._capture = capture
+        self._on_auto_mission_key = on_auto_mission_key
         
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
@@ -202,17 +203,43 @@ class Controller:
             # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the play button (region 64)
             try:
                 def auto_mission_key_pressed(_e):
-                    if self._analyzer is not None:
-                        logger.info("Controller: M key pressed - assuming GAME_LOBBY, clicking play button and entering GAME_STARTING")
-                        self._analyzer._game_lobby = False
-                        self._analyzer._game_end_b = False
-                        self._analyzer._game_starting = True
-                        self.click_grid_region(64, block=False, count=1)
-                        self._start_game_starting_loop()
+                    if self._on_auto_mission_key is not None:
+                        self._on_auto_mission_key()
+                    self.start_auto_mission(force=True)
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click play button in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
+
+    def start_auto_mission(self, force: bool = False):
+        """Click the play button and enter GAME_STARTING state.
+
+        Called both from the AUTO_MISSION_KEY hotkey and automatically by the
+        main loop when unattended_mode is active and GAME_LOBBY is detected.
+
+        Args:
+            force: if True, bypass the GAME_STARTING guard (used by manual M key press
+                   to assume GAME_LOBBY and restart the cycle regardless of current state).
+        """
+        if self._analyzer is None:
+            return
+        if not force and self._analyzer._game_starting:
+            logger.debug("Controller: start_auto_mission called but already in GAME_STARTING - ignoring")
+            return
+
+        def _run():
+            logger.info("Controller: start_auto_mission - waiting 3s for game to settle before clicking play button")
+            time.sleep(3)
+            if self._analyzer is None:
+                return
+            logger.info("Controller: start_auto_mission - clicking play button and entering GAME_STARTING")
+            self._analyzer._game_lobby = False
+            self._analyzer._game_end_b = False
+            self._analyzer._game_starting = True
+            self.click_grid_region(64, block=False, count=1)
+            self._start_game_starting_loop()
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
@@ -241,7 +268,7 @@ class Controller:
         # Use generic executor to perform the key press
         self._execute_key_press(AFTERBURNER_KEY, hold_seconds=hold_seconds, block=block, action_name='afterburner')
 
-    def _execute_key_press(self, key: str, hold_seconds: float = 2.5, block: bool = True, action_name: str | None = None):
+    def _execute_key_press(self, key: str, hold_seconds: float = 2.5, block: bool = True, action_name: str | None = None, ignore_cancel: bool = False):
         """Generic key press executor used by maneuvers.
 
         Args:
@@ -282,7 +309,7 @@ class Controller:
                 keyboard_module.press(key)
                 start = time.time()
                 while (time.time() - start) < hold_seconds:
-                    if self._mission_cancel.is_set():
+                    if not ignore_cancel and self._mission_cancel.is_set():
                         logger.debug("Controller: %s cancelled", label)
                         break
                     time.sleep(0.05)
@@ -312,9 +339,9 @@ class Controller:
         """Roll right by holding the configured roll-right key."""
         self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_right')
 
-    def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True):
+    def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
-        self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares')
+        self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares', ignore_cancel=ignore_cancel)
 
     def wingsweep(self, hold_seconds: float = 0.5, block: bool = True):
         """Perform a wingsweep maneuver by pressing the configured wingsweep key."""

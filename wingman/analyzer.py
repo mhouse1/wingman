@@ -128,18 +128,21 @@ def _process_incoming_region(incoming_frame):
     }
     
     # Try variants
+    raw_texts = []
     for variant_name, variant_img in variants.items():
         results_incoming = reader.readtext(variant_img, detail=0, paragraph=True)
         extracted_text = " ".join(str(result) for result in results_incoming)
         normalized = " ".join(extracted_text.upper().split()).replace(" ", "")
-        
+        if normalized:
+            raw_texts.append(f"{variant_name}={normalized!r}")
+
         # Check for MING or WARNING (incoming missile text)
         if "MING" in normalized or ("ARNING" in normalized and len(normalized) >= 6):
             ocr_time = time.time() - t_start
-            return (True, ocr_time, variant_name, normalized)
-    
+            return (True, ocr_time, variant_name, normalized, raw_texts)
+
     ocr_time = time.time() - t_start
-    return (False, ocr_time, None, None)
+    return (False, ocr_time, None, None, raw_texts)
 
 
 def _process_click_to_region(click_to_frame):
@@ -720,13 +723,15 @@ class GameStateAnalyzer:
                     self._ocr_cache['timestamp'] = current_time
 
                 # Now wait for incoming — its result is independent of respawn.
-                incoming_detected, incoming_ocr_time, variant_name, incoming_text = incoming_future.result(timeout=120)
+                incoming_detected, incoming_ocr_time, variant_name, incoming_text, incoming_raw = incoming_future.result(timeout=120)
                 t3 = time.time()
 
                 if incoming_detected:
                     logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
                     self._game_end_b = False
                     self._game_lobby = False
+                elif incoming_raw:
+                    logger.debug("Analyzer: No match in incoming region %s — raw OCR: %s", self.incoming_region, ", ".join(incoming_raw))
                 else:
                     logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
 

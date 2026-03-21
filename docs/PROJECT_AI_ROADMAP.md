@@ -1,7 +1,8 @@
 # Wingman: Project Status & AI Evolution Roadmap
 
-**Current Date:** February 21, 2026  
-**Current Phase:** Phase 1 (Game Automation with Limited AI)
+**Current Date:** March 20, 2026
+**Current Version:** v1.5.1 ("Enable full unattended operation")
+**Current Phase:** Phase 1-2 (Automation + Text-Based Perception)
 
 ---
 
@@ -9,21 +10,26 @@
 
 ### Current Architecture
 
-**Wingman is a game automation bot with a single AI component:**
+**Wingman is a game automation bot with OCR-based text perception and full unattended operation:**
 
 ```
 Wingman Bot
-├── Game Automation (95%)
-│   ├── Hotkey Input System (U/Y/X keys)
+├── Game Automation (80%)
+│   ├── Hotkey Input System (U/Y/X/M/P keys)
 │   ├── Mission Execution (J20, Loiter)
 │   ├── Flight Control (nose_up, padlock, fire, flares)
-│   └── Respawn Detection (Rule-based trigger)
-├── AI Component (5%)
-│   └── EasyOCR (Detects "RESPAWN" text in screenshots)
-└── Optimization Layer
-    ├── Frame Caching (5s cooldown)
-    ├── Background Threading (non-blocking analysis)
-    └── Grid Region Extraction (attempted, abandoned)
+│   └── Auto-restart / auto-click / auto-launch logic
+├── AI Component (20%)
+│   └── EasyOCR — 4 detection targets via 8x8 grid regions:
+│       ├── "RESPAWN"           → region 44 (cancel + restart mission)
+│       ├── "INCOMING"          → region 21 (deploy flares)
+│       ├── "CLICK TO CONTINUE" → region 60 (auto-click play button)
+│       └── "GOOD LUCK"         → region 16 (auto-launch mission)
+└── Infrastructure Layer
+    ├── Game State Machine (LOBBY / BATTLE / END / STARTING)
+    ├── Thread Pool (3 parallel OCR workers)
+    ├── Background Threading (non-blocking, zero-copy frames)
+    └── 8x8 Grid Region Extraction (active, used for all detections)
 ```
 
 ### Current Capabilities
@@ -32,67 +38,84 @@ Wingman Bot
 |---------|------|--------|
 | Hotkey Missions (U/Y) | Automation | ✅ Working |
 | Auto-cancel on Respawn | Automation + Rule | ✅ Working |
-| Auto-restart after 5s | Automation + Timer | ✅ Working |
-| Respawn Text Detection | AI (EasyOCR) | ✅ Working |
+| Auto-restart after 4s | Automation + Timer | ✅ Working |
+| Respawn Text Detection | AI (EasyOCR region 44) | ✅ Working |
 | Flight Control Sequences | Automation | ✅ Working |
 | Weapon & Flare Loop | Automation | ✅ Working |
+| Incoming Missile Detection | AI (EasyOCR region 21) | ✅ Working (v1.4+) |
+| Auto-flare on Incoming | Automation + Rule | ✅ Working (v1.4+) |
+| "Click to Continue" Detection | AI (EasyOCR region 60) | ✅ Working |
+| Auto-click Play Button | Automation + Rule | ✅ Working |
+| "Good Luck" Detection | AI (EasyOCR region 16) | ✅ Working |
+| Auto-launch Mission after Game Start | Automation + Rule | ✅ Working |
+| Game State Machine (4 states) | Architecture | ✅ Working (v1.4.3) |
+| Full Unattended Loop (M key) | Automation | ✅ Working (v1.5.1) |
 
 ### What Makes It NOT AI-Driven
 
 1. **Hardcoded mission sequences:** Nose up 2s → Padlock → Fire → Flares (no learning)
 2. **Rule-based respawn logic:** `if "RESPAWN" detected → cancel mission` (simple condition)
 3. **No adaptation:** Bot runs same sequence every time, doesn't learn from outcomes
-4. **No perception beyond text:** Can't see enemy distance, health, ammo, radar
-5. **No autonomous decisions:** User triggers missions with hotkeys; bot executes script
+4. **No perception beyond text:** Can't see enemy distance, health, ammo, or radar — but does detect 4 distinct game UI text states via OCR
+5. **Limited autonomous decisions:** Once started with M or U/Y, bot runs fully unattended — but initial trigger still requires user input
 6. **Static strategy:** Same approach to every enemy/scenario (no variation)
 
 ### Current Flow
 
 ```
-User presses U (Start J20)
+User presses M (Unattended mode) or U (Manual J20 start)
+    ↓
+[M path] Controller clicks play button → GAME_STARTING state
+    ↓ OCR scans region 16 for "GOOD LUCK"
+    ↓ Wait 10s after detection → auto-launch mission_j20
     ↓
 Controller executes mission_j20()
     ↓
 Sequence: nose_up → padlock → fire → flares → roll (loop)
-    ↓
-Analyzer.analyze_frame() checks for "RESPAWN"
-    ↓
-If "RESPAWN" detected:
-    - Cancel missions
-    - Wait 5s
-    - Restart last mission
-    ↓
-If no respawn: Continue mission loop
+    ↓ (parallel background OCR threads)
+    ├── Region 21: "INCOMING" detected?
+    │       → Deploy flares immediately (non-blocking)
+    ├── Region 44: "RESPAWN" detected?
+    │       → Cancel mission → Wait 4s → Restart last mission
+    └── Region 60: "CLICK TO" detected? (GAME_END_B state)
+            → Auto-click play button → GAME_LOBBY state
+                    → Back to M path (fully unattended loop)
 ```
 
 ---
 
 ## Part 2: Evolution to AI-Driven System
 
-### Phase 1: Current State ✅
-**"Game Automation Bot with Basic AI"**
+### Phase 1-2: Current State ✅
+**"Game Automation Bot with Text-Based Perception"**
 
-**What you have:**
-- ✅ Full respawn detection (text-based)
-- ✅ Mission hotkey system
-- ✅ Auto-restart on respawn
-- ✅ Performance optimized (threading + caching)
+**What is working:**
+- ✅ Full respawn detection + auto-restart (text-based)
+- ✅ Incoming missile detection + auto-flare (text-based)
+- ✅ Game state machine (LOBBY / BATTLE / END / STARTING)
+- ✅ Full unattended loop — auto-click, auto-launch, auto-restart
+- ✅ Mission hotkey system (U/Y/M)
+- ✅ Threading-based parallel OCR (3 workers, non-blocking)
 
 **Time to implement:** Done (estimated 40 hours of dev)
 
 **What's missing for "true AI":**
 - ❌ No learning from experience
 - ❌ No adaptive strategy
-- ❌ No perception of game state beyond text
+- ❌ No perception beyond text (health, ammo, enemy distance, radar)
 
 ---
 
 ### Phase 2: Computer Vision Perception 📊
 **"AI that sees more of the game"**
 
-**Goal:** Detect game state beyond just "RESPAWN" text
+**Goal:** Detect game state beyond text — health, ammo, enemy proximity
 
-**Implementation (est. 20-40 hours):**
+**Already implemented (partial Phase 2):**
+- ✅ Incoming missile text detection → auto-flare (region 21)
+- ✅ Game state gating → OCR disabled in LOBBY to save CPU
+
+**Remaining Phase 2 work (est. 20-40 hours):**
 
 1. **Health Detection**
    - Train lightweight model on health bar screenshots
@@ -107,11 +130,10 @@ If no respawn: Continue mission loop
 3. **Ammo Status Recognition**
    - OCR ammo counter
    - Detect: Out of ammo, low ammo, full
-   - Use: Trigger RTB (return to base) when low
+   - Use: Trigger resupply mode when low/empty
 
 4. **UI State Detection**
-   - Detect missile lock (beeping)
-   - Lock warning indicators
+   - Detect missile lock indicator (visual, not audio-based)
    - Throttle position
    - Use: Advanced evasion tactics
 
@@ -362,9 +384,9 @@ class RLAgent:
 
 | Phase | Effort | Gameplay Benefit | AI Maturity |
 |-------|--------|-----------------|-------------|
-| 1 (Current) | ✅ Done | Basic automation | 5% |
-| 2 (Perception) | 20-40h | Better tactics | 30% |
-| 3 (Behavior Trees) | 30-60h | Adapts to situations | 50% |
+| 1-2 (Current) | ✅ Done | Full unattended automation + text perception | 20% |
+| 2 remainder (Perception) | 20-40h | Health/ammo/distance awareness | 35% |
+| 3 (Behavior Trees) | 30-60h | Adapts to situations | 55% |
 | 4 (RL) | 60-120h | Learns from play | 80% |
 | 5 (DRL + Vision) | 120-200h | Expert autonomy | 95% |
 | 6 (Multi-Agent) | 100-150h | Fleet tactics | 99% |
@@ -379,7 +401,8 @@ class RLAgent:
 ### Practical Recommendation
 
 **If goal is gameplay improvement:**
-- Do Phase 2 (perception) → Time: 20-40h, Impact: High
+- **First: Enable GPU** → Zero code changes, immediate 10-15x OCR speedup (see Bottlenecks)
+- Complete Phase 2 remainder (health/ammo/distance) → Time: 20-40h, Impact: High
 - Add Phase 3 (behavior trees) → Time: 30-60h, Impact: Medium-High
 - **Skip Phase 4-6 unless researching ML**
 
@@ -393,9 +416,22 @@ class RLAgent:
 ## Part 4: Current Bottlenecks & Next Steps
 
 ### Hardware Bottlenecks
-- **Current:** CPU-only OCR (2.6s per 5s)
-- **Solution 1:** Enable GPU (10-50x faster) → Immediate 20-40h speedup
-- **Solution 2:** Reduce resolution → 2-3x faster, minimal quality loss
+
+**Measured OCR performance (v1.5.1, CPU-only, from live session log 2026-03-20):**
+
+| Metric | Respawn OCR | Incoming OCR | Total (wall clock) |
+|--------|------------|--------------|-------------------|
+| Average | 2.63s | 3.07s | 3.25s |
+| Best | 1.63s | 1.82s | 1.85s |
+| Worst | 3.78s | 4.60s | 4.60s |
+
+Respawn and incoming OCR run in parallel (3 threads), so wall clock = max(respawn, incoming).
+Extract and Submit overhead = 0.00s — all cost is EasyOCR inference.
+High variance (1.85–4.60s) reflects CPU thread contention when both workers are active simultaneously.
+
+- **Current:** CPU-only OCR averaging **3.25s per cycle**, worst case **4.6s**
+- **Solution 1:** Enable GPU → expected <200ms per cycle (10-15x improvement, no code changes required — GPU path already implemented in v1.5.0, just needs CUDA available)
+- **Solution 2:** Reduce capture resolution → 2-3x faster, minimal detection quality loss
 
 ### Data Collection Bottleneck (Phase 2+)
 - **Current:** No labeled dataset for health, ammo, distance detection
@@ -411,11 +447,12 @@ class RLAgent:
 
 ## Summary: Wingman's AI Journey
 
-### Today (Phase 1)
+### Today (Phase 1-2)
 ```
-User: "Press U for J20 mission"
-Bot: Execute hardcoded sequence, detect respawn text, restart
-Result: Repeatable automation with text detection
+User: "Press M once"
+Bot: Clicks play → waits for Good Luck → launches J20 → deploys flares on INCOMING
+     → cancels and restarts on RESPAWN → clicks play again on match end → loops forever
+Result: Full unattended operation across multiple matches, OCR-driven text perception
 ```
 
 ### Phase 2 (Perception)
@@ -446,10 +483,12 @@ Result: Expert-level unsupervised learning from raw game data
 
 ---
 
-## Recommendation
+## Roadmap
 
-**Current Status:** Excellent foundation for automation. Ready for Phase 2 if desired.
+**Current Status:** Phase 1-2 complete. Full unattended operation working. OCR running CPU-only at 3.25s average / 4.6s worst case.
 
-**Next Priority:** Phase 2 (Perception) would give the most practical gameplay improvement with reasonable effort (20-40 hours, high user-visible impact).
+**Highest-impact next step (zero code changes):** Enable GPU for EasyOCR — the GPU path is already implemented in v1.5.0, it just needs CUDA available. Expected improvement: 3.25s → <200ms per cycle.
+
+**Next feature priority:** Phase 2 remainder (health/ammo/distance detection) — 20-40h, high user-visible impact.
 
 **Save Phase 4-6 for:** Research projects, academic papers, or technology exploration—they're overkill for a game bot but valuable for ML portfolio.
