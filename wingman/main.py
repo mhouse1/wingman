@@ -79,8 +79,11 @@ def main():
             unattended_active.set()
             logger.info("Unattended mode activated by M key press")
 
+    controls_cfg = cfg.get("controls", {})
+    ready_button_region = controls_cfg.get("ready_button_region", 64)
+
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, ready_button_region=ready_button_region)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -163,36 +166,17 @@ def main():
                             time.sleep(0.1)
                         else:
                             logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
-                        restart_not_before = time.time() + restart_delay_after_unlock
-                        logger.info("Mission lock released (or release pending); delaying restart by %.1f seconds", restart_delay_after_unlock)
                         respawn_state = RespawnState.RESPAWNING
+                        logger.info("Respawn screen active — waiting for it to clear before restart")
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
-
-                # Try to restart mission while respawn screen is showing (after delay)
-                if time.time() - last_restart_attempt > restart_retry_interval:
-                    now = time.time()
-                    if ctrl.is_mission_running():
-                        last_restart_attempt = now
-                        time.sleep(1)
-                        continue
-                    if now < restart_not_before:
-                        time.sleep(1)
-                        continue
-                    logger.info("Attempting to restart mission after respawn...")
-                    if ctrl.restart_last_mission():
-                        logger.info("Restarted last mission after respawn")
-                        respawn_state = RespawnState.IDLE
-                    else:
-                        logger.info("Mission restart attempt failed, will retry")
-                    last_restart_attempt = time.time()
-
                 time.sleep(1)
                 continue
 
-            # Gameplay resumed after respawn
+            # Gameplay resumed after respawn — start delay timer from this point
             if respawn_state == RespawnState.RESPAWNING:
-                logger.info("\033[92m✓ Gameplay resumed - ready for missions\033[0m")
+                restart_not_before = time.time() + restart_delay_after_unlock
+                logger.info("\033[92m✓ Gameplay resumed - scheduling restart in %.1fs\033[0m", restart_delay_after_unlock)
                 respawn_state = RespawnState.PENDING_RESTART
 
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)

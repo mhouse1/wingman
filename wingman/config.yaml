@@ -93,6 +93,8 @@ controls:
   fire_button: left  # 'left' for left-click; can be mapped to keys later
   # How long to hold the fire button (seconds). Set to 0 for instant click.
   fire_hold: 2.0
+  # Grid region of the "Ready/Play" button in the game lobby (bottom-right on an 8x8 grid)
+  ready_button_region: 64
 
 debug:
   show_window: false

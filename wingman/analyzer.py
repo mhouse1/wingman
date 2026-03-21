@@ -176,6 +176,39 @@ def _process_click_to_region(click_to_frame):
     return (False, ocr_time, None)
 
 
+def _process_event_refresh_region(frame):
+    """Worker function to detect 'Event refresh in progress' popup text in a region.
+
+    Scans for the substring 'AGAIN' (from 'try again so...') which appears in the
+    'Event refresh in progress' popup that blocks game entry.
+
+    Args:
+        frame: numpy array (BGR) — the extracted grid region
+
+    Returns:
+        tuple: (detected: bool, ocr_time: float, text_found: str or None)
+    """
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+
+    t_start = time.time()
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "AGAINSO" in text or "AGAIN" in text:
+            ocr_time = time.time() - t_start
+            return (True, ocr_time, text)
+
+    ocr_time = time.time() - t_start
+    return (False, ocr_time, None)
+
+
 def _process_good_luck_region(frame):
     """
     Worker function to detect 'Good Luck' text in a region in a thread pool thread.
@@ -858,6 +891,37 @@ class GameStateAnalyzer:
             return detected
         except Exception as e:
             logger.warning("Analyzer: Good Luck scan failed: %s", e)
+            return False
+
+    def scan_region_for_event_refresh(self, frame, region_num: int = 30) -> bool:
+        """Synchronously scan a region for 'Event refresh in progress' popup text.
+
+        Detects the popup by looking for 'again so' / 'AGAIN' in the OCR output,
+        which appears in the 'try again so...' message of the popup.
+
+        Args:
+            frame: Full BGR frame from screen capture.
+            region_num: Grid region to scan (default 30).
+
+        Returns:
+            True if the event refresh popup is detected.
+        """
+        executor = self.ocr_executor
+        if executor is None:
+            logger.warning("Analyzer: OCR executor not available for event refresh scan")
+            return False
+        try:
+            region_frame = self.get_region(frame, region_num)
+            detected, _, text = executor.submit(
+                _process_event_refresh_region, region_frame
+            ).result(timeout=30)
+            if detected:
+                logger.info("Analyzer: 'Event refresh' popup detected in region %d (text='%s')", region_num, text)
+            else:
+                logger.debug("Analyzer: Event refresh popup not found in region %d", region_num)
+            return detected
+        except Exception as e:
+            logger.warning("Analyzer: Event refresh scan failed: %s", e)
             return False
 
     def _crop_subregion(self, frame, grid_rows: int, grid_cols: int, subregion_num: int):

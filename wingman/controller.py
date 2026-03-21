@@ -51,7 +51,7 @@ EMOTE10 # Oops!
 """
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, ready_button_region: int = 64):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -66,6 +66,7 @@ class Controller:
         self._analyzer = analyzer
         self._capture = capture
         self._on_auto_mission_key = on_auto_mission_key
+        self._ready_button_region = ready_button_region
         
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
@@ -236,7 +237,7 @@ class Controller:
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
             self._analyzer._game_starting = True
-            self.click_grid_region(64, block=False, count=1)
+            self.click_grid_region(self._ready_button_region, block=False, count=1)
             self._start_game_starting_loop()
 
         threading.Thread(target=_run, daemon=True).start()
@@ -725,16 +726,17 @@ class Controller:
                         time.sleep(0.5)
 
                 if count > 1:
-                    # Final click on region 64 (lobby/continue button)
-                    row64 = (64 - 1) // grid_cols
-                    col64 = (64 - 1) % grid_cols
-                    x64 = int(abs_left + (col64 + 0.5) * cell_w)
-                    y64 = int(abs_top + (row64 + 0.5) * cell_h)
-                    logger.info("\033[93m📋 Clicking grid region 64 at (%d, %d)\033[0m", x64, y64)
-                    _raw_click(x64, y64)
-                if self._analyzer is not None:
-                    self._analyzer._game_lobby = True
-                    logger.info("\033[93m📋 Region 64 clicked → GAME_LOBBY\033[0m")
+                    # Final click on ready button (lobby/continue button)
+                    rbn = self._ready_button_region
+                    row_rb = (rbn - 1) // grid_cols
+                    col_rb = (rbn - 1) % grid_cols
+                    x_rb = int(abs_left + (col_rb + 0.5) * cell_w)
+                    y_rb = int(abs_top + (row_rb + 0.5) * cell_h)
+                    logger.info("\033[93m📋 Clicking ready button region %d at (%d, %d)\033[0m", rbn, x_rb, y_rb)
+                    _raw_click(x_rb, y_rb)
+                    if self._analyzer is not None:
+                        self._analyzer._game_lobby = True
+                        logger.info("\033[93m📋 Ready button (region %d) clicked → GAME_LOBBY\033[0m", self._ready_button_region)
             except Exception:
                 logger.exception("Controller: click_grid_region failed")
 
@@ -791,6 +793,42 @@ class Controller:
             finally:
                 ocr_running.clear()
 
+        def _click_corner_28_29_36_37():
+            """Click the screen corner where grid regions 28, 29, 36, 37 meet.
+
+            On an 8x8 grid the four regions share the corner at column-boundary 4,
+            row-boundary 4 (0-indexed), i.e. exactly half-way across and half-way
+            down the capture area.  This is used to dismiss the 'Event refresh in
+            progress' popup which appears there.
+            """
+            try:
+                if self._capture is None:
+                    logger.error("Controller: _click_corner_28_29_36_37 - no capture reference")
+                    return
+                with mss() as sct:
+                    monitors = sct.monitors
+                    monitor_index = self._capture.monitor_index
+                    if monitor_index < 1 or monitor_index >= len(monitors):
+                        logger.error("Controller: _click_corner_28_29_36_37 - monitor index %d out of range", monitor_index)
+                        return
+                    mon = monitors[monitor_index]
+                    region = self._capture.region
+                    abs_left = mon["left"] + region[0]
+                    abs_top = mon["top"] + region[1]
+                    cap_w = region[2]
+                    cap_h = region[3]
+                # Corner at col-boundary 4, row-boundary 4 of an 8×8 grid
+                abs_x = int(abs_left + 4 * cap_w / 8)
+                abs_y = int(abs_top + 4 * cap_h / 8)
+                logger.info("\033[93m📋 Clicking event-refresh corner (28/29/36/37) at (%d, %d)\033[0m", abs_x, abs_y)
+                ctypes.windll.user32.SetCursorPos(abs_x, abs_y)
+                time.sleep(0.05)
+                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+                time.sleep(0.05)
+                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+            except Exception:
+                logger.exception("Controller: _click_corner_28_29_36_37 failed")
+
         def _loop():
             logger.info("Controller: game_starting loop started - pressing J20 key every 5s until 'Good Luck' detected")
             loop_start = time.time()
@@ -801,6 +839,26 @@ class Controller:
                     if keyboard_module:
                         keyboard_module.press_and_release(MISSION_J20_KEY)
                         logger.info("Controller: game_starting - pressed J20 key")
+
+                    # Check region 30 for 'Event refresh in progress' popup
+                    if self._capture is not None and self._analyzer is not None:
+                        try:
+                            with mss() as sct:
+                                s = sct.grab(self._capture.get_monitor_rect())
+                                scan_frame = np.array(s)[:, :, :3]
+                            if self._analyzer.scan_region_for_event_refresh(scan_frame, region_num=30):
+                                logger.warning(
+                                    "\033[93mController: 'Event refresh in progress' popup detected - "
+                                    "clicking corner to dismiss, retrying in 1s\033[0m"
+                                )
+                                _click_corner_28_29_36_37()
+                                time.sleep(1.0)
+                                # Re-click region 64 to attempt game entry again
+                                logger.info("Controller: re-clicking region 64 to retry game entry after event refresh dismiss")
+                                self.click_grid_region(self._ready_button_region, count=1, block=True)
+                                continue
+                        except Exception:
+                            logger.exception("Controller: game_starting event-refresh check failed")
 
                     # Start async OCR scan if one isn't already running
                     if self._capture is not None and not ocr_running.is_set():
