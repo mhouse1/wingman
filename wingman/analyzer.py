@@ -287,6 +287,8 @@ class GameStateAnalyzer:
         self.use_ocr = respawn_cfg.get("use_ocr", True)
         self.respawn_region = respawn_cfg.get("region", 44)  # Region 44 for RESPA in 8x8 mapping
         self.incoming_region = respawn_cfg.get("incoming_region", 21)  # Region 21 for MING in 8x8 mapping
+        self.incoming_subgrid_size = max(1, respawn_cfg.get("incoming_subgrid_size", 1))
+        self.incoming_subregion = max(1, respawn_cfg.get("incoming_subregion", 1))
         self.click_to_region = respawn_cfg.get("click_to_region", 60)  # Region 60 for "Click to Continue"
 
         # Validate region numbers against the configured grid at startup
@@ -700,6 +702,8 @@ class GameStateAnalyzer:
                 # Extract respawn and incoming regions (click_to has its own thread)
                 respawn_frame = self.get_region(full_frame, self.respawn_region)
                 incoming_frame = self.get_region(full_frame, self.incoming_region)
+                if self.incoming_subgrid_size > 1:
+                    incoming_frame = self._crop_subregion(incoming_frame, self.incoming_subgrid_size, self.incoming_subregion)
                 t1 = time.time()
 
                 # Submit both tasks to thread pool for parallel processing
@@ -850,6 +854,31 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.warning("Analyzer: Good Luck scan failed: %s", e)
             return False
+
+    def _crop_subregion(self, frame, grid_size: int, subregion_num: int):
+        """Crop a sub-region from frame using a local NxN grid.
+
+        Args:
+            frame: numpy array of the parent region
+            grid_size: number of rows/cols in the sub-grid
+            subregion_num: 1-based cell index (row-major, left-to-right top-to-bottom)
+
+        Returns:
+            numpy array: cropped sub-region, or original frame if params are invalid
+        """
+        total = grid_size * grid_size
+        if grid_size < 2 or not (1 <= subregion_num <= total):
+            return frame
+        h, w = frame.shape[:2]
+        cell_h = h // grid_size
+        cell_w = w // grid_size
+        row = (subregion_num - 1) // grid_size
+        col = (subregion_num - 1) % grid_size
+        y1 = row * cell_h
+        y2 = y1 + cell_h
+        x1 = col * cell_w
+        x2 = x1 + cell_w
+        return frame[y1:y2, x1:x2]
 
     def get_region(self, frame, region_num):
         """

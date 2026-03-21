@@ -1,8 +1,8 @@
 # ADR 015: Game State Machine
 
-**Status:** Accepted
-**Date:** 2026-03-16
-**Version:** 1.4.3 (more automated control)
+| Status   | Date       | Wingman Version                |
+|----------|------------|--------------------------------|
+| Accepted | 2026-03-16 | 1.4.3 (more automated control) |
 
 ## Context
 

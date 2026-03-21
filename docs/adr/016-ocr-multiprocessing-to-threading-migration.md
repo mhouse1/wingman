@@ -1,10 +1,8 @@
 # ADR 016 — Migrate OCR Workers from Multiprocessing to Threading
 
-## Status
-
-Implemented
-**Date:** 2026-03-19
-**Version:** 1.4.6
+| Status      | Date       | Wingman Version |
+|-------------|------------|-----------------|
+| Implemented | 2026-03-19 | 1.4.6           |
 
 ## Context
 

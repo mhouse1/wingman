@@ -45,6 +45,11 @@ respawn_detection:
   
   # Also scan region 21 for INCOMING missile warning ("MING" visible)
   incoming_region: 21
+  # Sub-divide incoming_region into an NxN sub-grid and only scan one cell.
+  # Set incoming_subgrid_size: 1 to disable (scan the full region).
+  # Region 1 = top-left cell (row-major). Use the sub-grid cell that contains the warning text.
+  incoming_subgrid_size: 3
+  incoming_subregion: 1
 
   # Scan region 60 for "Click to Continue" prompt (lower priority - informational only)
   click_to_region: 60

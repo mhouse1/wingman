@@ -9,8 +9,8 @@ try:
 except Exception:
     keyboard_module = None
 
-WINGMAN_VERSION = "1.5.1"
-WINGMAN_VERSION_DETAILS = "Enable full unattended operation"
+WINGMAN_VERSION = "1.5.2"
+WINGMAN_VERSION_DETAILS = "Sub region optimization for OCR"
 # Key controls (change these to remap start/pause and cancel)
 EXIT_KEY = 'backspace'
 
