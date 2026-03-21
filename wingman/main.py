@@ -4,15 +4,9 @@ import time
 import logging
 import threading
 from enum import Enum, auto
-try:
-    import keyboard as keyboard_module
-except Exception:
-    keyboard_module = None
 
 WINGMAN_VERSION = "1.5.2"
 WINGMAN_VERSION_DETAILS = "Sub region optimization for OCR"
-# Key controls (change these to remap start/pause and cancel)
-EXIT_KEY = 'backspace'
 
 from .capture import Capture
 from .controller import Controller
@@ -35,7 +29,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="wingman/config.yaml")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
-    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s")
@@ -53,8 +46,6 @@ def main():
     )
     monitor_index = cfg["region"].get("monitor", 1)
 
-    running = threading.Event()
-    running.set()  # start running immediately with analyzer active
     exit_requested = threading.Event()
 
     # Initialize main components
@@ -125,10 +116,6 @@ def main():
             if exit_requested.is_set():
                 logger.info("Exit requested, shutting down")
                 break
-            if not running.is_set():
-                time.sleep(0.05)
-                continue
-
             # Capture and analyze frame
             frame = cap.get_frame()
             game_state = analyzer.analyze_frame(frame)
@@ -167,13 +154,27 @@ def main():
                         else:
                             logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
                         respawn_state = RespawnState.RESPAWNING
-                        logger.info("Respawn screen active — waiting for it to clear before restart")
+                        restart_not_before = time.time() + restart_delay_after_unlock
+                        logger.info("Respawn screen active — will restart %.1fs after screen clears (or after %.1fs if stuck)",
+                                    restart_delay_after_unlock, restart_delay_after_unlock)
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
+
+                # Attempt restart while respawn screen is showing (fallback if OCR never clears).
+                # Skips if mission still running or delay not yet elapsed.
+                if (not ctrl.is_mission_running()
+                        and time.time() >= restart_not_before
+                        and time.time() - last_restart_attempt > restart_retry_interval):
+                    logger.info("Attempting to restart mission after respawn...")
+                    if ctrl.restart_last_mission():
+                        logger.info("Restarted last mission after respawn")
+                        respawn_state = RespawnState.IDLE
+                    last_restart_attempt = time.time()
+
                 time.sleep(1)
                 continue
 
-            # Gameplay resumed after respawn — start delay timer from this point
+            # Gameplay resumed after respawn — reset delay timer from this point
             if respawn_state == RespawnState.RESPAWNING:
                 restart_not_before = time.time() + restart_delay_after_unlock
                 logger.info("\033[92m✓ Gameplay resumed - scheduling restart in %.1fs\033[0m", restart_delay_after_unlock)
