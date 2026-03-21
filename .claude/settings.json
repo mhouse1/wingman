@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ls c:/dev-tools/github/wingman/ --ignore=.venv*)"
+      "Bash(ls c:/dev-tools/github/wingman/ --ignore=.venv*)",
+      "Bash(make test:*)"
     ]
   }
 }

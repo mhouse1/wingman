@@ -45,7 +45,6 @@ respawn_detection:
   # Sub-divide respawn region into a rows×cols sub-grid and only scan one cell.
   # Set both to 1 to disable (scan the full region).
   # 2x1 grid: region 2 = bottom half where full "RESPA" text appears.
-  # "RESPA" spans both right cells of a 2x3 split — use 2x1 to keep it in one crop.
   respawn_subgrid_rows: 2
   respawn_subgrid_cols: 1
   respawn_subregion: 2
