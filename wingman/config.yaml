@@ -79,6 +79,9 @@ mission:
   restart_delay_after_unlock: 4.0
   # Interval (seconds) between restart attempts during respawn
   restart_retry_interval: 2.0
+  # Fallback timeout (seconds) to restart mission if OCR never clears the respawn screen.
+  # Should be well above the typical respawn screen duration (~8-10s) to avoid restarting early.
+  respawn_fallback_timeout: 20.0
   # Default weapon loop firing interval (seconds between shots)
   weapon_loop_interval: 0.5
 

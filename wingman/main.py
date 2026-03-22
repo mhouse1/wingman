@@ -63,6 +63,7 @@ def main():
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
+    respawn_fallback_timeout = mission_cfg.get("respawn_fallback_timeout", 20.0)
 
     def _on_auto_mission_key():
         """Called when AUTO_MISSION_KEY is pressed. Activates unattended mode for the session."""
@@ -156,9 +157,9 @@ def main():
                         else:
                             logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
                         respawn_state = RespawnState.RESPAWNING
-                        restart_not_before = time.time() + restart_delay_after_unlock
-                        logger.info("Respawn screen active — will restart %.1fs after screen clears (or after %.1fs if stuck)",
-                                    restart_delay_after_unlock, restart_delay_after_unlock)
+                        restart_not_before = time.time() + respawn_fallback_timeout
+                        logger.info("Respawn screen active — will restart %.1fs after screen clears (stuck OCR fallback in %.1fs)",
+                                    restart_delay_after_unlock, respawn_fallback_timeout)
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
