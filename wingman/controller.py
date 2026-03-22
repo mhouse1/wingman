@@ -209,6 +209,7 @@ class Controller:
                 def auto_mission_key_pressed(_e):
                     if self._on_auto_mission_key is not None:
                         self._on_auto_mission_key()
+                    self.cancel_mission()
                     self.start_auto_mission(force=True)
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click play button in GAME_LOBBY", AUTO_MISSION_KEY)
@@ -236,6 +237,8 @@ class Controller:
             time.sleep(3)
             if self._analyzer is None:
                 return
+            logger.info("Controller: start_auto_mission - cancelling any active mission before entering GAME_STARTING")
+            self.cancel_mission()
             logger.info("Controller: start_auto_mission - clicking play button and entering GAME_STARTING")
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False

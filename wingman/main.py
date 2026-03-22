@@ -127,9 +127,11 @@ def main():
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
                 last_game_state = current_game_state
-                if current_game_state == GameState.GAME_LOBBY and unattended_active.is_set():
-                    logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
-                    ctrl.start_auto_mission()
+                if current_game_state == GameState.GAME_LOBBY:
+                    ctrl.cancel_mission()
+                    if unattended_active.is_set():
+                        logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
+                        ctrl.start_auto_mission()
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             # Higher priority than respawn — must run before the respawn continue.
