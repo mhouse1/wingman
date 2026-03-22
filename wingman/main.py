@@ -9,7 +9,7 @@ WINGMAN_VERSION = "1.5.2"
 WINGMAN_VERSION_DETAILS = "Sub region optimization for OCR"
 
 from .capture import Capture
-from .controller import Controller
+from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY
 from .analyzer import GameStateAnalyzer, GameState
 
 
@@ -137,7 +137,7 @@ def main():
 
             # Detect respawn
             if game_state.get('is_respawning'):
-                if respawn_state == RespawnState.IDLE:
+                if respawn_state in (RespawnState.IDLE, RespawnState.PENDING_RESTART):
                     if time.time() < respawn_cooldown_until:
                         logger.debug("RESPAWN seen but suppressed by cooldown (%.1fs remaining)",
                                      respawn_cooldown_until - time.time())
@@ -161,8 +161,11 @@ def main():
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
                 # Attempt restart while respawn screen is showing (fallback if OCR never clears).
-                # Skips if mission still running or delay not yet elapsed.
-                if (not ctrl.is_mission_running()
+                # Skips if mission still running, delay not yet elapsed, or auto-restart disabled by manual End press.
+                if not ctrl._auto_respawn_restart:
+                    logger.debug("Auto-respawn restart disabled ('%s' was pressed) — press '%s' to re-enable",
+                                 CANCEL_MISSION_KEY, MISSION_J20_KEY)
+                elif (not ctrl.is_mission_running()
                         and time.time() >= restart_not_before
                         and time.time() - last_restart_attempt > restart_retry_interval):
                     logger.info("Attempting to restart mission after respawn...")
@@ -181,7 +184,8 @@ def main():
                 respawn_state = RespawnState.PENDING_RESTART
 
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)
-            if (respawn_state == RespawnState.PENDING_RESTART
+            if (ctrl._auto_respawn_restart
+                    and respawn_state == RespawnState.PENDING_RESTART
                     and time.time() >= restart_not_before
                     and time.time() - last_restart_attempt > restart_retry_interval):
                 if not ctrl.is_mission_running():
