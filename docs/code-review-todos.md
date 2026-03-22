@@ -201,7 +201,7 @@ This also documents the Windows dependency explicitly for future ADB migration (
 
 | # | Area | Priority | Status |
 |---|------|----------|--------|
-| 1.1 | Dead code: `calibrate_respawn_detection` uninitialised attrs | P1 | Open |
+| 1.1 | Dead code: `calibrate_respawn_detection` uninitialised attrs | P1 | Resolved |
 | 1.2 | Click-to thread never joined on shutdown | P1 | Open |
 | 1.3 | `ThreadPoolExecutor` lifecycle not guaranteed | P1 | Open |
 | 2.1 | Hotkey handler timeout guard missing | P2 | Open |

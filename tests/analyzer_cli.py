@@ -96,7 +96,7 @@ def capture_and_test_with_visualization():
     os._exit(0)
 
 
-def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = False):
+def test_respawn_detection(image_path: str = "RESPAWN.png"):
     print(f"Loading config and image: {image_path}")
     analyzer = GameStateAnalyzer(load_config())
     analyzer._game_lobby = False  # CLI tests static screenshots; force GAME_BATTLE
@@ -113,33 +113,6 @@ def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = Fa
 
     print(f"Image loaded: {frame.shape[1]}x{frame.shape[0]} pixels")
     print("-" * 60)
-
-    if calibrate:
-        print("Running calibration mode...")
-        print("This will show HSV masks and detection statistics")
-        print("Press any key to close windows\n")
-
-        stats = analyzer.calibrate_respawn_detection(frame)
-
-        print("\nCalibration Results:")
-        print("  Text Detection:")
-        print(f"    Pixels detected: {stats['text_pixels']}")
-        print(
-            f"    Ratio: {stats['text_ratio']:.6f} "
-            f"(threshold: {stats['text_threshold']:.6f})"
-        )
-        print(f"    Status: {'[OK] DETECTED' if stats['text_detected'] else '[FAIL] NOT DETECTED'}")
-        print("\n  Progress Bar Detection:")
-        print(f"    Pixels detected: {stats['bar_pixels']}")
-        print(
-            f"    Ratio: {stats['bar_ratio']:.6f} "
-            f"(threshold: {stats['bar_threshold']:.6f})"
-        )
-        print(f"    Status: {'[OK] DETECTED' if stats['bar_detected'] else '[FAIL] NOT DETECTED'}")
-        # Force exit to avoid hanging on EasyOCR threads
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os._exit(0)
 
     print("Analyzing frame...")
     state = analyzer.analyze_frame(frame)
@@ -162,8 +135,7 @@ def test_respawn_detection(image_path: str = "RESPAWN.png", calibrate: bool = Fa
         print("[OK] RESPAWN SCREEN DETECTED!")
     else:
         print("[FAIL] Respawn screen NOT detected")
-        print("\nTry running with --calibrate flag to debug:")
-        print("  python tests/analyzer_cli.py RESPAWN.png --calibrate")
+        print("\nTry running with --grid flag to visualize detection regions:")
     print("=" * 60)    
     # Force exit to avoid hanging on EasyOCR threads
     sys.stdout.flush()
@@ -360,7 +332,6 @@ def draw_subgrid_overlay(image_path: str):
 def main():
     parser = argparse.ArgumentParser(description="Test GameStateAnalyzer")
     parser.add_argument("image", nargs="?", default="RESPAWN.png", help="Path to screenshot")
-    parser.add_argument("--calibrate", action="store_true", help="Run calibration mode")
     parser.add_argument("--multiple", action="store_true", help="Test multiple screenshots")
     parser.add_argument("--grid", action="store_true", help="Run grid visualization")
     parser.add_argument("--capture", action="store_true", help="Capture screenshot then analyze")
@@ -379,7 +350,7 @@ def main():
     elif args.subgrid:
         draw_subgrid_overlay(args.image)
     else:
-        test_respawn_detection(args.image, args.calibrate)
+        test_respawn_detection(args.image)
 
 
 if __name__ == "__main__":
