@@ -98,6 +98,10 @@ controls:
   fire_hold: 2.0
   # Grid region of the "Ready/Play" button in the game lobby (bottom-right on an 8x8 grid)
   ready_button_region: 64
+  # Grid region where "Good Luck" text appears at match start
+  good_luck_region: 16
+  # Grid region where "Event refresh in progress" popup appears
+  event_refresh_region: 30
 
 debug:
   show_window: false

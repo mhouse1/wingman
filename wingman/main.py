@@ -5,11 +5,11 @@ import logging
 import threading
 from enum import Enum, auto
 
-WINGMAN_VERSION = "1.5.2"
-WINGMAN_VERSION_DETAILS = "Sub region optimization for OCR"
+WINGMAN_VERSION = "1.5.3"
+WINGMAN_VERSION_DETAILS = "Resolve some tech debt before moving onto new features"
 
 from .capture import Capture
-from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY
+from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE
 from .analyzer import GameStateAnalyzer, GameState
 
 
@@ -73,9 +73,11 @@ def main():
 
     controls_cfg = cfg.get("controls", {})
     ready_button_region = controls_cfg.get("ready_button_region", 64)
+    good_luck_region = controls_cfg.get("good_luck_region", 16)
+    event_refresh_region = controls_cfg.get("event_refresh_region", 30)
 
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, ready_button_region=ready_button_region)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, ready_button_region=ready_button_region, good_luck_region=good_luck_region, event_refresh_region=event_refresh_region)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -212,7 +214,7 @@ def main():
                 logger.info("\033[93m📋 CLICK TO CONTINUE detected in region %d\033[0m", analyzer.click_to_region)
                 last_click_to_alert_ts = click_to_ts
                 ctrl.cancel_mission()
-                ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False)
+                ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False, region_name=REGION_CLICK_TO_CONTINUE)
 
             # Enforce configurable loop interval
             elapsed = time.time() - loop_start

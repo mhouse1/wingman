@@ -50,8 +50,16 @@ EMOTE9 # Good Game!
 EMOTE10 # Oops!
 """
 
+# Region name constants — used as log labels in click_grid_region and elsewhere.
+# Defining them as constants means the string is written once; a rename is a
+# single-line change here rather than a grep-and-replace across the codebase.
+REGION_GOOD_LUCK         = "good_luck"
+REGION_EVENT_REFRESH     = "event_refresh"
+REGION_READY_BUTTON      = "ready_button"
+REGION_CLICK_TO_CONTINUE = "click_to_continue"
+
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, ready_button_region: int = 64):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, ready_button_region: int = 64, good_luck_region: int = 16, event_refresh_region: int = 30):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -67,6 +75,8 @@ class Controller:
         self._capture = capture
         self._on_auto_mission_key = on_auto_mission_key
         self._ready_button_region = ready_button_region
+        self._good_luck_region = good_luck_region
+        self._event_refresh_region = event_refresh_region
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         
         # Padlock camera cooldown: set when the key is pressed manually
@@ -235,7 +245,7 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register padlock camera cooldown hotkey")
 
-            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the play button (region 64)
+            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the ready_button
             try:
                 def auto_mission_key_pressed(_e):
                     if self._on_auto_mission_key is not None:
@@ -264,8 +274,8 @@ class Controller:
             return
 
         def _run():
-            logger.info("Controller: start_auto_mission - waiting 3s for game to settle before clicking play button")
-            time.sleep(3)
+            logger.info("Controller: start_auto_mission - waiting 5s for game to settle before clicking play button")
+            time.sleep(5)
             if self._analyzer is None:
                 return
             logger.info("Controller: start_auto_mission - cancelling any active mission before entering GAME_STARTING")
@@ -274,7 +284,7 @@ class Controller:
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
             self._analyzer._game_starting = True
-            self.click_grid_region(self._ready_button_region, block=False, count=1)
+            self.click_grid_region(self._ready_button_region, block=False, count=1, region_name=REGION_READY_BUTTON)
             self._start_game_starting_loop()
 
         threading.Thread(target=_run, daemon=True).start()
@@ -712,7 +722,7 @@ class Controller:
         
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
-    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6):
+    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6, region_name: str = None):
         """Move the mouse to the center of a grid region and left-click it.
 
         Args:
@@ -721,7 +731,8 @@ class Controller:
             grid_cols: Number of grid columns (default 8).
             block: If True run in the calling thread; otherwise spawn a daemon thread.
             count: Number of times to click the region. When count > 1 a final click on
-                   region 64 (lobby/continue button) is also performed.
+                   the ready button (lobby/continue button) is also performed.
+            region_name: Human-readable name for the region, used in log messages.
         """
         def _do_click():
             try:
@@ -748,8 +759,9 @@ class Controller:
                 col = (region_num - 1) % grid_cols
                 abs_x = int(abs_left + (col + 0.5) * cell_w)
                 abs_y = int(abs_top + (row + 0.5) * cell_h)
-                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
-                            region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
+                label = region_name if region_name else str(region_num)
+                logger.info("\033[93m📋 Clicking %s at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
+                            label, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
                 def _raw_click(x, y):
                     ctypes.windll.user32.SetCursorPos(x, y)
                     time.sleep(0.05)
@@ -769,7 +781,7 @@ class Controller:
                     col_rb = (rbn - 1) % grid_cols
                     x_rb = int(abs_left + (col_rb + 0.5) * cell_w)
                     y_rb = int(abs_top + (row_rb + 0.5) * cell_h)
-                    logger.info("\033[93m📋 Clicking ready button region %d at (%d, %d)\033[0m", rbn, x_rb, y_rb)
+                    logger.info("\033[93m📋 Clicking ready_button at (%d, %d)\033[0m", x_rb, y_rb)
                     _raw_click(x_rb, y_rb)
                     if self._analyzer is not None:
                         self._analyzer._game_lobby = True
@@ -811,7 +823,7 @@ class Controller:
     def _start_game_starting_loop(self):
         """Background loop active in GAME_STARTING state.
 
-        Every 5 seconds: press MISSION_J20_KEY and scan region 16 for 'Good Luck'.
+        Every 5 seconds: press MISSION_J20_KEY and scan the good_luck region for 'Good Luck'.
         Once detected, wait 10 seconds then launch mission_j20.
         """
         good_luck_event = threading.Event()
@@ -824,7 +836,7 @@ class Controller:
                 with mss() as sct:
                     s = sct.grab(self._capture.get_monitor_rect())
                     frame = np.array(s)[:, :, :3]
-                if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame, region_num=16):
+                if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame, region_num=self._good_luck_region):
                     good_luck_event.set()
             except Exception:
                 logger.exception("Controller: game_starting OCR scan error")
@@ -884,7 +896,7 @@ class Controller:
                             with mss() as sct:
                                 s = sct.grab(self._capture.get_monitor_rect())
                                 scan_frame = np.array(s)[:, :, :3]
-                            if self._analyzer.scan_region_for_event_refresh(scan_frame, region_num=30):
+                            if self._analyzer.scan_region_for_event_refresh(scan_frame, region_num=self._event_refresh_region):
                                 logger.warning(
                                     "\033[93mController: 'Event refresh in progress' popup detected - "
                                     "clicking corner to dismiss, retrying in 1s\033[0m"
@@ -892,8 +904,8 @@ class Controller:
                                 _click_corner_28_29_36_37()
                                 time.sleep(1.0)
                                 # Re-click region 64 to attempt game entry again
-                                logger.info("Controller: re-clicking region 64 to retry game entry after event refresh dismiss")
-                                self.click_grid_region(self._ready_button_region, count=1, block=True)
+                                logger.info("Controller: re-clicking ready_button to retry game entry after event refresh dismiss")
+                                self.click_grid_region(self._ready_button_region, count=1, block=True, region_name=REGION_READY_BUTTON)
                                 continue
                         except Exception:
                             logger.exception("Controller: game_starting event-refresh check failed")

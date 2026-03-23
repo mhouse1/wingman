@@ -33,6 +33,35 @@ Items are grouped by severity and area. Each item references the exact file and 
 
 ---
 
+### 1.4 Mission lock can be permanently stuck held
+
+**File:** [wingman/controller.py](../wingman/controller.py) — `_set_last_mission()` finally block
+**Issue:** The `_mission_lock.release()` call is wrapped in a `try/except RuntimeError` that swallows the exception and logs an error. If the release fails, the lock remains held indefinitely. The next call to `mission_j20()` or `mission_loiter()` will block forever on `acquire(blocking=False)` returning `False`, silently refusing to start any future mission — with no recovery path short of restarting the script.
+**Fix:** Remove the bare `except RuntimeError: pass` pattern. Either let the exception propagate (so the failure is visible), or use a guard that only releases if the lock is actually held:
+```python
+if self._mission_lock.locked():
+    self._mission_lock.release()
+```
+
+---
+
+### 1.5 `_background_ocr_lock` acquire blocks main loop indefinitely
+
+**File:** [wingman/analyzer.py](../wingman/analyzer.py) — `_run_ocr_in_background()`
+**Issue:** `with self._background_ocr_lock:` blocks without timeout. If the OCR worker thread stalls mid-operation (GPU OOM, unhandled exception inside the `with` block before the lock releases), the main loop calling `analyze_frame()` hangs indefinitely. No watchdog, no recovery.
+**Fix:** Use `self._background_ocr_lock.acquire(timeout=5.0)`. If acquire fails, log a warning and skip the current frame:
+```python
+if not self._background_ocr_lock.acquire(timeout=5.0):
+    logger.warning("Analyzer: background OCR lock timeout - skipping frame")
+    return
+try:
+    ...
+finally:
+    self._background_ocr_lock.release()
+```
+
+---
+
 ## Priority 2 — Robustness / Will silently fail or leak under load
 
 ### 2.1 Hotkey handlers have no timeout guard
@@ -43,15 +72,7 @@ Items are grouped by severity and area. Each item references the exact file and 
 
 ---
 
-### 2.2 `_run_ocr_in_background` has no timeout on lock acquire
-
-**File:** [wingman/analyzer.py](../wingman/analyzer.py) — lines 659–674
-**Issue:** `with self._background_ocr_lock:` will block indefinitely if the lock is held by a thread that has stalled (e.g. mid-exception). No recovery path exists.
-**Fix:** Use `self._background_ocr_lock.acquire(timeout=5.0)`. If acquire fails, log a warning and skip the current frame rather than blocking the main loop.
-
----
-
-### 2.3 `mss` screen capture not guarded against monitor disconnect
+### 2.2 `mss` screen capture not guarded against monitor disconnect
 
 **File:** [wingman/capture.py](../wingman/capture.py) — lines 27–34
 **Issue:** `get_frame()` calls `self.sct.grab()` with no exception handling. If the monitor is disconnected, the screen locks, or the region falls outside current display bounds, `mss` raises and crashes the main loop.
@@ -59,7 +80,7 @@ Items are grouped by severity and area. Each item references the exact file and 
 
 ---
 
-### 2.4 `click_grid_region` has no platform guard
+### 2.3 `click_grid_region` has no platform guard
 
 **File:** [wingman/controller.py](../wingman/controller.py) — lines 688–693
 **Issue:** `ctypes.windll.user32` is Windows-only. On Linux or macOS this raises `AttributeError: module 'ctypes' has no attribute 'windll'` at call time, not import time — so the error surfaces mid-operation rather than at startup.
@@ -74,7 +95,7 @@ This also documents the Windows dependency explicitly for future ADB migration (
 
 ---
 
-### 2.5 `get_frame()` uses a shared `mss` instance across calls
+### 2.4 `get_frame()` uses a shared `mss` instance across calls
 
 **File:** [wingman/capture.py](../wingman/capture.py) — lines 12, 27
 **Issue:** `self.sct = mss()` is created once in `__init__`. `mss` uses thread-local storage internally. If `get_frame()` is ever called from a thread other than the one that constructed `Capture`, the grab silently uses the wrong context. `controller.py` already works around this by creating a fresh `mss()` instance in daemon threads (lines 158–165, 667–668) — but `capture.get_frame()` itself is not protected.
@@ -204,11 +225,12 @@ This also documents the Windows dependency explicitly for future ADB migration (
 | 1.1 | Dead code: `calibrate_respawn_detection` uninitialised attrs | P1 | Resolved |
 | 1.2 | Click-to thread never joined on shutdown | P1 | Open |
 | 1.3 | `ThreadPoolExecutor` lifecycle not guaranteed | P1 | Open |
+| 1.4 | Mission lock can be permanently stuck held | P1 | Open |
+| 1.5 | `_background_ocr_lock` acquire blocks main loop indefinitely | P1 | Open |
 | 2.1 | Hotkey handler timeout guard missing | P2 | Open |
-| 2.2 | `_background_ocr_lock` acquire has no timeout | P2 | Open |
-| 2.3 | `mss` grab not guarded against monitor disconnect | P2 | Open |
-| 2.4 | `click_grid_region` has no platform guard | P2 | Open |
-| 2.5 | `get_frame()` shared `mss` instance thread contract undocumented | P2 | Open |
+| 2.2 | `mss` grab not guarded against monitor disconnect | P2 | Open |
+| 2.3 | `click_grid_region` has no platform guard | P2 | Open |
+| 2.4 | `get_frame()` shared `mss` instance thread contract undocumented | P2 | Open |
 | 3.1 | Tight poll loop during sleep interval | P3 | Open |
 | 3.2 | `import time` inside method body | P3 | Open |
 | 4.1 | Duplicate import in `capture.py` | P4 | Open |
@@ -219,6 +241,6 @@ This also documents the Windows dependency explicitly for future ADB migration (
 | 5.1 | No test for `cleanup()` path | P5 | Open |
 | 5.2 | No test for hotkey registration failure | P5 | Open |
 | 5.3 | No test for mission cancellation race | P5 | Open |
-| 5.4 | No test for `get_frame()` failure (post fix 2.3) | P5 | Open |
+| 5.4 | No test for `get_frame()` failure (post fix 2.2) | P5 | Open |
 | 6.1 | Monitor index defaults to 2 | P6 | Open |
 | 6.2 | Region defaults assume 1920×1200, undocumented | P6 | Open |

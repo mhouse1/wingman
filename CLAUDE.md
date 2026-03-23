@@ -22,6 +22,10 @@ Performance ADRs must include actual log excerpts with timing data, not just est
 
 Do not modify an ADR that has status `Accepted`. If a decision is superseded, write a new ADR and reference the old one. This keeps the decision history intact.
 
+## Diagrams
+
+Always use Mermaid for diagrams in documentation. Never use ASCII text diagrams (no box-drawing characters, no `┌─┐` borders, no `→` arrow art). Wrap all diagrams in a fenced code block with the `mermaid` language tag.
+
 ## Code Review Todos
 
 When completing work that addresses an item in `docs/code-review-todos.md`, update that file to mark the item resolved. Check it at the start of any session to see if pending items are relevant to the current task.
