@@ -40,6 +40,10 @@ _thread_local = threading.local()
 # model already on disk and initialize instantly.
 _ocr_init_lock = threading.Lock()
 
+# Set from config at startup by GameStateAnalyzer.__init__.
+# False (default) skips the failed GPU probe and goes straight to CPU init.
+_use_gpu: bool = False
+
 
 def _get_thread_ocr_reader():
     """Return the EasyOCR reader for the current thread, initializing it on first call."""
@@ -48,15 +52,11 @@ def _get_thread_ocr_reader():
             _thread_local.reader = None
             if easyocr:
                 try:
-                    _thread_local.reader = easyocr.Reader(['en'], gpu=True, verbose=False)
-                    logger.info("OCR thread %d: initialized EasyOCR reader (GPU)", threading.get_ident())
+                    _thread_local.reader = easyocr.Reader(['en'], gpu=_use_gpu, verbose=False)
+                    mode = "GPU" if _use_gpu else "CPU"
+                    logger.info("OCR thread %d: initialized EasyOCR reader (%s)", threading.get_ident(), mode)
                 except Exception as e:
-                    logger.warning("OCR thread %d: GPU init failed (%s), falling back to CPU", threading.get_ident(), e)
-                    try:
-                        _thread_local.reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-                        logger.info("OCR thread %d: initialized EasyOCR reader (CPU)", threading.get_ident())
-                    except Exception as e:
-                        logger.warning("OCR thread %d: EasyOCR init failed: %s", threading.get_ident(), e)
+                    logger.warning("OCR thread %d: EasyOCR init failed: %s", threading.get_ident(), e)
     return _thread_local.reader
 
 
@@ -84,7 +84,7 @@ def _process_respawn_region(respawn_frame):
     # Run OCR on both grayscale and thresholded images
     results = []
     for img, label in [(small_gray, 'gray'), (small_binary, 'binary')]:
-        ocr_results = reader.readtext(img, detail=1, paragraph=False)
+        ocr_results = reader.readtext(img, detail=1, paragraph=False, workers=0)
         for (_, text, conf) in ocr_results:
             text_clean = ''.join(c for c in text.strip().upper() if c.isalpha())
             results.append((label, text_clean, conf))
@@ -130,7 +130,7 @@ def _process_incoming_region(incoming_frame):
     # Try variants
     raw_texts = []
     for variant_name, variant_img in variants.items():
-        results_incoming = reader.readtext(variant_img, detail=0, paragraph=True)
+        results_incoming = reader.readtext(variant_img, detail=0, paragraph=True, workers=0)
         extracted_text = " ".join(str(result) for result in results_incoming)
         normalized = " ".join(extracted_text.upper().split()).replace(" ", "")
         if normalized:
@@ -166,7 +166,7 @@ def _process_click_to_region(click_to_frame):
     upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
 
     for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True)
+        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
         text = " ".join(str(r) for r in results).upper().replace(" ", "")
         if "CLICKTO" in text or "LICKTO" in text or "CLICK" in text:
             ocr_time = time.time() - t_start
@@ -199,7 +199,7 @@ def _process_event_refresh_region(frame):
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True)
+        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
         text = " ".join(str(r) for r in results).upper().replace(" ", "")
         if "AGAINSO" in text or "AGAIN" in text:
             ocr_time = time.time() - t_start
@@ -230,7 +230,7 @@ def _process_good_luck_region(frame):
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True)
+        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
         text = " ".join(str(r) for r in results).upper().replace(" ", "")
         if "GOODLUCK" in text or "GOOD" in text or "LUCK" in text:
             ocr_time = time.time() - t_start
@@ -315,6 +315,11 @@ class GameStateAnalyzer:
             grid_size = 8
         self.grid_rows = max(2, grid_size)
         self.grid_cols = max(2, grid_size)
+
+        # GPU flag — propagated to module-level so worker threads pick it up at init time
+        global _use_gpu
+        _use_gpu = bool(respawn_cfg.get("use_gpu", False))
+        logger.info("OCR mode: %s", "GPU" if _use_gpu else "CPU")
 
         # OCR-based respawn detection (looks for "RESPAWN" text)
         self.use_ocr = respawn_cfg.get("use_ocr", True)
@@ -530,9 +535,9 @@ class GameStateAnalyzer:
         """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
         if self._ocr_executor is None and easyocr and not self._ocr_executor_initialized:
             try:
-                self._ocr_executor = ThreadPoolExecutor(max_workers=3)
+                self._ocr_executor = ThreadPoolExecutor(max_workers=2)
                 self._ocr_executor_initialized = True
-                logger.info("Initialized ThreadPoolExecutor with 3 workers for parallel OCR")
+                logger.info("Initialized ThreadPoolExecutor with 2 workers for parallel OCR")
             except Exception as e:
                 logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
                 self._ocr_executor_initialized = True  # Prevent retries

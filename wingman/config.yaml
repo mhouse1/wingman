@@ -30,6 +30,10 @@ enemy_hsv:
 respawn_detection:
   # Use OCR to detect "RESPAWN" text
   use_ocr: true
+  # Set to true only if a CUDA-capable GPU is available.
+  # false initializes EasyOCR directly on CPU, removing the try/except probe fallback
+  # and the three 'GPU init failed' log warnings produced at session startup.
+  use_gpu: false
 
   # Detection grid size (NxN). 8 means regions are numbered on an 8x8 grid.
   grid_size: 8
