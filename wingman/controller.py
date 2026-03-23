@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 # Key bindings
 NOSE_UP_KEY = 'i'
 NOSE_DOWN_KEY = 'k'
-AFTERBURNER_KEY = 'e'
-AIRBRAKE_KEY = 'd'
 ROLL_LEFT_KEY = 'j'
 ROLL_RIGHT_KEY = 'l'
+AFTERBURNER_KEY = 'e'
+AIRBRAKE_KEY = 'd'
 DEPLOY_FLARES_KEY = 'space'
 FIRE_MACHINE_GUN = 'a'
 FIRE_ACTIVE_WEAPON = 'f'
@@ -79,6 +79,23 @@ class Controller:
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
+            # Cancel mission if maneuver keys are pressed during GAME_BATTLE
+            def maneuver_cancel_hotkey(e):
+                if self._analyzer and hasattr(self._analyzer, 'game_state'):
+                    try:
+                        state = self._analyzer.game_state()
+                    except Exception:
+                        state = None
+                    # Accept both Enum and string for compatibility
+                    if state and (getattr(state, 'name', None) == 'GAME_BATTLE' or str(state) == 'GAME_BATTLE'):
+                        logger.info("Controller: Maneuver key '%s' pressed during GAME_BATTLE - cancelling mission", e.name if hasattr(e, 'name') else e)
+                        self.cancel_mission()
+            for key in [NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY]:
+                try:
+                    keyboard_module.on_press_key(key, maneuver_cancel_hotkey, suppress=False)
+                    logger.info("Controller: registered maneuver cancel hotkey '%s'", key)
+                except Exception:
+                    logger.exception("Controller: failed to register maneuver cancel hotkey '%s'", key)
 
             # Exit script hotkey (Backspace)
             try:
@@ -101,6 +118,20 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to cancel mission", CANCEL_MISSION_KEY)
             except Exception:
                 logger.exception("Controller: failed to register cancel mission hotkey")
+
+            # Maneuver keys cancel mission when pressed during GAME_BATTLE (manual takeover)
+            try:
+                def maneuver_key_pressed(e):
+                    if self.is_mission_running():
+                        logger.info("Controller: maneuver key '%s' pressed - cancelling mission (manual takeover)", e.name)
+                        self._auto_respawn_restart = False
+                        self.cancel_mission()
+                for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY):
+                    keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
+                logger.info("Controller: registered maneuver keys (%s/%s/%s/%s) to cancel mission on manual press",
+                            NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register maneuver key hotkeys")
             try:
                 keyboard_module.add_hotkey(TOGGLE_WEAPON_LOOP_KEY, self.toggle_weapon_loop)
                 logger.info("Controller: registered hotkey '%s' to toggle weapon loop", TOGGLE_WEAPON_LOOP_KEY)
@@ -888,8 +919,8 @@ class Controller:
                         return
 
                     if good_luck_event.is_set():
-                        logger.info("\033[92mController: 'Good Luck' detected - waiting 10 seconds before starting J20 mission\033[0m")
-                        for _ in range(100):  # 100 * 0.1s = 10s
+                        logger.info("\033[92mController: 'Good Luck' detected - waiting 13 seconds before starting J20 mission\033[0m")
+                        for _ in range(130):  # 130 * 0.1s = 13s
                             if self._analyzer is None or not self._analyzer._game_starting:
                                 return
                             time.sleep(0.1)
