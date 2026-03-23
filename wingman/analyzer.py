@@ -176,6 +176,39 @@ def _process_click_to_region(click_to_frame):
     return (False, ocr_time, None)
 
 
+def _process_event_refresh_region(frame):
+    """Worker function to detect 'Event refresh in progress' popup text in a region.
+
+    Scans for the substring 'AGAIN' (from 'try again so...') which appears in the
+    'Event refresh in progress' popup that blocks game entry.
+
+    Args:
+        frame: numpy array (BGR) — the extracted grid region
+
+    Returns:
+        tuple: (detected: bool, ocr_time: float, text_found: str or None)
+    """
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+
+    t_start = time.time()
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "AGAINSO" in text or "AGAIN" in text:
+            ocr_time = time.time() - t_start
+            return (True, ocr_time, text)
+
+    ocr_time = time.time() - t_start
+    return (False, ocr_time, None)
+
+
 def _process_good_luck_region(frame):
     """
     Worker function to detect 'Good Luck' text in a region in a thread pool thread.
@@ -287,6 +320,11 @@ class GameStateAnalyzer:
         self.use_ocr = respawn_cfg.get("use_ocr", True)
         self.respawn_region = respawn_cfg.get("region", 44)  # Region 44 for RESPA in 8x8 mapping
         self.incoming_region = respawn_cfg.get("incoming_region", 21)  # Region 21 for MING in 8x8 mapping
+        self.incoming_subgrid_size = max(1, respawn_cfg.get("incoming_subgrid_size", 1))
+        self.incoming_subregion = max(1, respawn_cfg.get("incoming_subregion", 1))
+        self.respawn_subgrid_rows = max(1, respawn_cfg.get("respawn_subgrid_rows", 1))
+        self.respawn_subgrid_cols = max(1, respawn_cfg.get("respawn_subgrid_cols", 1))
+        self.respawn_subregion = max(1, respawn_cfg.get("respawn_subregion", 1))
         self.click_to_region = respawn_cfg.get("click_to_region", 60)  # Region 60 for "Click to Continue"
 
         # Validate region numbers against the configured grid at startup
@@ -699,7 +737,11 @@ class GameStateAnalyzer:
 
                 # Extract respawn and incoming regions (click_to has its own thread)
                 respawn_frame = self.get_region(full_frame, self.respawn_region)
+                if self.respawn_subgrid_rows > 1 or self.respawn_subgrid_cols > 1:
+                    respawn_frame = self._crop_subregion(respawn_frame, self.respawn_subgrid_rows, self.respawn_subgrid_cols, self.respawn_subregion)
                 incoming_frame = self.get_region(full_frame, self.incoming_region)
+                if self.incoming_subgrid_size > 1:
+                    incoming_frame = self._crop_subregion(incoming_frame, self.incoming_subgrid_size, self.incoming_subgrid_size, self.incoming_subregion)
                 t1 = time.time()
 
                 # Submit both tasks to thread pool for parallel processing
@@ -851,6 +893,63 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: Good Luck scan failed: %s", e)
             return False
 
+    def scan_region_for_event_refresh(self, frame, region_num: int = 30) -> bool:
+        """Synchronously scan a region for 'Event refresh in progress' popup text.
+
+        Detects the popup by looking for 'again so' / 'AGAIN' in the OCR output,
+        which appears in the 'try again so...' message of the popup.
+
+        Args:
+            frame: Full BGR frame from screen capture.
+            region_num: Grid region to scan (default 30).
+
+        Returns:
+            True if the event refresh popup is detected.
+        """
+        executor = self.ocr_executor
+        if executor is None:
+            logger.warning("Analyzer: OCR executor not available for event refresh scan")
+            return False
+        try:
+            region_frame = self.get_region(frame, region_num)
+            detected, _, text = executor.submit(
+                _process_event_refresh_region, region_frame
+            ).result(timeout=30)
+            if detected:
+                logger.info("Analyzer: 'Event refresh' popup detected in region %d (text='%s')", region_num, text)
+            else:
+                logger.debug("Analyzer: Event refresh popup not found in region %d", region_num)
+            return detected
+        except Exception as e:
+            logger.warning("Analyzer: Event refresh scan failed: %s", e)
+            return False
+
+    def _crop_subregion(self, frame, grid_rows: int, grid_cols: int, subregion_num: int):
+        """Crop a sub-region from frame using a local rows×cols grid.
+
+        Args:
+            frame: numpy array of the parent region
+            grid_rows: number of rows in the sub-grid
+            grid_cols: number of columns in the sub-grid
+            subregion_num: 1-based cell index (row-major, left-to-right top-to-bottom)
+
+        Returns:
+            numpy array: cropped sub-region, or original frame if params are invalid
+        """
+        total = grid_rows * grid_cols
+        if grid_rows < 1 or grid_cols < 1 or not (1 <= subregion_num <= total):
+            return frame
+        h, w = frame.shape[:2]
+        cell_h = h // grid_rows
+        cell_w = w // grid_cols
+        row = (subregion_num - 1) // grid_cols
+        col = (subregion_num - 1) % grid_cols
+        y1 = row * cell_h
+        y2 = y1 + cell_h
+        x1 = col * cell_w
+        x2 = x1 + cell_w
+        return frame[y1:y2, x1:x2]
+
     def get_region(self, frame, region_num):
         """
         Extract a grid region from the frame (left-to-right, top-to-bottom).
@@ -951,60 +1050,3 @@ class GameStateAnalyzer:
         
         return frame_copy
     
-    def calibrate_respawn_detection(self, frame):
-        """
-        Debug method to help calibrate respawn detection thresholds.
-        Shows HSV masks and pixel ratios for manual tuning.
-        
-        Args:
-            frame: numpy array of respawn screen capture
-            
-        Returns:
-            dict: Statistics about detected colors
-        """
-        h, w = frame.shape[:2]
-        total_pixels = h * w
-        
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        
-        # Analyze text region
-        center_y_start = int(h * 0.3)
-        center_y_end = int(h * 0.6)
-        center_x_start = int(w * 0.3)
-        center_x_end = int(w * 0.7)
-        center_region = hsv[center_y_start:center_y_end, center_x_start:center_x_end]
-        
-        text_mask = cv2.inRange(center_region, self.respawn_text_hsv_lower, self.respawn_text_hsv_upper)
-        text_pixels = cv2.countNonZero(text_mask)
-        text_ratio = text_pixels / total_pixels
-        
-        bar_mask = cv2.inRange(hsv, self.respawn_bar_hsv_lower, self.respawn_bar_hsv_upper)
-        bar_pixels = cv2.countNonZero(bar_mask)
-        bar_ratio = bar_pixels / total_pixels
-        
-        stats = {
-            'text_pixels': text_pixels,
-            'text_ratio': text_ratio,
-            'text_threshold': self.respawn_text_threshold,
-            'text_detected': text_ratio > self.respawn_text_threshold,
-            'bar_pixels': bar_pixels,
-            'bar_ratio': bar_ratio,
-            'bar_threshold': self.respawn_bar_threshold,
-            'bar_detected': bar_ratio > self.respawn_bar_threshold,
-        }
-        
-        # Display debug windows
-        cv2.imshow("Original Frame", frame)
-        cv2.imshow("Text Mask (White)", cv2.cvtColor(text_mask, cv2.COLOR_GRAY2BGR))
-        cv2.imshow("Bar Mask (Cyan)", cv2.cvtColor(bar_mask, cv2.COLOR_GRAY2BGR))
-        
-        # Combined visualization
-        combined = frame.copy()
-        combined[center_y_start:center_y_end, center_x_start:center_x_end][text_mask > 0] = [0, 255, 0]
-        combined[bar_mask > 0] = [0, 255, 255]
-        cv2.imshow("Combined Detection", combined)
-        
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        
-        return stats

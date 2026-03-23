@@ -4,18 +4,12 @@ import time
 import logging
 import threading
 from enum import Enum, auto
-try:
-    import keyboard as keyboard_module
-except Exception:
-    keyboard_module = None
 
-WINGMAN_VERSION = "1.5.1"
-WINGMAN_VERSION_DETAILS = "Enable full unattended operation"
-# Key controls (change these to remap start/pause and cancel)
-EXIT_KEY = 'backspace'
+WINGMAN_VERSION = "1.5.2"
+WINGMAN_VERSION_DETAILS = "Sub region optimization for OCR"
 
 from .capture import Capture
-from .controller import Controller
+from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY
 from .analyzer import GameStateAnalyzer, GameState
 
 
@@ -35,7 +29,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="wingman/config.yaml")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
-    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s")
@@ -53,8 +46,6 @@ def main():
     )
     monitor_index = cfg["region"].get("monitor", 1)
 
-    running = threading.Event()
-    running.set()  # start running immediately with analyzer active
     exit_requested = threading.Event()
 
     # Initialize main components
@@ -72,6 +63,7 @@ def main():
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
+    respawn_fallback_timeout = mission_cfg.get("respawn_fallback_timeout", 20.0)
 
     def _on_auto_mission_key():
         """Called when AUTO_MISSION_KEY is pressed. Activates unattended mode for the session."""
@@ -79,8 +71,11 @@ def main():
             unattended_active.set()
             logger.info("Unattended mode activated by M key press")
 
+    controls_cfg = cfg.get("controls", {})
+    ready_button_region = controls_cfg.get("ready_button_region", 64)
+
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, ready_button_region=ready_button_region)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -122,10 +117,6 @@ def main():
             if exit_requested.is_set():
                 logger.info("Exit requested, shutting down")
                 break
-            if not running.is_set():
-                time.sleep(0.05)
-                continue
-
             # Capture and analyze frame
             frame = cap.get_frame()
             game_state = analyzer.analyze_frame(frame)
@@ -137,9 +128,11 @@ def main():
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
                 last_game_state = current_game_state
-                if current_game_state == GameState.GAME_LOBBY and unattended_active.is_set():
-                    logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
-                    ctrl.start_auto_mission()
+                if current_game_state == GameState.GAME_LOBBY:
+                    ctrl.cancel_mission()
+                    if unattended_active.is_set():
+                        logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
+                        ctrl.start_auto_mission()
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             # Higher priority than respawn — must run before the respawn continue.
@@ -147,7 +140,7 @@ def main():
 
             # Detect respawn
             if game_state.get('is_respawning'):
-                if respawn_state == RespawnState.IDLE:
+                if respawn_state in (RespawnState.IDLE, RespawnState.PENDING_RESTART):
                     if time.time() < respawn_cooldown_until:
                         logger.debug("RESPAWN seen but suppressed by cooldown (%.1fs remaining)",
                                      respawn_cooldown_until - time.time())
@@ -163,40 +156,39 @@ def main():
                             time.sleep(0.1)
                         else:
                             logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
-                        restart_not_before = time.time() + restart_delay_after_unlock
-                        logger.info("Mission lock released (or release pending); delaying restart by %.1f seconds", restart_delay_after_unlock)
                         respawn_state = RespawnState.RESPAWNING
+                        restart_not_before = time.time() + respawn_fallback_timeout
+                        logger.info("Respawn screen active — will restart %.1fs after screen clears (stuck OCR fallback in %.1fs)",
+                                    restart_delay_after_unlock, respawn_fallback_timeout)
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
-                # Try to restart mission while respawn screen is showing (after delay)
-                if time.time() - last_restart_attempt > restart_retry_interval:
-                    now = time.time()
-                    if ctrl.is_mission_running():
-                        last_restart_attempt = now
-                        time.sleep(1)
-                        continue
-                    if now < restart_not_before:
-                        time.sleep(1)
-                        continue
+                # Attempt restart while respawn screen is showing (fallback if OCR never clears).
+                # Skips if mission still running, delay not yet elapsed, or auto-restart disabled by manual End press.
+                if not ctrl._auto_respawn_restart:
+                    logger.debug("Auto-respawn restart disabled ('%s' was pressed) — press '%s' to re-enable",
+                                 CANCEL_MISSION_KEY, MISSION_J20_KEY)
+                elif (not ctrl.is_mission_running()
+                        and time.time() >= restart_not_before
+                        and time.time() - last_restart_attempt > restart_retry_interval):
                     logger.info("Attempting to restart mission after respawn...")
                     if ctrl.restart_last_mission():
                         logger.info("Restarted last mission after respawn")
                         respawn_state = RespawnState.IDLE
-                    else:
-                        logger.info("Mission restart attempt failed, will retry")
                     last_restart_attempt = time.time()
 
                 time.sleep(1)
                 continue
 
-            # Gameplay resumed after respawn
+            # Gameplay resumed after respawn — reset delay timer from this point
             if respawn_state == RespawnState.RESPAWNING:
-                logger.info("\033[92m✓ Gameplay resumed - ready for missions\033[0m")
+                restart_not_before = time.time() + restart_delay_after_unlock
+                logger.info("\033[92m✓ Gameplay resumed - scheduling restart in %.1fs\033[0m", restart_delay_after_unlock)
                 respawn_state = RespawnState.PENDING_RESTART
 
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)
-            if (respawn_state == RespawnState.PENDING_RESTART
+            if (ctrl._auto_respawn_restart
+                    and respawn_state == RespawnState.PENDING_RESTART
                     and time.time() >= restart_not_before
                     and time.time() - last_restart_attempt > restart_retry_interval):
                 if not ctrl.is_mission_running():

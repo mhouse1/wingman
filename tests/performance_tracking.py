@@ -133,7 +133,7 @@ class PerformanceTracker:
                             'max': metrics.get('max', 0),
                             'runs': metrics.get('runs', 1)
                         })
-                    print(f"✓ Included current uncommitted data (v{version})")
+                    print(f"[OK] Included current uncommitted data (v{version})")
                 except Exception as e:
                     print(f"Warning: Could not read current performance.json: {e}", file=sys.stderr)
         
@@ -143,7 +143,7 @@ class PerformanceTracker:
                 writer = csv.DictWriter(f, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(rows)
-            print(f"✓ Generated {output_file.name} with {len(rows)} data points")
+            print(f"[OK] Generated {output_file.name} with {len(rows)} data points")
         
         return output_file
     
@@ -255,7 +255,7 @@ class PerformanceTracker:
         
         # Save HTML
         fig.write_html(str(output_html))
-        print(f"✓ Generated {output_html.name}")
+        print(f"[OK] Generated {output_html.name}")
         
         return output_html
 

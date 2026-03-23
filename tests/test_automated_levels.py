@@ -5,6 +5,7 @@ uv run pytest tests/test_automated_levels.py -k test_level3_unit_ocr --html=test
 
 '''
 import subprocess
+import sys
 import time
 import os
 from pathlib import Path
@@ -90,7 +91,7 @@ def test_level1_static_screenshot():
     ]
     for name, path, should_detect in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
-        cmd = f"uv run python {SCRIPT} {path} --grid"
+        cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'
         code, out, err, elapsed = run_command(cmd)
         print(f"\n[Level 1 Output for {name}]\n", out)
         assert code == 0, f"Level 1 failed for {name}: {err}"
@@ -117,7 +118,7 @@ def test_respawn_detection_positive():
     ]
     for name, path, description in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
-        cmd = f"uv run python {SCRIPT} {path} --grid"
+        cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'
         code, out, err, elapsed = run_command(cmd)
         print(f"\n[Respawn Detection Positive - {name} ({description})]\n", out)
         assert code == 0, f"Positive detection failed for {name}: {err}"
@@ -138,7 +139,7 @@ def test_respawn_detection_negative():
     ]
     for name, path, description in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
-        cmd = f"uv run python {SCRIPT} {path} --grid"
+        cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'
         code, out, err, elapsed = run_command(cmd)
         print(f"\n[Respawn Detection Negative - {name} ({description})]\n", out)
         assert code == 0, f"Negative detection failed for {name}: {err}"
@@ -154,7 +155,7 @@ def test_level2_live_capture():
     - Perform grid-based region analysis on captured frame
     - Generate grid visualization even when respawn is not detected
     """
-    cmd = f"uv run python {SCRIPT} --capture"
+    cmd = f'"{sys.executable}" {SCRIPT} --capture'
     code, out, err, elapsed = run_command(cmd)
     print("\n[Level 2 Output]\n", out)
     assert code == 0, f"Level 2 failed: {err}"
@@ -230,7 +231,7 @@ def test_level3_unit_ocr():
     stage_times = {}
 
     t0 = time.time()
-    cmd = f"uv run python {SCRIPT} --unit-ocr"
+    cmd = f'"{sys.executable}" {SCRIPT} --unit-ocr'
     t1 = time.time()
     code, out, err, elapsed = run_command(cmd)
     t2 = time.time()
@@ -303,6 +304,8 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
     _, _, incoming_region, _ = _grid_meta(cfg)
     frame = _load_image(image_path)
     region_frame = analyzer.get_region(frame, incoming_region)
+    if analyzer.incoming_subgrid_size > 1:
+        region_frame = analyzer._crop_subregion(region_frame, analyzer.incoming_subgrid_size, analyzer.incoming_subgrid_size, analyzer.incoming_subregion)
 
     reader = analyzer.ocr_reader
     assert reader is not None, "EasyOCR reader failed to initialize"
