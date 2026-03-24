@@ -78,7 +78,8 @@ class Controller:
         self._good_luck_region = good_luck_region
         self._event_refresh_region = event_refresh_region
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
-        
+        self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
+
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
 
@@ -91,6 +92,9 @@ class Controller:
         if keyboard_module:
             # Cancel mission if maneuver keys are pressed during GAME_BATTLE
             def maneuver_cancel_hotkey(e):
+                if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
+                    logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
+                    return
                 if self._analyzer and hasattr(self._analyzer, 'game_state'):
                     try:
                         state = self._analyzer.game_state()
@@ -132,6 +136,9 @@ class Controller:
             # Maneuver keys cancel mission when pressed during GAME_BATTLE (manual takeover)
             try:
                 def maneuver_key_pressed(e):
+                    if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
+                        logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
+                        return
                     if self.is_mission_running():
                         logger.info("Controller: maneuver key '%s' pressed - cancelling mission (manual takeover)", e.name)
                         self._auto_respawn_restart = False
@@ -811,6 +818,7 @@ class Controller:
         with self._last_mission_lock:
             self._last_mission = mission_name
         self._auto_respawn_restart = True
+        self._game_battle_since = time.time()
         if self._analyzer is not None:
             self._analyzer._last_battle_event_ts = time.time()
             self._analyzer._game_end_b = False

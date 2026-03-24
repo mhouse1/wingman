@@ -100,6 +100,7 @@ def main():
     last_incoming_alert_ts = 0.0
     last_click_to_alert_ts = 0.0
     last_game_state = None
+    game_end_b_since = 0.0  # timestamp of GAME_END_B entry; used by stall timeout guard
 
     def _deploy_flares_on_new_incoming() -> bool:
         """Deploy flares in a burst when a new incoming OCR detection arrives."""
@@ -143,11 +144,23 @@ def main():
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
                 last_game_state = current_game_state
+                if current_game_state == GameState.GAME_END_B:
+                    game_end_b_since = time.time()
+                else:
+                    game_end_b_since = 0.0
                 if current_game_state == GameState.GAME_LOBBY:
                     ctrl.cancel_mission()
                     if unattended_active.is_set():
                         logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
                         ctrl.start_auto_mission()
+
+            # GAME_END_B stall guard: if click-to OCR cache gets stuck, force recovery
+            if (current_game_state == GameState.GAME_END_B
+                    and game_end_b_since > 0
+                    and time.time() - game_end_b_since > 30.0):
+                logger.warning("GAME_END_B timeout — click-to OCR may be stuck; forcing recovery to GAME_BATTLE")
+                analyzer._game_end_b = False
+                game_end_b_since = 0.0
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             # Higher priority than respawn — must run before the respawn continue.

@@ -340,4 +340,4 @@ respawn OCR detects "RESPA"
 
 ## Known Architectural Debt
 
-No open P1–P4 items. All items from the 2026-03-20 engineering review were resolved in v1.5.3. See [code-review/001-2026-03.md](code-review/001-2026-03.md) for the full resolved history.
+No open P1–P2 items. P3 (no production instrumentation) and P5 (no end-to-end tests) are open in the 2026-03-24 review cycle. See [code-review/002-2026-03.md](code-review/002-2026-03.md).
