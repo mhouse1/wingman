@@ -5,6 +5,12 @@ import logging
 import threading
 from enum import Enum, auto
 
+try:
+    import colorama
+    colorama.init()
+except ImportError:
+    colorama = None
+
 WINGMAN_VERSION = "1.5.3"
 WINGMAN_VERSION_DETAILS = "Resolve some tech debt before moving onto new features"
 
@@ -31,7 +37,11 @@ def main():
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s")
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    handler = logging.StreamHandler()
+    handler.stream.reconfigure(encoding="utf-8", errors="replace")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logging.basicConfig(level=log_level, handlers=[handler])
     logger = logging.getLogger("wingman")
 
     cfg = load_config(args.config)
@@ -50,7 +60,7 @@ def main():
 
     # Initialize main components
     cap = Capture(region, monitor_index)
-    analyzer = GameStateAnalyzer(cfg)
+    analyzer = GameStateAnalyzer(cfg)  # also usable as a context manager via __enter__/__exit__
 
     unattended_mode = cfg.get("unattended_mode", False)
     unattended_active = threading.Event()
@@ -121,6 +131,9 @@ def main():
                 break
             # Capture and analyze frame
             frame = cap.get_frame()
+            if frame is None:
+                logger.warning("Frame capture failed (monitor disconnected or region out of bounds) — skipping cycle")
+                continue
             game_state = analyzer.analyze_frame(frame)
 
             # Log game state transitions
@@ -216,17 +229,21 @@ def main():
                 ctrl.cancel_mission()
                 ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False, region_name=REGION_CLICK_TO_CONTINUE)
 
-            # Enforce configurable loop interval
+            # Enforce configurable loop interval.
+            # Block on incoming_event so flare deployment wakes immediately on new OCR results
+            # rather than spinning at 20 Hz.  The event is set by the background OCR thread
+            # whenever a new incoming result is written; we clear it after acting on it.
             elapsed = time.time() - loop_start
             if elapsed < loop_interval_sec:
                 sleep_end = loop_start + loop_interval_sec
                 while True:
                     now = time.time()
-                    if now >= sleep_end:
+                    remaining = sleep_end - now
+                    if remaining <= 0:
                         break
-                    # Poll incoming cache during sleep so flare deploy is not delayed until next loop.
+                    analyzer.incoming_event.wait(timeout=remaining)
+                    analyzer.incoming_event.clear()
                     _deploy_flares_on_new_incoming()
-                    time.sleep(min(0.05, sleep_end - now))
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:
