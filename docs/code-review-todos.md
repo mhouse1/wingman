@@ -1,6 +1,6 @@
 # Code Review — Engineering Debt TODO
 
-Generated from engineering quality review (2026-03-20).
+Generated from engineering quality review (2026-03-20). Updated 2026-03-23.
 Items are grouped by severity and area. Each item references the exact file and line(s) to change.
 
 ---
@@ -19,7 +19,7 @@ Items are grouped by severity and area. Each item references the exact file and 
 
 ### 1.2 Click-to background thread is never joined on shutdown
 
-**File:** [wingman/analyzer.py](../wingman/analyzer.py) — lines 547–549, 512–519
+**File:** [wingman/analyzer.py](../wingman/analyzer.py) — thread start: line 595; thread def: line 811; cleanup: lines 562–565
 **Issue:** `_run_click_to_in_background` is a daemon thread started on first frame and runs an infinite `while True` loop. `cleanup()` shuts down the `ThreadPoolExecutor` but does not signal or join this thread. On interpreter shutdown the thread is killed mid-operation, which can produce spurious log lines and leave the executor in an inconsistent state.
 **Fix:** Add a stop `threading.Event` (e.g. `_click_to_stop`) to `__init__`. Check it in the loop. Set it in `cleanup()` before joining.
 
@@ -27,7 +27,7 @@ Items are grouped by severity and area. Each item references the exact file and 
 
 ### 1.3 `ThreadPoolExecutor` lifecycle not guaranteed
 
-**File:** [wingman/analyzer.py](../wingman/analyzer.py) — lines 488–499, 512–519
+**File:** [wingman/analyzer.py](../wingman/analyzer.py) — executor property: lines 534–543; cleanup: lines 562–565
 **Issue:** The executor is only shut down if `cleanup()` is called. If the caller forgets (or an exception bypasses the `finally` in `main.py`), the pool's worker threads and their EasyOCR model references are never released.
 **Fix:** Implement `__enter__` / `__exit__` on `GameStateAnalyzer` so it can be used as a context manager, or add `__del__` as a fallback that calls `cleanup()`. Update `main.py` to use `with GameStateAnalyzer(cfg) as analyzer:`.
 
@@ -35,8 +35,8 @@ Items are grouped by severity and area. Each item references the exact file and 
 
 ### 1.4 Mission lock can be permanently stuck held
 
-**File:** [wingman/controller.py](../wingman/controller.py) — `_set_last_mission()` finally block
-**Issue:** The `_mission_lock.release()` call is wrapped in a `try/except RuntimeError` that swallows the exception and logs an error. If the release fails, the lock remains held indefinitely. The next call to `mission_j20()` or `mission_loiter()` will block forever on `acquire(blocking=False)` returning `False`, silently refusing to start any future mission — with no recovery path short of restarting the script.
+**File:** [wingman/controller.py](../wingman/controller.py) — `mission_loiter` finally: lines 554–558; `mission_j20` finally: lines 699–704
+**Issue:** The `_mission_lock.release()` call in both mission finally blocks is wrapped in a `try/except RuntimeError` that swallows the exception. If the release fails, the lock remains held indefinitely. The next call to `mission_j20()` or `mission_loiter()` will block forever on `acquire(blocking=False)` returning `False`, silently refusing to start any future mission — with no recovery path short of restarting the script.
 **Fix:** Remove the bare `except RuntimeError: pass` pattern. Either let the exception propagate (so the failure is visible), or use a guard that only releases if the lock is actually held:
 ```python
 if self._mission_lock.locked():
@@ -47,8 +47,8 @@ if self._mission_lock.locked():
 
 ### 1.5 `_background_ocr_lock` acquire blocks main loop indefinitely
 
-**File:** [wingman/analyzer.py](../wingman/analyzer.py) — `_run_ocr_in_background()`
-**Issue:** `with self._background_ocr_lock:` blocks without timeout. If the OCR worker thread stalls mid-operation (GPU OOM, unhandled exception inside the `with` block before the lock releases), the main loop calling `analyze_frame()` hangs indefinitely. No watchdog, no recovery.
+**File:** [wingman/analyzer.py](../wingman/analyzer.py) — `analyze_frame()` line 705; `_run_ocr_in_background()` lines 723–808
+**Issue:** `with self._background_ocr_lock:` blocks without timeout. If the OCR worker thread stalls mid-operation (unhandled exception inside the `with` block before the lock releases), the main loop calling `analyze_frame()` hangs indefinitely. No watchdog, no recovery.
 **Fix:** Use `self._background_ocr_lock.acquire(timeout=5.0)`. If acquire fails, log a warning and skip the current frame:
 ```python
 if not self._background_ocr_lock.acquire(timeout=5.0):
@@ -64,11 +64,9 @@ finally:
 
 ## Priority 2 — Robustness / Will silently fail or leak under load
 
-### 2.1 Hotkey handlers have no timeout guard
+### 2.1 ~~Hotkey handlers have no timeout guard~~ — Resolved
 
-**File:** [wingman/controller.py](../wingman/controller.py) — lines 107–114, 753–765
-**Issue:** `_do_ocr_scan()` called from `_start_game_starting_loop` submits a task to the OCR executor and calls `.result()` with `timeout=30`. If EasyOCR hangs (GPU OOM, model load failure) the hotkey handler thread blocks for 30 seconds. During that window the J20 key press loop stalls entirely.
-**Fix:** Wrap the `.result()` call in a `try/except TimeoutError`. Log the timeout and return `False` so the loop continues. Consider reducing the timeout to 10 s to match the loop's 5 s polling interval.
+**Resolved 2026-03-23.** `_do_ocr_scan` was refactored to run as a fire-and-forget daemon thread that signals a `threading.Event` on detection (controller.py line 832). The `_start_game_starting_loop` polls `good_luck_event.is_set()` in a 0.1s tick loop with a `max_wait` hard timeout (line 927). No `.result()` call — the hotkey handler thread can no longer block for 30 seconds.
 
 ---
 
@@ -82,7 +80,7 @@ finally:
 
 ### 2.3 `click_grid_region` has no platform guard
 
-**File:** [wingman/controller.py](../wingman/controller.py) — lines 688–693
+**File:** [wingman/controller.py](../wingman/controller.py) — `click_grid_region` def: line 725; `ctypes.windll` calls: lines 766–770
 **Issue:** `ctypes.windll.user32` is Windows-only. On Linux or macOS this raises `AttributeError: module 'ctypes' has no attribute 'windll'` at call time, not import time — so the error surfaces mid-operation rather than at startup.
 **Fix:** Add a platform check at the top of `_do_click()`:
 ```python
@@ -107,7 +105,7 @@ This also documents the Windows dependency explicitly for future ADB migration (
 
 ### 3.1 Tight poll loop during `loop_interval_sec` sleep
 
-**File:** [wingman/main.py](../wingman/main.py) — lines 206–212
+**File:** [wingman/main.py](../wingman/main.py) — lines 221–229
 **Issue:** The main loop spins at 20 Hz (`time.sleep(0.05)`) checking `_deploy_flares_on_new_incoming()` during the configured sleep interval. This burns CPU continuously even when no events are occurring.
 **Fix:** Add a `threading.Event` (e.g. `_incoming_event`) that `_run_ocr_in_background` sets whenever a new incoming result is written to the cache. The main loop can then `_incoming_event.wait(timeout=remaining)` instead of spinning. On wake, check the cache and clear the event.
 
@@ -115,7 +113,7 @@ This also documents the Windows dependency explicitly for future ADB migration (
 
 ### 3.2 `import time` inside method body
 
-**File:** [wingman/analyzer.py](../wingman/analyzer.py) — line 765
+**File:** [wingman/analyzer.py](../wingman/analyzer.py) — line 817
 **Issue:** `_run_click_to_in_background` re-imports `time` at every call. `time` is already available at module level.
 **Fix:** Remove the local import. One line change.
 
@@ -133,7 +131,7 @@ This also documents the Windows dependency explicitly for future ADB migration (
 
 ### 4.2 ANSI colour codes without a Windows terminal guard
 
-**File:** [wingman/controller.py](../wingman/controller.py) — lines 256–268, 576, 583, 591, 627 and throughout
+**File:** [wingman/controller.py](../wingman/controller.py) — lines 334–341, 493, 550, 578, 581, 651, 666, 687, 701, 723 and throughout
 **Issue:** Raw `\033[9Xm` escape sequences are written directly into log strings. On Windows, the default `cmd.exe` and older PowerShell versions do not render ANSI codes — the sequences appear as literal characters in the log output. `colorama` is not listed in `requirements.txt` or `pyproject.toml`.
 **Fix options:**
 - Add `colorama` to dependencies and call `colorama.init()` at startup in `main.py`.
@@ -156,15 +154,15 @@ This also documents the Windows dependency explicitly for future ADB migration (
 
 | Line | Current | Should be |
 |------|---------|-----------|
-| 576 | `"initiated roll_right while afterburner loop is active"` | `"initiating roll_right while afterburner loop is active"` |
-| 591 | `"initiating finall roll right 300sec"` | `"initiating final roll right 300 sec"` |
+| 651 | `"initiated roll_right while afterburner loop is active"` | `"initiating roll_right while afterburner loop is active"` |
+| 666 | `"initiating finall roll right 300sec"` | `"initiating final roll right 300 sec"` |
 
 ---
 
 ### 4.5 `restart_last_mission()` tri-state return value is undocumented
 
-**File:** [wingman/controller.py](../wingman/controller.py) — lines 816–834
-**File:** [wingman/main.py](../wingman/main.py) — lines 178–187
+**File:** [wingman/controller.py](../wingman/controller.py) — lines 951–970
+**File:** [wingman/main.py](../wingman/main.py) — lines 177–199
 **Issue:** The method returns `True` (restarted), `False` (lock held), or `None` (no previous mission). This is non-obvious. `main.py` handles all three cases correctly but only because it was written by the same author. A future contributor will likely treat `None` as falsy and collapse two distinct cases.
 **Fix:** Add a docstring to `restart_last_mission()` spelling out the three return values and what each means. Or replace with a named enum/dataclass result.
 
@@ -195,7 +193,7 @@ This also documents the Windows dependency explicitly for future ADB migration (
 
 ### 5.4 No test for `get_frame()` failure handling (after fix 2.3)
 
-**What's missing:** Once `get_frame()` is wrapped in try/except (fix 2.3 above), add a test that mocks `sct.grab` to raise and asserts `get_frame()` returns `None` rather than propagating.
+**What's missing:** Once `get_frame()` is wrapped in try/except (fix 2.2 above), add a test that mocks `sct.grab` to raise and asserts `get_frame()` returns `None` rather than propagating.
 **File to add test to:** [tests/](../tests/) — `test_capture.py`.
 
 ---
@@ -227,7 +225,7 @@ This also documents the Windows dependency explicitly for future ADB migration (
 | 1.3 | `ThreadPoolExecutor` lifecycle not guaranteed | P1 | Open |
 | 1.4 | Mission lock can be permanently stuck held | P1 | Open |
 | 1.5 | `_background_ocr_lock` acquire blocks main loop indefinitely | P1 | Open |
-| 2.1 | Hotkey handler timeout guard missing | P2 | Open |
+| 2.1 | Hotkey handler timeout guard missing | P2 | Resolved |
 | 2.2 | `mss` grab not guarded against monitor disconnect | P2 | Open |
 | 2.3 | `click_grid_region` has no platform guard | P2 | Open |
 | 2.4 | `get_frame()` shared `mss` instance thread contract undocumented | P2 | Open |

@@ -4,7 +4,7 @@
 #   make test1       -> run region 33 continue-text OCR test
 #   make test2       -> run region 9 INCO-text OCR test
 #   make test-perf   -> run tests + generate CSV + chart
-#   make test-perf-preview -> run tests + preview chart with uncommitted data
+#   make tp              -> run tests + preview chart with uncommitted data
 #   make test-perf-csv   -> generate performance CSV from git history
 #   make test-perf-chart -> generate performance visualization chart
 #   make report      -> run tests and generate HTML report
@@ -15,7 +15,7 @@
 #   make commit      -> commit all changes with a default message
 #   make push        -> push current branch
 
-.PHONY: test test1 test2 test-perf test-perf-preview test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run
+.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run
 
 # Generate HTML report for automated levels test
 test:
@@ -50,7 +50,7 @@ test-perf: test test-perf-csv test-perf-chart
 	@echo ""
 
 # Preview performance trends including current uncommitted data
-test-perf-preview: test
+tp: test
 	uv run python tests/performance_tracking.py --include-current --chart
 	@echo ""
 	@echo "✅ Performance preview complete (includes uncommitted data)!"
