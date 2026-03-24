@@ -552,14 +552,12 @@ class Controller:
                 logger.exception("Controller: mission_loiter failed")
             finally:
                 self._mission_complete.set()
-                try:
+                if self._mission_lock.locked():
                     self._mission_lock.release()
-                except RuntimeError:
-                    pass
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
-        
+
         # Wait for mission to complete or exit requested
         while not self._mission_complete.is_set():
             if self._exit_event and self._exit_event.is_set():
@@ -648,7 +646,7 @@ class Controller:
                     return
                 # Roll right and afterburner
                 self.roll_right(50, block=False)
-                logger.info("\033[91mController:initiated roll_right while afterburner loop is active\033[0m")
+                logger.info("\033[91mController: initiating roll_right while afterburner loop is active\033[0m")
                 self.afterburner(10)
                 if not self._interruptible_sleep(10, check_interval=1.0):
                     logger.info("Controller: mission cancelled during afterburner recharge")
@@ -663,7 +661,7 @@ class Controller:
                     weapon_loop_active.clear()
                     return
                 self.afterburner(10)
-                logger.info("\033[91mController: initiating finall roll right 300sec \033[0m")
+                logger.info("\033[91mController: initiating final roll right 300 sec \033[0m")
 
                 self.roll_right(300)
                 if self._mission_cancel.is_set():
@@ -696,12 +694,9 @@ class Controller:
                     self._weapon_thread.join(timeout=1.0)
             finally:
                 self._mission_complete.set()
-                try:
+                if self._mission_lock.locked():
                     self._mission_lock.release()
                     logger.info("\033[91mController: mission_j20 - lock released\033[0m")
-                except RuntimeError:
-                    logger.error("Controller: mission_j20 - failed to release lock (was already released)")
-                    pass
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
@@ -735,6 +730,9 @@ class Controller:
             region_name: Human-readable name for the region, used in log messages.
         """
         def _do_click():
+            if sys.platform != "win32":
+                logger.error("click_grid_region: Win32 mouse_event not available on %s", sys.platform)
+                return
             try:
                 if self._capture is None:
                     logger.error("Controller: click_grid_region - no capture reference")
@@ -949,6 +947,13 @@ class Controller:
         threading.Thread(target=_loop, daemon=True).start()
 
     def restart_last_mission(self):
+        """Restart the most recently started mission.
+
+        Returns:
+            True  — mission was successfully restarted.
+            False — mission is currently running (lock held); restart skipped.
+            None  — no previous mission has been recorded; nothing to restart.
+        """
         if self.is_mission_running():
             logger.warning("\033[91mController: cannot restart mission - previous mission still in progress (lock held)\033[0m")
             return False

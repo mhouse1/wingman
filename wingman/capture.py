@@ -2,9 +2,6 @@ import numpy as np
 from mss import mss
 
 
-from mss import mss
-import numpy as np
-
 class Capture:
     def __init__(self, region, monitor_index=1):
         self.region = region
@@ -25,10 +22,20 @@ class Capture:
         return {"left": left, "top": top, "width": width, "height": height}
 
     def get_frame(self):
-        """Return a BGR image of the configured region on the selected monitor."""
-        monitor = self.get_monitor_rect()
-        s = self.sct.grab(monitor)
-        img = np.array(s)
-        # mss returns BGRA
-        img = img[:, :, :3]
-        return img
+        """Return a BGR image of the configured region on the selected monitor.
+
+        Must be called from the same thread that constructed this Capture instance.
+        mss uses thread-local storage internally; calls from a different thread will
+        silently use the wrong context.  Code in controller.py that captures from
+        daemon threads creates its own short-lived ``mss()`` context instead of
+        calling this method.
+        """
+        try:
+            monitor = self.get_monitor_rect()
+            s = self.sct.grab(monitor)
+            img = np.array(s)
+            # mss returns BGRA
+            img = img[:, :, :3]
+            return img
+        except Exception:
+            return None

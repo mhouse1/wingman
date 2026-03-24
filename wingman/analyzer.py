@@ -360,6 +360,9 @@ class GameStateAnalyzer:
             'timestamp': 0.0,
         }
         self._incoming_cache_lock = threading.Lock()
+        # Signalled by the background OCR thread each time a new incoming result is written.
+        # The main loop waits on this event during its sleep interval to react without spinning.
+        self.incoming_event = threading.Event()
 
         # "Click to Continue" cache (lower priority than respawn/incoming)
         self._click_to_cache = {
@@ -371,6 +374,7 @@ class GameStateAnalyzer:
         self._click_to_latest_frame = None
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
+        self._click_to_stop = threading.Event()
 
         self._game_end_b = False    # Set when "Click to Continue" is detected
         self._game_lobby = True     # Start in GAME_LOBBY; cleared when a mission begins
@@ -557,6 +561,7 @@ class GameStateAnalyzer:
 
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
+        self._click_to_stop.set()
         if self._ocr_executor is not None:
             try:
                 self._ocr_executor.shutdown(wait=False)
@@ -564,6 +569,13 @@ class GameStateAnalyzer:
             except Exception as e:
                 logger.warning("Error shutting down ThreadPoolExecutor: %s", e)
             self._ocr_executor = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.cleanup()
+        return False
     
     def analyze_frame(self, frame, region=None):
         """
@@ -702,7 +714,10 @@ class GameStateAnalyzer:
         
         # Cache expired - schedule background OCR (non-blocking).
         # If OCR is already running, update pending frame; otherwise, start thread.
-        with self._background_ocr_lock:
+        if not self._background_ocr_lock.acquire(timeout=5.0):
+            logger.warning("Analyzer: background OCR lock timeout - skipping frame")
+            return cached_result
+        try:
             if self._background_ocr_running:
                 self._background_ocr_pending_frame = frame
                 logger.debug("Background OCR busy; will process latest pending frame next")
@@ -716,7 +731,9 @@ class GameStateAnalyzer:
                 )
                 self._background_ocr_thread.start()
                 logger.debug("Background OCR scheduled")
-        
+        finally:
+            self._background_ocr_lock.release()
+
         # Return cached result (may be stale) while background OCR runs
         return cached_result
     
@@ -786,6 +803,8 @@ class GameStateAnalyzer:
                 with self._incoming_cache_lock:
                     self._incoming_cache['result'] = incoming_result
                     self._incoming_cache['timestamp'] = current_time
+                if incoming_detected:
+                    self.incoming_event.set()
 
                 # Log timing
                 logger.debug(
@@ -814,10 +833,8 @@ class GameStateAnalyzer:
         Runs every 5 seconds in its own daemon thread so it never delays the
         high-priority respawn/incoming OCR cycle.
         """
-        import time
         interval = 5.0
-        while True:
-            time.sleep(interval)
+        while not self._click_to_stop.wait(timeout=interval):
             state = self.game_state
             if state in (GameState.GAME_END_B, GameState.GAME_LOBBY, GameState.GAME_STARTING):
                 logger.debug("Click-to OCR skipped: %s state active", state.name)

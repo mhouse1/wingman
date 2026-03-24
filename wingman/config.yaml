@@ -8,13 +8,19 @@ unattended_mode: true
 # [UnitTest] OCR Stage Timings:
 #   Setup: 0.00s, Reader: 1.17s, Grayscale: 0.00s, Threshold: 0.00s, Resize: 0.00s, OCR: 3.61s, Total: 4.82s
 loop_interval_sec: 1.5
-# Screen capture region (left, top, width, height)
+# Screen capture region (left, top, width, height).
+# These values are calibrated for a 1920×1200 display.
+# To recalibrate: press V in-game to capture a screenshot, then use the grid
+# overlay in tests/test-output/ to identify the correct region coordinates.
 region:
   left: 0
   top: 0
   width: 1920
   height: 1200
-# Monitor index for screen capture (1=primary, 2=secondary, etc.)
+# Monitor index for screen capture.
+#   1 = primary monitor (default for single-monitor setups)
+#   2 = first secondary monitor
+# WARNING: setting this to 2 on a single-monitor machine will raise ValueError at startup.
 monitor: 2
   # Dell monitor 3840x1600
   # width: 3839
