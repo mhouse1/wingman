@@ -260,6 +260,7 @@ name = "metalstorm-wingman"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "colorama" },
     { name = "easyocr" },
     { name = "keyboard" },
     { name = "mss" },
@@ -281,6 +282,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "colorama" },
     { name = "easyocr" },
     { name = "keyboard", specifier = ">=0.13.5" },
     { name = "mss" },

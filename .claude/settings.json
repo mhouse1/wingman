@@ -4,7 +4,8 @@
       "Bash(ls c:/dev-tools/github/wingman/ --ignore=.venv*)",
       "Bash(make test:*)",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''tests/test_automated_levels.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''tests/test_automated_levels.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''tests/test_automated_levels.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
+      "Bash(find \"c:\\\\dev-tools\\\\github\\\\wingman\\\\tests\" -name \"*.py\" -type f -exec wc -l {} +)"
     ]
   }
 }

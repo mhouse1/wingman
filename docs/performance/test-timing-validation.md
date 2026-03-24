@@ -87,6 +87,19 @@ Tolerance: ±5s
 💡 Tip: Use pytest --strict-timing to fail on timing violations (useful for CI)
 ```
 
+## Interpreting Slow Runs
+
+A timing violation does not always indicate a code regression. OCR tests are CPU-bound and sensitive to system load at the time of the run.
+
+**Observed pattern (2026-03-23):** All OCR tests ran 4–5× slower than baseline in a single session (`test_respawn_detection_positive`: 12s baseline → 60s actual). Every test was affected uniformly. Re-running immediately returned to nominal times.
+
+**Rule of thumb:** if *all* OCR tests are slow in the same run and they pass on a re-run, the cause is CPU load (background processes, antivirus scan, OS update, thermal throttling), not a code change. A genuine regression typically affects one or two specific tests, not the entire suite uniformly.
+
+**Before investigating a timing violation:**
+1. Re-run the test in isolation: `uv run pytest tests/test_automated_levels.py -k <test_name>`
+2. Check CPU load during the run (Task Manager / `htop`)
+3. Only treat it as a regression if it reproduces consistently on a lightly loaded machine
+
 ## Updating the Baseline
 
 When test performance changes legitimately (e.g., optimization or hardware upgrades):

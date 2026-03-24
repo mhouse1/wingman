@@ -5,11 +5,17 @@ import logging
 import threading
 from enum import Enum, auto
 
-WINGMAN_VERSION = "1.5.2"
-WINGMAN_VERSION_DETAILS = "Sub region optimization for OCR"
+try:
+    import colorama
+    colorama.init()
+except ImportError:
+    colorama = None
+
+WINGMAN_VERSION = "1.5.3"
+WINGMAN_VERSION_DETAILS = "Resolve some tech debt before moving onto new features"
 
 from .capture import Capture
-from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY
+from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE
 from .analyzer import GameStateAnalyzer, GameState
 
 
@@ -31,7 +37,11 @@ def main():
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s")
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    handler = logging.StreamHandler()
+    handler.stream.reconfigure(encoding="utf-8", errors="replace")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logging.basicConfig(level=log_level, handlers=[handler])
     logger = logging.getLogger("wingman")
 
     cfg = load_config(args.config)
@@ -50,7 +60,7 @@ def main():
 
     # Initialize main components
     cap = Capture(region, monitor_index)
-    analyzer = GameStateAnalyzer(cfg)
+    analyzer = GameStateAnalyzer(cfg)  # also usable as a context manager via __enter__/__exit__
 
     unattended_mode = cfg.get("unattended_mode", False)
     unattended_active = threading.Event()
@@ -73,9 +83,11 @@ def main():
 
     controls_cfg = cfg.get("controls", {})
     ready_button_region = controls_cfg.get("ready_button_region", 64)
+    good_luck_region = controls_cfg.get("good_luck_region", 16)
+    event_refresh_region = controls_cfg.get("event_refresh_region", 30)
 
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, ready_button_region=ready_button_region)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, ready_button_region=ready_button_region, good_luck_region=good_luck_region, event_refresh_region=event_refresh_region)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -88,6 +100,7 @@ def main():
     last_incoming_alert_ts = 0.0
     last_click_to_alert_ts = 0.0
     last_game_state = None
+    game_end_b_since = 0.0  # timestamp of GAME_END_B entry; used by stall timeout guard
 
     def _deploy_flares_on_new_incoming() -> bool:
         """Deploy flares in a burst when a new incoming OCR detection arrives."""
@@ -119,6 +132,9 @@ def main():
                 break
             # Capture and analyze frame
             frame = cap.get_frame()
+            if frame is None:
+                logger.warning("Frame capture failed (monitor disconnected or region out of bounds) — skipping cycle")
+                continue
             game_state = analyzer.analyze_frame(frame)
 
             # Log game state transitions
@@ -128,11 +144,23 @@ def main():
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
                 last_game_state = current_game_state
+                if current_game_state == GameState.GAME_END_B:
+                    game_end_b_since = time.time()
+                else:
+                    game_end_b_since = 0.0
                 if current_game_state == GameState.GAME_LOBBY:
                     ctrl.cancel_mission()
                     if unattended_active.is_set():
                         logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
                         ctrl.start_auto_mission()
+
+            # GAME_END_B stall guard: if click-to OCR cache gets stuck, force recovery
+            if (current_game_state == GameState.GAME_END_B
+                    and game_end_b_since > 0
+                    and time.time() - game_end_b_since > 30.0):
+                logger.warning("GAME_END_B timeout — click-to OCR may be stuck; forcing recovery to GAME_BATTLE")
+                analyzer._game_end_b = False
+                game_end_b_since = 0.0
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             # Higher priority than respawn — must run before the respawn continue.
@@ -212,19 +240,23 @@ def main():
                 logger.info("\033[93m📋 CLICK TO CONTINUE detected in region %d\033[0m", analyzer.click_to_region)
                 last_click_to_alert_ts = click_to_ts
                 ctrl.cancel_mission()
-                ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False)
+                ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False, region_name=REGION_CLICK_TO_CONTINUE)
 
-            # Enforce configurable loop interval
+            # Enforce configurable loop interval.
+            # Block on incoming_event so flare deployment wakes immediately on new OCR results
+            # rather than spinning at 20 Hz.  The event is set by the background OCR thread
+            # whenever a new incoming result is written; we clear it after acting on it.
             elapsed = time.time() - loop_start
             if elapsed < loop_interval_sec:
                 sleep_end = loop_start + loop_interval_sec
                 while True:
                     now = time.time()
-                    if now >= sleep_end:
+                    remaining = sleep_end - now
+                    if remaining <= 0:
                         break
-                    # Poll incoming cache during sleep so flare deploy is not delayed until next loop.
+                    analyzer.incoming_event.wait(timeout=remaining)
+                    analyzer.incoming_event.clear()
                     _deploy_flares_on_new_incoming()
-                    time.sleep(min(0.05, sleep_end - now))
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:

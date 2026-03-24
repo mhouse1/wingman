@@ -22,6 +22,53 @@ Performance ADRs must include actual log excerpts with timing data, not just est
 
 Do not modify an ADR that has status `Accepted`. If a decision is superseded, write a new ADR and reference the old one. This keeps the decision history intact.
 
+## Diagrams
+
+Always use Mermaid for diagrams in documentation. Never use ASCII text diagrams (no box-drawing characters, no `┌─┐` borders, no `→` arrow art). Wrap all diagrams in a fenced code block with the `mermaid` language tag.
+
+## Lock Release in Finally Blocks
+
+Never use `try: lock.release() except RuntimeError: pass` in finally blocks. Always guard with:
+
+```python
+if self._some_lock.locked():
+    self._some_lock.release()
+```
+
+The swallowed-exception pattern silently leaves the lock held if `release()` fails, permanently blocking future `acquire(blocking=False)` callers.
+
+## Stoppable Daemon Threads
+
+Any long-running daemon thread must be stoppable via a `threading.Event`. Use `event.wait(timeout=interval)` as the loop tick — not `while True: time.sleep(interval)`. The stop event must be set in `cleanup()` before the executor is shut down:
+
+```python
+# __init__
+self._my_stop = threading.Event()
+
+# thread body
+while not self._my_stop.wait(timeout=5.0):
+    ...
+
+# cleanup()
+self._my_stop.set()
+```
+
+## Lock Acquire Timeout on Main-Loop Paths
+
+Any lock that can be held by a background thread must use `acquire(timeout=N)` when called from the main loop. Bare `with lock:` is only safe when both sides run in background threads. Return or skip the cycle gracefully on timeout:
+
+```python
+if not self._some_lock.acquire(timeout=5.0):
+    logger.warning("lock timeout - skipping frame")
+    return cached_result
+try:
+    ...
+finally:
+    self._some_lock.release()
+```
+
 ## Code Review Todos
 
-When completing work that addresses an item in `docs/code-review-todos.md`, update that file to mark the item resolved. Check it at the start of any session to see if pending items are relevant to the current task.
+Review files live in `docs/code-review/` and are numbered sequentially (`001-2026-03.md`, `002-…`, etc.). Each file covers one review cycle and is closed (immutable) once all items resolve.
+
+At the start of any session, open the highest-numbered file and check for open items relevant to the current task. When an item is resolved, mark it Resolved in that file. When starting a new review cycle, create the next numbered file in the same directory.

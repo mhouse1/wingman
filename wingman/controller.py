@@ -50,8 +50,16 @@ EMOTE9 # Good Game!
 EMOTE10 # Oops!
 """
 
+# Region name constants — used as log labels in click_grid_region and elsewhere.
+# Defining them as constants means the string is written once; a rename is a
+# single-line change here rather than a grep-and-replace across the codebase.
+REGION_GOOD_LUCK         = "good_luck"
+REGION_EVENT_REFRESH     = "event_refresh"
+REGION_READY_BUTTON      = "ready_button"
+REGION_CLICK_TO_CONTINUE = "click_to_continue"
+
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, ready_button_region: int = 64):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, ready_button_region: int = 64, good_luck_region: int = 16, event_refresh_region: int = 30):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -67,8 +75,11 @@ class Controller:
         self._capture = capture
         self._on_auto_mission_key = on_auto_mission_key
         self._ready_button_region = ready_button_region
+        self._good_luck_region = good_luck_region
+        self._event_refresh_region = event_refresh_region
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
-        
+        self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
+
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
 
@@ -81,6 +92,9 @@ class Controller:
         if keyboard_module:
             # Cancel mission if maneuver keys are pressed during GAME_BATTLE
             def maneuver_cancel_hotkey(e):
+                if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
+                    logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
+                    return
                 if self._analyzer and hasattr(self._analyzer, 'game_state'):
                     try:
                         state = self._analyzer.game_state()
@@ -122,6 +136,9 @@ class Controller:
             # Maneuver keys cancel mission when pressed during GAME_BATTLE (manual takeover)
             try:
                 def maneuver_key_pressed(e):
+                    if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
+                        logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
+                        return
                     if self.is_mission_running():
                         logger.info("Controller: maneuver key '%s' pressed - cancelling mission (manual takeover)", e.name)
                         self._auto_respawn_restart = False
@@ -235,7 +252,7 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register padlock camera cooldown hotkey")
 
-            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the play button (region 64)
+            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the ready_button
             try:
                 def auto_mission_key_pressed(_e):
                     if self._on_auto_mission_key is not None:
@@ -264,8 +281,8 @@ class Controller:
             return
 
         def _run():
-            logger.info("Controller: start_auto_mission - waiting 3s for game to settle before clicking play button")
-            time.sleep(3)
+            logger.info("Controller: start_auto_mission - waiting 5s for game to settle before clicking play button")
+            time.sleep(5)
             if self._analyzer is None:
                 return
             logger.info("Controller: start_auto_mission - cancelling any active mission before entering GAME_STARTING")
@@ -274,7 +291,7 @@ class Controller:
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
             self._analyzer._game_starting = True
-            self.click_grid_region(self._ready_button_region, block=False, count=1)
+            self.click_grid_region(self._ready_button_region, block=False, count=1, region_name=REGION_READY_BUTTON)
             self._start_game_starting_loop()
 
         threading.Thread(target=_run, daemon=True).start()
@@ -542,14 +559,12 @@ class Controller:
                 logger.exception("Controller: mission_loiter failed")
             finally:
                 self._mission_complete.set()
-                try:
+                if self._mission_lock.locked():
                     self._mission_lock.release()
-                except RuntimeError:
-                    pass
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
-        
+
         # Wait for mission to complete or exit requested
         while not self._mission_complete.is_set():
             if self._exit_event and self._exit_event.is_set():
@@ -638,7 +653,7 @@ class Controller:
                     return
                 # Roll right and afterburner
                 self.roll_right(50, block=False)
-                logger.info("\033[91mController:initiated roll_right while afterburner loop is active\033[0m")
+                logger.info("\033[91mController: initiating roll_right while afterburner loop is active\033[0m")
                 self.afterburner(10)
                 if not self._interruptible_sleep(10, check_interval=1.0):
                     logger.info("Controller: mission cancelled during afterburner recharge")
@@ -653,7 +668,7 @@ class Controller:
                     weapon_loop_active.clear()
                     return
                 self.afterburner(10)
-                logger.info("\033[91mController: initiating finall roll right 300sec \033[0m")
+                logger.info("\033[91mController: initiating final roll right 300 sec \033[0m")
 
                 self.roll_right(300)
                 if self._mission_cancel.is_set():
@@ -686,12 +701,9 @@ class Controller:
                     self._weapon_thread.join(timeout=1.0)
             finally:
                 self._mission_complete.set()
-                try:
+                if self._mission_lock.locked():
                     self._mission_lock.release()
                     logger.info("\033[91mController: mission_j20 - lock released\033[0m")
-                except RuntimeError:
-                    logger.error("Controller: mission_j20 - failed to release lock (was already released)")
-                    pass
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
@@ -712,7 +724,7 @@ class Controller:
         
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
-    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6):
+    def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6, region_name: str = None):
         """Move the mouse to the center of a grid region and left-click it.
 
         Args:
@@ -721,9 +733,13 @@ class Controller:
             grid_cols: Number of grid columns (default 8).
             block: If True run in the calling thread; otherwise spawn a daemon thread.
             count: Number of times to click the region. When count > 1 a final click on
-                   region 64 (lobby/continue button) is also performed.
+                   the ready button (lobby/continue button) is also performed.
+            region_name: Human-readable name for the region, used in log messages.
         """
         def _do_click():
+            if sys.platform != "win32":
+                logger.error("click_grid_region: Win32 mouse_event not available on %s", sys.platform)
+                return
             try:
                 if self._capture is None:
                     logger.error("Controller: click_grid_region - no capture reference")
@@ -748,8 +764,9 @@ class Controller:
                 col = (region_num - 1) % grid_cols
                 abs_x = int(abs_left + (col + 0.5) * cell_w)
                 abs_y = int(abs_top + (row + 0.5) * cell_h)
-                logger.info("\033[93m📋 Clicking grid region %d at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
-                            region_num, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
+                label = region_name if region_name else str(region_num)
+                logger.info("\033[93m📋 Clicking %s at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
+                            label, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
                 def _raw_click(x, y):
                     ctypes.windll.user32.SetCursorPos(x, y)
                     time.sleep(0.05)
@@ -769,7 +786,7 @@ class Controller:
                     col_rb = (rbn - 1) % grid_cols
                     x_rb = int(abs_left + (col_rb + 0.5) * cell_w)
                     y_rb = int(abs_top + (row_rb + 0.5) * cell_h)
-                    logger.info("\033[93m📋 Clicking ready button region %d at (%d, %d)\033[0m", rbn, x_rb, y_rb)
+                    logger.info("\033[93m📋 Clicking ready_button at (%d, %d)\033[0m", x_rb, y_rb)
                     _raw_click(x_rb, y_rb)
                     if self._analyzer is not None:
                         self._analyzer._game_lobby = True
@@ -801,6 +818,7 @@ class Controller:
         with self._last_mission_lock:
             self._last_mission = mission_name
         self._auto_respawn_restart = True
+        self._game_battle_since = time.time()
         if self._analyzer is not None:
             self._analyzer._last_battle_event_ts = time.time()
             self._analyzer._game_end_b = False
@@ -811,7 +829,7 @@ class Controller:
     def _start_game_starting_loop(self):
         """Background loop active in GAME_STARTING state.
 
-        Every 5 seconds: press MISSION_J20_KEY and scan region 16 for 'Good Luck'.
+        Every 5 seconds: press MISSION_J20_KEY and scan the good_luck region for 'Good Luck'.
         Once detected, wait 10 seconds then launch mission_j20.
         """
         good_luck_event = threading.Event()
@@ -824,7 +842,7 @@ class Controller:
                 with mss() as sct:
                     s = sct.grab(self._capture.get_monitor_rect())
                     frame = np.array(s)[:, :, :3]
-                if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame, region_num=16):
+                if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame, region_num=self._good_luck_region):
                     good_luck_event.set()
             except Exception:
                 logger.exception("Controller: game_starting OCR scan error")
@@ -884,7 +902,7 @@ class Controller:
                             with mss() as sct:
                                 s = sct.grab(self._capture.get_monitor_rect())
                                 scan_frame = np.array(s)[:, :, :3]
-                            if self._analyzer.scan_region_for_event_refresh(scan_frame, region_num=30):
+                            if self._analyzer.scan_region_for_event_refresh(scan_frame, region_num=self._event_refresh_region):
                                 logger.warning(
                                     "\033[93mController: 'Event refresh in progress' popup detected - "
                                     "clicking corner to dismiss, retrying in 1s\033[0m"
@@ -892,8 +910,8 @@ class Controller:
                                 _click_corner_28_29_36_37()
                                 time.sleep(1.0)
                                 # Re-click region 64 to attempt game entry again
-                                logger.info("Controller: re-clicking region 64 to retry game entry after event refresh dismiss")
-                                self.click_grid_region(self._ready_button_region, count=1, block=True)
+                                logger.info("Controller: re-clicking ready_button to retry game entry after event refresh dismiss")
+                                self.click_grid_region(self._ready_button_region, count=1, block=True, region_name=REGION_READY_BUTTON)
                                 continue
                         except Exception:
                             logger.exception("Controller: game_starting event-refresh check failed")
@@ -937,6 +955,13 @@ class Controller:
         threading.Thread(target=_loop, daemon=True).start()
 
     def restart_last_mission(self):
+        """Restart the most recently started mission.
+
+        Returns:
+            True  — mission was successfully restarted.
+            False — mission is currently running (lock held); restart skipped.
+            None  — no previous mission has been recorded; nothing to restart.
+        """
         if self.is_mission_running():
             logger.warning("\033[91mController: cannot restart mission - previous mission still in progress (lock held)\033[0m")
             return False
