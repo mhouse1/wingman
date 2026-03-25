@@ -11,10 +11,11 @@ from pathlib import Path
 
 
 class GameState(Enum):
-    GAME_BATTLE   = auto()  # Active gameplay (default); respawn/incoming scanning active
-    GAME_END_B    = auto()  # "Click to Continue" detected; clicking in progress
-    GAME_LOBBY    = auto()  # Final continue (region 64) clicked; waiting in lobby
-    GAME_STARTING = auto()  # Play pressed; waiting for "Good Luck" before launching mission
+    GAME_BATTLE          = auto()  # Active gameplay (default); respawn/incoming scanning active
+    GAME_END_B           = auto()  # "Click to Continue" detected; clicking in progress
+    GAME_LOBBY           = auto()  # Final continue (region 64) clicked; waiting in lobby
+    GAME_STARTING        = auto()  # Play pressed; waiting for "Good Luck" before launching mission
+    GAME_STARTING_STALLED = auto() # GAME_STARTING timed out without "Good Luck" detection
 
 try:
     import easyocr
@@ -376,9 +377,10 @@ class GameStateAnalyzer:
         self._click_to_thread_started = False
         self._click_to_stop = threading.Event()
 
-        self._game_end_b = False    # Set when "Click to Continue" is detected
-        self._game_lobby = True     # Start in GAME_LOBBY; cleared when a mission begins
-        self._game_starting = False # Set when play is pressed; waiting for "Good Luck"
+        self._game_end_b = False           # Set when "Click to Continue" is detected
+        self._game_lobby = True            # Start in GAME_LOBBY; cleared when a mission begins
+        self._game_starting = False        # Set when play is pressed; waiting for "Good Luck"
+        self._game_starting_stalled = False  # Set when GAME_STARTING times out without Good Luck
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
         # Thread pool executor for parallel OCR processing
@@ -553,6 +555,8 @@ class GameStateAnalyzer:
         """Current high-level game state."""
         if self._game_starting:
             return GameState.GAME_STARTING
+        if self._game_starting_stalled:
+            return GameState.GAME_STARTING_STALLED
         if self._game_lobby:
             return GameState.GAME_LOBBY
         if self._game_end_b:
@@ -795,9 +799,9 @@ class GameStateAnalyzer:
                     self._game_end_b = False
                     self._game_lobby = False
                 elif incoming_raw:
-                    logger.debug("Analyzer: No match in incoming region %s — raw OCR: %s", self.incoming_region, ", ".join(incoming_raw))
+                    logger.debug("Analyzer: No match in INCOMING region — raw OCR: %s", ", ".join(incoming_raw))
                 else:
-                    logger.debug("Analyzer: No text detected in incoming region %s", self.incoming_region)
+                    logger.debug("Analyzer: No text detected in INCOMING region")
 
                 incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
                 with self._incoming_cache_lock:
@@ -907,9 +911,9 @@ class GameStateAnalyzer:
                 _process_good_luck_region, region_frame
             ).result(timeout=30)
             if detected:
-                logger.info("Analyzer: 'Good Luck' detected in region %d (text='%s')", region_num, text)
+                logger.info("Analyzer: 'Good Luck' detected in GOOD_LUCK region (text='%s')", text)
             else:
-                logger.debug("Analyzer: 'Good Luck' not found in region %d", region_num)
+                logger.debug("Analyzer: 'Good Luck' not found in GOOD_LUCK region")
             return detected
         except Exception as e:
             logger.warning("Analyzer: Good Luck scan failed: %s", e)
@@ -938,9 +942,9 @@ class GameStateAnalyzer:
                 _process_event_refresh_region, region_frame
             ).result(timeout=30)
             if detected:
-                logger.info("Analyzer: 'Event refresh' popup detected in region %d (text='%s')", region_num, text)
+                logger.info("Analyzer: 'Event refresh' popup detected in EVENT_REFRESH region (text='%s')", text)
             else:
-                logger.debug("Analyzer: Event refresh popup not found in region %d", region_num)
+                logger.debug("Analyzer: Event refresh popup not found in EVENT_REFRESH region")
             return detected
         except Exception as e:
             logger.warning("Analyzer: Event refresh scan failed: %s", e)
