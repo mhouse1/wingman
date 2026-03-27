@@ -159,9 +159,9 @@ class Controller:
                 def start_j20_mission(e):
                     self._auto_respawn_restart = True
                     if self._analyzer is not None and self._analyzer._game_starting:
-                        logger.debug("Controller: '%s' key pressed but in GAME_STARTING - ignoring hotkey (loop controls mission launch)", MISSION_J20_KEY)
-                        return
-                    logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
+                        logger.info("Controller: '%s' key pressed during GAME_STARTING - entering GAME_BATTLE", MISSION_J20_KEY)
+                    else:
+                        logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
                     self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
