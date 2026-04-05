@@ -37,6 +37,7 @@ MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
 CANCEL_MISSION_KEY = 'end'   # Press End to cancel active mission
 CAPTURE_SCREEN_SHOT = 'v'  # Press V to capture a screenshot (for testing/debugging)
 AUTO_MISSION_KEY = 'm'  # Press M to start an automatic mission based on detected game state (not implemented yet)
+SIMULATE_RESPAWN_KEY = 'b'  # Press B to inject a fake respawn OCR result (testing)
 """
 EMOTE1 # Moving to
 EMOTE2 # Help!
@@ -159,9 +160,9 @@ class Controller:
                 def start_j20_mission(e):
                     self._auto_respawn_restart = True
                     if self._analyzer is not None and self._analyzer._game_starting:
-                        logger.debug("Controller: '%s' key pressed but in GAME_STARTING - ignoring hotkey (loop controls mission launch)", MISSION_J20_KEY)
-                        return
-                    logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
+                        logger.info("Controller: '%s' key pressed during GAME_STARTING - entering GAME_BATTLE", MISSION_J20_KEY)
+                    else:
+                        logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
                     self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
@@ -171,7 +172,7 @@ class Controller:
 
             try:
                 def start_loiter_mission(e):
-                    logger.info("Controller: Y key pressed - starting loiter mission")
+                    logger.info("Controller: '%s' key pressed - starting loiter mission", MISSION_LOITER_KEY)
                     self._set_last_mission("loiter")
                     threading.Thread(target=self.mission_loiter, daemon=True).start()
                 keyboard_module.on_press_key(MISSION_LOITER_KEY, start_loiter_mission, suppress=False)
@@ -188,7 +189,7 @@ class Controller:
                     if now - self._last_b_press_time < 0.5:  # debounce: ignore key-repeat
                         return
                     self._last_b_press_time = now
-                    logger.info("Controller: B key pressed - simulating respawn detected (as if OCR detected 'RESPAWN')")
+                    logger.info("Controller: '%s' key pressed - simulating respawn detected (as if OCR detected 'RESPAWN')", SIMULATE_RESPAWN_KEY)
                     if self._analyzer is not None:
                         with self._analyzer._ocr_cache_lock:
                             self._analyzer._ocr_cache['result'] = (True, 1.0, "ocr")
@@ -197,15 +198,15 @@ class Controller:
                     else:
                         logger.warning("Controller: No analyzer reference to inject fake OCR respawn result.")
                     self._simulate_respawn_flag.set()
-                keyboard_module.on_press_key('b', simulate_respawn, suppress=False)
-                logger.info("Controller: registered hotkey 'b' to simulate respawn detected")
+                keyboard_module.on_press_key(SIMULATE_RESPAWN_KEY, simulate_respawn, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to simulate respawn detected", SIMULATE_RESPAWN_KEY)
             except Exception:
                 logger.exception("Controller: failed to register simulate respawn hotkey")
 
             # Register hotkey for capturing screenshots (for testing/debugging)
             try:
                 def capture_screenshot(e):
-                    logger.info("Controller: V key pressed - capturing screenshot")
+                    logger.info("Controller: '%s' key pressed - capturing screenshot", CAPTURE_SCREEN_SHOT)
                     if self._capture is not None and self._analyzer is not None:
                         try:
                             # Create new mss instance for thread-safety (mss uses thread-local storage)
@@ -245,8 +246,9 @@ class Controller:
             # the padlock loop for 10 seconds so it doesn't immediately re-lock.
             try:
                 def padlock_key_pressed(e):
-                    self._padlock_cooldown_until = time.time() + 10.0
-                    logger.info("Controller: P key pressed manually - padlock loop cooldown set for 10 seconds")
+                    cooldown = 10.0
+                    self._padlock_cooldown_until = time.time() + cooldown
+                    logger.info("Controller: '%s' key pressed manually - padlock loop cooldown set for %.0fs", PADLOCK_CAMERA, cooldown)
                 keyboard_module.on_press_key(PADLOCK_CAMERA, padlock_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to set padlock loop cooldown", PADLOCK_CAMERA)
             except Exception:
@@ -281,8 +283,9 @@ class Controller:
             return
 
         def _run():
-            logger.info("Controller: start_auto_mission - waiting 5s for game to settle before clicking play button")
-            time.sleep(5)
+            settle_delay = 5
+            logger.info("Controller: start_auto_mission - waiting %ds for game to settle before clicking play button", settle_delay)
+            time.sleep(settle_delay)
             if self._analyzer is None:
                 return
             logger.info("Controller: start_auto_mission - cancelling any active mission before entering GAME_STARTING")
@@ -824,6 +827,7 @@ class Controller:
             self._analyzer._game_end_b = False
             self._analyzer._game_lobby = False
             self._analyzer._game_starting = False
+            self._analyzer._game_starting_stalled = False
             logger.info("Controller: mission '%s' started → GAME_BATTLE", mission_name)
 
     def _start_game_starting_loop(self):
@@ -886,15 +890,15 @@ class Controller:
                 logger.exception("Controller: _click_corner_28_29_36_37 failed")
 
         def _loop():
-            logger.info("Controller: game_starting loop started - pressing J20 key every 5s until 'Good Luck' detected")
+            logger.info("Controller: game_starting loop started - pressing '%s' key every 5s until 'Good Luck' detected", MISSION_J20_KEY)
             loop_start = time.time()
-            max_wait = 120  # safety timeout: clear _game_starting if Good Luck never detected
+            max_wait = 180  # safety timeout: clear _game_starting if Good Luck never detected
             try:
                 while self._analyzer is not None and self._analyzer._game_starting:
                     # Press MISSION_J20_KEY every interval
                     if keyboard_module:
                         keyboard_module.press_and_release(MISSION_J20_KEY)
-                        logger.info("Controller: game_starting - pressed J20 key")
+                        logger.info("Controller: game_starting - pressed '%s' key", MISSION_J20_KEY)
 
                     # Check region 30 for 'Event refresh in progress' popup
                     if self._capture is not None and self._analyzer is not None:
@@ -931,14 +935,16 @@ class Controller:
                         return
 
                     if time.time() - loop_start > max_wait:
-                        logger.warning("Controller: game_starting timed out after %ds without 'Good Luck' - clearing state", max_wait)
+                        logger.warning("Controller: game_starting timed out after %ds without 'Good Luck' - entering GAME_STARTING_STALLED", max_wait)
                         if self._analyzer is not None:
                             self._analyzer._game_starting = False
+                            self._analyzer._game_starting_stalled = True
                         return
 
                     if good_luck_event.is_set():
-                        logger.info("\033[92mController: 'Good Luck' detected - waiting 13 seconds before starting J20 mission\033[0m")
-                        for _ in range(130):  # 130 * 0.1s = 13s
+                        good_luck_wait = 13
+                        logger.info("\033[92mController: 'Good Luck' detected - waiting %ds before starting '%s' mission\033[0m", good_luck_wait, MISSION_J20_KEY)
+                        for _ in range(good_luck_wait * 10):  # N * 0.1s = Ns
                             if self._analyzer is None or not self._analyzer._game_starting:
                                 return
                             time.sleep(0.1)

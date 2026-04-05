@@ -11,7 +11,7 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.5.3"
+WINGMAN_VERSION = "1.5.4"
 WINGMAN_VERSION_DETAILS = "Resolve some tech debt before moving onto new features"
 
 from .capture import Capture
@@ -237,7 +237,7 @@ def main():
                 click_to_detected, _, _ = analyzer._click_to_cache['result']
                 click_to_ts = analyzer._click_to_cache['timestamp']
             if click_to_detected and click_to_ts > last_click_to_alert_ts:
-                logger.info("\033[93m📋 CLICK TO CONTINUE detected in region %d\033[0m", analyzer.click_to_region)
+                logger.info("\033[93m📋 CLICK TO CONTINUE detected in CLICK_TO_CONTINUE region\033[0m")
                 last_click_to_alert_ts = click_to_ts
                 ctrl.cancel_mission()
                 ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False, region_name=REGION_CLICK_TO_CONTINUE)
