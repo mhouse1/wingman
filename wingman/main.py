@@ -11,8 +11,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.5.4"
-WINGMAN_VERSION_DETAILS = "Resolve some tech debt before moving onto new features"
+WINGMAN_VERSION = "1.6.0"
+WINGMAN_VERSION_DETAILS = "New dynamic screen region selection architecture"
 
 from .capture import Capture
 from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE

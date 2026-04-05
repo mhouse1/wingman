@@ -108,7 +108,8 @@ n:
 	git commit -am "new feature"
 
 p:
-	git push
+	git add .
+	git commit -am .
 
 squash:
 	git rebase -i --autosquash origin/main
