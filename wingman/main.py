@@ -30,6 +30,31 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
+def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8, sleep_fn=time.sleep):
+    """Click through GAME_END prompt and force transition to GAME_LOBBY.
+
+    Clicks the center prompt repeatedly, then clicks the lower-right continue
+    button. After the final click, explicitly flips state flags so the analyzer
+    exits GAME_END_B even if OCR polling is currently skipping in that state.
+    """
+    ctrl.click_crop(
+        analyzer.crops["click_to"],
+        block=True,
+        count=5,
+        region_name=REGION_CLICK_TO_CONTINUE,
+    )
+    sleep_fn(settle_seconds)
+    ctrl.click_crop(
+        analyzer.crops["ready_button"],
+        block=True,
+        count=1,
+        region_name="ready_button",
+    )
+    analyzer._game_end_b = False
+    analyzer._game_lobby = True
+    logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
+
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -241,28 +266,11 @@ def main():
                 logger.info("\033[93m📋 CLICK TO CONTINUE detected in CLICK_TO_CONTINUE region\033[0m")
                 last_click_to_alert_ts = click_to_ts
                 ctrl.cancel_mission()
-
-                def _click_through_game_end():
-                    # Click the center prompt repeatedly, then click the lower-right
-                    # continue/ready button to finish exiting the end screen.
-                    ctrl.click_crop(
-                        analyzer.crops["click_to"],
-                        block=True,
-                        count=5,
-                        region_name=REGION_CLICK_TO_CONTINUE,
-                    )
-                    time.sleep(0.8)
-                    ctrl.click_crop(
-                        analyzer.crops["ready_button"],
-                        block=True,
-                        count=1,
-                        region_name="ready_button",
-                    )
-                    analyzer._game_end_b = False
-                    analyzer._game_lobby = True
-                    logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
-
-                threading.Thread(target=_click_through_game_end, daemon=True).start()
+                threading.Thread(
+                    target=_click_through_game_end,
+                    args=(ctrl, analyzer, logger),
+                    daemon=True,
+                ).start()
 
             # Enforce configurable loop interval.
             # Block on incoming_event so flare deployment wakes immediately on new OCR results
