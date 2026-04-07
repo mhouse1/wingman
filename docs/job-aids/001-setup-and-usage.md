@@ -1,4 +1,4 @@
-# Job Aid: Setup and Usage
+# Job Aid 001 — Setup and Usage
 
 ## Requirements
 
@@ -92,7 +92,7 @@ Direct pytest example:
 uv run pytest tests/test_automated_levels.py --html=tests/test-output/report.html --self-contained-html
 ```
 
-See [how-to-test-analyzer.md](how-to-test-analyzer.md) for analyzer-specific test guidance.
+See [Job Aid 004 — How to Test the Game State Analyzer](004-how-to-test-analyzer.md) for analyzer-specific test guidance.
 
 ---
 

@@ -1,4 +1,4 @@
-# Wingman Performance Report: Dual-Region OCR Optimization
+# Performance Doc 004 — Wingman Performance Report v1.4.0 (Dual-Region OCR)
 
 ## Test Summary
 prompt: "based on this log what is the average time it takes for screenshots to be processed?

@@ -67,6 +67,23 @@ finally:
     self._some_lock.release()
 ```
 
+## Document Heading Format
+
+All new documents (job aids, performance docs, code reviews, ADRs, and any other docs under `docs/`) must begin with a title and a compact status/metadata table immediately after:
+
+```
+# <Document Type NNN> — <Title>
+
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Draft    | 2026-04-07 | 1.6.0           |
+```
+
+- Read `WINGMAN_VERSION` from `wingman/main.py` — never guess it.
+- Use today's actual date.
+- Use `Draft` for new documents; update to `Active` or `Accepted` once reviewed.
+- This rule applies to **all** new docs, not just ADRs.
+
 ## Code Review Todos
 
 Review files live in `docs/code-review/` and are numbered sequentially (`001-2026-03.md`, `002-…`, etc.). Each file covers one review cycle and is closed (immutable) once all items resolve.

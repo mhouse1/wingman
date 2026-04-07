@@ -62,7 +62,7 @@ Crops are scale-independent within a stable capture region. Adding or adjusting 
 
 ## Getting Started
 
-See [docs/job-aids/job-aid-setup-and-usage.md](docs/job-aids/job-aid-setup-and-usage.md) for requirements, installation, hotkey reference, configuration options, and troubleshooting.
+See [Job Aid 001 — Setup and Usage](docs/job-aids/001-setup-and-usage.md) for requirements, installation, hotkey reference, configuration options, and troubleshooting.
 
 ### Quick start
 
@@ -103,7 +103,7 @@ python tests/calibrate.py --crop respawn
 python tests/calibrate.py
 ```
 
-See [docs/job-aids/job-aid-calibrate-crop-regions.md](docs/job-aids/job-aid-calibrate-crop-regions.md) for the full calibration workflow.
+See [Job Aid 006 — Calibrate Crop Regions](docs/job-aids/006-calibrate-crop-regions.md) for the full calibration workflow.
 
 ---
 

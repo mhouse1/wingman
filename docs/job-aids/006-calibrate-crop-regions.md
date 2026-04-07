@@ -1,4 +1,4 @@
-# Job Aid: Calibrate Crop Regions
+# Job Aid 006 — Calibrate Crop Regions
 
 Crop regions are named percentage-coordinate rectangles defined in `config.yaml` under `crops:`.
 Calibration maps each crop to the pixel area it should cover, using static reference screenshots.

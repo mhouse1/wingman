@@ -1,4 +1,4 @@
-# Job Aid: Adding New Python Packages with uv
+# Job Aid 002 — Adding New Python Packages with uv
 
 This guide explains how to add new Python packages to your project using the uv package manager and `pyproject.toml`.
 
