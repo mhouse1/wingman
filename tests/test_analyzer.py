@@ -180,3 +180,16 @@ def test_game_battle_does_not_block_respawn_detection(analyzer: GameStateAnalyze
     state = analyzer.analyze_frame(frame)
 
     assert state["is_respawning"] is True
+
+
+def test_game_end_b_blocks_background_ocr_scheduling(analyzer: GameStateAnalyzer):
+    """GAME_END_B must skip OCR scheduling, including INCOMING region work."""
+    analyzer._game_end_b = True
+    assert analyzer.game_state == GameState.GAME_END_B
+
+    frame = _load_image(TEST_SCREENSHOT)
+    result = analyzer._detect_respawn_ocr(frame)
+
+    assert result == (False, 0.0, None)
+    assert analyzer._background_ocr_running is False
+    assert analyzer._background_ocr_thread is None

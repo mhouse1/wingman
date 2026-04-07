@@ -141,6 +141,11 @@ def main():
                 last_game_state = current_game_state
                 if current_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
+                    # GAME_END_B is not a respawn flow; clear any stale pending-restart
+                    # state so we do not relaunch a mission during click-through.
+                    respawn_state = RespawnState.IDLE
+                    restart_not_before = 0.0
+                    last_restart_attempt = 0.0
                 else:
                     game_end_b_since = 0.0
                 if current_game_state == GameState.GAME_LOBBY:
@@ -212,6 +217,7 @@ def main():
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)
             if (ctrl._auto_respawn_restart
                     and respawn_state == RespawnState.PENDING_RESTART
+                    and current_game_state == GameState.GAME_BATTLE
                     and time.time() >= restart_not_before
                     and time.time() - last_restart_attempt > restart_retry_interval):
                 if not ctrl.is_mission_running():
@@ -235,7 +241,28 @@ def main():
                 logger.info("\033[93m📋 CLICK TO CONTINUE detected in CLICK_TO_CONTINUE region\033[0m")
                 last_click_to_alert_ts = click_to_ts
                 ctrl.cancel_mission()
-                ctrl.click_crop(analyzer.crops["click_to"], block=False, region_name=REGION_CLICK_TO_CONTINUE)
+
+                def _click_through_game_end():
+                    # Click the center prompt repeatedly, then click the lower-right
+                    # continue/ready button to finish exiting the end screen.
+                    ctrl.click_crop(
+                        analyzer.crops["click_to"],
+                        block=True,
+                        count=5,
+                        region_name=REGION_CLICK_TO_CONTINUE,
+                    )
+                    time.sleep(0.8)
+                    ctrl.click_crop(
+                        analyzer.crops["ready_button"],
+                        block=True,
+                        count=1,
+                        region_name="ready_button",
+                    )
+                    analyzer._game_end_b = False
+                    analyzer._game_lobby = True
+                    logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
+
+                threading.Thread(target=_click_through_game_end, daemon=True).start()
 
             # Enforce configurable loop interval.
             # Block on incoming_event so flare deployment wakes immediately on new OCR results

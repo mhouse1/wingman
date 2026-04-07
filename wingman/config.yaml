@@ -1,7 +1,7 @@
 unattended_mode: true
 loop_interval_sec: 1.5
 region: {left: 0, top: 0, width: 1920, height: 1200}
-monitor: 2
+monitor: 1
 enemy_hsv:
   lower: [0, 120, 120]
   upper: [10, 255, 255]

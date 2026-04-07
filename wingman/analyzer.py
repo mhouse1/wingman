@@ -645,9 +645,9 @@ class GameStateAnalyzer:
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
-        # Skip OCR entirely in GAME_LOBBY / GAME_STARTING — no battle events possible
-        # and the transition to GAME_BATTLE is driven by _set_last_mission, not OCR.
-        if self.game_state in (GameState.GAME_LOBBY, GameState.GAME_STARTING):
+        # Skip OCR entirely outside active battle — no respawn/incoming events are
+        # relevant in these states, and transitions are driven externally.
+        if self.game_state in (GameState.GAME_END_B, GameState.GAME_LOBBY, GameState.GAME_STARTING):
             return (False, 0.0, None)
 
         # Check if we can use cached result (throttle OCR)
