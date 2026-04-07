@@ -21,7 +21,7 @@ crops:
   event_refresh:
   - [0.4597, 0.3167]
   - [0.7035, 0.5422]
-  ready_button:
+  play_button:
   - [0.7535, 0.84]
   - [0.9785, 0.97]
   event_refresh_dismiss:

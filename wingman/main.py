@@ -15,7 +15,7 @@ WINGMAN_VERSION = "1.6.0"
 WINGMAN_VERSION_DETAILS = "New dynamic screen region selection architecture"
 
 from .capture import Capture
-from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE
+from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState
 
 
@@ -45,10 +45,10 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     )
     sleep_fn(settle_seconds)
     ctrl.click_crop(
-        analyzer.crops["ready_button"],
+        analyzer.crops["play_button"],
         block=True,
         count=1,
-        region_name="ready_button",
+        region_name=REGION_PLAY_BUTTON,
     )
     analyzer._game_end_b = False
     analyzer._game_lobby = True

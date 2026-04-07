@@ -131,7 +131,7 @@ run:
 #   make calibrate-crop CROP=respawn
 #     Recalibrates a single named crop — useful when one region shifts but the
 #     rest are still good. Replace respawn with any name from the crops: section
-#     (incoming, click_to, good_luck, ready_button, event_refresh, event_refresh_dismiss).
+#     (incoming, click_to, good_luck, play_button, event_refresh, event_refresh_dismiss).
 #
 #   Controls in the window:
 #     Click top-left corner, then bottom-right corner — saves the crop

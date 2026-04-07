@@ -782,7 +782,9 @@ class GameStateAnalyzer:
         interval = 5.0
         while not self._click_to_stop.wait(timeout=interval):
             state = self.game_state
-            if state in (GameState.GAME_END_B, GameState.GAME_LOBBY, GameState.GAME_STARTING):
+            if state == GameState.GAME_STARTING:
+                continue
+            if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
                 logger.debug("Click-to OCR skipped: %s state active", state.name)
                 continue
             with self._click_to_frame_lock:

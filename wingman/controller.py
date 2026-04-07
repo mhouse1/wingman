@@ -58,7 +58,7 @@ EMOTE10 # Oops!
 # single-line change here rather than a grep-and-replace across the codebase.
 REGION_GOOD_LUCK         = "good_luck"
 REGION_EVENT_REFRESH     = "event_refresh"
-REGION_READY_BUTTON      = "ready_button"
+REGION_PLAY_BUTTON       = "play_button"
 REGION_CLICK_TO_CONTINUE = "click_to_continue"
 
 class Controller:
@@ -256,7 +256,7 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register padlock camera cooldown hotkey")
 
-            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the ready_button
+            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the play_button
             try:
                 def auto_mission_key_pressed(_e):
                     if self._on_auto_mission_key is not None:
@@ -296,7 +296,7 @@ class Controller:
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
             self._analyzer._game_starting = True
-            self.click_crop(self._crops["ready_button"], block=False, count=1, region_name=REGION_READY_BUTTON)
+            self.click_crop(self._crops["play_button"], block=False, count=1, region_name=REGION_PLAY_BUTTON)
             self._start_game_starting_loop()
 
         threading.Thread(target=_run, daemon=True).start()
@@ -911,38 +911,6 @@ class Controller:
             finally:
                 ocr_running.clear()
 
-        def _click_event_refresh_dismiss():
-            """Click the event_refresh_dismiss crop centre to dismiss the popup."""
-            try:
-                if self._capture is None:
-                    logger.error("Controller: _click_event_refresh_dismiss - no capture reference")
-                    return
-                with mss() as sct:
-                    monitors = sct.monitors
-                    monitor_index = self._capture.monitor_index
-                    if monitor_index < 1 or monitor_index >= len(monitors):
-                        logger.error("Controller: _click_event_refresh_dismiss - monitor index %d out of range", monitor_index)
-                        return
-                    mon = monitors[monitor_index]
-                    region = self._capture.region
-                    abs_left = mon["left"] + region[0]
-                    abs_top = mon["top"] + region[1]
-                    cap_w = region[2]
-                    cap_h = region[3]
-                dismiss_coords = self._crops.get("event_refresh_dismiss")
-                if dismiss_coords is None:
-                    logger.error("Controller: event_refresh_dismiss crop not configured")
-                    return
-                abs_x, abs_y = crop_centre(dismiss_coords, cap_w, cap_h, abs_left, abs_top)
-                logger.info("\033[93m📋 Clicking event_refresh_dismiss at (%d, %d)\033[0m", abs_x, abs_y)
-                ctypes.windll.user32.SetCursorPos(abs_x, abs_y)
-                time.sleep(0.05)
-                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
-                time.sleep(0.05)
-                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
-            except Exception:
-                logger.exception("Controller: _click_event_refresh_dismiss failed")
-
         def _loop():
             logger.info("Controller: game_starting loop started - pressing '%s' key every 5s until 'Good Luck' detected", MISSION_J20_KEY)
             loop_start = time.time()
@@ -953,26 +921,6 @@ class Controller:
                     if keyboard_module:
                         keyboard_module.press_and_release(MISSION_J20_KEY)
                         logger.info("Controller: game_starting - pressed '%s' key", MISSION_J20_KEY)
-
-                    # Check region 30 for 'Event refresh in progress' popup
-                    if self._capture is not None and self._analyzer is not None:
-                        try:
-                            with mss() as sct:
-                                s = sct.grab(self._capture.get_monitor_rect())
-                                scan_frame = np.array(s)[:, :, :3]
-                            if self._analyzer.scan_region_for_event_refresh(scan_frame):
-                                logger.warning(
-                                    "\033[93mController: 'Event refresh in progress' popup detected - "
-                                    "clicking corner to dismiss, retrying in 1s\033[0m"
-                                )
-                                _click_event_refresh_dismiss()
-                                time.sleep(1.0)
-                                # Re-click ready_button to attempt game entry again
-                                logger.info("Controller: re-clicking ready_button to retry game entry after event refresh dismiss")
-                                self.click_crop(self._crops["ready_button"], count=1, block=True, region_name=REGION_READY_BUTTON)
-                                continue
-                        except Exception:
-                            logger.exception("Controller: game_starting event-refresh check failed")
 
                     # Start async OCR scan if one isn't already running
                     if self._capture is not None and not ocr_running.is_set():

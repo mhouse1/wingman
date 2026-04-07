@@ -21,7 +21,7 @@ calibration:
     crops: [click_to]
   - screenshot: GOODLUCK.png        # 1920×1200 — good luck / game starting
     crops: [good_luck]
-  - screenshot: PLAY1.png    # 1920×1200 — lobby ready button
-    crops: [ready_button]
+  - screenshot: PLAY1.png    # 1920×1200 — lobby play button
+    crops: [play_button]
   - screenshot: UNREADY.png  # 1920×1200 — event refresh popup
     crops: [event_refresh, event_refresh_dismiss]
