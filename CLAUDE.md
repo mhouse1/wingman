@@ -1,18 +1,21 @@
 # Wingman — AI Collaboration Rules
 
-## ADR Authoring
+## Sequential Numbering — All `docs/` Subdirectories
 
-When creating any ADR under `docs/adr/`, place status, date, and version in a compact table immediately after the ADR title. Use today's actual date and read `WINGMAN_VERSION` from `wingman/main.py`:
+Every file created under any subdirectory of `docs/` must have a zero-padded three-digit prefix:
 
 ```
-| Status   | Date       | Wingman Version |
-|----------|------------|-----------------|
-| Accepted | 2026-03-21 | 1.5.2           |
+001-my-document.md
+002-another-document.md
 ```
+
+Before creating a new file in any `docs/` subdirectory, list the existing files in that folder to find the highest number and increment by 1. Never guess or reuse a number — gaps and collisions break the sequence across sessions.
+
+This applies to: `docs/adr/`, `docs/job-aids/`, `docs/performance/`, `docs/code-review/`, and any future subdirectory under `docs/`.
 
 ## ADR — Sequential Numbering
 
-Before creating a new ADR, list the files in `docs/adr/` to find the highest existing number and increment by 1. Never guess or reuse a number — gaps and collisions break the sequence across sessions.
+The general sequential numbering rule above applies. Additionally: before creating a new ADR, list the files in `docs/adr/` to find the highest existing number and increment by 1.
 
 ## ADR — Performance Changes
 
@@ -82,10 +85,9 @@ All new documents (job aids, performance docs, code reviews, ADRs, and any other
 - Read `WINGMAN_VERSION` from `wingman/main.py` — never guess it.
 - Use today's actual date.
 - Use `Draft` for new documents; update to `Active` or `Accepted` once reviewed.
+- **ADRs** use `Accepted` (not `Draft`) from the moment they are written — an ADR records a decision already made.
 - This rule applies to **all** new docs, not just ADRs.
 
 ## Code Review Todos
 
 Review files live in `docs/code-review/` and are numbered sequentially (`001-2026-03.md`, `002-…`, etc.). Each file covers one review cycle and is closed (immutable) once all items resolve.
-
-At the start of any session, open the highest-numbered file and check for open items relevant to the current task. When an item is resolved, mark it Resolved in that file. When starting a new review cycle, create the next numbered file in the same directory.
