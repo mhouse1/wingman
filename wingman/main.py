@@ -120,6 +120,8 @@ def main():
     last_incoming_alert_ts = 0.0
     last_click_to_alert_ts = 0.0
     last_game_state = None
+    lobby_play_scan_interval = 5.0
+    last_lobby_play_scan_attempt = 0.0
     game_end_b_since = 0.0  # timestamp of GAME_END_B entry; used by stall timeout guard
 
     def _deploy_flares_on_new_incoming() -> bool:
@@ -177,7 +179,17 @@ def main():
                     ctrl.cancel_mission()
                     if unattended_active.is_set():
                         logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
+                        last_lobby_play_scan_attempt = time.time()
                         ctrl.start_auto_mission()
+
+            # In unattended mode, keep retrying lobby PLAY detection/click every 5s
+            # until GAME_LOBBY transitions out.
+            if (unattended_active.is_set()
+                    and current_game_state == GameState.GAME_LOBBY
+                    and time.time() - last_lobby_play_scan_attempt >= lobby_play_scan_interval):
+                logger.info("Unattended mode: GAME_LOBBY retry - scanning play_button for PLAY")
+                last_lobby_play_scan_attempt = time.time()
+                ctrl.start_auto_mission()
 
             # GAME_END_B stall guard: if click-to OCR cache gets stuck, force recovery
             if (current_game_state == GameState.GAME_END_B

@@ -285,13 +285,27 @@ class Controller:
             return
 
         def _run():
-            settle_delay = 5
-            logger.info("Controller: start_auto_mission - waiting %ds for game to settle before clicking play button", settle_delay)
-            time.sleep(settle_delay)
             if self._analyzer is None:
                 return
             logger.info("Controller: start_auto_mission - cancelling any active mission before entering GAME_STARTING")
             self.cancel_mission()
+
+            if self._capture is None:
+                logger.warning("Controller: start_auto_mission - no capture source; skipping play button click")
+                return
+
+            try:
+                with mss() as sct:
+                    s = sct.grab(self._capture.get_monitor_rect())
+                    frame = np.array(s)[:, :, :3]
+            except Exception:
+                logger.exception("Controller: start_auto_mission - failed to capture frame for play button OCR")
+                return
+
+            if not self._analyzer.scan_region_for_play_button(frame):
+                logger.info("Controller: start_auto_mission - PLAY text not present in play_button crop; skipping click")
+                return
+
             logger.info("Controller: start_auto_mission - clicking play button and entering GAME_STARTING")
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False

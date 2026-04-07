@@ -243,6 +243,29 @@ def _process_good_luck_region(frame):
     return (False, ocr_time, None)
 
 
+def _process_play_button_region(frame):
+    """Worker function to detect 'PLAY' text in the play_button crop."""
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+
+    t_start = time.time()
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "PLAY" in text:
+            ocr_time = time.time() - t_start
+            return (True, ocr_time, text)
+
+    ocr_time = time.time() - t_start
+    return (False, ocr_time, None)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -890,5 +913,25 @@ class GameStateAnalyzer:
             return detected
         except Exception as e:
             logger.warning("Analyzer: Event refresh scan failed: %s", e)
+            return False
+
+    def scan_region_for_play_button(self, frame) -> bool:
+        """Synchronously scan the play_button crop for 'PLAY' text via OCR pool."""
+        executor = self.ocr_executor
+        if executor is None:
+            logger.warning("Analyzer: OCR executor not available for play button scan")
+            return False
+        try:
+            region_frame = get_crop(frame, *self.crops["play_button"])
+            detected, _, text = executor.submit(
+                _process_play_button_region, region_frame
+            ).result(timeout=30)
+            if detected:
+                logger.info("Analyzer: 'PLAY' detected in play_button crop (text='%s')", text)
+            else:
+                logger.debug("Analyzer: 'PLAY' not found in play_button crop")
+            return detected
+        except Exception as e:
+            logger.warning("Analyzer: Play button scan failed: %s", e)
             return False
 
