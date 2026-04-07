@@ -19,9 +19,9 @@ calibration:
     crops: [incoming]
   - screenshot: continue.png          # 1920×1200 — click to continue screen
     crops: [click_to]
-  - screenshot: game_start.png        # 1920×1200 — good luck / game starting
+  - screenshot: GOODLUCK.png        # 1920×1200 — good luck / game starting
     crops: [good_luck]
-  - screenshot: game_beginning.png    # 1920×1200 — lobby ready button
+  - screenshot: PLAY1.png    # 1920×1200 — lobby ready button
     crops: [ready_button]
-  - screenshot: event_refresh_in_progress.png  # 1920×1200 — event refresh popup
+  - screenshot: UNREADY.png  # 1920×1200 — event refresh popup
     crops: [event_refresh, event_refresh_dismiss]

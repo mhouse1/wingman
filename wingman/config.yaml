@@ -1,104 +1,44 @@
-# Unattended mode: when true, automatically transitions game_end → game_lobby → game_battle
-# without requiring a manual 'm' key press. CANCEL_MISSION_KEY and EXIT_KEY still apply.
-# Pressing AUTO_MISSION_KEY ('m') at runtime while this is true also activates the full cycle.
 unattended_mode: true
-
-# Main loop interval (seconds between each screen capture, this should not be faster than the OCR rate
-# Data From automated test will show OCR rate
-# [UnitTest] OCR Stage Timings:
-#   Setup: 0.00s, Reader: 1.17s, Grayscale: 0.00s, Threshold: 0.00s, Resize: 0.00s, OCR: 3.61s, Total: 4.82s
 loop_interval_sec: 1.5
-# Screen capture region (left, top, width, height).
-# These values are calibrated for a 1920×1200 display.
-# To recalibrate crops: run python tests/calibrate.py
-region:
-  left: 0
-  top: 0
-  width: 1920
-  height: 1200
-# Monitor index for screen capture.
-#   1 = primary monitor (default for single-monitor setups)
-#   2 = first secondary monitor
-# WARNING: setting this to 2 on a single-monitor machine will raise ValueError at startup.
+region: {left: 0, top: 0, width: 1920, height: 1200}
 monitor: 2
-  # Dell monitor 3840x1600
-  # width: 3839
-  # height: 1599
-
-
-# HSV color range for enemy HUD marker (example for red markers)
 enemy_hsv:
   lower: [0, 120, 120]
   upper: [10, 255, 255]
-
-# Named percentage-coordinate crop regions.
-# Each crop is [[x1_pct, y1_pct], [x2_pct, y2_pct]] where x is horizontal (left→right)
-# and y is vertical (top→bottom), both as fractions of the capture frame (0.0–1.0).
-# Run: python tests/calibrate.py  to recalibrate these values against reference screenshots.
 crops:
-  respawn:                [[0.44, 0.55], [0.62, 0.70]]   # "RESPAWN" text — cancel + restart
-  incoming:               [[0.00, 0.06], [0.22, 0.19]]   # "INCOMING" text — deploy flares
-  click_to:               [[0.28, 0.72], [0.72, 0.84]]   # "Click to Continue" — click play
-  good_luck:              [[0.24, 0.38], [0.76, 0.54]]   # "Good Luck" — launch mission
-  event_refresh:          [[0.30, 0.30], [0.70, 0.55]]   # "Event refresh in progress" popup
-  ready_button:           [[0.44, 0.88], [0.56, 0.96]]   # Lobby play/ready button
-  # Click-only target — not scanned by OCR. Intentionally small (4%×4%) to place the
-  # click at the centre point of the event-refresh dismiss corner.
-  event_refresh_dismiss:  [[0.48, 0.48], [0.52, 0.52]]
-
-# Respawn screen detection settings
+  respawn:
+  - [0.4188, 0.6978]
+  - [0.5292, 0.7233]
+  incoming:
+  - [0.4618, 0.2556]
+  - [0.5361, 0.2844]
+  click_to:
+  - [0.4097, 0.8956]
+  - [0.5687, 0.9289]
+  good_luck:
+  - [0.9035, 0.0244]
+  - [0.991, 0.2789]
+  event_refresh:
+  - [0.4597, 0.3167]
+  - [0.7035, 0.5422]
+  ready_button:
+  - [0.7535, 0.84]
+  - [0.9785, 0.97]
+  event_refresh_dismiss:
+  - [0.7236, 0.8556]
+  - [0.9792, 0.97]
 respawn_detection:
-  # Use OCR to detect "RESPAWN" text
   use_ocr: true
-  # Set to true only if a CUDA-capable GPU is available.
-  # false initializes EasyOCR directly on CPU, removing the try/except probe fallback
-  # and the three 'GPU init failed' log warnings produced at session startup.
   use_gpu: false
-
-  # OCR performance: only run OCR every N seconds (use cached result otherwise)
-  # Non-blocking background thread: main loop NEVER blocks on OCR!
-  # Respawn screens visible for 5+ seconds, so checking every 5s is plenty
-  ocr_cooldown: 0.2  # Seconds between OCR runs (lower for faster detection)
-
-  # Fallback HSV detection (if OCR unavailable)
-  # White text detection (for "RESPAWN" text)
-  # HSV: High Value (brightness), Low Saturation
+  ocr_cooldown: 0.2
   text_hsv_lower: [0, 0, 180]
   text_hsv_upper: [180, 50, 255]
-  text_threshold: 0.001  # 0.1% of screen pixels
-
-  # Cyan progress bar detection
-  # HSV: Cyan is around 90 hue, high saturation
+  text_threshold: 0.001
   bar_hsv_lower: [80, 100, 100]
   bar_hsv_upper: [100, 255, 255]
-  bar_threshold: 0.0005  # 0.05% of screen pixels
-
-# Mission timing and restart parameters
-mission:
-  # Delay (seconds) after mission lock release before attempting restart
-  restart_delay_after_unlock: 4.0
-  # Interval (seconds) between restart attempts during respawn
-  restart_retry_interval: 2.0
-  # Fallback timeout (seconds) to restart mission if OCR never clears the respawn screen.
-  # Should be well above the typical respawn screen duration (~8-10s) to avoid restarting early.
-  respawn_fallback_timeout: 20.0
-  # Default weapon loop firing interval (seconds between shots)
-  weapon_loop_interval: 0.5
-
-aim:
-  smoothing: 0.25    # fraction toward target each frame (0..1)
-  fire_cooldown: 0.2 # seconds between shots
-
-controls:
-  # Preferred boolean option: set to true to fire with the left mouse button.
-  left_mouse_button: true
-  # Backwards-compatible: you can still set `fire_button: <key>` for keyboard/mouse mapping
-  fire_button: left  # 'left' for left-click; can be mapped to keys later
-  # How long to hold the fire button (seconds). Set to 0 for instant click.
-  fire_hold: 2.0
-
-debug:
-  show_window: false
-  show_grid_highlighted: false  # Auto-save crop visualization when respawn detected
-  draw_markers: true
-  debug_output_dir: tests/test-output  # Directory for OCR preprocessing debug images
+  bar_threshold: 0.0005
+mission: {restart_delay_after_unlock: 4.0, restart_retry_interval: 2.0, respawn_fallback_timeout: 20.0,
+  weapon_loop_interval: 0.5}
+aim: {smoothing: 0.25, fire_cooldown: 0.2}
+controls: {left_mouse_button: true, fire_button: left, fire_hold: 2.0}
+debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, debug_output_dir: tests/test-output}
