@@ -9,6 +9,8 @@ import time
 from enum import Enum, auto
 from pathlib import Path
 
+from .crop_region import get_crop, load_crops, draw_crops
+
 
 class GameState(Enum):
     GAME_BATTLE          = auto()  # Active gameplay (default); respawn/incoming scanning active
@@ -306,16 +308,6 @@ class GameStateAnalyzer:
         """
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
-        
-        # Grid configuration for region extraction (default 8x8 = 64 regions)
-        grid_size = respawn_cfg.get("grid_size", 8)
-        try:
-            grid_size = int(grid_size)
-        except (TypeError, ValueError):
-            logger.warning("Invalid respawn_detection.grid_size=%r, defaulting to 8", grid_size)
-            grid_size = 8
-        self.grid_rows = max(2, grid_size)
-        self.grid_cols = max(2, grid_size)
 
         # GPU flag — propagated to module-level so worker threads pick it up at init time
         global _use_gpu
@@ -324,25 +316,9 @@ class GameStateAnalyzer:
 
         # OCR-based respawn detection (looks for "RESPAWN" text)
         self.use_ocr = respawn_cfg.get("use_ocr", True)
-        self.respawn_region = respawn_cfg.get("region", 44)  # Region 44 for RESPA in 8x8 mapping
-        self.incoming_region = respawn_cfg.get("incoming_region", 21)  # Region 21 for MING in 8x8 mapping
-        self.incoming_subgrid_size = max(1, respawn_cfg.get("incoming_subgrid_size", 1))
-        self.incoming_subregion = max(1, respawn_cfg.get("incoming_subregion", 1))
-        self.respawn_subgrid_rows = max(1, respawn_cfg.get("respawn_subgrid_rows", 1))
-        self.respawn_subgrid_cols = max(1, respawn_cfg.get("respawn_subgrid_cols", 1))
-        self.respawn_subregion = max(1, respawn_cfg.get("respawn_subregion", 1))
-        self.click_to_region = respawn_cfg.get("click_to_region", 60)  # Region 60 for "Click to Continue"
 
-        # Validate region numbers against the configured grid at startup
-        total_regions = self.grid_rows * self.grid_cols
-        for name, value in [("respawn_detection.region", self.respawn_region),
-                             ("respawn_detection.incoming_region", self.incoming_region),
-                             ("respawn_detection.click_to_region", self.click_to_region)]:
-            if not isinstance(value, int) or not (1 <= value <= total_regions):
-                raise ValueError(
-                    f"Config error: {name}={value!r} is out of range for a "
-                    f"{self.grid_rows}x{self.grid_cols} grid (valid: 1–{total_regions})"
-                )
+        # Named percentage-coordinate crop regions (ADR 023)
+        self.crops = load_crops(config.get("crops", {}))
         
         # EasyOCR reader (lazy initialization on first use)
         self._ocr_reader = None
@@ -413,15 +389,6 @@ class GameStateAnalyzer:
         if not self.debug_output_dir.exists():
             self.debug_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Screenshot capture overlay grid size (independent from detection grid).
-        # Example: 6 -> 6x6, 8 -> 8x8.
-        capture_grid_size = debug_cfg.get("capture_grid_size", 6)
-        try:
-            capture_grid_size = int(capture_grid_size)
-        except (TypeError, ValueError):
-            logger.warning("Invalid debug.capture_grid_size=%r, defaulting to 6", capture_grid_size)
-            capture_grid_size = 6
-        self.capture_grid_size = max(2, capture_grid_size)
 
     @staticmethod
     def _levenshtein_distance(a: str, b: str) -> int:
@@ -581,16 +548,12 @@ class GameStateAnalyzer:
         self.cleanup()
         return False
     
-    def analyze_frame(self, frame, region=None):
-        """
-        Analyze a single frame and return game state.
-        
+    def analyze_frame(self, frame):
+        """Analyze a single frame and return game state.
+
         Args:
-            frame: numpy array (BGR image from screen capture)
-                region: Optional grid region index to analyze (1..N*N).
-                    N is respawn_detection.grid_size (default 8).
-                    If None, analyzes full frame.
-            
+            frame: numpy array (BGR image from screen capture).
+
         Returns:
             dict: Game state with keys:
                 - is_respawning: bool
@@ -611,13 +574,6 @@ class GameStateAnalyzer:
             threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
             logger.debug("Click-to background thread started")
 
-        # Extract region if specified
-        analysis_frame = frame
-        total_regions = self.grid_rows * self.grid_cols
-        if region and 1 <= region <= total_regions:
-            analysis_frame = self.get_region(frame, region)
-            logger.debug("Analyzing region %d (%dx%d)", region, analysis_frame.shape[1], analysis_frame.shape[0])
-        
         state = {
             'is_respawning': False,
             'respawn_confidence': 0.0,
@@ -629,17 +585,8 @@ class GameStateAnalyzer:
             'click_to_method': None,
             'game_state': self.game_state,
         }
-        
-        # Detect respawn screen - only check configured respawn_region where RESPAWN text appears
-        if region is None:
-            # Full frame: pass full frame to OCR (it will extract regions internally)
-            respawn_detected, confidence, method = self._detect_respawn(frame)
-        elif region == self.respawn_region:
-            # Already in respawn region: check for respawn
-            respawn_detected, confidence, method = self._detect_respawn(analysis_frame)
-        else:
-            # Other regions: skip respawn detection (not present there)
-            respawn_detected, confidence, method = False, 0.0, None
+
+        respawn_detected, confidence, method = self._detect_respawn(frame)
         
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
@@ -660,17 +607,16 @@ class GameStateAnalyzer:
         state['is_click_to'] = click_to_detected
         state['click_to_method'] = click_to_method
         
-        # Save highlighted grid if enabled (every frame)
+        # Save crop overlay if enabled (every frame)
         if self.show_grid_highlighted:
             try:
-                highlight = self.respawn_region if respawn_detected else None
                 output_dir = Path("tests") / "test-output"
                 output_dir.mkdir(parents=True, exist_ok=True)
-                output_path = str(output_dir / "output_grid_highlighted.png")
-                self.draw_grid(frame, highlight_region=highlight, 
-                              output_path=output_path)
-                logger.debug("Saved highlighted grid to %s (respawn: %s, region: %s)", 
-                           output_path, respawn_detected, highlight)
+                output_path = str(output_dir / "output_crops.png")
+                annotated = draw_crops(frame, self.crops)
+                import cv2 as _cv2
+                _cv2.imwrite(output_path, annotated)
+                logger.debug("Saved crop overlay to %s", output_path)
             except Exception as e:
                 logger.warning("Failed to save highlighted grid: %s", e)
         
@@ -761,13 +707,9 @@ class GameStateAnalyzer:
                     logger.warning("OCR executor not initialized")
                     return
 
-                # Extract respawn and incoming regions (click_to has its own thread)
-                respawn_frame = self.get_region(full_frame, self.respawn_region)
-                if self.respawn_subgrid_rows > 1 or self.respawn_subgrid_cols > 1:
-                    respawn_frame = self._crop_subregion(respawn_frame, self.respawn_subgrid_rows, self.respawn_subgrid_cols, self.respawn_subregion)
-                incoming_frame = self.get_region(full_frame, self.incoming_region)
-                if self.incoming_subgrid_size > 1:
-                    incoming_frame = self._crop_subregion(incoming_frame, self.incoming_subgrid_size, self.incoming_subgrid_size, self.incoming_subregion)
+                # Extract respawn and incoming crops (click_to has its own thread)
+                respawn_frame = get_crop(full_frame, *self.crops["respawn"])
+                incoming_frame = get_crop(full_frame, *self.crops["incoming"])
                 t1 = time.time()
 
                 # Submit both tasks to thread pool for parallel processing
@@ -851,7 +793,7 @@ class GameStateAnalyzer:
             if executor is None:
                 continue
             try:
-                click_to_frame = self.get_region(frame, self.click_to_region)
+                click_to_frame = get_crop(frame, *self.crops["click_to"])
                 click_to_detected, _, click_to_text = executor.submit(
                     _process_click_to_region, click_to_frame
                 ).result(timeout=120)
@@ -891,12 +833,11 @@ class GameStateAnalyzer:
         self._click_to_cache['result'] = (False, 0.0, None)
         logger.debug("OCR caches reset")
 
-    def scan_region_for_good_luck(self, frame, region_num: int = 16) -> bool:
-        """Synchronously scan a region for 'Good Luck' text via OCR pool.
+    def scan_region_for_good_luck(self, frame) -> bool:
+        """Synchronously scan the good_luck crop for 'Good Luck' text via OCR pool.
 
         Args:
             frame: Full BGR frame from screen capture.
-            region_num: Grid region to scan (default 16).
 
         Returns:
             True if 'Good Luck' text is detected.
@@ -906,28 +847,27 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: OCR executor not available for Good Luck scan")
             return False
         try:
-            region_frame = self.get_region(frame, region_num)
+            region_frame = get_crop(frame, *self.crops["good_luck"])
             detected, _, text = executor.submit(
                 _process_good_luck_region, region_frame
             ).result(timeout=30)
             if detected:
-                logger.info("Analyzer: 'Good Luck' detected in GOOD_LUCK region (text='%s')", text)
+                logger.info("Analyzer: 'Good Luck' detected in good_luck crop (text='%s')", text)
             else:
-                logger.debug("Analyzer: 'Good Luck' not found in GOOD_LUCK region")
+                logger.debug("Analyzer: 'Good Luck' not found in good_luck crop")
             return detected
         except Exception as e:
             logger.warning("Analyzer: Good Luck scan failed: %s", e)
             return False
 
-    def scan_region_for_event_refresh(self, frame, region_num: int = 30) -> bool:
-        """Synchronously scan a region for 'Event refresh in progress' popup text.
+    def scan_region_for_event_refresh(self, frame) -> bool:
+        """Synchronously scan the event_refresh crop for 'Event refresh in progress' popup.
 
         Detects the popup by looking for 'again so' / 'AGAIN' in the OCR output,
         which appears in the 'try again so...' message of the popup.
 
         Args:
             frame: Full BGR frame from screen capture.
-            region_num: Grid region to scan (default 30).
 
         Returns:
             True if the event refresh popup is detected.
@@ -937,142 +877,16 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: OCR executor not available for event refresh scan")
             return False
         try:
-            region_frame = self.get_region(frame, region_num)
+            region_frame = get_crop(frame, *self.crops["event_refresh"])
             detected, _, text = executor.submit(
                 _process_event_refresh_region, region_frame
             ).result(timeout=30)
             if detected:
-                logger.info("Analyzer: 'Event refresh' popup detected in EVENT_REFRESH region (text='%s')", text)
+                logger.info("Analyzer: 'Event refresh' popup detected in event_refresh crop (text='%s')", text)
             else:
-                logger.debug("Analyzer: Event refresh popup not found in EVENT_REFRESH region")
+                logger.debug("Analyzer: Event refresh popup not found in event_refresh crop")
             return detected
         except Exception as e:
             logger.warning("Analyzer: Event refresh scan failed: %s", e)
             return False
 
-    def _crop_subregion(self, frame, grid_rows: int, grid_cols: int, subregion_num: int):
-        """Crop a sub-region from frame using a local rows×cols grid.
-
-        Args:
-            frame: numpy array of the parent region
-            grid_rows: number of rows in the sub-grid
-            grid_cols: number of columns in the sub-grid
-            subregion_num: 1-based cell index (row-major, left-to-right top-to-bottom)
-
-        Returns:
-            numpy array: cropped sub-region, or original frame if params are invalid
-        """
-        total = grid_rows * grid_cols
-        if grid_rows < 1 or grid_cols < 1 or not (1 <= subregion_num <= total):
-            return frame
-        h, w = frame.shape[:2]
-        cell_h = h // grid_rows
-        cell_w = w // grid_cols
-        row = (subregion_num - 1) // grid_cols
-        col = (subregion_num - 1) % grid_cols
-        y1 = row * cell_h
-        y2 = y1 + cell_h
-        x1 = col * cell_w
-        x2 = x1 + cell_w
-        return frame[y1:y2, x1:x2]
-
-    def get_region(self, frame, region_num):
-        """
-        Extract a grid region from the frame (left-to-right, top-to-bottom).
-        Grid size is NxN where N is respawn_detection.grid_size.
-        
-        Args:
-            frame: numpy array
-            region_num: int from 1 to N*N
-            
-        Returns:
-            numpy array: Cropped region
-        """
-        total_regions = self.grid_rows * self.grid_cols
-        if not 1 <= region_num <= total_regions:
-            logger.warning("Invalid region %d, returning full frame", region_num)
-            return frame
-        
-        h, w = frame.shape[:2]
-        region_h = h // self.grid_rows
-        region_w = w // self.grid_cols
-        
-        # Convert region number to row/col (0-indexed)
-        row = (region_num - 1) // self.grid_cols
-        col = (region_num - 1) % self.grid_cols
-        
-        y1 = row * region_h
-        y2 = y1 + region_h
-        x1 = col * region_w
-        x2 = x1 + region_w
-        
-        return frame[y1:y2, x1:x2]
-    
-    def draw_grid(self, frame, highlight_region=None, output_path=None, grid_size=None):
-        """
-        Draw a grid with region numbers on frame.
-        
-        Args:
-            frame: numpy array
-            highlight_region: int 1..N*N to highlight a specific region (green border)
-            output_path: if provided, save annotated frame to this path
-            grid_size: optional NxN override for drawing (e.g., 6 or 8)
-            
-        Returns:
-            numpy array: Frame with grid overlay
-        """
-        frame_copy = frame.copy()
-        h, w = frame.shape[:2]
-
-        rows = self.grid_rows
-        cols = self.grid_cols
-        if grid_size is not None:
-            try:
-                size = max(2, int(grid_size))
-                rows = size
-                cols = size
-            except (TypeError, ValueError):
-                logger.warning("Invalid grid_size=%r; using default %dx%d", grid_size, rows, cols)
-        
-        region_h = h // rows
-        region_w = w // cols
-        
-        # Draw grid lines (cyan dotted lines)
-        for i in range(1, cols):
-            x = w * i // cols
-            for y in range(0, h, 10):
-                cv2.line(frame_copy, (x, y), (x, min(y + 5, h)), (255, 255, 0), 1)
-        
-        for i in range(1, rows):
-            y = h * i // rows
-            for x in range(0, w, 10):
-                cv2.line(frame_copy, (x, y), (min(x + 5, w), y), (255, 255, 0), 1)
-        
-        # Add region numbers
-        total_regions = rows * cols
-        for region in range(1, total_regions + 1):
-            row = (region - 1) // cols
-            col = (region - 1) % cols
-            x = col * region_w + region_w // 2 - 15
-            y = row * region_h + region_h // 2 + 10
-            # Smaller text for more regions
-            cv2.putText(frame_copy, str(region), (x, y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        
-        # Highlight specific region if requested
-        if highlight_region and 1 <= highlight_region <= total_regions:
-            row = (highlight_region - 1) // cols
-            col = (highlight_region - 1) % cols
-            x1 = col * region_w
-            y1 = row * region_h
-            x2 = x1 + region_w
-            y2 = y1 + region_h
-            cv2.rectangle(frame_copy, (x1, y1), (x2, y2), (0, 255, 0), 4)
-        
-        # Save if path provided
-        if output_path:
-            cv2.imwrite(output_path, frame_copy)
-            logger.info("Saved grid visualization to %s", output_path)
-        
-        return frame_copy
-    

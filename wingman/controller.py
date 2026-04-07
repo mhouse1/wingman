@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from mss import mss
 
+from .crop_region import CropCoords, crop_centre, draw_crops
+
 try:
     import keyboard as keyboard_module
 except Exception:
@@ -60,7 +62,7 @@ REGION_READY_BUTTON      = "ready_button"
 REGION_CLICK_TO_CONTINUE = "click_to_continue"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, ready_button_region: int = 64, good_luck_region: int = 16, event_refresh_region: int = 30):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -75,9 +77,7 @@ class Controller:
         self._analyzer = analyzer
         self._capture = capture
         self._on_auto_mission_key = on_auto_mission_key
-        self._ready_button_region = ready_button_region
-        self._good_luck_region = good_luck_region
-        self._event_refresh_region = event_refresh_region
+        self._crops: "dict[str, CropCoords]" = crops or {}
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
 
@@ -218,21 +218,23 @@ class Controller:
                                 # mss returns BGRA, convert to BGR
                                 frame = frame[:, :, :3]
                             
-                            # Add configurable grid overlay (e.g., 6x6 or 8x8) for screenshot capture.
-                            capture_grid_size = getattr(self._analyzer, "capture_grid_size", 6)
-                            frame_with_grid = self._analyzer.draw_grid(frame, grid_size=capture_grid_size)
-                            
+                            # Draw named crop overlays for calibration verification
+                            crops = self._crops
+                            if self._analyzer is not None:
+                                crops = getattr(self._analyzer, "crops", crops)
+                            frame_with_crops = draw_crops(frame, crops)
+
                             # Create output directory if it doesn't exist
                             output_dir = Path("tests/test-output")
                             output_dir.mkdir(parents=True, exist_ok=True)
-                            
+
                             # Generate timestamp filename
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             filename = output_dir / f"screenshot_{timestamp}.png"
-                            
-                            # Save screenshot with grid overlay
-                            cv2.imwrite(str(filename), frame_with_grid)
-                            logger.info("Controller: Screenshot saved to %s with %dx%d grid overlay", filename, capture_grid_size, capture_grid_size)
+
+                            # Save screenshot with crop overlays
+                            cv2.imwrite(str(filename), frame_with_crops)
+                            logger.info("Controller: Screenshot saved to %s with crop overlays", filename)
                         except Exception as e:
                             logger.exception("Controller: Failed to capture screenshot: %s", e)
                     else:
@@ -294,7 +296,7 @@ class Controller:
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
             self._analyzer._game_starting = True
-            self.click_grid_region(self._ready_button_region, block=False, count=1, region_name=REGION_READY_BUTTON)
+            self.click_crop(self._crops["ready_button"], block=False, count=1, region_name=REGION_READY_BUTTON)
             self._start_game_starting_loop()
 
         threading.Thread(target=_run, daemon=True).start()
@@ -802,6 +804,62 @@ class Controller:
         else:
             threading.Thread(target=_do_click, daemon=True).start()
 
+    def click_crop(self, coords: "CropCoords", block: bool = False, count: int = 1, region_name: str = None):
+        """Move the mouse to the centre of a named crop region and left-click it.
+
+        Uses percentage-coordinate CropCoords (from crop_region.py) to derive
+        the absolute screen position via crop_centre().
+
+        Args:
+            coords: CropCoords percentage-coordinate bounding box for the target region.
+            block: If True run in the calling thread; otherwise spawn a daemon thread.
+            count: Number of times to click the region (0.5s apart when count > 1).
+            region_name: Human-readable label used in log messages.
+        """
+        def _do_click():
+            if sys.platform != "win32":
+                logger.error("click_crop: Win32 mouse_event not available on %s", sys.platform)
+                return
+            try:
+                if self._capture is None:
+                    logger.error("Controller: click_crop - no capture reference")
+                    return
+                with mss() as sct:
+                    monitors = sct.monitors
+                    monitor_index = self._capture.monitor_index
+                    if monitor_index < 1 or monitor_index >= len(monitors):
+                        logger.error("Controller: click_crop - monitor index %d out of range", monitor_index)
+                        return
+                    mon = monitors[monitor_index]
+                    region = self._capture.region
+                    abs_left = mon["left"] + region[0]
+                    abs_top = mon["top"] + region[1]
+                    cap_w = region[2]
+                    cap_h = region[3]
+                abs_x, abs_y = crop_centre(coords, cap_w, cap_h, abs_left, abs_top)
+                label = region_name or f"({coords.x1:.2f},{coords.y1:.2f})"
+                logger.info("\033[93m📋 Clicking %s at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
+                            label, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
+
+                def _raw_click(x, y):
+                    ctypes.windll.user32.SetCursorPos(x, y)
+                    time.sleep(0.05)
+                    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+                    time.sleep(0.05)
+                    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+
+                for i in range(count):
+                    _raw_click(abs_x, abs_y)
+                    if i < count - 1:
+                        time.sleep(0.5)
+            except Exception:
+                logger.exception("Controller: click_crop failed")
+
+        if block:
+            _do_click()
+        else:
+            threading.Thread(target=_do_click, daemon=True).start()
+
     def cancel_mission(self):
         """Request cancellation of any running mission.
 
@@ -846,30 +904,24 @@ class Controller:
                 with mss() as sct:
                     s = sct.grab(self._capture.get_monitor_rect())
                     frame = np.array(s)[:, :, :3]
-                if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame, region_num=self._good_luck_region):
+                if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame):
                     good_luck_event.set()
             except Exception:
                 logger.exception("Controller: game_starting OCR scan error")
             finally:
                 ocr_running.clear()
 
-        def _click_corner_28_29_36_37():
-            """Click the screen corner where grid regions 28, 29, 36, 37 meet.
-
-            On an 8x8 grid the four regions share the corner at column-boundary 4,
-            row-boundary 4 (0-indexed), i.e. exactly half-way across and half-way
-            down the capture area.  This is used to dismiss the 'Event refresh in
-            progress' popup which appears there.
-            """
+        def _click_event_refresh_dismiss():
+            """Click the event_refresh_dismiss crop centre to dismiss the popup."""
             try:
                 if self._capture is None:
-                    logger.error("Controller: _click_corner_28_29_36_37 - no capture reference")
+                    logger.error("Controller: _click_event_refresh_dismiss - no capture reference")
                     return
                 with mss() as sct:
                     monitors = sct.monitors
                     monitor_index = self._capture.monitor_index
                     if monitor_index < 1 or monitor_index >= len(monitors):
-                        logger.error("Controller: _click_corner_28_29_36_37 - monitor index %d out of range", monitor_index)
+                        logger.error("Controller: _click_event_refresh_dismiss - monitor index %d out of range", monitor_index)
                         return
                     mon = monitors[monitor_index]
                     region = self._capture.region
@@ -877,17 +929,19 @@ class Controller:
                     abs_top = mon["top"] + region[1]
                     cap_w = region[2]
                     cap_h = region[3]
-                # Corner at col-boundary 4, row-boundary 4 of an 8×8 grid
-                abs_x = int(abs_left + 4 * cap_w / 8)
-                abs_y = int(abs_top + 4 * cap_h / 8)
-                logger.info("\033[93m📋 Clicking event-refresh corner (28/29/36/37) at (%d, %d)\033[0m", abs_x, abs_y)
+                dismiss_coords = self._crops.get("event_refresh_dismiss")
+                if dismiss_coords is None:
+                    logger.error("Controller: event_refresh_dismiss crop not configured")
+                    return
+                abs_x, abs_y = crop_centre(dismiss_coords, cap_w, cap_h, abs_left, abs_top)
+                logger.info("\033[93m📋 Clicking event_refresh_dismiss at (%d, %d)\033[0m", abs_x, abs_y)
                 ctypes.windll.user32.SetCursorPos(abs_x, abs_y)
                 time.sleep(0.05)
                 ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
                 time.sleep(0.05)
                 ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
             except Exception:
-                logger.exception("Controller: _click_corner_28_29_36_37 failed")
+                logger.exception("Controller: _click_event_refresh_dismiss failed")
 
         def _loop():
             logger.info("Controller: game_starting loop started - pressing '%s' key every 5s until 'Good Luck' detected", MISSION_J20_KEY)
@@ -906,16 +960,16 @@ class Controller:
                             with mss() as sct:
                                 s = sct.grab(self._capture.get_monitor_rect())
                                 scan_frame = np.array(s)[:, :, :3]
-                            if self._analyzer.scan_region_for_event_refresh(scan_frame, region_num=self._event_refresh_region):
+                            if self._analyzer.scan_region_for_event_refresh(scan_frame):
                                 logger.warning(
                                     "\033[93mController: 'Event refresh in progress' popup detected - "
                                     "clicking corner to dismiss, retrying in 1s\033[0m"
                                 )
-                                _click_corner_28_29_36_37()
+                                _click_event_refresh_dismiss()
                                 time.sleep(1.0)
-                                # Re-click region 64 to attempt game entry again
+                                # Re-click ready_button to attempt game entry again
                                 logger.info("Controller: re-clicking ready_button to retry game entry after event refresh dismiss")
-                                self.click_grid_region(self._ready_button_region, count=1, block=True, region_name=REGION_READY_BUTTON)
+                                self.click_crop(self._crops["ready_button"], count=1, block=True, region_name=REGION_READY_BUTTON)
                                 continue
                         except Exception:
                             logger.exception("Controller: game_starting event-refresh check failed")

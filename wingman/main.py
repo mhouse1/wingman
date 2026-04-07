@@ -54,7 +54,7 @@ def main():
         cfg["region"]["width"],
         cfg["region"]["height"],
     )
-    monitor_index = cfg["region"].get("monitor", 1)
+    monitor_index = cfg.get("monitor", 1)
 
     exit_requested = threading.Event()
 
@@ -81,13 +81,8 @@ def main():
             unattended_active.set()
             logger.info("Unattended mode activated by M key press")
 
-    controls_cfg = cfg.get("controls", {})
-    ready_button_region = controls_cfg.get("ready_button_region", 64)
-    good_luck_region = controls_cfg.get("good_luck_region", 16)
-    event_refresh_region = controls_cfg.get("event_refresh_region", 30)
-
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, ready_button_region=ready_button_region, good_luck_region=good_luck_region, event_refresh_region=event_refresh_region)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, crops=analyzer.crops)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -240,7 +235,7 @@ def main():
                 logger.info("\033[93m📋 CLICK TO CONTINUE detected in CLICK_TO_CONTINUE region\033[0m")
                 last_click_to_alert_ts = click_to_ts
                 ctrl.cancel_mission()
-                ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False, region_name=REGION_CLICK_TO_CONTINUE)
+                ctrl.click_crop(analyzer.crops["click_to"], block=False, region_name=REGION_CLICK_TO_CONTINUE)
 
             # Enforce configurable loop interval.
             # Block on incoming_event so flare deployment wakes immediately on new OCR results

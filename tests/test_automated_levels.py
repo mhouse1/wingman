@@ -26,6 +26,7 @@ from constants import (
     TEST_SCREENSHOT_INCOMING_2,
 )
 from wingman.analyzer import GameStateAnalyzer
+from wingman.crop_region import get_crop
 
 SCRIPT = str(Path(__file__).resolve().parent / "analyzer_cli.py")
 
@@ -34,15 +35,6 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     with path.open("r", encoding="utf-8") as file_handle:
         return yaml.safe_load(file_handle)
 
-
-def _grid_meta(cfg: dict) -> tuple[int, int, int, int]:
-    """Return (grid_size, total_regions, incoming_region, respawn_region)."""
-    respawn_cfg = cfg.get("respawn_detection", {})
-    grid_size = int(respawn_cfg.get("grid_size", 6))
-    total_regions = grid_size * grid_size
-    incoming_region = int(respawn_cfg.get("incoming_region", 10))
-    respawn_region = int(respawn_cfg.get("region", 27))
-    return grid_size, total_regions, incoming_region, respawn_region
 
 
 def _load_image(image_path: Path):
@@ -256,36 +248,26 @@ def test_level3_unit_ocr():
     ],
 )
 def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
-    """Validate continue text OCR includes 'LICK TO C' in at least one grid region."""
+    """Validate continue text OCR includes 'LICK TO C' in the click_to crop region."""
     cfg = load_config()
     analyzer = GameStateAnalyzer(cfg)
-    _, total_regions, _, _ = _grid_meta(cfg)
     frame = _load_image(image_path)
 
     reader = analyzer.ocr_reader
     assert reader is not None, "EasyOCR reader failed to initialize"
 
-    matched_region = None
-    region_outputs = {}
+    coords = analyzer.crops["click_to"]
+    region_frame = get_crop(frame, coords.x1, coords.y1, coords.x2, coords.y2)
+    gray = cv2.cvtColor(region_frame, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    preprocessed = cv2.resize(binary, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
 
-    for region in range(1, total_regions + 1):
-        region_frame = analyzer.get_region(frame, region)
-        gray = cv2.cvtColor(region_frame, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        preprocessed = cv2.resize(binary, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_AREA)
+    ocr_results = reader.readtext(preprocessed, detail=0, paragraph=True)
+    extracted_text = " ".join(str(result) for result in ocr_results)
+    normalized = " ".join(extracted_text.upper().split())
 
-        ocr_results = reader.readtext(preprocessed, detail=0, paragraph=True)
-        extracted_text = " ".join(str(result) for result in ocr_results)
-        normalized = " ".join(extracted_text.upper().split())
-        region_outputs[region] = normalized
-
-        if "LICK TO C" in normalized:
-            matched_region = region
-            break
-
-    assert matched_region is not None, (
-        f"Expected 'LICK TO C' in one of {total_regions} regions for {image_path.name}; "
-        f"sample outputs: {dict(list(region_outputs.items())[:10])}"
+    assert "LICK TO C" in normalized, (
+        f"Expected 'LICK TO C' in click_to crop for {image_path.name}; got: {normalized!r}"
     )
 
 
@@ -298,14 +280,12 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
     ],
 )
 def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
-    """Validate configured incoming region OCR includes 'MING' on INCOMING screenshots."""
+    """Validate incoming crop region OCR includes 'MING' on INCOMING screenshots."""
     cfg = load_config()
     analyzer = GameStateAnalyzer(cfg)
-    _, _, incoming_region, _ = _grid_meta(cfg)
     frame = _load_image(image_path)
-    region_frame = analyzer.get_region(frame, incoming_region)
-    if analyzer.incoming_subgrid_size > 1:
-        region_frame = analyzer._crop_subregion(region_frame, analyzer.incoming_subgrid_size, analyzer.incoming_subgrid_size, analyzer.incoming_subregion)
+    coords = analyzer.crops["incoming"]
+    region_frame = get_crop(frame, coords.x1, coords.y1, coords.x2, coords.y2)
 
     reader = analyzer.ocr_reader
     assert reader is not None, "EasyOCR reader failed to initialize"
@@ -347,7 +327,7 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
             break
 
     assert matched_variant is not None, (
-        f"Expected '{target}' in region {incoming_region} for {image_path.name}; no preprocessing variant matched. "
+        f"Expected '{target}' in incoming crop for {image_path.name}; no preprocessing variant matched. "
         f"Variant outputs: {variant_outputs}"
     )
 
