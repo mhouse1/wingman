@@ -1,8 +1,8 @@
-# Performance Tracking and Trends
+# Performance Doc 001 — Performance Tracking and Trends
 
 ## Overview
 
-The test suite automatically tracks performance metrics over time using three components:
+The test suite automatically tracks performance metrics over each software revision using three components:
 
 1. **`performance.json`** - Generated after each test run
 2. **`performance-history.csv`** - Aggregated trends from git history

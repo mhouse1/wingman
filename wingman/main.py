@@ -11,8 +11,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.5.4"
-WINGMAN_VERSION_DETAILS = "Resolve some tech debt before moving onto new features"
+WINGMAN_VERSION = "1.6.0"
+WINGMAN_VERSION_DETAILS = "New dynamic screen region selection architecture"
 
 from .capture import Capture
 from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE
@@ -28,6 +28,31 @@ class RespawnState(Enum):
 def load_config(path):
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8, sleep_fn=time.sleep):
+    """Click through GAME_END prompt and force transition to GAME_LOBBY.
+
+    Clicks the center prompt repeatedly, then clicks the lower-right continue
+    button. After the final click, explicitly flips state flags so the analyzer
+    exits GAME_END_B even if OCR polling is currently skipping in that state.
+    """
+    ctrl.click_crop(
+        analyzer.crops["click_to"],
+        block=True,
+        count=5,
+        region_name=REGION_CLICK_TO_CONTINUE,
+    )
+    sleep_fn(settle_seconds)
+    ctrl.click_crop(
+        analyzer.crops["ready_button"],
+        block=True,
+        count=1,
+        region_name="ready_button",
+    )
+    analyzer._game_end_b = False
+    analyzer._game_lobby = True
+    logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
 
 
 
@@ -54,7 +79,7 @@ def main():
         cfg["region"]["width"],
         cfg["region"]["height"],
     )
-    monitor_index = cfg["region"].get("monitor", 1)
+    monitor_index = cfg.get("monitor", 1)
 
     exit_requested = threading.Event()
 
@@ -81,13 +106,8 @@ def main():
             unattended_active.set()
             logger.info("Unattended mode activated by M key press")
 
-    controls_cfg = cfg.get("controls", {})
-    ready_button_region = controls_cfg.get("ready_button_region", 64)
-    good_luck_region = controls_cfg.get("good_luck_region", 16)
-    event_refresh_region = controls_cfg.get("event_refresh_region", 30)
-
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, ready_button_region=ready_button_region, good_luck_region=good_luck_region, event_refresh_region=event_refresh_region)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, crops=analyzer.crops)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -146,6 +166,11 @@ def main():
                 last_game_state = current_game_state
                 if current_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
+                    # GAME_END_B is not a respawn flow; clear any stale pending-restart
+                    # state so we do not relaunch a mission during click-through.
+                    respawn_state = RespawnState.IDLE
+                    restart_not_before = 0.0
+                    last_restart_attempt = 0.0
                 else:
                     game_end_b_since = 0.0
                 if current_game_state == GameState.GAME_LOBBY:
@@ -217,6 +242,7 @@ def main():
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)
             if (ctrl._auto_respawn_restart
                     and respawn_state == RespawnState.PENDING_RESTART
+                    and current_game_state == GameState.GAME_BATTLE
                     and time.time() >= restart_not_before
                     and time.time() - last_restart_attempt > restart_retry_interval):
                 if not ctrl.is_mission_running():
@@ -240,7 +266,11 @@ def main():
                 logger.info("\033[93m📋 CLICK TO CONTINUE detected in CLICK_TO_CONTINUE region\033[0m")
                 last_click_to_alert_ts = click_to_ts
                 ctrl.cancel_mission()
-                ctrl.click_grid_region(analyzer.click_to_region, analyzer.grid_rows, analyzer.grid_cols, block=False, region_name=REGION_CLICK_TO_CONTINUE)
+                threading.Thread(
+                    target=_click_through_game_end,
+                    args=(ctrl, analyzer, logger),
+                    daemon=True,
+                ).start()
 
             # Enforce configurable loop interval.
             # Block on incoming_event so flare deployment wakes immediately on new OCR results

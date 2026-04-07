@@ -5,7 +5,19 @@
       "Bash(make test:*)",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''tests/test_automated_levels.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''tests/test_automated_levels.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
-      "Bash(find \"c:\\\\dev-tools\\\\github\\\\wingman\\\\tests\" -name \"*.py\" -type f -exec wc -l {} +)"
+      "Bash(find \"c:\\\\dev-tools\\\\github\\\\wingman\\\\tests\" -name \"*.py\" -type f -exec wc -l {} +)",
+      "Bash(mv job-aid-setup-and-usage.md 001-setup-and-usage.md)",
+      "Bash(mv job-aid-add-python-package.md 002-add-python-package.md)",
+      "Bash(mv job-aid-run-automated-test.md 003-run-automated-test.md)",
+      "Bash(mv job-aid-how-to-test-analyzer.md 004-how-to-test-analyzer.md)",
+      "Bash(mv job-aid-update-performance-chart.md 005-update-performance-chart.md)",
+      "Bash(mv performance-tracking.md 001-performance-tracking.md)",
+      "Bash(mv performance-degredation-detection.md 002-performance-degradation-detection.md)",
+      "Bash(mv performance-wingman-1.0.0-lenovo-t14.md 003-performance-wingman-1.0.0-lenovo-t14.md)",
+      "Bash(mv performance-wingman-1.4.0-dual-region-ocr.md 004-performance-wingman-1.4.0-dual-region-ocr.md)",
+      "Bash(mv performance-wingman-1.5.2-subgrid-ocr.md 005-performance-wingman-1.5.2-subgrid-ocr.md)",
+      "Bash(ls c:/dev-tools/github/wingman/tests/*.py)",
+      "Bash(python -c ':*)"
     ]
   }
 }

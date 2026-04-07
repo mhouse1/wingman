@@ -2,7 +2,7 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Accepted | 2026-03-26 | 1.5.4           |
+| Accepted | 2026-03-26 | 1.6.0           |
 
 ## Context
 
@@ -23,6 +23,8 @@ Replace the grid-based region system with **named percentage-coordinate crops**.
 ### Config schema (new)
 
 ```yaml
+# Each crop is [[x1_pct, y1_pct], [x2_pct, y2_pct]] where x is horizontal (left→right)
+# and y is vertical (top→bottom), both as fractions of the capture frame (0.0–1.0).
 crops:
   respawn:       [[0.44, 0.55], [0.62, 0.70]]
   incoming:      [[0.00, 0.06], [0.22, 0.19]]
@@ -37,13 +39,57 @@ Coordinates are **scale-independent within a stable capture region**: if the gam
 ### Core extraction (new)
 
 ```python
-def get_crop(frame, x1: float, y1: float, x2: float, y2: float):
-    """Extract a percentage-coordinate crop from a full frame."""
+def get_crop(frame, x1: float, y1: float, x2: float, y2: float) -> np.ndarray:
+    """Extract a percentage-coordinate crop from a full frame.
+
+    All coordinates are fractions of the frame dimensions (0.0–1.0).
+    Coordinate order follows screen convention: x (horizontal) before y (vertical).
+    In NumPy indexing this maps to frame[y_start:y_end, x_start:x_end].
+
+    Args:
+        frame: Full capture frame as a numpy array.
+        x1: Left edge as a fraction of frame width.
+        y1: Top edge as a fraction of frame height.
+        x2: Right edge as a fraction of frame width.
+        y2: Bottom edge as a fraction of frame height.
+
+    Returns:
+        Cropped region as a numpy array.
+    """
     h, w = frame.shape[:2]
     return frame[int(h * y1):int(h * y2), int(w * x1):int(w * x2)]
 ```
 
-This is a pure function with no instance state. `GameStateAnalyzer` loads crop coordinates from config and stores them as named tuples; callers pass the coordinates directly to `get_crop`.
+This is a **module-level pure function** with no instance state. `GameStateAnalyzer` loads crop coordinates from config and stores them as named tuples; callers pass the coordinates directly to `get_crop`.
+
+### Modularity requirement
+
+`get_crop`, `draw_crops`, and the crop config-loading logic must live in a **dedicated module** (`wingman/crop_region.py`) with no imports from the rest of Wingman. `GameStateAnalyzer` and `Controller` import from `crop_region`; `crop_region` imports only `numpy` and the standard library.
+
+This boundary makes the screen-scanning primitives reusable by any future system — a different game, a UI automation tool, a standalone calibration script — without pulling in OCR readers, game-state machines, or controller logic.
+
+**Public surface of `wingman/crop_region.py`:**
+
+```python
+# Core types
+CropCoords = NamedTuple("CropCoords", [("x1", float), ("y1", float),
+                                        ("x2", float), ("y2", float)])
+
+# Core functions
+def get_crop(frame: np.ndarray, x1: float, y1: float,
+             x2: float, y2: float) -> np.ndarray: ...
+
+def load_crops(crops_cfg: dict) -> dict[str, CropCoords]: ...
+
+def draw_crops(frame: np.ndarray,
+               crops: dict[str, CropCoords]) -> np.ndarray: ...
+
+def crop_centre(coords: CropCoords,
+                frame_w: int, frame_h: int,
+                abs_left: int, abs_top: int) -> tuple[int, int]: ...
+```
+
+`load_crops` converts raw config dicts into `CropCoords` named tuples and validates that all values are in `[0.0, 1.0]` and `x1 < x2`, `y1 < y2`. `crop_centre` computes the absolute screen click target from a crop and a capture-region origin — removing the coordinate arithmetic currently scattered across `controller.py`.
 
 ### Config migration (before → after)
 
@@ -86,23 +132,157 @@ The event-refresh corner dismiss (`4 * cap_w / 8, 4 * cap_h / 8`) is also grid-d
 
 ```yaml
 crops:
-  event_refresh_dismiss: [[0.49, 0.49], [0.51, 0.51]]  # corner point between regions 28/29/36/37
+  # Click-only target — not scanned by OCR. Intentionally small (4%×4%) to place the
+  # click at the centre point between the old grid regions 28/29/36/37.
+  # If the capture region shifts, recalibrate to the screen-centre dismiss point.
+  event_refresh_dismiss: [[0.48, 0.48], [0.52, 0.52]]
 ```
 
 ### Calibration tooling
 
-The V-key debug screenshot is augmented to draw each named crop as a labelled bounding box, replacing the numbered grid overlay. For initial calibration, `analyzer_cli.py` gains a `--calibrate` flag: it captures a live screenshot and lets the user click two corners, then prints the resulting `[x%, y%]` pairs ready to paste into config.
+Calibration is performed entirely offline against static reference screenshots — the game does not need to be running. Reference images live in `tests/test_screenshots/`. A separate config file (`tests/calibration_map.yaml`) declares which crops are defined from which screenshot. A standalone tool (`tests/calibrate.py`) drives the loop: it opens each image, accepts two mouse clicks per crop, and writes the result directly into `config.yaml`. No copy-paste.
+
+#### Calibration map
+
+`tests/calibration_map.yaml` maps each reference screenshot to the crop names it covers. One screenshot can cover multiple crops if the same game screen contains several regions of interest.
+
+```yaml
+# tests/calibration_map.yaml
+# For each entry: open the screenshot and prompt for each listed crop in order.
+# Run: python tests/calibrate.py
+#
+# IMPORTANT: screenshots must be captured at the same region dimensions as
+# config.yaml region.width × region.height. The tool validates this on startup
+# and refuses to run if there is a mismatch.
+
+calibration:
+  - screenshot: respawn_screen.png      # 1920×1200
+    crops: [respawn, incoming, click_to]
+  - screenshot: lobby_ready.png         # 1920×1200
+    crops: [ready_button]
+  - screenshot: lobby_event_refresh.png # 1920×1200
+    crops: [event_refresh, event_refresh_dismiss]
+  - screenshot: match_start.png         # 1920×1200
+    crops: [good_luck]
+```
+
+Screenshots are one-time captures taken from a real game session and committed to the repo. They must be taken with the capture `region:` configured to match `config.yaml` at the time of capture — the dimensions are embedded as a comment per entry and validated at tool startup. Calibration can be re-run at any time without the game as long as the region dimensions are unchanged.
+
+At startup, `calibrate.py` cross-checks two things and aborts with a clear error if either fails:
+
+1. **Dimension match** — every screenshot's pixel dimensions must equal `config.yaml region.width × region.height`. A mismatch means the screenshot was taken with a different region and percentages would be computed against the wrong frame size.
+2. **Coverage check** — every key under `crops:` in `config.yaml` must appear in at least one `calibration_map.yaml` entry. An uncovered crop is flagged as a warning so it isn't silently left uncalibrated.
+
+#### How `calibrate.py` works
+
+```mermaid
+flowchart TD
+    A[Load calibration_map.yaml\nLoad config.yaml] --> B{Dimension check:\nscreenshot px == region w×h?}
+    B -- fail --> ERR[Abort with error:\nscreenshot was taken at wrong region size]
+    B -- pass --> COV{Coverage check:\nall config crops mapped?}
+    COV -- gaps --> WARN[Print warning:\nunmapped crops listed]
+    COV -- ok --> C
+    WARN --> C[For each screenshot entry]
+    C --> D[Open image in window\nDraw all already-defined crops as faded grey boxes]
+    D --> E{Is crop already\ndefined in config?}
+    E -- yes --> F[Highlight next target crop name in window title\ne.g. 'Click corners for: respawn  —  S=skip  Q=quit']
+    E -- no --> G[Highlight crop name in window title\ne.g. 'Click corners for: respawn  —  UNDEFINED  Q=quit'\nS key disabled]
+    F --> H{User action}
+    G --> H
+    H -- clicks top-left\nthen bottom-right --> I[Draw green box over selection]
+    I --> J[Write updated coords to config.yaml immediately]
+    J --> K{More crops\nfor this screenshot?}
+    K -- yes --> D
+    K -- no --> C
+    H -- S key\nonly if already defined --> L[Keep existing value\nadvance to next crop]
+    L --> K
+    H -- Q key --> M[Save progress so far\nexit]
+```
+
+Key properties:
+- **Crash-safe**: config is written after each individual crop — a partial run leaves all previously completed crops intact.
+- **Re-entrant**: re-running allows skipping crops whose existing box still looks correct; S is available only when a crop already has a defined value.
+- **Context-aware**: all already-defined crops from `config.yaml` are drawn as faded boxes on the image, so the user can see neighbouring regions while clicking a new one.
+- **S blocked for undefined crops**: pressing S on a crop with no existing value is a no-op — the tool requires a click pair before it will advance.
+- **Misclick recovery**: a bad click pair produces a visible wrong box; re-run `--crop <name>` immediately to correct it. There is no undo within a session.
+
+#### Workflow A — First-time calibration
+
+1. **Capture reference screenshots.** For each game screen state that contains crops, take a screenshot while the game is running **with the current `config.yaml region:` in effect** and save it to `tests/test_screenshots/`. Note the region dimensions in the `calibration_map.yaml` comment for that entry.
+
+2. **Add entries to `calibration_map.yaml`** mapping each screenshot to the crop names it should define.
+
+3. **Run the calibration tool:**
+   ```
+   python tests/calibrate.py
+   ```
+   The tool validates dimensions and coverage, then iterates every entry in order. For each crop it prompts:
+   ```
+   [1/8] respawn  (respawn_screen.png)  — click top-left corner
+   ```
+
+4. **Click two corners** on the image window — top-left first, then bottom-right. A green rectangle appears. The tool writes the coordinates into `config.yaml` and advances.
+
+5. **Press Q** to quit early; progress to that point is saved.
+
+6. **Verify** with the V-key debug screenshot while the game is running (see below).
+
+---
+
+#### Workflow B — Recalibrate a single crop
+
+```
+python tests/calibrate.py --crop respawn
+```
+
+Opens the screenshot mapped to `respawn`, draws the existing box in yellow as a reference, and prompts for new corners. Writes the update immediately. Use this to recover from a misclick or to adjust a single region after a minor UI shift.
+
+---
+
+#### Workflow C — Full recalibration after capture region size change
+
+When `config.yaml region.width` or `region.height` changes, the old reference screenshots are no longer valid — they were taken at different dimensions and the tool will refuse to use them. New screenshots must be captured before re-running calibration.
+
+1. Update `config.yaml region:` to the new dimensions.
+2. Capture fresh reference screenshots for every game screen state.
+3. Update the dimension comments in `calibration_map.yaml`.
+4. Run:
+   ```
+   python tests/calibrate.py
+   ```
+   All crops are undefined relative to the new frame; S is blocked for every entry. Complete the full click loop.
+5. Verify with V.
+
+> If only the region **position** changed (left/top moved, width/height unchanged), existing screenshots are still valid — dimensions match and percentages are correct. Re-run normally; press S on crops that still look right.
+
+---
+
+#### V-key debug screenshot (runtime verification)
+
+Pressing V while Wingman is running saves a screenshot to `tests/test-output/` with all named crops drawn as labelled coloured rectangles over the live frame. This is the final verification step after calibration:
+
+```mermaid
+graph LR
+    A[Live capture frame] --> B[draw_crops from config]
+    B --> C[Each box: unique colour + name label]
+    C --> D[Saved to tests/test-output/debug_YYYYMMDD_HHMMSS.png]
+```
+
+A correctly calibrated crop tightly encloses its target text. A box that is too large wastes OCR time; a box that clips text produces partial reads.
 
 ### Code changes
 
 | File | Change |
 |---|---|
-| `wingman/analyzer.py` | Replace `get_region(frame, region_num)` and `_crop_subregion` with `get_crop(frame, x1, y1, x2, y2)`. Remove `grid_rows`, `grid_cols`, `respawn_region`, `incoming_region`, `click_to_region`, subgrid fields. Load named crop coordinates from `crops:` config section. |
-| `wingman/controller.py` | Replace `ready_button_region`, `good_luck_region`, `event_refresh_region` integer fields with crop-coordinate tuples. Update `click_grid_region` to compute click target from crop centre. Add `event_refresh_dismiss` crop for corner click. Remove `REGION_*` integer-passing call sites. |
-| `wingman/main.py` | Update `click_grid_region` calls to pass crop coordinates directly. |
-| `wingman/config.yaml` | Add `crops:` section; remove `respawn_detection.grid_size`, region number keys, and subgrid keys. |
-| `tests/analyzer_cli.py` | Add `--calibrate` mode: live capture → click two corners → print percentage coordinates. |
-| `tests/` | Update any test that constructs region numbers. |
+| `wingman/crop_region.py` _(new)_ | New module. Contains `CropCoords`, `get_crop`, `load_crops`, `draw_crops`, `crop_centre`. No imports from the rest of Wingman — only `numpy` and stdlib. This is the portable, reusable surface of the screen-scanning subsystem. |
+| `wingman/analyzer.py` | Import `get_crop`, `load_crops`, `draw_crops` from `crop_region`. Remove `get_region`, `_crop_subregion`, `draw_grid`, `grid_rows`, `grid_cols`, `respawn_region`, `incoming_region`, `click_to_region`, subgrid fields, and `capture_grid_size`. Call `load_crops(config["crops"])` in `__init__` and store result as `self.crops`. |
+| `wingman/controller.py` | Import `crop_centre` from `crop_region`. Replace `ready_button_region`, `good_luck_region`, `event_refresh_region` integer fields with `CropCoords` tuples. Replace `click_grid_region` arithmetic with `crop_centre`. Add `event_refresh_dismiss` crop. Replace `draw_grid` call with `draw_crops`. Remove `REGION_*` integer-passing call sites. |
+| `wingman/main.py` | Update `click_grid_region` calls to pass `CropCoords` directly. |
+| `wingman/config.yaml` | Add `crops:` section (with axis-order comment); remove `respawn_detection.grid_size`, all region number keys, subgrid keys, and `debug.capture_grid_size`. |
+| `tests/calibrate.py` _(new)_ | Standalone offline calibration tool. On startup: validates all screenshot dimensions match `config.yaml region.width × region.height` (aborts on mismatch) and warns on any `config.yaml crops:` key with no `calibration_map.yaml` entry. Iterates entries in map order, prompts for two clicks per crop, writes coordinates directly into `config.yaml` after each crop. S key skips only crops that already have a defined value. Flag: `--crop <name>` to recalibrate a single named crop. |
+| `tests/calibration_map.yaml` _(new)_ | Maps reference screenshot filenames to the crop names they cover, with a dimension comment per entry. Determines iteration order for `calibrate.py`. |
+| `tests/test_screenshots/` _(new dir)_ | Static reference screenshots captured from real game sessions. One file per distinct game screen state. Committed to the repo so calibration can be re-run without the game. |
+| `tests/` | Update any test that constructs region numbers or calls `get_region`/`draw_grid`. Add unit tests for `load_crops` validation and `crop_centre` arithmetic directly against `crop_region.py`. |
 
 ## Future Capability: Target Tracking
 
@@ -147,7 +327,7 @@ With grid regions this would not be practical:
 
 ```yaml
 crops:
-  tracking_zone: [[0.20, 0.15], [0.80, 0.85]]  # Area scanned for HUD diamonds
+  tracking_zone: [[0.20, 0.15], [0.80, 0.85]]  # [[x1_pct, y1_pct], [x2_pct, y2_pct]] — area scanned for HUD diamonds
 
 tracking:
   diamond_green_hsv_lower: [40, 120, 120]
@@ -165,6 +345,7 @@ tracking:
 - Crops are scale-independent within a stable capture region; no recalibration needed when the game's internal render resolution changes.
 - Adding a new region of interest requires only two coordinates, not grid-size arithmetic.
 - `get_crop` is a pure function — trivially testable and reusable.
+- `wingman/crop_region.py` has no Wingman-specific imports — it can be copied or imported into any future screen-scanning or OCR project without modification.
 
 **Negative / migration cost:**
 - All existing region numbers must be recalibrated to percentage coordinates. The V-key screenshot with the new labelled overlay is the calibration tool.

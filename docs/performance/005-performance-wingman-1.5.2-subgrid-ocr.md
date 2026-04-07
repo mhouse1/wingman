@@ -1,4 +1,4 @@
-# Wingman Performance Report: Sub-Grid OCR Optimization
+# Performance Doc 005 — Wingman Performance Report v1.5.2 (Sub-Grid OCR)
 
 **Test Date:** 2026-03-21
 **Wingman Version:** 1.5.2

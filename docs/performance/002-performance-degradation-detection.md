@@ -1,4 +1,4 @@
-# Test Timing Validation (Level 5)
+# Performance Doc 002 — Test Timing Validation (Level 5)
 
 ## Overview
 The automated test suite includes **Level 5: Performance Validation** as the final test stage. This test validates execution times of all previous tests against baseline durations extracted from `tests/test-output/report.html`.
