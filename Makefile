@@ -21,7 +21,7 @@
 
 # Generate HTML report for automated levels test
 test:
-	uv run pytest tests/test_automated_levels.py --html=tests/test-output/report.html --self-contained-html
+	uv run pytest tests/test_automated_levels.py tests/test_main_game_end.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
