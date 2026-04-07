@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from wingman.analyzer import GameStateAnalyzer
 from wingman.capture import Capture
+from wingman.crop_region import draw_crops, get_crop
 
 
 def load_config(path: Path | None = None) -> dict:
@@ -77,7 +78,7 @@ def capture_and_test_with_visualization():
         cfg["region"]["width"],
         cfg["region"]["height"],
     )
-    monitor_index = cfg["region"].get("monitor", 1)
+    monitor_index = cfg.get("monitor", 1)
     cap = Capture(region, monitor_index=monitor_index)
 
     print(f"Capturing screenshot from monitor {monitor_index} region {region}...")
@@ -201,15 +202,15 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
 
     # First call schedules background OCR
     state = analyzer.analyze_frame(frame)
-    
+
     # Wait for background OCR thread to complete
     if analyzer._background_ocr_thread and analyzer._background_ocr_thread.is_alive():
         print("\nWaiting for OCR to complete...")
         analyzer._background_ocr_thread.join(timeout=120)
-    
+
     # Re-analyze to get updated cache result
     state = analyzer.analyze_frame(frame)
-    
+
     print("\nFull frame analysis:")
     print(f"  Respawning: {state['is_respawning']}")
     print(f"  Confidence: {state['respawn_confidence']:.2%}")
@@ -217,51 +218,37 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
 
     output_dir = Path("tests") / "test-output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    analyzer.draw_grid(frame, output_path=str(output_dir / "output_grid.png"))
-    print(f"\n[OK] Saved grid visualization to {output_dir / 'output_grid.png'}")
 
-    total_regions = analyzer.grid_rows * analyzer.grid_cols
-    print(f"\nTesting individual regions (1-{total_regions}):")
-    print("-" * 60)
-    respawn_regions = []
+    # Draw named crop overlays on the frame
+    frame_with_crops = draw_crops(frame, analyzer.crops)
+    output_grid = str(output_dir / "output_grid.png")
+    cv2.imwrite(output_grid, frame_with_crops)
+    print(f"\n[OK] Saved grid visualization to {output_grid}")
 
-    for region in range(1, total_regions + 1):
-        region_state = analyzer.analyze_frame(frame, region=region)
-        status = "[OK] RESPAWN" if region_state["is_respawning"] else "  gameplay"
-        confidence = region_state["respawn_confidence"]
-        print(f"  Region {region:2d}: {status} | Conf: {confidence:.2%}")
-
-        if region_state["is_respawning"]:
-            respawn_regions.append((region, confidence))
-
-    print("-" * 60)
-    if respawn_regions:
-        print(f"\n[OK] Respawn detected in region(s): {[r[0] for r in respawn_regions]}")
-        best_region = max(respawn_regions, key=lambda value: value[1])
-        print(f"  Best match: Region {best_region[0]} (confidence: {best_region[1]:.2%})")
-        print(f"\nRecommendation: Use region={best_region[0]} for faster analysis")
-
-        output_dir = Path("tests") / "test-output"
-        analyzer.draw_grid(frame, highlight_region=best_region[0], output_path=str(output_dir / "output_grid_highlighted.png"))
-        print(f"[OK] Saved highlighted grid to {output_dir / 'output_grid_highlighted.png'}")
+    if state["is_respawning"]:
+        output_highlighted = str(output_dir / "output_grid_highlighted.png")
+        cv2.imwrite(output_highlighted, frame_with_crops)
+        print(f"[OK] Saved highlighted grid to {output_highlighted}")
+        print(f"\n[OK] Respawn detected in region(s): ['respawn']")
+        print(f"  Confidence: {state['respawn_confidence']:.2%}")
     else:
         print("\n[FAIL] Respawn NOT detected in any region")
 
     elapsed = time.time() - start_time
     print(f"\nTotal runtime: {elapsed:.2f} seconds")
-    
+
     # Force exit to avoid hanging on EasyOCR threads
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)
 
 
-def draw_subgrid_overlay(image_path: str):
-    """Draw the respawn and incoming sub-grid overlays on their extracted regions.
+def draw_crops_overlay(image_path: str):
+    """Draw named crop region overlays on a screenshot.
 
     Outputs:
-      tests/test-output/subgrid_respawn.png   — region 44 with rows×cols sub-grid
-      tests/test-output/subgrid_incoming.png  — region 21 with NxN sub-grid
+      tests/test-output/crops_overlay.png  — full frame with all named crop rectangles labelled
+      tests/test-output/crop_<name>.png    — individual crop extract for each named region
     """
     config = load_config()
     analyzer = GameStateAnalyzer(config)
@@ -274,59 +261,21 @@ def draw_subgrid_overlay(image_path: str):
     output_dir = Path("tests") / "test-output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _draw_subgrid(cell_frame, grid_rows, grid_cols, highlight_cell):
-        """Return a copy of cell_frame with a rows×cols numbered grid drawn on it."""
-        out = cell_frame.copy()
-        h, w = out.shape[:2]
-        cell_h = h // grid_rows
-        cell_w = w // grid_cols
+    # Full-frame overlay with all crop rectangles
+    frame_with_crops = draw_crops(frame, analyzer.crops)
+    overlay_out = str(output_dir / "crops_overlay.png")
+    cv2.imwrite(overlay_out, frame_with_crops)
+    print(f"[OK] Crops overlay -> {overlay_out}")
 
-        # Draw grid lines
-        for c in range(1, grid_cols):
-            x = w * c // grid_cols
-            cv2.line(out, (x, 0), (x, h), (0, 255, 255), 2)
-        for r in range(1, grid_rows):
-            y = h * r // grid_rows
-            cv2.line(out, (0, y), (w, y), (0, 255, 255), 2)
-
-        # Number each cell
-        for idx in range(1, grid_rows * grid_cols + 1):
-            row = (idx - 1) // grid_cols
-            col = (idx - 1) % grid_cols
-            cx = col * cell_w + cell_w // 2 - 10
-            cy = row * cell_h + cell_h // 2 + 10
-            cv2.putText(out, str(idx), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 2)
-
-        # Highlight configured sub-region
-        if 1 <= highlight_cell <= grid_rows * grid_cols:
-            row = (highlight_cell - 1) // grid_cols
-            col = (highlight_cell - 1) % grid_cols
-            x1 = col * cell_w
-            y1 = row * cell_h
-            cv2.rectangle(out, (x1, y1), (x1 + cell_w, y1 + cell_h), (0, 255, 0), 4)
-
-        return out
-
-    # --- Respawn region sub-grid ---
-    respawn_cell = analyzer.get_region(frame, analyzer.respawn_region)
-    respawn_overlay = _draw_subgrid(
-        respawn_cell,
-        analyzer.respawn_subgrid_rows,
-        analyzer.respawn_subgrid_cols,
-        analyzer.respawn_subregion,
-    )
-    respawn_out = str(output_dir / "subgrid_respawn.png")
-    cv2.imwrite(respawn_out, respawn_overlay)
-    print(f"[OK] Respawn sub-grid ({analyzer.respawn_subgrid_rows}x{analyzer.respawn_subgrid_cols}, "
-          f"highlight={analyzer.respawn_subregion}) -> {respawn_out}")
-
-    # --- Incoming region sub-grid ---
-    incoming_cell = analyzer.get_region(frame, analyzer.incoming_region)
-    n = analyzer.incoming_subgrid_size
-    incoming_overlay = _draw_subgrid(incoming_cell, n, n, analyzer.incoming_subregion)
-    incoming_out = str(output_dir / "subgrid_incoming.png")
-    cv2.imwrite(incoming_out, incoming_overlay)
-    print(f"[OK] Incoming sub-grid ({n}x{n}, highlight={analyzer.incoming_subregion}) -> {incoming_out}")
+    # Individual crop extracts
+    for name, coords in analyzer.crops.items():
+        crop_img = get_crop(frame, coords.x1, coords.y1, coords.x2, coords.y2)
+        if crop_img.size == 0:
+            print(f"[WARN] Crop '{name}' is empty — skipping")
+            continue
+        crop_out = str(output_dir / f"crop_{name}.png")
+        cv2.imwrite(crop_out, crop_img)
+        print(f"[OK] Crop '{name}' ({crop_img.shape[1]}x{crop_img.shape[0]}) -> {crop_out}")
 
 
 def main():
@@ -336,7 +285,7 @@ def main():
     parser.add_argument("--grid", action="store_true", help="Run grid visualization")
     parser.add_argument("--capture", action="store_true", help="Capture screenshot then analyze")
     parser.add_argument("--unit-ocr", action="store_true", help="Directly test _run_ocr_in_background")
-    parser.add_argument("--subgrid", action="store_true", help="Draw sub-grid overlays for respawn and incoming regions")
+    parser.add_argument("--crops", action="store_true", help="Draw named crop region overlays on a screenshot")
     args = parser.parse_args()
 
     if args.unit_ocr:
@@ -347,8 +296,8 @@ def main():
         test_multiple_images()
     elif args.grid:
         test_with_visualization(args.image)
-    elif args.subgrid:
-        draw_subgrid_overlay(args.image)
+    elif args.crops:
+        draw_crops_overlay(args.image)
     else:
         test_respawn_detection(args.image)
 

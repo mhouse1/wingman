@@ -1,0 +1,27 @@
+# tests/calibration_map.yaml
+# Maps each reference screenshot to the crop names it covers.
+# Run: python tests/calibrate.py
+#
+# IMPORTANT: screenshots must be captured at the same region dimensions as
+# config.yaml region.width × region.height. The tool validates this on startup
+# and refuses to run if there is a mismatch.
+#
+# To capture reference screenshots:
+#   1. Launch the game and navigate to the relevant screen.
+#   2. Press V in wingman to save a screenshot with crop overlays.
+#   3. Copy the raw screenshot (without overlays) to test_screenshots/ and
+#      add it here under the appropriate crops list.
+
+calibration:
+  - screenshot: RESPAWN.png           # 1920×1200 — respawn overlay screen
+    crops: [respawn]
+  - screenshot: INCOMING.png          # 1920×1200 — incoming missile warning
+    crops: [incoming]
+  - screenshot: continue.png          # 1920×1200 — click to continue screen
+    crops: [click_to]
+  - screenshot: GOODLUCK.png        # 1920×1200 — good luck / game starting
+    crops: [good_luck]
+  - screenshot: PLAY1.png    # 1920×1200 — lobby ready button
+    crops: [ready_button]
+  - screenshot: UNREADY.png  # 1920×1200 — event refresh popup
+    crops: [event_refresh, event_refresh_dismiss]

@@ -14,12 +14,14 @@
 #   make diff        -> git diff
 #   make commit      -> commit all changes with a default message
 #   make push        -> push current branch
+#   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
+#   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 
-.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run
+.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run calibrate calibrate-crop
 
 # Generate HTML report for automated levels test
 test:
-	uv run pytest tests/test_automated_levels.py --html=tests/test-output/report.html --self-contained-html
+	uv run pytest tests/test_automated_levels.py tests/test_main_game_end.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -118,3 +120,25 @@ squash:
 
 run:
 	wingman.bat
+
+# Two commands are available for calibrating crop regions:
+#
+#   make calibrate
+#     Walks through every screenshot in tests/calibration_map.yaml and lets you
+#     click two corners per crop. Config is written immediately after each crop
+#     so a Q quit saves whatever you completed.
+#
+#   make calibrate-crop CROP=respawn
+#     Recalibrates a single named crop — useful when one region shifts but the
+#     rest are still good. Replace respawn with any name from the crops: section
+#     (incoming, click_to, good_luck, ready_button, event_refresh, event_refresh_dismiss).
+#
+#   Controls in the window:
+#     Click top-left corner, then bottom-right corner — saves the crop
+#     S — skip (keeps the existing value; disabled if the crop has never been set)
+#     Q — quit and save progress so far
+calibrate:
+	uv run python tests/calibrate.py
+
+calibrate-crop:
+	uv run python tests/calibrate.py --crop $(CROP)

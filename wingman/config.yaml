@@ -1,121 +1,44 @@
-# Unattended mode: when true, automatically transitions game_end → game_lobby → game_battle
-# without requiring a manual 'm' key press. CANCEL_MISSION_KEY and EXIT_KEY still apply.
-# Pressing AUTO_MISSION_KEY ('m') at runtime while this is true also activates the full cycle.
 unattended_mode: true
-
-# Main loop interval (seconds between each screen capture, this should not be faster than the OCR rate
-# Data From automated test will show OCR rate
-# [UnitTest] OCR Stage Timings:
-#   Setup: 0.00s, Reader: 1.17s, Grayscale: 0.00s, Threshold: 0.00s, Resize: 0.00s, OCR: 3.61s, Total: 4.82s
 loop_interval_sec: 1.5
-# Screen capture region (left, top, width, height).
-# These values are calibrated for a 1920×1200 display.
-# To recalibrate: press V in-game to capture a screenshot, then use the grid
-# overlay in tests/test-output/ to identify the correct region coordinates.
-region:
-  left: 0
-  top: 0
-  width: 1920
-  height: 1200
-# Monitor index for screen capture.
-#   1 = primary monitor (default for single-monitor setups)
-#   2 = first secondary monitor
-# WARNING: setting this to 2 on a single-monitor machine will raise ValueError at startup.
-monitor: 2
-  # Dell monitor 3840x1600
-  # width: 3839
-  # height: 1599
-
-
-# HSV color range for enemy HUD marker (example for red markers)
+region: {left: 0, top: 0, width: 1920, height: 1200}
+monitor: 1
 enemy_hsv:
   lower: [0, 120, 120]
   upper: [10, 255, 255]
-
-# Respawn screen detection settings
+crops:
+  respawn:
+  - [0.4188, 0.6978]
+  - [0.5292, 0.7233]
+  incoming:
+  - [0.4618, 0.2556]
+  - [0.5361, 0.2844]
+  click_to:
+  - [0.4097, 0.8956]
+  - [0.5687, 0.9289]
+  good_luck:
+  - [0.9035, 0.0244]
+  - [0.991, 0.2789]
+  event_refresh:
+  - [0.4597, 0.3167]
+  - [0.7035, 0.5422]
+  ready_button:
+  - [0.7535, 0.84]
+  - [0.9785, 0.97]
+  event_refresh_dismiss:
+  - [0.7236, 0.8556]
+  - [0.9792, 0.97]
 respawn_detection:
-  # Use OCR to detect "RESPAWN" text
   use_ocr: true
-  # Set to true only if a CUDA-capable GPU is available.
-  # false initializes EasyOCR directly on CPU, removing the try/except probe fallback
-  # and the three 'GPU init failed' log warnings produced at session startup.
   use_gpu: false
-
-  # Detection grid size (NxN). 8 means regions are numbered on an 8x8 grid.
-  grid_size: 8
-  
-  # OCR performance: only run OCR every N seconds (use cached result otherwise)
-  # Non-blocking background thread: main loop NEVER blocks on OCR!
-  # Respawn screens visible for 5+ seconds, so checking every 5s is plenty
-  ocr_cooldown: 0.2  # Seconds between OCR runs (lower for faster detection)
-  
-  # Grid region where RESPA text appears (8x8 grid = 64 regions)
-  # Run test_analyzer.py with --grid to find the correct region
-  region: 44
-  # Sub-divide respawn region into a rows×cols sub-grid and only scan one cell.
-  # Set both to 1 to disable (scan the full region).
-  # 2x1 grid: region 2 = bottom half where full "RESPA" text appears.
-  respawn_subgrid_rows: 2
-  respawn_subgrid_cols: 1
-  respawn_subregion: 2
-  
-  # Also scan region 21 for INCOMING missile warning ("MING" visible)
-  incoming_region: 21
-  # Sub-divide incoming_region into an NxN sub-grid and only scan one cell.
-  # Set incoming_subgrid_size: 1 to disable (scan the full region).
-  # Region 1 = top-left cell (row-major). Use the sub-grid cell that contains the warning text.
-  incoming_subgrid_size: 3
-  incoming_subregion: 1
-
-  # Scan region 60 for "Click to Continue" prompt (lower priority - informational only)
-  click_to_region: 60
-
-  # Fallback HSV detection (if OCR unavailable)
-  # White text detection (for "RESPAWN" text)
-  # HSV: High Value (brightness), Low Saturation
+  ocr_cooldown: 0.2
   text_hsv_lower: [0, 0, 180]
   text_hsv_upper: [180, 50, 255]
-  text_threshold: 0.001  # 0.1% of screen pixels
-  
-  # Cyan progress bar detection
-  # HSV: Cyan is around 90 hue, high saturation
+  text_threshold: 0.001
   bar_hsv_lower: [80, 100, 100]
   bar_hsv_upper: [100, 255, 255]
-  bar_threshold: 0.0005  # 0.05% of screen pixels
-
-# Mission timing and restart parameters
-mission:
-  # Delay (seconds) after mission lock release before attempting restart
-  restart_delay_after_unlock: 4.0
-  # Interval (seconds) between restart attempts during respawn
-  restart_retry_interval: 2.0
-  # Fallback timeout (seconds) to restart mission if OCR never clears the respawn screen.
-  # Should be well above the typical respawn screen duration (~8-10s) to avoid restarting early.
-  respawn_fallback_timeout: 20.0
-  # Default weapon loop firing interval (seconds between shots)
-  weapon_loop_interval: 0.5
-
-aim:
-  smoothing: 0.25    # fraction toward target each frame (0..1)
-  fire_cooldown: 0.2 # seconds between shots
-
-controls:
-  # Preferred boolean option: set to true to fire with the left mouse button.
-  left_mouse_button: true
-  # Backwards-compatible: you can still set `fire_button: <key>` for keyboard/mouse mapping
-  fire_button: left  # 'left' for left-click; can be mapped to keys later
-  # How long to hold the fire button (seconds). Set to 0 for instant click.
-  fire_hold: 2.0
-  # Grid region of the "Ready/Play" button in the game lobby (bottom-right on an 8x8 grid)
-  ready_button_region: 64
-  # Grid region where "Good Luck" text appears at match start
-  good_luck_region: 16
-  # Grid region where "Event refresh in progress" popup appears
-  event_refresh_region: 30
-
-debug:
-  show_window: false
-  show_grid_highlighted: false  # Auto-save grid visualization when respawn detected
-  capture_grid_size: 8  # Grid size for V screenshot overlay: 6 => 6x6, 8 => 8x8
-  draw_markers: true
-  debug_output_dir: tests/test-output  # Directory for OCR preprocessing debug images
+  bar_threshold: 0.0005
+mission: {restart_delay_after_unlock: 4.0, restart_retry_interval: 2.0, respawn_fallback_timeout: 20.0,
+  weapon_loop_interval: 0.5}
+aim: {smoothing: 0.25, fire_cooldown: 0.2}
+controls: {left_mouse_button: true, fire_button: left, fire_hold: 2.0}
+debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, debug_output_dir: tests/test-output}
