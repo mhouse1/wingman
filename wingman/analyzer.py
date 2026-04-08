@@ -244,7 +244,7 @@ def _process_good_luck_region(frame):
 
 
 def _process_play_button_region(frame):
-    """Worker function to detect 'PLAY' text in the play_button crop."""
+    """Worker function to detect 'PLAY' or 'READY' text in play_button crop."""
     reader = _get_thread_ocr_reader()
     if reader is None:
         return (False, 0.0, None)
@@ -258,7 +258,7 @@ def _process_play_button_region(frame):
     for img in (upscaled, binary):
         results = reader.readtext(img, detail=0, paragraph=True, workers=0)
         text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "PLAY" in text:
+        if "PLAY" in text or "READY" in text:
             ocr_time = time.time() - t_start
             return (True, ocr_time, text)
 
@@ -916,7 +916,7 @@ class GameStateAnalyzer:
             return False
 
     def scan_region_for_play_button(self, frame) -> bool:
-        """Synchronously scan the play_button crop for 'PLAY' text via OCR pool."""
+        """Synchronously scan play_button crop for 'PLAY' or 'READY' text."""
         executor = self.ocr_executor
         if executor is None:
             logger.warning("Analyzer: OCR executor not available for play button scan")
@@ -927,9 +927,9 @@ class GameStateAnalyzer:
                 _process_play_button_region, region_frame
             ).result(timeout=30)
             if detected:
-                logger.info("Analyzer: 'PLAY' detected in play_button crop (text='%s')", text)
+                logger.info("Analyzer: 'PLAY/READY' detected in play_button crop (text='%s')", text)
             else:
-                logger.debug("Analyzer: 'PLAY' not found in play_button crop")
+                logger.debug("Analyzer: 'PLAY/READY' not found in play_button crop")
             return detected
         except Exception as e:
             logger.warning("Analyzer: Play button scan failed: %s", e)

@@ -303,7 +303,7 @@ class Controller:
                 return
 
             if not self._analyzer.scan_region_for_play_button(frame):
-                logger.info("Controller: start_auto_mission - PLAY text not present in play_button crop; skipping click")
+                logger.info("Controller: start_auto_mission - PLAY/READY text not present in play_button crop; skipping click")
                 return
 
             logger.info("Controller: start_auto_mission - clicking play button and entering GAME_STARTING")
