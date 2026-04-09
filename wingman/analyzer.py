@@ -317,6 +317,23 @@ def _process_unlock_close_region(frame):
     return (False, time.time() - t_start, None)
 
 
+def _process_final_continue_region(frame):
+    """Worker function to detect 'Continue' button text in FINAL_CONTINUE crop."""
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+    t_start = time.time()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "CONTINUE" in text:
+            return (True, time.time() - t_start, text)
+    return (False, time.time() - t_start, None)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -1006,6 +1023,7 @@ class GameStateAnalyzer:
             ("REVEAL_ALL",           _process_reveal_all_region),
             ("TAP_HERE_TO_CONTINUE", _process_tap_here_region),
             ("UNLOCK_CLOSE",         _process_unlock_close_region),
+            ("FINAL_CONTINUE",       _process_final_continue_region),
         ]
         for crop_name, worker_fn in checks:
             if crop_name not in self.crops:

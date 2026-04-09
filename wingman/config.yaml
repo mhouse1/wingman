@@ -36,6 +36,9 @@ crops:
   UNLOCK_CLOSE: # Actual text is "Close"
   - [0.1264, 0.6433]
   - [0.2035, 0.6856]
+  FINAL_CONTINUE: # Actual text is "Continue"
+  - [0.8257, 0.9156]
+  - [0.9243, 0.9444]
 respawn_detection:
   use_ocr: true
   use_gpu: false

@@ -63,6 +63,7 @@ REGION_CLICK_TO_CONTINUE = "click_to_continue"
 REGION_REVEAL_ALL        = "REVEAL_ALL"
 REGION_TAP_HERE          = "TAP_HERE_TO_CONTINUE"
 REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
+REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
     def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None):

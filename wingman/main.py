@@ -50,13 +50,6 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
         count=1,
         region_name=REGION_PLAY_BUTTON,
     )
-    sleep_fn(1.0)
-    ctrl.click_crop(
-        analyzer.crops["play_button"],
-        block=True,
-        count=1,
-        region_name=REGION_PLAY_BUTTON,
-    )
     analyzer._game_end_b = False
     analyzer._game_lobby = True
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
