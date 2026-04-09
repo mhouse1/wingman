@@ -266,6 +266,57 @@ def _process_play_button_region(frame):
     return (False, ocr_time, None)
 
 
+def _process_reveal_all_region(frame):
+    """Worker function to detect 'REVEAL ALL' button text in REVEAL_ALL crop."""
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+    t_start = time.time()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "REVEAL" in text:
+            return (True, time.time() - t_start, text)
+    return (False, time.time() - t_start, None)
+
+
+def _process_tap_here_region(frame):
+    """Worker function to detect 'TAP HERE TO CONTINUE' text in TAP_HERE_TO_CONTINUE crop."""
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+    t_start = time.time()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "TAP" in text or "CONTINUE" in text:
+            return (True, time.time() - t_start, text)
+    return (False, time.time() - t_start, None)
+
+
+def _process_unlock_close_region(frame):
+    """Worker function to detect 'Close' button text in UNLOCK_CLOSE crop."""
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (False, 0.0, None)
+    t_start = time.time()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    for img in (upscaled, binary):
+        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
+        text = " ".join(str(r) for r in results).upper().replace(" ", "")
+        if "CLOSE" in text:
+            return (True, time.time() - t_start, text)
+    return (False, time.time() - t_start, None)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -934,4 +985,41 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.warning("Analyzer: Play button scan failed: %s", e)
             return False
+
+    def scan_region_for_lobby_popups(self, frame):
+        """Scan for lobby popup buttons that may be blocking the play button.
+
+        Checks REVEAL_ALL, TAP_HERE_TO_CONTINUE, and UNLOCK_CLOSE crops in order.
+
+        Args:
+            frame: Full BGR frame from screen capture.
+
+        Returns:
+            The crop name (str) of the first detected popup, or None if none found.
+        """
+        executor = self.ocr_executor
+        if executor is None:
+            logger.warning("Analyzer: OCR executor not available for lobby popup scan")
+            return None
+
+        checks = [
+            ("REVEAL_ALL",           _process_reveal_all_region),
+            ("TAP_HERE_TO_CONTINUE", _process_tap_here_region),
+            ("UNLOCK_CLOSE",         _process_unlock_close_region),
+        ]
+        for crop_name, worker_fn in checks:
+            if crop_name not in self.crops:
+                logger.debug("Analyzer: crop '%s' not in config — skipping popup check", crop_name)
+                continue
+            try:
+                region_frame = get_crop(frame, *self.crops[crop_name])
+                detected, _, text = executor.submit(worker_fn, region_frame).result(timeout=30)
+                if detected:
+                    logger.info("Analyzer: lobby popup '%s' detected (text='%s')", crop_name, text)
+                    return crop_name
+                else:
+                    logger.debug("Analyzer: lobby popup '%s' not found", crop_name)
+            except Exception as e:
+                logger.warning("Analyzer: lobby popup scan for '%s' failed: %s", crop_name, e)
+        return None
 

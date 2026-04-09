@@ -60,6 +60,9 @@ REGION_GOOD_LUCK         = "good_luck"
 REGION_EVENT_REFRESH     = "event_refresh"
 REGION_PLAY_BUTTON       = "play_button"
 REGION_CLICK_TO_CONTINUE = "click_to_continue"
+REGION_REVEAL_ALL        = "REVEAL_ALL"
+REGION_TAP_HERE          = "TAP_HERE_TO_CONTINUE"
+REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 
 class Controller:
     def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None):
@@ -80,6 +83,7 @@ class Controller:
         self._crops: "dict[str, CropCoords]" = crops or {}
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
+        self._lobby_play_not_visible_since = 0.0  # tracks how long play button has been absent in lobby
 
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
@@ -303,9 +307,27 @@ class Controller:
                 return
 
             if not self._analyzer.scan_region_for_play_button(frame):
-                logger.info("Controller: start_auto_mission - PLAY/READY text not present in play_button crop; skipping click")
+                now = time.time()
+                if self._lobby_play_not_visible_since == 0.0:
+                    self._lobby_play_not_visible_since = now
+                    logger.info("Controller: start_auto_mission - PLAY/READY not visible; starting 3s popup-check timer")
+                elif now - self._lobby_play_not_visible_since >= 3.0:
+                    logger.info("Controller: play button absent for %.1fs — scanning for lobby popups",
+                                now - self._lobby_play_not_visible_since)
+                    popup = self._analyzer.scan_region_for_lobby_popups(frame)
+                    if popup:
+                        logger.info("Controller: dismissing lobby popup '%s'", popup)
+                        self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
+                        if popup == REGION_REVEAL_ALL:
+                            time.sleep(3.0)
+                            logger.info("Controller: REVEAL_ALL second click after 3s delay")
+                            self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
+                    else:
+                        logger.info("Controller: no lobby popups detected; waiting for play button")
                 return
 
+            # Play button visible — reset popup absence timer
+            self._lobby_play_not_visible_since = 0.0
             logger.info("Controller: start_auto_mission - clicking play button and entering GAME_STARTING")
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
