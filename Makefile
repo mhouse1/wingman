@@ -16,8 +16,9 @@
 #   make push        -> push current branch
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
+#   make add_new_crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
 
-.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run calibrate calibrate-crop
+.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run calibrate calibrate-crop add_new_crops
 
 # Generate HTML report for automated levels test
 test:
@@ -133,6 +134,10 @@ run:
 #     rest are still good. Replace respawn with any name from the crops: section
 #     (incoming, click_to, good_luck, play_button, event_refresh, event_refresh_dismiss).
 #
+#   make add_new_crops
+#     Scans test_screenshots/to_be_added for images, then calibrates one crop per
+#     image. The crop name is exactly the filename stem (without extension).
+#
 #   Controls in the window:
 #     Click top-left corner, then bottom-right corner — saves the crop
 #     S — skip (keeps the existing value; disabled if the crop has never been set)
@@ -142,3 +147,6 @@ calibrate:
 
 calibrate-crop:
 	uv run python tests/calibrate.py --crop $(CROP)
+
+add_new_crops:
+	uv run python tests/calibrate.py --add-new-crops

@@ -7,6 +7,7 @@ coordinates directly into wingman/config.yaml. No game required.
 Usage:
     python tests/calibrate.py                    # calibrate all crops
     python tests/calibrate.py --crop respawn     # recalibrate one crop only
+    python tests/calibrate.py --add-new-crops    # add/update crops from test_screenshots/to_be_added and move calibrated images to test_screenshots/
 
 Controls (per crop):
     Click top-left corner, then bottom-right corner  — define/update crop
@@ -37,6 +38,7 @@ _ROOT = _HERE.parent
 _CONFIG_PATH = _ROOT / "wingman" / "config.yaml"
 _MAP_PATH = _HERE / "calibration_map.yaml"
 _SCREENSHOTS_DIR = _ROOT / "test_screenshots"
+_TO_BE_ADDED_DIR = _SCREENSHOTS_DIR / "to_be_added"
 
 sys.path.insert(0, str(_ROOT))
 from wingman.crop_region import CropCoords, load_crops
@@ -103,6 +105,48 @@ def _validate(cfg: dict, calibration: list[dict]) -> bool:
         print(f"[WARN] crops in config.yaml with no calibration_map.yaml entry: {sorted(unmapped)}")
 
     return ok
+
+
+def _validate_dimensions(cfg: dict, image_paths: list[Path]) -> bool:
+    region_w = cfg.get("region", {}).get("width", 0)
+    region_h = cfg.get("region", {}).get("height", 0)
+
+    ok = True
+    for img_path in image_paths:
+        if not img_path.exists():
+            print(f"[WARN] screenshot not found: {img_path}")
+            continue
+        img = cv2.imread(str(img_path))
+        if img is None:
+            print(f"[WARN] cannot read: {img_path}")
+            continue
+        h, w = img.shape[:2]
+        if w != region_w or h != region_h:
+            print(
+                f"[ERROR] dimension mismatch: {img_path.name} is {w}x{h} "
+                f"but config.yaml region is {region_w}x{region_h}.\n"
+                f"  Screenshot was taken at a different capture region - percentages would be wrong.\n"
+                f"  Either retake the screenshot with the current region, or update region: in config.yaml."
+            )
+            ok = False
+
+    return ok
+
+
+def _move_to_screenshots_root(image_path: Path) -> Path:
+    """Move image to test_screenshots/, suffixing name if needed to avoid collision."""
+    target = _SCREENSHOTS_DIR / image_path.name
+    if not target.exists():
+        return image_path.replace(target)
+
+    stem = image_path.stem
+    suffix = image_path.suffix
+    i = 1
+    while True:
+        candidate = _SCREENSHOTS_DIR / f"{stem}_{i}{suffix}"
+        if not candidate.exists():
+            return image_path.replace(candidate)
+        i += 1
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +321,8 @@ def main():
     parser = argparse.ArgumentParser(description="Offline crop calibration for Wingman")
     parser.add_argument("--crop", metavar="NAME",
                         help="Calibrate only this crop name (default: all)")
+    parser.add_argument("--add-new-crops", action="store_true",
+                        help="Calibrate one crop per image from test_screenshots/to_be_added using filename as crop name")
     args = parser.parse_args()
 
     if not _CONFIG_PATH.exists():
@@ -287,55 +333,101 @@ def main():
         sys.exit(1)
 
     cfg = _load_yaml(_CONFIG_PATH)
-    cal_doc = _load_yaml(_MAP_PATH)
-    calibration: list[dict] = cal_doc.get("calibration", [])
-
-    if not _validate(cfg, calibration):
-        sys.exit(1)
-
     current_crops = load_crops(cfg.get("crops") or {}) if cfg.get("crops") else {}
 
-    filter_crop = args.crop
+    if args.add_new_crops:
+        if args.crop:
+            print("[ERROR] --crop cannot be used together with --add-new-crops")
+            sys.exit(1)
 
-    for entry in calibration:
-        screenshot = entry.get("screenshot", "")
-        crop_names: list[str] = entry.get("crops", [])
+        allowed_ext = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
+        to_add_images = sorted(
+            p for p in _TO_BE_ADDED_DIR.iterdir()
+            if p.is_file() and p.suffix.lower() in allowed_ext
+        ) if _TO_BE_ADDED_DIR.exists() else []
 
-        if filter_crop:
-            crop_names = [c for c in crop_names if c == filter_crop]
-            if not crop_names:
+        if not to_add_images:
+            print(f"[ERROR] no images found in: {_TO_BE_ADDED_DIR}")
+            sys.exit(1)
+
+        if not _validate_dimensions(cfg, to_add_images):
+            sys.exit(1)
+
+        for img_path in to_add_images:
+            crop_name = img_path.stem
+            frame = cv2.imread(str(img_path))
+            if frame is None:
+                print(f"[SKIP] cannot read: {img_path}")
                 continue
 
-        img_path = _SCREENSHOTS_DIR / screenshot
-        if not img_path.exists():
-            print(f"[SKIP] screenshot not found: {img_path}")
-            continue
-
-        frame = cv2.imread(str(img_path))
-        if frame is None:
-            print(f"[SKIP] cannot read: {img_path}")
-            continue
-
-        print(f"\n--- {screenshot} ---")
-
-        for crop_name in crop_names:
             existing = current_crops.get(crop_name)
+            print(f"\n--- {img_path.name} ---")
             print(f"  Calibrating '{crop_name}' "
                   f"({'existing: ' + str(existing) if existing else 'UNDEFINED'})...")
 
             result = _calibrate_crop(frame, crop_name, existing, current_crops)
 
             if result == "quit":
-                print("[INFO] Quit — progress saved.")
+                print("[INFO] Quit - progress saved.")
                 sys.exit(0)
             elif result == "skip":
-                print(f"  Skipped '{crop_name}' — keeping existing value.")
+                print(f"  Skipped '{crop_name}' - keeping existing value.")
             else:
                 x1, y1, x2, y2 = result
                 _update_crop_in_config(cfg, crop_name, x1, y1, x2, y2)
                 _save_config(_CONFIG_PATH, cfg)
                 current_crops = load_crops(cfg.get("crops") or {})
                 print(f"  Saved '{crop_name}': [[{x1:.4f}, {y1:.4f}], [{x2:.4f}, {y2:.4f}]]")
+                moved_to = _move_to_screenshots_root(img_path)
+                print(f"  Moved screenshot to: {moved_to}")
+    else:
+        cal_doc = _load_yaml(_MAP_PATH)
+        calibration: list[dict] = cal_doc.get("calibration", [])
+
+        if not _validate(cfg, calibration):
+            sys.exit(1)
+
+        filter_crop = args.crop
+
+        for entry in calibration:
+            screenshot = entry.get("screenshot", "")
+            crop_names: list[str] = entry.get("crops", [])
+
+            if filter_crop:
+                crop_names = [c for c in crop_names if c == filter_crop]
+                if not crop_names:
+                    continue
+
+            img_path = _SCREENSHOTS_DIR / screenshot
+            if not img_path.exists():
+                print(f"[SKIP] screenshot not found: {img_path}")
+                continue
+
+            frame = cv2.imread(str(img_path))
+            if frame is None:
+                print(f"[SKIP] cannot read: {img_path}")
+                continue
+
+            print(f"\n--- {screenshot} ---")
+
+            for crop_name in crop_names:
+                existing = current_crops.get(crop_name)
+                print(f"  Calibrating '{crop_name}' "
+                      f"({'existing: ' + str(existing) if existing else 'UNDEFINED'})...")
+
+                result = _calibrate_crop(frame, crop_name, existing, current_crops)
+
+                if result == "quit":
+                    print("[INFO] Quit - progress saved.")
+                    sys.exit(0)
+                elif result == "skip":
+                    print(f"  Skipped '{crop_name}' - keeping existing value.")
+                else:
+                    x1, y1, x2, y2 = result
+                    _update_crop_in_config(cfg, crop_name, x1, y1, x2, y2)
+                    _save_config(_CONFIG_PATH, cfg)
+                    current_crops = load_crops(cfg.get("crops") or {})
+                    print(f"  Saved '{crop_name}': [[{x1:.4f}, {y1:.4f}], [{x2:.4f}, {y2:.4f}]]")
 
     print("\n[DONE] Calibration complete.")
 
