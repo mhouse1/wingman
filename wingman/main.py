@@ -45,7 +45,7 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     )
     sleep_fn(settle_seconds)
     ctrl.click_crop(
-        analyzer.crops["play_button"],
+        analyzer.crops["PLAY"],
         block=True,
         count=1,
         region_name=REGION_PLAY_BUTTON,

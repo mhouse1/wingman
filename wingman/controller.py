@@ -58,7 +58,7 @@ EMOTE10 # Oops!
 # single-line change here rather than a grep-and-replace across the codebase.
 REGION_GOOD_LUCK         = "good_luck"
 REGION_EVENT_REFRESH     = "event_refresh"
-REGION_PLAY_BUTTON       = "play_button"
+REGION_PLAY_BUTTON       = "PLAY"
 REGION_CLICK_TO_CONTINUE = "click_to_continue"
 REGION_REVEAL_ALL        = "REVEAL_ALL"
 REGION_TAP_HERE          = "TAP_HERE_TO_CONTINUE"

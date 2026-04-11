@@ -22,7 +22,7 @@ class _FakeController:
 def test_click_through_game_end_transitions_to_lobby():
     ctrl = _FakeController()
     analyzer = SimpleNamespace(
-        crops={"click_to": object(), "play_button": object()},
+        crops={"click_to": object(), "PLAY": object()},
         _game_end_b=True,
         _game_lobby=False,
     )
@@ -41,7 +41,7 @@ def test_click_through_game_end_transitions_to_lobby():
     assert ctrl.calls[0]["region_name"] == "click_to_continue"
     assert ctrl.calls[1]["count"] == 1
     assert ctrl.calls[1]["block"] is True
-    assert ctrl.calls[1]["region_name"] == "play_button"
+    assert ctrl.calls[1]["region_name"] == "PLAY"
 
     assert analyzer._game_end_b is False
     assert analyzer._game_lobby is True

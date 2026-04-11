@@ -18,12 +18,9 @@ crops:
   good_luck:
   - [0.9035, 0.0244]
   - [0.991, 0.2789]
-  event_refresh: # Actual text is "Ok"
+  event_refresh:
   - [0.4597, 0.3167]
   - [0.7035, 0.5422]
-  play_button: # Actual text is "Play" or "Ready" for multiplayer
-  - [0.7535, 0.84]
-  - [0.9785, 0.97]
   event_refresh_dismiss:
   - [0.7236, 0.8556]
   - [0.9792, 0.97]
@@ -33,12 +30,21 @@ crops:
   TAP_HERE_TO_CONTINUE:
   - [0.4139, 0.8467]
   - [0.5861, 0.8767]
-  UNLOCK_CLOSE: # Actual text is "Close"
+  UNLOCK_CLOSE:
   - [0.1264, 0.6433]
   - [0.2035, 0.6856]
-  FINAL_CONTINUE: # Actual text is "Continue"
+  FINAL_CONTINUE:
   - [0.8257, 0.9156]
   - [0.9243, 0.9444]
+  HEALTH:
+  - [0.3944, 0.95]
+  - [0.4208, 0.9756]
+  PLAY:
+  - [0.7944, 0.8844]
+  - [0.9125, 0.9389]
+  READY:
+  - [0.7993, 0.8656]
+  - [0.9069, 0.9111]
 respawn_detection:
   use_ocr: true
   use_gpu: false

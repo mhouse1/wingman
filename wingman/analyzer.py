@@ -990,14 +990,14 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: OCR executor not available for play button scan")
             return False
         try:
-            region_frame = get_crop(frame, *self.crops["play_button"])
+            region_frame = get_crop(frame, *self.crops["PLAY"])
             detected, _, text = executor.submit(
                 _process_play_button_region, region_frame
             ).result(timeout=30)
             if detected:
-                logger.info("Analyzer: 'PLAY/READY' detected in play_button crop (text='%s')", text)
+                logger.info("Analyzer: 'PLAY/READY' detected in PLAY crop (text='%s')", text)
             else:
-                logger.debug("Analyzer: 'PLAY/READY' not found in play_button crop")
+                logger.debug("Analyzer: 'PLAY/READY' not found in PLAY crop")
             return detected
         except Exception as e:
             logger.warning("Analyzer: Play button scan failed: %s", e)
