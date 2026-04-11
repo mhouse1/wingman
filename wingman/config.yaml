@@ -59,6 +59,7 @@ crops:
     coords:
     - [0.3944, 0.95]
     - [0.4208, 0.9756]
+    # numeric display — OCR extracts integer; no text tokens used
   PLAY:
     coords:
     - [0.7944, 0.8844]

@@ -176,6 +176,37 @@ def _process_text_region(frame, text_tokens: "list[str]"):
     return (False, time.time() - t_start, None)
 
 
+def _process_health_region(health_frame) -> "tuple[int | None, float]":
+    """Extract the numeric health value from the health crop via OCR.
+
+    Upscales and thresholds the crop to maximise digit legibility, then strips
+    all non-digit characters from the OCR output.
+
+    Args:
+        health_frame: numpy array (BGR) — the extracted health crop region.
+
+    Returns:
+        tuple: (health_value: int or None, ocr_time: float)
+               health_value is None when no digits are found.
+    """
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (None, 0.0)
+
+    t_start = time.time()
+    gray = cv2.cvtColor(health_frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    for img in (binary, upscaled):
+        results = reader.readtext(img, detail=0, paragraph=False, workers=0)
+        digits = "".join(c for r in results for c in str(r) if c.isdigit())
+        if digits:
+            return (int(digits), time.time() - t_start)
+
+    return (None, time.time() - t_start)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -290,6 +321,16 @@ class GameStateAnalyzer:
         self._game_lobby = True            # Start in GAME_LOBBY; cleared when a mission begins
         self._game_starting = False        # Set when play is pressed; waiting for "Good Luck"
         self._game_starting_stalled = False  # Set when GAME_STARTING times out without Good Luck
+
+        # Health sub-state (GAME_BATTLE only)
+        self._health: "int | None" = None  # Last known health value from OCR
+        self._game_battle_alive = False    # True when health >= 1 in GAME_BATTLE
+        self._health_lock = threading.Lock()
+        self._health_no_digits_since = 0.0  # timestamp when health OCR started returning no digits
+        # Signalled when _game_battle_alive transitions False → True.
+        # The main loop waits on this event to restart the mission immediately.
+        self.alive_event = threading.Event()
+
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
         # Thread pool executor for parallel OCR processing
@@ -441,9 +482,9 @@ class GameStateAnalyzer:
         """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
         if self._ocr_executor is None and easyocr and not self._ocr_executor_initialized:
             try:
-                self._ocr_executor = ThreadPoolExecutor(max_workers=2)
+                self._ocr_executor = ThreadPoolExecutor(max_workers=3)
                 self._ocr_executor_initialized = True
-                logger.info("Initialized ThreadPoolExecutor with 2 workers for parallel OCR")
+                logger.info("Initialized ThreadPoolExecutor with 3 workers for parallel OCR")
             except Exception as e:
                 logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
                 self._ocr_executor_initialized = True  # Prevent retries
@@ -462,6 +503,12 @@ class GameStateAnalyzer:
         if self._game_end_b:
             return GameState.GAME_END_B
         return GameState.GAME_BATTLE
+
+    @property
+    def game_battle_alive(self) -> bool:
+        """True when the last health reading during GAME_BATTLE was >= 1."""
+        with self._health_lock:
+            return self._game_battle_alive
 
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
@@ -516,6 +563,8 @@ class GameStateAnalyzer:
             'incoming_method': None,
             'is_click_to': False,
             'click_to_method': None,
+            'health': None,
+            'game_battle_alive': False,
             'game_state': self.game_state,
         }
 
@@ -539,7 +588,11 @@ class GameStateAnalyzer:
 
         state['is_click_to'] = click_to_detected
         state['click_to_method'] = click_to_method
-        
+
+        with self._health_lock:
+            state['health'] = self._health
+            state['game_battle_alive'] = self._game_battle_alive
+
         # Save crop overlay if enabled (every frame)
         if self.show_grid_highlighted:
             try:
@@ -640,15 +693,17 @@ class GameStateAnalyzer:
                     logger.warning("OCR executor not initialized")
                     return
 
-                # Extract respawn and incoming crops (click_to has its own thread)
+                # Extract respawn, incoming, and health crops (click_to has its own thread)
                 respawn_frame = get_crop(full_frame, *self.crops["respawn"][:4])
                 incoming_frame = get_crop(full_frame, *self.crops["incoming"][:4])
+                health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4]) if "HEALTH" in self.crops else None
                 t1 = time.time()
 
-                # Submit both tasks to thread pool for parallel processing
-                # Numpy arrays are passed by reference — no serialization needed
+                # Submit all three tasks to thread pool for parallel processing.
+                # Numpy arrays are passed by reference — no serialization needed.
                 respawn_future = executor.submit(_process_respawn_region, respawn_frame)
                 incoming_future = executor.submit(_process_incoming_region, incoming_frame)
+                health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
                 t2 = time.time()
 
                 # Wait for respawn result first — update its cache immediately so the
@@ -685,11 +740,46 @@ class GameStateAnalyzer:
                 if incoming_detected:
                     self.incoming_event.set()
 
+                # Wait for health result and update sub-state.
+                health_ocr_time = 0.0
+                if health_future is not None:
+                    health_value, health_ocr_time = health_future.result(timeout=120)
+                    if health_value is not None:
+                        # Digits found — reset no-digits timer and update state.
+                        self._health_no_digits_since = 0.0
+                        alive = health_value >= 1
+                        with self._health_lock:
+                            prev_alive = self._game_battle_alive
+                            self._health = health_value
+                            self._game_battle_alive = alive
+                        logger.info("Health: %d | alive=%s", health_value, alive)
+                        # Signal False → True transition for immediate mission restart.
+                        if alive and not prev_alive:
+                            logger.info("Analyzer: health alive transition False→True")
+                            self.alive_event.set()
+                    else:
+                        # No digits — only clear alive flag after 3 s of consecutive misses.
+                        now_t = time.time()
+                        if self._health_no_digits_since == 0.0:
+                            self._health_no_digits_since = now_t
+                            logger.debug("Analyzer: Health OCR returned no digits (grace timer started)")
+                        elif now_t - self._health_no_digits_since >= 3.0:
+                            with self._health_lock:
+                                self._game_battle_alive = False
+                            logger.debug(
+                                "Analyzer: Health OCR no digits for %.1fs → game_battle_alive=False",
+                                now_t - self._health_no_digits_since)
+                        else:
+                            logger.debug(
+                                "Analyzer: Health OCR no digits (%.1fs elapsed, 3s threshold)",
+                                now_t - self._health_no_digits_since)
+                t4 = time.time()
+
                 # Log timing
                 logger.debug(
                     "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
-                    "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Total: %.2fs",
-                    t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, t3-t0
+                    "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | Total: %.2fs",
+                    t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, health_ocr_time, t4-t0
                 )
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
@@ -755,6 +845,8 @@ class GameStateAnalyzer:
             'incoming_method': None,
             'is_click_to': False,
             'click_to_method': None,
+            'health': None,
+            'game_battle_alive': False,
             'game_state': GameState.GAME_BATTLE,
         }
     
