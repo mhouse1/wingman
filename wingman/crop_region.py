@@ -19,11 +19,15 @@ class CropCoords(NamedTuple):
 
     All values are fractions of the capture frame (0.0–1.0).
     x is horizontal (left→right), y is vertical (top→bottom).
+
+    text: OCR substrings to match (any hit → detected). None or empty means
+          click-only — no OCR scanning is performed for this crop.
     """
     x1: float
     y1: float
     x2: float
     y2: float
+    text: "list[str] | None" = None
 
 
 def get_crop(frame: np.ndarray, x1: float, y1: float,
@@ -51,8 +55,21 @@ def get_crop(frame: np.ndarray, x1: float, y1: float,
 def load_crops(crops_cfg: dict) -> "dict[str, CropCoords]":
     """Load and validate crop coordinates from a config dict.
 
-    Each entry must be [[x1, y1], [x2, y2]] with all values in [0.0, 1.0],
-    x1 < x2, and y1 < y2.
+    Supports two entry formats:
+
+      List format (legacy):
+        name:
+        - [x1, y1]
+        - [x2, y2]
+
+      Dict format (with optional OCR text):
+        name:
+          coords:
+          - [x1, y1]
+          - [x2, y2]
+          text: [TOKEN1, TOKEN2]   # optional; omit for click-only crops
+
+    All coordinate values must be in [0.0, 1.0] with x1 < x2 and y1 < y2.
 
     Args:
         crops_cfg: Raw dict from config.yaml crops: section.
@@ -64,13 +81,20 @@ def load_crops(crops_cfg: dict) -> "dict[str, CropCoords]":
         ValueError: If any crop definition is invalid.
     """
     result: "dict[str, CropCoords]" = {}
-    for name, coords in crops_cfg.items():
+    for name, entry in crops_cfg.items():
+        if isinstance(entry, dict):
+            raw_coords = entry.get("coords")
+            raw_text = entry.get("text")
+            text = [str(t) for t in raw_text] if raw_text else None
+        else:
+            raw_coords = entry
+            text = None
         try:
-            (x1, y1), (x2, y2) = coords
+            (x1, y1), (x2, y2) = raw_coords
             x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
         except (TypeError, ValueError) as e:
             raise ValueError(
-                f"crops.{name}: expected [[x1,y1],[x2,y2]], got {coords!r}"
+                f"crops.{name}: expected [[x1,y1],[x2,y2]], got {raw_coords!r}"
             ) from e
         errors = []
         for label, val in [("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2)]:
@@ -82,7 +106,7 @@ def load_crops(crops_cfg: dict) -> "dict[str, CropCoords]":
             errors.append(f"y1={y1!r} must be less than y2={y2!r}")
         if errors:
             raise ValueError(f"crops.{name}: " + "; ".join(errors))
-        result[name] = CropCoords(x1, y1, x2, y2)
+        result[name] = CropCoords(x1, y1, x2, y2, text)
     return result
 
 

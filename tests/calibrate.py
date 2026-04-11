@@ -62,8 +62,12 @@ def _update_crop_in_config(cfg: dict, name: str, x1: float, y1: float,
                             x2: float, y2: float) -> None:
     if "crops" not in cfg or cfg["crops"] is None:
         cfg["crops"] = {}
-    cfg["crops"][name] = [[round(x1, 4), round(y1, 4)],
-                           [round(x2, 4), round(y2, 4)]]
+    coords = [[round(x1, 4), round(y1, 4)], [round(x2, 4), round(y2, 4)]]
+    existing = cfg["crops"].get(name)
+    if isinstance(existing, dict):
+        cfg["crops"][name] = {**existing, "coords": coords}
+    else:
+        cfg["crops"][name] = {"coords": coords}
 
 
 # ---------------------------------------------------------------------------

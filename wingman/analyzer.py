@@ -148,12 +148,12 @@ def _process_incoming_region(incoming_frame):
     return (False, ocr_time, None, None, raw_texts)
 
 
-def _process_click_to_region(click_to_frame):
-    """
-    Worker function to process "Click to Continue" region in a thread pool thread.
+def _process_text_region(frame, text_tokens: "list[str]"):
+    """Generic OCR worker: detect any of the given text tokens in a crop region.
 
     Args:
-        click_to_frame: numpy array (BGR) — passed by reference, no copy
+        frame: numpy array (BGR) — the extracted crop region.
+        text_tokens: list of uppercase substrings; returns True on the first hit.
 
     Returns:
         tuple: (detected: bool, ocr_time: float, text_found: str or None)
@@ -163,40 +163,6 @@ def _process_click_to_region(click_to_frame):
         return (False, 0.0, None)
 
     t_start = time.time()
-
-    gray = cv2.cvtColor(click_to_frame, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
-
-    for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
-        text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "CLICKTO" in text or "LICKTO" in text or "CLICK" in text:
-            ocr_time = time.time() - t_start
-            return (True, ocr_time, text)
-
-    ocr_time = time.time() - t_start
-    return (False, ocr_time, None)
-
-
-def _process_event_refresh_region(frame):
-    """Worker function to detect 'Event refresh in progress' popup text in a region.
-
-    Scans for the substring 'AGAIN' (from 'try again so...') which appears in the
-    'Event refresh in progress' popup that blocks game entry.
-
-    Args:
-        frame: numpy array (BGR) — the extracted grid region
-
-    Returns:
-        tuple: (detected: bool, ocr_time: float, text_found: str or None)
-    """
-    reader = _get_thread_ocr_reader()
-    if reader is None:
-        return (False, 0.0, None)
-
-    t_start = time.time()
-
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -204,133 +170,9 @@ def _process_event_refresh_region(frame):
     for img in (upscaled, binary):
         results = reader.readtext(img, detail=0, paragraph=True, workers=0)
         text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "AGAINSO" in text or "AGAIN" in text:
-            ocr_time = time.time() - t_start
-            return (True, ocr_time, text)
-
-    ocr_time = time.time() - t_start
-    return (False, ocr_time, None)
-
-
-def _process_good_luck_region(frame):
-    """
-    Worker function to detect 'Good Luck' text in a region in a thread pool thread.
-
-    Args:
-        frame: numpy array (BGR) — passed by reference, no copy
-
-    Returns:
-        tuple: (detected: bool, ocr_time: float, text_found: str or None)
-    """
-    reader = _get_thread_ocr_reader()
-    if reader is None:
-        return (False, 0.0, None)
-
-    t_start = time.time()
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
-        text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "GOODLUCK" in text or "GOOD" in text or "LUCK" in text:
-            ocr_time = time.time() - t_start
-            return (True, ocr_time, text)
-
-    ocr_time = time.time() - t_start
-    return (False, ocr_time, None)
-
-
-def _process_play_button_region(frame):
-    """Worker function to detect 'PLAY' or 'READY' text in play_button crop."""
-    reader = _get_thread_ocr_reader()
-    if reader is None:
-        return (False, 0.0, None)
-
-    t_start = time.time()
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
-        text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "PLAY" in text or "READY" in text:
-            ocr_time = time.time() - t_start
-            return (True, ocr_time, text)
-
-    ocr_time = time.time() - t_start
-    return (False, ocr_time, None)
-
-
-def _process_reveal_all_region(frame):
-    """Worker function to detect 'REVEAL ALL' button text in REVEAL_ALL crop."""
-    reader = _get_thread_ocr_reader()
-    if reader is None:
-        return (False, 0.0, None)
-    t_start = time.time()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
-        text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "REVEAL" in text:
+        if any(token in text for token in text_tokens):
             return (True, time.time() - t_start, text)
-    return (False, time.time() - t_start, None)
 
-
-def _process_tap_here_region(frame):
-    """Worker function to detect 'TAP HERE TO CONTINUE' text in TAP_HERE_TO_CONTINUE crop."""
-    reader = _get_thread_ocr_reader()
-    if reader is None:
-        return (False, 0.0, None)
-    t_start = time.time()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
-        text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "TAP" in text or "CONTINUE" in text:
-            return (True, time.time() - t_start, text)
-    return (False, time.time() - t_start, None)
-
-
-def _process_unlock_close_region(frame):
-    """Worker function to detect 'Close' button text in UNLOCK_CLOSE crop."""
-    reader = _get_thread_ocr_reader()
-    if reader is None:
-        return (False, 0.0, None)
-    t_start = time.time()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
-        text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "CLOSE" in text:
-            return (True, time.time() - t_start, text)
-    return (False, time.time() - t_start, None)
-
-
-def _process_final_continue_region(frame):
-    """Worker function to detect 'Continue' button text in FINAL_CONTINUE crop."""
-    reader = _get_thread_ocr_reader()
-    if reader is None:
-        return (False, 0.0, None)
-    t_start = time.time()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    for img in (upscaled, binary):
-        results = reader.readtext(img, detail=0, paragraph=True, workers=0)
-        text = " ".join(str(r) for r in results).upper().replace(" ", "")
-        if "CONTINUE" in text:
-            return (True, time.time() - t_start, text)
     return (False, time.time() - t_start, None)
 
 
@@ -799,8 +641,8 @@ class GameStateAnalyzer:
                     return
 
                 # Extract respawn and incoming crops (click_to has its own thread)
-                respawn_frame = get_crop(full_frame, *self.crops["respawn"])
-                incoming_frame = get_crop(full_frame, *self.crops["incoming"])
+                respawn_frame = get_crop(full_frame, *self.crops["respawn"][:4])
+                incoming_frame = get_crop(full_frame, *self.crops["incoming"][:4])
                 t1 = time.time()
 
                 # Submit both tasks to thread pool for parallel processing
@@ -886,9 +728,9 @@ class GameStateAnalyzer:
             if executor is None:
                 continue
             try:
-                click_to_frame = get_crop(frame, *self.crops["click_to"])
+                click_to_frame = get_crop(frame, *self.crops["click_to"][:4])
                 click_to_detected, _, click_to_text = executor.submit(
-                    _process_click_to_region, click_to_frame
+                    _process_text_region, click_to_frame, self.crops["click_to"].text or []
                 ).result(timeout=120)
                 result = (True, 1.0, "ocr") if click_to_detected else (False, 0.0, None)
                 with self._click_to_cache_lock:
@@ -940,9 +782,9 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: OCR executor not available for Good Luck scan")
             return False
         try:
-            region_frame = get_crop(frame, *self.crops["good_luck"])
+            region_frame = get_crop(frame, *self.crops["good_luck"][:4])
             detected, _, text = executor.submit(
-                _process_good_luck_region, region_frame
+                _process_text_region, region_frame, self.crops["good_luck"].text or []
             ).result(timeout=30)
             if detected:
                 logger.info("Analyzer: 'Good Luck' detected in good_luck crop (text='%s')", text)
@@ -970,9 +812,9 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: OCR executor not available for event refresh scan")
             return False
         try:
-            region_frame = get_crop(frame, *self.crops["event_refresh"])
+            region_frame = get_crop(frame, *self.crops["event_refresh"][:4])
             detected, _, text = executor.submit(
-                _process_event_refresh_region, region_frame
+                _process_text_region, region_frame, self.crops["event_refresh"].text or []
             ).result(timeout=30)
             if detected:
                 logger.info("Analyzer: 'Event refresh' popup detected in event_refresh crop (text='%s')", text)
@@ -991,7 +833,7 @@ class GameStateAnalyzer:
             return None
         try:
             futures = {
-                crop: executor.submit(_process_play_button_region, get_crop(frame, *self.crops[crop]))
+                crop: executor.submit(_process_text_region, get_crop(frame, *self.crops[crop][:4]), self.crops[crop].text or [])
                 for crop in ("PLAY", "READY")
             }
             for crop, fut in futures.items():
@@ -1021,19 +863,15 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: OCR executor not available for lobby popup scan")
             return None
 
-        checks = [
-            ("REVEAL_ALL",           _process_reveal_all_region),
-            ("TAP_HERE_TO_CONTINUE", _process_tap_here_region),
-            ("UNLOCK_CLOSE",         _process_unlock_close_region),
-            ("FINAL_CONTINUE",       _process_final_continue_region),
-        ]
-        for crop_name, worker_fn in checks:
+        popup_crops = ["REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE"]
+        for crop_name in popup_crops:
             if crop_name not in self.crops:
                 logger.debug("Analyzer: crop '%s' not in config — skipping popup check", crop_name)
                 continue
             try:
-                region_frame = get_crop(frame, *self.crops[crop_name])
-                detected, _, text = executor.submit(worker_fn, region_frame).result(timeout=30)
+                crop = self.crops[crop_name]
+                region_frame = get_crop(frame, *crop[:4])
+                detected, _, text = executor.submit(_process_text_region, region_frame, crop.text or []).result(timeout=30)
                 if detected:
                     logger.info("Analyzer: lobby popup '%s' detected (text='%s')", crop_name, text)
                     return crop_name
