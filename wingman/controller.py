@@ -261,15 +261,27 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register padlock camera cooldown hotkey")
 
-            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the play_button
+            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click PLAY/READY directly
             try:
                 def auto_mission_key_pressed(_e):
+                    if self._analyzer is None or not self._analyzer._game_lobby:
+                        return
                     if self._on_auto_mission_key is not None:
                         self._on_auto_mission_key()
-                    self.cancel_mission()
-                    self.start_auto_mission(force=True)
+                    crop = next(
+                        (c for c in ("PLAY", "READY") if c in self._crops),
+                        None,
+                    )
+                    if crop is None:
+                        logger.warning("Controller: '%s' pressed but no PLAY/READY crop configured", AUTO_MISSION_KEY)
+                        return
+                    logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s", AUTO_MISSION_KEY, crop)
+                    self._analyzer._game_lobby = False
+                    self._analyzer._game_starting = True
+                    self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
+                    self._start_game_starting_loop()
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to click play button in GAME_LOBBY", AUTO_MISSION_KEY)
+                logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
 
@@ -292,8 +304,6 @@ class Controller:
         def _run():
             if self._analyzer is None:
                 return
-            logger.info("Controller: start_auto_mission - cancelling any active mission before entering GAME_STARTING")
-            self.cancel_mission()
 
             if self._capture is None:
                 logger.warning("Controller: start_auto_mission - no capture source; skipping play button click")
@@ -307,7 +317,8 @@ class Controller:
                 logger.exception("Controller: start_auto_mission - failed to capture frame for play button OCR")
                 return
 
-            if not self._analyzer.scan_region_for_play_button(frame):
+            detected_crop = self._analyzer.scan_region_for_play_button(frame)
+            if detected_crop is None:
                 now = time.time()
                 if self._lobby_play_not_visible_since == 0.0:
                     self._lobby_play_not_visible_since = now
@@ -327,13 +338,17 @@ class Controller:
                         logger.info("Controller: no lobby popups detected; waiting for play button")
                 return
 
-            # Play button visible — reset popup absence timer
+            # Play/Ready button visible — reset popup absence timer
             self._lobby_play_not_visible_since = 0.0
-            logger.info("Controller: start_auto_mission - clicking play button and entering GAME_STARTING")
+            # Re-check state after OCR: another thread may have already clicked play
+            if self._analyzer._game_starting:
+                logger.debug("Controller: start_auto_mission - state already GAME_STARTING after OCR; skipping click")
+                return
+            logger.info("Controller: start_auto_mission - clicking %s and entering GAME_STARTING", detected_crop)
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
             self._analyzer._game_starting = True
-            self.click_crop(self._crops["play_button"], block=False, count=1, region_name=REGION_PLAY_BUTTON)
+            self.click_crop(self._crops[detected_crop], block=False, count=1, region_name=detected_crop)
             self._start_game_starting_loop()
 
         threading.Thread(target=_run, daemon=True).start()

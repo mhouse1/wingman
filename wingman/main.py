@@ -40,7 +40,7 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     ctrl.click_crop(
         analyzer.crops["click_to"],
         block=True,
-        count=5,
+        count=7,
         region_name=REGION_CLICK_TO_CONTINUE,
     )
     sleep_fn(settle_seconds)

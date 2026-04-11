@@ -36,7 +36,7 @@ def test_click_through_game_end_transitions_to_lobby():
     )
 
     assert len(ctrl.calls) == 2
-    assert ctrl.calls[0]["count"] == 5
+    assert ctrl.calls[0]["count"] == 7
     assert ctrl.calls[0]["block"] is True
     assert ctrl.calls[0]["region_name"] == "click_to_continue"
     assert ctrl.calls[1]["count"] == 1

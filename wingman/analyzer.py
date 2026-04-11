@@ -983,25 +983,27 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: Event refresh scan failed: %s", e)
             return False
 
-    def scan_region_for_play_button(self, frame) -> bool:
-        """Synchronously scan play_button crop for 'PLAY' or 'READY' text."""
+    def scan_region_for_play_button(self, frame) -> "str | None":
+        """Scan PLAY and READY crops in parallel; return the crop name that fired, or None."""
         executor = self.ocr_executor
         if executor is None:
             logger.warning("Analyzer: OCR executor not available for play button scan")
-            return False
+            return None
         try:
-            region_frame = get_crop(frame, *self.crops["PLAY"])
-            detected, _, text = executor.submit(
-                _process_play_button_region, region_frame
-            ).result(timeout=30)
-            if detected:
-                logger.info("Analyzer: 'PLAY/READY' detected in PLAY crop (text='%s')", text)
-            else:
-                logger.debug("Analyzer: 'PLAY/READY' not found in PLAY crop")
-            return detected
+            futures = {
+                crop: executor.submit(_process_play_button_region, get_crop(frame, *self.crops[crop]))
+                for crop in ("PLAY", "READY")
+            }
+            for crop, fut in futures.items():
+                detected, _, text = fut.result(timeout=30)
+                if detected:
+                    logger.info("Analyzer: '%s' detected in %s crop (text='%s')", crop, crop, text)
+                    return crop
+                logger.debug("Analyzer: '%s' not found in %s crop", crop, crop)
+            return None
         except Exception as e:
             logger.warning("Analyzer: Play button scan failed: %s", e)
-            return False
+            return None
 
     def scan_region_for_lobby_popups(self, frame):
         """Scan for lobby popup buttons that may be blocking the play button.
