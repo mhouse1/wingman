@@ -16,7 +16,8 @@ class GameState(Enum):
     GAME_BATTLE          = auto()  # Active gameplay (default); respawn/incoming scanning active
     GAME_END_B           = auto()  # "Click to Continue" detected; clicking in progress
     GAME_LOBBY           = auto()  # Final continue (region 64) clicked; waiting in lobby
-    GAME_STARTING        = auto()  # Play pressed; waiting for "Good Luck" before launching mission
+    GAME_WAITING         = auto()  # PLAY clicked; waiting for CANCEL crop to confirm matchmaking
+    GAME_STARTING        = auto()  # Matchmaking confirmed; waiting for "Good Luck" before launching mission
     GAME_STARTING_STALLED = auto() # GAME_STARTING timed out without "Good Luck" detection
 
 try:
@@ -319,7 +320,8 @@ class GameStateAnalyzer:
 
         self._game_end_b = False           # Set when "Click to Continue" is detected
         self._game_lobby = True            # Start in GAME_LOBBY; cleared when a mission begins
-        self._game_starting = False        # Set when play is pressed; waiting for "Good Luck"
+        self._game_waiting = False         # Set when PLAY clicked; cleared when CANCEL confirmed
+        self._game_starting = False        # Set when matchmaking confirmed; waiting for "Good Luck"
         self._game_starting_stalled = False  # Set when GAME_STARTING times out without Good Luck
 
         # Health sub-state (GAME_BATTLE only)
@@ -498,6 +500,8 @@ class GameStateAnalyzer:
             return GameState.GAME_STARTING
         if self._game_starting_stalled:
             return GameState.GAME_STARTING_STALLED
+        if self._game_waiting:
+            return GameState.GAME_WAITING
         if self._game_lobby:
             return GameState.GAME_LOBBY
         if self._game_end_b:
@@ -633,7 +637,8 @@ class GameStateAnalyzer:
         """
         # Skip OCR entirely outside active battle — no respawn/incoming events are
         # relevant in these states, and transitions are driven externally.
-        if self.game_state in (GameState.GAME_END_B, GameState.GAME_LOBBY, GameState.GAME_STARTING):
+        if self.game_state in (GameState.GAME_END_B, GameState.GAME_LOBBY,
+                               GameState.GAME_WAITING, GameState.GAME_STARTING):
             return (False, 0.0, None)
 
         # Check if we can use cached result (throttle OCR)
@@ -805,7 +810,7 @@ class GameStateAnalyzer:
         interval = 5.0
         while not self._click_to_stop.wait(timeout=interval):
             state = self.game_state
-            if state == GameState.GAME_STARTING:
+            if state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
                 continue
             if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
                 logger.debug("Click-to OCR skipped: %s state active", state.name)
@@ -972,4 +977,31 @@ class GameStateAnalyzer:
             except Exception as e:
                 logger.warning("Analyzer: lobby popup scan for '%s' failed: %s", crop_name, e)
         return None
+
+    def scan_region_for_cancel(self, frame) -> bool:
+        """Synchronously scan the CANCEL crop to confirm matchmaking is active.
+
+        Returns True if the CANCEL button is visible (player is in the matchmaking
+        queue), False if not found or the crop is not configured.
+        """
+        if "CANCEL" not in self.crops:
+            logger.debug("Analyzer: CANCEL crop not configured — skipping scan")
+            return False
+        executor = self.ocr_executor
+        if executor is None:
+            logger.warning("Analyzer: OCR executor not available for CANCEL scan")
+            return False
+        try:
+            region_frame = get_crop(frame, *self.crops["CANCEL"][:4])
+            detected, _, text = executor.submit(
+                _process_text_region, region_frame, self.crops["CANCEL"].text or []
+            ).result(timeout=30)
+            if detected:
+                logger.info("Analyzer: CANCEL button detected (text='%s') → matchmaking active", text)
+            else:
+                logger.debug("Analyzer: CANCEL button not found in CANCEL crop")
+            return detected
+        except Exception as e:
+            logger.warning("Analyzer: CANCEL scan failed: %s", e)
+            return False
 
