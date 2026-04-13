@@ -69,6 +69,11 @@ crops:
     - [0.7993, 0.8656]
     - [0.9069, 0.9111]
     text: [READY]
+  CANCEL:
+    coords:
+    - [0.7896, 0.8678]
+    - [0.9167, 0.9089]
+    text: [CANCEL]
 respawn_detection:
   use_ocr: true
   use_gpu: false

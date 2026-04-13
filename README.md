@@ -2,7 +2,7 @@
 
 Game automation assistant for MetalStorm (PC). Runs fully unattended across multiple matches — launches missions, detects threats, deploys flares, handles respawns, and restarts the next match automatically.
 
-**Current version:** v1.6.0 | **Phase:** 1-2 (Automation + Text-Based Perception)
+**Current version:** v1.6.1 | **Phase:** 1-2 (Automation + Text-Based Perception)
 
 ---
 
@@ -29,6 +29,7 @@ Press M
 | Incoming missile detection + auto-flare | ✅ Working |
 | "Click to Continue" auto-click | ✅ Working |
 | Event refresh popup auto-dismiss | ✅ Working |
+| Lobby popup handling (Reveal All, Tap Here, Unlock Close, Final Continue) | ✅ Working |
 | Game state machine (LOBBY / STARTING / BATTLE / END) | ✅ Working |
 | Game-starting stall detection + recovery | ✅ Working |
 | Padlock camera loop + weapon fire loop | ✅ Working |
@@ -40,17 +41,28 @@ Press M
 
 Wingman captures a region of the screen on each loop tick and runs EasyOCR on named crop regions to detect game state. Three OCR threads run in parallel on a background thread pool — the main mission loop is never blocked.
 
-### Screen region system (v1.6.0)
+### Screen region system (v1.6.0+)
 
 Crops are defined by name in `config.yaml` as percentage coordinates of the capture frame:
 
 ```yaml
-# [[x1_pct, y1_pct], [x2_pct, y2_pct]] — fractions of frame width/height (0.0–1.0)
+# All coords are fractions of frame width/height (0.0–1.0)
 crops:
-  respawn:   [[0.44, 0.55], [0.62, 0.70]]   # "RESPAWN" → cancel + restart
-  incoming:  [[0.00, 0.06], [0.22, 0.19]]   # "INCOMING" → deploy flares
-  click_to:  [[0.28, 0.72], [0.72, 0.84]]   # "Click to Continue" → click play
-  good_luck: [[0.24, 0.38], [0.76, 0.54]]   # "Good Luck" → launch mission
+  respawn:              # "RESPAWN" → cancel + restart
+    coords: [[0.4188, 0.6978], [0.5292, 0.7233]]
+    text: [RESPAWN]
+  incoming:             # "INCOMING" → deploy flares
+    coords: [[0.4618, 0.2556], [0.5361, 0.2844]]
+    text: [MING, ARNING]
+  click_to:             # "Click to Continue" → GAME_END_B
+    coords: [[0.4097, 0.8956], [0.5687, 0.9289]]
+    text: [CLICKTO, LICKTO, CLICK]
+  REVEAL_ALL:           # lobby popup → double-click, then wait
+    coords: [[0.8132, 0.8633], [0.9375, 0.9011]]
+    text: [REVEAL]
+  FINAL_CONTINUE:       # post-match continue button
+    coords: [[0.8257, 0.9156], [0.9243, 0.9444]]
+    text: [CONTINUE]
   ...
 ```
 
@@ -101,6 +113,10 @@ python tests/calibrate.py --crop respawn
 
 # Full calibration loop
 python tests/calibrate.py
+
+# Add and calibrate new crops from test_screenshots/to_be_added/
+# (filename stem becomes the crop name; calibrated images are moved to test_screenshots/)
+python tests/calibrate.py --add-new-crops
 ```
 
 See [Job Aid 006 — Calibrate Crop Regions](docs/job-aids/006-calibrate-crop-regions.md) for the full calibration workflow.
@@ -111,8 +127,9 @@ See [Job Aid 006 — Calibrate Crop Regions](docs/job-aids/006-calibrate-crop-re
 
 | Phase | Goal | Status |
 |-------|------|--------|
-| 1-2 | Automation + text perception (current) | ✅ Done |
-| 2 (remainder) | Named crop regions + offline calibration tooling | 🔄 In progress |
+| 1-2 | Automation + text perception | ✅ Done |
+| 2 | Named crop regions + offline calibration tooling | ✅ Done |
+| 2 | Lobby popup handling (Reveal All, Tap Here, Unlock Close) | ✅ Done |
 | 2 (next) | Health, ammo, enemy distance detection | Planned |
 | 3 | Behaviour trees — adaptive tactics based on game state | Planned |
 | 4 | Reinforcement learning — bot learns from experience | Future |

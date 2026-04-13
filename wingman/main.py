@@ -15,7 +15,7 @@ WINGMAN_VERSION = "1.6.1"
 WINGMAN_VERSION_DETAILS = "Optimize state machine and detection using new architecture from 1.6.0, plus various bug fixes and improvements."
 
 from .capture import Capture
-from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
+from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState
 
 
@@ -122,7 +122,23 @@ def main():
     last_game_state = None
     lobby_play_scan_interval = 5.0
     last_lobby_play_scan_attempt = 0.0
-    game_end_b_since = 0.0  # timestamp of GAME_END_B entry; used by stall timeout guard
+    game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
+    game_lobby_since = 0.0    # timestamp of GAME_LOBBY entry; used by 10s force-click guard
+    game_waiting_since = 0.0      # timestamp of GAME_WAITING entry; used by CANCEL scan + 180s timeout
+    last_cancel_scan_ts = 0.0     # last time CANCEL crop was scanned in GAME_WAITING
+    last_play_reclick_ts = 0.0    # last time PLAY was re-clicked in GAME_WAITING
+    play_reclick_interval = 15.0  # minimum seconds between PLAY re-clicks
+
+    def _handle_alive_transition():
+        """Restart mission immediately when health transitions dead → alive."""
+        nonlocal last_restart_attempt, respawn_state
+        analyzer.alive_event.clear()
+        if (analyzer.game_state == GameState.GAME_BATTLE
+                and not ctrl.is_mission_running()):
+            logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
+            ctrl.restart_last_mission()
+            last_restart_attempt = time.time()
+            respawn_state = RespawnState.IDLE
 
     def _deploy_flares_on_new_incoming() -> bool:
         """Deploy flares in a burst when a new incoming OCR detection arrives."""
@@ -176,11 +192,21 @@ def main():
                 else:
                     game_end_b_since = 0.0
                 if current_game_state == GameState.GAME_LOBBY:
+                    game_lobby_since = time.time()
+                    game_waiting_since = 0.0
                     ctrl.cancel_mission()
                     if unattended_active.is_set():
                         logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
                         last_lobby_play_scan_attempt = time.time()
                         ctrl.start_auto_mission()
+                else:
+                    game_lobby_since = 0.0
+                if current_game_state == GameState.GAME_WAITING:
+                    game_waiting_since = time.time()
+                    last_cancel_scan_ts = time.time()   # first scan after 3s, not immediately
+                    last_play_reclick_ts = time.time()  # don't re-click immediately either
+                else:
+                    game_waiting_since = 0.0
 
             # In unattended mode, keep retrying lobby PLAY detection/click every 5s
             # until GAME_LOBBY transitions out.
@@ -190,6 +216,59 @@ def main():
                 logger.info("Unattended mode: GAME_LOBBY retry - scanning play_button for PLAY")
                 last_lobby_play_scan_attempt = time.time()
                 ctrl.start_auto_mission()
+
+            # GAME_LOBBY stall guard: if PLAY button OCR keeps failing for 10+ seconds,
+            # bypass OCR and click the PLAY crop directly from the main loop.
+            if (unattended_active.is_set()
+                    and current_game_state == GameState.GAME_LOBBY
+                    and game_lobby_since > 0
+                    and time.time() - game_lobby_since > 10.0
+                    and not ctrl.is_mission_running()):
+                crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
+                if crop:
+                    logger.info(
+                        "\033[93m📋 GAME_LOBBY stall (%.1fs) — force-clicking %s\033[0m",
+                        time.time() - game_lobby_since, crop)
+                    game_lobby_since = time.time()  # reset so we retry every 10s if state persists
+                    analyzer._game_lobby = False
+                    analyzer._game_waiting = True
+                    ctrl.click_crop(analyzer.crops[crop], block=False, count=1, region_name=crop)
+
+            # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
+            # CANCEL visible → matchmaking active → advance to GAME_STARTING.
+            # CANCEL absent  → PLAY click missed → re-click PLAY.
+            # 180s timeout   → give up, return to GAME_LOBBY.
+            if current_game_state == GameState.GAME_WAITING and game_waiting_since > 0:
+                elapsed_waiting = time.time() - game_waiting_since
+                if elapsed_waiting > 180.0:
+                    logger.warning(
+                        "GAME_WAITING timeout after %.0fs — CANCEL never detected; returning to GAME_LOBBY",
+                        elapsed_waiting)
+                    analyzer._game_waiting = False
+                    analyzer._game_lobby = True
+                    game_waiting_since = 0.0
+                elif time.time() - last_cancel_scan_ts >= 3.0:
+                    last_cancel_scan_ts = time.time()
+                    cancel_detected = analyzer.scan_region_for_cancel(frame)
+                    if cancel_detected:
+                        logger.info(
+                            "\033[92m✓ CANCEL detected (%.1fs) — matchmaking confirmed → GAME_STARTING\033[0m",
+                            elapsed_waiting)
+                        analyzer._game_waiting = False
+                        analyzer._game_starting = True
+                        ctrl._start_game_starting_loop()
+                    else:
+                        crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
+                        if crop and time.time() - last_play_reclick_ts >= play_reclick_interval:
+                            logger.info(
+                                "GAME_WAITING: CANCEL not found (%.1fs) — re-clicking %s",
+                                elapsed_waiting, crop)
+                            last_play_reclick_ts = time.time()
+                            ctrl.click_crop(analyzer.crops[crop], block=False, count=1, region_name=crop)
+                        elif crop:
+                            logger.debug(
+                                "GAME_WAITING: CANCEL not found (%.1fs) — waiting %.1fs before re-click",
+                                elapsed_waiting, play_reclick_interval - (time.time() - last_play_reclick_ts))
 
             # GAME_END_B stall guard: if click-to OCR cache gets stuck, force recovery
             if (current_game_state == GameState.GAME_END_B
@@ -203,6 +282,10 @@ def main():
             # Higher priority than respawn — must run before the respawn continue.
             _deploy_flares_on_new_incoming()
 
+            # Restart mission immediately when health transitions dead → alive.
+            if analyzer.alive_event.is_set():
+                _handle_alive_transition()
+
             # Detect respawn
             if game_state.get('is_respawning'):
                 if respawn_state in (RespawnState.IDLE, RespawnState.PENDING_RESTART):
@@ -212,6 +295,7 @@ def main():
                     else:
                         logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
                         respawn_cooldown_until = time.time() + 10.0
+                        ctrl._auto_respawn_restart = True  # always restart after respawn regardless of prior cancel
                         ctrl.cancel_mission()
                         # Wait for mission lock to release before restart
                         logger.info("Waiting for mission lock to release before restart...")
@@ -229,11 +313,8 @@ def main():
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
                 # Attempt restart while respawn screen is showing (fallback if OCR never clears).
-                # Skips if mission still running, delay not yet elapsed, or auto-restart disabled by manual End press.
-                if not ctrl._auto_respawn_restart:
-                    logger.debug("Auto-respawn restart disabled ('%s' was pressed) — press '%s' to re-enable",
-                                 CANCEL_MISSION_KEY, MISSION_J20_KEY)
-                elif (not ctrl.is_mission_running()
+                # Skips if mission still running or delay not yet elapsed.
+                if (not ctrl.is_mission_running()
                         and time.time() >= restart_not_before
                         and time.time() - last_restart_attempt > restart_retry_interval):
                     logger.info("Attempting to restart mission after respawn...")
@@ -252,8 +333,7 @@ def main():
                 respawn_state = RespawnState.PENDING_RESTART
 
             # Retry mission restart if pending and delay has passed (persists across gameplay resume)
-            if (ctrl._auto_respawn_restart
-                    and respawn_state == RespawnState.PENDING_RESTART
+            if (respawn_state == RespawnState.PENDING_RESTART
                     and current_game_state == GameState.GAME_BATTLE
                     and time.time() >= restart_not_before
                     and time.time() - last_restart_attempt > restart_retry_interval):
@@ -299,6 +379,8 @@ def main():
                     analyzer.incoming_event.wait(timeout=remaining)
                     analyzer.incoming_event.clear()
                     _deploy_flares_on_new_incoming()
+                    if analyzer.alive_event.is_set():
+                        _handle_alive_transition()
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:

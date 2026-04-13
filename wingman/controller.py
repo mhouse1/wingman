@@ -123,6 +123,7 @@ class Controller:
                     logger.info("Controller: Backspace key pressed - exiting script")
                     if self._exit_event:
                         self._exit_event.set()
+                    os._exit(0)
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey 'backspace' to exit script")
             except Exception:
@@ -164,8 +165,20 @@ class Controller:
             try:
                 def start_j20_mission(e):
                     self._auto_respawn_restart = True
-                    if self._analyzer is not None and self._analyzer._game_starting:
-                        logger.info("Controller: '%s' key pressed during GAME_STARTING - entering GAME_BATTLE", MISSION_J20_KEY)
+                    if self._analyzer is not None:
+                        current_state = self._analyzer.game_state
+                        if str(current_state) != 'GameState.GAME_BATTLE':
+                            logger.info(
+                                "Controller: '%s' key pressed — forcing GAME_BATTLE (was %s)",
+                                MISSION_J20_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
+                            )
+                            self._analyzer._game_starting = False
+                            self._analyzer._game_starting_stalled = False
+                            self._analyzer._game_waiting = False
+                            self._analyzer._game_lobby = False
+                            self._analyzer._game_end_b = False
+                        else:
+                            logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
                     else:
                         logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
                     self._set_last_mission("j20")
@@ -261,11 +274,22 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register padlock camera cooldown hotkey")
 
-            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click PLAY/READY directly
+            # Auto-mission hotkey: force GAME_LOBBY state, then click PLAY/READY
             try:
                 def auto_mission_key_pressed(_e):
-                    if self._analyzer is None or not self._analyzer._game_lobby:
+                    if self._analyzer is None:
                         return
+                    if not self._analyzer._game_lobby:
+                        current_state = self._analyzer.game_state
+                        logger.info(
+                            "Controller: '%s' key pressed — forcing GAME_LOBBY (was %s)",
+                            AUTO_MISSION_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
+                        )
+                        self._analyzer._game_starting = False
+                        self._analyzer._game_starting_stalled = False
+                        self._analyzer._game_waiting = False
+                        self._analyzer._game_end_b = False
+                        self._analyzer._game_lobby = True
                     if self._on_auto_mission_key is not None:
                         self._on_auto_mission_key()
                     crop = next(
@@ -277,9 +301,8 @@ class Controller:
                         return
                     logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s", AUTO_MISSION_KEY, crop)
                     self._analyzer._game_lobby = False
-                    self._analyzer._game_starting = True
+                    self._analyzer._game_waiting = True
                     self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
-                    self._start_game_starting_loop()
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
@@ -297,8 +320,8 @@ class Controller:
         """
         if self._analyzer is None:
             return
-        if not force and self._analyzer._game_starting:
-            logger.debug("Controller: start_auto_mission called but already in GAME_STARTING - ignoring")
+        if not force and (self._analyzer._game_starting or self._analyzer._game_waiting):
+            logger.debug("Controller: start_auto_mission called but already in GAME_STARTING/GAME_WAITING - ignoring")
             return
 
         def _run():
@@ -334,6 +357,22 @@ class Controller:
                             time.sleep(3.0)
                             logger.info("Controller: REVEAL_ALL second click after 3s delay")
                             self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
+                    elif now - self._lobby_play_not_visible_since >= 5.0:
+                        # No popup blocking and play button absent for 5+ seconds — OCR may
+                        # be failing to detect it.  Force-click the play button crop directly.
+                        crop = next((c for c in ("PLAY", "READY") if c in self._crops), None)
+                        if crop:
+                            logger.info(
+                                "Controller: no popup found and play button absent %.1fs — force-clicking %s",
+                                now - self._lobby_play_not_visible_since, crop)
+                            self._lobby_play_not_visible_since = 0.0
+                            self._analyzer._game_lobby = False
+                            self._analyzer._game_end_b = False
+                            self._analyzer._game_waiting = True
+                            self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
+                            return
+                        else:
+                            logger.warning("Controller: no PLAY/READY crop configured — cannot force-click")
                     else:
                         logger.info("Controller: no lobby popups detected; waiting for play button")
                 return
@@ -341,15 +380,14 @@ class Controller:
             # Play/Ready button visible — reset popup absence timer
             self._lobby_play_not_visible_since = 0.0
             # Re-check state after OCR: another thread may have already clicked play
-            if self._analyzer._game_starting:
-                logger.debug("Controller: start_auto_mission - state already GAME_STARTING after OCR; skipping click")
+            if self._analyzer._game_starting or self._analyzer._game_waiting:
+                logger.debug("Controller: start_auto_mission - state already GAME_STARTING/GAME_WAITING after OCR; skipping click")
                 return
-            logger.info("Controller: start_auto_mission - clicking %s and entering GAME_STARTING", detected_crop)
+            logger.info("Controller: start_auto_mission - clicking %s and entering GAME_WAITING", detected_crop)
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
-            self._analyzer._game_starting = True
+            self._analyzer._game_waiting = True
             self.click_crop(self._crops[detected_crop], block=False, count=1, region_name=detected_crop)
-            self._start_game_starting_loop()
 
         threading.Thread(target=_run, daemon=True).start()
 
