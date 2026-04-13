@@ -17,7 +17,8 @@
       "Bash(mv performance-wingman-1.4.0-dual-region-ocr.md 004-performance-wingman-1.4.0-dual-region-ocr.md)",
       "Bash(mv performance-wingman-1.5.2-subgrid-ocr.md 005-performance-wingman-1.5.2-subgrid-ocr.md)",
       "Bash(ls c:/dev-tools/github/wingman/tests/*.py)",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(ls -la /c/dev-tools/github/wingman/tests/*.py)"
     ]
   }
 }

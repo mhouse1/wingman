@@ -11,11 +11,11 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.0"
-WINGMAN_VERSION_DETAILS = "New dynamic screen region selection architecture"
+WINGMAN_VERSION = "1.6.1"
+WINGMAN_VERSION_DETAILS = "Optimize state machine and detection using new architecture from 1.6.0, plus various bug fixes and improvements."
 
 from .capture import Capture
-from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE
+from .controller import Controller, CANCEL_MISSION_KEY, MISSION_J20_KEY, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState
 
 
@@ -40,15 +40,15 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     ctrl.click_crop(
         analyzer.crops["click_to"],
         block=True,
-        count=5,
+        count=7,
         region_name=REGION_CLICK_TO_CONTINUE,
     )
     sleep_fn(settle_seconds)
     ctrl.click_crop(
-        analyzer.crops["ready_button"],
+        analyzer.crops["PLAY"],
         block=True,
         count=1,
-        region_name="ready_button",
+        region_name=REGION_PLAY_BUTTON,
     )
     analyzer._game_end_b = False
     analyzer._game_lobby = True
@@ -120,6 +120,8 @@ def main():
     last_incoming_alert_ts = 0.0
     last_click_to_alert_ts = 0.0
     last_game_state = None
+    lobby_play_scan_interval = 5.0
+    last_lobby_play_scan_attempt = 0.0
     game_end_b_since = 0.0  # timestamp of GAME_END_B entry; used by stall timeout guard
 
     def _deploy_flares_on_new_incoming() -> bool:
@@ -177,7 +179,17 @@ def main():
                     ctrl.cancel_mission()
                     if unattended_active.is_set():
                         logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
+                        last_lobby_play_scan_attempt = time.time()
                         ctrl.start_auto_mission()
+
+            # In unattended mode, keep retrying lobby PLAY detection/click every 5s
+            # until GAME_LOBBY transitions out.
+            if (unattended_active.is_set()
+                    and current_game_state == GameState.GAME_LOBBY
+                    and time.time() - last_lobby_play_scan_attempt >= lobby_play_scan_interval):
+                logger.info("Unattended mode: GAME_LOBBY retry - scanning play_button for PLAY")
+                last_lobby_play_scan_attempt = time.time()
+                ctrl.start_auto_mission()
 
             # GAME_END_B stall guard: if click-to OCR cache gets stuck, force recovery
             if (current_game_state == GameState.GAME_END_B

@@ -6,3 +6,4 @@ __pycache__/
 *.py[cod]
 *$py.class
 untrack_todo.md
+to_be_added/

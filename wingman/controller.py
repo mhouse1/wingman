@@ -58,8 +58,12 @@ EMOTE10 # Oops!
 # single-line change here rather than a grep-and-replace across the codebase.
 REGION_GOOD_LUCK         = "good_luck"
 REGION_EVENT_REFRESH     = "event_refresh"
-REGION_READY_BUTTON      = "ready_button"
+REGION_PLAY_BUTTON       = "PLAY"
 REGION_CLICK_TO_CONTINUE = "click_to_continue"
+REGION_REVEAL_ALL        = "REVEAL_ALL"
+REGION_TAP_HERE          = "TAP_HERE_TO_CONTINUE"
+REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
+REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
     def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None):
@@ -80,6 +84,7 @@ class Controller:
         self._crops: "dict[str, CropCoords]" = crops or {}
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
+        self._lobby_play_not_visible_since = 0.0  # tracks how long play button has been absent in lobby
 
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
@@ -256,15 +261,27 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register padlock camera cooldown hotkey")
 
-            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click the ready_button
+            # Auto-mission hotkey: when M is pressed in GAME_LOBBY, click PLAY/READY directly
             try:
                 def auto_mission_key_pressed(_e):
+                    if self._analyzer is None or not self._analyzer._game_lobby:
+                        return
                     if self._on_auto_mission_key is not None:
                         self._on_auto_mission_key()
-                    self.cancel_mission()
-                    self.start_auto_mission(force=True)
+                    crop = next(
+                        (c for c in ("PLAY", "READY") if c in self._crops),
+                        None,
+                    )
+                    if crop is None:
+                        logger.warning("Controller: '%s' pressed but no PLAY/READY crop configured", AUTO_MISSION_KEY)
+                        return
+                    logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s", AUTO_MISSION_KEY, crop)
+                    self._analyzer._game_lobby = False
+                    self._analyzer._game_starting = True
+                    self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
+                    self._start_game_starting_loop()
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to click play button in GAME_LOBBY", AUTO_MISSION_KEY)
+                logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
 
@@ -285,18 +302,53 @@ class Controller:
             return
 
         def _run():
-            settle_delay = 5
-            logger.info("Controller: start_auto_mission - waiting %ds for game to settle before clicking play button", settle_delay)
-            time.sleep(settle_delay)
             if self._analyzer is None:
                 return
-            logger.info("Controller: start_auto_mission - cancelling any active mission before entering GAME_STARTING")
-            self.cancel_mission()
-            logger.info("Controller: start_auto_mission - clicking play button and entering GAME_STARTING")
+
+            if self._capture is None:
+                logger.warning("Controller: start_auto_mission - no capture source; skipping play button click")
+                return
+
+            try:
+                with mss() as sct:
+                    s = sct.grab(self._capture.get_monitor_rect())
+                    frame = np.array(s)[:, :, :3]
+            except Exception:
+                logger.exception("Controller: start_auto_mission - failed to capture frame for play button OCR")
+                return
+
+            detected_crop = self._analyzer.scan_region_for_play_button(frame)
+            if detected_crop is None:
+                now = time.time()
+                if self._lobby_play_not_visible_since == 0.0:
+                    self._lobby_play_not_visible_since = now
+                    logger.info("Controller: start_auto_mission - PLAY/READY not visible; starting 3s popup-check timer")
+                elif now - self._lobby_play_not_visible_since >= 3.0:
+                    logger.info("Controller: play button absent for %.1fs — scanning for lobby popups",
+                                now - self._lobby_play_not_visible_since)
+                    popup = self._analyzer.scan_region_for_lobby_popups(frame)
+                    if popup:
+                        logger.info("Controller: dismissing lobby popup '%s'", popup)
+                        self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
+                        if popup == REGION_REVEAL_ALL:
+                            time.sleep(3.0)
+                            logger.info("Controller: REVEAL_ALL second click after 3s delay")
+                            self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
+                    else:
+                        logger.info("Controller: no lobby popups detected; waiting for play button")
+                return
+
+            # Play/Ready button visible — reset popup absence timer
+            self._lobby_play_not_visible_since = 0.0
+            # Re-check state after OCR: another thread may have already clicked play
+            if self._analyzer._game_starting:
+                logger.debug("Controller: start_auto_mission - state already GAME_STARTING after OCR; skipping click")
+                return
+            logger.info("Controller: start_auto_mission - clicking %s and entering GAME_STARTING", detected_crop)
             self._analyzer._game_lobby = False
             self._analyzer._game_end_b = False
             self._analyzer._game_starting = True
-            self.click_crop(self._crops["ready_button"], block=False, count=1, region_name=REGION_READY_BUTTON)
+            self.click_crop(self._crops[detected_crop], block=False, count=1, region_name=detected_crop)
             self._start_game_starting_loop()
 
         threading.Thread(target=_run, daemon=True).start()
@@ -911,38 +963,6 @@ class Controller:
             finally:
                 ocr_running.clear()
 
-        def _click_event_refresh_dismiss():
-            """Click the event_refresh_dismiss crop centre to dismiss the popup."""
-            try:
-                if self._capture is None:
-                    logger.error("Controller: _click_event_refresh_dismiss - no capture reference")
-                    return
-                with mss() as sct:
-                    monitors = sct.monitors
-                    monitor_index = self._capture.monitor_index
-                    if monitor_index < 1 or monitor_index >= len(monitors):
-                        logger.error("Controller: _click_event_refresh_dismiss - monitor index %d out of range", monitor_index)
-                        return
-                    mon = monitors[monitor_index]
-                    region = self._capture.region
-                    abs_left = mon["left"] + region[0]
-                    abs_top = mon["top"] + region[1]
-                    cap_w = region[2]
-                    cap_h = region[3]
-                dismiss_coords = self._crops.get("event_refresh_dismiss")
-                if dismiss_coords is None:
-                    logger.error("Controller: event_refresh_dismiss crop not configured")
-                    return
-                abs_x, abs_y = crop_centre(dismiss_coords, cap_w, cap_h, abs_left, abs_top)
-                logger.info("\033[93m📋 Clicking event_refresh_dismiss at (%d, %d)\033[0m", abs_x, abs_y)
-                ctypes.windll.user32.SetCursorPos(abs_x, abs_y)
-                time.sleep(0.05)
-                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
-                time.sleep(0.05)
-                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
-            except Exception:
-                logger.exception("Controller: _click_event_refresh_dismiss failed")
-
         def _loop():
             logger.info("Controller: game_starting loop started - pressing '%s' key every 5s until 'Good Luck' detected", MISSION_J20_KEY)
             loop_start = time.time()
@@ -953,26 +973,6 @@ class Controller:
                     if keyboard_module:
                         keyboard_module.press_and_release(MISSION_J20_KEY)
                         logger.info("Controller: game_starting - pressed '%s' key", MISSION_J20_KEY)
-
-                    # Check region 30 for 'Event refresh in progress' popup
-                    if self._capture is not None and self._analyzer is not None:
-                        try:
-                            with mss() as sct:
-                                s = sct.grab(self._capture.get_monitor_rect())
-                                scan_frame = np.array(s)[:, :, :3]
-                            if self._analyzer.scan_region_for_event_refresh(scan_frame):
-                                logger.warning(
-                                    "\033[93mController: 'Event refresh in progress' popup detected - "
-                                    "clicking corner to dismiss, retrying in 1s\033[0m"
-                                )
-                                _click_event_refresh_dismiss()
-                                time.sleep(1.0)
-                                # Re-click ready_button to attempt game entry again
-                                logger.info("Controller: re-clicking ready_button to retry game entry after event refresh dismiss")
-                                self.click_crop(self._crops["ready_button"], count=1, block=True, region_name=REGION_READY_BUTTON)
-                                continue
-                        except Exception:
-                            logger.exception("Controller: game_starting event-refresh check failed")
 
                     # Start async OCR scan if one isn't already running
                     if self._capture is not None and not ocr_running.is_set():

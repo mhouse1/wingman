@@ -16,8 +16,10 @@
 #   make push        -> push current branch
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
+#   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
+#   make r           -> run wingman.bat
 
-.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash run calibrate calibrate-crop
+.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash r calibrate calibrate-crop add-crops
 
 # Generate HTML report for automated levels test
 test:
@@ -118,7 +120,7 @@ squash:
 
 
 
-run:
+ r:
 	wingman.bat
 
 # Two commands are available for calibrating crop regions:
@@ -131,7 +133,11 @@ run:
 #   make calibrate-crop CROP=respawn
 #     Recalibrates a single named crop — useful when one region shifts but the
 #     rest are still good. Replace respawn with any name from the crops: section
-#     (incoming, click_to, good_luck, ready_button, event_refresh, event_refresh_dismiss).
+#     (incoming, click_to, good_luck, PLAY, event_refresh, event_refresh_dismiss).
+#
+#   make add-crops
+#     Scans test_screenshots/to_be_added for images, then calibrates one crop per
+#     image. The crop name is exactly the filename stem (without extension).
 #
 #   Controls in the window:
 #     Click top-left corner, then bottom-right corner — saves the crop
@@ -142,3 +148,6 @@ calibrate:
 
 calibrate-crop:
 	uv run python tests/calibrate.py --crop $(CROP)
+
+add-crops:
+	uv run python tests/calibrate.py --add-new-crops
