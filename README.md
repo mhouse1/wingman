@@ -2,7 +2,7 @@
 
 Game automation assistant for MetalStorm (PC). Runs fully unattended across multiple matches — launches missions, detects threats, deploys flares, handles respawns, and restarts the next match automatically.
 
-**Current version:** v1.6.1 | **Phase:** 1-2 (Automation + Text-Based Perception)
+**Current version:** v1.6.3 | **Phase:** 1-2 (Automation + Text-Based Perception)
 
 ---
 
@@ -27,10 +27,12 @@ Press M
 | J20 and Loiter missions | ✅ Working |
 | Respawn detection + auto-restart | ✅ Working |
 | Incoming missile detection + auto-flare | ✅ Working |
+| Health detection → mission restart on death | ✅ Working |
 | "Click to Continue" auto-click | ✅ Working |
 | Event refresh popup auto-dismiss | ✅ Working |
-| Lobby popup handling (Reveal All, Tap Here, Unlock Close, Final Continue) | ✅ Working |
-| Game state machine (LOBBY / STARTING / BATTLE / END) | ✅ Working |
+| Lobby popup handling (Reveal All, Tap Here, Unlock Close, Final Continue, Inspect, Invited, Creation Failed) | ✅ Working |
+| UNREADY detection → suppress play button click | ✅ Working |
+| Game state machine (LOBBY / WAITING / STARTING / BATTLE / END) | ✅ Working |
 | Game-starting stall detection + recovery | ✅ Working |
 | Padlock camera loop + weapon fire loop | ✅ Working |
 | CPU-only OCR (no GPU required) | ✅ Working |
@@ -68,6 +70,8 @@ crops:
 
 Crops are scale-independent within a stable capture region. Adding or adjusting a region requires only two coordinates — no grid arithmetic. See [ADR 023](docs/adr/023-percentage-coordinate-crop-regions.md) for the full design.
 
+![GAME_BATTLE crop regions](test_screenshots/GAME_AI.png)
+
 **OCR performance (CPU-only):** avg ~3.25s/cycle. Enabling GPU (CUDA) drops this to <200ms — see [GPU setup guide](docs/TODO-enable-gpu-ocr.md).
 
 ---
@@ -98,7 +102,8 @@ make run
 | `y` | Start loiter mission manually |
 | `end` | Cancel current mission |
 | `backspace` | Exit |
-| `x` | Toggle weapon loop |
+| `x` | Toggle weapon fire loop |
+| `p` | Padlock camera (sets cooldown if pressed manually) |
 | `v` | Save debug screenshot with crop overlays |
 
 ---
@@ -129,8 +134,9 @@ See [Job Aid 006 — Calibrate Crop Regions](docs/job-aids/006-calibrate-crop-re
 |-------|------|--------|
 | 1-2 | Automation + text perception | ✅ Done |
 | 2 | Named crop regions + offline calibration tooling | ✅ Done |
-| 2 | Lobby popup handling (Reveal All, Tap Here, Unlock Close) | ✅ Done |
-| 2 (next) | Health, ammo, enemy distance detection | Planned |
+| 2 | Lobby popup handling (Reveal All, Tap Here, Unlock Close, Inspect, Invited, Creation Failed) | ✅ Done |
+| 2 | Health detection + mission restart on death | ✅ Done |
+| 2 (next) | Ammo and enemy distance detection | Planned |
 | 3 | Behaviour trees — adaptive tactics based on game state | Planned |
 | 4 | Reinforcement learning — bot learns from experience | Future |
 | 5-6 | Deep RL + vision, multi-agent swarm tactics | Research |

@@ -509,6 +509,66 @@ class Controller:
         """Activate the currently selected weapon (short press)."""
         self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=hold_seconds, block=block, action_name='fire_active_weapon')
 
+    def reload_flares(self, block: bool = False):
+        """Press SPECIAL_ABILITY to reload flares (triggered when flare count == 2)."""
+        logger.info("\033[93m🔥 Reloading flares via SPECIAL_ABILITY key\033[0m")
+        self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
+
+    def eject_and_dive(self):
+        """Cancel mission then hold AFTERBURNER + NOSE_DOWN simultaneously for 5 seconds.
+
+        Called when missile count reaches zero — ends the mission and puts the
+        aircraft into a sustained afterburner nose-down to leave the engagement.
+        """
+        logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
+        self.cancel_mission()
+
+        def _run():
+            if not keyboard_module:
+                logger.error("Controller: keyboard library not available for eject_and_dive")
+                return
+            try:
+                keyboard_module.press(AFTERBURNER_KEY)
+                keyboard_module.press(NOSE_DOWN_KEY)
+                time.sleep(5.0)
+            finally:
+                try:
+                    keyboard_module.release(AFTERBURNER_KEY)
+                except Exception:
+                    pass
+                try:
+                    keyboard_module.release(NOSE_DOWN_KEY)
+                except Exception:
+                    pass
+            logger.info("Controller: eject_and_dive complete")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def disengage_roll_right(self, duration: float = 10.0):
+        """Cancel mission then hold ROLL_RIGHT_KEY for `duration` seconds.
+
+        Called when no enemy is detected in ENEMY_AHEAD for 20+ seconds — rolls
+        the aircraft back toward the map centre to avoid drifting out of bounds.
+        """
+        logger.info("\033[93m↩ No enemy for 20s — cancelling mission and rolling right for %.0fs\033[0m", duration)
+        self.cancel_mission()
+
+        def _run():
+            if not keyboard_module:
+                logger.error("Controller: keyboard library not available for disengage_roll_right")
+                return
+            try:
+                keyboard_module.press(ROLL_RIGHT_KEY)
+                time.sleep(duration)
+            finally:
+                try:
+                    keyboard_module.release(ROLL_RIGHT_KEY)
+                except Exception:
+                    pass
+            logger.info("Controller: disengage_roll_right complete")
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def start_weapon_loop(self, interval: float | None = None):
         """Start continuously firing the active weapon in a loop.
         

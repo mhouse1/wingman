@@ -284,6 +284,11 @@ class GameStateAnalyzer:
 
         # Named percentage-coordinate crop regions (ADR 023)
         self.crops = load_crops(config.get("crops", {}))
+
+        # Enemy HSV range for red-color detection in ENEMY_AHEAD crop
+        enemy_hsv_cfg = config.get("enemy_hsv", {})
+        self._enemy_hsv_lower = np.array(enemy_hsv_cfg.get("lower", [0, 120, 120]), dtype=np.uint8)
+        self._enemy_hsv_upper = np.array(enemy_hsv_cfg.get("upper", [10, 255, 255]), dtype=np.uint8)
         
         # EasyOCR reader (lazy initialization on first use)
         self._ocr_reader = None
@@ -332,6 +337,14 @@ class GameStateAnalyzer:
         # Signalled when _game_battle_alive transitions False → True.
         # The main loop waits on this event to restart the mission immediately.
         self.alive_event = threading.Event()
+
+        # Ammo sub-state (GAME_BATTLE only)
+        self._ammo_flares: "int | None" = None   # Last known flare count from OCR
+        self._ammo_missiles: "int | None" = None  # Last known missile count from OCR
+        self._ammo_lock = threading.Lock()
+        # Signalled when flares == 2 (reload needed) or missiles == 0 (end mission).
+        self.low_flares_event = threading.Event()
+        self.no_missiles_event = threading.Event()
 
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
@@ -484,9 +497,9 @@ class GameStateAnalyzer:
         """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
         if self._ocr_executor is None and easyocr and not self._ocr_executor_initialized:
             try:
-                self._ocr_executor = ThreadPoolExecutor(max_workers=3)
+                self._ocr_executor = ThreadPoolExecutor(max_workers=5)
                 self._ocr_executor_initialized = True
-                logger.info("Initialized ThreadPoolExecutor with 3 workers for parallel OCR")
+                logger.info("Initialized ThreadPoolExecutor with 5 workers for parallel OCR")
             except Exception as e:
                 logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
                 self._ocr_executor_initialized = True  # Prevent retries
@@ -698,17 +711,21 @@ class GameStateAnalyzer:
                     logger.warning("OCR executor not initialized")
                     return
 
-                # Extract respawn, incoming, and health crops (click_to has its own thread)
+                # Extract respawn, incoming, health, and ammo crops (click_to has its own thread)
                 respawn_frame = get_crop(full_frame, *self.crops["respawn"][:4])
                 incoming_frame = get_crop(full_frame, *self.crops["incoming"][:4])
                 health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4]) if "HEALTH" in self.crops else None
+                ammo_flares_frame = get_crop(full_frame, *self.crops["AMMO_FLARES"][:4]) if "AMMO_FLARES" in self.crops else None
+                ammo_missile_frame = get_crop(full_frame, *self.crops["AMMO_MISSILE"][:4]) if "AMMO_MISSILE" in self.crops else None
                 t1 = time.time()
 
-                # Submit all three tasks to thread pool for parallel processing.
+                # Submit all tasks to the thread pool for parallel processing.
                 # Numpy arrays are passed by reference — no serialization needed.
                 respawn_future = executor.submit(_process_respawn_region, respawn_frame)
                 incoming_future = executor.submit(_process_incoming_region, incoming_frame)
                 health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
+                ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame) if ammo_flares_frame is not None else None
+                ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame) if ammo_missile_frame is not None else None
                 t2 = time.time()
 
                 # Wait for respawn result first — update its cache immediately so the
@@ -778,13 +795,35 @@ class GameStateAnalyzer:
                             logger.debug(
                                 "Analyzer: Health OCR no digits (%.1fs elapsed, 3s threshold)",
                                 now_t - self._health_no_digits_since)
+                # Resolve ammo futures and fire events.
+                ammo_flares_ocr_time = 0.0
+                ammo_missile_ocr_time = 0.0
+                if ammo_flares_future is not None:
+                    flares_value, ammo_flares_ocr_time = ammo_flares_future.result(timeout=120)
+                    if flares_value is not None:
+                        with self._ammo_lock:
+                            self._ammo_flares = flares_value
+                        logger.info("Ammo flares: %d", flares_value)
+                        if flares_value == 2:
+                            self.low_flares_event.set()
+                if ammo_missile_future is not None:
+                    missile_value, ammo_missile_ocr_time = ammo_missile_future.result(timeout=120)
+                    if missile_value is not None:
+                        with self._ammo_lock:
+                            self._ammo_missiles = missile_value
+                        logger.info("Ammo missiles: %d", missile_value)
+                        if missile_value == 0:
+                            self.no_missiles_event.set()
+
                 t4 = time.time()
 
                 # Log timing
                 logger.debug(
                     "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
-                    "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | Total: %.2fs",
-                    t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, health_ocr_time, t4-t0
+                    "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | "
+                    "Flares OCR: %.2fs | Missiles OCR: %.2fs | Total: %.2fs",
+                    t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, health_ocr_time,
+                    ammo_flares_ocr_time, ammo_missile_ocr_time, t4-t0
                 )
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
@@ -864,6 +903,28 @@ class GameStateAnalyzer:
         self._click_to_cache['timestamp'] = 0.0
         self._click_to_cache['result'] = (False, 0.0, None)
         logger.debug("OCR caches reset")
+
+    def detect_enemy_red(self, frame) -> bool:
+        """Return True if the ENEMY_AHEAD crop contains red pixels (enemy marker visible).
+
+        Uses a pure HSV colour mask — no OCR, runs synchronously on the calling thread.
+        Red wraps in HSV; the primary range [0–10] from enemy_hsv config is checked, plus
+        the wrap-around range [170–180] is always included.
+        """
+        if "ENEMY_AHEAD" not in self.crops:
+            return False
+        try:
+            crop = get_crop(frame, *self.crops["ENEMY_AHEAD"][:4])
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, self._enemy_hsv_lower, self._enemy_hsv_upper)
+            # Always include the wrap-around red range (hue 170–180)
+            wrap_lower = np.array([170, self._enemy_hsv_lower[1], self._enemy_hsv_lower[2]], dtype=np.uint8)
+            wrap_upper = np.array([180, self._enemy_hsv_upper[1], self._enemy_hsv_upper[2]], dtype=np.uint8)
+            mask |= cv2.inRange(hsv, wrap_lower, wrap_upper)
+            return bool(np.any(mask))
+        except Exception as e:
+            logger.warning("Analyzer: detect_enemy_red failed: %s", e)
+            return False
 
     def scan_region_for_good_luck(self, frame) -> bool:
         """Synchronously scan the good_luck crop for 'Good Luck' text via OCR pool.

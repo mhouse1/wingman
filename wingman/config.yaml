@@ -94,6 +94,22 @@ crops:
     - [0.7764, 0.8678]
     - [0.9299, 0.9067]
     text: [READY]
+  AMMO_FLARES:
+    coords:
+    - [0.0118, 0.9589]
+    - [0.0194, 0.9767]
+  AMMO_MISSILE:
+    coords:
+    - [0.0854, 0.9578]
+    - [0.0958, 0.9756]
+  ENEMY_AHEAD:
+    coords:
+    - [0.8924, 0.0222]
+    - [0.9389, 0.1033]
+  ENEMY_CLOSE_BY:
+    coords:
+    - [0.8764, 0.0822]
+    - [0.9521, 0.1856]
 respawn_detection:
   use_ocr: true
   use_gpu: false

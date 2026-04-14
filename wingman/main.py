@@ -120,6 +120,8 @@ def main():
     last_incoming_alert_ts = 0.0
     last_click_to_alert_ts = 0.0
     last_game_state = None
+    last_flare_reload_ts = 0.0    # cooldown: don't spam SPECIAL_ABILITY if flares stay at 2
+    enemy_last_seen_ts = 0.0      # timestamp of last frame with red in ENEMY_AHEAD (0 = not in battle yet)
     lobby_play_scan_interval = 5.0
     last_lobby_play_scan_attempt = 0.0
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
@@ -139,6 +141,28 @@ def main():
             ctrl.restart_last_mission()
             last_restart_attempt = time.time()
             respawn_state = RespawnState.IDLE
+
+    def _handle_low_flares():
+        """Press SPECIAL_ABILITY to reload flares when count reaches 2."""
+        nonlocal last_flare_reload_ts
+        analyzer.low_flares_event.clear()
+        if analyzer.game_state != GameState.GAME_BATTLE:
+            return
+        if time.time() - last_flare_reload_ts < 30.0:
+            logger.debug("Low-flares event: reload suppressed by cooldown (%.1fs remaining)",
+                         30.0 - (time.time() - last_flare_reload_ts))
+            return
+        ctrl.reload_flares()
+        last_flare_reload_ts = time.time()
+
+    def _handle_no_missiles():
+        """End mission and eject when missile count reaches zero."""
+        analyzer.no_missiles_event.clear()
+        if analyzer.game_state != GameState.GAME_BATTLE:
+            return
+        if not ctrl.is_mission_running():
+            return
+        ctrl.eject_and_dive()
 
     def _deploy_flares_on_new_incoming() -> bool:
         """Deploy flares in a burst when a new incoming OCR detection arrives."""
@@ -207,6 +231,8 @@ def main():
                     last_play_reclick_ts = time.time()  # don't re-click immediately either
                 else:
                     game_waiting_since = 0.0
+                if current_game_state == GameState.GAME_BATTLE:
+                    enemy_last_seen_ts = time.time()  # assume enemy present on battle entry
 
             # In unattended mode, keep retrying lobby PLAY detection/click every 5s
             # until GAME_LOBBY transitions out.
@@ -285,6 +311,21 @@ def main():
             # Restart mission immediately when health transitions dead → alive.
             if analyzer.alive_event.is_set():
                 _handle_alive_transition()
+
+            # Ammo events (GAME_BATTLE only).
+            if analyzer.low_flares_event.is_set():
+                _handle_low_flares()
+            if analyzer.no_missiles_event.is_set():
+                _handle_no_missiles()
+
+            # Enemy presence check: if ENEMY_AHEAD has had no red for 20s, disengage.
+            if current_game_state == GameState.GAME_BATTLE and enemy_last_seen_ts > 0:
+                if analyzer.detect_enemy_red(frame):
+                    enemy_last_seen_ts = time.time()
+                elif time.time() - enemy_last_seen_ts >= 20.0 and ctrl.is_mission_running():
+                    logger.info("\033[93m↩ No enemy in ENEMY_AHEAD for 20s — disengaging\033[0m")
+                    enemy_last_seen_ts = time.time()  # reset to avoid re-triggering
+                    ctrl.disengage_roll_right()
 
             # Detect respawn
             if game_state.get('is_respawning'):
@@ -381,6 +422,10 @@ def main():
                     _deploy_flares_on_new_incoming()
                     if analyzer.alive_event.is_set():
                         _handle_alive_transition()
+                    if analyzer.low_flares_event.is_set():
+                        _handle_low_flares()
+                    if analyzer.no_missiles_event.is_set():
+                        _handle_no_missiles()
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:
