@@ -923,18 +923,32 @@ class GameStateAnalyzer:
             return False
 
     def scan_region_for_play_button(self, frame) -> "str | None":
-        """Scan PLAY and READY crops in parallel; return the crop name that fired, or None."""
+        """Scan PLAY, READY, and UNREADY crops in parallel.
+
+        Returns the crop name (PLAY or READY) if the play button is detected,
+        or None if neither is found or UNREADY is detected (suppresses clicking).
+        """
         executor = self.ocr_executor
         if executor is None:
             logger.warning("Analyzer: OCR executor not available for play button scan")
             return None
         try:
+            scan_crops = [c for c in ("PLAY", "READY", "UNREADY") if c in self.crops]
             futures = {
                 crop: executor.submit(_process_text_region, get_crop(frame, *self.crops[crop][:4]), self.crops[crop].text or [])
-                for crop in ("PLAY", "READY")
+                for crop in scan_crops
             }
-            for crop, fut in futures.items():
-                detected, _, text = fut.result(timeout=30)
+            # Resolve UNREADY first; if detected, suppress clicking entirely
+            if "UNREADY" in futures:
+                detected, _, text = futures["UNREADY"].result(timeout=30)
+                if detected:
+                    logger.info("Analyzer: UNREADY detected (text='%s') — suppressing PLAY click", text)
+                    return None
+                logger.debug("Analyzer: UNREADY not found")
+            for crop in ("PLAY", "READY"):
+                if crop not in futures:
+                    continue
+                detected, _, text = futures[crop].result(timeout=30)
                 if detected:
                     logger.info("Analyzer: '%s' detected in %s crop (text='%s')", crop, crop, text)
                     return crop
@@ -947,7 +961,8 @@ class GameStateAnalyzer:
     def scan_region_for_lobby_popups(self, frame):
         """Scan for lobby popup buttons that may be blocking the play button.
 
-        Checks REVEAL_ALL, TAP_HERE_TO_CONTINUE, and UNLOCK_CLOSE crops in order.
+        Checks REVEAL_ALL, TAP_HERE_TO_CONTINUE, UNLOCK_CLOSE, FINAL_CONTINUE,
+        INSPECT, INVITED, and CREATION_FAILED crops in order.
 
         Args:
             frame: Full BGR frame from screen capture.
@@ -960,7 +975,8 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: OCR executor not available for lobby popup scan")
             return None
 
-        popup_crops = ["REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE"]
+        popup_crops = ["REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE",
+                       "INSPECT", "INVITED", "CREATION_FAILED"]
         for crop_name in popup_crops:
             if crop_name not in self.crops:
                 logger.debug("Analyzer: crop '%s' not in config — skipping popup check", crop_name)

@@ -74,6 +74,26 @@ crops:
     - [0.7896, 0.8678]
     - [0.9167, 0.9089]
     text: [CANCEL]
+  CREATION_FAILED:
+    coords:
+    - [0.4826, 0.5089]
+    - [0.5167, 0.5378]
+    text: [OK]
+  INSPECT:
+    coords:
+    - [0.0285, 0.0289]
+    - [0.184, 0.0556]
+    text: [INSPECTAIRCRAFT]
+  INVITED:
+    coords:
+    - [0.5833, 0.5711]
+    - [0.6542, 0.5967]
+    text: [INVITED]
+  UNREADY:
+    coords:
+    - [0.7764, 0.8678]
+    - [0.9299, 0.9067]
+    text: [READY]
 respawn_detection:
   use_ocr: true
   use_gpu: false

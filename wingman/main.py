@@ -11,8 +11,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.2"
-WINGMAN_VERSION_DETAILS = "Optimize state machine and detection using new architecture from 1.6.0, plus various bug fixes and improvements."
+WINGMAN_VERSION = "1.6.3"
+WINGMAN_VERSION_DETAILS = "More automation using new crops"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
