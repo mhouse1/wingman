@@ -337,7 +337,15 @@ def main():
         sys.exit(1)
 
     cfg = _load_yaml(_CONFIG_PATH)
-    current_crops = load_crops(cfg.get("crops") or {}) if cfg.get("crops") else {}
+    # Load existing crops, skipping any with invalid coordinates so a bad entry
+    # doesn't prevent the tool from running (e.g. when overwriting a crop).
+    raw_crops = cfg.get("crops") or {}
+    current_crops: dict = {}
+    for name, entry in raw_crops.items():
+        try:
+            current_crops.update(load_crops({name: entry}))
+        except ValueError as _e:
+            print(f"[WARN] Skipping invalid crop '{name}' in config: {_e}")
 
     if args.add_new_crops:
         if args.crop:

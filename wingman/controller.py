@@ -85,6 +85,7 @@ class Controller:
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
         self._lobby_play_not_visible_since = 0.0  # tracks how long play button has been absent in lobby
+        self._popup_last_clicked: "dict[str, float]" = {}  # popup name → timestamp of last click
 
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
@@ -93,6 +94,11 @@ class Controller:
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
         self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
+
+        # Search-and-destroy loop state (padlock + weapon fire; used during disengage)
+        self._sdl_stop: threading.Event | None = None
+        self._sdl_padlock_thread: threading.Thread | None = None
+        self._sdl_weapon_thread: threading.Thread | None = None
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
@@ -236,10 +242,8 @@ class Controller:
                                 # mss returns BGRA, convert to BGR
                                 frame = frame[:, :, :3]
                             
-                            # Draw named crop overlays for calibration verification
-                            crops = self._crops
-                            if self._analyzer is not None:
-                                crops = getattr(self._analyzer, "crops", crops)
+                            # Draw only state-relevant crop overlays
+                            crops = self._analyzer.crops_for_state()
                             frame_with_crops = draw_crops(frame, crops)
 
                             # Create output directory if it doesn't exist
@@ -328,6 +332,12 @@ class Controller:
             if self._analyzer is None:
                 return
 
+            # Guard against stale threads: if state has already advanced past GAME_LOBBY
+            # (e.g. another path clicked PLAY while this thread was queued), abort now.
+            if self._analyzer._game_starting or self._analyzer._game_waiting:
+                logger.debug("Controller: start_auto_mission _run - state already GAME_STARTING/GAME_WAITING; aborting stale thread")
+                return
+
             if self._capture is None:
                 logger.warning("Controller: start_auto_mission - no capture source; skipping play button click")
                 return
@@ -351,12 +361,29 @@ class Controller:
                                 now - self._lobby_play_not_visible_since)
                     popup = self._analyzer.scan_region_for_lobby_popups(frame)
                     if popup:
-                        logger.info("Controller: dismissing lobby popup '%s'", popup)
-                        self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
-                        if popup == REGION_REVEAL_ALL:
-                            time.sleep(3.0)
-                            logger.info("Controller: REVEAL_ALL second click after 3s delay")
-                            self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
+                        if not self.popup_click_allowed(popup):
+                            logger.debug("Controller: popup '%s' click suppressed by cooldown", popup)
+                        else:
+                            logger.info("Controller: dismissing lobby popup '%s'", popup)
+                            self.record_popup_click(popup)
+                            click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
+                            self.click_crop(self._crops[click_target], block=True, count=1, region_name=click_target)
+                            if popup == REGION_REVEAL_ALL:
+                                time.sleep(3.0)
+                                logger.info("Controller: REVEAL_ALL second click after 3s delay")
+                                self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
+                            elif popup == "INVITED":
+                                time.sleep(1.5)
+                                try:
+                                    with mss() as sct:
+                                        s = sct.grab(self._capture.get_monitor_rect())
+                                        ready_frame = np.array(s)[:, :, :3]
+                                    ready = self._analyzer.scan_region_for_play_button(ready_frame)
+                                    if ready:
+                                        logger.info("Controller: INVITED accepted — clicking %s", ready)
+                                        self.click_crop(self._crops[ready], block=True, count=1, region_name=ready)
+                                except Exception:
+                                    logger.exception("Controller: failed to click READY after INVITED accept")
                     elif now - self._lobby_play_not_visible_since >= 5.0:
                         # No popup blocking and play button absent for 5+ seconds — OCR may
                         # be failing to detect it.  Force-click the play button crop directly.
@@ -515,22 +542,53 @@ class Controller:
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
 
     def eject_and_dive(self):
-        """Cancel mission then hold AFTERBURNER + NOSE_DOWN simultaneously for 5 seconds.
+        """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
-        Called when missile count reaches zero — ends the mission and puts the
-        aircraft into a sustained afterburner nose-down to leave the engagement.
+        NOSE_DOWN is held for 10 seconds then released.
+        AFTERBURNER is held until respawn is detected (or a 120s safety timeout).
         """
         logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
+        # Force health state to dead so the False→True transition fires when
+        # health is detected again after respawn, triggering mission restart.
+        if self._analyzer is not None:
+            with self._analyzer._health_lock:
+                self._analyzer._game_battle_alive = False
+                self._analyzer._health_no_digits_since = 0.0
+
+        def _is_respawning() -> bool:
+            if self._analyzer is None:
+                return False
+            with self._analyzer._ocr_cache_lock:
+                detected, _, _ = self._analyzer._ocr_cache['result']
+            return detected
 
         def _run():
             if not keyboard_module:
                 logger.error("Controller: keyboard library not available for eject_and_dive")
                 return
             try:
-                keyboard_module.press(AFTERBURNER_KEY)
                 keyboard_module.press(NOSE_DOWN_KEY)
-                time.sleep(5.0)
+                keyboard_module.press(AFTERBURNER_KEY)
+                logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
+
+                # Hold nose-down for 10s then release; afterburner stays on
+                time.sleep(10.0)
+                try:
+                    keyboard_module.release(NOSE_DOWN_KEY)
+                except Exception:
+                    pass
+                logger.info("Controller: eject_and_dive — nose-down released, holding afterburner until respawn")
+
+                # Hold afterburner until respawn detected (max 120s)
+                deadline = time.time() + 120.0
+                while time.time() < deadline:
+                    if _is_respawning():
+                        logger.info("Controller: eject_and_dive — respawn detected, releasing afterburner")
+                        break
+                    time.sleep(0.5)
+                else:
+                    logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
             finally:
                 try:
                     keyboard_module.release(AFTERBURNER_KEY)
@@ -544,19 +602,79 @@ class Controller:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def disengage_roll_right(self, duration: float = 10.0):
-        """Cancel mission then hold ROLL_RIGHT_KEY for `duration` seconds.
+    def start_search_and_destroy_loop(self):
+        """Start background padlock + weapon-fire loops.
 
-        Called when no enemy is detected in ENEMY_AHEAD for 20+ seconds — rolls
-        the aircraft back toward the map centre to avoid drifting out of bounds.
+        Loops stop when either _sdl_stop is set (explicit stop) or
+        _mission_cancel is set (any cancellation signal), whichever comes first.
         """
-        logger.info("\033[93m↩ No enemy for 20s — cancelling mission and rolling right for %.0fs\033[0m", duration)
+        if self._sdl_stop is not None and not self._sdl_stop.is_set():
+            logger.debug("Controller: search_and_destroy_loop already running")
+            return
+
+        self._sdl_stop = threading.Event()
+        stop = self._sdl_stop
+
+        def _padlock_loop():
+            logger.info("Controller: search_and_destroy padlock loop started")
+            try:
+                while not stop.is_set() and not self._mission_cancel.is_set():
+                    if time.time() >= self._padlock_cooldown_until:
+                        self.padlock_camera(hold_seconds=0.1, block=True)
+                    for _ in range(60):  # 6 s interruptible
+                        if stop.is_set() or self._mission_cancel.is_set():
+                            break
+                        time.sleep(0.1)
+            finally:
+                logger.info("Controller: search_and_destroy padlock loop stopped")
+
+        def _weapon_loop():
+            logger.info("Controller: search_and_destroy weapon loop started")
+            try:
+                while not stop.is_set() and not self._mission_cancel.is_set():
+                    self.fire_active_weapon(hold_seconds=0.1, block=True)
+                    for _ in range(10):  # 1 s interruptible
+                        if stop.is_set() or self._mission_cancel.is_set():
+                            break
+                        time.sleep(0.1)
+            finally:
+                logger.info("Controller: search_and_destroy weapon loop stopped")
+
+        self._sdl_padlock_thread = threading.Thread(target=_padlock_loop, daemon=True)
+        self._sdl_weapon_thread = threading.Thread(target=_weapon_loop, daemon=True)
+        self._sdl_padlock_thread.start()
+        self._sdl_weapon_thread.start()
+        logger.info("Controller: search_and_destroy_loop started")
+
+    def stop_search_and_destroy_loop(self):
+        """Stop the search-and-destroy padlock + weapon-fire loops."""
+        if self._sdl_stop is None or self._sdl_stop.is_set():
+            logger.debug("Controller: search_and_destroy_loop not running")
+            return
+        self._sdl_stop.set()
+        if self._sdl_padlock_thread:
+            self._sdl_padlock_thread.join(timeout=1.0)
+            self._sdl_padlock_thread = None
+        if self._sdl_weapon_thread:
+            self._sdl_weapon_thread.join(timeout=1.0)
+            self._sdl_weapon_thread = None
+        logger.info("Controller: search_and_destroy_loop stopped")
+
+    def disengage_roll_right(self, duration: float = 10.0):
+        """Cancel mission maneuvers then hold ROLL_RIGHT_KEY for `duration` seconds.
+
+        search_and_destroy_loop() keeps running during the roll so the aircraft
+        continues tracking and firing at any enemy that comes into view.
+        Called when no enemy is detected in ENEMY_CLOSE_BY for 30+ seconds.
+        """
+        logger.info("\033[93m↩ No enemy for 30s — cancelling mission and rolling right for %.0fs\033[0m", duration)
         self.cancel_mission()
 
         def _run():
             if not keyboard_module:
                 logger.error("Controller: keyboard library not available for disengage_roll_right")
                 return
+            self.start_search_and_destroy_loop()
             try:
                 keyboard_module.press(ROLL_RIGHT_KEY)
                 time.sleep(duration)
@@ -565,6 +683,7 @@ class Controller:
                     keyboard_module.release(ROLL_RIGHT_KEY)
                 except Exception:
                     pass
+                self.stop_search_and_destroy_loop()
             logger.info("Controller: disengage_roll_right complete")
 
         threading.Thread(target=_run, daemon=True).start()
@@ -742,47 +861,6 @@ class Controller:
         self._mission_complete.clear()
         self._mission_cancel.clear()
 
-        # Background loop flags and thread references
-        padlock_loop_active = threading.Event()
-        weapon_loop_active = threading.Event()
-        self._padlock_thread = None
-        self._weapon_thread = None
-
-        def _padlock_loop():
-            """Background loop to press padlock camera every 6 seconds"""
-            logger.info("Controller: mission_j20 padlock loop started")
-            try:
-                while padlock_loop_active.is_set() and not self._mission_cancel.is_set():
-                    if time.time() < self._padlock_cooldown_until:
-                        logger.debug("Controller: padlock loop skipping press - manual cooldown active")
-                    else:
-                        self.padlock_camera(hold_seconds=0.1, block=True)
-                    # Interruptible sleep - check for cancellation every 0.1 seconds
-                    for _ in range(60):  # 60 * 0.1 = 6 seconds
-                        if not padlock_loop_active.is_set() or self._mission_cancel.is_set():
-                            break
-                        time.sleep(0.1)
-            except Exception:
-                logger.exception("Controller: mission_j20 padlock loop error")
-            finally:
-                logger.info("Controller: mission_j20 padlock loop stopped")
-
-        def _weapon_fire_loop():
-            """Background loop to fire active weapon every 1 second"""
-            logger.info("Controller: mission_j20 weapon fire loop started")
-            try:
-                while weapon_loop_active.is_set() and not self._mission_cancel.is_set():
-                    self.fire_active_weapon(hold_seconds=0.1, block=True)
-                    # Interruptible sleep - check for cancellation every 0.1 seconds
-                    for _ in range(10):  # 10 * 0.1 = 1 second
-                        if not weapon_loop_active.is_set() or self._mission_cancel.is_set():
-                            break
-                        time.sleep(0.1)
-            except Exception:
-                logger.exception("Controller: mission_j20 weapon fire loop error")
-            finally:
-                logger.info("Controller: mission_j20 weapon fire loop stopped")
-
         def _mission_runner():
             try:
                 # Execute mission maneuvers (maneuvers log their own activity)
@@ -791,20 +869,13 @@ class Controller:
                     logger.info("Controller: mission cancelled after nose_up")
                     return
 
-                # Start background loops after first wingsweep
-                padlock_loop_active.set()
-                weapon_loop_active.set()
-                self._padlock_thread = threading.Thread(target=_padlock_loop, daemon=True)
-                self._weapon_thread = threading.Thread(target=_weapon_fire_loop, daemon=True)
-                self._padlock_thread.start()
-                self._weapon_thread.start()
+                # Start search-and-destroy loop after first maneuver
+                self.start_search_and_destroy_loop()
                 logger.info("Controller: mission_j20 background loops started")
-                
+
                 self.afterburner(20.0)
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after afterburner")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
                     return
                 # Roll right and afterburner
                 self.roll_right(50, block=False)
@@ -812,15 +883,11 @@ class Controller:
                 self.afterburner(10)
                 if not self._interruptible_sleep(10, check_interval=1.0):
                     logger.info("Controller: mission cancelled during afterburner recharge")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
                     return
                 logger.info("\033[94mController:  initiated second afterburner\033[0m")
                 self.afterburner(10)
                 if not self._interruptible_sleep(10, check_interval=1.0):
                     logger.info("Controller: mission cancelled during afterburner recharge")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
                     return
                 self.afterburner(10)
                 logger.info("\033[91mController: initiating final roll right 300 sec \033[0m")
@@ -828,32 +895,15 @@ class Controller:
                 self.roll_right(300)
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after roll_right")
-                    padlock_loop_active.clear()
-                    weapon_loop_active.clear()
                     return
 
-                # Stop background loops
-                padlock_loop_active.clear()
-                weapon_loop_active.clear()
-                
-                # Wait for background threads to fully stop
-                if self._padlock_thread is not None:
-                    self._padlock_thread.join(timeout=1.0)
-                if self._weapon_thread is not None:
-                    self._weapon_thread.join(timeout=1.0)
-                
+                self.stop_search_and_destroy_loop()
                 #self.nose_down(4.0)
                 #time.sleep(10.0)  # additional wait time to stabilize
                 logger.info("\033[91mController: mission_j20 - sequence complete\033[0m")
             except Exception:
                 logger.exception("Controller: mission_j20 failed")
-                padlock_loop_active.clear()
-                weapon_loop_active.clear()
-                # Wait for background threads to stop
-                if self._padlock_thread is not None:
-                    self._padlock_thread.join(timeout=1.0)
-                if self._weapon_thread is not None:
-                    self._weapon_thread.join(timeout=1.0)
+                self.stop_search_and_destroy_loop()
             finally:
                 self._mission_complete.set()
                 if self._mission_lock.locked():
@@ -954,6 +1004,15 @@ class Controller:
         else:
             threading.Thread(target=_do_click, daemon=True).start()
 
+    def popup_click_allowed(self, popup: str, cooldown: float = 30.0) -> bool:
+        """Return True if `popup` has not been clicked within `cooldown` seconds."""
+        last = self._popup_last_clicked.get(popup, 0.0)
+        return time.time() - last >= cooldown
+
+    def record_popup_click(self, popup: str) -> None:
+        """Record that `popup` was just clicked (starts its cooldown)."""
+        self._popup_last_clicked[popup] = time.time()
+
     def click_crop(self, coords: "CropCoords", block: bool = False, count: int = 1, region_name: str = None):
         """Move the mouse to the centre of a named crop region and left-click it.
 
@@ -1014,12 +1073,13 @@ class Controller:
         """Request cancellation of any running mission.
 
         Sets the cancel flag which maneuvers poll and stops the standalone
-        weapon loop. Mission completion/lock release are finalized by the
-        mission runner thread.
+        weapon loop. search_and_destroy_loop self-terminates when it sees
+        _mission_cancel. Mission completion/lock release are finalized by
+        the mission runner thread.
         """
         logger.info("\033[91mController: cancel_mission called\033[0m")
         self._mission_cancel.set()
-        self.stop_weapon_loop()  # Stop weapon loop when mission is cancelled
+        self.stop_weapon_loop()
 
     def is_mission_running(self) -> bool:
         """Return True when a mission thread currently holds the mission lock."""
@@ -1034,6 +1094,7 @@ class Controller:
             self._analyzer._last_battle_event_ts = time.time()
             self._analyzer._game_end_b = False
             self._analyzer._game_lobby = False
+            self._analyzer._game_waiting = False
             self._analyzer._game_starting = False
             self._analyzer._game_starting_stalled = False
             logger.info("Controller: mission '%s' started → GAME_BATTLE", mission_name)

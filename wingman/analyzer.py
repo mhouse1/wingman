@@ -256,6 +256,33 @@ def _respawn_text_matches(text_clean: str) -> bool:
     return False
 
 
+# Crops that are relevant for each game state.  Only these will be overlaid
+# on debug screenshots — all others are filtered out.
+_STATE_CROPS: "dict[GameState, set[str]]" = {
+    GameState.GAME_BATTLE: {
+        "respawn", "incoming", "click_to",
+        "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY",
+    },
+    GameState.GAME_END_B: {
+        "click_to", "FINAL_CONTINUE",
+    },
+    GameState.GAME_LOBBY: {
+        "PLAY", "READY", "UNREADY", "CANCEL",
+        "CREATION_FAILED", "INSPECT", "INVITED",
+        "REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE",
+    },
+    GameState.GAME_WAITING: {
+        "PLAY", "READY", "CANCEL",
+    },
+    GameState.GAME_STARTING: {
+        "good_luck",
+    },
+    GameState.GAME_STARTING_STALLED: {
+        "good_luck",
+    },
+}
+
+
 # ============================================================================
 # GameStateAnalyzer Class
 # ============================================================================
@@ -285,7 +312,7 @@ class GameStateAnalyzer:
         # Named percentage-coordinate crop regions (ADR 023)
         self.crops = load_crops(config.get("crops", {}))
 
-        # Enemy HSV range for red-color detection in ENEMY_AHEAD crop
+        # Enemy HSV range for red-color detection in ENEMY_CLOSE_BY crop
         enemy_hsv_cfg = config.get("enemy_hsv", {})
         self._enemy_hsv_lower = np.array(enemy_hsv_cfg.get("lower", [0, 120, 120]), dtype=np.uint8)
         self._enemy_hsv_upper = np.array(enemy_hsv_cfg.get("upper", [10, 255, 255]), dtype=np.uint8)
@@ -497,9 +524,9 @@ class GameStateAnalyzer:
         """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
         if self._ocr_executor is None and easyocr and not self._ocr_executor_initialized:
             try:
-                self._ocr_executor = ThreadPoolExecutor(max_workers=5)
+                self._ocr_executor = ThreadPoolExecutor(max_workers=13)
                 self._ocr_executor_initialized = True
-                logger.info("Initialized ThreadPoolExecutor with 5 workers for parallel OCR")
+                logger.info("Initialized ThreadPoolExecutor with 13 workers for parallel OCR")
             except Exception as e:
                 logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
                 self._ocr_executor_initialized = True  # Prevent retries
@@ -509,6 +536,11 @@ class GameStateAnalyzer:
     @property
     def game_state(self) -> GameState:
         """Current high-level game state."""
+        # If health is alive (>=1), always return GAME_BATTLE
+        with self._health_lock:
+            if self._health is not None and self._health >= 1:
+                return GameState.GAME_BATTLE
+
         if self._game_starting:
             return GameState.GAME_STARTING
         if self._game_starting_stalled:
@@ -526,6 +558,16 @@ class GameStateAnalyzer:
         """True when the last health reading during GAME_BATTLE was >= 1."""
         with self._health_lock:
             return self._game_battle_alive
+
+    def crops_for_state(self, state: "GameState | None" = None) -> "dict[str, CropCoords]":
+        """Return only the crops relevant to the given game state.
+
+        If state is None, the current game state is used.  Any crop name not
+        present in the config is silently skipped.
+        """
+        s = state if state is not None else self.game_state
+        names = _STATE_CROPS.get(s, set())
+        return {k: v for k, v in self.crops.items() if k in names}
 
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
@@ -610,13 +652,13 @@ class GameStateAnalyzer:
             state['health'] = self._health
             state['game_battle_alive'] = self._game_battle_alive
 
-        # Save crop overlay if enabled (every frame)
+        # Save crop overlay if enabled (every frame) — only state-relevant crops
         if self.show_grid_highlighted:
             try:
                 output_dir = Path("tests") / "test-output"
                 output_dir.mkdir(parents=True, exist_ok=True)
                 output_path = str(output_dir / "output_crops.png")
-                annotated = draw_crops(frame, self.crops)
+                annotated = draw_crops(frame, self.crops_for_state())
                 import cv2 as _cv2
                 _cv2.imwrite(output_path, annotated)
                 logger.debug("Saved crop overlay to %s", output_path)
@@ -711,120 +753,126 @@ class GameStateAnalyzer:
                     logger.warning("OCR executor not initialized")
                     return
 
-                # Extract respawn, incoming, health, and ammo crops (click_to has its own thread)
-                respawn_frame = get_crop(full_frame, *self.crops["respawn"][:4])
-                incoming_frame = get_crop(full_frame, *self.crops["incoming"][:4])
-                health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4]) if "HEALTH" in self.crops else None
-                ammo_flares_frame = get_crop(full_frame, *self.crops["AMMO_FLARES"][:4]) if "AMMO_FLARES" in self.crops else None
-                ammo_missile_frame = get_crop(full_frame, *self.crops["AMMO_MISSILE"][:4]) if "AMMO_MISSILE" in self.crops else None
-                t1 = time.time()
-
-                # Submit all tasks to the thread pool for parallel processing.
-                # Numpy arrays are passed by reference — no serialization needed.
-                respawn_future = executor.submit(_process_respawn_region, respawn_frame)
-                incoming_future = executor.submit(_process_incoming_region, incoming_frame)
-                health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
-                ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame) if ammo_flares_frame is not None else None
-                ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame) if ammo_missile_frame is not None else None
-                t2 = time.time()
-
-                # Wait for respawn result first — update its cache immediately so the
-                # main loop can react without waiting for the (often slower) incoming OCR.
-                respawn_detected, respawn_ocr_time, respawn_text = respawn_future.result(timeout=120)
-
-                if respawn_detected:
-                    logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
-                    self._game_end_b = False
-                    self._game_lobby = False
-
-                respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
-                with self._ocr_cache_lock:
-                    self._ocr_cache['result'] = respawn_result
-                    self._ocr_cache['timestamp'] = current_time
-
-                # Now wait for incoming — its result is independent of respawn.
-                incoming_detected, incoming_ocr_time, variant_name, incoming_text, incoming_raw = incoming_future.result(timeout=120)
-                t3 = time.time()
-
-                if incoming_detected:
-                    logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
-                    self._game_end_b = False
-                    self._game_lobby = False
-                elif incoming_raw:
-                    logger.debug("Analyzer: No match in INCOMING region — raw OCR: %s", ", ".join(incoming_raw))
+                state = self.game_state
+                # Only process GAME_BATTLE crops in GAME_BATTLE or GAME_END_B
+                if state not in (GameState.GAME_BATTLE, GameState.GAME_END_B):
+                    logger.debug(f"Skipping GAME_BATTLE crop OCR in {state.name} state")
+                    time.sleep(0.2)
                 else:
-                    logger.debug("Analyzer: No text detected in INCOMING region")
+                    # Extract respawn, incoming, health, and ammo crops (click_to has its own thread)
+                    respawn_frame = get_crop(full_frame, *self.crops["respawn"][:4])
+                    incoming_frame = get_crop(full_frame, *self.crops["incoming"][:4])
+                    health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4]) if "HEALTH" in self.crops else None
+                    ammo_flares_frame = get_crop(full_frame, *self.crops["AMMO_FLARES"][:4]) if "AMMO_FLARES" in self.crops else None
+                    ammo_missile_frame = get_crop(full_frame, *self.crops["AMMO_MISSILE"][:4]) if "AMMO_MISSILE" in self.crops else None
+                    t1 = time.time()
 
-                incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
-                with self._incoming_cache_lock:
-                    self._incoming_cache['result'] = incoming_result
-                    self._incoming_cache['timestamp'] = current_time
-                if incoming_detected:
-                    self.incoming_event.set()
+                    # Submit all tasks to the thread pool for parallel processing.
+                    # Numpy arrays are passed by reference — no serialization needed.
+                    respawn_future = executor.submit(_process_respawn_region, respawn_frame)
+                    incoming_future = executor.submit(_process_incoming_region, incoming_frame)
+                    health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
+                    ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame) if ammo_flares_frame is not None else None
+                    ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame) if ammo_missile_frame is not None else None
+                    t2 = time.time()
 
-                # Wait for health result and update sub-state.
-                health_ocr_time = 0.0
-                if health_future is not None:
-                    health_value, health_ocr_time = health_future.result(timeout=120)
-                    if health_value is not None:
-                        # Digits found — reset no-digits timer and update state.
-                        self._health_no_digits_since = 0.0
-                        alive = health_value >= 1
-                        with self._health_lock:
-                            prev_alive = self._game_battle_alive
-                            self._health = health_value
-                            self._game_battle_alive = alive
-                        logger.info("Health: %d | alive=%s", health_value, alive)
-                        # Signal False → True transition for immediate mission restart.
-                        if alive and not prev_alive:
-                            logger.info("Analyzer: health alive transition False→True")
-                            self.alive_event.set()
+                    # Wait for respawn result first — update its cache immediately so the
+                    # main loop can react without waiting for the (often slower) incoming OCR.
+                    respawn_detected, respawn_ocr_time, respawn_text = respawn_future.result(timeout=120)
+
+                    if respawn_detected:
+                        logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
+                        self._game_end_b = False
+                        self._game_lobby = False
+
+                    respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
+                    with self._ocr_cache_lock:
+                        self._ocr_cache['result'] = respawn_result
+                        self._ocr_cache['timestamp'] = current_time
+
+                    # Now wait for incoming — its result is independent of respawn.
+                    incoming_detected, incoming_ocr_time, variant_name, incoming_text, incoming_raw = incoming_future.result(timeout=120)
+                    t3 = time.time()
+
+                    if incoming_detected:
+                        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
+                        self._game_end_b = False
+                        self._game_lobby = False
+                    elif incoming_raw:
+                        logger.debug("Analyzer: No match in INCOMING region — raw OCR: %s", ", ".join(incoming_raw))
                     else:
-                        # No digits — only clear alive flag after 3 s of consecutive misses.
-                        now_t = time.time()
-                        if self._health_no_digits_since == 0.0:
-                            self._health_no_digits_since = now_t
-                            logger.debug("Analyzer: Health OCR returned no digits (grace timer started)")
-                        elif now_t - self._health_no_digits_since >= 3.0:
+                        logger.debug("Analyzer: No text detected in INCOMING region")
+
+                    incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
+                    with self._incoming_cache_lock:
+                        self._incoming_cache['result'] = incoming_result
+                        self._incoming_cache['timestamp'] = current_time
+                    if incoming_detected:
+                        self.incoming_event.set()
+
+                    # Wait for health result and update sub-state.
+                    health_ocr_time = 0.0
+                    if health_future is not None:
+                        health_value, health_ocr_time = health_future.result(timeout=120)
+                        if health_value is not None:
+                            # Digits found — reset no-digits timer and update state.
+                            self._health_no_digits_since = 0.0
+                            alive = health_value >= 1
                             with self._health_lock:
-                                self._game_battle_alive = False
-                            logger.debug(
-                                "Analyzer: Health OCR no digits for %.1fs → game_battle_alive=False",
-                                now_t - self._health_no_digits_since)
+                                prev_alive = self._game_battle_alive
+                                self._health = health_value
+                                self._game_battle_alive = alive
+                            logger.info("Health: %d | alive=%s", health_value, alive)
+                            # Signal False → True transition for immediate mission restart.
+                            if alive and not prev_alive:
+                                logger.info("Analyzer: health alive transition False→True")
+                                self.alive_event.set()
                         else:
-                            logger.debug(
-                                "Analyzer: Health OCR no digits (%.1fs elapsed, 3s threshold)",
-                                now_t - self._health_no_digits_since)
-                # Resolve ammo futures and fire events.
-                ammo_flares_ocr_time = 0.0
-                ammo_missile_ocr_time = 0.0
-                if ammo_flares_future is not None:
-                    flares_value, ammo_flares_ocr_time = ammo_flares_future.result(timeout=120)
-                    if flares_value is not None:
-                        with self._ammo_lock:
-                            self._ammo_flares = flares_value
-                        logger.info("Ammo flares: %d", flares_value)
-                        if flares_value == 2:
-                            self.low_flares_event.set()
-                if ammo_missile_future is not None:
-                    missile_value, ammo_missile_ocr_time = ammo_missile_future.result(timeout=120)
-                    if missile_value is not None:
-                        with self._ammo_lock:
-                            self._ammo_missiles = missile_value
-                        logger.info("Ammo missiles: %d", missile_value)
-                        if missile_value == 0:
-                            self.no_missiles_event.set()
+                            # No digits — only clear alive flag after 3 s of consecutive misses.
+                            now_t = time.time()
+                            if self._health_no_digits_since == 0.0:
+                                self._health_no_digits_since = now_t
+                                logger.debug("Analyzer: Health OCR returned no digits (grace timer started)")
+                            elif now_t - self._health_no_digits_since >= 3.0:
+                                with self._health_lock:
+                                    self._game_battle_alive = False
+                                logger.debug(
+                                    "Analyzer: Health OCR no digits for %.1fs → game_battle_alive=False",
+                                    now_t - self._health_no_digits_since)
+                            else:
+                                logger.debug(
+                                    "Analyzer: Health OCR no digits (%.1fs elapsed, 3s threshold)",
+                                    now_t - self._health_no_digits_since)
+                    # Resolve ammo futures and fire events.
+                    ammo_flares_ocr_time = 0.0
+                    ammo_missile_ocr_time = 0.0
+                    if ammo_flares_future is not None:
+                        flares_value, ammo_flares_ocr_time = ammo_flares_future.result(timeout=120)
+                        if flares_value is not None:
+                            with self._ammo_lock:
+                                self._ammo_flares = flares_value
+                            logger.info("Ammo flares: %d", flares_value)
+                            if flares_value == 2:
+                                self.low_flares_event.set()
+                    if ammo_missile_future is not None:
+                        missile_value, ammo_missile_ocr_time = ammo_missile_future.result(timeout=120)
+                        if missile_value is not None:
+                            with self._ammo_lock:
+                                self._ammo_missiles = missile_value
+                            logger.info("Ammo missiles: %d", missile_value)
+                            if missile_value == 0:
+                                self.no_missiles_event.set()
 
-                t4 = time.time()
+                    t4 = time.time()
 
-                # Log timing
-                logger.debug(
-                    "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
-                    "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | "
-                    "Flares OCR: %.2fs | Missiles OCR: %.2fs | Total: %.2fs",
-                    t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, health_ocr_time,
-                    ammo_flares_ocr_time, ammo_missile_ocr_time, t4-t0
-                )
+                    # Log timing
+                    logger.debug(
+                        "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
+                        "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | "
+                        "Flares OCR: %.2fs | Missiles OCR: %.2fs | Total: %.2fs",
+                        t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, health_ocr_time,
+                        ammo_flares_ocr_time, ammo_missile_ocr_time, t4-t0
+                    )
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
 
@@ -871,7 +919,12 @@ class GameStateAnalyzer:
                     self._click_to_cache['result'] = result
                     self._click_to_cache['timestamp'] = time.time()
                 if click_to_detected:
+                    # Enter GAME_END_B state and clear other state flags
                     self._game_end_b = True
+                    self._game_lobby = False
+                    self._game_waiting = False
+                    self._game_starting = False
+                    self._game_starting_stalled = False
                     logger.debug("Analyzer: detected 'Click to' text (matched: '%s') → GAME_END_B", click_to_text)
             except RuntimeError:
                 return  # executor shut down — exit the loop cleanly
@@ -905,16 +958,16 @@ class GameStateAnalyzer:
         logger.debug("OCR caches reset")
 
     def detect_enemy_red(self, frame) -> bool:
-        """Return True if the ENEMY_AHEAD crop contains red pixels (enemy marker visible).
+        """Return True if the ENEMY_CLOSE_BY crop contains red pixels (enemy marker visible).
 
         Uses a pure HSV colour mask — no OCR, runs synchronously on the calling thread.
         Red wraps in HSV; the primary range [0–10] from enemy_hsv config is checked, plus
         the wrap-around range [170–180] is always included.
         """
-        if "ENEMY_AHEAD" not in self.crops:
+        if "ENEMY_CLOSE_BY" not in self.crops:
             return False
         try:
-            crop = get_crop(frame, *self.crops["ENEMY_AHEAD"][:4])
+            crop = get_crop(frame, *self.crops["ENEMY_CLOSE_BY"][:4])
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, self._enemy_hsv_lower, self._enemy_hsv_upper)
             # Always include the wrap-around red range (hue 170–180)
@@ -1022,22 +1075,24 @@ class GameStateAnalyzer:
     def scan_region_for_lobby_popups(self, frame):
         """Scan for lobby popup buttons that may be blocking the play button.
 
-        Checks REVEAL_ALL, TAP_HERE_TO_CONTINUE, UNLOCK_CLOSE, FINAL_CONTINUE,
-        INSPECT, INVITED, and CREATION_FAILED crops in order.
+        All popup crops are submitted to the executor in parallel. Only one popup
+        can be visible at a time; whichever is detected is returned.
 
         Args:
             frame: Full BGR frame from screen capture.
 
         Returns:
-            The crop name (str) of the first detected popup, or None if none found.
+            The crop name (str) of the detected popup, or None if none found.
         """
         executor = self.ocr_executor
         if executor is None:
             logger.warning("Analyzer: OCR executor not available for lobby popup scan")
             return None
 
-        popup_crops = ["REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE",
-                       "INSPECT", "INVITED", "CREATION_FAILED"]
+        popup_crops = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "TAP_HERE_TO_CONTINUE",
+                       "UNLOCK_CLOSE", "FINAL_CONTINUE", "INSPECT", "event_refresh"]
+
+        futures = {}
         for crop_name in popup_crops:
             if crop_name not in self.crops:
                 logger.debug("Analyzer: crop '%s' not in config — skipping popup check", crop_name)
@@ -1045,7 +1100,13 @@ class GameStateAnalyzer:
             try:
                 crop = self.crops[crop_name]
                 region_frame = get_crop(frame, *crop[:4])
-                detected, _, text = executor.submit(_process_text_region, region_frame, crop.text or []).result(timeout=30)
+                futures[crop_name] = executor.submit(_process_text_region, region_frame, crop.text or [])
+            except Exception as e:
+                logger.warning("Analyzer: lobby popup submit for '%s' failed: %s", crop_name, e)
+
+        for crop_name, future in futures.items():
+            try:
+                detected, _, text = future.result(timeout=30)
                 if detected:
                     logger.info("Analyzer: lobby popup '%s' detected (text='%s')", crop_name, text)
                     return crop_name
