@@ -35,6 +35,11 @@ Press M
 | Game state machine (LOBBY / WAITING / STARTING / BATTLE / END) | ✅ Working |
 | Game-starting stall detection + recovery | ✅ Working |
 | Padlock camera loop + weapon fire loop | ✅ Working |
+| Search and destroy loop (auto-padlock + auto-fire while in battle) | ✅ Working |
+| Ammo detection — missiles and flares remaining | ✅ Working |
+| Enemy proximity detection (ENEMY_CLOSE_BY region) | ✅ Working |
+| Eject and dive on missiles empty (End key cancels) | ✅ Working |
+| OCR scanning suspended in GAME_LOBBY (no wasted CPU) | ✅ Working |
 | CPU-only OCR (no GPU required) | ✅ Working |
 
 ---
@@ -136,7 +141,8 @@ See [Job Aid 006 — Calibrate Crop Regions](docs/job-aids/006-calibrate-crop-re
 | 2 | Named crop regions + offline calibration tooling | ✅ Done |
 | 2 | Lobby popup handling (Reveal All, Tap Here, Unlock Close, Inspect, Invited, Creation Failed) | ✅ Done |
 | 2 | Health detection + mission restart on death | ✅ Done |
-| 2 (next) | Ammo and enemy distance detection | Planned |
+| 2 | Ammo and enemy proximity detection | ✅ Done |
+| 2 | Search and destroy loop (auto-padlock + auto-fire) | ✅ Done |
 | 3 | Behaviour trees — adaptive tactics based on game state | Planned |
 | 4 | Reinforcement learning — bot learns from experience | Future |
 | 5-6 | Deep RL + vision, multi-agent swarm tactics | Research |
