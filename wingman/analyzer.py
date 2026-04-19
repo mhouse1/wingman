@@ -536,11 +536,8 @@ class GameStateAnalyzer:
     @property
     def game_state(self) -> GameState:
         """Current high-level game state."""
-        # If health is alive (>=1), always return GAME_BATTLE
-        with self._health_lock:
-            if self._health is not None and self._health >= 1:
-                return GameState.GAME_BATTLE
-
+        # Explicit state flags take precedence over cached health — e.g. GAME_LOBBY
+        # must win even when _health still holds a positive value from the last battle.
         if self._game_starting:
             return GameState.GAME_STARTING
         if self._game_starting_stalled:
@@ -551,6 +548,10 @@ class GameStateAnalyzer:
             return GameState.GAME_LOBBY
         if self._game_end_b:
             return GameState.GAME_END_B
+        # Health shortcut: skip the remaining property checks when we know we're alive.
+        with self._health_lock:
+            if self._health is not None and self._health >= 1:
+                return GameState.GAME_BATTLE
         return GameState.GAME_BATTLE
 
     @property

@@ -99,6 +99,9 @@ class Controller:
         self._sdl_stop: threading.Event | None = None
         self._sdl_padlock_thread: threading.Thread | None = None
         self._sdl_weapon_thread: threading.Thread | None = None
+
+        # Eject-and-dive cancellation: set by End key to abort the dive thread early
+        self._eject_stop = threading.Event()
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
@@ -140,6 +143,7 @@ class Controller:
                 def cancel_mission_hotkey(e):
                     logger.info("Controller: '%s' key pressed - cancelling mission and disabling auto-respawn restart", CANCEL_MISSION_KEY)
                     self._auto_respawn_restart = False
+                    self._eject_stop.set()
                     self.cancel_mission()
                 keyboard_module.on_press_key(CANCEL_MISSION_KEY, cancel_mission_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to cancel mission", CANCEL_MISSION_KEY)
@@ -387,6 +391,12 @@ class Controller:
                     elif now - self._lobby_play_not_visible_since >= 5.0:
                         # No popup blocking and play button absent for 5+ seconds — OCR may
                         # be failing to detect it.  Force-click the play button crop directly.
+                        # Re-check state: OCR took time and state may have advanced already.
+                        if self._analyzer._game_starting or self._analyzer._game_waiting:
+                            logger.debug(
+                                "Controller: start_auto_mission - state advanced to %s during OCR; skipping force-click",
+                                self._analyzer.game_state.name)
+                            return
                         crop = next((c for c in ("PLAY", "READY") if c in self._crops), None)
                         if crop:
                             logger.info(
@@ -549,6 +559,7 @@ class Controller:
         """
         logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
+        self._eject_stop.clear()
         # Force health state to dead so the False→True transition fires when
         # health is detected again after respawn, triggering mission restart.
         if self._analyzer is not None:
@@ -572,8 +583,11 @@ class Controller:
                 keyboard_module.press(AFTERBURNER_KEY)
                 logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
 
-                # Hold nose-down for 10s then release; afterburner stays on
-                time.sleep(10.0)
+                # Hold nose-down for 10s then release; afterburner stays on.
+                # Check _eject_stop every 0.25s so End key cancels promptly.
+                if self._eject_stop.wait(timeout=10.0):
+                    logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
+                    return
                 try:
                     keyboard_module.release(NOSE_DOWN_KEY)
                 except Exception:
@@ -583,6 +597,9 @@ class Controller:
                 # Hold afterburner until respawn detected (max 120s)
                 deadline = time.time() + 120.0
                 while time.time() < deadline:
+                    if self._eject_stop.is_set():
+                        logger.info("Controller: eject_and_dive — cancelled by End key")
+                        return
                     if _is_respawning():
                         logger.info("Controller: eject_and_dive — respawn detected, releasing afterburner")
                         break
@@ -608,7 +625,9 @@ class Controller:
         Loops stop when either _sdl_stop is set (explicit stop) or
         _mission_cancel is set (any cancellation signal), whichever comes first.
         """
-        if self._sdl_stop is not None and not self._sdl_stop.is_set():
+        padlock_alive = (self._sdl_padlock_thread is not None
+                         and self._sdl_padlock_thread.is_alive())
+        if self._sdl_stop is not None and not self._sdl_stop.is_set() and padlock_alive:
             logger.debug("Controller: search_and_destroy_loop already running")
             return
 
