@@ -59,14 +59,29 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="wingman/config.yaml")
-    parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    parser.add_argument("--log-level", default="INFO", help="Console log level (DEBUG, INFO, WARNING, ERROR)")
+    parser.add_argument("--log-file", default=None, metavar="PATH",
+                        help="Write DEBUG-level logs to this file (console keeps --log-level)")
     args = parser.parse_args()
 
-    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    handler = logging.StreamHandler()
-    handler.stream.reconfigure(encoding="utf-8", errors="replace")
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logging.basicConfig(level=log_level, handlers=[handler])
+    console_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    console_handler = logging.StreamHandler()
+    console_handler.stream.reconfigure(encoding="utf-8", errors="replace")
+    console_handler.setFormatter(fmt)
+    console_handler.setLevel(console_level)
+
+    handlers = [console_handler]
+
+    if args.log_file:
+        file_handler = logging.FileHandler(args.log_file, encoding="utf-8")
+        file_handler.setFormatter(fmt)
+        file_handler.setLevel(logging.DEBUG)
+        handlers.append(file_handler)
+
+    root_level = logging.DEBUG if args.log_file else console_level
+    logging.basicConfig(level=root_level, handlers=handlers)
     logger = logging.getLogger("wingman")
 
     cfg = load_config(args.config)

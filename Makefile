@@ -17,9 +17,10 @@
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
-#   make r           -> run wingman.bat
+#   make r           -> run wingman (INFO console only)
+#   make rd          -> run wingman with DEBUG log written to wingman.log
 
-.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash r calibrate calibrate-crop add-crops
+.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart clean wrelease s d c t f n p squash r rd calibrate calibrate-crop add-crops
 
 # Generate HTML report for automated levels test
 test:
@@ -114,14 +115,18 @@ n:
 p:
 	git add .
 	git commit -am .
+	git push
 
 squash:
 	git rebase -i --autosquash origin/main
 
 
 
- r:
+r:
 	wingman.bat
+
+rd:
+	wingman.bat --log-file wingman.log
 
 # Two commands are available for calibrating crop regions:
 #
