@@ -25,15 +25,27 @@ The perception layer is solid. The problem is what happens with these signals. D
 
 The result: the bot has one tactic (J20 attack sequence) that it runs regardless of game state, interrupting only on death or eject conditions. Adding a new tactic (e.g. "evade when health is low") means modifying three files and reasoning about shared state across threads.
 
-**Phase 3 goal:** Replace the scattered if/else logic with a structured `BehaviorTree` that selects the correct tactic each tick based on the full perceived state.
+Two tactics already require persistent timers that survive across ticks:
+
+- **DISENGAGE** — only triggers after enemy absent for 30s (the `enemy_last_seen_ts` variable in `main.py`)
+- **EVADE** — once entered, should not flip back to ATTACK the moment health recovers slightly (needs a hold timer)
+
+Without a framework, these timers accumulate as additional `_xxx_ts` variables in `main.py` — the exact pattern Phase 3 is trying to eliminate.
+
+**Phase 3 goal:** Replace the scattered if/else logic with a structured behavior tree using `py-trees`, adopted now so the scaffolding is in place for Phase 4 RL.
 
 ---
 
 ## Decision
 
-Implement a lightweight **behavior tree (BT)** as the tactical decision layer between `GameStateAnalyzer` (perception) and `Controller` (action execution).
+Adopt **`py-trees`** as the behavior tree framework in Phase 3.
 
-The BT runs on each perception tick (every ~1s) and selects one of a small set of predefined **leaf tactics**. Each tactic is a `Controller` method. The BT does not execute the tactic itself — it decides which tactic *should* be running, and signals the `Controller` to start or stop accordingly.
+Reasons to adopt now rather than defer to Phase 4:
+
+1. **Cooldown/hold decorators needed immediately.** The DISENGAGE 30s timer and EVADE hold are `py-trees` `Cooldown` and `EternalGuard` decorators — without the framework these go back into `main.py` as ad-hoc timestamps.
+2. **No migration cost later.** Controller tactic wrappers written as py-trees `Action` nodes in Phase 3 require no rewrite for Phase 4. Deferring means writing them twice.
+3. **Blackboard available from day one.** Phase 4 RL will need shared state between nodes (e.g. reward accumulation, episode context). The py-trees blackboard can carry this; adding it later requires retrofitting every node.
+4. **Glue code is small and written once.** The only Phase 3 cost unique to py-trees (vs. a hand-rolled selector) is the thread-liveness → `RUNNING/SUCCESS/FAILURE` wrapper — approximately 20 lines, written once, reused by every leaf.
 
 ---
 
@@ -45,19 +57,26 @@ The BT runs on each perception tick (every ~1s) and selects one of a small set o
 ┌─────────────────────────────────┐
 │  GameStateAnalyzer (perception) │  OCR, pixel reads, state flags
 └────────────────┬────────────────┘
-                 │  AnalyzerSnapshot (read-only struct)
+                 │  AnalyzerSnapshot (frozen dataclass, taken once per tick)
 ┌────────────────▼────────────────┐
-│  BehaviorTree (decision)        │  tick() → TacticId
+│  py-trees BehaviorTree          │  tick() → RUNNING / SUCCESS / FAILURE
+│  (Selector root)                │
+│  ├─ IdleCondition               │
+│  ├─ RespawnWaitAction           │
+│  ├─ EjectAction                 │
+│  ├─ Cooldown(EvadeAction, 10s)  │
+│  ├─ Cooldown(DisengageAction)   │
+│  └─ AttackAction                │
 └────────────────┬────────────────┘
-                 │  tactic selection
+                 │  start / stop tactic
 ┌────────────────▼────────────────┐
-│  Controller (action)            │  start/stop tactic methods
+│  Controller (action)            │  mission_j20, eject_and_dive, etc.
 └─────────────────────────────────┘
 ```
 
-The BT is **read-only** with respect to game state. It reads an `AnalyzerSnapshot` (a frozen dataclass) and returns a `TacticId`. The `Controller` is the only component that presses keys or moves the mouse.
-
 ### AnalyzerSnapshot
+
+Taken once at the start of each tick and written to the py-trees blackboard. All nodes read from the blackboard — no node holds a reference to the live `Analyzer`.
 
 ```python
 @dataclass(frozen=True)
@@ -72,48 +91,68 @@ class AnalyzerSnapshot:
     game_state: GameState
 ```
 
-Snapshot is taken once per tick. The BT sees a consistent view of state — no risk of flags changing mid-evaluation.
+### Node types used
 
-### Tactic IDs
+| py-trees type | Used for |
+|---------------|----------|
+| `py_trees.composites.Selector` | Root — first SUCCESS child wins |
+| `py_trees.behaviour.Behaviour` | Each tactic leaf (Idle, Attack, Eject, …) |
+| `py_trees.decorators.Cooldown` | Prevent EVADE flapping; DISENGAGE hold |
+| `py_trees.blackboard.Blackboard` | Share `AnalyzerSnapshot` across nodes |
+
+### Thread-liveness glue
+
+Controller tactics run in background threads. py-trees nodes return synchronous `RUNNING/SUCCESS/FAILURE`. The bridge:
 
 ```python
-class Tactic(enum.Enum):
-    IDLE          = "idle"           # do nothing (lobby, waiting)
-    ATTACK        = "attack"         # standard J20 sequence + S&D loop
-    EVADE         = "evade"          # evasive maneuver (health critical)
-    EJECT         = "eject"          # eject_and_dive (no missiles)
-    DISENGAGE     = "disengage"      # roll right away from area (enemy gone 30s)
-    RESPAWN_WAIT  = "respawn_wait"   # wait for respawn signal
+class TacticAction(py_trees.behaviour.Behaviour):
+    def __init__(self, name, start_fn, is_running_fn):
+        super().__init__(name)
+        self._start_fn = start_fn
+        self._is_running_fn = is_running_fn
+
+    def update(self):
+        snapshot = self.blackboard.get("snapshot")
+        if not self._should_run(snapshot):
+            return py_trees.common.Status.FAILURE
+        if not self._is_running_fn():
+            self._start_fn()
+        return py_trees.common.Status.RUNNING
+
+    def terminate(self, new_status):
+        if new_status == py_trees.common.Status.INVALID:
+            ctrl.cancel_mission()  # BT switched away — stop this tactic
 ```
+
+`is_running_fn` checks thread liveness (`thread.is_alive()`). `start_fn` calls the existing `Controller` method unchanged.
 
 ### Behavior tree structure
 
-Evaluated top-to-bottom; first matching condition wins.
-
 ```
-Root (Selector)
-├── IDLE          — if game_state not GAME_BATTLE
-├── RESPAWN_WAIT  — if is_respawning
-├── EJECT         — if missiles == 0
-├── EVADE         — if health is not None and health < 25  (future: threshold TBD)
-├── DISENGAGE     — if enemy_absent_seconds >= 30 and no mission running
-└── ATTACK        — default (healthy, armed, enemy present or unknown)
+Selector (root)
+├── Idle          — SUCCESS if game_state != GAME_BATTLE  (no action)
+├── RespawnWait   — SUCCESS if is_respawning              (hold, wait for alive event)
+├── Eject         — SUCCESS if missiles == 0              (eject_and_dive)
+├── Cooldown(10s)
+│   └── Evade     — SUCCESS if health < EVADE_THRESHOLD   (evasive maneuver; threshold TBD)
+├── Cooldown(30s)
+│   └── Disengage — SUCCESS if enemy_absent_seconds >= 30 (disengage_roll_right)
+└── Attack        — always SUCCESS                        (mission_j20 + S&D loop)
 ```
 
-This is a pure **priority selector** — no memory, no partial trees, no accumulators. Each tick is evaluated independently. This makes it easy to reason about: given any snapshot, you can determine exactly which tactic will be selected by reading down the list.
+Priority order: top node wins. `Cooldown` wraps EVADE and DISENGAGE so that once selected, the tactic holds for its minimum duration before the selector re-evaluates. ATTACK is the unconditional fallback.
 
 ### Tick integration
 
-The BT tick runs in the main loop after perception events are processed:
-
 ```python
-# main loop (after OCR event handlers)
+# main loop — after OCR event handlers
 snapshot = analyzer.snapshot()
-tactic = behavior_tree.tick(snapshot)
-ctrl.set_tactic(tactic)
+blackboard = py_trees.blackboard.Blackboard()
+blackboard.set("snapshot", snapshot)
+behavior_tree.tick()
 ```
 
-`Controller.set_tactic(tactic)` compares the new tactic to the currently-running tactic. If unchanged, it's a no-op. If different, it stops the current tactic (cancel_mission / stop_sdl_loop) and starts the new one.
+Immediate reactive handlers (`_deploy_flares_on_new_incoming`, `_handle_alive_transition`) remain outside the BT — they need sub-100ms response, faster than the ~1s OCR tick rate.
 
 ---
 
@@ -121,78 +160,77 @@ ctrl.set_tactic(tactic)
 
 ### What stays
 
-- `GameStateAnalyzer` — unchanged, still produces events and state flags
-- `Controller` tactic methods — `mission_j20`, `eject_and_dive`, `disengage_roll_right`, `start_search_and_destroy_loop` — become BT leaf actions, otherwise unchanged
-- Event handlers in `main.py` — `_handle_alive_transition`, `_deploy_flares_on_new_incoming` — stay as immediate reactive handlers (they bypass the BT because they need sub-second response)
+- `GameStateAnalyzer` — unchanged
+- `Controller` tactic methods (`mission_j20`, `eject_and_dive`, `disengage_roll_right`) — become `start_fn` targets in `TacticAction` wrappers, otherwise unchanged
+- `_deploy_flares_on_new_incoming`, `_handle_alive_transition` — stay as direct event handlers
 
 ### What changes
 
 | Current | Phase 3 |
 |---------|---------|
-| `_handle_no_missiles()` in `main.py` calls `eject_and_dive()` directly | BT selects `EJECT` tactic; `Controller.set_tactic` calls `eject_and_dive()` |
-| `mission_j20()` hardcodes linear sequence | `ATTACK` tactic starts `mission_j20()`; BT can switch away mid-mission |
-| Enemy no-detection timer in `main.py` | `enemy_absent_seconds` in snapshot; `DISENGAGE` leaf in BT |
-| No low-health behaviour | `EVADE` leaf added when health perception threshold is calibrated |
+| `_handle_no_missiles()` calls `eject_and_dive()` directly | `EjectAction` node calls it; `_handle_no_missiles` removed |
+| Enemy 30s timer as `enemy_last_seen_ts` in main loop | `enemy_absent_seconds` in snapshot; `Cooldown(DisengageAction)` node |
+| `mission_j20()` linear sequence, cancel-only branching | `AttackAction` leaf starts it; BT switches away cleanly via `terminate()` |
+| No EVADE behaviour | `Cooldown(EvadeAction)` node, threshold stubbed as ATTACK until calibrated |
+| `_handle_low_flares()` logs warning | Low flares stays a log; Phase 4 can add a `LowAmmoAction` leaf |
 
 ### What is deferred to Phase 4
 
-- Learning which tactic performs best (RL)
-- Per-enemy-type tactic variation
-- Formation awareness
-- Altitude/speed as decision inputs
+- RL policy replacing or shadowing individual leaf nodes
+- Per-enemy-type subtrees
+- `py_trees.decorators.Retry` on failed attacks
+- Formation and altitude as blackboard inputs
 
 ---
 
 ## Alternatives considered
 
-### 1. Continue ad-hoc if/else in main loop
+### 1. Hand-rolled flat priority selector (original plan)
 
-Already the current approach. Works for simple cases, but adding Phase 3 tactics means adding more interleaved flags and timers to `main.py`. The 30s enemy-absent disengage check is a preview of how this scales: it required a `enemy_last_seen_ts` variable threaded through the loop, a check, and a controller call — all in the main loop body. A second and third tactic follow the same pattern and the loop becomes unmanageable.
+30-line class, no dependency. Adequate for a memoryless selector. Rejected because DISENGAGE and EVADE require persistent timers — without `py-trees` decorators those timers return to `main.py` as ad-hoc timestamp variables, which is the problem Phase 3 exists to solve. Also requires a full rewrite when Phase 4 adopts py-trees anyway.
 
-**Rejected:** Does not scale.
+**Rejected:** Defers the migration cost without eliminating it; reintroduces timer scatter.
 
 ### 2. Finite State Machine (FSM)
 
-An FSM with states `ATTACKING`, `EVADING`, `EJECTING`, etc. and explicit transitions. Appropriate when transitions have side effects or guards that depend on *how* a state was entered (history). For Wingman, tactic selection is purely a function of current snapshot — no history needed. An FSM adds transition declarations without adding clarity.
+Explicit states with named transitions. Appropriate when transition guards depend on history. Tactic selection in Wingman is a function of the current snapshot only — the FSM's transition table adds declarations without adding clarity over a priority selector.
 
-**Rejected:** Unnecessary complexity for a memoryless selector.
+**Rejected:** Unnecessary complexity for a priority-based selector.
 
-### 3. Full py-trees library
+### 3. Skip to Phase 4 RL directly
 
-`py-trees` provides composites, decorators, blackboard, and tick lifecycle. It would be a natural fit for Phase 4 when tactics become sub-trees with memory. For Phase 3 the tree is a flat priority selector — implementing it with `py-trees` adds a dependency and learning curve for what is currently a 30-line class.
+RL requires a training loop, reward function, and policy network, plus thousands of missions to converge. The BT provides the baseline policy that RL can use for imitation learning and validates that perception signals are reliable before committing to RL infrastructure.
 
-**Deferred to Phase 4:** Adopt `py-trees` when the tree grows beyond a flat selector and needs decorators (cooldowns, retry) or blackboard sharing between nodes.
-
-### 4. Skip behavior trees, go straight to Phase 4 RL
-
-Phase 4 RL needs a training environment, a reward function, and a policy network. It also needs all the Phase 2 perception signals to be reliable — which they now are. However, RL requires 1000s of training missions. A behavior tree serves as a **strong baseline policy** that can be used to bootstrap RL (imitation learning) and also validates that the perception signals are actionable before committing to RL infrastructure.
-
-**Rejected as Phase 3 skip:** BT is a prerequisite for RL, not an alternative.
+**Rejected:** BT is a prerequisite, not an alternative.
 
 ---
 
 ## Implementation plan
 
-1. **`wingman/behavior_tree.py`** — `AnalyzerSnapshot`, `Tactic` enum, `BehaviorTree.tick()`
-2. **`wingman/controller.py`** — `set_tactic(tactic: Tactic)` — stops current, starts new
-3. **`wingman/main.py`** — replace per-tactic event handlers with single `behavior_tree.tick()` call; keep immediate reactive handlers (`_deploy_flares_on_new_incoming`, `_handle_alive_transition`)
-4. **`tests/test_behavior_tree.py`** — unit tests: given snapshot X → assert tactic Y (no Controller, no OCR, pure logic)
+1. **`pyproject.toml`** — add `py-trees` dependency
+2. **`wingman/behavior_tree.py`** — `AnalyzerSnapshot`, `TacticAction` base class, full tree construction
+3. **`wingman/controller.py`** — remove `set_tactic()`; `TacticAction.terminate()` calls `cancel_mission()` directly
+4. **`wingman/main.py`** — replace per-tactic handlers with `blackboard.set` + `behavior_tree.tick()`; keep reactive handlers
+5. **`tests/test_behavior_tree.py`** — unit tests: given snapshot X → assert node status Y (no Controller threads, no OCR)
 
-The EVADE tactic is stubbed as ATTACK until a health threshold is calibrated on real gameplay data. `Tactic.EVADE` is defined in the enum from day one so the BT structure is complete even before the threshold is known.
+`Tactic.EVADE` threshold is set to `None` (disabled) until calibrated on real gameplay data. The node exists in the tree; it simply returns `FAILURE` immediately when threshold is unset.
 
 ---
 
 ## Consequences
 
 **Positive:**
-- Adding a new tactic is one new `Tactic` enum value + one new leaf node + one `Controller` method — isolated, testable
-- BT is unit-testable without mocking OCR or Controller; snapshot is a plain frozen dataclass
-- Tactic selection logic is in one place and readable top-to-bottom
-- Enables Phase 4 RL: the BT becomes the baseline policy; RL can shadow or replace individual leaves
+- Timer/cooldown logic lives in py-trees decorators, not in `main.py` variables
+- Adding a new tactic = one `TacticAction` subclass + one leaf in the tree
+- Unit-testable at the node level with no threading or OCR
+- Phase 4 RL can replace any leaf with a learned policy node; no structural change needed
+- Blackboard available for Phase 4 reward/episode state from day one
 
 **Negative:**
-- `set_tactic` introduces a new source of `cancel_mission` calls; must be careful not to double-cancel in the same tick as a keyboard hotkey cancel
-- The BT tick rate is bounded by OCR cycle time (~1s); truly reactive behaviour (flares on incoming) must remain as direct event handlers, not BT leaves
+- `py-trees` is a new runtime dependency (~500 lines, pure Python, no native extensions)
+- `RUNNING/SUCCESS/FAILURE` semantics require the thread-liveness glue layer (~20 lines)
+- py-trees tick model is synchronous; care needed that `behavior_tree.tick()` does not block the main loop (it won't — `update()` only checks thread liveness, never waits)
 
 **Neutral:**
-- Existing `mission_j20` and `eject_and_dive` are not rewritten — they become leaf targets. Phase 3 is an architecture layer over existing actions, not a replacement of them.
+- Existing Controller tactic methods are not rewritten — they become `start_fn` arguments
+- Immediate reactive handlers stay outside the BT and are unaffected
