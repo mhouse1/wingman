@@ -154,7 +154,8 @@ def main():
         analyzer.alive_event.clear()
         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
         if (analyzer.game_state == GameState.GAME_BATTLE
-                and not ctrl.is_mission_running()):
+                and not ctrl.is_mission_running()
+                and ctrl._auto_respawn_restart):
             logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
             ctrl.restart_last_mission()
             last_restart_attempt = time.time()
@@ -392,6 +393,7 @@ def main():
                         respawn_cooldown_until = time.time() + 10.0
                         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
                         ctrl._auto_respawn_restart = True  # always restart after respawn regardless of prior cancel
+                        ctrl._eject_stop.set()            # interrupt any in-progress eject_and_dive immediately
                         ctrl.cancel_mission()
                         # Wait for mission lock to release before restart
                         logger.info("Waiting for mission lock to release before restart...")
