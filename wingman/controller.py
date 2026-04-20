@@ -11,6 +11,7 @@ from pathlib import Path
 from mss import mss
 
 from .crop_region import CropCoords, crop_centre, draw_crops
+from .analyzer import GameState
 
 try:
     import keyboard as keyboard_module
@@ -107,6 +108,8 @@ class Controller:
         if keyboard_module:
             # Cancel mission if maneuver keys are pressed during GAME_BATTLE
             def maneuver_cancel_hotkey(e):
+                if getattr(e, 'is_injected', False):
+                    return
                 if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
                     logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
                     return
@@ -153,6 +156,8 @@ class Controller:
             # Maneuver keys cancel mission when pressed during GAME_BATTLE (manual takeover)
             try:
                 def maneuver_key_pressed(e):
+                    if getattr(e, 'is_injected', False):
+                        return
                     if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
                         logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
                         return
@@ -177,16 +182,13 @@ class Controller:
                     self._auto_respawn_restart = True
                     if self._analyzer is not None:
                         current_state = self._analyzer.game_state
-                        if str(current_state) != 'GameState.GAME_BATTLE':
+                        if current_state != GameState.GAME_BATTLE:
                             logger.info(
                                 "Controller: '%s' key pressed — forcing GAME_BATTLE (was %s)",
                                 MISSION_J20_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
                             )
-                            self._analyzer._game_starting = False
-                            self._analyzer._game_starting_stalled = False
-                            self._analyzer._game_waiting = False
-                            self._analyzer._game_lobby = False
-                            self._analyzer._game_end_b = False
+                            with self._analyzer._state_lock:
+                                self._analyzer.state = GameState.GAME_BATTLE.name
                         else:
                             logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
                     else:
@@ -287,17 +289,13 @@ class Controller:
                 def auto_mission_key_pressed(_e):
                     if self._analyzer is None:
                         return
-                    if not self._analyzer._game_lobby:
+                    if self._analyzer.game_state != GameState.GAME_LOBBY:
                         current_state = self._analyzer.game_state
                         logger.info(
                             "Controller: '%s' key pressed — forcing GAME_LOBBY (was %s)",
                             AUTO_MISSION_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
                         )
-                        self._analyzer._game_starting = False
-                        self._analyzer._game_starting_stalled = False
-                        self._analyzer._game_waiting = False
-                        self._analyzer._game_end_b = False
-                        self._analyzer._game_lobby = True
+                        self._analyzer._trigger("manual_reset")
                     if self._on_auto_mission_key is not None:
                         self._on_auto_mission_key()
                     crop = next(
@@ -308,8 +306,7 @@ class Controller:
                         logger.warning("Controller: '%s' pressed but no PLAY/READY crop configured", AUTO_MISSION_KEY)
                         return
                     logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s", AUTO_MISSION_KEY, crop)
-                    self._analyzer._game_lobby = False
-                    self._analyzer._game_waiting = True
+                    self._analyzer._trigger("play_clicked")
                     self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
@@ -328,7 +325,7 @@ class Controller:
         """
         if self._analyzer is None:
             return
-        if not force and (self._analyzer._game_starting or self._analyzer._game_waiting):
+        if not force and self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
             logger.debug("Controller: start_auto_mission called but already in GAME_STARTING/GAME_WAITING - ignoring")
             return
 
@@ -338,7 +335,7 @@ class Controller:
 
             # Guard against stale threads: if state has already advanced past GAME_LOBBY
             # (e.g. another path clicked PLAY while this thread was queued), abort now.
-            if self._analyzer._game_starting or self._analyzer._game_waiting:
+            if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
                 logger.debug("Controller: start_auto_mission _run - state already GAME_STARTING/GAME_WAITING; aborting stale thread")
                 return
 
@@ -392,7 +389,7 @@ class Controller:
                         # No popup blocking and play button absent for 5+ seconds — OCR may
                         # be failing to detect it.  Force-click the play button crop directly.
                         # Re-check state: OCR took time and state may have advanced already.
-                        if self._analyzer._game_starting or self._analyzer._game_waiting:
+                        if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
                             logger.debug(
                                 "Controller: start_auto_mission - state advanced to %s during OCR; skipping force-click",
                                 self._analyzer.game_state.name)
@@ -403,9 +400,7 @@ class Controller:
                                 "Controller: no popup found and play button absent %.1fs — force-clicking %s",
                                 now - self._lobby_play_not_visible_since, crop)
                             self._lobby_play_not_visible_since = 0.0
-                            self._analyzer._game_lobby = False
-                            self._analyzer._game_end_b = False
-                            self._analyzer._game_waiting = True
+                            self._analyzer._trigger("play_clicked")
                             self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
                             return
                         else:
@@ -417,13 +412,11 @@ class Controller:
             # Play/Ready button visible — reset popup absence timer
             self._lobby_play_not_visible_since = 0.0
             # Re-check state after OCR: another thread may have already clicked play
-            if self._analyzer._game_starting or self._analyzer._game_waiting:
+            if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
                 logger.debug("Controller: start_auto_mission - state already GAME_STARTING/GAME_WAITING after OCR; skipping click")
                 return
             logger.info("Controller: start_auto_mission - clicking %s and entering GAME_WAITING", detected_crop)
-            self._analyzer._game_lobby = False
-            self._analyzer._game_end_b = False
-            self._analyzer._game_waiting = True
+            self._analyzer._trigger("play_clicked")
             self.click_crop(self._crops[detected_crop], block=False, count=1, region_name=detected_crop)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -1013,7 +1006,7 @@ class Controller:
                     logger.info("\033[93m📋 Clicking ready_button at (%d, %d)\033[0m", x_rb, y_rb)
                     _raw_click(x_rb, y_rb)
                     if self._analyzer is not None:
-                        self._analyzer._game_lobby = True
+                        self._analyzer._trigger("manual_reset")
                         logger.info("\033[93m📋 Ready button (region %d) clicked → GAME_LOBBY\033[0m", self._ready_button_region)
             except Exception:
                 logger.exception("Controller: click_grid_region failed")
@@ -1111,11 +1104,6 @@ class Controller:
         self._game_battle_since = time.time()
         if self._analyzer is not None:
             self._analyzer._last_battle_event_ts = time.time()
-            self._analyzer._game_end_b = False
-            self._analyzer._game_lobby = False
-            self._analyzer._game_waiting = False
-            self._analyzer._game_starting = False
-            self._analyzer._game_starting_stalled = False
             logger.info("Controller: mission '%s' started → GAME_BATTLE", mission_name)
 
     def _start_game_starting_loop(self):
@@ -1141,12 +1129,16 @@ class Controller:
             finally:
                 ocr_running.clear()
 
+        def _in_starting():
+            return (self._analyzer is not None
+                    and self._analyzer.game_state == GameState.GAME_STARTING)
+
         def _loop():
             logger.info("Controller: game_starting loop started - pressing '%s' key every 5s until 'Good Luck' detected", MISSION_J20_KEY)
             loop_start = time.time()
-            max_wait = 180  # safety timeout: clear _game_starting if Good Luck never detected
+            max_wait = 180  # safety timeout: GAME_STARTING → GAME_STARTING_STALLED if Good Luck never detected
             try:
-                while self._analyzer is not None and self._analyzer._game_starting:
+                while _in_starting():
                     # Press MISSION_J20_KEY every interval
                     if keyboard_module:
                         keyboard_module.press_and_release(MISSION_J20_KEY)
@@ -1157,31 +1149,31 @@ class Controller:
                         ocr_running.set()
                         threading.Thread(target=_do_ocr_scan, daemon=True).start()
 
-                    # 5-second interruptible wait; breaks early on Good Luck detection
+                    # 5-second interruptible wait; breaks early on Good Luck detection or state change
                     for _ in range(50):  # 50 * 0.1s = 5s
-                        if good_luck_event.is_set() or self._analyzer is None or not self._analyzer._game_starting:
+                        if good_luck_event.is_set() or not _in_starting():
                             break
                         time.sleep(0.1)
 
-                    if not (self._analyzer is not None and self._analyzer._game_starting):
+                    if not _in_starting():
                         return
 
                     if time.time() - loop_start > max_wait:
-                        logger.warning("Controller: game_starting timed out after %ds without 'Good Luck' - entering GAME_STARTING_STALLED", max_wait)
+                        logger.warning("Controller: game_starting timed out after %ds without 'Good Luck'", max_wait)
                         if self._analyzer is not None:
-                            self._analyzer._game_starting = False
-                            self._analyzer._game_starting_stalled = True
+                            self._analyzer._trigger("starting_timeout")
                         return
 
                     if good_luck_event.is_set():
                         good_luck_wait = 13
                         logger.info("\033[92mController: 'Good Luck' detected - waiting %ds before starting '%s' mission\033[0m", good_luck_wait, MISSION_J20_KEY)
                         for _ in range(good_luck_wait * 10):  # N * 0.1s = Ns
-                            if self._analyzer is None or not self._analyzer._game_starting:
+                            if not _in_starting():
                                 return
                             time.sleep(0.1)
-                        if self._analyzer is not None and self._analyzer._game_starting:
+                        if _in_starting():
                             logger.info("Controller: game_starting - launching J20 mission")
+                            self._analyzer._trigger("good_luck_detected")
                             self._set_last_mission("j20")
                             threading.Thread(target=self.mission_j20, daemon=True).start()
                         return

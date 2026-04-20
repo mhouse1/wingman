@@ -50,8 +50,7 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
         count=1,
         region_name=REGION_PLAY_BUTTON,
     )
-    analyzer._game_end_b = False
-    analyzer._game_lobby = True
+    analyzer._trigger("continue_clicked")
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
 
 
@@ -123,6 +122,10 @@ def main():
 
     # Initialize controller with config-driven weapon loop interval and exit event
     ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, crops=analyzer.crops)
+
+    # Wire FSM entry-hook callbacks (ADR 025) — injected after both objects exist
+    analyzer._on_cancel_mission = ctrl.cancel_mission
+    analyzer._on_start_game_starting_loop = ctrl._start_game_starting_loop
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -268,10 +271,7 @@ def main():
                 last_lobby_cancel_scan_ts = time.time()
                 if analyzer.scan_region_for_cancel(frame):
                     logger.info("\033[92m✓ CANCEL detected in GAME_LOBBY — advancing to GAME_STARTING\033[0m")
-                    analyzer._game_lobby = False
-                    analyzer._game_waiting = False
-                    analyzer._game_starting = True
-                    ctrl._start_game_starting_loop()
+                    analyzer._trigger("cancel_detected")  # on_enter_GAME_STARTING fires _start_game_starting_loop
 
             # GAME_LOBBY stall guard: if PLAY button OCR keeps failing for 10+ seconds,
             # bypass OCR and click the PLAY crop directly from the main loop.
@@ -281,13 +281,13 @@ def main():
                     and time.time() - game_lobby_since > 10.0
                     and not ctrl.is_mission_running()):
                 crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
-                if crop:
+                # Re-read live state: start_auto_mission may have already advanced us
+                if crop and analyzer.game_state == GameState.GAME_LOBBY:
                     logger.info(
                         "\033[93m📋 GAME_LOBBY stall (%.1fs) — force-clicking %s\033[0m",
                         time.time() - game_lobby_since, crop)
                     game_lobby_since = time.time()  # reset so we retry every 10s if state persists
-                    analyzer._game_lobby = False
-                    analyzer._game_waiting = True
+                    analyzer._trigger("play_clicked")
                     ctrl.click_crop(analyzer.crops[crop], block=False, count=1, region_name=crop)
 
             # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
@@ -300,8 +300,7 @@ def main():
                     logger.warning(
                         "GAME_WAITING timeout after %.0fs — CANCEL never detected; returning to GAME_LOBBY",
                         elapsed_waiting)
-                    analyzer._game_waiting = False
-                    analyzer._game_lobby = True
+                    analyzer._trigger("waiting_timeout")
                     game_waiting_since = 0.0
                 elif time.time() - last_cancel_scan_ts >= 3.0:
                     last_cancel_scan_ts = time.time()
@@ -310,9 +309,7 @@ def main():
                         logger.info(
                             "\033[92m✓ CANCEL detected (%.1fs) — matchmaking confirmed → GAME_STARTING\033[0m",
                             elapsed_waiting)
-                        analyzer._game_waiting = False
-                        analyzer._game_starting = True
-                        ctrl._start_game_starting_loop()
+                        analyzer._trigger("cancel_detected")  # on_enter_GAME_STARTING fires _start_game_starting_loop
                     else:
                         # Scan for lobby popups every 5s while CANCEL is absent
                         if time.time() - last_waiting_popup_scan_ts >= 5.0:
@@ -341,11 +338,21 @@ def main():
                                         threading.Thread(target=_click_ready_after_invite, daemon=True).start()
                         crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
                         if crop and time.time() - last_play_reclick_ts >= play_reclick_interval:
-                            logger.info(
-                                "GAME_WAITING: CANCEL not found (%.1fs) — re-clicking %s",
-                                elapsed_waiting, crop)
-                            last_play_reclick_ts = time.time()
-                            ctrl.click_crop(analyzer.crops[crop], block=False, count=1, region_name=crop)
+                            # Only re-click if PLAY/READY is actually visible — clicking PLAY while
+                            # matchmaking is in progress cancels it. If PLAY isn't visible the game
+                            # is still processing the previous click; leave it alone.
+                            visible_crop = analyzer.scan_region_for_play_button(frame)
+                            if visible_crop:
+                                logger.info(
+                                    "GAME_WAITING: CANCEL not found (%.1fs) and %s visible — re-clicking",
+                                    elapsed_waiting, visible_crop)
+                                last_play_reclick_ts = time.time()
+                                ctrl.click_crop(analyzer.crops[visible_crop], block=False, count=1, region_name=visible_crop)
+                            else:
+                                logger.debug(
+                                    "GAME_WAITING: CANCEL not found (%.1fs) but PLAY not visible — matchmaking in progress, waiting",
+                                    elapsed_waiting)
+                                last_play_reclick_ts = time.time()  # reset timer to avoid spamming OCR
                         elif crop:
                             logger.debug(
                                 "GAME_WAITING: CANCEL not found (%.1fs) — waiting %.1fs before re-click",
@@ -355,8 +362,8 @@ def main():
             if (current_game_state == GameState.GAME_END_B
                     and game_end_b_since > 0
                     and time.time() - game_end_b_since > 30.0):
-                logger.warning("GAME_END_B timeout — click-to OCR may be stuck; forcing recovery to GAME_BATTLE")
-                analyzer._game_end_b = False
+                logger.warning("GAME_END_B timeout — click-to OCR may be stuck; forcing recovery to GAME_LOBBY")
+                analyzer._trigger("manual_reset")
                 game_end_b_since = 0.0
 
             # Deploy flares immediately when a new incoming OCR result arrives.

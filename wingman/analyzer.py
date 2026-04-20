@@ -9,6 +9,8 @@ import time
 from enum import Enum, auto
 from pathlib import Path
 
+from transitions import Machine
+
 from .crop_region import get_crop, load_crops, draw_crops
 
 
@@ -284,6 +286,26 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
 
 
 # ============================================================================
+# FSM Transition Table (ADR 025)
+# ============================================================================
+
+_FSM_TRANSITIONS = [
+    {"trigger": "play_clicked",       "source": "GAME_LOBBY",            "dest": "GAME_WAITING"},
+    {"trigger": "cancel_detected",    "source": "GAME_LOBBY",            "dest": "GAME_STARTING"},
+    {"trigger": "cancel_detected",    "source": "GAME_WAITING",          "dest": "GAME_STARTING"},
+    {"trigger": "waiting_timeout",    "source": "GAME_WAITING",          "dest": "GAME_LOBBY"},
+    {"trigger": "good_luck_detected", "source": "GAME_STARTING",         "dest": "GAME_BATTLE"},
+    {"trigger": "starting_timeout",   "source": "GAME_STARTING",         "dest": "GAME_STARTING_STALLED"},
+    {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
+    {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
+    {"trigger": "click_to_detected",  "source": "GAME_BATTLE",           "dest": "GAME_END_B"},
+    {"trigger": "manual_reset",       "source": "*",                     "dest": "GAME_LOBBY"},
+    {"trigger": "continue_clicked",   "source": "GAME_END_B",            "dest": "GAME_LOBBY"},
+    {"trigger": "respawn_detected",   "source": "GAME_END_B",            "dest": "GAME_BATTLE"},
+]
+
+
+# ============================================================================
 # GameStateAnalyzer Class
 # ============================================================================
 
@@ -350,11 +372,20 @@ class GameStateAnalyzer:
         self._click_to_thread_started = False
         self._click_to_stop = threading.Event()
 
-        self._game_end_b = False           # Set when "Click to Continue" is detected
-        self._game_lobby = True            # Start in GAME_LOBBY; cleared when a mission begins
-        self._game_waiting = False         # Set when PLAY clicked; cleared when CANCEL confirmed
-        self._game_starting = False        # Set when matchmaking confirmed; waiting for "Good Luck"
-        self._game_starting_stalled = False  # Set when GAME_STARTING times out without Good Luck
+        # FSM — single authoritative state field managed by the transitions library.
+        # Trigger methods (play_clicked, cancel_detected, …) are added to this instance
+        # by Machine.__init__. All callers use self._trigger() for thread-safe dispatch.
+        self._state_lock = threading.Lock()
+        self._on_cancel_mission = None           # injected by main.py after construction
+        self._on_start_game_starting_loop = None  # injected by main.py after construction
+
+        Machine(
+            model=self,
+            states=[s.name for s in GameState],
+            transitions=_FSM_TRANSITIONS,
+            initial=GameState.GAME_LOBBY.name,
+            ignore_invalid_triggers=False,
+        )
 
         # Health sub-state (GAME_BATTLE only)
         self._health: "int | None" = None  # Last known health value from OCR
@@ -533,26 +564,40 @@ class GameStateAnalyzer:
                 return None
         return self._ocr_executor
     
-    @property
-    def game_state(self) -> GameState:
-        """Current high-level game state."""
-        # Explicit state flags take precedence over cached health — e.g. GAME_LOBBY
-        # must win even when _health still holds a positive value from the last battle.
-        if self._game_starting:
-            return GameState.GAME_STARTING
-        if self._game_starting_stalled:
-            return GameState.GAME_STARTING_STALLED
-        if self._game_waiting:
-            return GameState.GAME_WAITING
-        if self._game_lobby:
-            return GameState.GAME_LOBBY
-        if self._game_end_b:
-            return GameState.GAME_END_B
-        # Health shortcut: skip the remaining property checks when we know we're alive.
+    def _trigger(self, trigger_name: str) -> bool:
+        """Thread-safe FSM trigger dispatch. Raises MachineError on invalid transitions."""
+        with self._state_lock:
+            fn = getattr(self, trigger_name, None)
+            if fn is None:
+                logger.error("FSM: unknown trigger '%s'", trigger_name)
+                return False
+            return fn()
+
+    # ------------------------------------------------------------------
+    # FSM entry hooks — called automatically by transitions on state entry
+    # ------------------------------------------------------------------
+
+    def on_enter_GAME_LOBBY(self):
+        if self._on_cancel_mission:
+            self._on_cancel_mission()
+
+    def on_enter_GAME_STARTING(self):
+        if self._on_start_game_starting_loop:
+            self._on_start_game_starting_loop()
+
+    def on_enter_GAME_BATTLE(self):
+        self._health_no_digits_since = 0.0
         with self._health_lock:
             if self._health is not None and self._health >= 1:
-                return GameState.GAME_BATTLE
-        return GameState.GAME_BATTLE
+                self.alive_event.set()
+
+    def on_enter_GAME_STARTING_STALLED(self):
+        logger.warning("FSM: GAME_STARTING → GAME_STARTING_STALLED (Good Luck not detected in time)")
+
+    @property
+    def game_state(self) -> GameState:
+        """Current high-level game state (read from FSM)."""
+        return GameState[self.state]
 
     @property
     def game_battle_alive(self) -> bool:
@@ -783,8 +828,8 @@ class GameStateAnalyzer:
 
                     if respawn_detected:
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
-                        self._game_end_b = False
-                        self._game_lobby = False
+                        if self.game_state == GameState.GAME_END_B:
+                            self._trigger("respawn_detected")
 
                     respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
                     with self._ocr_cache_lock:
@@ -797,8 +842,6 @@ class GameStateAnalyzer:
 
                     if incoming_detected:
                         logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
-                        self._game_end_b = False
-                        self._game_lobby = False
                     elif incoming_raw:
                         logger.debug("Analyzer: No match in INCOMING region — raw OCR: %s", ", ".join(incoming_raw))
                     else:
@@ -920,12 +963,8 @@ class GameStateAnalyzer:
                     self._click_to_cache['result'] = result
                     self._click_to_cache['timestamp'] = time.time()
                 if click_to_detected:
-                    # Enter GAME_END_B state and clear other state flags
-                    self._game_end_b = True
-                    self._game_lobby = False
-                    self._game_waiting = False
-                    self._game_starting = False
-                    self._game_starting_stalled = False
+                    if self.game_state == GameState.GAME_BATTLE:
+                        self._trigger("click_to_detected")
                     logger.debug("Analyzer: detected 'Click to' text (matched: '%s') → GAME_END_B", click_to_text)
             except RuntimeError:
                 return  # executor shut down — exit the loop cleanly
