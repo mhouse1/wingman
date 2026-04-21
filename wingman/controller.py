@@ -697,6 +697,9 @@ class Controller:
                     pass
                 self.stop_search_and_destroy_loop()
             logger.info("Controller: disengage_roll_right complete")
+            if self._auto_respawn_restart and self._last_mission:
+                logger.info("Controller: restarting mission after disengage")
+                self.restart_last_mission()
 
         threading.Thread(target=_run, daemon=True).start()
 
