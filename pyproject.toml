@@ -15,6 +15,7 @@ dependencies = [
 	"pandas>=2.3.3",
 	"easyocr",
 	"colorama",
+	"transitions",
 ]
 
 [dependency-groups]

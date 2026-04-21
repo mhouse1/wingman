@@ -25,7 +25,7 @@ from constants import (
     TEST_SCREENSHOT_INCOMING_1,
     TEST_SCREENSHOT_INCOMING_2,
 )
-from wingman.analyzer import GameStateAnalyzer
+from wingman.analyzer import GameState, GameStateAnalyzer
 from wingman.crop_region import get_crop
 
 SCRIPT = str(Path(__file__).resolve().parent / "analyzer_cli.py")
@@ -177,7 +177,7 @@ def test_get_frame_and_analyze_frame():
     )
     cap = Capture(region, monitor_index=cfg["region"].get("monitor", 1))
     analyzer = GameStateAnalyzer(cfg)
-    analyzer._game_lobby = False  # force GAME_BATTLE so analyze_frame runs
+    analyzer.state = GameState.GAME_BATTLE.name  # force GAME_BATTLE so analyze_frame runs
 
     # Seed the cache so analyze_frame returns immediately without scheduling OCR
     with analyzer._ocr_cache_lock:

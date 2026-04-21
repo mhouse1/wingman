@@ -31,10 +31,6 @@ crops:
     - [0.4597, 0.3167]
     - [0.7035, 0.5422]
     text: [AGAINSO, AGAIN]
-  event_refresh_dismiss:
-    coords:
-    - [0.7236, 0.8556]
-    - [0.9792, 0.97]
   REVEAL_ALL:
     coords:
     - [0.8132, 0.8633]
@@ -57,8 +53,8 @@ crops:
     text: [CONTINUE]
   HEALTH:
     coords:
-    - [0.3944, 0.95]
-    - [0.4208, 0.9756]
+    - [0.3868, 0.95]
+    - [0.4201, 0.9756]
   PLAY:
     coords:
     - [0.7944, 0.8844]
@@ -74,6 +70,42 @@ crops:
     - [0.7896, 0.8678]
     - [0.9167, 0.9089]
     text: [CANCEL]
+  CREATION_FAILED:
+    coords:
+    - [0.4826, 0.5089]
+    - [0.5167, 0.5378]
+    text: [OK]
+  INSPECT:
+    coords:
+    - [0.0285, 0.0289]
+    - [0.184, 0.0556]
+    text: [INSPECTAIRCRAFT]
+  INVITED:
+    coords:
+    - [0.5611, 0.5133]
+    - [0.6764, 0.6833]
+    text: [ACCEPT]
+  UNREADY:
+    coords:
+    - [0.7764, 0.8678]
+    - [0.9299, 0.9067]
+    text: [READY]
+  AMMO_FLARES:
+    coords:
+    - [0.0118, 0.9589]
+    - [0.0194, 0.9767]
+  AMMO_MISSILE:
+    coords:
+    - [0.0854, 0.9578]
+    - [0.0958, 0.9756]
+  ENEMY_CLOSE_BY:
+    coords:
+    - [0.8764, 0.0822]
+    - [0.9521, 0.1856]
+  event_refresh_dismiss:
+    coords:
+    - [0.4354, 0.4756]
+    - [0.5604, 0.52]
 respawn_detection:
   use_ocr: true
   use_gpu: false
