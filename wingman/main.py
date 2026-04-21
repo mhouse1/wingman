@@ -12,7 +12,7 @@ except ImportError:
     colorama = None
 
 WINGMAN_VERSION = "1.6.3"
-WINGMAN_VERSION_DETAILS = "More automation using new crops"
+WINGMAN_VERSION_DETAILS = "More automation using new crops, updated automated test"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
