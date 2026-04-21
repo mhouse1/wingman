@@ -28,7 +28,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 @pytest.fixture
 def analyzer() -> GameStateAnalyzer:
     a = GameStateAnalyzer(load_config())
-    a._game_lobby = False  # Tests use static screenshots; force GAME_BATTLE
+    a.state = GameState.GAME_BATTLE.name  # Tests use static screenshots; force GAME_BATTLE
     return a
 
 
@@ -151,7 +151,7 @@ def test_game_starting_blocks_respawn_detection(analyzer: GameStateAnalyzer):
     timeout on the loop.  If Good Luck detection fails, _game_starting stays
     True forever and all respawn OCR is silently skipped.
     """
-    analyzer._game_starting = True
+    analyzer.state = GameState.GAME_STARTING.name
     assert analyzer.game_state == GameState.GAME_STARTING
 
     # Seed the OCR cache as if a respawn was previously detected
@@ -184,7 +184,7 @@ def test_game_battle_does_not_block_respawn_detection(analyzer: GameStateAnalyze
 
 def test_game_end_b_blocks_background_ocr_scheduling(analyzer: GameStateAnalyzer):
     """GAME_END_B must skip OCR scheduling, including INCOMING region work."""
-    analyzer._game_end_b = True
+    analyzer.state = GameState.GAME_END_B.name
     assert analyzer.game_state == GameState.GAME_END_B
 
     frame = _load_image(TEST_SCREENSHOT)
