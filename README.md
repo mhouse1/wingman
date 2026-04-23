@@ -4,6 +4,11 @@ Game automation assistant for MetalStorm (PC). Runs fully unattended across mult
 
 **Current version:** v1.6.3
 
+![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
+![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
+![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI3.png)
+
+
 ---
 
 ## What It Does
