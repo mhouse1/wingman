@@ -11,7 +11,7 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.3"
+WINGMAN_VERSION = "1.6.4"
 WINGMAN_VERSION_DETAILS = "More automation using new crops, updated automated test"
 
 from .capture import Capture
@@ -136,6 +136,7 @@ def main():
     last_restart_attempt = 0.0
     restart_not_before = 0.0
     last_incoming_alert_ts = 0.0
+    missile_ignore_until = 0.0       # suppress missile alerts for 10s after respawn
     last_click_to_alert_ts = 0.0
     last_game_state = None
     last_flare_reload_ts = 0.0    # cooldown: don't spam SPECIAL_ABILITY if flares stay at 2
@@ -149,7 +150,7 @@ def main():
     last_cancel_scan_ts = 0.0     # last time CANCEL crop was scanned in GAME_WAITING
     last_play_reclick_ts = 0.0    # last time PLAY was re-clicked in GAME_WAITING
     last_waiting_popup_scan_ts = 0.0  # last time lobby popups were scanned in GAME_WAITING
-    play_reclick_interval = 15.0  # minimum seconds between PLAY re-clicks
+    play_reclick_interval = 45.0  # minimum seconds between PLAY re-clicks
 
     def _handle_alive_transition():
         """Restart mission immediately when health transitions dead → alive."""
@@ -192,6 +193,11 @@ def main():
             incoming_ts = analyzer._incoming_cache['timestamp']
 
         if incoming_detected and incoming_ts > last_incoming_alert_ts:
+            if time.time() < missile_ignore_until:
+                logger.debug("Missile alert suppressed — post-respawn grace period (%.1fs remaining)",
+                             missile_ignore_until - time.time())
+                last_incoming_alert_ts = incoming_ts
+                return False
             logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
             last_incoming_alert_ts = incoming_ts
 
@@ -325,7 +331,13 @@ def main():
                                     click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
                                     ctrl.click_crop(analyzer.crops[click_target], block=False, count=1, region_name=click_target)
                                     last_play_reclick_ts = time.time()  # don't re-click PLAY right after a popup
-                                    if popup == "INVITED":
+                                    if popup == "REVEAL_ALL":
+                                        def _reveal_all_second_click():
+                                            time.sleep(3.0)
+                                            logger.info("\033[93m📋 REVEAL_ALL second click after 3s delay\033[0m")
+                                            ctrl.click_crop(analyzer.crops["REVEAL_ALL"], block=False, count=1, region_name="REVEAL_ALL")
+                                        threading.Thread(target=_reveal_all_second_click, daemon=True).start()
+                                    elif popup == "INVITED":
                                         def _click_ready_after_invite():
                                             time.sleep(1.5)
                                             new_frame = cap.get_frame()
@@ -398,6 +410,7 @@ def main():
                     else:
                         logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
                         respawn_cooldown_until = time.time() + 10.0
+                        missile_ignore_until = time.time() + 10.0
                         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
                         ctrl._auto_respawn_restart = True  # always restart after respawn regardless of prior cancel
                         ctrl._eject_stop.set()            # interrupt any in-progress eject_and_dive immediately

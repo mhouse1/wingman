@@ -89,7 +89,7 @@ crops:
     coords:
     - [0.7764, 0.8678]
     - [0.9299, 0.9067]
-    text: [READY]
+    text: [UNREADY]
   AMMO_FLARES:
     coords:
     - [0.0118, 0.9589]

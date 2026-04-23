@@ -1,0 +1,46 @@
+# Wingman Coding Constraints
+
+## Lock Release in Finally Blocks
+
+Never use `try: lock.release() except RuntimeError: pass` in finally blocks. Always guard with:
+
+```python
+if self._some_lock.locked():
+    self._some_lock.release()
+```
+
+The swallowed-exception pattern silently leaves the lock held if `release()` fails, permanently blocking future `acquire(blocking=False)` callers.
+
+## Stoppable Daemon Threads
+
+Any long-running daemon thread must be stoppable via a `threading.Event`. Use `event.wait(timeout=interval)` as the loop tick — not `while True: time.sleep(interval)`. The stop event must be set in `cleanup()` before the executor is shut down:
+
+```python
+# __init__
+self._my_stop = threading.Event()
+
+# thread body
+while not self._my_stop.wait(timeout=5.0):
+    ...
+
+# cleanup()
+self._my_stop.set()
+```
+
+## Lock Acquire Timeout on Main-Loop Paths
+
+Any lock that can be held by a background thread must use `acquire(timeout=N)` when called from the main loop. Bare `with lock:` is only safe when both sides run in background threads. Return or skip the cycle gracefully on timeout:
+
+```python
+if not self._some_lock.acquire(timeout=5.0):
+    logger.warning("lock timeout - skipping frame")
+    return cached_result
+try:
+    ...
+finally:
+    self._some_lock.release()
+```
+
+## Diagrams
+
+Always use Mermaid for diagrams in documentation. Never use ASCII text diagrams (no box-drawing characters, no `┌─┐` borders, no `→` arrow art). Wrap all diagrams in a fenced code block with the `mermaid` language tag.

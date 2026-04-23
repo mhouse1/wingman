@@ -547,7 +547,7 @@ class Controller:
     def eject_and_dive(self):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
-        NOSE_DOWN is held for 10 seconds then released.
+        NOSE_DOWN is held for x seconds then released.
         AFTERBURNER is held until respawn is detected (or a 120s safety timeout).
         """
         logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
@@ -578,7 +578,7 @@ class Controller:
 
                 # Hold nose-down for 10s then release; afterburner stays on.
                 # Check _eject_stop every 0.25s so End key cancels promptly.
-                if self._eject_stop.wait(timeout=10.0):
+                if self._eject_stop.wait(timeout=5.0):
                     logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
                     return
                 try:
