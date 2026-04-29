@@ -85,7 +85,6 @@ class Controller:
         self._crops: "dict[str, CropCoords]" = crops or {}
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
-        self._lobby_play_not_visible_since = 0.0  # tracks how long play button has been absent in lobby
         self._popup_last_clicked: "dict[str, float]" = {}  # popup name → timestamp of last click
 
         # Padlock camera cooldown: set when the key is pressed manually
@@ -336,111 +335,6 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
 
-    def start_auto_mission(self, force: bool = False):
-        """Click the play button and enter GAME_STARTING state.
-
-        Called both from the AUTO_MISSION_KEY hotkey and automatically by the
-        main loop when unattended_mode is active and GAME_LOBBY is detected.
-
-        Args:
-            force: if True, bypass the GAME_STARTING guard (used by manual M key press
-                   to assume GAME_LOBBY and restart the cycle regardless of current state).
-        """
-        if self._analyzer is None:
-            return
-        if not force and self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
-            logger.debug("Controller: start_auto_mission called but already in GAME_STARTING/GAME_WAITING - ignoring")
-            return
-
-        def _run():
-            if self._analyzer is None:
-                return
-
-            # Guard against stale threads: if state has already advanced past GAME_LOBBY
-            # (e.g. another path clicked PLAY while this thread was queued), abort now.
-            if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
-                logger.debug("Controller: start_auto_mission _run - state already GAME_STARTING/GAME_WAITING; aborting stale thread")
-                return
-
-            if self._capture is None:
-                logger.warning("Controller: start_auto_mission - no capture source; skipping play button click")
-                return
-
-            try:
-                with mss() as sct:
-                    s = sct.grab(self._capture.get_monitor_rect())
-                    frame = np.array(s)[:, :, :3]
-            except Exception:
-                logger.exception("Controller: start_auto_mission - failed to capture frame for play button OCR")
-                return
-
-            detected_crop = self._analyzer.scan_region_for_play_button(frame)
-            if detected_crop is None:
-                now = time.time()
-                if self._lobby_play_not_visible_since == 0.0:
-                    self._lobby_play_not_visible_since = now
-                    logger.info("Controller: start_auto_mission - PLAY/READY not visible; starting 3s popup-check timer")
-                elif now - self._lobby_play_not_visible_since >= 3.0:
-                    logger.info("Controller: play button absent for %.1fs — scanning for lobby popups",
-                                now - self._lobby_play_not_visible_since)
-                    popup = self._analyzer.scan_region_for_lobby_popups(frame)
-                    if popup:
-                        if not self.popup_click_allowed(popup):
-                            logger.debug("Controller: popup '%s' click suppressed by cooldown", popup)
-                        else:
-                            logger.info("Controller: dismissing lobby popup '%s'", popup)
-                            self.record_popup_click(popup)
-                            click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
-                            self.click_crop(self._crops[click_target], block=True, count=1, region_name=click_target)
-                            if popup == REGION_REVEAL_ALL:
-                                time.sleep(3.0)
-                                logger.info("Controller: REVEAL_ALL second click after 3s delay")
-                                self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
-                            elif popup == "INVITED":
-                                time.sleep(1.5)
-                                try:
-                                    with mss() as sct:
-                                        s = sct.grab(self._capture.get_monitor_rect())
-                                        ready_frame = np.array(s)[:, :, :3]
-                                    ready = self._analyzer.scan_region_for_play_button(ready_frame)
-                                    if ready:
-                                        logger.info("Controller: INVITED accepted — clicking %s", ready)
-                                        self.click_crop(self._crops[ready], block=True, count=1, region_name=ready)
-                                except Exception:
-                                    logger.exception("Controller: failed to click READY after INVITED accept")
-                    elif now - self._lobby_play_not_visible_since >= 5.0:
-                        # No popup blocking and play button absent for 5+ seconds — OCR may
-                        # be failing to detect it.  Force-click the play button crop directly.
-                        # Re-check state: OCR took time and state may have advanced already.
-                        if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
-                            logger.debug(
-                                "Controller: start_auto_mission - state advanced to %s during OCR; skipping force-click",
-                                self._analyzer.game_state.name)
-                            return
-                        crop = next((c for c in ("PLAY", "READY") if c in self._crops), None)
-                        if crop:
-                            logger.info(
-                                "Controller: no popup found and play button absent %.1fs — force-clicking %s",
-                                now - self._lobby_play_not_visible_since, crop)
-                            self._lobby_play_not_visible_since = 0.0
-                            self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
-                            return
-                        else:
-                            logger.warning("Controller: no PLAY/READY crop configured — cannot force-click")
-                    else:
-                        logger.info("Controller: no lobby popups detected; waiting for play button")
-                return
-
-            # Play/Ready button visible — reset popup absence timer
-            self._lobby_play_not_visible_since = 0.0
-            # Re-check state after OCR: another thread may have already clicked play
-            if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
-                logger.debug("Controller: start_auto_mission - state already GAME_STARTING/GAME_WAITING after OCR; skipping click")
-                return
-            logger.info("Controller: start_auto_mission - clicking %s (waiting for CANCEL to confirm)", detected_crop)
-            self.click_crop(self._crops[detected_crop], block=False, count=1, region_name=detected_crop)
-
-        threading.Thread(target=_run, daemon=True).start()
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.

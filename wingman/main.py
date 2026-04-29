@@ -126,6 +126,37 @@ def main():
     # Wire FSM entry-hook callbacks (ADR 025) — injected after both objects exist
     analyzer._on_cancel_mission = ctrl.cancel_mission
     analyzer._on_start_game_starting_loop = ctrl._start_game_starting_loop
+    analyzer._on_lobby_play_click = lambda crop: ctrl.click_crop(
+        analyzer.crops[crop], block=False, count=1, region_name=crop
+    )
+
+    def _handle_lobby_popup(popup):
+        if not ctrl.popup_click_allowed(popup):
+            logger.debug("Lobby quick-scan: popup '%s' click suppressed by cooldown", popup)
+            return
+        logger.info("\033[93m📋 Lobby quick-scan: dismissing popup '%s'\033[0m", popup)
+        ctrl.record_popup_click(popup)
+        click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
+        ctrl.click_crop(analyzer.crops[click_target], block=False, count=1, region_name=click_target)
+        if popup == "REVEAL_ALL":
+            def _reveal_all_second_click():
+                time.sleep(3.0)
+                logger.info("\033[93m📋 REVEAL_ALL second click after 3s delay\033[0m")
+                ctrl.click_crop(analyzer.crops["REVEAL_ALL"], block=False, count=1, region_name="REVEAL_ALL")
+            threading.Thread(target=_reveal_all_second_click, daemon=True).start()
+        elif popup == "INVITED":
+            def _click_ready_after_invite():
+                time.sleep(1.5)
+                new_frame = cap.get_frame()
+                if new_frame is None:
+                    return
+                ready = analyzer.scan_region_for_play_button(new_frame)
+                if ready:
+                    logger.info("\033[92m📋 INVITED accepted — clicking %s\033[0m", ready)
+                    ctrl.click_crop(analyzer.crops[ready], block=False, count=1, region_name=ready)
+            threading.Thread(target=_click_ready_after_invite, daemon=True).start()
+
+    analyzer._on_lobby_popup_click = _handle_lobby_popup
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -141,13 +172,10 @@ def main():
     last_game_state = None
     last_flare_reload_ts = 0.0    # cooldown: don't spam SPECIAL_ABILITY if flares stay at 2
     enemy_last_seen_ts = 0.0      # timestamp of last frame with red in ENEMY_CLOSE_BY (0 = not in battle yet)
-    lobby_play_scan_interval = 5.0
-    last_lobby_play_scan_attempt = 0.0
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
     game_waiting_since = 0.0      # timestamp of GAME_WAITING entry; used by CANCEL scan + 180s timeout
     last_cancel_scan_ts = 0.0     # last time CANCEL crop was scanned in GAME_WAITING
     last_play_reclick_ts = 0.0    # last time PLAY was re-clicked in GAME_WAITING
-    last_waiting_popup_scan_ts = 0.0  # last time lobby popups were scanned in GAME_WAITING
     play_reclick_interval = 45.0  # minimum seconds between PLAY re-clicks
 
     def _handle_alive_transition():
@@ -158,6 +186,11 @@ def main():
         if (analyzer.game_state == GameState.GAME_BATTLE
                 and not ctrl.is_mission_running()
                 and ctrl._auto_respawn_restart):
+            with analyzer._ammo_lock:
+                missiles = analyzer._ammo_missiles
+            if missiles is not None and missiles == 0:
+                logger.info("\033[92m💚 HEALTH ALIVE — missiles empty, skipping restart\033[0m")
+                return
             logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
             ctrl.restart_last_mission()
             last_restart_attempt = time.time()
@@ -253,28 +286,14 @@ def main():
                     game_waiting_since = 0.0
                     if prev_game_state is not None:
                         ctrl.cancel_mission()
-                    if unattended_active.is_set():
-                        logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
-                        last_lobby_play_scan_attempt = time.time()
-                        ctrl.start_auto_mission()
                 if current_game_state == GameState.GAME_WAITING:
                     game_waiting_since = time.time()
                     last_cancel_scan_ts = time.time()         # first scan after 3s, not immediately
                     last_play_reclick_ts = time.time()        # don't re-click immediately either
-                    last_waiting_popup_scan_ts = 0.0          # allow popup scan immediately on entry
                 else:
                     game_waiting_since = 0.0
                 if current_game_state == GameState.GAME_BATTLE:
                     enemy_last_seen_ts = time.time()  # assume enemy present on battle entry
-
-            # In unattended mode, keep retrying lobby PLAY detection/click every 5s
-            # until GAME_LOBBY transitions out.
-            if (unattended_active.is_set()
-                    and current_game_state == GameState.GAME_LOBBY
-                    and time.time() - last_lobby_play_scan_attempt >= lobby_play_scan_interval):
-                logger.info("Unattended mode: GAME_LOBBY retry - scanning play_button for PLAY")
-                last_lobby_play_scan_attempt = time.time()
-                ctrl.start_auto_mission()
 
 
             # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
@@ -298,37 +317,6 @@ def main():
                             elapsed_waiting)
                         analyzer._trigger("cancel_detected")  # on_enter_GAME_STARTING fires _start_game_starting_loop
                     else:
-                        # Scan for lobby popups every 5s while CANCEL is absent
-                        if time.time() - last_waiting_popup_scan_ts >= 5.0:
-                            last_waiting_popup_scan_ts = time.time()
-                            popup = analyzer.scan_region_for_lobby_popups(frame)
-                            if popup:
-                                if not ctrl.popup_click_allowed(popup):
-                                    logger.debug("GAME_WAITING: popup '%s' click suppressed by cooldown", popup)
-                                else:
-                                    logger.info(
-                                        "\033[93m📋 GAME_WAITING: dismissing lobby popup '%s'\033[0m", popup)
-                                    ctrl.record_popup_click(popup)
-                                    click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
-                                    ctrl.click_crop(analyzer.crops[click_target], block=False, count=1, region_name=click_target)
-                                    last_play_reclick_ts = time.time()  # don't re-click PLAY right after a popup
-                                    if popup == "REVEAL_ALL":
-                                        def _reveal_all_second_click():
-                                            time.sleep(3.0)
-                                            logger.info("\033[93m📋 REVEAL_ALL second click after 3s delay\033[0m")
-                                            ctrl.click_crop(analyzer.crops["REVEAL_ALL"], block=False, count=1, region_name="REVEAL_ALL")
-                                        threading.Thread(target=_reveal_all_second_click, daemon=True).start()
-                                    elif popup == "INVITED":
-                                        def _click_ready_after_invite():
-                                            time.sleep(1.5)
-                                            new_frame = cap.get_frame()
-                                            if new_frame is None:
-                                                return
-                                            ready = analyzer.scan_region_for_play_button(new_frame)
-                                            if ready:
-                                                logger.info("\033[92m📋 INVITED accepted — clicking %s\033[0m", ready)
-                                                ctrl.click_crop(analyzer.crops[ready], block=False, count=1, region_name=ready)
-                                        threading.Thread(target=_click_ready_after_invite, daemon=True).start()
                         crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
                         if crop and time.time() - last_play_reclick_ts >= play_reclick_interval:
                             # Only re-click if PLAY/READY is actually visible — clicking PLAY while
