@@ -11,8 +11,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.4"
-WINGMAN_VERSION_DETAILS = "More automation using new crops, updated automated test"
+WINGMAN_VERSION = "1.6.5"
+WINGMAN_VERSION_DETAILS = "FSM stability improvements, mission restart retry logic, and enhanced logging"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -144,9 +144,7 @@ def main():
     lobby_play_scan_interval = 5.0
     last_lobby_play_scan_attempt = 0.0
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
-    game_lobby_since = 0.0    # timestamp of GAME_LOBBY entry; used by 10s force-click guard
     game_waiting_since = 0.0      # timestamp of GAME_WAITING entry; used by CANCEL scan + 180s timeout
-    last_lobby_cancel_scan_ts = 0.0  # last time CANCEL crop was scanned in GAME_LOBBY
     last_cancel_scan_ts = 0.0     # last time CANCEL crop was scanned in GAME_WAITING
     last_play_reclick_ts = 0.0    # last time PLAY was re-clicked in GAME_WAITING
     last_waiting_popup_scan_ts = 0.0  # last time lobby popups were scanned in GAME_WAITING
@@ -182,6 +180,15 @@ def main():
         """End mission and eject when missile count reaches zero."""
         analyzer.no_missiles_event.clear()
         if not ctrl.is_mission_running():
+            return
+        with analyzer._ocr_cache_lock:
+            currently_respawning, _, _ = analyzer._ocr_cache['result']
+        if currently_respawning:
+            logger.debug("No-missiles suppressed — respawn screen active")
+            return
+        if time.time() < missile_ignore_until:
+            logger.debug("No-missiles suppressed — post-respawn grace (%.1fs remaining)",
+                         missile_ignore_until - time.time())
             return
         ctrl.eject_and_dive()
 
@@ -231,6 +238,7 @@ def main():
                 logger.info("\033[96m🎮 Game state: %s → %s\033[0m",
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
+                prev_game_state = last_game_state
                 last_game_state = current_game_state
                 if current_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
@@ -242,15 +250,13 @@ def main():
                 else:
                     game_end_b_since = 0.0
                 if current_game_state == GameState.GAME_LOBBY:
-                    game_lobby_since = time.time()
                     game_waiting_since = 0.0
-                    ctrl.cancel_mission()
+                    if prev_game_state is not None:
+                        ctrl.cancel_mission()
                     if unattended_active.is_set():
                         logger.info("Unattended mode: auto-triggering mission from GAME_LOBBY")
                         last_lobby_play_scan_attempt = time.time()
                         ctrl.start_auto_mission()
-                else:
-                    game_lobby_since = 0.0
                 if current_game_state == GameState.GAME_WAITING:
                     game_waiting_since = time.time()
                     last_cancel_scan_ts = time.time()         # first scan after 3s, not immediately
@@ -270,31 +276,6 @@ def main():
                 last_lobby_play_scan_attempt = time.time()
                 ctrl.start_auto_mission()
 
-            # GAME_LOBBY: scan for CANCEL every 3s — if matchmaking is already active,
-            # skip straight to GAME_STARTING without waiting for PLAY detection.
-            if (current_game_state == GameState.GAME_LOBBY
-                    and time.time() - last_lobby_cancel_scan_ts >= 3.0):
-                last_lobby_cancel_scan_ts = time.time()
-                if analyzer.scan_region_for_cancel(frame):
-                    logger.info("\033[92m✓ CANCEL detected in GAME_LOBBY — advancing to GAME_STARTING\033[0m")
-                    analyzer._trigger("cancel_detected")  # on_enter_GAME_STARTING fires _start_game_starting_loop
-
-            # GAME_LOBBY stall guard: if PLAY button OCR keeps failing for 10+ seconds,
-            # bypass OCR and click the PLAY crop directly from the main loop.
-            if (unattended_active.is_set()
-                    and current_game_state == GameState.GAME_LOBBY
-                    and game_lobby_since > 0
-                    and time.time() - game_lobby_since > 10.0
-                    and not ctrl.is_mission_running()):
-                crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
-                # Re-read live state: start_auto_mission may have already advanced us
-                if crop and analyzer.game_state == GameState.GAME_LOBBY:
-                    logger.info(
-                        "\033[93m📋 GAME_LOBBY stall (%.1fs) — force-clicking %s\033[0m",
-                        time.time() - game_lobby_since, crop)
-                    game_lobby_since = time.time()  # reset so we retry every 10s if state persists
-                    analyzer._trigger("play_clicked")
-                    ctrl.click_crop(analyzer.crops[crop], block=False, count=1, region_name=crop)
 
             # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
             # CANCEL visible → matchmaking active → advance to GAME_STARTING.
@@ -412,7 +393,10 @@ def main():
                         respawn_cooldown_until = time.time() + 10.0
                         missile_ignore_until = time.time() + 10.0
                         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
-                        ctrl._auto_respawn_restart = True  # always restart after respawn regardless of prior cancel
+                        ctrl._auto_respawn_restart = True  # always restart after respawn
+                        # Exit manual mode on death — mission restarts when health returns
+                        if current_game_state == GameState.GAME_BATTLE_MANUAL:
+                            analyzer._trigger("respawn_reset")
                         ctrl._eject_stop.set()            # interrupt any in-progress eject_and_dive immediately
                         ctrl.cancel_mission()
                         # Wait for mission lock to release before restart

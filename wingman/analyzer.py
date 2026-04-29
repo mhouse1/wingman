@@ -21,6 +21,7 @@ class GameState(Enum):
     GAME_WAITING         = auto()  # PLAY clicked; waiting for CANCEL crop to confirm matchmaking
     GAME_STARTING        = auto()  # Matchmaking confirmed; waiting for "Good Luck" before launching mission
     GAME_STARTING_STALLED = auto() # GAME_STARTING timed out without "Good Luck" detection
+    GAME_BATTLE_MANUAL   = auto()  # Player took manual control; auto-mission restart suppressed
 
 try:
     import easyocr
@@ -282,6 +283,10 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
     GameState.GAME_STARTING_STALLED: {
         "good_luck",
     },
+    GameState.GAME_BATTLE_MANUAL: {
+        "respawn", "incoming", "click_to",
+        "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY",
+    },
 }
 
 
@@ -290,7 +295,6 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
 # ============================================================================
 
 _FSM_TRANSITIONS = [
-    {"trigger": "play_clicked",       "source": "GAME_LOBBY",            "dest": "GAME_WAITING"},
     {"trigger": "cancel_detected",    "source": "GAME_LOBBY",            "dest": "GAME_STARTING"},
     {"trigger": "cancel_detected",    "source": "GAME_WAITING",          "dest": "GAME_STARTING"},
     {"trigger": "waiting_timeout",    "source": "GAME_WAITING",          "dest": "GAME_LOBBY"},
@@ -298,7 +302,9 @@ _FSM_TRANSITIONS = [
     {"trigger": "starting_timeout",   "source": "GAME_STARTING",         "dest": "GAME_STARTING_STALLED"},
     {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
     {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
-    {"trigger": "click_to_detected",  "source": "GAME_BATTLE",           "dest": "GAME_END_B"},
+    {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL"], "dest": "GAME_END_B"},
+    {"trigger": "manual_takeover",    "source": "GAME_BATTLE",            "dest": "GAME_BATTLE_MANUAL"},
+    {"trigger": "respawn_reset",      "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
     {"trigger": "manual_reset",       "source": "*",                     "dest": "GAME_LOBBY"},
     {"trigger": "continue_clicked",   "source": "GAME_END_B",            "dest": "GAME_LOBBY"},
     {"trigger": "respawn_detected",   "source": "GAME_END_B",            "dest": "GAME_BATTLE"},
@@ -371,6 +377,8 @@ class GameStateAnalyzer:
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
         self._click_to_stop = threading.Event()
+        self._lobby_quick_scan_thread_started = False
+        self._lobby_quick_scan_stop = threading.Event()
 
         # FSM — single authoritative state field managed by the transitions library.
         # Trigger methods (play_clicked, cancel_detected, …) are added to this instance
@@ -591,6 +599,11 @@ class GameStateAnalyzer:
             if self._health is not None and self._health >= 1:
                 self.alive_event.set()
 
+    def on_enter_GAME_BATTLE_MANUAL(self):
+        logger.info("FSM: entering GAME_BATTLE_MANUAL — manual takeover active, auto-restart suppressed")
+        if self._on_cancel_mission:
+            self._on_cancel_mission()
+
     def on_enter_GAME_STARTING_STALLED(self):
         logger.warning("FSM: GAME_STARTING → GAME_STARTING_STALLED (Good Luck not detected in time)")
 
@@ -618,6 +631,7 @@ class GameStateAnalyzer:
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
         self._click_to_stop.set()
+        self._lobby_quick_scan_stop.set()
         if self._ocr_executor is not None:
             try:
                 self._ocr_executor.shutdown(wait=False)
@@ -653,11 +667,15 @@ class GameStateAnalyzer:
         with self._click_to_frame_lock:
             self._click_to_latest_frame = frame
 
-        # Start the click_to background thread once on first frame
+        # Start background threads once on first frame
         if not self._click_to_thread_started:
             self._click_to_thread_started = True
             threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
             logger.debug("Click-to background thread started")
+        if not self._lobby_quick_scan_thread_started:
+            self._lobby_quick_scan_thread_started = True
+            threading.Thread(target=self._run_game_lobby_quick_scan, daemon=True).start()
+            logger.debug("Lobby quick-scan background thread started")
 
         state = {
             'is_respawning': False,
@@ -801,7 +819,7 @@ class GameStateAnalyzer:
 
                 state = self.game_state
                 # Only process GAME_BATTLE crops in GAME_BATTLE or GAME_END_B
-                if state not in (GameState.GAME_BATTLE, GameState.GAME_END_B):
+                if state not in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_END_B):
                     logger.debug(f"Skipping GAME_BATTLE crop OCR in {state.name} state")
                     time.sleep(0.2)
                 else:
@@ -957,7 +975,7 @@ class GameStateAnalyzer:
                 click_to_frame = get_crop(frame, *self.crops["click_to"][:4])
                 click_to_detected, _, click_to_text = executor.submit(
                     _process_text_region, click_to_frame, self.crops["click_to"].text or []
-                ).result(timeout=120)
+                ).result(timeout=30)
                 result = (True, 1.0, "ocr") if click_to_detected else (False, 0.0, None)
                 with self._click_to_cache_lock:
                     self._click_to_cache['result'] = result
@@ -970,6 +988,44 @@ class GameStateAnalyzer:
                 return  # executor shut down — exit the loop cleanly
             except Exception as e:
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
+
+    def _run_game_lobby_quick_scan(self):
+        """Scan the CANCEL crop every 1 second while in GAME_LOBBY.
+
+        Acts as the GAME_LOBBY state driver: the moment matchmaking activates
+        and CANCEL becomes visible, this thread fires cancel_detected →
+        GAME_STARTING without waiting for the main loop.
+        """
+        if "CANCEL" not in self.crops:
+            logger.warning("Lobby quick-scan: CANCEL crop not configured — thread exiting")
+            return
+        executor = self.ocr_executor
+        while not self._lobby_quick_scan_stop.wait(timeout=1.0):
+            if self.game_state != GameState.GAME_LOBBY:
+                continue
+            executor = self.ocr_executor
+            if executor is None:
+                continue
+            with self._click_to_frame_lock:
+                frame = self._click_to_latest_frame
+            if frame is None:
+                continue
+            try:
+                region_frame = get_crop(frame, *self.crops["CANCEL"][:4])
+                detected, _, text = executor.submit(
+                    _process_text_region, region_frame, self.crops["CANCEL"].text or []
+                ).result(timeout=30)
+                if detected:
+                    logger.info(
+                        "\033[92m✓ Lobby quick-scan: CANCEL detected (text='%s') → GAME_STARTING\033[0m",
+                        text)
+                    self._trigger("cancel_detected")
+                else:
+                    logger.debug("Lobby quick-scan: CANCEL not found")
+            except RuntimeError:
+                return  # executor shut down
+            except Exception as e:
+                logger.warning("Lobby quick-scan: CANCEL scan failed: %s", e)
 
     def _empty_state(self):
         """Return empty game state for error cases."""
@@ -1034,16 +1090,19 @@ class GameStateAnalyzer:
             return False
         try:
             region_frame = get_crop(frame, *self.crops["good_luck"][:4])
+            # timeout=120: all 13 workers initialize serially under _ocr_init_lock
+            # (~6-8 s each = up to 104 s total). A 30 s timeout silently drops
+            # detections when the assigned worker is still queued for init.
             detected, _, text = executor.submit(
                 _process_text_region, region_frame, self.crops["good_luck"].text or []
-            ).result(timeout=30)
+            ).result(timeout=120)
             if detected:
                 logger.info("Analyzer: 'Good Luck' detected in good_luck crop (text='%s')", text)
             else:
                 logger.debug("Analyzer: 'Good Luck' not found in good_luck crop")
             return detected
         except Exception as e:
-            logger.warning("Analyzer: Good Luck scan failed: %s", e)
+            logger.warning("Analyzer: Good Luck scan failed: %r", e)
             return False
 
     def scan_region_for_event_refresh(self, frame) -> bool:

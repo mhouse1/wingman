@@ -103,6 +103,17 @@ class Controller:
 
         # Eject-and-dive cancellation: set by End key to abort the dive thread early
         self._eject_stop = threading.Event()
+        # Set while eject_and_dive thread is running; cleared by the thread's finally block.
+        self._ejecting = threading.Event()
+
+        # Tracks how many programmatic key presses are in flight.
+        # keyboard.KeyboardEvent has no is_injected attribute, so the getattr guard
+        # in the maneuver hooks always falls back to False and cannot distinguish
+        # machine-generated from human-generated key events.  Incrementing this
+        # counter before keyboard.press() and decrementing after keyboard.release()
+        # lets the hooks skip cancel logic for keys the mission pressed itself.
+        self._programmatic_key_count = 0
+        self._programmatic_key_lock = threading.Lock()
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
@@ -110,6 +121,9 @@ class Controller:
             def maneuver_cancel_hotkey(e):
                 if getattr(e, 'is_injected', False):
                     return
+                with self._programmatic_key_lock:
+                    if self._programmatic_key_count > 0:
+                        return
                 if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
                     logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
                     return
@@ -158,13 +172,23 @@ class Controller:
                 def maneuver_key_pressed(e):
                     if getattr(e, 'is_injected', False):
                         return
+                    with self._programmatic_key_lock:
+                        if self._programmatic_key_count > 0:
+                            return
                     if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
                         logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
                         return
-                    if self.is_mission_running():
-                        logger.info("Controller: maneuver key '%s' pressed - cancelling mission (manual takeover)", e.name)
+                    if self.is_mission_running() or self._ejecting.is_set():
+                        logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", e.name)
                         self._auto_respawn_restart = False
+                        self._eject_stop.set()
                         self.cancel_mission()
+                        if self._analyzer is not None:
+                            try:
+                                if self._analyzer.game_state == GameState.GAME_BATTLE:
+                                    self._analyzer._trigger("manual_takeover")
+                            except Exception:
+                                pass
                 for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY):
                     keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
                 logger.info("Controller: registered maneuver keys (%s/%s/%s/%s) to cancel mission on manual press",
@@ -305,8 +329,7 @@ class Controller:
                     if crop is None:
                         logger.warning("Controller: '%s' pressed but no PLAY/READY crop configured", AUTO_MISSION_KEY)
                         return
-                    logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s", AUTO_MISSION_KEY, crop)
-                    self._analyzer._trigger("play_clicked")
+                    logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s (waiting for CANCEL)", AUTO_MISSION_KEY, crop)
                     self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
@@ -400,7 +423,6 @@ class Controller:
                                 "Controller: no popup found and play button absent %.1fs — force-clicking %s",
                                 now - self._lobby_play_not_visible_since, crop)
                             self._lobby_play_not_visible_since = 0.0
-                            self._analyzer._trigger("play_clicked")
                             self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
                             return
                         else:
@@ -415,8 +437,7 @@ class Controller:
             if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
                 logger.debug("Controller: start_auto_mission - state already GAME_STARTING/GAME_WAITING after OCR; skipping click")
                 return
-            logger.info("Controller: start_auto_mission - clicking %s and entering GAME_WAITING", detected_crop)
-            self._analyzer._trigger("play_clicked")
+            logger.info("Controller: start_auto_mission - clicking %s (waiting for CANCEL to confirm)", detected_crop)
             self.click_crop(self._crops[detected_crop], block=False, count=1, region_name=detected_crop)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -486,18 +507,24 @@ class Controller:
                     logger.error("Controller: keyboard library not available for %s", label)
                     return
                 logger.debug("Controller: using keyboard library for '%s' press", key)
-                keyboard_module.press(key)
-                start = time.time()
-                while (time.time() - start) < hold_seconds:
-                    if not ignore_cancel and self._mission_cancel.is_set():
-                        logger.debug("Controller: %s cancelled", label)
-                        break
-                    time.sleep(0.05)
+                with self._programmatic_key_lock:
+                    self._programmatic_key_count += 1
                 try:
-                    keyboard_module.release(key)
-                except Exception:
-                    logger.exception("Controller: failed to release '%s' key", key)
-                logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
+                    keyboard_module.press(key)
+                    start = time.time()
+                    while (time.time() - start) < hold_seconds:
+                        if not ignore_cancel and self._mission_cancel.is_set():
+                            logger.debug("Controller: %s cancelled", label)
+                            break
+                        time.sleep(0.05)
+                    try:
+                        keyboard_module.release(key)
+                    except Exception:
+                        logger.exception("Controller: failed to release '%s' key", key)
+                    logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
+                finally:
+                    with self._programmatic_key_lock:
+                        self._programmatic_key_count -= 1
             except Exception:
                 logger.exception("Controller: %s failed", label)
 
@@ -571,6 +598,7 @@ class Controller:
             if not keyboard_module:
                 logger.error("Controller: keyboard library not available for eject_and_dive")
                 return
+            self._ejecting.set()
             try:
                 keyboard_module.press(NOSE_DOWN_KEY)
                 keyboard_module.press(AFTERBURNER_KEY)
@@ -600,6 +628,7 @@ class Controller:
                 else:
                     logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
             finally:
+                self._ejecting.clear()
                 try:
                     keyboard_module.release(AFTERBURNER_KEY)
                 except Exception:
