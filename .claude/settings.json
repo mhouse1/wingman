@@ -19,7 +19,8 @@
       "Bash(ls c:/dev-tools/github/wingman/tests/*.py)",
       "Bash(python -c ':*)",
       "Bash(ls -la /c/dev-tools/github/wingman/tests/*.py)",
-      "Bash(uv add *)"
+      "Bash(uv add *)",
+      "Bash(.venv/Scripts/python -c \"from transitions import MachineError; print\\('ok'\\)\")"
     ]
   }
 }

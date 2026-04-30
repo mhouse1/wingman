@@ -9,7 +9,7 @@ import time
 from enum import Enum, auto
 from pathlib import Path
 
-from transitions import Machine
+from transitions import Machine, MachineError
 
 from .crop_region import get_crop, load_crops, draw_crops
 
@@ -575,13 +575,18 @@ class GameStateAnalyzer:
         return self._ocr_executor
     
     def _trigger(self, trigger_name: str) -> bool:
-        """Thread-safe FSM trigger dispatch. Raises MachineError on invalid transitions."""
+        """Thread-safe FSM trigger dispatch. Returns False on invalid transitions."""
         with self._state_lock:
             fn = getattr(self, trigger_name, None)
             if fn is None:
                 logger.error("FSM: unknown trigger '%s'", trigger_name)
                 return False
-            return fn()
+            try:
+                return fn()
+            except MachineError as e:
+                logger.warning("FSM: ignored invalid trigger '%s' from state %s: %s",
+                               trigger_name, self.game_state, e)
+                return False
 
     # ------------------------------------------------------------------
     # FSM entry hooks — called automatically by transitions on state entry
