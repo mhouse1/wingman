@@ -121,7 +121,9 @@ def main():
             logger.info("Unattended mode activated by M key press")
 
     # Initialize controller with config-driven weapon loop interval and exit event
-    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, crops=analyzer.crops)
+    j20_cfg = cfg.get("j20_mission", {})
+    target_painting_mode = j20_cfg.get("target_painting_mode", False)
+    ctrl = Controller(region, analyzer=analyzer, weapon_loop_interval=weapon_loop_interval, exit_event=exit_requested, capture=cap, on_auto_mission_key=_on_auto_mission_key, crops=analyzer.crops, target_painting_mode=target_painting_mode)
 
     # Wire FSM entry-hook callbacks (ADR 025) — injected after both objects exist
     analyzer._on_cancel_mission = ctrl.cancel_mission

@@ -67,7 +67,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -99,6 +99,7 @@ class Controller:
         self._sdl_stop: threading.Event | None = None
         self._sdl_padlock_thread: threading.Thread | None = None
         self._sdl_weapon_thread: threading.Thread | None = None
+        self._target_painting_mode = target_painting_mode
 
         # Eject-and-dive cancellation: set by End key to abort the dive thread early
         self._eject_stop = threading.Event()
@@ -573,7 +574,22 @@ class Controller:
             logger.info("Controller: search_and_destroy weapon loop started")
             try:
                 while not stop.is_set() and not self._mission_cancel.is_set():
-                    self.fire_active_weapon(hold_seconds=0.1, block=True)
+                    should_fire = True
+                    if self._target_painting_mode and self._analyzer is not None:
+                        ammo_lock = self._analyzer._ammo_lock
+                        if not ammo_lock.acquire(timeout=0.5):
+                            logger.debug("Controller: target_painting ammo lock timeout — firing")
+                        else:
+                            try:
+                                missiles = self._analyzer._ammo_missiles
+                            finally:
+                                if ammo_lock.locked():
+                                    ammo_lock.release()
+                            if missiles == 1 and self._analyzer.game_state != GameState.GAME_BATTLE_MANUAL:
+                                logger.debug("Controller: target_painting suppressing fire (ammo_missiles=1)")
+                                should_fire = False
+                    if should_fire:
+                        self.fire_active_weapon(hold_seconds=0.1, block=True)
                     for _ in range(10):  # 1 s interruptible
                         if stop.is_set() or self._mission_cancel.is_set():
                             break

@@ -121,3 +121,4 @@ mission: {restart_delay_after_unlock: 4.0, restart_retry_interval: 2.0, respawn_
 aim: {smoothing: 0.25, fire_cooldown: 0.2}
 controls: {left_mouse_button: true, fire_button: left, fire_hold: 2.0}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, debug_output_dir: tests/test-output}
+j20_mission: {target_painting_mode: true}

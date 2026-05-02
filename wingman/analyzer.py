@@ -295,6 +295,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
 # ============================================================================
 
 _FSM_TRANSITIONS = [
+    {"trigger": "play_clicked",        "source": "GAME_LOBBY",            "dest": "GAME_WAITING"},
     {"trigger": "cancel_detected",    "source": "GAME_LOBBY",            "dest": "GAME_STARTING"},
     {"trigger": "cancel_detected",    "source": "GAME_WAITING",          "dest": "GAME_STARTING"},
     {"trigger": "waiting_timeout",    "source": "GAME_WAITING",          "dest": "GAME_LOBBY"},
@@ -1094,6 +1095,7 @@ class GameStateAnalyzer:
                                 last_play_click_ts = time.time()
                                 if self._on_lobby_play_click:
                                     self._on_lobby_play_click(crop)
+                                self._trigger("play_clicked")
                                 handled = True
                             break
                     if not handled:
