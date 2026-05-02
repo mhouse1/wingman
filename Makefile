@@ -13,7 +13,8 @@
 #   make status      -> git status
 #   make diff        -> git diff
 #   make commit      -> commit all changes with a default message
-#   make push        -> push current branch
+#   make p           -> stage, commit (message "."), and push
+#   make p "msg"     -> stage, commit with "msg", and push
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
@@ -112,9 +113,17 @@ n:
 	git add .
 	git commit -am "new feature"
 
+# Extra words after 'p' are joined as the commit message: make p "my comment"
+ifeq (p,$(firstword $(MAKECMDGOALS)))
+  _P_MSG := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  ifneq (,$(_P_MSG))
+    $(eval $(_P_MSG):;@:)
+  endif
+endif
+
 p:
 	git add .
-	git commit -am .
+	git commit -am "$(if $(_P_MSG),$(_P_MSG),.)"
 	git push
 
 squash:

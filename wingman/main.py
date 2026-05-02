@@ -74,7 +74,7 @@ def main():
     handlers = [console_handler]
 
     if args.log_file:
-        file_handler = logging.FileHandler(args.log_file, encoding="utf-8")
+        file_handler = logging.FileHandler(args.log_file, mode="w", encoding="utf-8")
         file_handler.setFormatter(fmt)
         file_handler.setLevel(logging.DEBUG)
         handlers.append(file_handler)

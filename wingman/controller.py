@@ -495,6 +495,12 @@ class Controller:
             self._ejecting.set()
             try:
                 keyboard_module.press(NOSE_DOWN_KEY)
+                # Wait for the mission thread to fully exit before pressing
+                # AFTERBURNER so its _execute_key_press finally block can't
+                # release the key after we press it.
+                mission_exit_deadline = time.time() + 2.0
+                while self.is_mission_running() and time.time() < mission_exit_deadline:
+                    time.sleep(0.05)
                 keyboard_module.press(AFTERBURNER_KEY)
                 logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
 
