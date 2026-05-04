@@ -590,7 +590,8 @@ class Controller:
                                 should_fire = False
                     if should_fire:
                         self.fire_active_weapon(hold_seconds=0.1, block=True)
-                    for _ in range(10):  # 1 s interruptible
+                    steps = max(1, int(self._weapon_loop_interval / 0.1))
+                    for _ in range(steps):
                         if stop.is_set() or self._mission_cancel.is_set():
                             break
                         time.sleep(0.1)

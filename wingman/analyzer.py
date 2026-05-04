@@ -375,11 +375,13 @@ class GameStateAnalyzer:
         self._click_to_cache_lock = threading.Lock()
         # Click-to runs on its own low-frequency thread; track latest frame separately
         self._click_to_latest_frame = None
+        self._click_to_frame_ts = 0.0
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
         self._click_to_stop = threading.Event()
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
+        self._last_lobby_play_click_ts = 0.0  # reset on GAME_LOBBY re-entry
 
         # FSM — single authoritative state field managed by the transitions library.
         # Trigger methods (play_clicked, cancel_detected, …) are added to this instance
@@ -594,6 +596,7 @@ class GameStateAnalyzer:
     # ------------------------------------------------------------------
 
     def on_enter_GAME_LOBBY(self):
+        self._last_lobby_play_click_ts = 0.0
         if self._on_cancel_mission:
             self._on_cancel_mission()
 
@@ -674,6 +677,7 @@ class GameStateAnalyzer:
         # Keep latest full frame available for the click_to background thread
         with self._click_to_frame_lock:
             self._click_to_latest_frame = frame
+            self._click_to_frame_ts = time.time()
 
         # Start background threads once on first frame
         if not self._click_to_thread_started:
@@ -1016,7 +1020,6 @@ class GameStateAnalyzer:
             logger.warning("Lobby quick-scan: no crops configured — thread exiting")
             return
 
-        last_play_click_ts = 0.0
         last_popup_scan_ts = 0.0
 
         while not self._lobby_quick_scan_stop.wait(timeout=1.0):
@@ -1028,7 +1031,11 @@ class GameStateAnalyzer:
                 continue
             with self._click_to_frame_lock:
                 frame = self._click_to_latest_frame
+                frame_ts = self._click_to_frame_ts
             if frame is None:
+                continue
+            if time.time() - frame_ts > 3.0:
+                logger.debug("Lobby quick-scan: skipping stale frame (%.1fs old)", time.time() - frame_ts)
                 continue
             try:
                 now = time.time()
@@ -1078,10 +1085,10 @@ class GameStateAnalyzer:
                             continue
                         detected, _, text = futures[crop].result(timeout=120)
                         if detected:
-                            if time.time() - last_play_click_ts < 60.0:
+                            if time.time() - self._last_lobby_play_click_ts < 60.0:
                                 logger.debug(
                                     "Lobby quick-scan: %s visible but click suppressed (%.1fs since last click)",
-                                    crop, time.time() - last_play_click_ts)
+                                    crop, time.time() - self._last_lobby_play_click_ts)
                                 handled = True
                             elif self.game_state == GameState.GAME_STARTING:
                                 logger.debug(
@@ -1092,7 +1099,7 @@ class GameStateAnalyzer:
                                 logger.info(
                                     "\033[93m📋 Lobby quick-scan: %s detected (text='%s') — clicking\033[0m",
                                     crop, text)
-                                last_play_click_ts = time.time()
+                                self._last_lobby_play_click_ts = time.time()
                                 if self._on_lobby_play_click:
                                     self._on_lobby_play_click(crop)
                                 self._trigger("play_clicked")
