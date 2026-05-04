@@ -29,13 +29,16 @@ Replace `start_auto_mission()` and the main-loop lobby guards with a single long
 | Every 1 s | `GAME_LOBBY` | `CANCEL`, `UNREADY`, `PLAY`, `READY` (whichever are configured) |
 | Every 5 s | `GAME_LOBBY` or `GAME_WAITING` | `INVITED`, `CREATION_FAILED`, `REVEAL_ALL`, `UNLOCK_CLOSE`, `INSPECT`, `event_refresh` |
 
-All futures for a given cycle are submitted to the shared `ThreadPoolExecutor` in one parallel batch before any result is read. Resolution order within each cycle:
+Lobby crops and popup crops are submitted in **two separate batches** per cycle. The popup batch re-reads `_click_to_latest_frame` immediately before submission, so a popup that appeared while the lobby OCR was running is caught in the same cycle rather than the next. Each batch is skipped if the frame is older than 3 s.
 
-1. `CANCEL` / `UNREADY` — if either is detected, fire `cancel_detected` (→ `GAME_STARTING`) and skip PLAY processing for this cycle.
-2. `PLAY` / `READY` — if detected and a 60 s per-play-click cooldown has not fired, call `_on_lobby_play_click(crop)` (→ `ctrl.click_crop`) and fire `play_clicked` (→ `GAME_WAITING`).
-3. Popup crops — first detected popup calls `_on_lobby_popup_click(popup)` (→ `ctrl.click_crop`).
+Resolution order within each cycle:
 
-The 60 s play-click cooldown (`last_play_click_ts`) prevents the thread from re-firing `play_clicked` if the state has not yet advanced after a successful click.
+1. `CANCEL` — fire `cancel_detected` (→ `GAME_STARTING`).
+2. `UNREADY` — fire `play_clicked` (→ `GAME_WAITING`). Means this player already clicked READY; waiting for squad. `GAME_WAITING` then polls for CANCEL every 3 s until matchmaking confirms.
+3. `PLAY` / `READY` — if detected and the 60 s per-play-click cooldown has not fired, call `_on_lobby_play_click(crop)` (→ `ctrl.click_crop`) and fire `play_clicked` (→ `GAME_WAITING`).
+4. Popup crops — first detected popup calls `_on_lobby_popup_click(popup)` (→ `ctrl.click_crop`). **Suppressed for 5 s after any PLAY/READY click** so CANCEL detection in `GAME_WAITING` is not delayed by popup OCR cost.
+
+The 60 s play-click cooldown (`self._last_lobby_play_click_ts`, reset to `0.0` in `on_enter_GAME_LOBBY`) prevents the thread from re-firing `play_clicked` if the state has not yet advanced after a successful click.
 
 ### Callbacks injected from `main.py`
 
@@ -111,38 +114,25 @@ Active popup crops scanned in the quick-scan thread:
 - Single thread eliminates the concurrent `_run` thread race from `start_auto_mission()`.
 - Main loop is simpler — no lobby-specific guard branches.
 - Thread lifetime is predictable: started once, stopped by `cleanup()`.
-- All lobby OCR is parallel within each 1 s cycle (one executor batch submission).
+- Lobby OCR and popup OCR run in parallel within their respective batches each cycle. Using two separate batches (lobby first, popup second with a fresh frame read) allows popup detection to catch prompts that appeared mid-lobby-scan.
 
 **Negative / Trade-offs**
 
 - The 1 s scan interval is fixed; the old `start_auto_mission()` could scan immediately on entry (it was called directly from the main loop's first GAME_LOBBY iteration). The quick-scan thread waits up to 1 s before its first scan.
 - `unattended_active` is now effectively inert with respect to lobby automation. If a future requirement needs to suppress automated play-clicking (e.g., semi-manual mode), the thread will need a check added.
+- Each popup OCR cycle on CPU takes significantly longer than the nominal 5 s interval (observed 13–16 s per cycle in logs). The separate-batch + fresh-frame design reduces missed-popup windows, but the underlying cost per popup scan remains high. The 5 s post-PLAY-click suppression avoids adding this cost on top of the CANCEL detection path.
 
 ## Known Issues
 
-### 1. UNREADY fires wrong FSM trigger — advances to `GAME_STARTING` instead of `GAME_WAITING`
+### 1. UNREADY fires wrong FSM trigger — advances to `GAME_STARTING` instead of `GAME_WAITING` ✓ Fixed
 
 **Game context**: in multiplayer mode the PLAY button reads "READY". Clicking it changes the button to "UNREADY" (this player is ready; waiting for others). Once all squad members are ready, the button changes to "WAITING" and CANCEL becomes visible — at which point matchmaking is confirmed active.
 
-In `_run_game_lobby_quick_scan`, the CANCEL/UNREADY resolution block fires the same trigger for both crops:
+The CANCEL/UNREADY resolution block was firing `cancel_detected` for both crops, incorrectly advancing the FSM to `GAME_STARTING` when only this player had readied up.
 
-```python
-for crop in ("CANCEL", "UNREADY"):
-    ...
-    if detected:
-        self._trigger("cancel_detected")   # ← fires for UNREADY too → GAME_STARTING
-        handled = True
-        break
-```
-
-Advancing to `GAME_STARTING` on UNREADY is incorrect. `GAME_STARTING` waits for a "Good Luck" screen; it has no CANCEL confirmation step and no recovery path if other squad members take a long time to ready up (only `starting_give_up` after its own stall timeout).
-
-The semantically correct transition is `play_clicked` → `GAME_WAITING`. The UNREADY state means "READY was already clicked" — equivalent to what `play_clicked` normally signals. `GAME_WAITING` then:
-- Scans for CANCEL every 3 s (confirming matchmaking started once all members ready up)
-- Fires `cancel_detected` → `GAME_STARTING` naturally when CANCEL appears
-- Falls back to `GAME_LOBBY` via `waiting_timeout` after 180 s if the squad never fully readies
-
-**Fix**: when `crop == "UNREADY"` is detected, fire `play_clicked` (→ `GAME_WAITING`) instead of `cancel_detected`; fire `cancel_detected` only when `crop == "CANCEL"`.
+**Fix applied**: the block now branches on `crop`:
+- `CANCEL` → `cancel_detected` (→ `GAME_STARTING`) as before.
+- `UNREADY` → `play_clicked` (→ `GAME_WAITING`) and stamps `_last_lobby_play_click_ts` to prevent an immediate re-click. `GAME_WAITING` then polls for CANCEL every 3 s and falls back via `waiting_timeout` if the squad never fully readies.
 
 ### 2. `last_play_click_ts` not reset on GAME_LOBBY re-entry — stale cooldown ✓ Fixed
 
@@ -167,6 +157,10 @@ Both the click-to thread and the lobby quick-scan thread read `_click_to_latest_
 **Retain `start_auto_mission()` with a guard flag** — add a mutex to prevent concurrent runs. Rejected: the main-loop stall guard would still need to exist, and two separate mechanisms for the same task is harder to reason about than one.
 
 **Move CANCEL scan for GAME_WAITING into the quick-scan thread** — considered but not done. The main-loop 3 s CANCEL scan also owns the `game_waiting_since` 180 s timeout and the PLAY re-click on CANCEL-absent. Moving all of that into the thread would require the thread to own more state. Left as main-loop responsibility for now.
+
+**Reduce popup scan interval to 1 s** — considered. The observed popup detection latency of 13–16 s is primarily caused by the OCR cost per cycle, not the 5 s scheduling interval. Reducing the interval to 1 s would make popup detections more likely to land on a prompt rather than a stale frame but would also saturate the executor during the lobby phase. Not done; the separate-batch/fresh-frame design is the higher-value fix.
+
+**Template matching for stable popups (REVEAL_ALL, UNLOCK_CLOSE)** — these popups have fixed layouts and do not require OCR. Template matching or HSV pixel density would detect them in < 1 ms vs. ~1–2 s per EasyOCR call. Not yet implemented; noted as a future optimisation.
 
 ## References
 
