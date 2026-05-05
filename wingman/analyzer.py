@@ -571,6 +571,13 @@ class GameStateAnalyzer:
                 self._ocr_executor = ThreadPoolExecutor(max_workers=13)
                 self._ocr_executor_initialized = True
                 logger.info("Initialized ThreadPoolExecutor with 13 workers for parallel OCR")
+                # Pre-warm: each worker thread must initialize its own EasyOCR reader
+                # (serialized by _ocr_init_lock). Submitting 13 fire-and-forget tasks here
+                # starts that initialization in the background so the first real lobby scan
+                # does not stall waiting for cold workers.
+                for _ in range(13):
+                    self._ocr_executor.submit(_get_thread_ocr_reader)
+                logger.debug("OCR worker pre-warm submitted (13 tasks)")
             except Exception as e:
                 logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
                 self._ocr_executor_initialized = True  # Prevent retries
@@ -1161,6 +1168,21 @@ class GameStateAnalyzer:
                                     get_crop(popup_frame, *self.crops[crop][:4]),
                                     self.crops[crop].text or [],
                                 )
+
+                if popup_futures:
+                    # Re-check state before blocking on results. If we've transitioned out of
+                    # GAME_LOBBY / GAME_WAITING while futures were queued (e.g. PLAY was clicked
+                    # and we're now in GAME_STARTING), cancel queued futures and skip this batch
+                    # entirely to avoid holding up the executor for 50+ seconds.
+                    current_state_for_popup = self.game_state
+                    if current_state_for_popup not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+                        for f in popup_futures.values():
+                            f.cancel()
+                        logger.debug(
+                            "Lobby quick-scan: popup futures cancelled — state changed to %s",
+                            current_state_for_popup,
+                        )
+                        popup_futures = {}
 
                 if popup_futures:
                     popup_detected = False
