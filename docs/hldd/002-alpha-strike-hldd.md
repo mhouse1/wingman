@@ -24,10 +24,10 @@ The Team Captain issues tactical orders by using in-game emote shortcuts. Wingma
 |---|---|---|---|---|
 | EMOTE2 | Help! | `CMD_OVERWATCH` | Enter high-altitude target painting mode | Maintain radar jamming / escort |
 | EMOTE4 | Attack | `CMD_ATTACK` | Maintain target painting, descend to engagement range | Switch from jamming to attack mode |
-| EMOTE3 | Follow | `CMD_REGROUP` | Return to follow-the-leader formation | Return to escort formation |
-| EMOTE1 | (default/reset) | `CMD_DEFAULT` | Reset to follow-the-leader mode | Reset to radar jamming mode |
+| EMOTE3 | Defend | `CMD_REGROUP` | Return to follow-the-leader formation | Return to escort formation |
+| EMOTE1 | Moving to | `CMD_DEFAULT` | Reset to follow-the-leader mode | Reset to radar jamming mode |
 
-Emote detection uses an existing OCR crop region scoped to the emote notification area. Text match against `[HELP, ATTACK, FOLLOW]` tokens triggers a mode transition in the relevant instance.
+Emote detection uses an existing OCR crop region scoped to the emote notification area. Text match against `[HELP, ATTACK, DEFEND]` tokens triggers a mode transition in the relevant instance.
 
 ---
 
@@ -107,7 +107,7 @@ stateDiagram-v2
 ```mermaid
 flowchart TD
     CAP[Frame Capture] --> OCR[Emote OCR Region\nper-instance crop]
-    OCR --> PARSE[Token Parser\nHELP / ATTACK / FOLLOW]
+    OCR --> PARSE[Token Parser\nHELP / ATTACK / DEFEND]
     PARSE -->|CMD_OVERWATCH| J20[J-20 State Machine]
     PARSE -->|CMD_ATTACK| J20
     PARSE -->|CMD_ATTACK| A6[A-6 State Machine]
@@ -157,7 +157,7 @@ alpha_strike:
     coords:
       - [0.40, 0.88]
       - [0.60, 0.94]
-    text: [HELP, ATTACK, FOLLOW]
+    text: [HELP, ATTACK, DEFEND]
   j20:
     altitude_floor_px: 200        # minimum screen Y for high-altitude hold
     painting_mode_on_start: false # start in Follow, not TargetPainting

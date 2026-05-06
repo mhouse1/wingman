@@ -41,12 +41,15 @@ CANCEL_MISSION_KEY = 'end'   # Press End to cancel active mission
 CAPTURE_SCREEN_SHOT = 'v'  # Press V to capture a screenshot (for testing/debugging)
 AUTO_MISSION_KEY = 'm'  # Press M to start an automatic mission based on detected game state (not implemented yet)
 SIMULATE_RESPAWN_KEY = 'b'  # Press B to inject a fake respawn OCR result (testing)
+
+# Available Emotes in-game
+# The list here are for future use when implementing hldd003's request for emote support, and are not currently used in the codebase.
 """
-EMOTE1 # Moving to
+EMOTE1 # Moving to , bind to numpad 1
 EMOTE2 # Help!
 EMOTE3 # Defend
-EMOTE4 # Attack
-EMOTE5 # Goodluck
+EMOTE4 # Attack, bind to T, use with HLDD003's target painting mode for marking targets to attack with the weapon loop
+EMOTE5 # Goodluck , bind to 'u', the same key as J20 mission for easy access at the start of a match
 EMOTE6 # Well Played  
 EMOTE7 # Wow!
 EMOTE8 # Thanks!
