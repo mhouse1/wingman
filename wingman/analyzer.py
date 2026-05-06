@@ -9,7 +9,7 @@ import time
 from enum import Enum, auto
 from pathlib import Path
 
-from transitions import Machine
+from transitions import Machine, MachineError
 
 from .crop_region import get_crop, load_crops, draw_crops
 
@@ -21,6 +21,7 @@ class GameState(Enum):
     GAME_WAITING         = auto()  # PLAY clicked; waiting for CANCEL crop to confirm matchmaking
     GAME_STARTING        = auto()  # Matchmaking confirmed; waiting for "Good Luck" before launching mission
     GAME_STARTING_STALLED = auto() # GAME_STARTING timed out without "Good Luck" detection
+    GAME_BATTLE_MANUAL   = auto()  # Player took manual control; auto-mission restart suppressed
 
 try:
     import easyocr
@@ -282,6 +283,10 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
     GameState.GAME_STARTING_STALLED: {
         "good_luck",
     },
+    GameState.GAME_BATTLE_MANUAL: {
+        "respawn", "incoming", "click_to",
+        "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY",
+    },
 }
 
 
@@ -290,7 +295,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
 # ============================================================================
 
 _FSM_TRANSITIONS = [
-    {"trigger": "play_clicked",       "source": "GAME_LOBBY",            "dest": "GAME_WAITING"},
+    {"trigger": "play_clicked",        "source": "GAME_LOBBY",            "dest": "GAME_WAITING"},
     {"trigger": "cancel_detected",    "source": "GAME_LOBBY",            "dest": "GAME_STARTING"},
     {"trigger": "cancel_detected",    "source": "GAME_WAITING",          "dest": "GAME_STARTING"},
     {"trigger": "waiting_timeout",    "source": "GAME_WAITING",          "dest": "GAME_LOBBY"},
@@ -298,9 +303,11 @@ _FSM_TRANSITIONS = [
     {"trigger": "starting_timeout",   "source": "GAME_STARTING",         "dest": "GAME_STARTING_STALLED"},
     {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
     {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
-    {"trigger": "click_to_detected",  "source": "GAME_BATTLE",           "dest": "GAME_END_B"},
+    {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL"], "dest": "GAME_END_B"},
+    {"trigger": "manual_takeover",    "source": "GAME_BATTLE",            "dest": "GAME_BATTLE_MANUAL"},
+    {"trigger": "respawn_reset",      "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
     {"trigger": "manual_reset",       "source": "*",                     "dest": "GAME_LOBBY"},
-    {"trigger": "continue_clicked",   "source": "GAME_END_B",            "dest": "GAME_LOBBY"},
+    {"trigger": "continue_clicked",   "source": ["GAME_END_B", "GAME_BATTLE_MANUAL"], "dest": "GAME_LOBBY"},
     {"trigger": "respawn_detected",   "source": "GAME_END_B",            "dest": "GAME_BATTLE"},
 ]
 
@@ -368,9 +375,13 @@ class GameStateAnalyzer:
         self._click_to_cache_lock = threading.Lock()
         # Click-to runs on its own low-frequency thread; track latest frame separately
         self._click_to_latest_frame = None
+        self._click_to_frame_ts = 0.0
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
         self._click_to_stop = threading.Event()
+        self._lobby_quick_scan_thread_started = False
+        self._lobby_quick_scan_stop = threading.Event()
+        self._last_lobby_play_click_ts = 0.0  # reset on GAME_LOBBY re-entry
 
         # FSM — single authoritative state field managed by the transitions library.
         # Trigger methods (play_clicked, cancel_detected, …) are added to this instance
@@ -378,6 +389,8 @@ class GameStateAnalyzer:
         self._state_lock = threading.Lock()
         self._on_cancel_mission = None           # injected by main.py after construction
         self._on_start_game_starting_loop = None  # injected by main.py after construction
+        self._on_lobby_play_click = None         # injected by main.py; called with crop name when PLAY/READY detected
+        self._on_lobby_popup_click = None        # injected by main.py; called with popup crop name when a popup is detected
 
         Machine(
             model=self,
@@ -558,6 +571,13 @@ class GameStateAnalyzer:
                 self._ocr_executor = ThreadPoolExecutor(max_workers=13)
                 self._ocr_executor_initialized = True
                 logger.info("Initialized ThreadPoolExecutor with 13 workers for parallel OCR")
+                # Pre-warm: each worker thread must initialize its own EasyOCR reader
+                # (serialized by _ocr_init_lock). Submitting 13 fire-and-forget tasks here
+                # starts that initialization in the background so the first real lobby scan
+                # does not stall waiting for cold workers.
+                for _ in range(13):
+                    self._ocr_executor.submit(_get_thread_ocr_reader)
+                logger.debug("OCR worker pre-warm submitted (13 tasks)")
             except Exception as e:
                 logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
                 self._ocr_executor_initialized = True  # Prevent retries
@@ -565,19 +585,25 @@ class GameStateAnalyzer:
         return self._ocr_executor
     
     def _trigger(self, trigger_name: str) -> bool:
-        """Thread-safe FSM trigger dispatch. Raises MachineError on invalid transitions."""
+        """Thread-safe FSM trigger dispatch. Returns False on invalid transitions."""
         with self._state_lock:
             fn = getattr(self, trigger_name, None)
             if fn is None:
                 logger.error("FSM: unknown trigger '%s'", trigger_name)
                 return False
-            return fn()
+            try:
+                return fn()
+            except MachineError as e:
+                logger.warning("FSM: ignored invalid trigger '%s' from state %s: %s",
+                               trigger_name, self.game_state, e)
+                return False
 
     # ------------------------------------------------------------------
     # FSM entry hooks — called automatically by transitions on state entry
     # ------------------------------------------------------------------
 
     def on_enter_GAME_LOBBY(self):
+        self._last_lobby_play_click_ts = 0.0
         if self._on_cancel_mission:
             self._on_cancel_mission()
 
@@ -590,6 +616,11 @@ class GameStateAnalyzer:
         with self._health_lock:
             if self._health is not None and self._health >= 1:
                 self.alive_event.set()
+
+    def on_enter_GAME_BATTLE_MANUAL(self):
+        logger.info("FSM: entering GAME_BATTLE_MANUAL — manual takeover active, auto-restart suppressed")
+        if self._on_cancel_mission:
+            self._on_cancel_mission()
 
     def on_enter_GAME_STARTING_STALLED(self):
         logger.warning("FSM: GAME_STARTING → GAME_STARTING_STALLED (Good Luck not detected in time)")
@@ -618,6 +649,7 @@ class GameStateAnalyzer:
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
         self._click_to_stop.set()
+        self._lobby_quick_scan_stop.set()
         if self._ocr_executor is not None:
             try:
                 self._ocr_executor.shutdown(wait=False)
@@ -652,12 +684,17 @@ class GameStateAnalyzer:
         # Keep latest full frame available for the click_to background thread
         with self._click_to_frame_lock:
             self._click_to_latest_frame = frame
+            self._click_to_frame_ts = time.time()
 
-        # Start the click_to background thread once on first frame
+        # Start background threads once on first frame
         if not self._click_to_thread_started:
             self._click_to_thread_started = True
             threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
             logger.debug("Click-to background thread started")
+        if not self._lobby_quick_scan_thread_started:
+            self._lobby_quick_scan_thread_started = True
+            threading.Thread(target=self._run_game_lobby_quick_scan, daemon=True).start()
+            logger.info("Lobby quick-scan background thread started")
 
         state = {
             'is_respawning': False,
@@ -801,7 +838,7 @@ class GameStateAnalyzer:
 
                 state = self.game_state
                 # Only process GAME_BATTLE crops in GAME_BATTLE or GAME_END_B
-                if state not in (GameState.GAME_BATTLE, GameState.GAME_END_B):
+                if state not in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_END_B):
                     logger.debug(f"Skipping GAME_BATTLE crop OCR in {state.name} state")
                     time.sleep(0.2)
                 else:
@@ -957,7 +994,7 @@ class GameStateAnalyzer:
                 click_to_frame = get_crop(frame, *self.crops["click_to"][:4])
                 click_to_detected, _, click_to_text = executor.submit(
                     _process_text_region, click_to_frame, self.crops["click_to"].text or []
-                ).result(timeout=120)
+                ).result(timeout=30)
                 result = (True, 1.0, "ocr") if click_to_detected else (False, 0.0, None)
                 with self._click_to_cache_lock:
                     self._click_to_cache['result'] = result
@@ -970,6 +1007,221 @@ class GameStateAnalyzer:
                 return  # executor shut down — exit the loop cleanly
             except Exception as e:
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
+
+    def _run_game_lobby_quick_scan(self):
+        """Scan lobby crops every 1s while in GAME_LOBBY or GAME_WAITING.
+
+        Lobby crops and popup crops are submitted in separate batches so popup OCR
+        can use a fresher frame than the one used for CANCEL / PLAY detection.
+
+        Popup scan fires every 5s in both states unless a PLAY/READY click happened
+        within the last 5s; CANCEL/PLAY scan fires every cycle in GAME_LOBBY only.
+        """
+        lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
+        popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL",
+                            "UNLOCK_CLOSE", "INSPECT", "event_refresh"]
+        popup_crops = [c for c in popup_crop_names if c in self.crops]
+
+        if not lobby_crops and not popup_crops:
+            logger.warning("Lobby quick-scan: no crops configured — thread exiting")
+            return
+
+        last_popup_scan_ts = 0.0
+
+        while not self._lobby_quick_scan_stop.wait(timeout=1.0):
+            cycle_start = time.time()
+            state = self.game_state
+            if state not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+                continue
+
+            executor = self.ocr_executor
+            if executor is None:
+                continue
+
+            try:
+                # --- CANCEL / UNREADY / PLAY / READY (GAME_LOBBY only) ---
+                lobby_futures = {}
+                lobby_scan_start = None
+                handled = False
+                play_clicked_this_cycle = False
+
+                if state == GameState.GAME_LOBBY and lobby_crops:
+                    with self._click_to_frame_lock:
+                        frame = self._click_to_latest_frame
+                        frame_ts = self._click_to_frame_ts
+
+                    if frame is not None:
+                        frame_age = time.time() - frame_ts
+                        if frame_age > 3.0:
+                            logger.debug(
+                                "Lobby quick-scan: skipping stale lobby frame (%.1fs old)",
+                                frame_age,
+                            )
+                        else:
+                            lobby_scan_start = time.time()
+                            for crop in lobby_crops:
+                                lobby_futures[crop] = executor.submit(
+                                    _process_text_region,
+                                    get_crop(frame, *self.crops[crop][:4]),
+                                    self.crops[crop].text or [],
+                                )
+
+                if state == GameState.GAME_LOBBY:
+                    for crop in ("CANCEL", "UNREADY"):
+                        if crop not in lobby_futures:
+                            continue
+                        detected, _, text = lobby_futures[crop].result(timeout=120)
+                        if detected:
+                            if crop == "UNREADY":
+                                # UNREADY means this player already clicked READY and is waiting
+                                # for squad members. The correct transition is play_clicked →
+                                # GAME_WAITING, not cancel_detected → GAME_STARTING.
+                                logger.info(
+                                    "\033[93m📋 Lobby quick-scan: UNREADY detected — squad not ready yet → GAME_WAITING\033[0m")
+                                self._last_lobby_play_click_ts = time.time()
+                                self._trigger("play_clicked")
+                            else:
+                                logger.info(
+                                    "\033[92m✓ Lobby quick-scan: CANCEL detected (text='%s') → GAME_STARTING\033[0m",
+                                    text)
+                                self._trigger("cancel_detected")
+                            handled = True
+                            break
+
+                if not handled and state == GameState.GAME_LOBBY:
+                    for crop in ("PLAY", "READY"):
+                        if crop not in lobby_futures:
+                            continue
+                        detected, _, text = lobby_futures[crop].result(timeout=120)
+                        if not detected:
+                            continue
+                        if time.time() - self._last_lobby_play_click_ts < 60.0:
+                            logger.debug(
+                                "Lobby quick-scan: %s visible but click suppressed (%.1fs since last click)",
+                                crop, time.time() - self._last_lobby_play_click_ts,
+                            )
+                            handled = True
+                        elif self.game_state == GameState.GAME_STARTING:
+                            logger.debug(
+                                "Lobby quick-scan: %s visible but state is now GAME_STARTING — skipping click",
+                                crop,
+                            )
+                            handled = True
+                        else:
+                            logger.info(
+                                "\033[93m📋 Lobby quick-scan: %s detected (text='%s') — clicking\033[0m",
+                                crop, text,
+                            )
+                            self._last_lobby_play_click_ts = time.time()
+                            if self._on_lobby_play_click:
+                                self._on_lobby_play_click(crop)
+                            self._trigger("play_clicked")
+                            handled = True
+                            play_clicked_this_cycle = True
+                        break
+
+                    if not handled and lobby_futures:
+                        logger.info("Lobby quick-scan: no lobby crops detected")
+
+                if lobby_futures and lobby_scan_start is not None:
+                    logger.debug(
+                        "Lobby quick-scan: lobby batch completed in %.2fs",
+                        time.time() - lobby_scan_start,
+                    )
+
+                # After a PLAY/READY click, skip popup OCR briefly so the main loop can
+                # focus on GAME_WAITING CANCEL detection without spending this cycle on popups.
+                popup_cooldown_remaining = 5.0 - (time.time() - self._last_lobby_play_click_ts)
+                do_popup_scan = (
+                    bool(popup_crops)
+                    and not play_clicked_this_cycle
+                    and popup_cooldown_remaining <= 0.0
+                    and time.time() - last_popup_scan_ts >= 5.0
+                )
+                if bool(popup_crops) and popup_cooldown_remaining > 0.0:
+                    logger.debug(
+                        "Lobby quick-scan: popup scan suppressed for %.1fs after PLAY/READY click",
+                        popup_cooldown_remaining,
+                    )
+
+                # --- Popup crops (both states, every 5s) ---
+                popup_futures = {}
+                popup_scan_start = None
+                if do_popup_scan:
+                    with self._click_to_frame_lock:
+                        popup_frame = self._click_to_latest_frame
+                        popup_frame_ts = self._click_to_frame_ts
+
+                    if popup_frame is not None:
+                        popup_frame_age = time.time() - popup_frame_ts
+                        if popup_frame_age > 3.0:
+                            logger.debug(
+                                "Lobby quick-scan: skipping stale popup frame (%.1fs old)",
+                                popup_frame_age,
+                            )
+                        else:
+                            last_popup_scan_ts = time.time()
+                            popup_scan_start = time.time()
+                            for crop in popup_crops:
+                                popup_futures[crop] = executor.submit(
+                                    _process_text_region,
+                                    get_crop(popup_frame, *self.crops[crop][:4]),
+                                    self.crops[crop].text or [],
+                                )
+
+                if popup_futures:
+                    # Re-check state before blocking on results. If we've transitioned out of
+                    # GAME_LOBBY / GAME_WAITING while futures were queued (e.g. PLAY was clicked
+                    # and we're now in GAME_STARTING), cancel queued futures and skip this batch
+                    # entirely to avoid holding up the executor for 50+ seconds.
+                    current_state_for_popup = self.game_state
+                    if current_state_for_popup not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+                        for f in popup_futures.values():
+                            f.cancel()
+                        logger.debug(
+                            "Lobby quick-scan: popup futures cancelled — state changed to %s",
+                            current_state_for_popup,
+                        )
+                        popup_futures = {}
+
+                if popup_futures:
+                    popup_detected = False
+                    for crop in popup_crops:
+                        if crop not in popup_futures:
+                            continue
+                        try:
+                            detected, _, text = popup_futures[crop].result(timeout=120)
+                            if detected:
+                                logger.info(
+                                    "Lobby quick-scan: popup '%s' detected (text='%s')",
+                                    crop, text,
+                                )
+                                if self._on_lobby_popup_click:
+                                    self._on_lobby_popup_click(crop)
+                                popup_detected = True
+                                break
+                            logger.debug("Lobby quick-scan: popup '%s' not found", crop)
+                        except Exception as e:
+                            logger.warning(
+                                "Lobby quick-scan: popup '%s' scan failed: %s: %s",
+                                crop, type(e).__name__, e,
+                            )
+
+                    if popup_scan_start is not None:
+                        logger.debug(
+                            "Lobby quick-scan: popup batch completed in %.2fs%s",
+                            time.time() - popup_scan_start,
+                            " (detected)" if popup_detected else "",
+                        )
+
+                logger.debug(
+                    "Lobby quick-scan: cycle completed in %.2fs",
+                    time.time() - cycle_start,
+                )
+            except RuntimeError:
+                return  # executor shut down
+            except Exception as e:
+                logger.warning("Lobby quick-scan: scan failed: %s: %s", type(e).__name__, e)
 
     def _empty_state(self):
         """Return empty game state for error cases."""
@@ -1034,16 +1286,19 @@ class GameStateAnalyzer:
             return False
         try:
             region_frame = get_crop(frame, *self.crops["good_luck"][:4])
+            # timeout=120: all 13 workers initialize serially under _ocr_init_lock
+            # (~6-8 s each = up to 104 s total). A 30 s timeout silently drops
+            # detections when the assigned worker is still queued for init.
             detected, _, text = executor.submit(
                 _process_text_region, region_frame, self.crops["good_luck"].text or []
-            ).result(timeout=30)
+            ).result(timeout=120)
             if detected:
                 logger.info("Analyzer: 'Good Luck' detected in good_luck crop (text='%s')", text)
             else:
                 logger.debug("Analyzer: 'Good Luck' not found in good_luck crop")
             return detected
         except Exception as e:
-            logger.warning("Analyzer: Good Luck scan failed: %s", e)
+            logger.warning("Analyzer: Good Luck scan failed: %r", e)
             return False
 
     def scan_region_for_event_refresh(self, frame) -> bool:
@@ -1111,50 +1366,6 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.warning("Analyzer: Play button scan failed: %s", e)
             return None
-
-    def scan_region_for_lobby_popups(self, frame):
-        """Scan for lobby popup buttons that may be blocking the play button.
-
-        All popup crops are submitted to the executor in parallel. Only one popup
-        can be visible at a time; whichever is detected is returned.
-
-        Args:
-            frame: Full BGR frame from screen capture.
-
-        Returns:
-            The crop name (str) of the detected popup, or None if none found.
-        """
-        executor = self.ocr_executor
-        if executor is None:
-            logger.warning("Analyzer: OCR executor not available for lobby popup scan")
-            return None
-
-        popup_crops = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "TAP_HERE_TO_CONTINUE",
-                       "UNLOCK_CLOSE", "FINAL_CONTINUE", "INSPECT", "event_refresh"]
-
-        futures = {}
-        for crop_name in popup_crops:
-            if crop_name not in self.crops:
-                logger.debug("Analyzer: crop '%s' not in config — skipping popup check", crop_name)
-                continue
-            try:
-                crop = self.crops[crop_name]
-                region_frame = get_crop(frame, *crop[:4])
-                futures[crop_name] = executor.submit(_process_text_region, region_frame, crop.text or [])
-            except Exception as e:
-                logger.warning("Analyzer: lobby popup submit for '%s' failed: %s", crop_name, e)
-
-        for crop_name, future in futures.items():
-            try:
-                detected, _, text = future.result(timeout=30)
-                if detected:
-                    logger.info("Analyzer: lobby popup '%s' detected (text='%s')", crop_name, text)
-                    return crop_name
-                else:
-                    logger.debug("Analyzer: lobby popup '%s' not found", crop_name)
-            except Exception as e:
-                logger.warning("Analyzer: lobby popup scan for '%s' failed: %s", crop_name, e)
-        return None
 
     def scan_region_for_cancel(self, frame) -> bool:
         """Synchronously scan the CANCEL crop to confirm matchmaking is active.

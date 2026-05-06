@@ -67,8 +67,8 @@ crops:
     text: [READY]
   CANCEL:
     coords:
-    - [0.7896, 0.8678]
-    - [0.9167, 0.9089]
+    - [0.7833, 0.8589]
+    - [0.9222, 0.9156]
     text: [CANCEL]
   CREATION_FAILED:
     coords:
@@ -117,7 +117,8 @@ respawn_detection:
   bar_hsv_upper: [100, 255, 255]
   bar_threshold: 0.0005
 mission: {restart_delay_after_unlock: 4.0, restart_retry_interval: 2.0, respawn_fallback_timeout: 20.0,
-  weapon_loop_interval: 0.5}
+  weapon_loop_interval: 1.0}
 aim: {smoothing: 0.25, fire_cooldown: 0.2}
 controls: {left_mouse_button: true, fire_button: left, fire_hold: 2.0}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, debug_output_dir: tests/test-output}
+j20_mission: {target_painting_mode: false}

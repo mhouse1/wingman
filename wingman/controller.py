@@ -41,12 +41,15 @@ CANCEL_MISSION_KEY = 'end'   # Press End to cancel active mission
 CAPTURE_SCREEN_SHOT = 'v'  # Press V to capture a screenshot (for testing/debugging)
 AUTO_MISSION_KEY = 'm'  # Press M to start an automatic mission based on detected game state (not implemented yet)
 SIMULATE_RESPAWN_KEY = 'b'  # Press B to inject a fake respawn OCR result (testing)
+
+# Available Emotes in-game
+# The list here are for future use when implementing hldd003's request for emote support, and are not currently used in the codebase.
 """
-EMOTE1 # Moving to
+EMOTE1 # Moving to , bind to numpad 1
 EMOTE2 # Help!
 EMOTE3 # Defend
-EMOTE4 # Attack
-EMOTE5 # Goodluck
+EMOTE4 # Attack, bind to T, use with HLDD003's target painting mode for marking targets to attack with the weapon loop
+EMOTE5 # Goodluck , bind to 'u', the same key as J20 mission for easy access at the start of a match
 EMOTE6 # Well Played  
 EMOTE7 # Wow!
 EMOTE8 # Thanks!
@@ -67,7 +70,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -85,7 +88,6 @@ class Controller:
         self._crops: "dict[str, CropCoords]" = crops or {}
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
-        self._lobby_play_not_visible_since = 0.0  # tracks how long play button has been absent in lobby
         self._popup_last_clicked: "dict[str, float]" = {}  # popup name → timestamp of last click
 
         # Padlock camera cooldown: set when the key is pressed manually
@@ -100,9 +102,21 @@ class Controller:
         self._sdl_stop: threading.Event | None = None
         self._sdl_padlock_thread: threading.Thread | None = None
         self._sdl_weapon_thread: threading.Thread | None = None
+        self._target_painting_mode = target_painting_mode
 
         # Eject-and-dive cancellation: set by End key to abort the dive thread early
         self._eject_stop = threading.Event()
+        # Set while eject_and_dive thread is running; cleared by the thread's finally block.
+        self._ejecting = threading.Event()
+
+        # Tracks how many programmatic key presses are in flight.
+        # keyboard.KeyboardEvent has no is_injected attribute, so the getattr guard
+        # in the maneuver hooks always falls back to False and cannot distinguish
+        # machine-generated from human-generated key events.  Incrementing this
+        # counter before keyboard.press() and decrementing after keyboard.release()
+        # lets the hooks skip cancel logic for keys the mission pressed itself.
+        self._programmatic_key_count = 0
+        self._programmatic_key_lock = threading.Lock()
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
@@ -110,6 +124,9 @@ class Controller:
             def maneuver_cancel_hotkey(e):
                 if getattr(e, 'is_injected', False):
                     return
+                with self._programmatic_key_lock:
+                    if self._programmatic_key_count > 0:
+                        return
                 if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
                     logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
                     return
@@ -158,13 +175,23 @@ class Controller:
                 def maneuver_key_pressed(e):
                     if getattr(e, 'is_injected', False):
                         return
+                    with self._programmatic_key_lock:
+                        if self._programmatic_key_count > 0:
+                            return
                     if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
                         logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
                         return
-                    if self.is_mission_running():
-                        logger.info("Controller: maneuver key '%s' pressed - cancelling mission (manual takeover)", e.name)
+                    if self.is_mission_running() or self._ejecting.is_set():
+                        logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", e.name)
                         self._auto_respawn_restart = False
+                        self._eject_stop.set()
                         self.cancel_mission()
+                        if self._analyzer is not None:
+                            try:
+                                if self._analyzer.game_state == GameState.GAME_BATTLE:
+                                    self._analyzer._trigger("manual_takeover")
+                            except Exception:
+                                pass
                 for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY):
                     keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
                 logger.info("Controller: registered maneuver keys (%s/%s/%s/%s) to cancel mission on manual press",
@@ -305,121 +332,13 @@ class Controller:
                     if crop is None:
                         logger.warning("Controller: '%s' pressed but no PLAY/READY crop configured", AUTO_MISSION_KEY)
                         return
-                    logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s", AUTO_MISSION_KEY, crop)
-                    self._analyzer._trigger("play_clicked")
+                    logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s (waiting for CANCEL)", AUTO_MISSION_KEY, crop)
                     self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
 
-    def start_auto_mission(self, force: bool = False):
-        """Click the play button and enter GAME_STARTING state.
-
-        Called both from the AUTO_MISSION_KEY hotkey and automatically by the
-        main loop when unattended_mode is active and GAME_LOBBY is detected.
-
-        Args:
-            force: if True, bypass the GAME_STARTING guard (used by manual M key press
-                   to assume GAME_LOBBY and restart the cycle regardless of current state).
-        """
-        if self._analyzer is None:
-            return
-        if not force and self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
-            logger.debug("Controller: start_auto_mission called but already in GAME_STARTING/GAME_WAITING - ignoring")
-            return
-
-        def _run():
-            if self._analyzer is None:
-                return
-
-            # Guard against stale threads: if state has already advanced past GAME_LOBBY
-            # (e.g. another path clicked PLAY while this thread was queued), abort now.
-            if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
-                logger.debug("Controller: start_auto_mission _run - state already GAME_STARTING/GAME_WAITING; aborting stale thread")
-                return
-
-            if self._capture is None:
-                logger.warning("Controller: start_auto_mission - no capture source; skipping play button click")
-                return
-
-            try:
-                with mss() as sct:
-                    s = sct.grab(self._capture.get_monitor_rect())
-                    frame = np.array(s)[:, :, :3]
-            except Exception:
-                logger.exception("Controller: start_auto_mission - failed to capture frame for play button OCR")
-                return
-
-            detected_crop = self._analyzer.scan_region_for_play_button(frame)
-            if detected_crop is None:
-                now = time.time()
-                if self._lobby_play_not_visible_since == 0.0:
-                    self._lobby_play_not_visible_since = now
-                    logger.info("Controller: start_auto_mission - PLAY/READY not visible; starting 3s popup-check timer")
-                elif now - self._lobby_play_not_visible_since >= 3.0:
-                    logger.info("Controller: play button absent for %.1fs — scanning for lobby popups",
-                                now - self._lobby_play_not_visible_since)
-                    popup = self._analyzer.scan_region_for_lobby_popups(frame)
-                    if popup:
-                        if not self.popup_click_allowed(popup):
-                            logger.debug("Controller: popup '%s' click suppressed by cooldown", popup)
-                        else:
-                            logger.info("Controller: dismissing lobby popup '%s'", popup)
-                            self.record_popup_click(popup)
-                            click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
-                            self.click_crop(self._crops[click_target], block=True, count=1, region_name=click_target)
-                            if popup == REGION_REVEAL_ALL:
-                                time.sleep(3.0)
-                                logger.info("Controller: REVEAL_ALL second click after 3s delay")
-                                self.click_crop(self._crops[popup], block=True, count=1, region_name=popup)
-                            elif popup == "INVITED":
-                                time.sleep(1.5)
-                                try:
-                                    with mss() as sct:
-                                        s = sct.grab(self._capture.get_monitor_rect())
-                                        ready_frame = np.array(s)[:, :, :3]
-                                    ready = self._analyzer.scan_region_for_play_button(ready_frame)
-                                    if ready:
-                                        logger.info("Controller: INVITED accepted — clicking %s", ready)
-                                        self.click_crop(self._crops[ready], block=True, count=1, region_name=ready)
-                                except Exception:
-                                    logger.exception("Controller: failed to click READY after INVITED accept")
-                    elif now - self._lobby_play_not_visible_since >= 5.0:
-                        # No popup blocking and play button absent for 5+ seconds — OCR may
-                        # be failing to detect it.  Force-click the play button crop directly.
-                        # Re-check state: OCR took time and state may have advanced already.
-                        if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
-                            logger.debug(
-                                "Controller: start_auto_mission - state advanced to %s during OCR; skipping force-click",
-                                self._analyzer.game_state.name)
-                            return
-                        crop = next((c for c in ("PLAY", "READY") if c in self._crops), None)
-                        if crop:
-                            logger.info(
-                                "Controller: no popup found and play button absent %.1fs — force-clicking %s",
-                                now - self._lobby_play_not_visible_since, crop)
-                            self._lobby_play_not_visible_since = 0.0
-                            self._analyzer._trigger("play_clicked")
-                            self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
-                            return
-                        else:
-                            logger.warning("Controller: no PLAY/READY crop configured — cannot force-click")
-                    else:
-                        logger.info("Controller: no lobby popups detected; waiting for play button")
-                return
-
-            # Play/Ready button visible — reset popup absence timer
-            self._lobby_play_not_visible_since = 0.0
-            # Re-check state after OCR: another thread may have already clicked play
-            if self._analyzer.game_state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
-                logger.debug("Controller: start_auto_mission - state already GAME_STARTING/GAME_WAITING after OCR; skipping click")
-                return
-            logger.info("Controller: start_auto_mission - clicking %s and entering GAME_WAITING", detected_crop)
-            self._analyzer._trigger("play_clicked")
-            self.click_crop(self._crops[detected_crop], block=False, count=1, region_name=detected_crop)
-
-        threading.Thread(target=_run, daemon=True).start()
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-up maneuver: presses and holds the configured nose-up key.
@@ -486,18 +405,24 @@ class Controller:
                     logger.error("Controller: keyboard library not available for %s", label)
                     return
                 logger.debug("Controller: using keyboard library for '%s' press", key)
-                keyboard_module.press(key)
-                start = time.time()
-                while (time.time() - start) < hold_seconds:
-                    if not ignore_cancel and self._mission_cancel.is_set():
-                        logger.debug("Controller: %s cancelled", label)
-                        break
-                    time.sleep(0.05)
+                with self._programmatic_key_lock:
+                    self._programmatic_key_count += 1
                 try:
-                    keyboard_module.release(key)
-                except Exception:
-                    logger.exception("Controller: failed to release '%s' key", key)
-                logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
+                    keyboard_module.press(key)
+                    start = time.time()
+                    while (time.time() - start) < hold_seconds:
+                        if not ignore_cancel and self._mission_cancel.is_set():
+                            logger.debug("Controller: %s cancelled", label)
+                            break
+                        time.sleep(0.05)
+                    try:
+                        keyboard_module.release(key)
+                    except Exception:
+                        logger.exception("Controller: failed to release '%s' key", key)
+                    logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
+                finally:
+                    with self._programmatic_key_lock:
+                        self._programmatic_key_count -= 1
             except Exception:
                 logger.exception("Controller: %s failed", label)
 
@@ -571,8 +496,15 @@ class Controller:
             if not keyboard_module:
                 logger.error("Controller: keyboard library not available for eject_and_dive")
                 return
+            self._ejecting.set()
             try:
                 keyboard_module.press(NOSE_DOWN_KEY)
+                # Wait for the mission thread to fully exit before pressing
+                # AFTERBURNER so its _execute_key_press finally block can't
+                # release the key after we press it.
+                mission_exit_deadline = time.time() + 2.0
+                while self.is_mission_running() and time.time() < mission_exit_deadline:
+                    time.sleep(0.05)
                 keyboard_module.press(AFTERBURNER_KEY)
                 logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
 
@@ -600,6 +532,7 @@ class Controller:
                 else:
                     logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
             finally:
+                self._ejecting.clear()
                 try:
                     keyboard_module.release(AFTERBURNER_KEY)
                 except Exception:
@@ -644,8 +577,24 @@ class Controller:
             logger.info("Controller: search_and_destroy weapon loop started")
             try:
                 while not stop.is_set() and not self._mission_cancel.is_set():
-                    self.fire_active_weapon(hold_seconds=0.1, block=True)
-                    for _ in range(10):  # 1 s interruptible
+                    should_fire = True
+                    if self._target_painting_mode and self._analyzer is not None:
+                        ammo_lock = self._analyzer._ammo_lock
+                        if not ammo_lock.acquire(timeout=0.5):
+                            logger.debug("Controller: target_painting ammo lock timeout — firing")
+                        else:
+                            try:
+                                missiles = self._analyzer._ammo_missiles
+                            finally:
+                                if ammo_lock.locked():
+                                    ammo_lock.release()
+                            if missiles == 1 and self._analyzer.game_state != GameState.GAME_BATTLE_MANUAL:
+                                logger.debug("Controller: target_painting suppressing fire (ammo_missiles=1)")
+                                should_fire = False
+                    if should_fire:
+                        self.fire_active_weapon(hold_seconds=0.1, block=True)
+                    steps = max(1, int(self._weapon_loop_interval / 0.1))
+                    for _ in range(steps):
                         if stop.is_set() or self._mission_cancel.is_set():
                             break
                         time.sleep(0.1)
