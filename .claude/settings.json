@@ -20,7 +20,10 @@
       "Bash(python -c ':*)",
       "Bash(ls -la /c/dev-tools/github/wingman/tests/*.py)",
       "Bash(uv add *)",
-      "Bash(.venv/Scripts/python -c \"from transitions import MachineError; print\\('ok'\\)\")"
+      "Bash(.venv/Scripts/python -c \"from transitions import MachineError; print\\('ok'\\)\")",
+      "Bash(Get-ChildItem -Recurse -Directory -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(xargs cat)"
     ]
   }
 }
