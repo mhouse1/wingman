@@ -4,10 +4,14 @@ import logging
 import cv2
 import numpy as np
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import time
 from enum import Enum, auto
 from pathlib import Path
+
+HEALTH_WINDOW_SIZE  = 10   # readings kept in rolling window (~10 s at 1 Hz)
+HEALTH_SPIKE_FACTOR = 1.5  # reject readings more than 50 % above the established ceiling
 
 from transitions import Machine, MachineError
 
@@ -211,6 +215,43 @@ def _process_health_region(health_frame) -> "tuple[int | None, float]":
     return (None, time.time() - t_start)
 
 
+def _apply_health_ceiling_filter(
+    value: int,
+    window: deque,
+    ceiling: "int | None",
+    window_size: int,
+    spike_factor: float,
+    last_accepted: "int | None",
+) -> "tuple[int | None, int | None]":
+    """Reject OCR health readings that are implausibly large (stray prefix digits).
+
+    Returns (filtered_value, new_ceiling).
+    filtered_value is last_accepted when the reading is rejected as a spike,
+    or None when rejected and no prior accepted reading exists.
+    """
+    if ceiling is None:
+        window.append(value)
+        new_ceiling = max(window) if len(window) == window_size else None
+        return (value, new_ceiling)
+    if value <= ceiling * spike_factor:
+        window.append(value)
+        return (value, max(window))
+    logger.warning(
+        "Analyzer: Health OCR spike rejected: %d (ceiling=%d, factor=%.1f)",
+        value, ceiling, spike_factor)
+    return (last_accepted, ceiling)
+
+
+def _process_crop_region(frame, crop_coords, text_tokens):
+    """Extract crop and run text detection entirely inside a worker thread.
+
+    Wrapping get_crop() here ensures it is covered by future.result(timeout=N)
+    in the lobby quick-scan thread; a synchronous call in the submission loop
+    would have no timeout protection and can block indefinitely.
+    """
+    return _process_text_region(get_crop(frame, *crop_coords), text_tokens)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -405,6 +446,8 @@ class GameStateAnalyzer:
         self._game_battle_alive = False    # True when health >= 1 in GAME_BATTLE
         self._health_lock = threading.Lock()
         self._health_no_digits_since = 0.0  # timestamp when health OCR started returning no digits
+        self._health_window: deque = deque(maxlen=HEALTH_WINDOW_SIZE)
+        self._health_ceiling: "int | None" = None
         # Signalled when _game_battle_alive transitions False → True.
         # The main loop waits on this event to restart the mission immediately.
         self.alive_event = threading.Event()
@@ -607,6 +650,9 @@ class GameStateAnalyzer:
 
     def on_enter_GAME_LOBBY(self):
         self._last_lobby_play_click_ts = 0.0
+        with self._health_lock:
+            self._health_window.clear()
+            self._health_ceiling = None
         if self._on_cancel_mission:
             self._on_cancel_mission()
 
@@ -617,6 +663,8 @@ class GameStateAnalyzer:
     def on_enter_GAME_BATTLE(self):
         self._health_no_digits_since = 0.0
         with self._health_lock:
+            self._health_window.clear()
+            self._health_ceiling = None
             if self._health is not None and self._health >= 1:
                 self.alive_event.set()
 
@@ -895,14 +943,21 @@ class GameStateAnalyzer:
                     if health_future is not None:
                         health_value, health_ocr_time = health_future.result(timeout=120)
                         if health_value is not None:
-                            # Digits found — reset no-digits timer and update state.
-                            self._health_no_digits_since = 0.0
-                            alive = health_value >= 1
                             with self._health_lock:
+                                health_value, self._health_ceiling = _apply_health_ceiling_filter(
+                                    health_value,
+                                    self._health_window,
+                                    self._health_ceiling,
+                                    HEALTH_WINDOW_SIZE,
+                                    HEALTH_SPIKE_FACTOR,
+                                    self._health,
+                                )
                                 prev_alive = self._game_battle_alive
+                                alive = health_value >= 1 if health_value is not None else False
                                 self._health = health_value
                                 self._game_battle_alive = alive
-                            logger.info("Health: %d | alive=%s", health_value, alive)
+                            self._health_no_digits_since = 0.0
+                            logger.info("Health: %s | alive=%s", health_value, alive)
                             # Signal False → True transition for immediate mission restart.
                             if alive and not prev_alive:
                                 logger.info("Analyzer: health alive transition False→True")
@@ -960,16 +1015,26 @@ class GameStateAnalyzer:
                     health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4])
                     health_future = executor.submit(_process_health_region, health_frame)
                     health_value, _ = health_future.result(timeout=120)
-                    if health_value is not None and health_value >= 1:
+                    if health_value is not None:
                         with self._health_lock:
-                            prev_alive = self._game_battle_alive
-                            self._health = health_value
-                            self._game_battle_alive = True
-                        logger.info(
-                            "Analyzer: health %d detected in GAME_STARTING → game_battle_alive=True",
-                            health_value)
-                        if not prev_alive:
-                            self.alive_event.set()
+                            health_value, self._health_ceiling = _apply_health_ceiling_filter(
+                                health_value,
+                                self._health_window,
+                                self._health_ceiling,
+                                HEALTH_WINDOW_SIZE,
+                                HEALTH_SPIKE_FACTOR,
+                                self._health,
+                            )
+                        if health_value is not None and health_value >= 1:
+                            with self._health_lock:
+                                prev_alive = self._game_battle_alive
+                                self._health = health_value
+                                self._game_battle_alive = True
+                            logger.info(
+                                "Analyzer: health %d detected in GAME_STARTING → game_battle_alive=True",
+                                health_value)
+                            if not prev_alive:
+                                self.alive_event.set()
                 else:
                     logger.debug("Skipping GAME_BATTLE crop OCR in %s state", state.name)
                     time.sleep(0.2)
@@ -1080,8 +1145,9 @@ class GameStateAnalyzer:
                             lobby_scan_start = time.time()
                             for crop in lobby_crops:
                                 lobby_futures[crop] = executor.submit(
-                                    _process_text_region,
-                                    get_crop(frame, *self.crops[crop][:4]),
+                                    _process_crop_region,
+                                    frame,
+                                    self.crops[crop][:4],
                                     self.crops[crop].text or [],
                                 )
 
@@ -1089,7 +1155,11 @@ class GameStateAnalyzer:
                     for crop in ("CANCEL", "UNREADY"):
                         if crop not in lobby_futures:
                             continue
-                        detected, _, text = lobby_futures[crop].result(timeout=120)
+                        try:
+                            detected, _, text = lobby_futures[crop].result(timeout=20)
+                        except Exception as e:
+                            logger.warning("Lobby quick-scan: %s result failed: %s", crop, e)
+                            continue
                         if detected:
                             if crop == "UNREADY":
                                 # UNREADY means this player already clicked READY and is waiting
@@ -1111,7 +1181,11 @@ class GameStateAnalyzer:
                     for crop in ("PLAY", "READY"):
                         if crop not in lobby_futures:
                             continue
-                        detected, _, text = lobby_futures[crop].result(timeout=120)
+                        try:
+                            detected, _, text = lobby_futures[crop].result(timeout=20)
+                        except Exception as e:
+                            logger.warning("Lobby quick-scan: %s result failed: %s", crop, e)
+                            continue
                         if not detected:
                             continue
                         if time.time() - self._last_lobby_play_click_ts < 60.0:
@@ -1183,8 +1257,9 @@ class GameStateAnalyzer:
                             popup_scan_start = time.time()
                             for crop in popup_crops:
                                 popup_futures[crop] = executor.submit(
-                                    _process_text_region,
-                                    get_crop(popup_frame, *self.crops[crop][:4]),
+                                    _process_crop_region,
+                                    popup_frame,
+                                    self.crops[crop][:4],
                                     self.crops[crop].text or [],
                                 )
 
@@ -1209,7 +1284,7 @@ class GameStateAnalyzer:
                         if crop not in popup_futures:
                             continue
                         try:
-                            detected, _, text = popup_futures[crop].result(timeout=120)
+                            detected, _, text = popup_futures[crop].result(timeout=20)
                             if detected:
                                 logger.info(
                                     "Lobby quick-scan: popup '%s' detected (text='%s')",
@@ -1233,10 +1308,14 @@ class GameStateAnalyzer:
                             " (detected)" if popup_detected else "",
                         )
 
-                logger.debug(
-                    "Lobby quick-scan: cycle completed in %.2fs",
-                    time.time() - cycle_start,
-                )
+                cycle_elapsed = time.time() - cycle_start
+                if cycle_elapsed > 15.0:
+                    logger.warning(
+                        "Lobby quick-scan: slow cycle %.1fs (OCR timeout or hung worker)",
+                        cycle_elapsed,
+                    )
+                else:
+                    logger.debug("Lobby quick-scan: cycle completed in %.2fs", cycle_elapsed)
             except RuntimeError:
                 return  # executor shut down
             except Exception as e:
