@@ -22,6 +22,7 @@ Both checks print a clear error or warning; the dimension check aborts the run.
 """
 
 import sys
+import types
 import tkinter as tk
 from pathlib import Path
 
@@ -307,7 +308,7 @@ def _calibrate_crop(frame: np.ndarray, crop_name: str,
     canvas.bind("<Button-1>", _on_click)
     canvas.bind("<Motion>", _on_motion)
     root.bind("<Key>", _on_key)
-    root.protocol("WM_DELETE_WINDOW", lambda: (_on_key(type("E", (), {"char": "q"})()),))
+    root.protocol("WM_DELETE_WINDOW", lambda: _on_key(types.SimpleNamespace(char="q")))
 
     root.mainloop()
 

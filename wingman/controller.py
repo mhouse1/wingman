@@ -87,6 +87,7 @@ class Controller:
         self._crops: "dict[str, CropCoords]" = crops or {}
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
+        self._ready_button_region = 0  # grid region number for the ready-button click; 0 = not configured
         self._popup_last_clicked: "dict[str, float]" = {}  # popup name → timestamp of last click
 
         # Padlock camera cooldown: set when the key is pressed manually
@@ -525,7 +526,9 @@ class Controller:
         """
         padlock_alive = (self._sdl_padlock_thread is not None
                          and self._sdl_padlock_thread.is_alive())
-        if self._sdl_stop is not None and not self._sdl_stop.is_set() and padlock_alive:
+        weapon_alive = (self._sdl_weapon_thread is not None
+                        and self._sdl_weapon_thread.is_alive())
+        if self._sdl_stop is not None and not self._sdl_stop.is_set() and (padlock_alive or weapon_alive):
             logger.debug("Controller: search_and_destroy_loop already running")
             return
 
@@ -923,7 +926,7 @@ class Controller:
                     if i < count - 1:
                         time.sleep(0.5)
 
-                if count > 1:
+                if count > 1 and self._ready_button_region:
                     # Final click on ready button (lobby/continue button)
                     rbn = self._ready_button_region
                     row_rb = (rbn - 1) // grid_cols

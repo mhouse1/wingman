@@ -471,7 +471,8 @@ class GameStateAnalyzer:
         self._background_ocr_running = False
         self._background_ocr_thread = None  # Still use a thread to coordinate async results
         self._background_ocr_lock = threading.Lock()
-        
+        self._last_battle_event_ts = 0.0
+
         # Fallback HSV detection (if OCR unavailable)
         self.respawn_text_hsv_lower = np.array(
             respawn_cfg.get("text_hsv_lower", [0, 0, 180]), 
