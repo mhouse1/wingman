@@ -386,10 +386,12 @@ class Controller:
                     keyboard_module.press(key)
                     start = time.time()
                     while (time.time() - start) < hold_seconds:
-                        if not ignore_cancel and self._mission_cancel.is_set():
-                            logger.debug("Controller: %s cancelled", label)
-                            break
-                        time.sleep(0.05)
+                        if not ignore_cancel:
+                            if self._mission_cancel.wait(timeout=0.05):
+                                logger.debug("Controller: %s cancelled", label)
+                                break
+                        else:
+                            time.sleep(0.05)
                     try:
                         keyboard_module.release(key)
                     except Exception:
@@ -495,13 +497,12 @@ class Controller:
                 # Hold afterburner until respawn detected (max 120s)
                 deadline = time.time() + 120.0
                 while time.time() < deadline:
-                    if self._eject_stop.is_set():
+                    if self._eject_stop.wait(timeout=0.5):
                         logger.info("Controller: eject_and_dive — cancelled by End key")
                         return
                     if _is_respawning():
                         logger.info("Controller: eject_and_dive — respawn detected, releasing afterburner")
                         break
-                    time.sleep(0.5)
                 else:
                     logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
             finally:
@@ -542,9 +543,8 @@ class Controller:
                     if time.time() >= self._padlock_cooldown_until:
                         self.padlock_camera(hold_seconds=0.1, block=True)
                     for _ in range(60):  # 6 s interruptible
-                        if stop.is_set() or self._mission_cancel.is_set():
+                        if stop.wait(timeout=0.1) or self._mission_cancel.is_set():
                             break
-                        time.sleep(0.1)
             finally:
                 logger.info("Controller: search_and_destroy padlock loop stopped")
 
@@ -570,9 +570,8 @@ class Controller:
                         self.fire_active_weapon(hold_seconds=0.1, block=True)
                     steps = max(1, int(self._weapon_loop_interval / 0.1))
                     for _ in range(steps):
-                        if stop.is_set() or self._mission_cancel.is_set():
+                        if stop.wait(timeout=0.1) or self._mission_cancel.is_set():
                             break
-                        time.sleep(0.1)
             finally:
                 logger.info("Controller: search_and_destroy weapon loop stopped")
 
@@ -613,7 +612,7 @@ class Controller:
             self.start_search_and_destroy_loop()
             try:
                 keyboard_module.press(ROLL_RIGHT_KEY)
-                time.sleep(duration)
+                self._interruptible_sleep(duration)
             finally:
                 try:
                     keyboard_module.release(ROLL_RIGHT_KEY)
@@ -622,7 +621,9 @@ class Controller:
                 if not self.is_mission_running():
                     self.stop_search_and_destroy_loop()
             logger.info("Controller: disengage_roll_right complete")
-            if self._auto_respawn_restart and self._last_mission and not self.is_mission_running():
+            with self._last_mission_lock:
+                last_mission = self._last_mission
+            if self._auto_respawn_restart and last_mission and not self.is_mission_running():
                 logger.info("Controller: restarting mission after disengage")
                 self.restart_last_mission()
 
@@ -696,10 +697,9 @@ class Controller:
         """
         remaining = float(seconds)
         while remaining > 0:
-            if self._mission_cancel.is_set():
-                return False
             interval = min(check_interval, remaining)
-            time.sleep(interval)
+            if self._mission_cancel.wait(timeout=interval):
+                return False
             remaining -= interval
         return True
 
@@ -782,12 +782,11 @@ class Controller:
         mission_a.start()
 
         # Wait for mission to complete or exit requested
-        while not self._mission_complete.is_set():
+        while not self._mission_complete.wait(timeout=0.05):
             if self._exit_event and self._exit_event.is_set():
                 logger.info("Controller: exit requested, aborting mission wait")
                 self.cancel_mission()
                 break
-            time.sleep(0.05)
 
     def mission_j20(self):
         """This mission sequence performs a predefined set of maneuvers for the J20 with continuous padlock and weapon fire
@@ -854,15 +853,14 @@ class Controller:
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
-        
+
         # Wait for mission to complete or exit requested
-        while not self._mission_complete.is_set():
+        while not self._mission_complete.wait(timeout=0.05):
             if self._exit_event and self._exit_event.is_set():
                 logger.info("Controller: exit requested, aborting mission wait")
                 self.cancel_mission()
                 break
-            time.sleep(0.05)
-        
+
         # Wait for the mission runner thread to fully exit
         mission_a.join(timeout=2.0)
         
@@ -1083,7 +1081,7 @@ class Controller:
                     # 5-second interruptible wait; breaks early on Good Luck detection or state change.
                     # After 10 s gate: also arm health scan and check game_battle_alive each tick.
                     for _ in range(50):  # 50 * 0.1s = 5s
-                        if good_luck_event.is_set() or not _in_starting():
+                        if good_luck_event.wait(timeout=0.1) or not _in_starting():
                             break
                         if not health_scan_armed and time.time() - loop_start >= 10.0:
                             health_scan_armed = True
@@ -1098,7 +1096,6 @@ class Controller:
                             self._set_last_mission("j20")
                             threading.Thread(target=self.mission_j20, daemon=True).start()
                             return
-                        time.sleep(0.1)
 
                     if not _in_starting():
                         return

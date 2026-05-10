@@ -58,7 +58,7 @@ _use_gpu: bool = False
 
 def _get_thread_ocr_reader():
     """Return the EasyOCR reader for the current thread, initializing it on first call."""
-    if not hasattr(_thread_local, 'reader'):
+    if not getattr(_thread_local, 'reader', None):
         with _ocr_init_lock:
             _thread_local.reader = None
             if easyocr:
@@ -121,11 +121,11 @@ def _process_incoming_region(incoming_frame):
         incoming_frame: numpy array (BGR) of the incoming region — passed by reference, no copy
 
     Returns:
-        tuple: (detected: bool, ocr_time: float, variant_name: str or None, text_found: str or None)
+        tuple: (detected: bool, ocr_time: float, variant_name: str or None, text_found: str or None, raw_texts: list)
     """
     reader = _get_thread_ocr_reader()
     if reader is None:
-        return (False, 0.0, None, None)
+        return (False, 0.0, None, None, [])
 
     t_start = time.time()
     
@@ -419,6 +419,7 @@ class GameStateAnalyzer:
         self._click_to_stop = threading.Event()
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
+        self._lobby_quick_scan_thread: "threading.Thread | None" = None
         self._last_lobby_play_click_ts = 0.0  # reset on GAME_LOBBY re-entry
 
         # FSM — single authoritative state field managed by the transitions library.
@@ -471,6 +472,7 @@ class GameStateAnalyzer:
         self._background_ocr_running = False
         self._background_ocr_thread = None  # Still use a thread to coordinate async results
         self._background_ocr_lock = threading.Lock()
+        self._background_ocr_stop = threading.Event()
         self._last_battle_event_ts = 0.0
 
         # Fallback HSV detection (if OCR unavailable)
@@ -498,21 +500,24 @@ class GameStateAnalyzer:
     def ocr_executor(self):
         """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
         if self._ocr_executor is None and easyocr and not self._ocr_executor_initialized:
-            try:
-                self._ocr_executor = ThreadPoolExecutor(max_workers=13)
-                self._ocr_executor_initialized = True
-                logger.info("Initialized ThreadPoolExecutor with 13 workers for parallel OCR")
-                # Pre-warm: each worker thread must initialize its own EasyOCR reader
-                # (serialized by _ocr_init_lock). Submitting 13 fire-and-forget tasks here
-                # starts that initialization in the background so the first real lobby scan
-                # does not stall waiting for cold workers.
-                for _ in range(13):
-                    self._ocr_executor.submit(_get_thread_ocr_reader)
-                logger.debug("OCR worker pre-warm submitted (13 tasks)")
-            except Exception as e:
-                logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
-                self._ocr_executor_initialized = True  # Prevent retries
+            if not self._background_ocr_lock.acquire(timeout=1.0):
                 return None
+            try:
+                if self._ocr_executor is None and not self._ocr_executor_initialized:
+                    try:
+                        self._ocr_executor = ThreadPoolExecutor(max_workers=13)
+                        self._ocr_executor_initialized = True
+                        logger.info("Initialized ThreadPoolExecutor with 13 workers for parallel OCR")
+                        for _ in range(13):
+                            self._ocr_executor.submit(_get_thread_ocr_reader)
+                        logger.debug("OCR worker pre-warm submitted (13 tasks)")
+                    except Exception as e:
+                        logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
+                        self._ocr_executor_initialized = True
+                        return None
+            finally:
+                if self._background_ocr_lock.locked():
+                    self._background_ocr_lock.release()
         return self._ocr_executor
     
     def _trigger(self, trigger_name: str) -> bool:
@@ -546,8 +551,8 @@ class GameStateAnalyzer:
             self._on_start_game_starting_loop()
 
     def on_enter_GAME_BATTLE(self):
-        self._health_no_digits_since = 0.0
         with self._health_lock:
+            self._health_no_digits_since = 0.0
             self._health_window.clear()
             self._health_ceiling = None
             if self._health is not None and self._health >= 1:
@@ -586,6 +591,7 @@ class GameStateAnalyzer:
         """Clean up resources (call when shutting down)."""
         self._click_to_stop.set()
         self._lobby_quick_scan_stop.set()
+        self._background_ocr_stop.set()
         if self._ocr_executor is not None:
             try:
                 self._ocr_executor.shutdown(wait=False)
@@ -627,9 +633,16 @@ class GameStateAnalyzer:
             self._click_to_thread_started = True
             threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
             logger.debug("Click-to background thread started")
-        if not self._lobby_quick_scan_thread_started:
+        thread_dead = (self._lobby_quick_scan_thread is not None
+                       and not self._lobby_quick_scan_thread.is_alive())
+        if not self._lobby_quick_scan_thread_started or thread_dead:
+            if thread_dead:
+                logger.warning("Lobby quick-scan thread died unexpectedly — restarting")
+                self._lobby_quick_scan_stop.clear()
             self._lobby_quick_scan_thread_started = True
-            threading.Thread(target=self._run_game_lobby_quick_scan, daemon=True).start()
+            self._lobby_quick_scan_thread = threading.Thread(
+                target=self._run_game_lobby_quick_scan, daemon=True)
+            self._lobby_quick_scan_thread.start()
             logger.info("Lobby quick-scan background thread started")
 
         state = {
@@ -755,7 +768,7 @@ class GameStateAnalyzer:
     
     def _run_ocr_in_background(self):
         """Run OCR in background using thread pool for parallel region processing."""
-        while True:
+        while not self._background_ocr_stop.is_set():
             with self._background_ocr_lock:
                 full_frame = self._background_ocr_frame
 
@@ -771,6 +784,8 @@ class GameStateAnalyzer:
                 executor = self.ocr_executor
                 if executor is None:
                     logger.warning("OCR executor not initialized")
+                    with self._background_ocr_lock:
+                        self._background_ocr_running = False
                     return
 
                 state = self.game_state
@@ -842,7 +857,7 @@ class GameStateAnalyzer:
                                 alive = health_value >= 1 if health_value is not None else False
                                 self._health = health_value
                                 self._game_battle_alive = alive
-                            self._health_no_digits_since = 0.0
+                                self._health_no_digits_since = 0.0
                             logger.info("Health: %s | alive=%s", health_value, alive)
                             # Signal False → True transition for immediate mission restart.
                             if alive and not prev_alive:
@@ -851,19 +866,23 @@ class GameStateAnalyzer:
                         else:
                             # No digits — only clear alive flag after 3 s of consecutive misses.
                             now_t = time.time()
-                            if self._health_no_digits_since == 0.0:
-                                self._health_no_digits_since = now_t
+                            with self._health_lock:
+                                no_digits_since = self._health_no_digits_since
+                                if no_digits_since == 0.0:
+                                    self._health_no_digits_since = now_t
+                                    no_digits_since = now_t
+                            if no_digits_since == now_t:
                                 logger.debug("Analyzer: Health OCR returned no digits (grace timer started)")
-                            elif now_t - self._health_no_digits_since >= 3.0:
+                            elif now_t - no_digits_since >= 3.0:
                                 with self._health_lock:
                                     self._game_battle_alive = False
                                 logger.debug(
                                     "Analyzer: Health OCR no digits for %.1fs → game_battle_alive=False",
-                                    now_t - self._health_no_digits_since)
+                                    now_t - no_digits_since)
                             else:
                                 logger.debug(
                                     "Analyzer: Health OCR no digits (%.1fs elapsed, 3s threshold)",
-                                    now_t - self._health_no_digits_since)
+                                    now_t - no_digits_since)
                     # Resolve ammo futures and fire events.
                     ammo_flares_ocr_time = 0.0
                     ammo_missile_ocr_time = 0.0
@@ -923,7 +942,7 @@ class GameStateAnalyzer:
                                 self.alive_event.set()
                 else:
                     logger.debug("Skipping GAME_BATTLE crop OCR in %s state", state.name)
-                    time.sleep(0.2)
+                    self._background_ocr_stop.wait(timeout=0.2)
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
 
@@ -1225,12 +1244,15 @@ class GameStateAnalyzer:
     
     def reset_cache(self):
         """Reset OCR caches - useful when switching between different images/scenes."""
-        self._ocr_cache['timestamp'] = 0.0
-        self._ocr_cache['result'] = (False, 0.0, None)
-        self._incoming_cache['timestamp'] = 0.0
-        self._incoming_cache['result'] = (False, 0.0, None)
-        self._click_to_cache['timestamp'] = 0.0
-        self._click_to_cache['result'] = (False, 0.0, None)
+        with self._ocr_cache_lock:
+            self._ocr_cache['timestamp'] = 0.0
+            self._ocr_cache['result'] = (False, 0.0, None)
+        with self._incoming_cache_lock:
+            self._incoming_cache['timestamp'] = 0.0
+            self._incoming_cache['result'] = (False, 0.0, None)
+        with self._click_to_cache_lock:
+            self._click_to_cache['timestamp'] = 0.0
+            self._click_to_cache['result'] = (False, 0.0, None)
         logger.debug("OCR caches reset")
 
     def detect_enemy_red(self, frame) -> bool:

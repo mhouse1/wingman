@@ -4,6 +4,8 @@ import time
 import logging
 import threading
 from enum import Enum, auto
+import numpy as np
+from mss import mss
 
 try:
     import colorama
@@ -44,8 +46,12 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
         region_name=REGION_CLICK_TO_CONTINUE,
     )
     sleep_fn(settle_seconds)
+    play_crop = analyzer.crops.get("PLAY")
+    if play_crop is None:
+        logger.warning("_click_through_game_end: PLAY crop not configured — skipping final click")
+        return
     ctrl.click_crop(
-        analyzer.crops["PLAY"],
+        play_crop,
         block=True,
         count=1,
         region_name=REGION_PLAY_BUTTON,
@@ -143,14 +149,31 @@ def main():
         if popup == "REVEAL_ALL":
             def _reveal_all_second_click():
                 time.sleep(3.0)
+                if analyzer.game_state != GameState.GAME_LOBBY:
+                    logger.debug("REVEAL_ALL second click suppressed — state is %s", analyzer.game_state)
+                    return
                 logger.info("\033[93m📋 REVEAL_ALL second click after 3s delay\033[0m")
                 ctrl.click_crop(analyzer.crops["REVEAL_ALL"], block=False, count=1, region_name="REVEAL_ALL")
             threading.Thread(target=_reveal_all_second_click, daemon=True).start()
         elif popup == "INVITED":
             def _click_ready_after_invite():
                 time.sleep(1.5)
-                new_frame = cap.get_frame()
-                if new_frame is None:
+                try:
+                    with mss() as sct:
+                        monitors = sct.monitors
+                        if cap.monitor_index < 1 or cap.monitor_index >= len(monitors):
+                            return
+                        mon = monitors[cap.monitor_index]
+                        monitor_rect = {
+                            "left": mon["left"] + cap.region[0],
+                            "top": mon["top"] + cap.region[1],
+                            "width": cap.region[2],
+                            "height": cap.region[3],
+                        }
+                        s = sct.grab(monitor_rect)
+                        new_frame = np.array(s)[:, :, :3]
+                except Exception as e:
+                    logger.warning("INVITED: frame capture failed: %s", e)
                     return
                 ready = analyzer.scan_region_for_play_button(new_frame)
                 if ready:
