@@ -272,7 +272,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
     GameState.GAME_LOBBY: {
         "PLAY", "READY", "UNREADY", "CANCEL",
         "CREATION_FAILED", "INSPECT", "INVITED",
-        "REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE",
+        "REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE", "SILVER",
     },
     GameState.GAME_WAITING: {
         "PLAY", "READY", "CANCEL",
@@ -1018,7 +1018,7 @@ class GameStateAnalyzer:
         within the last 5s; CANCEL/PLAY scan fires every cycle in GAME_LOBBY only.
         """
         lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
-        popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL",
+        popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
                             "UNLOCK_CLOSE", "INSPECT", "event_refresh"]
         popup_crops = [c for c in popup_crop_names if c in self.crops]
 
