@@ -408,6 +408,9 @@ class GameStateAnalyzer:
         # Signalled when _game_battle_alive transitions False → True.
         # The main loop waits on this event to restart the mission immediately.
         self.alive_event = threading.Event()
+        # Set by _start_game_starting_loop after the 10-second gate to enable the
+        # GAME_STARTING health-only OCR scan (ADR 032 battle-alive fallback).
+        self._game_starting_health_scan_enabled = threading.Event()
 
         # Ammo sub-state (GAME_BATTLE only)
         self._ammo_flares: "int | None" = None   # Last known flare count from OCR
@@ -837,11 +840,7 @@ class GameStateAnalyzer:
                     return
 
                 state = self.game_state
-                # Only process GAME_BATTLE crops in GAME_BATTLE or GAME_END_B
-                if state not in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_END_B):
-                    logger.debug(f"Skipping GAME_BATTLE crop OCR in {state.name} state")
-                    time.sleep(0.2)
-                else:
+                if state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_END_B):
                     # Extract respawn, incoming, health, and ammo crops (click_to has its own thread)
                     respawn_frame = get_crop(full_frame, *self.crops["respawn"][:4])
                     incoming_frame = get_crop(full_frame, *self.crops["incoming"][:4])
@@ -954,6 +953,26 @@ class GameStateAnalyzer:
                         t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, health_ocr_time,
                         ammo_flares_ocr_time, ammo_missile_ocr_time, t4-t0
                     )
+                elif (state == GameState.GAME_STARTING
+                        and self._game_starting_health_scan_enabled.is_set()
+                        and "HEALTH" in self.crops):
+                    # Health-only scan for the battle-alive fallback (ADR 032).
+                    health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4])
+                    health_future = executor.submit(_process_health_region, health_frame)
+                    health_value, _ = health_future.result(timeout=120)
+                    if health_value is not None and health_value >= 1:
+                        with self._health_lock:
+                            prev_alive = self._game_battle_alive
+                            self._health = health_value
+                            self._game_battle_alive = True
+                        logger.info(
+                            "Analyzer: health %d detected in GAME_STARTING → game_battle_alive=True",
+                            health_value)
+                        if not prev_alive:
+                            self.alive_event.set()
+                else:
+                    logger.debug("Skipping GAME_BATTLE crop OCR in %s state", state.name)
+                    time.sleep(0.2)
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
 

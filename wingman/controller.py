@@ -1089,6 +1089,7 @@ class Controller:
             logger.info("Controller: game_starting loop started - pressing '%s' key every 5s until 'Good Luck' detected", MISSION_J20_KEY)
             loop_start = time.time()
             max_wait = 180  # safety timeout: GAME_STARTING → GAME_STARTING_STALLED if Good Luck never detected
+            health_scan_armed = False
             try:
                 while _in_starting():
                     # Press MISSION_J20_KEY every interval
@@ -1101,10 +1102,24 @@ class Controller:
                         ocr_running.set()
                         threading.Thread(target=_do_ocr_scan, daemon=True).start()
 
-                    # 5-second interruptible wait; breaks early on Good Luck detection or state change
+                    # 5-second interruptible wait; breaks early on Good Luck detection or state change.
+                    # After 10 s gate: also arm health scan and check game_battle_alive each tick.
                     for _ in range(50):  # 50 * 0.1s = 5s
                         if good_luck_event.is_set() or not _in_starting():
                             break
+                        if not health_scan_armed and time.time() - loop_start >= 10.0:
+                            health_scan_armed = True
+                            if self._analyzer is not None:
+                                self._analyzer._game_starting_health_scan_enabled.set()
+                                logger.info("Controller: game_starting health-scan fallback armed (10s gate)")
+                        if health_scan_armed and self._analyzer is not None and self._analyzer.game_battle_alive:
+                            logger.info(
+                                "\033[92mController: game_battle_alive detected in GAME_STARTING "
+                                "— launching mission immediately\033[0m")
+                            self._analyzer._trigger("good_luck_detected")
+                            self._set_last_mission("j20")
+                            threading.Thread(target=self.mission_j20, daemon=True).start()
+                            return
                         time.sleep(0.1)
 
                     if not _in_starting():
@@ -1132,6 +1147,8 @@ class Controller:
             except Exception:
                 logger.exception("Controller: game_starting loop error")
             finally:
+                if self._analyzer is not None:
+                    self._analyzer._game_starting_health_scan_enabled.clear()
                 logger.info("Controller: game_starting loop stopped")
 
         threading.Thread(target=_loop, daemon=True).start()
