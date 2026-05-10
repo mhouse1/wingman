@@ -387,9 +387,6 @@ class GameStateAnalyzer:
         self._enemy_hsv_lower = np.array(enemy_hsv_cfg.get("lower", [0, 120, 120]), dtype=np.uint8)
         self._enemy_hsv_upper = np.array(enemy_hsv_cfg.get("upper", [10, 255, 255]), dtype=np.uint8)
         
-        # EasyOCR reader (lazy initialization on first use)
-        self._ocr_reader = None
-        
         # OCR result caching for performance (avoid running OCR every frame)
         self._ocr_cache = {
             'result': (False, 0.0, None),  # (is_respawning, confidence, method)
@@ -496,119 +493,6 @@ class GameStateAnalyzer:
             self.debug_output_dir.mkdir(parents=True, exist_ok=True)
         
 
-    @staticmethod
-    def _levenshtein_distance(a: str, b: str) -> int:
-        """Compute Levenshtein distance between two strings."""
-        if a == b:
-            return 0
-        if not a:
-            return len(b)
-        if not b:
-            return len(a)
-
-        prev_row = list(range(len(b) + 1))
-        for i, char_a in enumerate(a, start=1):
-            curr_row = [i]
-            for j, char_b in enumerate(b, start=1):
-                insertions = prev_row[j] + 1
-                deletions = curr_row[j - 1] + 1
-                substitutions = prev_row[j - 1] + (char_a != char_b)
-                curr_row.append(min(insertions, deletions, substitutions))
-            prev_row = curr_row
-        return prev_row[-1]
-
-    @classmethod
-    def _is_respawn_text(cls, text_clean: str) -> bool:
-        """Return True when OCR text is a plausible match for respawn label.
-        
-        The actual in-game text is 'RESPA' (not 'RESPAWN'), so we match that
-        with tolerance for OCR errors.
-        """
-        if not text_clean:
-            return False
-
-        # Primary target: match what's actually displayed in-game
-        target = "RESPA"
-        if target in text_clean:
-            return True
-
-        # Fallback: Check for common OCR partial matches (handles severe OCR errors)
-        # OCR often misreads characters, so check for partial matches
-        # Note: "REPA" is intentionally excluded — it's too short and causes false positives;
-        # the Levenshtein check below handles "REPA"-type misreads (distance 1 from "RESPA").
-        if "RESP" in text_clean:
-            return True
-        
-        # Levenshtein distance for near-matches (typos with 1-2 character errors)
-        # Compare same-length windows for near-matches.
-        window_len = len(target)
-        candidates = []
-        if len(text_clean) < window_len:
-            candidates.append(text_clean)
-        else:
-            for index in range(0, len(text_clean) - window_len + 1):
-                candidates.append(text_clean[index:index + window_len])
-
-        for candidate in candidates:
-            distance = cls._levenshtein_distance(candidate, target)
-            if distance <= 2:
-                return True
-
-        return False
-    
-    @classmethod
-    def _is_incoming_text(cls, text_clean: str) -> bool:
-        """Return True when OCR text matches incoming missile warning.
-        
-        The actual in-game text shows 'MING' (from 'INCOMING'), so we match that
-        with tolerance for OCR errors.
-        """
-        if not text_clean:
-            return False
-
-        # Primary target: 'MING' visible in game
-        target = "MING"
-        if target in text_clean:
-            return True
-        
-        # Also check for partial 'INCOMING' text
-        if "INCOM" in text_clean or "NCOMING" in text_clean:
-            return True
-        
-        # Levenshtein distance for near-matches (OCR errors)
-        window_len = len(target)
-        candidates = []
-        if len(text_clean) < window_len:
-            candidates.append(text_clean)
-        else:
-            for index in range(0, len(text_clean) - window_len + 1):
-                candidates.append(text_clean[index:index + window_len])
-
-        for candidate in candidates:
-            distance = cls._levenshtein_distance(candidate, target)
-            if distance <= 1:  # Stricter tolerance for MING (shorter word)
-                return True
-
-        return False
-    
-    @property
-    def ocr_reader(self):
-        """Lazy initialization of EasyOCR reader (10s startup delay)."""
-        if self._ocr_reader is None and easyocr:
-            logger.info("Initializing EasyOCR reader (this may take ~10 seconds)...")
-            try:
-                self._ocr_reader = easyocr.Reader(['en'], gpu=True)
-                logger.info("EasyOCR reader initialized successfully")
-            except Exception as e:
-                logger.warning("Failed to initialize EasyOCR with GPU, trying CPU: %s", e)
-                try:
-                    self._ocr_reader = easyocr.Reader(['en'], gpu=False)
-                    logger.info("EasyOCR reader initialized with CPU")
-                except Exception as e:
-                    logger.error("Failed to initialize EasyOCR: %s", e)
-                    return None
-        return self._ocr_reader
-    
     @property
     def ocr_executor(self):
         """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
@@ -862,7 +746,8 @@ class GameStateAnalyzer:
                 self._background_ocr_thread.start()
                 logger.debug("Background OCR scheduled")
         finally:
-            self._background_ocr_lock.release()
+            if self._background_ocr_lock.locked():
+                self._background_ocr_lock.release()
 
         # Return cached result (may be stale) while background OCR runs
         return cached_result

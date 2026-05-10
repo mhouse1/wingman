@@ -3,7 +3,6 @@ import logging
 import threading
 import ctypes
 import sys
-import os
 import cv2
 import numpy as np
 from datetime import datetime
@@ -96,6 +95,7 @@ class Controller:
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
+        self._weapon_loop_stop = threading.Event()
         self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
 
         # Search-and-destroy loop state (padlock + weapon fire; used during disengage)
@@ -120,39 +120,12 @@ class Controller:
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
-            # Cancel mission if maneuver keys are pressed during GAME_BATTLE
-            def maneuver_cancel_hotkey(e):
-                if getattr(e, 'is_injected', False):
-                    return
-                with self._programmatic_key_lock:
-                    if self._programmatic_key_count > 0:
-                        return
-                if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
-                    logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
-                    return
-                if self._analyzer and hasattr(self._analyzer, 'game_state'):
-                    try:
-                        state = self._analyzer.game_state()
-                    except Exception:
-                        state = None
-                    # Accept both Enum and string for compatibility
-                    if state and (getattr(state, 'name', None) == 'GAME_BATTLE' or str(state) == 'GAME_BATTLE'):
-                        logger.info("Controller: Maneuver key '%s' pressed during GAME_BATTLE - cancelling mission", e.name if hasattr(e, 'name') else e)
-                        self.cancel_mission()
-            for key in [NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY]:
-                try:
-                    keyboard_module.on_press_key(key, maneuver_cancel_hotkey, suppress=False)
-                    logger.info("Controller: registered maneuver cancel hotkey '%s'", key)
-                except Exception:
-                    logger.exception("Controller: failed to register maneuver cancel hotkey '%s'", key)
-
             # Exit script hotkey (Backspace)
             try:
                 def exit_script_hotkey(e):
                     logger.info("Controller: Backspace key pressed - exiting script")
                     if self._exit_event:
                         self._exit_event.set()
-                    os._exit(0)
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey 'backspace' to exit script")
             except Exception:
@@ -216,6 +189,7 @@ class Controller:
                             )
                             with self._analyzer._state_lock:
                                 self._analyzer.state = GameState.GAME_BATTLE.name
+                            self._analyzer.on_enter_GAME_BATTLE()
                         else:
                             logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
                     else:
@@ -488,9 +462,7 @@ class Controller:
         def _is_respawning() -> bool:
             if self._analyzer is None:
                 return False
-            with self._analyzer._ocr_cache_lock:
-                detected, _, _ = self._analyzer._ocr_cache['result']
-            return detected
+            return self._analyzer.game_battle_alive
 
         def _run():
             if not keyboard_module:
@@ -669,23 +641,24 @@ class Controller:
         # Clear mission cancel flag so weapon loop can fire properly
         self._mission_cancel.clear()
         self._weapon_loop_active = True
-        
+        self._weapon_loop_stop.clear()
+
         def _loop():
             logger.info("Controller: weapon loop started (interval=%.2fs)", self._weapon_loop_interval)
             try:
-                while self._weapon_loop_active:
+                while True:
                     try:
-                        # Use shorter hold time for better game responsiveness
                         self.fire_active_weapon(hold_seconds=0.1, block=True)
                     except Exception as e:
                         logger.warning("Controller: weapon loop fire failed: %s", e)
-                    time.sleep(self._weapon_loop_interval)
+                    if self._weapon_loop_stop.wait(timeout=self._weapon_loop_interval):
+                        break
             except Exception:
                 logger.exception("Controller: weapon loop error")
             finally:
                 self._weapon_loop_active = False
                 logger.info("Controller: weapon loop stopped")
-        
+
         self._weapon_loop_thread = threading.Thread(target=_loop, daemon=True)
         self._weapon_loop_thread.start()
 
@@ -696,9 +669,10 @@ class Controller:
             return
         
         logger.info("Controller: stopping weapon loop")
+        self._weapon_loop_stop.set()
         self._weapon_loop_active = False
         if self._weapon_loop_thread:
-            self._weapon_loop_thread.join(timeout=1.0)
+            self._weapon_loop_thread.join(timeout=2.0)
             self._weapon_loop_thread = None
 
     def toggle_weapon_loop(self):
