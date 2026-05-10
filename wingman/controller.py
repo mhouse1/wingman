@@ -644,9 +644,10 @@ class Controller:
                     keyboard_module.release(ROLL_RIGHT_KEY)
                 except Exception:
                     pass
-                self.stop_search_and_destroy_loop()
+                if not self.is_mission_running():
+                    self.stop_search_and_destroy_loop()
             logger.info("Controller: disengage_roll_right complete")
-            if self._auto_respawn_restart and self._last_mission:
+            if self._auto_respawn_restart and self._last_mission and not self.is_mission_running():
                 logger.info("Controller: restarting mission after disengage")
                 self.restart_last_mission()
 
