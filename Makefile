@@ -25,7 +25,7 @@
 
 # Generate HTML report for automated levels test
 test:
-	uv run pytest tests/test_automated_levels.py tests/test_main_game_end.py --html=tests/test-output/report.html --self-contained-html
+	uv run pytest tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -78,12 +78,23 @@ clean:
 # and there will be no performance history to commit if you haven't generated the performance.json file with the latest data
 # once you ran wrelease you can then run make p to push the commit with the new version and performance data to GitHub
 wrelease:
+	@count=$$(ls docs/performance/current/run_*.json 2>/dev/null | wc -l); \
+	if [ "$$count" -lt 5 ]; then \
+		echo "WARNING: only $$count session(s) in docs/performance/current/ — recommended minimum is 5."; \
+		printf "Release anyway with thin baseline? [y/N] "; \
+		read answer; \
+		if [ "$$answer" != "y" ] && [ "$$answer" != "Y" ]; then \
+			echo "Aborted. Run more sessions, then retry."; \
+			exit 1; \
+		fi; \
+	fi
 	git add wingman/main.py
 	git add -f tests/test-output/performance.json
 	rm -rf docs/performance/release
 	mkdir -p docs/performance/release
 	cp docs/performance/current/run_*.json docs/performance/release/ 2>/dev/null; true
 	git add docs/performance/release/
+	rm -f docs/performance/current/run_*.json
 	version=$$(sed -n 's/^WINGMAN_VERSION = "\([^"]*\)"/\1/p' wingman/main.py); \
 	details=$$(sed -n 's/^WINGMAN_VERSION_DETAILS = "\([^"]*\)"/\1/p' wingman/main.py); \
 	test -n "$$version" || (echo "Could not parse WINGMAN_VERSION from wingman/main.py" && exit 1); \
