@@ -1,8 +1,8 @@
 # Wingman — Architecture
 
-| Status | Date | Wingman Version |
-|---|---|---|
-| Active | 2026-05-10 | 1.6.6 |
+| Status | Date       | Wingman Version |
+|--------|------------|-----------------|
+| Active | 2026-05-11 | 1.6.6           |
 
 ## Overview
 
@@ -19,6 +19,8 @@ flowchart LR
     subgraph main ["main.py — Orchestration"]
         C["capture.py\nCapture"] --> A["analyzer.py\nGameStateAnalyzer"]
         A --> Ctrl["controller.py\nController"]
+        A --> P["performance.py\nPerformanceTracker"]
+        P --> main.py
     end
 ```
 
@@ -28,6 +30,7 @@ flowchart LR
 | `analyzer.py` | Perception: OCR detection, FSM ownership, result caches. No input. |
 | `controller.py` | Actuation: keyboard/mouse, missions, hotkeys. No perception. |
 | `main.py` | Orchestration: main loop, respawn recovery, unattended mode. |
+| `performance.py` | Runtime performance tracking: per-crop OCR timing, reaction latency, regression comparison. |
 
 ---
 
@@ -135,13 +138,45 @@ Any registered maneuver key pressed during `GAME_BATTLE` (outside the 2s entry g
 
 ---
 
+### `PerformanceTracker`
+
+Implemented in `performance.py`. Collects per-crop OCR timing and incoming → flare reaction latency during live sessions and emits two outputs:
+
+1. **Round-end histogram** — logged at each `GAME_LOBBY` entry (buffer-check: skips if no battle data). Shows per-crop bucket distribution plus mean and p95.
+2. **Session-end comparison** — logged after clean `ThreadPoolExecutor` shutdown. Writes a JSON run file to `docs/performance/current/`, then emits:
+   - Block 1: this session vs accumulated current-period aggregate (always)
+   - Block 2: current-period aggregate vs release baseline (gated on 5 sessions + 1,000 incoming cycles)
+
+**Wiring:**
+
+| Call site | Method | Thread |
+|-----------|--------|--------|
+| `analyzer._run_ocr_in_background()` after each `future.result()` | `record_ocr_crop(crop, seconds)` | Background OCR thread |
+| `main._deploy_flares_on_new_incoming()` before flare burst | `record_reaction(seconds)` | Main thread |
+| `main` GAME_LOBBY transition block | `on_enter_game_lobby()` | Main thread |
+| `analyzer.cleanup()` after executor shutdown | `on_session_end()` | Main thread |
+
+**Thread safety:** a single `threading.Lock` guards all buffers. `record_ocr_crop` (background thread) uses bare `with lock`. `record_reaction` and `on_enter_game_lobby` (main thread) use `acquire(timeout=0.1)` and skip gracefully on timeout per the lock-on-main-loop pattern in [CLAUDE.md](../CLAUDE.md).
+
+**Folder layout:**
+
+```
+docs/performance/
+  current/   ← gitignored; one JSON per clean session, accumulates between releases
+  release/   ← committed; replaced by make wrelease (copies all of current/ here)
+```
+
+See [ADR 031](adr/031-round-end-histogram-reporting.md) and [Job Aid 008](job-aids/008-performance-regression-workflow.md).
+
+---
+
 ### `main.py` — Orchestration
 
 The main loop runs at `loop_interval_sec` (default 1.5s), blocking on `incoming_event` between ticks so flare deployment wakes immediately on new OCR data. Each iteration:
 
 1. Capture frame — skip cycle if `None`
 2. Call `analyzer.analyze_frame()` — returns cached state immediately
-3. Detect FSM state transition → run state-entry side effects (cancel mission on `GAME_LOBBY` entry, auto-trigger `start_auto_mission` in unattended mode)
+3. Detect FSM state transition → run state-entry side effects (cancel mission on `GAME_LOBBY` entry, `tracker.on_enter_game_lobby()` for round histogram, auto-trigger `start_auto_mission` in unattended mode)
 4. Run per-state timed checks:
    - `GAME_LOBBY`: retry PLAY scan every 5s; stall guard (10s) force-clicks PLAY if OCR keeps failing
    - `GAME_WAITING`: scan for CANCEL every 3s; re-click PLAY only if PLAY is actually visible again; 180s timeout → `waiting_timeout`
@@ -191,7 +226,7 @@ stateDiagram-v2
 
 | Hook | Action |
 |---|---|
-| `on_enter_GAME_LOBBY` | `ctrl.cancel_mission()`; clear health window and ceiling |
+| `on_enter_GAME_LOBBY` | `ctrl.cancel_mission()`; clear health window and ceiling; `tracker.on_enter_game_lobby()` (round histogram if buffer non-empty) |
 | `on_enter_GAME_STARTING` | `ctrl._start_game_starting_loop()` |
 | `on_enter_GAME_BATTLE` | Clear health window + ceiling; set `alive_event` if health already ≥ 1 |
 | `on_enter_GAME_BATTLE_MANUAL` | `ctrl.cancel_mission()`; suppress auto-restart |
@@ -279,6 +314,7 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `mission` | Restart delays, retry intervals, respawn fallback timeout |
 | `ocr` | `use_gpu` flag, cooldown, preprocessing parameters |
 | `j20_mission` | `target_painting_mode` flag |
+| `performance` | Runtime tracking: `enabled`, `output_dir`, regression `min_sessions`, `min_cycles`, `threshold_pct` |
 
 ---
 
@@ -289,7 +325,8 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 ```
 load config
 init Capture (mss context)
-init GameStateAnalyzer (FSM starts at GAME_LOBBY; pre-warm 13 OCR workers)
+init PerformanceTracker (loads config, sets session_start timestamp)
+init GameStateAnalyzer (FSM starts at GAME_LOBBY; pre-warm 13 OCR workers; tracker injected)
 init Controller (registers all hotkeys)
 if unattended_mode → set unattended_active event
 enter main loop → GAME_LOBBY detected → start_auto_mission()
@@ -300,6 +337,7 @@ enter main loop → GAME_LOBBY detected → start_auto_mission()
 ```
 [GAME_LOBBY]
   → cancel_mission() + health window reset  (on_enter_GAME_LOBBY callback)
+  → tracker.on_enter_game_lobby() → emit round histogram if battle data buffered
   → lobby quick-scan thread: detects PLAY/READY → click play → play_clicked → GAME_WAITING
 
 [GAME_WAITING]
@@ -384,5 +422,5 @@ Player presses NOSE_UP / NOSE_DOWN / ROLL_LEFT / ROLL_RIGHT during GAME_BATTLE
 | [028](adr/028-enemy-quadrant-detection-and-nose-orientation.md) | Enemy quadrant detection and nose orientation (Draft) |
 | [029](adr/029-game-lobby-quick-scan-thread.md) | GAME_LOBBY dedicated quick-scan background thread |
 | [030](adr/030-health-ceiling-from-repeated-readings.md) | Health ceiling spike filter from rolling OCR window |
-| [031](adr/031-round-end-histogram-reporting.md) | Round-end OCR timing histogram on GAME_LOBBY entry (Draft) |
+| [031](adr/031-round-end-histogram-reporting.md) | Round-end OCR timing histogram and reaction latency tracking (Accepted) |
 | [032](adr/032-game-battle-alive-fallback-trigger.md) | `game_battle_alive` fallback trigger for GAME_STARTING → GAME_BATTLE |

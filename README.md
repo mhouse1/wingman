@@ -61,12 +61,14 @@ Take control at any time by pressing a maneuver key (`i` / `k` / `j` / `l`) — 
 | CPU-only OCR — no GPU required | ✅ Working |
 | Offline crop calibration — no live game needed | ✅ Working |
 | Multi-instance — run one per emulator window for a full squad | ✅ Working |
+| Per-crop OCR timing + reaction latency tracking (ADR 031) | ✅ Working |
+| Session performance JSON + cross-version regression detection | ✅ Working |
 
 ---
 
 ## How It Works
 
-On each loop tick, Wingman captures a screen region and runs EasyOCR against named crop areas to read game state. Three OCR workers run in parallel on a background thread pool so the main mission logic is never blocked.
+On each loop tick, Wingman captures a screen region and runs EasyOCR against named crop areas to read game state. Five crops run in parallel across 13 thread-pool workers so the main mission logic is never blocked.
 
 ### Game state machine
 
@@ -119,7 +121,7 @@ crops:
 
 Use the calibration tool to set or adjust any crop region offline against reference screenshots.
 
-**OCR performance (CPU-only):** avg ~3.25s/cycle. Enabling GPU (CUDA) drops this to <200ms — see [GPU setup guide](docs/TODO-enable-gpu-ocr.md).
+**OCR performance (CPU-only):** avg ~0.38s per crop (parallel, v1.6.6 — see [Performance Doc 007](docs/performance/007-performance-wingman-1.6.6-per-crop-ocr-tracking.md)). Enabling GPU (CUDA) drops this to <200ms — see [GPU setup guide](docs/TODO-enable-gpu-ocr.md).
 
 ---
 
@@ -159,6 +161,34 @@ make rd
 
 ---
 
+## Performance Tracking
+
+Wingman automatically tracks per-crop OCR timing and incoming → flare reaction latency during every session. No setup required — just run normally and stop cleanly (`backspace`).
+
+At each match end you'll see a round histogram in the log:
+
+```
+[ROUND 8 — OCR crop timings | 160 cycles]
+  crop            <0.10s  0.10-0.24s  0.25-0.49s  >=0.50s   mean    p95
+  incoming            0%         11%         61%      28%  0.43s  0.78s
+  respawn             0%         26%         60%      14%  0.36s  0.69s
+  ...
+
+[ROUND 8 — Reaction latency | 20 events]
+  <0.25s 25%   0.25-0.49s 65%   0.50-0.99s 10%   >=1.00s 0%
+  mean 0.32s   max 0.53s
+```
+
+After 5 sessions, regression detection activates — Wingman compares the current period against the last release baseline and flags any crop that drifts more than 20%.
+
+```
+make wrelease   # lock in current performance as the release baseline
+```
+
+See [Job Aid 008 — Performance Regression Workflow](docs/job-aids/008-performance-regression-workflow.md) for the full workflow.
+
+---
+
 ## Calibrating Crop Regions
 
 If the capture window moves or a crop needs adjustment, recalibrate offline using static reference screenshots — no live game required.
@@ -190,6 +220,7 @@ See [Job Aid 006 — Calibrate Crop Regions](docs/job-aids/006-calibrate-crop-re
 | 2 | Search and destroy loop | ✅ Done |
 | 2 | Formal FSM (transitions library) | ✅ Done |
 | 2 | Manual override — maneuver keys hand off to human pilot | ✅ Done |
+| 2 | Runtime performance tracking + regression detection (ADR 031) | ✅ Done |
 | 3 | Behaviour trees — adaptive tactics based on game state | Planned |
 | 3 | Squadron coordination — multiple instances queue and launch together | Planned |
 | 4 | Reinforcement learning — bot learns from experience | Future |
