@@ -1,95 +1,101 @@
-# Job Aid 005 — Updating performance-trends.html
+# Job Aid 005 — Updating the Performance Chart
 
-This guide explains how to add new data points and update the performance-trends.html chart for the Wingman project.
+| Status | Date       | Wingman Version |
+|--------|------------|-----------------|
+| Active | 2026-05-11 | 1.6.6           |
 
-## Steps to Add a New Data Point
+## Two performance systems
 
-1. **Run the Performance Tests**
-   
-   Run the full performance test workflow:
-   
-   ```sh
-   make test-perf
-   ```
-   This will:
-   - Run all automated tests
-   - Update `tests/test-output/performance.json` with the latest results
-   - Generate the CSV and HTML chart files
+Wingman has two complementary performance tracking systems:
 
-2. **Commit the New Data Point**
-   
-   To add the new data point to the chart history, commit the updated performance.json:
-   
-   ```sh
-   make wrelease
-   ```
-   This will:
-   - Force add the new `performance.json` to git (even though it's normally ignored)
-   - Commit with the current `WINGMAN_VERSION` and details
-   - Regenerate the chart to include the new data point
+| System | What it measures | Where data lives |
+|--------|-----------------|------------------|
+| **Test-based chart** (this doc) | Automated OCR test accuracy and speed across git history | `tests/test-output/performance.json` → `performance-trends.html` |
+| **Runtime tracking** (Job Aid 008) | Per-crop OCR timing and reaction latency during live sessions | `docs/performance/current/` → `docs/performance/release/` |
 
-## Adding Multiple Data Points for the Same Version
+Both are snapshotted by `make wrelease`. This document covers the test-based chart.
 
-You can add multiple data points for the same `WINGMAN_VERSION` (e.g., to track performance across several runs or environments for a single release):
+---
 
-1. **Repeat the workflow:**
-   - Run `make test-perf` to generate a new `performance.json` with fresh test results.
-   - Run `make wrelease` to commit the new data point. Each commit, even with the same version, is stored as a separate entry in the chart history.
+## Updating the chart
 
-2. **Result:**
-   - The chart will show multiple points on the x-axis for the same version label, one for each commit.
-   - This is useful for comparing repeated runs, hardware changes, or configuration tweaks within a single release.
-
-**Example:**
-```
-make test-perf
-make wrelease   # First data point for v1.4.2
-# ...change test conditions or rerun...
-make test-perf
-make wrelease   # Second data point for v1.4.2
-```
-All points will appear under the same version on the chart.
-
-3. **View the Updated Chart**
-   
-   Open the chart in your browser:
-   
-   - `tests/test-output/performance-trends.html`
-
-   The x-axis will show the `WINGMAN_VERSION` for each data point. Multiple points for the same version are supported.
-
-## Previewing Before Committing
-
-Use `perf-preview` to see how the chart will look with the latest test results before committing them to history:
+### 1. Run the performance tests
 
 ```sh
-make test-perf-preview
+make test-perf
 ```
 
-This will:
-- Run the full test suite
-- Generate the chart with the current (uncommitted) `performance.json` included as a preview point
-- Print the path to open: `tests/test-output/performance-trends.html`
+This runs all automated tests, updates `tests/test-output/performance.json` with the latest results, and generates the CSV and HTML chart files.
 
-> **Note:** The preview point is not added to history. Run `make wrelease` when you are satisfied with the results to commit it permanently.
+### 2. Preview before committing (optional)
+
+```sh
+make tp
+```
+
+Runs the test suite and generates the chart with the current (uncommitted) `performance.json` included as a preview point. The preview point is not added to history. Open `tests/test-output/performance-trends.html` to review.
 
 Typical workflow when evaluating a change:
 
 ```sh
-make test-perf-preview   # check results look right
-make wrelease            # commit to history once satisfied
+make tp        # check results look right
+make wrelease  # commit to history once satisfied
 ```
+
+### 3. Commit and snapshot
+
+```sh
+make wrelease
+```
+
+This:
+- Force-adds `tests/test-output/performance.json` to git (it is normally gitignored)
+- Copies all `docs/performance/current/run_*.json` files into `docs/performance/release/` as the new runtime baseline
+- Commits both with the current `WINGMAN_VERSION` and `WINGMAN_VERSION_DETAILS`
+- Regenerates the chart
+
+### 4. View the chart
+
+Open in your browser:
+
+```
+tests/test-output/performance-trends.html
+```
+
+The x-axis shows `WINGMAN_VERSION`. Multiple data points for the same version are supported — each `wrelease` commit is stored as a separate entry.
+
+---
+
+## Adding multiple data points for the same version
+
+Run the workflow repeatedly to track performance across different runs or environments within a single release:
+
+```sh
+make test-perf
+make wrelease   # first data point for v1.6.6
+
+# change test conditions or rerun...
+
+make test-perf
+make wrelease   # second data point for v1.6.6
+```
+
+All points appear under the same version label on the chart.
+
+---
 
 ## Troubleshooting
 
-- **New data point not showing up?**
-  - Make sure you committed `performance.json` via `make wrelease` (step 2).
-  - Refresh the HTML file in your browser.
+**New data point not showing up?**
+- Confirm you ran `make wrelease` (not just `make test-perf`).
+- Refresh the HTML file in your browser — it does not auto-reload.
 
-## Summary
-- Use `make test-perf` to generate new results.
-- Use `make wrelease` to add a new data point to the chart.
-- Open `performance-trends.html` to view the chart.
+**`make wrelease` says "No staged changes to commit"?**
+- `performance.json` was not updated. Run `make test-perf` first.
 
 ---
-For more details, see the Makefile targets or ask the project maintainers.
+
+## References
+
+- [Job Aid 008 — Runtime Performance Regression Workflow](008-performance-regression-workflow.md)
+- [ADR 031 — Round-End Histogram Reporting](../adr/031-round-end-histogram-reporting.md)
