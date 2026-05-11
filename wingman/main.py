@@ -13,8 +13,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.6"
-WINGMAN_VERSION_DETAILS = "Improvements before phase3"
+WINGMAN_VERSION = "1.6.7"
+WINGMAN_VERSION_DETAILS = "experimental"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
