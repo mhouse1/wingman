@@ -2,7 +2,7 @@
 
 An AI wingman for MetalStorm (PC). Runs as your squadron partner — fully autonomous across multiple matches — or alongside you as a manual-override co-pilot you can take control of at any time. The long-term goal is a squadron of AI wingmen flying together, each running an independent Wingman instance.
 
-**Current version:** v1.6.5
+**Current version:** v1.6.6
 
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
@@ -50,6 +50,10 @@ Take control at any time by pressing a maneuver key (`i` / `k` / `j` / `l`) — 
 | Ammo tracking — missiles and flares remaining | ✅ Working |
 | Eject and dive when missiles empty | ✅ Working |
 | Enemy proximity detection | ✅ Working |
+| 30s no-enemy disengage — rolls right, restarts mission | ✅ Working |
+| Matchmaking CANCEL confirmation + PLAY re-click if queue drops | ✅ Working |
+| GAME_WAITING 180s timeout → GAME_LOBBY recovery | ✅ Working |
+| Manual-takeover mode (GAME_BATTLE_MANUAL) — auto-restart suppressed | ✅ Working |
 | Search and destroy loop (auto-padlock + auto-fire) | ✅ Working |
 | Target-painting mode (suppresses last missile) | ✅ Working |
 | Lobby popup handling (Reveal All, Tap Here, Unlock Close, Inspect, Invited, Event Refresh, Final Continue) | ✅ Working |
@@ -68,10 +72,30 @@ On each loop tick, Wingman captures a screen region and runs EasyOCR against nam
 
 Wingman tracks which phase of the match it's in using a formal state machine:
 
-```
-GAME_LOBBY → GAME_WAITING → GAME_STARTING → GAME_BATTLE → GAME_END_B → GAME_LOBBY
-                                  ↕
-                        GAME_STARTING_STALLED
+```mermaid
+stateDiagram-v2
+    [*] --> GAME_LOBBY
+
+    GAME_LOBBY --> GAME_WAITING : play_clicked
+    GAME_LOBBY --> GAME_STARTING : cancel_detected
+
+    GAME_WAITING --> GAME_STARTING : cancel_detected
+    GAME_WAITING --> GAME_LOBBY : waiting_timeout (180 s)
+
+    GAME_STARTING --> GAME_BATTLE : good_luck_detected
+    GAME_STARTING --> GAME_STARTING_STALLED : starting_timeout
+
+    GAME_STARTING_STALLED --> GAME_STARTING : starting_recovery
+    GAME_STARTING_STALLED --> GAME_LOBBY : starting_give_up
+
+    GAME_BATTLE --> GAME_END_B : click_to_detected
+    GAME_BATTLE --> GAME_BATTLE_MANUAL : manual_takeover
+
+    GAME_BATTLE_MANUAL --> GAME_BATTLE : respawn_reset
+    GAME_BATTLE_MANUAL --> GAME_END_B : click_to_detected
+
+    GAME_END_B --> GAME_LOBBY : continue_clicked
+    GAME_END_B --> GAME_BATTLE : respawn_detected
 ```
 
 Each state change fires callbacks (cancel mission, start mission loop, etc.). Invalid transitions are rejected rather than silently ignored.

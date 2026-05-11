@@ -3,7 +3,6 @@ import logging
 import threading
 import ctypes
 import sys
-import os
 import cv2
 import numpy as np
 from datetime import datetime
@@ -88,6 +87,7 @@ class Controller:
         self._crops: "dict[str, CropCoords]" = crops or {}
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
+        self._ready_button_region = 0  # grid region number for the ready-button click; 0 = not configured
         self._popup_last_clicked: "dict[str, float]" = {}  # popup name → timestamp of last click
 
         # Padlock camera cooldown: set when the key is pressed manually
@@ -96,6 +96,7 @@ class Controller:
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
+        self._weapon_loop_stop = threading.Event()
         self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
 
         # Search-and-destroy loop state (padlock + weapon fire; used during disengage)
@@ -120,39 +121,12 @@ class Controller:
         
         # Register hotkey for weapon loop toggle and other hotkeys
         if keyboard_module:
-            # Cancel mission if maneuver keys are pressed during GAME_BATTLE
-            def maneuver_cancel_hotkey(e):
-                if getattr(e, 'is_injected', False):
-                    return
-                with self._programmatic_key_lock:
-                    if self._programmatic_key_count > 0:
-                        return
-                if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
-                    logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
-                    return
-                if self._analyzer and hasattr(self._analyzer, 'game_state'):
-                    try:
-                        state = self._analyzer.game_state()
-                    except Exception:
-                        state = None
-                    # Accept both Enum and string for compatibility
-                    if state and (getattr(state, 'name', None) == 'GAME_BATTLE' or str(state) == 'GAME_BATTLE'):
-                        logger.info("Controller: Maneuver key '%s' pressed during GAME_BATTLE - cancelling mission", e.name if hasattr(e, 'name') else e)
-                        self.cancel_mission()
-            for key in [NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY]:
-                try:
-                    keyboard_module.on_press_key(key, maneuver_cancel_hotkey, suppress=False)
-                    logger.info("Controller: registered maneuver cancel hotkey '%s'", key)
-                except Exception:
-                    logger.exception("Controller: failed to register maneuver cancel hotkey '%s'", key)
-
             # Exit script hotkey (Backspace)
             try:
                 def exit_script_hotkey(e):
                     logger.info("Controller: Backspace key pressed - exiting script")
                     if self._exit_event:
                         self._exit_event.set()
-                    os._exit(0)
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey 'backspace' to exit script")
             except Exception:
@@ -160,7 +134,12 @@ class Controller:
 
             # Cancel mission hotkey (End)
             try:
+                self._last_cancel_key_ts = 0.0
                 def cancel_mission_hotkey(e):
+                    now = time.time()
+                    if now - self._last_cancel_key_ts < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_cancel_key_ts = now
                     logger.info("Controller: '%s' key pressed - cancelling mission and disabling auto-respawn restart", CANCEL_MISSION_KEY)
                     self._auto_respawn_restart = False
                     self._eject_stop.set()
@@ -216,6 +195,7 @@ class Controller:
                             )
                             with self._analyzer._state_lock:
                                 self._analyzer.state = GameState.GAME_BATTLE.name
+                            self._analyzer.on_enter_GAME_BATTLE()
                         else:
                             logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
                     else:
@@ -411,10 +391,12 @@ class Controller:
                     keyboard_module.press(key)
                     start = time.time()
                     while (time.time() - start) < hold_seconds:
-                        if not ignore_cancel and self._mission_cancel.is_set():
-                            logger.debug("Controller: %s cancelled", label)
-                            break
-                        time.sleep(0.05)
+                        if not ignore_cancel:
+                            if self._mission_cancel.wait(timeout=0.05):
+                                logger.debug("Controller: %s cancelled", label)
+                                break
+                        else:
+                            time.sleep(0.05)
                     try:
                         keyboard_module.release(key)
                     except Exception:
@@ -488,9 +470,7 @@ class Controller:
         def _is_respawning() -> bool:
             if self._analyzer is None:
                 return False
-            with self._analyzer._ocr_cache_lock:
-                detected, _, _ = self._analyzer._ocr_cache['result']
-            return detected
+            return self._analyzer.game_battle_alive
 
         def _run():
             if not keyboard_module:
@@ -522,13 +502,12 @@ class Controller:
                 # Hold afterburner until respawn detected (max 120s)
                 deadline = time.time() + 120.0
                 while time.time() < deadline:
-                    if self._eject_stop.is_set():
+                    if self._eject_stop.wait(timeout=0.5):
                         logger.info("Controller: eject_and_dive — cancelled by End key")
                         return
                     if _is_respawning():
                         logger.info("Controller: eject_and_dive — respawn detected, releasing afterburner")
                         break
-                    time.sleep(0.5)
                 else:
                     logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
             finally:
@@ -553,7 +532,9 @@ class Controller:
         """
         padlock_alive = (self._sdl_padlock_thread is not None
                          and self._sdl_padlock_thread.is_alive())
-        if self._sdl_stop is not None and not self._sdl_stop.is_set() and padlock_alive:
+        weapon_alive = (self._sdl_weapon_thread is not None
+                        and self._sdl_weapon_thread.is_alive())
+        if self._sdl_stop is not None and not self._sdl_stop.is_set() and (padlock_alive or weapon_alive):
             logger.debug("Controller: search_and_destroy_loop already running")
             return
 
@@ -567,9 +548,8 @@ class Controller:
                     if time.time() >= self._padlock_cooldown_until:
                         self.padlock_camera(hold_seconds=0.1, block=True)
                     for _ in range(60):  # 6 s interruptible
-                        if stop.is_set() or self._mission_cancel.is_set():
+                        if stop.wait(timeout=0.1) or self._mission_cancel.is_set():
                             break
-                        time.sleep(0.1)
             finally:
                 logger.info("Controller: search_and_destroy padlock loop stopped")
 
@@ -595,9 +575,8 @@ class Controller:
                         self.fire_active_weapon(hold_seconds=0.1, block=True)
                     steps = max(1, int(self._weapon_loop_interval / 0.1))
                     for _ in range(steps):
-                        if stop.is_set() or self._mission_cancel.is_set():
+                        if stop.wait(timeout=0.1) or self._mission_cancel.is_set():
                             break
-                        time.sleep(0.1)
             finally:
                 logger.info("Controller: search_and_destroy weapon loop stopped")
 
@@ -638,7 +617,7 @@ class Controller:
             self.start_search_and_destroy_loop()
             try:
                 keyboard_module.press(ROLL_RIGHT_KEY)
-                time.sleep(duration)
+                self._interruptible_sleep(duration)
             finally:
                 try:
                     keyboard_module.release(ROLL_RIGHT_KEY)
@@ -647,7 +626,9 @@ class Controller:
                 if not self.is_mission_running():
                     self.stop_search_and_destroy_loop()
             logger.info("Controller: disengage_roll_right complete")
-            if self._auto_respawn_restart and self._last_mission and not self.is_mission_running():
+            with self._last_mission_lock:
+                last_mission = self._last_mission
+            if self._auto_respawn_restart and last_mission and not self.is_mission_running():
                 logger.info("Controller: restarting mission after disengage")
                 self.restart_last_mission()
 
@@ -669,23 +650,24 @@ class Controller:
         # Clear mission cancel flag so weapon loop can fire properly
         self._mission_cancel.clear()
         self._weapon_loop_active = True
-        
+        self._weapon_loop_stop.clear()
+
         def _loop():
             logger.info("Controller: weapon loop started (interval=%.2fs)", self._weapon_loop_interval)
             try:
-                while self._weapon_loop_active:
+                while True:
                     try:
-                        # Use shorter hold time for better game responsiveness
                         self.fire_active_weapon(hold_seconds=0.1, block=True)
                     except Exception as e:
                         logger.warning("Controller: weapon loop fire failed: %s", e)
-                    time.sleep(self._weapon_loop_interval)
+                    if self._weapon_loop_stop.wait(timeout=self._weapon_loop_interval):
+                        break
             except Exception:
                 logger.exception("Controller: weapon loop error")
             finally:
                 self._weapon_loop_active = False
                 logger.info("Controller: weapon loop stopped")
-        
+
         self._weapon_loop_thread = threading.Thread(target=_loop, daemon=True)
         self._weapon_loop_thread.start()
 
@@ -696,9 +678,10 @@ class Controller:
             return
         
         logger.info("Controller: stopping weapon loop")
+        self._weapon_loop_stop.set()
         self._weapon_loop_active = False
         if self._weapon_loop_thread:
-            self._weapon_loop_thread.join(timeout=1.0)
+            self._weapon_loop_thread.join(timeout=2.0)
             self._weapon_loop_thread = None
 
     def toggle_weapon_loop(self):
@@ -719,10 +702,9 @@ class Controller:
         """
         remaining = float(seconds)
         while remaining > 0:
-            if self._mission_cancel.is_set():
-                return False
             interval = min(check_interval, remaining)
-            time.sleep(interval)
+            if self._mission_cancel.wait(timeout=interval):
+                return False
             remaining -= interval
         return True
 
@@ -805,12 +787,11 @@ class Controller:
         mission_a.start()
 
         # Wait for mission to complete or exit requested
-        while not self._mission_complete.is_set():
+        while not self._mission_complete.wait(timeout=0.05):
             if self._exit_event and self._exit_event.is_set():
                 logger.info("Controller: exit requested, aborting mission wait")
                 self.cancel_mission()
                 break
-            time.sleep(0.05)
 
     def mission_j20(self):
         """This mission sequence performs a predefined set of maneuvers for the J20 with continuous padlock and weapon fire
@@ -877,15 +858,14 @@ class Controller:
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
-        
+
         # Wait for mission to complete or exit requested
-        while not self._mission_complete.is_set():
+        while not self._mission_complete.wait(timeout=0.05):
             if self._exit_event and self._exit_event.is_set():
                 logger.info("Controller: exit requested, aborting mission wait")
                 self.cancel_mission()
                 break
-            time.sleep(0.05)
-        
+
         # Wait for the mission runner thread to fully exit
         mission_a.join(timeout=2.0)
         
@@ -949,7 +929,7 @@ class Controller:
                     if i < count - 1:
                         time.sleep(0.5)
 
-                if count > 1:
+                if count > 1 and self._ready_button_region:
                     # Final click on ready button (lobby/continue button)
                     rbn = self._ready_button_region
                     row_rb = (rbn - 1) // grid_cols
@@ -1106,7 +1086,7 @@ class Controller:
                     # 5-second interruptible wait; breaks early on Good Luck detection or state change.
                     # After 10 s gate: also arm health scan and check game_battle_alive each tick.
                     for _ in range(50):  # 50 * 0.1s = 5s
-                        if good_luck_event.is_set() or not _in_starting():
+                        if good_luck_event.wait(timeout=0.1) or not _in_starting():
                             break
                         if not health_scan_armed and time.time() - loop_start >= 10.0:
                             health_scan_armed = True
@@ -1121,7 +1101,6 @@ class Controller:
                             self._set_last_mission("j20")
                             threading.Thread(target=self.mission_j20, daemon=True).start()
                             return
-                        time.sleep(0.1)
 
                     if not _in_starting():
                         return
@@ -1180,3 +1159,12 @@ class Controller:
 
         logger.info("Controller: no last mission to restart")
         return None  # None = no previous mission (distinct from False = failed/locked)
+
+    def cleanup(self):
+        """Deregister all keyboard hooks registered by this controller."""
+        if keyboard_module:
+            try:
+                keyboard_module.unhook_all()
+                logger.info("Controller: all keyboard hooks deregistered")
+            except Exception:
+                logger.exception("Controller: failed to unhook keyboard hooks")
