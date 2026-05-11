@@ -13,7 +13,7 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.7"
+WINGMAN_VERSION = "1.6.8"
 WINGMAN_VERSION_DETAILS = "experimental"
 
 from .capture import Capture
