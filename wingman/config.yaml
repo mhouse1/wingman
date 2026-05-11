@@ -106,6 +106,11 @@ crops:
     coords:
     - [0.4354, 0.4756]
     - [0.5604, 0.52]
+  SILVER:
+    coords:
+    - [0.5174, 0.4078]
+    - [0.7, 0.4767]
+    text: [SILVER]
 respawn_detection:
   use_ocr: true
   use_gpu: false
@@ -122,3 +127,13 @@ aim: {smoothing: 0.25, fire_cooldown: 0.2}
 controls: {left_mouse_button: true, fire_button: left, fire_hold: 2.0}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, debug_output_dir: tests/test-output}
 j20_mission: {target_painting_mode: false}
+performance:
+  round_histogram:
+    enabled: true
+    png_enabled: false
+    png_every_n_rounds: 0
+    output_dir: docs/performance
+  regression:
+    min_sessions: 5
+    min_cycles: 1000
+    threshold_pct: 20

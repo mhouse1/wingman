@@ -25,7 +25,7 @@ from constants import (
     TEST_SCREENSHOT_INCOMING_1,
     TEST_SCREENSHOT_INCOMING_2,
 )
-from wingman.analyzer import GameState, GameStateAnalyzer
+from wingman.analyzer import GameState, GameStateAnalyzer, _get_thread_ocr_reader
 from wingman.crop_region import get_crop
 
 SCRIPT = str(Path(__file__).resolve().parent / "analyzer_cli.py")
@@ -253,7 +253,7 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
     analyzer = GameStateAnalyzer(cfg)
     frame = _load_image(image_path)
 
-    reader = analyzer.ocr_reader
+    reader = _get_thread_ocr_reader()
     assert reader is not None, "EasyOCR reader failed to initialize"
 
     coords = analyzer.crops["click_to"]
@@ -287,7 +287,7 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
     coords = analyzer.crops["incoming"]
     region_frame = get_crop(frame, coords.x1, coords.y1, coords.x2, coords.y2)
 
-    reader = analyzer.ocr_reader
+    reader = _get_thread_ocr_reader()
     assert reader is not None, "EasyOCR reader failed to initialize"
 
     gray = cv2.cvtColor(region_frame, cv2.COLOR_BGR2GRAY)

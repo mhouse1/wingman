@@ -4,10 +4,14 @@ import logging
 import cv2
 import numpy as np
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import time
 from enum import Enum, auto
 from pathlib import Path
+
+HEALTH_WINDOW_SIZE  = 10   # readings kept in rolling window (~10 s at 1 Hz)
+HEALTH_SPIKE_FACTOR = 1.5  # reject readings more than 50 % above the established ceiling
 
 from transitions import Machine, MachineError
 
@@ -54,7 +58,7 @@ _use_gpu: bool = False
 
 def _get_thread_ocr_reader():
     """Return the EasyOCR reader for the current thread, initializing it on first call."""
-    if not hasattr(_thread_local, 'reader'):
+    if not getattr(_thread_local, 'reader', None):
         with _ocr_init_lock:
             _thread_local.reader = None
             if easyocr:
@@ -117,11 +121,11 @@ def _process_incoming_region(incoming_frame):
         incoming_frame: numpy array (BGR) of the incoming region — passed by reference, no copy
 
     Returns:
-        tuple: (detected: bool, ocr_time: float, variant_name: str or None, text_found: str or None)
+        tuple: (detected: bool, ocr_time: float, variant_name: str or None, text_found: str or None, raw_texts: list)
     """
     reader = _get_thread_ocr_reader()
     if reader is None:
-        return (False, 0.0, None, None)
+        return (False, 0.0, None, None, [])
 
     t_start = time.time()
     
@@ -211,6 +215,43 @@ def _process_health_region(health_frame) -> "tuple[int | None, float]":
     return (None, time.time() - t_start)
 
 
+def _apply_health_ceiling_filter(
+    value: int,
+    window: deque,
+    ceiling: "int | None",
+    window_size: int,
+    spike_factor: float,
+    last_accepted: "int | None",
+) -> "tuple[int | None, int | None]":
+    """Reject OCR health readings that are implausibly large (stray prefix digits).
+
+    Returns (filtered_value, new_ceiling).
+    filtered_value is last_accepted when the reading is rejected as a spike,
+    or None when rejected and no prior accepted reading exists.
+    """
+    if ceiling is None:
+        window.append(value)
+        new_ceiling = max(window) if len(window) == window_size else None
+        return (value, new_ceiling)
+    if value <= ceiling * spike_factor:
+        window.append(value)
+        return (value, max(window))
+    logger.warning(
+        "Analyzer: Health OCR spike rejected: %d (ceiling=%d, factor=%.1f)",
+        value, ceiling, spike_factor)
+    return (last_accepted, ceiling)
+
+
+def _process_crop_region(frame, crop_coords, text_tokens):
+    """Extract crop and run text detection entirely inside a worker thread.
+
+    Wrapping get_crop() here ensures it is covered by future.result(timeout=N)
+    in the lobby quick-scan thread; a synchronous call in the submission loop
+    would have no timeout protection and can block indefinitely.
+    """
+    return _process_text_region(get_crop(frame, *crop_coords), text_tokens)
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -272,7 +313,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
     GameState.GAME_LOBBY: {
         "PLAY", "READY", "UNREADY", "CANCEL",
         "CREATION_FAILED", "INSPECT", "INVITED",
-        "REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE",
+        "REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE", "SILVER",
     },
     GameState.GAME_WAITING: {
         "PLAY", "READY", "CANCEL",
@@ -320,13 +361,15 @@ _FSM_TRANSITIONS = [
 class GameStateAnalyzer:
     """Analyzes game screenshots to determine current game state."""
     
-    def __init__(self, config):
+    def __init__(self, config, tracker=None):
         """
         Initialize analyzer with configuration.
-        
+
         Args:
-            config: Dict with HSV ranges and detection thresholds
+            config:  Dict with HSV ranges and detection thresholds
+            tracker: Optional PerformanceTracker instance (ADR 031)
         """
+        self._tracker = tracker
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
 
@@ -345,9 +388,6 @@ class GameStateAnalyzer:
         enemy_hsv_cfg = config.get("enemy_hsv", {})
         self._enemy_hsv_lower = np.array(enemy_hsv_cfg.get("lower", [0, 120, 120]), dtype=np.uint8)
         self._enemy_hsv_upper = np.array(enemy_hsv_cfg.get("upper", [10, 255, 255]), dtype=np.uint8)
-        
-        # EasyOCR reader (lazy initialization on first use)
-        self._ocr_reader = None
         
         # OCR result caching for performance (avoid running OCR every frame)
         self._ocr_cache = {
@@ -381,6 +421,7 @@ class GameStateAnalyzer:
         self._click_to_stop = threading.Event()
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
+        self._lobby_quick_scan_thread: "threading.Thread | None" = None
         self._last_lobby_play_click_ts = 0.0  # reset on GAME_LOBBY re-entry
 
         # FSM — single authoritative state field managed by the transitions library.
@@ -405,9 +446,14 @@ class GameStateAnalyzer:
         self._game_battle_alive = False    # True when health >= 1 in GAME_BATTLE
         self._health_lock = threading.Lock()
         self._health_no_digits_since = 0.0  # timestamp when health OCR started returning no digits
+        self._health_window: deque = deque(maxlen=HEALTH_WINDOW_SIZE)
+        self._health_ceiling: "int | None" = None
         # Signalled when _game_battle_alive transitions False → True.
         # The main loop waits on this event to restart the mission immediately.
         self.alive_event = threading.Event()
+        # Set by _start_game_starting_loop after the 10-second gate to enable the
+        # GAME_STARTING health-only OCR scan (ADR 032 battle-alive fallback).
+        self._game_starting_health_scan_enabled = threading.Event()
 
         # Ammo sub-state (GAME_BATTLE only)
         self._ammo_flares: "int | None" = None   # Last known flare count from OCR
@@ -428,7 +474,9 @@ class GameStateAnalyzer:
         self._background_ocr_running = False
         self._background_ocr_thread = None  # Still use a thread to coordinate async results
         self._background_ocr_lock = threading.Lock()
-        
+        self._background_ocr_stop = threading.Event()
+        self._last_battle_event_ts = 0.0
+
         # Fallback HSV detection (if OCR unavailable)
         self.respawn_text_hsv_lower = np.array(
             respawn_cfg.get("text_hsv_lower", [0, 0, 180]), 
@@ -450,138 +498,28 @@ class GameStateAnalyzer:
             self.debug_output_dir.mkdir(parents=True, exist_ok=True)
         
 
-    @staticmethod
-    def _levenshtein_distance(a: str, b: str) -> int:
-        """Compute Levenshtein distance between two strings."""
-        if a == b:
-            return 0
-        if not a:
-            return len(b)
-        if not b:
-            return len(a)
-
-        prev_row = list(range(len(b) + 1))
-        for i, char_a in enumerate(a, start=1):
-            curr_row = [i]
-            for j, char_b in enumerate(b, start=1):
-                insertions = prev_row[j] + 1
-                deletions = curr_row[j - 1] + 1
-                substitutions = prev_row[j - 1] + (char_a != char_b)
-                curr_row.append(min(insertions, deletions, substitutions))
-            prev_row = curr_row
-        return prev_row[-1]
-
-    @classmethod
-    def _is_respawn_text(cls, text_clean: str) -> bool:
-        """Return True when OCR text is a plausible match for respawn label.
-        
-        The actual in-game text is 'RESPA' (not 'RESPAWN'), so we match that
-        with tolerance for OCR errors.
-        """
-        if not text_clean:
-            return False
-
-        # Primary target: match what's actually displayed in-game
-        target = "RESPA"
-        if target in text_clean:
-            return True
-
-        # Fallback: Check for common OCR partial matches (handles severe OCR errors)
-        # OCR often misreads characters, so check for partial matches
-        # Note: "REPA" is intentionally excluded — it's too short and causes false positives;
-        # the Levenshtein check below handles "REPA"-type misreads (distance 1 from "RESPA").
-        if "RESP" in text_clean:
-            return True
-        
-        # Levenshtein distance for near-matches (typos with 1-2 character errors)
-        # Compare same-length windows for near-matches.
-        window_len = len(target)
-        candidates = []
-        if len(text_clean) < window_len:
-            candidates.append(text_clean)
-        else:
-            for index in range(0, len(text_clean) - window_len + 1):
-                candidates.append(text_clean[index:index + window_len])
-
-        for candidate in candidates:
-            distance = cls._levenshtein_distance(candidate, target)
-            if distance <= 2:
-                return True
-
-        return False
-    
-    @classmethod
-    def _is_incoming_text(cls, text_clean: str) -> bool:
-        """Return True when OCR text matches incoming missile warning.
-        
-        The actual in-game text shows 'MING' (from 'INCOMING'), so we match that
-        with tolerance for OCR errors.
-        """
-        if not text_clean:
-            return False
-
-        # Primary target: 'MING' visible in game
-        target = "MING"
-        if target in text_clean:
-            return True
-        
-        # Also check for partial 'INCOMING' text
-        if "INCOM" in text_clean or "NCOMING" in text_clean:
-            return True
-        
-        # Levenshtein distance for near-matches (OCR errors)
-        window_len = len(target)
-        candidates = []
-        if len(text_clean) < window_len:
-            candidates.append(text_clean)
-        else:
-            for index in range(0, len(text_clean) - window_len + 1):
-                candidates.append(text_clean[index:index + window_len])
-
-        for candidate in candidates:
-            distance = cls._levenshtein_distance(candidate, target)
-            if distance <= 1:  # Stricter tolerance for MING (shorter word)
-                return True
-
-        return False
-    
-    @property
-    def ocr_reader(self):
-        """Lazy initialization of EasyOCR reader (10s startup delay)."""
-        if self._ocr_reader is None and easyocr:
-            logger.info("Initializing EasyOCR reader (this may take ~10 seconds)...")
-            try:
-                self._ocr_reader = easyocr.Reader(['en'], gpu=True)
-                logger.info("EasyOCR reader initialized successfully")
-            except Exception as e:
-                logger.warning("Failed to initialize EasyOCR with GPU, trying CPU: %s", e)
-                try:
-                    self._ocr_reader = easyocr.Reader(['en'], gpu=False)
-                    logger.info("EasyOCR reader initialized with CPU")
-                except Exception as e:
-                    logger.error("Failed to initialize EasyOCR: %s", e)
-                    return None
-        return self._ocr_reader
-    
     @property
     def ocr_executor(self):
         """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
         if self._ocr_executor is None and easyocr and not self._ocr_executor_initialized:
-            try:
-                self._ocr_executor = ThreadPoolExecutor(max_workers=13)
-                self._ocr_executor_initialized = True
-                logger.info("Initialized ThreadPoolExecutor with 13 workers for parallel OCR")
-                # Pre-warm: each worker thread must initialize its own EasyOCR reader
-                # (serialized by _ocr_init_lock). Submitting 13 fire-and-forget tasks here
-                # starts that initialization in the background so the first real lobby scan
-                # does not stall waiting for cold workers.
-                for _ in range(13):
-                    self._ocr_executor.submit(_get_thread_ocr_reader)
-                logger.debug("OCR worker pre-warm submitted (13 tasks)")
-            except Exception as e:
-                logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
-                self._ocr_executor_initialized = True  # Prevent retries
+            if not self._background_ocr_lock.acquire(timeout=1.0):
                 return None
+            try:
+                if self._ocr_executor is None and not self._ocr_executor_initialized:
+                    try:
+                        self._ocr_executor = ThreadPoolExecutor(max_workers=13)
+                        self._ocr_executor_initialized = True
+                        logger.info("Initialized ThreadPoolExecutor with 13 workers for parallel OCR")
+                        for _ in range(13):
+                            self._ocr_executor.submit(_get_thread_ocr_reader)
+                        logger.debug("OCR worker pre-warm submitted (13 tasks)")
+                    except Exception as e:
+                        logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
+                        self._ocr_executor_initialized = True
+                        return None
+            finally:
+                if self._background_ocr_lock.locked():
+                    self._background_ocr_lock.release()
         return self._ocr_executor
     
     def _trigger(self, trigger_name: str) -> bool:
@@ -604,6 +542,9 @@ class GameStateAnalyzer:
 
     def on_enter_GAME_LOBBY(self):
         self._last_lobby_play_click_ts = 0.0
+        with self._health_lock:
+            self._health_window.clear()
+            self._health_ceiling = None
         if self._on_cancel_mission:
             self._on_cancel_mission()
 
@@ -612,8 +553,10 @@ class GameStateAnalyzer:
             self._on_start_game_starting_loop()
 
     def on_enter_GAME_BATTLE(self):
-        self._health_no_digits_since = 0.0
         with self._health_lock:
+            self._health_no_digits_since = 0.0
+            self._health_window.clear()
+            self._health_ceiling = None
             if self._health is not None and self._health >= 1:
                 self.alive_event.set()
 
@@ -650,10 +593,16 @@ class GameStateAnalyzer:
         """Clean up resources (call when shutting down)."""
         self._click_to_stop.set()
         self._lobby_quick_scan_stop.set()
+        self._background_ocr_stop.set()
         if self._ocr_executor is not None:
             try:
                 self._ocr_executor.shutdown(wait=False)
                 logger.info("ThreadPoolExecutor shut down successfully")
+                if self._tracker is not None:
+                    try:
+                        self._tracker.on_session_end()
+                    except Exception as e:
+                        logger.warning("PerformanceTracker: on_session_end failed: %s", e)
             except Exception as e:
                 logger.warning("Error shutting down ThreadPoolExecutor: %s", e)
             self._ocr_executor = None
@@ -691,9 +640,16 @@ class GameStateAnalyzer:
             self._click_to_thread_started = True
             threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
             logger.debug("Click-to background thread started")
-        if not self._lobby_quick_scan_thread_started:
+        thread_dead = (self._lobby_quick_scan_thread is not None
+                       and not self._lobby_quick_scan_thread.is_alive())
+        if not self._lobby_quick_scan_thread_started or thread_dead:
+            if thread_dead:
+                logger.warning("Lobby quick-scan thread died unexpectedly — restarting")
+                self._lobby_quick_scan_stop.clear()
             self._lobby_quick_scan_thread_started = True
-            threading.Thread(target=self._run_game_lobby_quick_scan, daemon=True).start()
+            self._lobby_quick_scan_thread = threading.Thread(
+                target=self._run_game_lobby_quick_scan, daemon=True)
+            self._lobby_quick_scan_thread.start()
             logger.info("Lobby quick-scan background thread started")
 
         state = {
@@ -811,14 +767,15 @@ class GameStateAnalyzer:
                 self._background_ocr_thread.start()
                 logger.debug("Background OCR scheduled")
         finally:
-            self._background_ocr_lock.release()
+            if self._background_ocr_lock.locked():
+                self._background_ocr_lock.release()
 
         # Return cached result (may be stale) while background OCR runs
         return cached_result
     
     def _run_ocr_in_background(self):
         """Run OCR in background using thread pool for parallel region processing."""
-        while True:
+        while not self._background_ocr_stop.is_set():
             with self._background_ocr_lock:
                 full_frame = self._background_ocr_frame
 
@@ -834,14 +791,12 @@ class GameStateAnalyzer:
                 executor = self.ocr_executor
                 if executor is None:
                     logger.warning("OCR executor not initialized")
+                    with self._background_ocr_lock:
+                        self._background_ocr_running = False
                     return
 
                 state = self.game_state
-                # Only process GAME_BATTLE crops in GAME_BATTLE or GAME_END_B
-                if state not in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_END_B):
-                    logger.debug(f"Skipping GAME_BATTLE crop OCR in {state.name} state")
-                    time.sleep(0.2)
-                else:
+                if state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_END_B):
                     # Extract respawn, incoming, health, and ammo crops (click_to has its own thread)
                     respawn_frame = get_crop(full_frame, *self.crops["respawn"][:4])
                     incoming_frame = get_crop(full_frame, *self.crops["incoming"][:4])
@@ -862,6 +817,8 @@ class GameStateAnalyzer:
                     # Wait for respawn result first — update its cache immediately so the
                     # main loop can react without waiting for the (often slower) incoming OCR.
                     respawn_detected, respawn_ocr_time, respawn_text = respawn_future.result(timeout=120)
+                    if self._tracker:
+                        self._tracker.record_ocr_crop("respawn", respawn_ocr_time)
 
                     if respawn_detected:
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
@@ -875,6 +832,8 @@ class GameStateAnalyzer:
 
                     # Now wait for incoming — its result is independent of respawn.
                     incoming_detected, incoming_ocr_time, variant_name, incoming_text, incoming_raw = incoming_future.result(timeout=120)
+                    if self._tracker:
+                        self._tracker.record_ocr_crop("incoming", incoming_ocr_time)
                     t3 = time.time()
 
                     if incoming_detected:
@@ -895,40 +854,58 @@ class GameStateAnalyzer:
                     health_ocr_time = 0.0
                     if health_future is not None:
                         health_value, health_ocr_time = health_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("health", health_ocr_time)
                         if health_value is not None:
-                            # Digits found — reset no-digits timer and update state.
-                            self._health_no_digits_since = 0.0
-                            alive = health_value >= 1
                             with self._health_lock:
+                                health_value, self._health_ceiling = _apply_health_ceiling_filter(
+                                    health_value,
+                                    self._health_window,
+                                    self._health_ceiling,
+                                    HEALTH_WINDOW_SIZE,
+                                    HEALTH_SPIKE_FACTOR,
+                                    self._health,
+                                )
                                 prev_alive = self._game_battle_alive
+                                alive = health_value >= 1 if health_value is not None else False
                                 self._health = health_value
                                 self._game_battle_alive = alive
-                            logger.info("Health: %d | alive=%s", health_value, alive)
+                                self._health_no_digits_since = 0.0
+                            logger.info("Health: %s | alive=%s", health_value, alive)
                             # Signal False → True transition for immediate mission restart.
                             if alive and not prev_alive:
-                                logger.info("Analyzer: health alive transition False→True")
+                                logger.info("Analyzer: health alive transition False→True — resetting health ceiling")
+                                with self._health_lock:
+                                    self._health_window.clear()
+                                    self._health_ceiling = None
                                 self.alive_event.set()
                         else:
                             # No digits — only clear alive flag after 3 s of consecutive misses.
                             now_t = time.time()
-                            if self._health_no_digits_since == 0.0:
-                                self._health_no_digits_since = now_t
+                            with self._health_lock:
+                                no_digits_since = self._health_no_digits_since
+                                if no_digits_since == 0.0:
+                                    self._health_no_digits_since = now_t
+                                    no_digits_since = now_t
+                            if no_digits_since == now_t:
                                 logger.debug("Analyzer: Health OCR returned no digits (grace timer started)")
-                            elif now_t - self._health_no_digits_since >= 3.0:
+                            elif now_t - no_digits_since >= 3.0:
                                 with self._health_lock:
                                     self._game_battle_alive = False
                                 logger.debug(
                                     "Analyzer: Health OCR no digits for %.1fs → game_battle_alive=False",
-                                    now_t - self._health_no_digits_since)
+                                    now_t - no_digits_since)
                             else:
                                 logger.debug(
                                     "Analyzer: Health OCR no digits (%.1fs elapsed, 3s threshold)",
-                                    now_t - self._health_no_digits_since)
+                                    now_t - no_digits_since)
                     # Resolve ammo futures and fire events.
                     ammo_flares_ocr_time = 0.0
                     ammo_missile_ocr_time = 0.0
                     if ammo_flares_future is not None:
                         flares_value, ammo_flares_ocr_time = ammo_flares_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("ammo_flares", ammo_flares_ocr_time)
                         if flares_value is not None:
                             with self._ammo_lock:
                                 self._ammo_flares = flares_value
@@ -937,6 +914,8 @@ class GameStateAnalyzer:
                                 self.low_flares_event.set()
                     if ammo_missile_future is not None:
                         missile_value, ammo_missile_ocr_time = ammo_missile_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("ammo_missiles", ammo_missile_ocr_time)
                         if missile_value is not None:
                             with self._ammo_lock:
                                 self._ammo_missiles = missile_value
@@ -954,6 +933,36 @@ class GameStateAnalyzer:
                         t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, health_ocr_time,
                         ammo_flares_ocr_time, ammo_missile_ocr_time, t4-t0
                     )
+                elif (state == GameState.GAME_STARTING
+                        and self._game_starting_health_scan_enabled.is_set()
+                        and "HEALTH" in self.crops):
+                    # Health-only scan for the battle-alive fallback (ADR 032).
+                    health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4])
+                    health_future = executor.submit(_process_health_region, health_frame)
+                    health_value, _ = health_future.result(timeout=120)
+                    if health_value is not None:
+                        with self._health_lock:
+                            health_value, self._health_ceiling = _apply_health_ceiling_filter(
+                                health_value,
+                                self._health_window,
+                                self._health_ceiling,
+                                HEALTH_WINDOW_SIZE,
+                                HEALTH_SPIKE_FACTOR,
+                                self._health,
+                            )
+                        if health_value is not None and health_value >= 1:
+                            with self._health_lock:
+                                prev_alive = self._game_battle_alive
+                                self._health = health_value
+                                self._game_battle_alive = True
+                            logger.info(
+                                "Analyzer: health %d detected in GAME_STARTING → game_battle_alive=True",
+                                health_value)
+                            if not prev_alive:
+                                self.alive_event.set()
+                else:
+                    logger.debug("Skipping GAME_BATTLE crop OCR in %s state", state.name)
+                    self._background_ocr_stop.wait(timeout=0.2)
             except Exception as e:
                 logger.warning("Analyzer: OCR detection failed: %s", e)
 
@@ -1018,7 +1027,7 @@ class GameStateAnalyzer:
         within the last 5s; CANCEL/PLAY scan fires every cycle in GAME_LOBBY only.
         """
         lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
-        popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL",
+        popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
                             "UNLOCK_CLOSE", "INSPECT", "event_refresh"]
         popup_crops = [c for c in popup_crop_names if c in self.crops]
 
@@ -1061,8 +1070,9 @@ class GameStateAnalyzer:
                             lobby_scan_start = time.time()
                             for crop in lobby_crops:
                                 lobby_futures[crop] = executor.submit(
-                                    _process_text_region,
-                                    get_crop(frame, *self.crops[crop][:4]),
+                                    _process_crop_region,
+                                    frame,
+                                    self.crops[crop][:4],
                                     self.crops[crop].text or [],
                                 )
 
@@ -1070,7 +1080,11 @@ class GameStateAnalyzer:
                     for crop in ("CANCEL", "UNREADY"):
                         if crop not in lobby_futures:
                             continue
-                        detected, _, text = lobby_futures[crop].result(timeout=120)
+                        try:
+                            detected, _, text = lobby_futures[crop].result(timeout=20)
+                        except Exception as e:
+                            logger.warning("Lobby quick-scan: %s result failed: %s", crop, e)
+                            continue
                         if detected:
                             if crop == "UNREADY":
                                 # UNREADY means this player already clicked READY and is waiting
@@ -1092,7 +1106,11 @@ class GameStateAnalyzer:
                     for crop in ("PLAY", "READY"):
                         if crop not in lobby_futures:
                             continue
-                        detected, _, text = lobby_futures[crop].result(timeout=120)
+                        try:
+                            detected, _, text = lobby_futures[crop].result(timeout=20)
+                        except Exception as e:
+                            logger.warning("Lobby quick-scan: %s result failed: %s", crop, e)
+                            continue
                         if not detected:
                             continue
                         if time.time() - self._last_lobby_play_click_ts < 60.0:
@@ -1164,8 +1182,9 @@ class GameStateAnalyzer:
                             popup_scan_start = time.time()
                             for crop in popup_crops:
                                 popup_futures[crop] = executor.submit(
-                                    _process_text_region,
-                                    get_crop(popup_frame, *self.crops[crop][:4]),
+                                    _process_crop_region,
+                                    popup_frame,
+                                    self.crops[crop][:4],
                                     self.crops[crop].text or [],
                                 )
 
@@ -1190,7 +1209,7 @@ class GameStateAnalyzer:
                         if crop not in popup_futures:
                             continue
                         try:
-                            detected, _, text = popup_futures[crop].result(timeout=120)
+                            detected, _, text = popup_futures[crop].result(timeout=20)
                             if detected:
                                 logger.info(
                                     "Lobby quick-scan: popup '%s' detected (text='%s')",
@@ -1214,10 +1233,14 @@ class GameStateAnalyzer:
                             " (detected)" if popup_detected else "",
                         )
 
-                logger.debug(
-                    "Lobby quick-scan: cycle completed in %.2fs",
-                    time.time() - cycle_start,
-                )
+                cycle_elapsed = time.time() - cycle_start
+                if cycle_elapsed > 15.0:
+                    logger.warning(
+                        "Lobby quick-scan: slow cycle %.1fs (OCR timeout or hung worker)",
+                        cycle_elapsed,
+                    )
+                else:
+                    logger.debug("Lobby quick-scan: cycle completed in %.2fs", cycle_elapsed)
             except RuntimeError:
                 return  # executor shut down
             except Exception as e:
@@ -1241,12 +1264,15 @@ class GameStateAnalyzer:
     
     def reset_cache(self):
         """Reset OCR caches - useful when switching between different images/scenes."""
-        self._ocr_cache['timestamp'] = 0.0
-        self._ocr_cache['result'] = (False, 0.0, None)
-        self._incoming_cache['timestamp'] = 0.0
-        self._incoming_cache['result'] = (False, 0.0, None)
-        self._click_to_cache['timestamp'] = 0.0
-        self._click_to_cache['result'] = (False, 0.0, None)
+        with self._ocr_cache_lock:
+            self._ocr_cache['timestamp'] = 0.0
+            self._ocr_cache['result'] = (False, 0.0, None)
+        with self._incoming_cache_lock:
+            self._incoming_cache['timestamp'] = 0.0
+            self._incoming_cache['result'] = (False, 0.0, None)
+        with self._click_to_cache_lock:
+            self._click_to_cache['timestamp'] = 0.0
+            self._click_to_cache['result'] = (False, 0.0, None)
         logger.debug("OCR caches reset")
 
     def detect_enemy_red(self, frame) -> bool:

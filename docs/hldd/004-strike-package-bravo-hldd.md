@@ -82,7 +82,7 @@ Human squadron emotes steer Wingman intent with conflict-aware routing.
 
 ### Command semantics in Bravo mode
 
-- Move to B emote:
+- Captain issues Moving to B emote:
   - AI wingman should not converge on B.
   - AI selects A or C to widen map control.
 - Attack B emote:
