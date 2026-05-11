@@ -19,6 +19,7 @@ WINGMAN_VERSION_DETAILS = "Improvements before phase3"
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState
+from .performance import PerformanceTracker
 
 
 class RespawnState(Enum):
@@ -105,7 +106,8 @@ def main():
 
     # Initialize main components
     cap = Capture(region, monitor_index)
-    analyzer = GameStateAnalyzer(cfg)  # also usable as a context manager via __enter__/__exit__
+    tracker = PerformanceTracker(cfg, version=WINGMAN_VERSION)
+    analyzer = GameStateAnalyzer(cfg, tracker=tracker)  # also usable as a context manager via __enter__/__exit__
 
     unattended_mode = cfg.get("unattended_mode", False)
     unattended_active = threading.Event()
@@ -265,6 +267,10 @@ def main():
                 return False
             logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
             last_incoming_alert_ts = incoming_ts
+            try:
+                tracker.record_reaction(time.time() - incoming_ts)
+            except Exception as e:
+                logger.warning("PerformanceTracker: record_reaction failed: %s", e)
 
             def _flare_burst():
                 for _ in range(3):
@@ -311,6 +317,10 @@ def main():
                     game_waiting_since = 0.0
                     if prev_game_state is not None:
                         ctrl.cancel_mission()
+                    try:
+                        tracker.on_enter_game_lobby()
+                    except Exception as e:
+                        logger.warning("PerformanceTracker: on_enter_game_lobby failed: %s", e)
                 if current_game_state == GameState.GAME_WAITING:
                     game_waiting_since = time.time()
                     last_cancel_scan_ts = time.time()         # first scan after 3s, not immediately
@@ -505,6 +515,7 @@ def main():
     except Exception:
         logger.exception("Unhandled exception in main loop")
     finally:
+        ctrl.cleanup()
         analyzer.cleanup()
 
 

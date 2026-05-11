@@ -80,6 +80,10 @@ clean:
 wrelease:
 	git add wingman/main.py
 	git add -f tests/test-output/performance.json
+	rm -rf docs/performance/release
+	mkdir -p docs/performance/release
+	cp docs/performance/current/run_*.json docs/performance/release/ 2>/dev/null; true
+	git add docs/performance/release/
 	version=$$(sed -n 's/^WINGMAN_VERSION = "\([^"]*\)"/\1/p' wingman/main.py); \
 	details=$$(sed -n 's/^WINGMAN_VERSION_DETAILS = "\([^"]*\)"/\1/p' wingman/main.py); \
 	test -n "$$version" || (echo "Could not parse WINGMAN_VERSION from wingman/main.py" && exit 1); \

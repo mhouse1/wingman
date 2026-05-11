@@ -1,5 +1,7 @@
 # Ignore test output directory
 tests/test-output/
+# Runtime performance data — accumulates between releases; only release/ is committed
+docs/performance/current/
 # Ignore Python bytecode cache directories and compiled files
 __pycache__/
 **/__pycache__/

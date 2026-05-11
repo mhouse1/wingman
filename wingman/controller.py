@@ -134,7 +134,12 @@ class Controller:
 
             # Cancel mission hotkey (End)
             try:
+                self._last_cancel_key_ts = 0.0
                 def cancel_mission_hotkey(e):
+                    now = time.time()
+                    if now - self._last_cancel_key_ts < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_cancel_key_ts = now
                     logger.info("Controller: '%s' key pressed - cancelling mission and disabling auto-respawn restart", CANCEL_MISSION_KEY)
                     self._auto_respawn_restart = False
                     self._eject_stop.set()
@@ -1154,3 +1159,12 @@ class Controller:
 
         logger.info("Controller: no last mission to restart")
         return None  # None = no previous mission (distinct from False = failed/locked)
+
+    def cleanup(self):
+        """Deregister all keyboard hooks registered by this controller."""
+        if keyboard_module:
+            try:
+                keyboard_module.unhook_all()
+                logger.info("Controller: all keyboard hooks deregistered")
+            except Exception:
+                logger.exception("Controller: failed to unhook keyboard hooks")

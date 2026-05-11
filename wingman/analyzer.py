@@ -361,13 +361,15 @@ _FSM_TRANSITIONS = [
 class GameStateAnalyzer:
     """Analyzes game screenshots to determine current game state."""
     
-    def __init__(self, config):
+    def __init__(self, config, tracker=None):
         """
         Initialize analyzer with configuration.
-        
+
         Args:
-            config: Dict with HSV ranges and detection thresholds
+            config:  Dict with HSV ranges and detection thresholds
+            tracker: Optional PerformanceTracker instance (ADR 031)
         """
+        self._tracker = tracker
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
 
@@ -596,6 +598,11 @@ class GameStateAnalyzer:
             try:
                 self._ocr_executor.shutdown(wait=False)
                 logger.info("ThreadPoolExecutor shut down successfully")
+                if self._tracker is not None:
+                    try:
+                        self._tracker.on_session_end()
+                    except Exception as e:
+                        logger.warning("PerformanceTracker: on_session_end failed: %s", e)
             except Exception as e:
                 logger.warning("Error shutting down ThreadPoolExecutor: %s", e)
             self._ocr_executor = None
@@ -810,6 +817,8 @@ class GameStateAnalyzer:
                     # Wait for respawn result first — update its cache immediately so the
                     # main loop can react without waiting for the (often slower) incoming OCR.
                     respawn_detected, respawn_ocr_time, respawn_text = respawn_future.result(timeout=120)
+                    if self._tracker:
+                        self._tracker.record_ocr_crop("respawn", respawn_ocr_time)
 
                     if respawn_detected:
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
@@ -823,6 +832,8 @@ class GameStateAnalyzer:
 
                     # Now wait for incoming — its result is independent of respawn.
                     incoming_detected, incoming_ocr_time, variant_name, incoming_text, incoming_raw = incoming_future.result(timeout=120)
+                    if self._tracker:
+                        self._tracker.record_ocr_crop("incoming", incoming_ocr_time)
                     t3 = time.time()
 
                     if incoming_detected:
@@ -843,6 +854,8 @@ class GameStateAnalyzer:
                     health_ocr_time = 0.0
                     if health_future is not None:
                         health_value, health_ocr_time = health_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("health", health_ocr_time)
                         if health_value is not None:
                             with self._health_lock:
                                 health_value, self._health_ceiling = _apply_health_ceiling_filter(
@@ -861,7 +874,10 @@ class GameStateAnalyzer:
                             logger.info("Health: %s | alive=%s", health_value, alive)
                             # Signal False → True transition for immediate mission restart.
                             if alive and not prev_alive:
-                                logger.info("Analyzer: health alive transition False→True")
+                                logger.info("Analyzer: health alive transition False→True — resetting health ceiling")
+                                with self._health_lock:
+                                    self._health_window.clear()
+                                    self._health_ceiling = None
                                 self.alive_event.set()
                         else:
                             # No digits — only clear alive flag after 3 s of consecutive misses.
@@ -888,6 +904,8 @@ class GameStateAnalyzer:
                     ammo_missile_ocr_time = 0.0
                     if ammo_flares_future is not None:
                         flares_value, ammo_flares_ocr_time = ammo_flares_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("ammo_flares", ammo_flares_ocr_time)
                         if flares_value is not None:
                             with self._ammo_lock:
                                 self._ammo_flares = flares_value
@@ -896,6 +914,8 @@ class GameStateAnalyzer:
                                 self.low_flares_event.set()
                     if ammo_missile_future is not None:
                         missile_value, ammo_missile_ocr_time = ammo_missile_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("ammo_missiles", ammo_missile_ocr_time)
                         if missile_value is not None:
                             with self._ammo_lock:
                                 self._ammo_missiles = missile_value
