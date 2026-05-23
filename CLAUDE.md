@@ -29,6 +29,19 @@ Do not modify an ADR that has status `Accepted`. If a decision is superseded, wr
 
 Always use Mermaid for diagrams in documentation. Never use ASCII text diagrams (no box-drawing characters, no `┌─┐` borders, no `→` arrow art). Wrap all diagrams in a fenced code block with the `mermaid` language tag.
 
+Use a compatibility-first Mermaid profile for shared docs:
+
+- Default to syntax that renders across common Mermaid versions/renderers.
+- Keep node labels plain-language; do not put symbolic expressions (for example `>`, `<`, `<=`, `>=`, or punctuation-heavy logic) inside node declarations.
+- Put equations/conditions in nearby bullets or surrounding prose, not in decision-node text.
+
+Advanced Mermaid features are allowed when both conditions are met:
+
+1. The target renderer/pipeline version is known to support the feature.
+2. A simplified fallback diagram (or equivalent textual explanation) is provided for portability.
+
+After creating or editing Mermaid blocks, verify they render in the target environment (not only in one local preview).
+
 ## Lock Release in Finally Blocks
 
 Never use `try: lock.release() except RuntimeError: pass` in finally blocks. Always guard with:
@@ -90,4 +103,14 @@ All new documents (job aids, performance docs, code reviews, ADRs, and any other
 
 ## Code Review Todos
 
-Review files live in `docs/code-review/` and are numbered sequentially (`001-2026-03.md`, `002-…`, etc.). Each file covers one review cycle and is closed (immutable) once all items resolve.
+Review files live in `docs/code-review/` and are numbered sequentially (`001-2026-03.md`, `002-…`, etc.). Each file covers one review cycle.
+
+Closed review files are historical records. Do not edit a closed review to change findings, severity, or the narrative assessment after the cycle is complete.
+
+Allowed before closure:
+- Add a final resolution summary for items reviewed in that cycle.
+
+After closure:
+- Record later status changes in a new review-cycle file, not by rewriting the old file.
+- Reference the original item ID and mark the current disposition explicitly: `Resolved`, `Deferred`, `Superseded`, or `Closed as stale`.
+- Treat the latest review file as the authoritative source for current disposition.

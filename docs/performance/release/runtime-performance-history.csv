@@ -1,0 +1,3 @@
+mode,version,point_label,session_count,incoming_cycles,reaction_events,incoming_mean,respawn_mean,health_mean,ammo_flares_mean,ammo_missiles_mean,reaction_mean,source_run_count,generated_at
+release,1.6.7,1.6.7,3,1914,31,0.4091,0.3666,0.3618,0.3236,0.3522,0.4478,3,2026-05-23T09:30:40.218221+00:00
+release,1.6.8,1.6.8,9,5767,143,0.6164,0.5472,0.5541,0.4922,0.5347,0.5985,9,2026-05-23T09:30:40.218221+00:00
