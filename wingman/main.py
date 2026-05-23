@@ -14,7 +14,7 @@ except ImportError:
     colorama = None
 
 WINGMAN_VERSION = "1.6.8"
-WINGMAN_VERSION_DETAILS = "experimental"
+WINGMAN_VERSION_DETAILS = "code-review fixes, no major changes"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
