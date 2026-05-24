@@ -98,8 +98,8 @@ All new documents (job aids, performance docs, code reviews, ADRs, and any other
 - Read `WINGMAN_VERSION` from `wingman/main.py` — never guess it.
 - Use today's actual date.
 - Use `Draft` for new documents; update to `Active` or `Accepted` once reviewed.
-- **ADRs** use `Accepted` (not `Draft`) from the moment they are written — an ADR records a decision already made.
-- This rule applies to **all** new docs, not just ADRs.
+- **ADRs** must start as `Draft` when first created.
+- Update an ADR to `Accepted` only after implementation is complete.
 
 ## Code Review Todos
 
