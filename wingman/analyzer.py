@@ -1042,7 +1042,9 @@ class GameStateAnalyzer:
         can use a fresher frame than the one used for CANCEL / PLAY detection.
 
         Popup scan fires every 5s in both states unless a PLAY/READY click happened
-        within the last 5s; CANCEL/PLAY scan fires every cycle in GAME_LOBBY only.
+        within the last 5s; CANCEL/PLAY scan fires every cycle in GAME_LOBBY;
+        CANCEL alone is also scanned every cycle in GAME_WAITING so a brief CANCEL
+        window is not missed between main-loop 3-second polling intervals.
         """
         lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
         popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
@@ -1066,13 +1068,21 @@ class GameStateAnalyzer:
                 continue
 
             try:
-                # --- CANCEL / UNREADY / PLAY / READY (GAME_LOBBY only) ---
+                # --- CANCEL / UNREADY / PLAY / READY ---
+                # GAME_LOBBY: scan all lobby crops.
+                # GAME_WAITING: scan CANCEL only — provides 1-second detection cadence
+                # instead of relying solely on the 3-second main-loop poll, which can
+                # miss a brief CANCEL window (e.g. squad-READY → match-found flow).
                 lobby_futures = {}
                 lobby_scan_start = None
                 handled = False
                 play_clicked_this_cycle = False
 
-                if state == GameState.GAME_LOBBY and lobby_crops:
+                crops_to_scan = (
+                    lobby_crops if state == GameState.GAME_LOBBY
+                    else [c for c in ("CANCEL",) if c in self.crops]
+                )
+                if crops_to_scan:
                     with self._click_to_frame_lock:
                         frame = self._click_to_latest_frame
                         frame_ts = self._click_to_frame_ts
@@ -1086,7 +1096,7 @@ class GameStateAnalyzer:
                             )
                         else:
                             lobby_scan_start = time.time()
-                            for crop in lobby_crops:
+                            for crop in crops_to_scan:
                                 lobby_futures[crop] = executor.submit(
                                     _process_crop_region,
                                     frame,
@@ -1119,6 +1129,21 @@ class GameStateAnalyzer:
                                 self._trigger("cancel_detected")
                             handled = True
                             break
+
+                if not handled and state == GameState.GAME_WAITING and "CANCEL" in lobby_futures:
+                    try:
+                        detected, _, text = lobby_futures["CANCEL"].result(timeout=20)
+                    except Exception as e:
+                        logger.warning("Lobby quick-scan: CANCEL result failed in GAME_WAITING: %s", e)
+                        detected = False
+                    if detected:
+                        logger.info(
+                            "\033[92m✓ Lobby quick-scan: CANCEL detected in GAME_WAITING (text='%s') → GAME_STARTING\033[0m",
+                            text)
+                        self._trigger("cancel_detected")
+                        handled = True
+                    else:
+                        logger.debug("Lobby quick-scan: CANCEL not found in GAME_WAITING")
 
                 if not handled and state == GameState.GAME_LOBBY:
                     for crop in ("PLAY", "READY"):
