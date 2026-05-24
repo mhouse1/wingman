@@ -1,96 +1,150 @@
 {
-  "timestamp": "2026-05-23T05:26:12.732542",
-  "version": "1.6.8",
+  "timestamp": "2026-05-23T22:30:00.581487",
+  "version": "1.6.9",
   "tests": {
-    "test_wingman_smoke_launch": {
-      "duration": 0.00010380003368481994,
-      "runs": 1,
-      "min": 0.00010380003368481994,
-      "max": 0.00010380003368481994
-    },
-    "test_level1_static_screenshot": {
-      "duration": 11.110213999985717,
-      "runs": 1,
-      "min": 11.110213999985717,
-      "max": 11.110213999985717
-    },
     "test_respawn_detection_positive": {
-      "duration": 9.747841433330905,
-      "runs": 3,
-      "min": 1.7053939999896102,
-      "max": 17.510758800024632
+      "duration": 13.667650449991925,
+      "runs": 2,
+      "min": 1.7492243999731727,
+      "max": 25.586076500010677
     },
     "test_respawn_detection_negative": {
-      "duration": 20.047294566679437,
-      "runs": 3,
-      "min": 11.317081100016367,
-      "max": 28.417602900008205
-    },
-    "test_level2_live_capture": {
-      "duration": 5.030847099958919,
-      "runs": 1,
-      "min": 5.030847099958919,
-      "max": 5.030847099958919
-    },
-    "test_get_frame_and_analyze_frame": {
-      "duration": 0.06931380002060905,
-      "runs": 1,
-      "min": 0.06931380002060905,
-      "max": 0.06931380002060905
-    },
-    "test_level3_unit_ocr": {
-      "duration": 4.090353999985382,
-      "runs": 1,
-      "min": 4.090353999985382,
-      "max": 4.090353999985382
-    },
-    "test_level4_region33_contains_lick_to_c": {
-      "duration": 0.7318422499811277,
+      "duration": 28.89032494998537,
       "runs": 2,
-      "min": 0.17319859995041043,
-      "max": 1.290485900011845
-    },
-    "test_level4_region9_contains_inco": {
-      "duration": 0.13792740002584955,
-      "runs": 3,
-      "min": 0.12714650004636496,
-      "max": 0.15075650002108887
-    },
-    "test_level5_performance_validation": {
-      "duration": 0.0023188000195659697,
-      "runs": 1,
-      "min": 0.0023188000195659697,
-      "max": 0.0023188000195659697
-    },
-    "test_click_through_game_end_transitions_to_lobby": {
-      "duration": 0.00021989998640492558,
-      "runs": 1,
-      "min": 0.00021989998640492558,
-      "max": 0.00021989998640492558
+      "min": 27.693428799975663,
+      "max": 30.087221099995077
     },
     "test_respawn_text_matches": {
-      "duration": 0.0005814555592627989,
+      "duration": 0.000625966660057505,
       "runs": 9,
-      "min": 0.0002297000028192997,
-      "max": 0.0012505999766290188
+      "min": 0.0005320999771356583,
+      "max": 0.000734599947463721
     },
     "test_game_starting_blocks_respawn_detection": {
-      "duration": 0.1864373999997042,
+      "duration": 0.1838075999985449,
       "runs": 1,
-      "min": 0.1864373999997042,
-      "max": 0.1864373999997042
+      "min": 0.1838075999985449,
+      "max": 0.1838075999985449
     },
     "test_game_battle_does_not_block_respawn_detection": {
-      "duration": 0.33203700004378334,
+      "duration": 0.1549148999620229,
       "runs": 1,
-      "min": 0.33203700004378334,
-      "max": 0.33203700004378334
+      "min": 0.1549148999620229,
+      "max": 0.1549148999620229
     },
     "test_game_end_b_blocks_background_ocr_scheduling": {
-      "duration": 0.149671999970451,
+      "duration": 0.1245467999833636,
       "runs": 1,
-      "min": 0.149671999970451,
-      "max": 0.149671999970451
+      "min": 0.1245467999833636,
+      "max": 0.1245467999833636
+    },
+    "test_cleanup_shuts_down_executor": {
+      "duration": 0.10380129999248311,
+      "runs": 1,
+      "min": 0.10380129999248311,
+      "max": 0.10380129999248311
+    },
+    "test_cleanup_signals_click_to_thread": {
+      "duration": 0.10337139997864142,
+      "runs": 1,
+      "min": 0.10337139997864142,
+      "max": 0.10337139997864142
+    },
+    "test_context_manager_calls_cleanup": {
+      "duration": 0.10354919999372214,
+      "runs": 1,
+      "min": 0.10354919999372214,
+      "max": 0.10354919999372214
+    },
+    "test_no_threads_leaked_after_cleanup": {
+      "duration": 0.41010000003734604,
+      "runs": 1,
+      "min": 0.41010000003734604,
+      "max": 0.41010000003734604
+    },
+    "test_trigger_runs_side_effect_callbacks_outside_state_lock": {
+      "duration": 0.0018112999969162047,
+      "runs": 1,
+      "min": 0.0018112999969162047,
+      "max": 0.0018112999969162047
+    },
+    "test_fsm_unattended_lifecycle_and_starting_loop_callbacks": {
+      "duration": 0.0024076999980024993,
+      "runs": 1,
+      "min": 0.0024076999980024993,
+      "max": 0.0024076999980024993
+    },
+    "test_init_without_keyboard": {
+      "duration": 0.0007634999928995967,
+      "runs": 1,
+      "min": 0.0007634999928995967,
+      "max": 0.0007634999928995967
+    },
+    "test_deploy_flares_without_keyboard": {
+      "duration": 0.0008590000215917826,
+      "runs": 1,
+      "min": 0.0008590000215917826,
+      "max": 0.0008590000215917826
+    },
+    "test_cancel_mission_without_keyboard": {
+      "duration": 0.00047749996883794665,
+      "runs": 1,
+      "min": 0.00047749996883794665,
+      "max": 0.00047749996883794665
+    },
+    "test_is_mission_running_without_keyboard": {
+      "duration": 0.0006477999850176275,
+      "runs": 1,
+      "min": 0.0006477999850176275,
+      "max": 0.0006477999850176275
+    },
+    "test_restart_last_mission_no_history": {
+      "duration": 0.0005189999938011169,
+      "runs": 1,
+      "min": 0.0005189999938011169,
+      "max": 0.0005189999938011169
+    },
+    "test_restart_last_mission_returns_false_when_running": {
+      "duration": 0.00121339998440817,
+      "runs": 1,
+      "min": 0.00121339998440817,
+      "max": 0.00121339998440817
+    },
+    "test_maneuver_key_triggers_manual_takeover_in_battle": {
+      "duration": 0.029300599999260157,
+      "runs": 1,
+      "min": 0.029300599999260157,
+      "max": 0.029300599999260157
+    },
+    "test_maneuver_key_does_not_trigger_manual_takeover_outside_battle": {
+      "duration": 0.029785800026729703,
+      "runs": 1,
+      "min": 0.029785800026729703,
+      "max": 0.029785800026729703
+    },
+    "test_maneuver_key_ignores_injected_events": {
+      "duration": 0.03025710000656545,
+      "runs": 1,
+      "min": 0.03025710000656545,
+      "max": 0.03025710000656545
+    },
+    "test_cancel_releases_lock_within_two_seconds": {
+      "duration": 0.023165600025095046,
+      "runs": 1,
+      "min": 0.023165600025095046,
+      "max": 0.023165600025095046
+    },
+    "test_cancel_prevents_new_missions": {
+      "duration": 0.0005275000003166497,
+      "runs": 1,
+      "min": 0.0005275000003166497,
+      "max": 0.0005275000003166497
+    },
+    "test_mission_lock_not_held_after_natural_completion": {
+      "duration": 0.20830650004791096,
+      "runs": 1,
+      "min": 0.20830650004791096,
+      "max": 0.20830650004791096
     }
   }
 }

@@ -347,6 +347,7 @@ _FSM_TRANSITIONS = [
     {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL"], "dest": "GAME_END_B"},
     {"trigger": "manual_takeover",    "source": "GAME_BATTLE",            "dest": "GAME_BATTLE_MANUAL"},
     {"trigger": "respawn_reset",      "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
+    {"trigger": "manual_force_battle", "source": "*",                    "dest": "GAME_BATTLE"},
     {"trigger": "manual_reset",       "source": "*",                     "dest": "GAME_LOBBY"},
     {"trigger": "continue_clicked",   "source": ["GAME_END_B", "GAME_BATTLE_MANUAL"], "dest": "GAME_LOBBY"},
     {"trigger": "respawn_detected",   "source": "GAME_END_B",            "dest": "GAME_BATTLE"},
@@ -523,18 +524,40 @@ class GameStateAnalyzer:
         return self._ocr_executor
     
     def _trigger(self, trigger_name: str) -> bool:
-        """Thread-safe FSM trigger dispatch. Returns False on invalid transitions."""
+        """Thread-safe FSM trigger dispatch. Returns False on invalid transitions.
+
+        State mutation remains protected by _state_lock, but external side effects
+        (mission cancel, starting-loop kickoff) are deferred until after the lock
+        is released to avoid long critical sections.
+        """
+        post_callbacks = []
         with self._state_lock:
             fn = getattr(self, trigger_name, None)
             if fn is None:
                 logger.error("FSM: unknown trigger '%s'", trigger_name)
                 return False
+
+            prev_state = self.game_state
             try:
-                return fn()
+                transitioned = bool(fn())
             except MachineError as e:
                 logger.warning("FSM: ignored invalid trigger '%s' from state %s: %s",
                                trigger_name, self.game_state, e)
                 return False
+
+            next_state = self.game_state
+            if transitioned and next_state != prev_state:
+                if next_state in (GameState.GAME_LOBBY, GameState.GAME_BATTLE_MANUAL) and self._on_cancel_mission:
+                    post_callbacks.append(self._on_cancel_mission)
+                if next_state == GameState.GAME_STARTING and self._on_start_game_starting_loop:
+                    post_callbacks.append(self._on_start_game_starting_loop)
+
+        for callback in post_callbacks:
+            try:
+                callback()
+            except Exception:
+                logger.exception("FSM: post-transition callback failed for trigger '%s'", trigger_name)
+        return transitioned
 
     # ------------------------------------------------------------------
     # FSM entry hooks — called automatically by transitions on state entry
@@ -545,12 +568,9 @@ class GameStateAnalyzer:
         with self._health_lock:
             self._health_window.clear()
             self._health_ceiling = None
-        if self._on_cancel_mission:
-            self._on_cancel_mission()
 
     def on_enter_GAME_STARTING(self):
-        if self._on_start_game_starting_loop:
-            self._on_start_game_starting_loop()
+        pass
 
     def on_enter_GAME_BATTLE(self):
         with self._health_lock:
@@ -562,8 +582,6 @@ class GameStateAnalyzer:
 
     def on_enter_GAME_BATTLE_MANUAL(self):
         logger.info("FSM: entering GAME_BATTLE_MANUAL — manual takeover active, auto-restart suppressed")
-        if self._on_cancel_mission:
-            self._on_cancel_mission()
 
     def on_enter_GAME_STARTING_STALLED(self):
         logger.warning("FSM: GAME_STARTING → GAME_STARTING_STALLED (Good Luck not detected in time)")

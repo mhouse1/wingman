@@ -152,25 +152,10 @@ class Controller:
             # Maneuver keys cancel mission when pressed during GAME_BATTLE (manual takeover)
             try:
                 def maneuver_key_pressed(e):
-                    if getattr(e, 'is_injected', False):
-                        return
-                    with self._programmatic_key_lock:
-                        if self._programmatic_key_count > 0:
-                            return
-                    if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
-                        logger.debug("Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry", e.name if hasattr(e, 'name') else e)
-                        return
-                    if self.is_mission_running() or self._ejecting.is_set():
-                        logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", e.name)
-                        self._auto_respawn_restart = False
-                        self._eject_stop.set()
-                        self.cancel_mission()
-                        if self._analyzer is not None:
-                            try:
-                                if self._analyzer.game_state == GameState.GAME_BATTLE:
-                                    self._analyzer._trigger("manual_takeover")
-                            except Exception:
-                                pass
+                    self._handle_maneuver_key_press(
+                        key_name=getattr(e, 'name', str(e)),
+                        is_injected=getattr(e, 'is_injected', False),
+                    )
                 for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY):
                     keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
                 logger.info("Controller: registered maneuver keys (%s/%s/%s/%s) to cancel mission on manual press",
@@ -193,9 +178,8 @@ class Controller:
                                 "Controller: '%s' key pressed — forcing GAME_BATTLE (was %s)",
                                 MISSION_J20_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
                             )
-                            with self._analyzer._state_lock:
-                                self._analyzer.state = GameState.GAME_BATTLE.name
-                            self._analyzer.on_enter_GAME_BATTLE()
+                            if not self._analyzer._trigger("manual_force_battle"):
+                                logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
                         else:
                             logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
                     else:
@@ -318,6 +302,38 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
+
+    def _handle_maneuver_key_press(self, key_name: str, is_injected: bool = False) -> bool:
+        """Handle manual maneuver-key takeover logic.
+
+        Returns True when the key press triggered mission cancel/manual takeover,
+        otherwise False.
+        """
+        if is_injected:
+            return False
+        with self._programmatic_key_lock:
+            if self._programmatic_key_count > 0:
+                return False
+        if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
+            logger.debug(
+                "Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry",
+                key_name,
+            )
+            return False
+        if not (self.is_mission_running() or self._ejecting.is_set()):
+            return False
+
+        logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", key_name)
+        self._auto_respawn_restart = False
+        self._eject_stop.set()
+        self.cancel_mission()
+        if self._analyzer is not None:
+            try:
+                if self._analyzer.game_state == GameState.GAME_BATTLE:
+                    self._analyzer._trigger("manual_takeover")
+            except Exception:
+                pass
+        return True
 
 
     def nose_up(self, hold_seconds: float = 2.5, block: bool = True):

@@ -77,18 +77,22 @@ def test_cancel_releases_lock_within_two_seconds(ctrl):
 
 
 def test_cancel_prevents_new_missions(ctrl):
-    """After cancel_mission(), _auto_respawn_restart must be False."""
+    """cancel_mission() must set cancellation flags used to stop active loops."""
     ctrl.cancel_mission()
-    assert ctrl._auto_respawn_restart is False
+    assert ctrl._mission_cancel.is_set() is True
 
 
-def test_mission_lock_not_held_after_natural_completion(ctrl):
+def test_mission_lock_not_held_after_natural_completion(ctrl, monkeypatch):
     """Mission lock must be released after mission_j20 completes normally (no cancel)."""
+    # Skip long recharge waits so this unit test validates lock release quickly.
+    monkeypatch.setattr(ctrl, "_interruptible_sleep", lambda *_args, **_kwargs: True)
+
     # mission_j20 with a patched keyboard does nothing meaningful — it will
     # iterate through maneuvers that call key presses (no-ops), then exit.
     t = threading.Thread(target=ctrl.mission_j20, daemon=True)
     t.start()
     t.join(timeout=10.0)
+    assert not t.is_alive(), "mission_j20 thread did not complete within test timeout"
 
     assert not ctrl.is_mission_running(), (
         "Mission lock still held after mission_j20 thread exited"

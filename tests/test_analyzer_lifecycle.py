@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from constants import CONFIG_PATH
-from wingman.analyzer import GameStateAnalyzer
+from wingman.analyzer import GameStateAnalyzer, GameState
 
 
 def _load_config():
@@ -92,3 +92,58 @@ def test_no_threads_leaked_after_cleanup(cfg):
     assert after <= before + 1, (
         f"Thread count did not return to baseline: before={before}, after={after}"
     )
+
+
+def test_trigger_runs_side_effect_callbacks_outside_state_lock(cfg):
+    """Regression guard for CR-008 H-4b: side effects must run after lock release."""
+    analyzer = GameStateAnalyzer(cfg)
+    analyzer.state = GameState.GAME_BATTLE.name
+
+    acquired_while_callback = []
+
+    def _cancel_side_effect():
+        ok = analyzer._state_lock.acquire(blocking=False)
+        acquired_while_callback.append(ok)
+        if ok:
+            analyzer._state_lock.release()
+
+    analyzer._on_cancel_mission = _cancel_side_effect
+
+    assert analyzer._trigger("manual_reset") is True
+    assert analyzer.game_state == GameState.GAME_LOBBY
+    assert acquired_while_callback == [True]
+
+
+def test_fsm_unattended_lifecycle_and_starting_loop_callbacks(cfg):
+    """Covers unattended lifecycle + GAME_STARTING callback ownership via FSM."""
+    analyzer = GameStateAnalyzer(cfg)
+
+    events = {"cancel": 0, "start_loop": 0}
+    def _on_cancel():
+        events["cancel"] += 1
+
+    def _on_start_loop():
+        events["start_loop"] += 1
+
+    analyzer._on_cancel_mission = _on_cancel
+    analyzer._on_start_game_starting_loop = _on_start_loop
+
+    assert analyzer.game_state == GameState.GAME_LOBBY
+
+    assert analyzer._trigger("play_clicked") is True
+    assert analyzer.game_state == GameState.GAME_WAITING
+
+    assert analyzer._trigger("waiting_timeout") is True
+    assert analyzer.game_state == GameState.GAME_LOBBY
+    assert events["cancel"] == 1
+
+    assert analyzer._trigger("cancel_detected") is True
+    assert analyzer.game_state == GameState.GAME_STARTING
+    assert events["start_loop"] == 1
+
+    assert analyzer._trigger("starting_timeout") is True
+    assert analyzer.game_state == GameState.GAME_STARTING_STALLED
+
+    assert analyzer._trigger("starting_recovery") is True
+    assert analyzer.game_state == GameState.GAME_STARTING
+    assert events["start_loop"] == 2

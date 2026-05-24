@@ -28,43 +28,45 @@
 .PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd calibrate calibrate-crop add-crops
 
 PYTHON ?= python
-RUNNER := $(shell if command -v uv >/dev/null 2>&1; then echo "uv run"; else echo "$(PYTHON)"; fi)
+HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
+PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run pytest,$(PYTHON) -m pytest)
+PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run python,$(PYTHON))
 
 # Generate HTML report for automated levels test
 test:
-	$(RUNNER) pytest tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
-	$(RUNNER) pytest tests/test_automated_levels.py -k level4_region33_contains_lick_to_c -q
+	$(PYTEST_RUN) tests/test_automated_levels.py -k level4_region33_contains_lick_to_c -q
 
 # Run region 9 OCR check for "INCO" on INCOMING screenshots
 test2:
-	$(RUNNER) pytest tests/test_automated_levels.py -k level4_region9_contains_inco -q
+	$(PYTEST_RUN) tests/test_automated_levels.py -k level4_region9_contains_inco -q
 
 # Generate CSV with performance trends from git history
 test-perf-csv:
-	$(RUNNER) python tests/performance_tracking.py --csv
+	$(PYTHON_RUN) tests/performance_tracking.py --csv
 
 # Generate HTML visualization of performance trends
 test-perf-chart:
-	$(RUNNER) python tests/performance_tracking.py --chart
+	$(PYTHON_RUN) tests/performance_tracking.py --chart
 
 # Generate runtime aggregate CSV from release run_*.json
 runtime-perf-csv-release:
-	$(RUNNER) python tests/runtime_performance_tracking.py --mode release --csv
+	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode release --csv
 
 # Generate runtime aggregate CSV from release + current run_*.json
 runtime-perf-csv-preview:
-	$(RUNNER) python tests/runtime_performance_tracking.py --mode preview --csv
+	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --csv
 
 # Generate runtime release artifacts (release CSV + release chart)
 runtime-perf-release:
-	$(RUNNER) python tests/runtime_performance_tracking.py --mode release --all
+	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode release --all
 
 # Generate runtime preview artifacts (preview CSV + preview chart)
 runtime-perf-preview:
-	$(RUNNER) python tests/runtime_performance_tracking.py --mode preview --all
+	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --all
 
 # Run full workflow: test → CSV → chart
 # after running this: git add -f 'c:/dev-tools/github/wingman/tests/test-output/performance.json'
@@ -80,7 +82,7 @@ test-perf: test test-perf-csv test-perf-chart
 
 # Preview performance trends including current uncommitted data
 tp: test
-	$(RUNNER) python tests/performance_tracking.py --include-current --chart
+	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
 	@echo "✅ Performance preview complete (test + runtime)!"
