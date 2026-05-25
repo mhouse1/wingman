@@ -24,7 +24,7 @@ def test_click_through_game_end_transitions_to_lobby():
     triggered = []
     analyzer = SimpleNamespace(
         crops={"click_to": object(), "PLAY": object()},
-        _trigger=lambda name: triggered.append(name),
+        trigger_event=lambda name: triggered.append(name),
     )
 
     _click_through_game_end(

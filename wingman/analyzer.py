@@ -560,6 +560,66 @@ class GameStateAnalyzer:
         return transitioned
 
     # ------------------------------------------------------------------
+    # Orchestration public API (ADR 039)
+    # ------------------------------------------------------------------
+
+    def set_on_cancel_mission(self, callback):
+        """Set callback invoked after transitions that must cancel mission logic."""
+        self._on_cancel_mission = callback
+
+    def set_on_start_game_starting_loop(self, callback):
+        """Set callback invoked when entering GAME_STARTING."""
+        self._on_start_game_starting_loop = callback
+
+    def set_on_lobby_play_click(self, callback):
+        """Set callback invoked with PLAY/READY crop names from lobby quick-scan."""
+        self._on_lobby_play_click = callback
+
+    def set_on_lobby_popup_click(self, callback):
+        """Set callback invoked with popup crop names from lobby quick-scan."""
+        self._on_lobby_popup_click = callback
+
+    def trigger_event(self, name: str) -> bool:
+        """Dispatch an FSM trigger via the thread-safe trigger wrapper."""
+        return self._trigger(name)
+
+    def get_ammo_missiles(self):
+        """Return the latest missile count snapshot."""
+        with self._ammo_lock:
+            return self._ammo_missiles
+
+    def get_respawn_cache_result(self):
+        """Return the cached respawn tuple (is_respawning, confidence, method)."""
+        with self._ocr_cache_lock:
+            return self._ocr_cache['result']
+
+    def get_incoming_cache_result(self):
+        """Return the cached incoming tuple (is_incoming, confidence, method)."""
+        with self._incoming_cache_lock:
+            return self._incoming_cache['result']
+
+    def get_incoming_cache_timestamp(self) -> float:
+        """Return timestamp for the latest incoming cache update."""
+        with self._incoming_cache_lock:
+            return self._incoming_cache['timestamp']
+
+    def get_click_to_cache_result(self):
+        """Return the cached click-to tuple (detected, confidence, method)."""
+        with self._click_to_cache_lock:
+            return self._click_to_cache['result']
+
+    def get_click_to_cache_timestamp(self) -> float:
+        """Return timestamp for the latest click-to cache update."""
+        with self._click_to_cache_lock:
+            return self._click_to_cache['timestamp']
+
+    def inject_respawn_ocr_result(self, detected: bool, confidence: float, method: str = "ocr") -> None:
+        """Testing helper to inject a respawn OCR cache result."""
+        with self._ocr_cache_lock:
+            self._ocr_cache['result'] = (bool(detected), float(confidence), method)
+            self._ocr_cache['timestamp'] = time.time()
+
+    # ------------------------------------------------------------------
     # FSM entry hooks — called automatically by transitions on state entry
     # ------------------------------------------------------------------
 

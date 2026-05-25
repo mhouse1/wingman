@@ -69,7 +69,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -104,6 +104,10 @@ class Controller:
         self._sdl_padlock_thread: threading.Thread | None = None
         self._sdl_weapon_thread: threading.Thread | None = None
         self._target_painting_mode = target_painting_mode
+        self._simulate_os_input = bool(simulate_os_input)
+        self._disable_hotkeys = bool(disable_hotkeys)
+        self._action_intents: list[dict] = []
+        self._action_intents_lock = threading.Lock()
 
         # Eject-and-dive cancellation: set by End key to abort the dive thread early
         self._eject_stop = threading.Event()
@@ -120,7 +124,7 @@ class Controller:
         self._programmatic_key_lock = threading.Lock()
         
         # Register hotkey for weapon loop toggle and other hotkeys
-        if keyboard_module:
+        if keyboard_module and not self._disable_hotkeys:
             # Exit script hotkey (Backspace)
             try:
                 def exit_script_hotkey(e):
@@ -178,7 +182,7 @@ class Controller:
                                 "Controller: '%s' key pressed — forcing GAME_BATTLE (was %s)",
                                 MISSION_J20_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
                             )
-                            if not self._analyzer._trigger("manual_force_battle"):
+                            if not self._analyzer.trigger_event("manual_force_battle"):
                                 logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
                         else:
                             logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
@@ -212,9 +216,7 @@ class Controller:
                     self._last_b_press_time = now
                     logger.info("Controller: '%s' key pressed - simulating respawn detected (as if OCR detected 'RESPAWN')", SIMULATE_RESPAWN_KEY)
                     if self._analyzer is not None:
-                        with self._analyzer._ocr_cache_lock:
-                            self._analyzer._ocr_cache['result'] = (True, 1.0, "ocr")
-                            self._analyzer._ocr_cache['timestamp'] = time.time()
+                        self._analyzer.inject_respawn_ocr_result(True, 1.0, "ocr")
                         logger.info("Controller: Injected fake OCR respawn result into analyzer cache.")
                     else:
                         logger.warning("Controller: No analyzer reference to inject fake OCR respawn result.")
@@ -286,7 +288,7 @@ class Controller:
                             "Controller: '%s' key pressed — forcing GAME_LOBBY (was %s)",
                             AUTO_MISSION_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
                         )
-                        self._analyzer._trigger("manual_reset")
+                        self._analyzer.trigger_event("manual_reset")
                     if self._on_auto_mission_key is not None:
                         self._on_auto_mission_key()
                     crop = next(
@@ -302,6 +304,19 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
+
+    def _record_action_intent(self, action_type: str, **payload):
+        intent = {
+            "timestamp": time.time(),
+            "action_type": action_type,
+            **payload,
+        }
+        with self._action_intents_lock:
+            self._action_intents.append(intent)
+
+    def get_action_intents(self) -> list[dict]:
+        with self._action_intents_lock:
+            return list(self._action_intents)
 
     def _handle_maneuver_key_press(self, key_name: str, is_injected: bool = False) -> bool:
         """Handle manual maneuver-key takeover logic.
@@ -330,7 +345,7 @@ class Controller:
         if self._analyzer is not None:
             try:
                 if self._analyzer.game_state == GameState.GAME_BATTLE:
-                    self._analyzer._trigger("manual_takeover")
+                    self._analyzer.trigger_event("manual_takeover")
             except Exception:
                 pass
         return True
@@ -397,6 +412,19 @@ class Controller:
 
         def _do_press():
             try:
+                if self._simulate_os_input:
+                    self._record_action_intent("key_press", key=key, hold_seconds=float(hold_seconds), action=label)
+                    start = time.time()
+                    while (time.time() - start) < hold_seconds:
+                        if not ignore_cancel:
+                            if self._mission_cancel.wait(timeout=0.05):
+                                logger.debug("Controller: %s cancelled", label)
+                                break
+                        else:
+                            time.sleep(0.05)
+                    self._record_action_intent("key_release", key=key, action=label)
+                    logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
+                    return
                 if not keyboard_module:
                     logger.error("Controller: keyboard library not available for %s", label)
                     return
@@ -489,19 +517,25 @@ class Controller:
             return self._analyzer.game_battle_alive
 
         def _run():
-            if not keyboard_module:
-                logger.error("Controller: keyboard library not available for eject_and_dive")
-                return
             self._ejecting.set()
             try:
-                keyboard_module.press(NOSE_DOWN_KEY)
+                if self._simulate_os_input:
+                    self._record_action_intent("key_press", key=NOSE_DOWN_KEY, action="eject_and_dive")
+                else:
+                    if not keyboard_module:
+                        logger.error("Controller: keyboard library not available for eject_and_dive")
+                        return
+                    keyboard_module.press(NOSE_DOWN_KEY)
                 # Wait for the mission thread to fully exit before pressing
                 # AFTERBURNER so its _execute_key_press finally block can't
                 # release the key after we press it.
                 mission_exit_deadline = time.time() + 2.0
                 while self.is_mission_running() and time.time() < mission_exit_deadline:
                     time.sleep(0.05)
-                keyboard_module.press(AFTERBURNER_KEY)
+                if self._simulate_os_input:
+                    self._record_action_intent("key_press", key=AFTERBURNER_KEY, action="eject_and_dive")
+                else:
+                    keyboard_module.press(AFTERBURNER_KEY)
                 logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
 
                 # Hold nose-down for 10s then release; afterburner stays on.
@@ -509,10 +543,13 @@ class Controller:
                 if self._eject_stop.wait(timeout=5.0):
                     logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
                     return
-                try:
-                    keyboard_module.release(NOSE_DOWN_KEY)
-                except Exception:
-                    pass
+                if self._simulate_os_input:
+                    self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
+                else:
+                    try:
+                        keyboard_module.release(NOSE_DOWN_KEY)
+                    except Exception:
+                        pass
                 logger.info("Controller: eject_and_dive — nose-down released, holding afterburner until respawn")
 
                 # Hold afterburner until respawn detected (max 120s)
@@ -528,14 +565,18 @@ class Controller:
                     logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
             finally:
                 self._ejecting.clear()
-                try:
-                    keyboard_module.release(AFTERBURNER_KEY)
-                except Exception:
-                    pass
-                try:
-                    keyboard_module.release(NOSE_DOWN_KEY)
-                except Exception:
-                    pass
+                if self._simulate_os_input:
+                    self._record_action_intent("key_release", key=AFTERBURNER_KEY, action="eject_and_dive")
+                    self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
+                else:
+                    try:
+                        keyboard_module.release(AFTERBURNER_KEY)
+                    except Exception:
+                        pass
+                    try:
+                        keyboard_module.release(NOSE_DOWN_KEY)
+                    except Exception:
+                        pass
             logger.info("Controller: eject_and_dive complete")
 
         threading.Thread(target=_run, daemon=True).start()
@@ -903,6 +944,17 @@ class Controller:
             region_name: Human-readable name for the region, used in log messages.
         """
         def _do_click():
+            if self._simulate_os_input:
+                label = region_name if region_name else str(region_num)
+                self._record_action_intent(
+                    "click_grid_region",
+                    region_num=int(region_num),
+                    region_name=label,
+                    count=int(count),
+                    grid_rows=int(grid_rows),
+                    grid_cols=int(grid_cols),
+                )
+                return
             if sys.platform != "win32":
                 logger.error("click_grid_region: Win32 mouse_event not available on %s", sys.platform)
                 return
@@ -955,7 +1007,7 @@ class Controller:
                     logger.info("\033[93m📋 Clicking ready_button at (%d, %d)\033[0m", x_rb, y_rb)
                     _raw_click(x_rb, y_rb)
                     if self._analyzer is not None:
-                        self._analyzer._trigger("manual_reset")
+                        self._analyzer.trigger_event("manual_reset")
                         logger.info("\033[93m📋 Ready button (region %d) clicked → GAME_LOBBY\033[0m", self._ready_button_region)
             except Exception:
                 logger.exception("Controller: click_grid_region failed")
@@ -987,6 +1039,15 @@ class Controller:
             region_name: Human-readable label used in log messages.
         """
         def _do_click():
+            if self._simulate_os_input:
+                label = region_name or f"({coords.x1:.2f},{coords.y1:.2f})"
+                self._record_action_intent(
+                    "click_crop",
+                    region_name=label,
+                    count=int(count),
+                    coords={"x1": coords.x1, "y1": coords.y1, "x2": coords.x2, "y2": coords.y2},
+                )
+                return
             if sys.platform != "win32":
                 logger.error("click_crop: Win32 mouse_event not available on %s", sys.platform)
                 return
@@ -1046,6 +1107,22 @@ class Controller:
         """Return True when a mission thread currently holds the mission lock."""
         return self._mission_lock.locked()
 
+    def start_game_starting_loop(self):
+        """Public orchestration entrypoint for the GAME_STARTING loop."""
+        self._start_game_starting_loop()
+
+    def is_auto_respawn_restart_enabled(self) -> bool:
+        """Return whether automatic respawn restart is currently enabled."""
+        return self._auto_respawn_restart
+
+    def set_auto_respawn_restart(self, enabled: bool) -> None:
+        """Enable or disable automatic restart after respawn."""
+        self._auto_respawn_restart = bool(enabled)
+
+    def stop_eject_sequence(self) -> None:
+        """Cancel an in-progress eject-and-dive sequence if one is active."""
+        self._eject_stop.set()
+
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:
             self._last_mission = mission_name
@@ -1090,7 +1167,10 @@ class Controller:
             try:
                 while _in_starting():
                     # Press MISSION_J20_KEY every interval
-                    if keyboard_module:
+                    if self._simulate_os_input:
+                        self._record_action_intent("key_tap", key=MISSION_J20_KEY, action="game_starting_loop")
+                        logger.info("Controller: game_starting - simulated '%s' key tap", MISSION_J20_KEY)
+                    elif keyboard_module:
                         keyboard_module.press_and_release(MISSION_J20_KEY)
                         logger.info("Controller: game_starting - pressed '%s' key", MISSION_J20_KEY)
 
@@ -1113,7 +1193,7 @@ class Controller:
                             logger.info(
                                 "\033[92mController: game_battle_alive detected in GAME_STARTING "
                                 "— launching mission immediately\033[0m")
-                            self._analyzer._trigger("good_luck_detected")
+                            self._analyzer.trigger_event("good_luck_detected")
                             self._set_last_mission("j20")
                             threading.Thread(target=self.mission_j20, daemon=True).start()
                             return
@@ -1124,7 +1204,7 @@ class Controller:
                     if time.time() - loop_start > max_wait:
                         logger.warning("Controller: game_starting timed out after %ds without 'Good Luck'", max_wait)
                         if self._analyzer is not None:
-                            self._analyzer._trigger("starting_timeout")
+                            self._analyzer.trigger_event("starting_timeout")
                         return
 
                     if good_luck_event.is_set():
@@ -1136,7 +1216,7 @@ class Controller:
                             time.sleep(0.1)
                         if _in_starting():
                             logger.info("Controller: game_starting - launching J20 mission")
-                            self._analyzer._trigger("good_luck_detected")
+                            self._analyzer.trigger_event("good_luck_detected")
                             self._set_last_mission("j20")
                             threading.Thread(target=self.mission_j20, daemon=True).start()
                         return
