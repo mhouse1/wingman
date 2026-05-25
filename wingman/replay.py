@@ -13,6 +13,9 @@ import yaml
 class ReplayStep:
     screenshot_name: str
     injection_time_s: float
+    expected_state: str | None = None
+    expected_trigger: str | None = None
+    max_settle_time_s: float | None = None
 
 
 @dataclass
@@ -29,7 +32,17 @@ def _normalize_step(step: Any) -> ReplayStep:
             inject = step.get("TIME_TO_INJECT")
         if screenshot is None or inject is None:
             raise ValueError(f"Invalid replay step dict: {step!r}")
-        return ReplayStep(str(screenshot), float(inject))
+
+        expected_state = step.get("expected_state")
+        expected_trigger = step.get("expected_trigger")
+        max_settle = step.get("max_settle_time_s")
+        return ReplayStep(
+            screenshot_name=str(screenshot),
+            injection_time_s=float(inject),
+            expected_state=str(expected_state) if expected_state is not None else None,
+            expected_trigger=str(expected_trigger) if expected_trigger is not None else None,
+            max_settle_time_s=float(max_settle) if max_settle is not None else None,
+        )
 
     if isinstance(step, (list, tuple)) and len(step) >= 2:
         return ReplayStep(str(step[0]), float(step[1]))
@@ -134,6 +147,7 @@ class ScreenshotReplayCapture:
         self._start_ts: float | None = None
         self._active_index = -1
         self._active_frame: np.ndarray | None = None
+        self._activated_indices: list[int] = []
         self._end_time_s = self._steps[-1].injection_time_s if self._steps else 0.0
 
     def _load_frame(self, screenshot_name: str) -> np.ndarray:
@@ -167,6 +181,7 @@ class ScreenshotReplayCapture:
                 break
             self._active_index = next_idx
             self._active_frame = self._load_frame(step.screenshot_name)
+            self._activated_indices.append(next_idx)
 
         if self._active_frame is None:
             # No frame is active yet; return a blank frame until the first injection time.
@@ -174,3 +189,179 @@ class ScreenshotReplayCapture:
             self._active_frame = np.zeros((height, width, 3), dtype=np.uint8)
 
         return self._active_frame.copy()
+
+    def consume_activated_steps(self) -> list[ReplayStep]:
+        """Return newly activated steps since the last poll, in order."""
+        if not self._activated_indices:
+            return []
+        out = [self._steps[i] for i in self._activated_indices]
+        self._activated_indices = []
+        return out
+
+
+def _normalize_expected_trigger(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    aliases = {
+        "manual_mode": "manual_takeover",
+        "manual_mode_entered": "state_enter:game_battle_manual",
+        "battle_started": "state_enter:game_battle",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _normalize_state(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.strip().lower()
+
+
+@dataclass
+class ReplayCheckpointResult:
+    screenshot_name: str
+    injection_time_s: float
+    expected_state: str | None
+    expected_trigger: str | None
+    max_settle_time_s: float
+    status: str = "pending"
+    activated_at_s: float | None = None
+    state_met_at_s: float | None = None
+    trigger_met_at_s: float | None = None
+    failure_reason: str | None = None
+
+
+class ReplayAssertionEngine:
+    """Evaluates replay expectations with timing and ordering constraints."""
+
+    def __init__(self, path_name: str, steps: list[ReplayStep], default_settle_s: float = 3.0):
+        self.path_name = path_name
+        self.default_settle_s = float(default_settle_s)
+        self._results: list[ReplayCheckpointResult] = []
+        for step in steps:
+            if not step.expected_state and not step.expected_trigger:
+                continue
+            settle = step.max_settle_time_s if step.max_settle_time_s is not None else self.default_settle_s
+            self._results.append(
+                ReplayCheckpointResult(
+                    screenshot_name=step.screenshot_name,
+                    injection_time_s=step.injection_time_s,
+                    expected_state=_normalize_state(step.expected_state),
+                    expected_trigger=_normalize_expected_trigger(step.expected_trigger),
+                    max_settle_time_s=float(settle),
+                )
+            )
+        self._active_index = 0
+        self._failures: list[str] = []
+        self._event_trace: list[dict[str, Any]] = []
+
+    def _current(self) -> ReplayCheckpointResult | None:
+        if self._active_index >= len(self._results):
+            return None
+        return self._results[self._active_index]
+
+    def _mark_satisfied_if_complete(self, checkpoint: ReplayCheckpointResult, now_s: float) -> None:
+        state_ok = checkpoint.expected_state is None or checkpoint.state_met_at_s is not None
+        trig_ok = checkpoint.expected_trigger is None or checkpoint.trigger_met_at_s is not None
+        if state_ok and trig_ok and checkpoint.status == "pending":
+            checkpoint.status = "passed"
+            if checkpoint.activated_at_s is None:
+                checkpoint.activated_at_s = now_s
+            self._active_index += 1
+
+    def on_step_activated(self, step: ReplayStep, now_s: float) -> None:
+        checkpoint = self._current()
+        if checkpoint is None:
+            return
+        if checkpoint.screenshot_name != step.screenshot_name:
+            return
+        checkpoint.activated_at_s = now_s
+        self._mark_satisfied_if_complete(checkpoint, now_s)
+
+    def on_event(self, event_name: str, now_s: float) -> None:
+        normalized_event = _normalize_expected_trigger(event_name)
+        self._event_trace.append({"at_s": now_s, "event": normalized_event})
+        checkpoint = self._current()
+        if checkpoint is None:
+            return
+
+        if checkpoint.expected_trigger == normalized_event:
+            checkpoint.trigger_met_at_s = now_s
+            self._mark_satisfied_if_complete(checkpoint, now_s)
+            return
+
+        for future in self._results[self._active_index + 1:]:
+            if future.expected_trigger == normalized_event:
+                msg = (
+                    "Out-of-order replay trigger: "
+                    f"'{normalized_event}' matched future checkpoint '{future.screenshot_name}' "
+                    f"before current checkpoint '{checkpoint.screenshot_name}'"
+                )
+                self._failures.append(msg)
+                return
+
+    def on_state(self, state_name: str, now_s: float) -> None:
+        checkpoint = self._current()
+        if checkpoint is None:
+            return
+        if checkpoint.expected_state == _normalize_state(state_name):
+            checkpoint.state_met_at_s = now_s
+            self._mark_satisfied_if_complete(checkpoint, now_s)
+
+    def tick(self, now_s: float) -> None:
+        checkpoint = self._current()
+        if checkpoint is None or checkpoint.status != "pending":
+            return
+        if checkpoint.activated_at_s is None:
+            return
+        deadline_s = checkpoint.activated_at_s + checkpoint.max_settle_time_s
+        if now_s <= deadline_s:
+            return
+
+        missing: list[str] = []
+        if checkpoint.expected_state and checkpoint.state_met_at_s is None:
+            missing.append(f"state={checkpoint.expected_state}")
+        if checkpoint.expected_trigger and checkpoint.trigger_met_at_s is None:
+            missing.append(f"trigger={checkpoint.expected_trigger}")
+        checkpoint.status = "failed"
+        checkpoint.failure_reason = (
+            "Checkpoint timeout waiting for "
+            + ", ".join(missing)
+            + f" within {checkpoint.max_settle_time_s:.1f}s"
+        )
+        self._failures.append(checkpoint.failure_reason)
+        self._active_index += 1
+
+    @property
+    def failures(self) -> list[str]:
+        return list(self._failures)
+
+    def has_failures(self) -> bool:
+        return bool(self._failures) or any(r.status == "failed" for r in self._results)
+
+    def is_complete(self) -> bool:
+        return self._active_index >= len(self._results)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path_name": self.path_name,
+            "has_failures": self.has_failures(),
+            "is_complete": self.is_complete(),
+            "failures": self.failures,
+            "checkpoints": [
+                {
+                    "screenshot_name": r.screenshot_name,
+                    "injection_time_s": r.injection_time_s,
+                    "expected_state": r.expected_state,
+                    "expected_trigger": r.expected_trigger,
+                    "max_settle_time_s": r.max_settle_time_s,
+                    "status": r.status,
+                    "activated_at_s": r.activated_at_s,
+                    "state_met_at_s": r.state_met_at_s,
+                    "trigger_met_at_s": r.trigger_met_at_s,
+                    "failure_reason": r.failure_reason,
+                }
+                for r in self._results
+            ],
+            "event_trace": self._event_trace,
+        }

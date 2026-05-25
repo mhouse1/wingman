@@ -45,8 +45,13 @@ Out of scope for this ADR:
 
 The top-level replay object is one path.
 
-Copilot will scan the current Wingman implementation and determine two high-value paths
-to start with, for example `PATH1` and `PATH2`.
+Initial path selection is grounded in observed production behavior from
+`wingman.log` (2026-05-25 session), using two recurring high-value sequences:
+
+- Path 1: standard lobby to battle flow, missile depletion, respawn handling, and
+  automatic mission restart
+- Path 2: missile depletion plus manual takeover, respawn recovery back to
+  `GAME_BATTLE`, and automatic restart
 
 Each path is represented as a dictionary-like mapping in the form:
 
@@ -73,10 +78,83 @@ The implementation must also create a dictionary of required screenshots for eac
 If any required screenshots are missing at implementation time, those screenshots will be
 captured after ADR 037 is implemented and then added to the replay fixture set.
 
-Paths may model different gameplay sequences. For example:
+Paths model different gameplay sequences and are chosen per replay run.
 
-- `PATH1` may be a simple sequence with no missile incoming injection
-- `PATH2` may be an alternate sequence that includes missile incoming injection events
+### Grounded Initial Paths (from wingman.log)
+
+The first implementation MUST ship with the following two paths and expected
+checkpoints.
+
+Observed log anchors used to derive these paths include:
+
+- `GAME_LOBBY -> GAME_WAITING -> GAME_STARTING -> GAME_BATTLE`
+- `MISSILES EMPTY - cancelling mission and ejecting`
+- `GAME_BATTLE -> GAME_BATTLE_MANUAL` (manual takeover path)
+- `RESPAWN DETECTED - Cancelling active missions`
+- `HEALTH ALIVE - restarting mission immediately`
+- `Controller: restarting last mission (J20)`
+
+Relative replay times are intentionally compressed from wall-clock logs while
+preserving event order and critical dwell windows (for example keeping respawn
+visible long enough to cross the alive-false threshold).
+
+Required screenshot schedule:
+
+```yaml
+PATH1 = {
+  (P1_000_LOBBY_PLAY.png, 0.0),
+  (P1_010_WAITING_CANCEL_VISIBLE.png, 1.2),
+  (P1_020_GOOD_LUCK_VISIBLE.png, 4.5),
+  (P1_030_BATTLE_HUD_MISSILES_4.png, 6.0),
+  (P1_040_BATTLE_HUD_MISSILES_0.png, 8.5),
+  (P1_050_EJECT_DIVE_TRANSITION.png, 9.2),
+  (P1_060_RESPAWN_VISIBLE_NO_HEALTH.png, 12.5),
+  (P1_070_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png, 16.8)
+}
+
+PATH2 = {
+  (P2_000_BATTLE_HUD_MISSILES_4.png, 0.0),
+  (P2_010_BATTLE_HUD_MISSILES_0.png, 1.6),
+  (P2_020_MANUAL_TAKEOVER_MOMENT.png, 1.9),
+  (P2_030_GAME_BATTLE_MANUAL_HUD.png, 2.3),
+  (P2_040_RESPAWN_VISIBLE_NO_HEALTH.png, 6.2),
+  (P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png, 10.1)
+}
+```
+
+Expected checkpoints for `PATH1`:
+
+- `P1_010_WAITING_CANCEL_VISIBLE.png`: `expected_state=GAME_WAITING`,
+  `expected_trigger=cancel_detected`, `max_settle_time_s=2.0`
+- `P1_020_GOOD_LUCK_VISIBLE.png`: `expected_state=GAME_STARTING`,
+  `expected_trigger=good_luck_detected`, `max_settle_time_s=4.0`
+- `P1_030_BATTLE_HUD_MISSILES_4.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=battle_started`, `max_settle_time_s=3.0`
+- `P1_040_BATTLE_HUD_MISSILES_0.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=missiles_empty`, `max_settle_time_s=2.0`
+- `P1_060_RESPAWN_VISIBLE_NO_HEALTH.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=respawn_detected`, `max_settle_time_s=3.0`
+- `P1_070_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=restart_last_mission`, `max_settle_time_s=3.0`
+
+Expected checkpoints for `PATH2`:
+
+- `P2_010_BATTLE_HUD_MISSILES_0.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=missiles_empty`, `max_settle_time_s=2.0`
+- `P2_020_MANUAL_TAKEOVER_MOMENT.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=manual_mode`, `max_settle_time_s=1.5`
+- `P2_030_GAME_BATTLE_MANUAL_HUD.png`: `expected_state=GAME_BATTLE_MANUAL`,
+  `expected_trigger=manual_mode_entered`, `max_settle_time_s=2.0`
+- `P2_040_RESPAWN_VISIBLE_NO_HEALTH.png`: `expected_state=GAME_BATTLE_MANUAL`,
+  `expected_trigger=respawn_detected`, `max_settle_time_s=3.0`
+- `P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=restart_last_mission`, `max_settle_time_s=3.0`
+
+Pass/fail additions for these grounded paths:
+
+- `PATH1` fails if `restart_last_mission` is not observed after respawn clears.
+- `PATH2` fails if `GAME_BATTLE_MANUAL` is not entered before respawn recovery.
+- `PATH2` fails if recovery does not return to `GAME_BATTLE` before restart.
 
 The chosen path must determine which event sequence is injected for that run, so the same
 scenario can replay a simple lane or a more complex combat lane without changing the test
@@ -94,23 +172,6 @@ verifiable intent events. This preserves orchestration realism while preventing 
 desktop input side effects during test execution.
 
 All fixtures must be loaded from `test_screenshots/integration_test`.
-
-Example shape:
-
-```yaml
-PATH1 = {
-  (LOBBY_PLAY_VISIBLE.png, 0.0),
-  (WAITING_CANCEL_VISIBLE.png, 1.2),
-  (BATTLE_HUD.png, 3.5)
-}
-
-PATH2 = {
-  (LOBBY_PLAY_VISIBLE.png, 0.0),
-  (WAITING_CANCEL_VISIBLE.png, 1.0),
-  (MISSILE_INCOMING.png, 2.2),
-  (BATTLE_HUD.png, 4.0)
-}
-```
 
 ## Phased Rollout
 

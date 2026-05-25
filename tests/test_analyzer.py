@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 
 import cv2
+import numpy as np
 import pytest
 import yaml
 
@@ -176,3 +177,40 @@ def test_game_end_b_blocks_background_ocr_scheduling(analyzer: GameStateAnalyzer
     assert result == (False, 0.0, None)
     assert analyzer._background_ocr_running is False
     assert analyzer._background_ocr_thread is None
+
+
+def test_waiting_cancel_baseline_capture_and_diff(analyzer: GameStateAnalyzer):
+    if "CANCEL" not in analyzer.crops:
+        pytest.skip("CANCEL crop not configured")
+
+    h = 3600
+    w = 3200
+    frame_a = np.zeros((h, w, 3), dtype=np.uint8)
+    frame_b = np.zeros((h, w, 3), dtype=np.uint8)
+
+    x1, y1, x2, y2 = analyzer.crops["CANCEL"][:4]
+    x1 = int(x1 * w)
+    x2 = int(x2 * w)
+    y1 = int(y1 * h)
+    y2 = int(y2 * h)
+    frame_b[y1:y2, x1:x2] = 255
+
+    assert analyzer.capture_waiting_cancel_baseline(frame_a) is True
+
+    diff_same = analyzer.compute_waiting_cancel_diff(frame_a)
+    diff_changed = analyzer.compute_waiting_cancel_diff(frame_b)
+
+    assert diff_same is not None
+    assert diff_changed is not None
+    assert diff_same <= 0.01
+    assert diff_changed > diff_same
+
+
+def test_waiting_cancel_diff_none_without_baseline(analyzer: GameStateAnalyzer):
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    with analyzer._waiting_cancel_baseline_lock:
+        analyzer._waiting_cancel_baseline_gray = None
+        analyzer._waiting_cancel_baseline_shape = None
+
+    diff = analyzer.compute_waiting_cancel_diff(frame)
+    assert diff is None

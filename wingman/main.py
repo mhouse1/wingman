@@ -23,6 +23,7 @@ from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState
 from .performance import PerformanceTracker
 from .replay import (
+    ReplayAssertionEngine,
     ScreenshotReplayCapture,
     build_required_screenshot_dictionary,
     find_missing_screenshots,
@@ -71,6 +72,55 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
 
 
+def _update_waiting_fallback(
+    analyzer,
+    frame,
+    elapsed_waiting: float,
+    play_visible: bool,
+    score: int,
+    consecutive: int,
+    *,
+    enabled: bool,
+    diff_threshold: float,
+    score_threshold: int,
+    consecutive_required: int,
+    min_elapsed_s: float,
+    logger,
+):
+    """Update GAME_WAITING fallback confidence and report if promotion should fire."""
+    if not enabled or "CANCEL" not in analyzer.crops or elapsed_waiting < min_elapsed_s:
+        return score, consecutive, False, None
+
+    if play_visible:
+        if score > 0 or consecutive > 0:
+            logger.debug("GAME_WAITING fallback reset: PLAY/READY visible")
+        return 0, 0, False, None
+
+    diff = analyzer.compute_waiting_cancel_diff(frame)
+    if diff is None:
+        return score, consecutive, False, None
+
+    score_step = 1
+    if diff >= diff_threshold:
+        score_step += 1
+
+    new_score = score + score_step
+    new_consecutive = consecutive + 1
+    logger.debug(
+        "GAME_WAITING fallback: play_not_visible=%s diff=%.3f score=%d consecutive=%d",
+        True,
+        diff,
+        new_score,
+        new_consecutive,
+    )
+
+    should_trigger = (
+        new_score >= score_threshold
+        and new_consecutive >= consecutive_required
+    )
+    return new_score, new_consecutive, should_trigger, diff
+
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -90,6 +140,8 @@ def main():
                         help="Where to write required/missing replay screenshot report")
     parser.add_argument("--replay-intents-output", default="tests/test-output/replay_action_intents.json",
                         help="Where to write recorded replay action intents")
+    parser.add_argument("--replay-assertions-output", default="tests/test-output/replay_assertions.json",
+                        help="Where to write replay assertion results and timing gates")
     args = parser.parse_args()
 
     console_level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -127,6 +179,7 @@ def main():
     exit_requested = threading.Event()
     replay_mode = bool(args.replay_config)
     replay_capture = None
+    replay_assertions = None
 
     # Initialize main components
     if replay_mode:
@@ -140,6 +193,7 @@ def main():
         write_required_screenshot_report(replay_report_path, replay_screenshot_dir, required, missing)
 
         replay_path = select_replay_path(replay_config_path, args.replay_path)
+        replay_assertions = ReplayAssertionEngine(replay_path.path_name, replay_path.steps)
         logger.info("Replay mode enabled: path=%s, screenshots=%s", replay_path.path_name, replay_screenshot_dir)
         if any(missing_names for missing_names in missing.values()):
             logger.warning("Replay screenshot report indicates missing files; see %s", replay_report_path)
@@ -168,6 +222,11 @@ def main():
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
     respawn_fallback_timeout = mission_cfg.get("respawn_fallback_timeout", 20.0)
+    waiting_fallback_enabled = mission_cfg.get("waiting_fallback_enabled", True)
+    waiting_fallback_diff_threshold = float(mission_cfg.get("waiting_fallback_diff_threshold", 0.08))
+    waiting_fallback_score_threshold = int(mission_cfg.get("waiting_fallback_score_threshold", 4))
+    waiting_fallback_consecutive_required = int(mission_cfg.get("waiting_fallback_consecutive_required", 2))
+    waiting_fallback_min_elapsed_s = float(mission_cfg.get("waiting_fallback_min_elapsed_s", 6.0))
 
     def _on_auto_mission_key():
         """Called when AUTO_MISSION_KEY is pressed. Activates unattended mode for the session."""
@@ -245,6 +304,15 @@ def main():
             threading.Thread(target=_click_ready_after_invite, daemon=True).start()
 
     analyzer.set_on_lobby_popup_click(_handle_lobby_popup)
+    if replay_assertions is not None:
+        def _on_fsm_transition(trigger_name, _prev_state_name, next_state_name, _timestamp_s):
+            if replay_capture is None:
+                return
+            now_s = replay_capture.elapsed_s()
+            replay_assertions.on_event(trigger_name, now_s)
+            replay_assertions.on_event(f"state_enter:{next_state_name}", now_s)
+
+        analyzer.set_on_fsm_transition(_on_fsm_transition)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -265,6 +333,13 @@ def main():
     last_cancel_scan_ts = 0.0     # last time CANCEL crop was scanned in GAME_WAITING
     last_play_reclick_ts = 0.0    # last time PLAY was re-clicked in GAME_WAITING
     play_reclick_interval = 45.0  # minimum seconds between PLAY re-clicks
+    waiting_fallback_score = 0
+    waiting_fallback_consecutive = 0
+
+    def _reset_waiting_fallback():
+        nonlocal waiting_fallback_score, waiting_fallback_consecutive
+        waiting_fallback_score = 0
+        waiting_fallback_consecutive = 0
 
     def _handle_alive_transition():
         """Restart mission immediately when health transitions dead → alive."""
@@ -280,6 +355,8 @@ def main():
                 return
             logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
             ctrl.restart_last_mission()
+            if replay_assertions is not None and replay_capture is not None:
+                replay_assertions.on_event("restart_last_mission", replay_capture.elapsed_s())
             last_restart_attempt = time.time()
             respawn_state = RespawnState.IDLE
 
@@ -309,6 +386,8 @@ def main():
             logger.debug("No-missiles suppressed — post-respawn grace (%.1fs remaining)",
                          missile_ignore_until - time.time())
             return
+        if replay_assertions is not None and replay_capture is not None:
+            replay_assertions.on_event("missiles_empty", replay_capture.elapsed_s())
         ctrl.eject_and_dive()
 
     def _deploy_flares_on_new_incoming() -> bool:
@@ -352,7 +431,22 @@ def main():
             if frame is None:
                 logger.warning("Frame capture failed (monitor disconnected or region out of bounds) — skipping cycle")
                 continue
+
+            if replay_assertions is not None and replay_capture is not None:
+                now_s = replay_capture.elapsed_s()
+                for step in replay_capture.consume_activated_steps():
+                    replay_assertions.on_step_activated(step, now_s)
+
             game_state = analyzer.analyze_frame(frame)
+
+            if replay_assertions is not None and replay_capture is not None:
+                now_s = replay_capture.elapsed_s()
+                replay_assertions.on_state(analyzer.game_state.name, now_s)
+                replay_assertions.tick(now_s)
+                if replay_assertions.has_failures():
+                    raise RuntimeError(
+                        "Replay assertion failure(s): " + "; ".join(replay_assertions.failures)
+                    )
 
             # Log game state transitions
             current_game_state = game_state.get('game_state')
@@ -383,8 +477,10 @@ def main():
                     game_waiting_since = time.time()
                     last_cancel_scan_ts = time.time()         # first scan after 3s, not immediately
                     last_play_reclick_ts = time.time()        # don't re-click immediately either
+                    _reset_waiting_fallback()
                 else:
                     game_waiting_since = 0.0
+                    _reset_waiting_fallback()
                 if current_game_state == GameState.GAME_BATTLE:
                     enemy_last_seen_ts = time.time()  # assume enemy present on battle entry
 
@@ -401,6 +497,7 @@ def main():
                         elapsed_waiting)
                     analyzer.trigger_event("waiting_timeout")
                     game_waiting_since = 0.0
+                    _reset_waiting_fallback()
                 elif time.time() - last_cancel_scan_ts >= 3.0:
                     last_cancel_scan_ts = time.time()
                     cancel_detected = analyzer.scan_region_for_cancel(frame)
@@ -409,13 +506,40 @@ def main():
                             "\033[92m✓ CANCEL detected (%.1fs) — matchmaking confirmed → GAME_STARTING\033[0m",
                             elapsed_waiting)
                         analyzer.trigger_event("cancel_detected")  # on_enter_GAME_STARTING fires game-starting loop
+                        _reset_waiting_fallback()
                     else:
                         crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
+                        visible_crop = analyzer.scan_region_for_play_button(frame) if crop else None
+                        play_visible = visible_crop is not None
+
+                        waiting_fallback_score, waiting_fallback_consecutive, fallback_triggered, _ = _update_waiting_fallback(
+                            analyzer,
+                            frame,
+                            elapsed_waiting,
+                            play_visible,
+                            waiting_fallback_score,
+                            waiting_fallback_consecutive,
+                            enabled=waiting_fallback_enabled,
+                            diff_threshold=waiting_fallback_diff_threshold,
+                            score_threshold=waiting_fallback_score_threshold,
+                            consecutive_required=waiting_fallback_consecutive_required,
+                            min_elapsed_s=waiting_fallback_min_elapsed_s,
+                            logger=logger,
+                        )
+
+                        if fallback_triggered:
+                            logger.info(
+                                "\033[92m✓ GAME_WAITING confirmed via QUEUE_FALLBACK (%.1fs) — matchmaking confirmed → GAME_STARTING\033[0m",
+                                elapsed_waiting,
+                            )
+                            analyzer.trigger_event("cancel_detected")
+                            _reset_waiting_fallback()
+                            continue
+
                         if crop and time.time() - last_play_reclick_ts >= play_reclick_interval:
                             # Only re-click if PLAY/READY is actually visible — clicking PLAY while
                             # matchmaking is in progress cancels it. If PLAY isn't visible the game
                             # is still processing the previous click; leave it alone.
-                            visible_crop = analyzer.scan_region_for_play_button(frame)
                             if visible_crop:
                                 logger.info(
                                     "GAME_WAITING: CANCEL not found (%.1fs) and %s visible — re-clicking",
@@ -592,6 +716,22 @@ def main():
                 encoding="utf-8",
             )
             logger.info("Replay action intents saved to %s", intents_output)
+
+            assertions_output = Path(args.replay_assertions_output)
+            assertions_output.parent.mkdir(parents=True, exist_ok=True)
+            assertions_output.write_text(
+                json.dumps(
+                    {
+                        "generated_at": time.time(),
+                        "replay_config": args.replay_config,
+                        "replay_path": args.replay_path,
+                        "assertions": replay_assertions.to_dict() if replay_assertions is not None else None,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            logger.info("Replay assertions saved to %s", assertions_output)
         ctrl.cleanup()
         analyzer.cleanup()
 

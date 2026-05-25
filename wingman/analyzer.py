@@ -35,6 +35,19 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _is_shutdown_runtime_error(exc: Exception) -> bool:
+    """Return True for expected RuntimeError messages during interpreter/executor shutdown."""
+    if not isinstance(exc, RuntimeError):
+        return False
+    msg = str(exc).lower()
+    return (
+        "interpreter shutdown" in msg
+        or "cannot schedule new futures" in msg
+        or "cannot schedule new task" in msg
+        or "shutdown" in msg
+    )
+
+
 # ============================================================================
 # OCR Worker Functions (called from thread pool — numpy arrays passed directly)
 # ============================================================================
@@ -423,7 +436,11 @@ class GameStateAnalyzer:
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
+        self._shutting_down = False
         self._last_lobby_play_click_ts = 0.0  # reset on GAME_LOBBY re-entry
+        self._waiting_cancel_baseline_gray: "np.ndarray | None" = None
+        self._waiting_cancel_baseline_shape: "tuple[int, int] | None" = None
+        self._waiting_cancel_baseline_lock = threading.Lock()
 
         # FSM — single authoritative state field managed by the transitions library.
         # Trigger methods (play_clicked, cancel_detected, …) are added to this instance
@@ -433,6 +450,7 @@ class GameStateAnalyzer:
         self._on_start_game_starting_loop = None  # injected by main.py after construction
         self._on_lobby_play_click = None         # injected by main.py; called with crop name when PLAY/READY detected
         self._on_lobby_popup_click = None        # injected by main.py; called with popup crop name when a popup is detected
+        self._on_fsm_transition = None           # injected by main.py; called after successful state transitions
 
         Machine(
             model=self,
@@ -502,6 +520,8 @@ class GameStateAnalyzer:
     @property
     def ocr_executor(self):
         """Lazy initialization of ThreadPoolExecutor for parallel OCR."""
+        if self._shutting_down:
+            return None
         if self._ocr_executor is None and easyocr and not self._ocr_executor_initialized:
             if not self._background_ocr_lock.acquire(timeout=1.0):
                 return None
@@ -515,7 +535,10 @@ class GameStateAnalyzer:
                             self._ocr_executor.submit(_get_thread_ocr_reader)
                         logger.debug("OCR worker pre-warm submitted (13 tasks)")
                     except Exception as e:
-                        logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
+                        if _is_shutdown_runtime_error(e) or self._shutting_down:
+                            logger.debug("ThreadPoolExecutor init skipped during shutdown: %s", e)
+                        else:
+                            logger.error("Failed to initialize ThreadPoolExecutor: %s", e)
                         self._ocr_executor_initialized = True
                         return None
             finally:
@@ -557,6 +580,12 @@ class GameStateAnalyzer:
                 callback()
             except Exception:
                 logger.exception("FSM: post-transition callback failed for trigger '%s'", trigger_name)
+
+        if transitioned and next_state != prev_state and self._on_fsm_transition is not None:
+            try:
+                self._on_fsm_transition(trigger_name, prev_state.name, next_state.name, time.time())
+            except Exception:
+                logger.exception("FSM: transition callback failed for trigger '%s'", trigger_name)
         return transitioned
 
     # ------------------------------------------------------------------
@@ -578,6 +607,13 @@ class GameStateAnalyzer:
     def set_on_lobby_popup_click(self, callback):
         """Set callback invoked with popup crop names from lobby quick-scan."""
         self._on_lobby_popup_click = callback
+
+    def set_on_fsm_transition(self, callback):
+        """Set callback invoked after successful FSM transitions.
+
+        Callback signature: (trigger_name, prev_state_name, next_state_name, timestamp_s).
+        """
+        self._on_fsm_transition = callback
 
     def trigger_event(self, name: str) -> bool:
         """Dispatch an FSM trigger via the thread-safe trigger wrapper."""
@@ -612,6 +648,57 @@ class GameStateAnalyzer:
         """Return timestamp for the latest click-to cache update."""
         with self._click_to_cache_lock:
             return self._click_to_cache['timestamp']
+
+    def capture_waiting_cancel_baseline(self, frame) -> bool:
+        """Capture/refresh GAME_WAITING fallback baseline from the CANCEL crop.
+
+        Returns True when a baseline was successfully captured.
+        """
+        if "CANCEL" not in self.crops:
+            return False
+        try:
+            cancel_crop = get_crop(frame, *self.crops["CANCEL"][:4])
+            gray = cv2.cvtColor(cancel_crop, cv2.COLOR_BGR2GRAY)
+            with self._waiting_cancel_baseline_lock:
+                self._waiting_cancel_baseline_gray = gray
+                self._waiting_cancel_baseline_shape = gray.shape
+            return True
+        except Exception as e:
+            logger.debug("Analyzer: waiting baseline capture failed: %s", e)
+            return False
+
+    def compute_waiting_cancel_diff(self, frame) -> "float | None":
+        """Compute normalized mean absolute diff against CANCEL baseline.
+
+        Returns None when baseline is missing or invalid for current crop shape.
+        """
+        if "CANCEL" not in self.crops:
+            return None
+        try:
+            cancel_crop = get_crop(frame, *self.crops["CANCEL"][:4])
+            gray = cv2.cvtColor(cancel_crop, cv2.COLOR_BGR2GRAY)
+        except Exception as e:
+            logger.debug("Analyzer: waiting diff crop failed: %s", e)
+            return None
+
+        with self._waiting_cancel_baseline_lock:
+            baseline = self._waiting_cancel_baseline_gray
+            baseline_shape = self._waiting_cancel_baseline_shape
+            if baseline is None or baseline_shape is None:
+                return None
+            if gray.shape != baseline_shape:
+                # Invalidate baseline on shape change; recapture in GAME_LOBBY.
+                self._waiting_cancel_baseline_gray = None
+                self._waiting_cancel_baseline_shape = None
+                logger.debug(
+                    "Analyzer: waiting baseline invalidated due to shape change (%s -> %s)",
+                    baseline_shape,
+                    gray.shape,
+                )
+                return None
+
+        diff = cv2.absdiff(gray, baseline)
+        return float(np.mean(diff) / 255.0)
 
     def inject_respawn_ocr_result(self, detected: bool, confidence: float, method: str = "ocr") -> None:
         """Testing helper to inject a respawn OCR cache result."""
@@ -669,6 +756,7 @@ class GameStateAnalyzer:
 
     def cleanup(self):
         """Clean up resources (call when shutting down)."""
+        self._shutting_down = True
         self._click_to_stop.set()
         self._lobby_quick_scan_stop.set()
         self._background_ocr_stop.set()
@@ -1042,6 +1130,13 @@ class GameStateAnalyzer:
                     logger.debug("Skipping GAME_BATTLE crop OCR in %s state", state.name)
                     self._background_ocr_stop.wait(timeout=0.2)
             except Exception as e:
+                if self._background_ocr_stop.is_set() or self._shutting_down or _is_shutdown_runtime_error(e):
+                    logger.debug("Analyzer: OCR background loop exiting during shutdown: %s", e)
+                    with self._background_ocr_lock:
+                        self._background_ocr_frame = None
+                        self._background_ocr_pending_frame = None
+                        self._background_ocr_running = False
+                    return
                 logger.warning("Analyzer: OCR detection failed: %s", e)
 
             with self._background_ocr_lock:
@@ -1093,6 +1188,9 @@ class GameStateAnalyzer:
             except RuntimeError:
                 return  # executor shut down — exit the loop cleanly
             except Exception as e:
+                if self._click_to_stop.is_set() or self._shutting_down or _is_shutdown_runtime_error(e):
+                    logger.debug("Analyzer: click_to OCR loop exiting during shutdown: %s", e)
+                    return
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
 
     def _run_game_lobby_quick_scan(self):
@@ -1229,6 +1327,7 @@ class GameStateAnalyzer:
                             )
                             handled = True
                         else:
+                            self.capture_waiting_cancel_baseline(frame)
                             logger.info(
                                 "\033[93m📋 Lobby quick-scan: %s detected (text='%s') — clicking\033[0m",
                                 crop, text,

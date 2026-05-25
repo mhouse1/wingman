@@ -24,13 +24,14 @@
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
 #   make r           -> run wingman (INFO console only)
 #   make rd          -> run wingman with DEBUG log written to wingman.log
+#   make y           -> run ADR37 replay integration smoke test (placeholder screenshots)
 
-.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd calibrate calibrate-crop add-crops
+.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y calibrate calibrate-crop add-crops
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
-PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run pytest,$(PYTHON) -m pytest)
-PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run python,$(PYTHON))
+PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pytest)
+PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
 
 # Generate HTML report for automated levels test
 test:
@@ -180,6 +181,10 @@ r:
 rd:
 	wingman.bat --log-file wingman.log
 
+# ADR37 replay integration smoke path (temporary until full screenshot catalog exists)
+y:
+	$(PYTEST_RUN) tests/test_replay_integration_make_y.py -q
+
 # Two commands are available for calibrating crop regions:
 #
 #   make calibrate
@@ -201,10 +206,10 @@ rd:
 #     S — skip (keeps the existing value; disabled if the crop has never been set)
 #     Q — quit and save progress so far
 calibrate:
-	uv run python tests/calibrate.py
+	uv run --active python tests/calibrate.py
 
 calibrate-crop:
-	uv run python tests/calibrate.py --crop $(CROP)
+	uv run --active python tests/calibrate.py --crop $(CROP)
 
 add-crops:
-	uv run python tests/calibrate.py --add-new-crops
+	uv run --active python tests/calibrate.py --add-new-crops
