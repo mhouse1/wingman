@@ -29,7 +29,7 @@ compatible with the existing performance tracking workflow.
 In scope:
 
 - Scenario format with ordered screenshot frames and per-frame timestamps
-- Replay runner that drives analyzer/main-loop paths without live capture
+- Replay runner that drives the `main.py` orchestration path without live capture
 - Assertions for expected transition sequence and timeout windows
 - Per-run metrics artifact for transition latency statistics
 
@@ -41,29 +41,68 @@ Out of scope for this ADR:
 
 ## Scenario Model
 
-Each replay scenario contains:
+The top-level replay object is one path.
 
-- Relative frame path
-- Scheduled offset in milliseconds
-- Optional expected state after processing the frame
-- Optional expected trigger event
+Copilot will scan the current Wingman implementation and determine two high-value paths
+to start with, for example `PATH1` and `PATH2`.
+
+Each path is represented as a dictionary-like mapping in the form:
+
+- `PATH1 = {(SCREENSHOTNAME, TIME_TO_INJECT), ...}`
+
+Where:
+
+- `SCREENSHOTNAME` is the exact screenshot filename, for example `CANCEL.png`
+- `TIME_TO_INJECT` is the total number of seconds after replay start when the screenshot
+  is injected into the test
+
+An implementation may also attach optional per-step expectation fields alongside each
+tuple-derived replay step:
+
+- `expected_state`
+- `expected_trigger`
+- `max_settle_time_s`
+
+All replay screenshots must come from `test_screenshots/integration_test`, and the test
+must use the exact filename as the injection selector. For example, `CANCEL.png` is used
+when the replay needs to inject the `CANCEL` state from `GAME_LOBBY` onto the screen.
+
+The implementation must also create a dictionary of required screenshots for each path.
+If any required screenshots are missing at implementation time, those screenshots will be
+captured after ADR 037 is implemented and then added to the replay fixture set.
+
+Paths may model different gameplay sequences. For example:
+
+- `PATH1` may be a simple sequence with no missile incoming injection
+- `PATH2` may be an alternate sequence that includes missile incoming injection events
+
+The chosen path must determine which event sequence is injected for that run, so the same
+scenario can replay a simple lane or a more complex combat lane without changing the test
+fixture layout.
+
+Injected frames persist until replaced by the next scheduled screenshot in the path.
+
+The first implementation should replay through the `main.py` execution path so timing,
+FSM transitions, controller interactions, and OCR scheduling behave as closely as possible
+to a real run, with live capture replaced by scheduled screenshots.
+
+All fixtures must be loaded from `test_screenshots/integration_test`.
 
 Example shape:
 
 ```yaml
-scenario: lobby-to-battle
-frames:
-  - at_ms: 0
-    image: LOBBY_PLAY_VISIBLE.png
-    expect_state: GAME_LOBBY
-  - at_ms: 1200
-    image: WAITING_CANCEL_VISIBLE.png
-    expect_trigger: cancel_detected
-    expect_state: GAME_STARTING
-  - at_ms: 3500
-    image: BATTLE_HUD.png
-    expect_trigger: good_luck_detected
-    expect_state: GAME_BATTLE
+PATH1 = {
+  (LOBBY_PLAY_VISIBLE.png, 0.0),
+  (WAITING_CANCEL_VISIBLE.png, 1.2),
+  (BATTLE_HUD.png, 3.5)
+}
+
+PATH2 = {
+  (LOBBY_PLAY_VISIBLE.png, 0.0),
+  (WAITING_CANCEL_VISIBLE.png, 1.0),
+  (MISSILE_INCOMING.png, 2.2),
+  (BATTLE_HUD.png, 4.0)
+}
 ```
 
 ## Phased Rollout
@@ -83,10 +122,13 @@ Record at least:
 
 Initial regression policy:
 
-- Fail on missing required transition.
-- Fail on unexpected transition order.
+- Fail a path when any required `expected_state` or `expected_trigger` is missed.
+- Fail a path when required transitions occur out of order.
+- Fail a path when a required transition exceeds its declared `max_settle_time_s`.
 - Warn when latency degrades beyond configured threshold until enough baseline data exists.
 - Promote warning to fail once minimum-session baseline criteria are met.
+
+Path pass/fail is evaluated per selected path, not only at the suite level.
 
 ## Architecture
 
