@@ -30,6 +30,8 @@ In scope:
 
 - Scenario format with ordered screenshot frames and per-frame timestamps
 - Replay runner that drives the `main.py` orchestration path without live capture
+- Replay-mode input virtualization: keyboard and mouse outputs are stubbed at the OS
+  boundary and recorded as action intents
 - Assertions for expected transition sequence and timeout windows
 - Per-run metrics artifact for transition latency statistics
 
@@ -86,6 +88,11 @@ The first implementation should replay through the `main.py` execution path so t
 FSM transitions, controller interactions, and OCR scheduling behave as closely as possible
 to a real run, with live capture replaced by scheduled screenshots.
 
+In replay mode, controller output actions must not be sent to the operating system.
+Instead, actions such as key presses and mouse clicks must be simulated and recorded as
+verifiable intent events. This preserves orchestration realism while preventing real
+desktop input side effects during test execution.
+
 All fixtures must be loaded from `test_screenshots/integration_test`.
 
 Example shape:
@@ -119,6 +126,8 @@ Record at least:
 - Event-to-transition latency per trigger
 - Scenario completion time
 - Transition success ratio
+- Controller action-intent trace (for example PLAY-click intent, key-press intent,
+  flare-deploy intent)
 
 Initial regression policy:
 
