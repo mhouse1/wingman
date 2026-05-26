@@ -65,7 +65,7 @@ def _load_run_file(path: Path) -> "dict | None":
         return None
 
 
-def _aggregate_folder(folder: Path) -> "dict | None":
+def _aggregate_folder(folder: Path, version_filter: str | None = None) -> "dict | None":
     """Weighted-mean aggregation across all run_*.json files in folder.
 
     Returns None when folder is missing or has no valid files.
@@ -76,6 +76,8 @@ def _aggregate_folder(folder: Path) -> "dict | None":
         return None
     files = sorted(folder.glob("run_*.json"))
     run_data = [d for f in files if (d := _load_run_file(f)) is not None]
+    if version_filter is not None:
+        run_data = [d for d in run_data if d.get("version") == version_filter]
     if not run_data:
         return None
 
@@ -147,6 +149,8 @@ class PerformanceTracker:
         self._output_dir       = Path(hist_cfg.get("output_dir", "docs/performance"))
         self._min_sessions: int  = reg_cfg.get("min_sessions", 5)
         self._min_cycles: int    = reg_cfg.get("min_cycles", 1000)
+        self._min_crop_samples: int = reg_cfg.get("min_crop_samples", 1000)
+        self._min_reaction_events: int = reg_cfg.get("min_reaction_events", 100)
         self._threshold_pct: float = reg_cfg.get("threshold_pct", 20)
         self._version          = version
 
@@ -323,7 +327,10 @@ class PerformanceTracker:
                 continue
             delta = (s_stats["mean"] - p_stats["mean"]) / max(p_stats["mean"], 0.001) * 100
             arrow = "↑" if delta > 0 else ""
-            flag  = "  ⚠️ OUTLIER SESSION" if abs(delta) >= self._threshold_pct else ""
+            if abs(delta) >= self._threshold_pct:
+                flag = "  ✅ LARGE IMPROVEMENT" if delta < 0 else "  ⚠️ POTENTIAL REGRESSION"
+            else:
+                flag = ""
             lines.append(
                 f"  {crop:<14}  mean {s_stats['mean']:.2f}s p95 {s_stats['p95']:.2f}s"
                 f"    {p_stats['mean']:.2f}s      {delta:+.0f}% {arrow}{flag}"
@@ -334,7 +341,10 @@ class PerformanceTracker:
         if r_s and r_p.get("n", 0) > 0:
             delta = (r_s["mean"] - r_p["mean"]) / max(r_p["mean"], 0.001) * 100
             arrow = "↑" if delta > 0 else ""
-            flag  = "  ⚠️ OUTLIER SESSION" if abs(delta) >= self._threshold_pct else ""
+            if abs(delta) >= self._threshold_pct:
+                flag = "  ✅ LARGE IMPROVEMENT" if delta < 0 else "  ⚠️ POTENTIAL REGRESSION"
+            else:
+                flag = ""
             lines.append(
                 f"  {'reaction':<14}  mean {r_s['mean']:.2f}s p95 {r_s['p95']:.2f}s"
                 f"    {r_p['mean']:.2f}s      {delta:+.0f}% {arrow}{flag}"
@@ -352,48 +362,143 @@ class PerformanceTracker:
             )
             return
 
-        release_agg = _aggregate_folder(self._output_dir / "release")
-        if release_agg is None:
+        release_dir = self._output_dir / "release"
+        release_agg_all = _aggregate_folder(release_dir)
+        if release_agg_all is None:
             logger.info(
                 "[PERIOD COMPARISON] no release/ baseline — run 'make wrelease' to create one"
             )
             return
 
+        release_ref_ver = release_agg_all["version"]
+        release_agg_version = _aggregate_folder(release_dir, version_filter=release_ref_ver)
+
         # Block 2: current-period aggregate vs release baseline
-        r_ver = release_agg["version"]
+        r_ver = release_ref_ver
         lines2 = [
-            f"[PERIOD vs RELEASE v{r_ver}"
+            f"[PERIOD vs RELEASE (all + version baseline v{r_ver})"
             f" | current: {period_sessions} sessions {period_n} cycles"
-            f" | release: {release_agg['session_count']} sessions {release_agg['total_n']} cycles]",
-            f"  {'crop':<14}  {'current mean':>12}  {'release mean':>12}  delta",
+            f" | release-all: {release_agg_all['session_count']} sessions {release_agg_all['total_n']} cycles"
+            f" | release-v{r_ver}: {release_agg_version['session_count'] if release_agg_version else 0} sessions"
+            f" {release_agg_version['total_n'] if release_agg_version else 0} cycles]",
+            f"  {'crop':<14}  {'current':>8}  {'rel-all':>8}  {'rel-v':>8}  {'Δall':>6}  {'Δv':>6}",
         ]
         for crop in _CROPS:
             c_stats = current_agg["ocr_crops"].get(crop)
-            r_stats = release_agg["ocr_crops"].get(crop)
-            if not c_stats or not r_stats:
+            r_stats_all = release_agg_all["ocr_crops"].get(crop)
+            r_stats_ver = (
+                release_agg_version["ocr_crops"].get(crop)
+                if release_agg_version is not None
+                else None
+            )
+            if not c_stats or not r_stats_all:
                 continue
-            delta  = (c_stats["mean"] - r_stats["mean"]) / max(r_stats["mean"], 0.001) * 100
-            arrow  = "↑" if delta > 0 else ""
-            flag   = "  ⚠️ REGRESSION" if abs(delta) >= self._threshold_pct else ""
-            prefix = "⚠️  " if flag else "   "
-            lines2.append(
-                f"  {prefix}{crop:<14}  {c_stats['mean']:.2f}s"
-                f"            {r_stats['mean']:.2f}s"
-                f"        {delta:+.0f}% {arrow}{flag}"
+            delta_all = (c_stats["mean"] - r_stats_all["mean"]) / max(r_stats_all["mean"], 0.001) * 100
+            delta_ver = (
+                (c_stats["mean"] - r_stats_ver["mean"]) / max(r_stats_ver["mean"], 0.001) * 100
+                if r_stats_ver
+                else None
+            )
+            arrow_all = "↑" if delta_all > 0 else ""
+            arrow_ver = "↑" if (delta_ver is not None and delta_ver > 0) else ""
+
+            has_confidence_all = (
+                c_stats.get("n", 0) >= self._min_crop_samples
+                and r_stats_all.get("n", 0) >= self._min_crop_samples
+            )
+            has_confidence_ver = (
+                r_stats_ver is not None
+                and c_stats.get("n", 0) >= self._min_crop_samples
+                and r_stats_ver.get("n", 0) >= self._min_crop_samples
             )
 
-        c_r = current_agg["reaction"]
-        r_r = release_agg["reaction"]
-        if c_r.get("n", 0) > 0 and r_r.get("n", 0) > 0:
-            delta  = (c_r["mean"] - r_r["mean"]) / max(r_r["mean"], 0.001) * 100
-            arrow  = "↑" if delta > 0 else ""
-            flag   = "  ⚠️ REGRESSION" if abs(delta) >= self._threshold_pct else ""
-            prefix = "⚠️  " if flag else "   "
+            if has_confidence_all and abs(delta_all) >= self._threshold_pct:
+                flag_all = "⚠️ REGRESSION" if delta_all > 0 else "✅ IMPROVEMENT"
+            elif not has_confidence_all:
+                flag_all = f"low confidence(all n={c_stats.get('n', 0)}/{r_stats_all.get('n', 0)})"
+            else:
+                flag_all = ""
+
+            if delta_ver is None:
+                flag_ver = "version baseline unavailable"
+            elif has_confidence_ver and abs(delta_ver) >= self._threshold_pct:
+                flag_ver = "⚠️ REGRESSION" if delta_ver > 0 else "✅ IMPROVEMENT"
+            elif not has_confidence_ver and r_stats_ver is not None:
+                flag_ver = f"low confidence(v n={c_stats.get('n', 0)}/{r_stats_ver.get('n', 0)})"
+            else:
+                flag_ver = ""
+
+            rel_v_mean_str = f"{r_stats_ver['mean']:.2f}s" if r_stats_ver else "n/a"
+            delta_ver_str = f"{delta_ver:+.0f}%{arrow_ver}" if delta_ver is not None else "n/a"
+
+            prefix = "⚠️  " if ("⚠️ REGRESSION" in f"{flag_all} {flag_ver}") else "   "
             lines2.append(
-                f"  {prefix}{'reaction':<14}  {c_r['mean']:.2f}s"
-                f"            {r_r['mean']:.2f}s"
-                f"        {delta:+.0f}% {arrow}{flag}"
+                f"  {prefix}{crop:<14}"
+                f"  {c_stats['mean']:.2f}s"
+                f"  {r_stats_all['mean']:.2f}s"
+                f"  {rel_v_mean_str:>8}"
+                f"  {delta_all:+.0f}%{arrow_all:1}"
+                f"  {delta_ver_str:>6}"
+            )
+            if flag_all:
+                lines2.append(f"  {'':<18}all: {flag_all}")
+            if flag_ver:
+                lines2.append(f"  {'':<18}v{r_ver}: {flag_ver}")
+
+        c_r = current_agg["reaction"]
+        r_r_all = release_agg_all["reaction"]
+        r_r_ver = release_agg_version["reaction"] if release_agg_version is not None else None
+        if c_r.get("n", 0) > 0 and r_r_all.get("n", 0) > 0:
+            delta_all = (c_r["mean"] - r_r_all["mean"]) / max(r_r_all["mean"], 0.001) * 100
+            delta_ver = (
+                (c_r["mean"] - r_r_ver["mean"]) / max(r_r_ver["mean"], 0.001) * 100
+                if r_r_ver and r_r_ver.get("n", 0) > 0
+                else None
+            )
+            arrow_all = "↑" if delta_all > 0 else ""
+            arrow_ver = "↑" if (delta_ver is not None and delta_ver > 0) else ""
+            has_confidence_all = (
+                c_r.get("n", 0) >= self._min_reaction_events
+                and r_r_all.get("n", 0) >= self._min_reaction_events
+            )
+            has_confidence_ver = (
+                r_r_ver is not None
+                and c_r.get("n", 0) >= self._min_reaction_events
+                and r_r_ver.get("n", 0) >= self._min_reaction_events
+            )
+
+            if has_confidence_all and abs(delta_all) >= self._threshold_pct:
+                flag_all = "⚠️ REGRESSION" if delta_all > 0 else "✅ IMPROVEMENT"
+            elif not has_confidence_all:
+                flag_all = f"low confidence(all n={c_r.get('n', 0)}/{r_r_all.get('n', 0)})"
+            else:
+                flag_all = ""
+
+            if delta_ver is None:
+                flag_ver = "version baseline unavailable"
+            elif has_confidence_ver and abs(delta_ver) >= self._threshold_pct:
+                flag_ver = "⚠️ REGRESSION" if delta_ver > 0 else "✅ IMPROVEMENT"
+            elif not has_confidence_ver and r_r_ver is not None:
+                flag_ver = f"low confidence(v n={c_r.get('n', 0)}/{r_r_ver.get('n', 0)})"
+            else:
+                flag_ver = ""
+
+            rel_v_mean_str = f"{r_r_ver['mean']:.2f}s" if r_r_ver else "n/a"
+            delta_ver_str = f"{delta_ver:+.0f}%{arrow_ver}" if delta_ver is not None else "n/a"
+
+            prefix = "⚠️  " if ("⚠️ REGRESSION" in f"{flag_all} {flag_ver}") else "   "
+            lines2.append(
+                f"  {prefix}{'reaction':<14}"
+                f"  {c_r['mean']:.2f}s"
+                f"  {r_r_all['mean']:.2f}s"
+                f"  {rel_v_mean_str:>8}"
+                f"  {delta_all:+.0f}%{arrow_all:1}"
+                f"  {delta_ver_str:>6}"
                 f"  ({c_r['n']} events in period)"
             )
+            if flag_all:
+                lines2.append(f"  {'':<18}all: {flag_all}")
+            if flag_ver:
+                lines2.append(f"  {'':<18}v{r_ver}: {flag_ver}")
 
         logger.info("\n".join(lines2))

@@ -1,0 +1,87 @@
+# ADR037 replay paths grounded in wingman.log.
+# PATH1 and PATH2 are the target production paths that require curated screenshots.
+# SMOKE_PATH is a temporary, generated-screenshot lane used by make y.
+
+PATH1:
+  - screenshot_name: P1_000_LOBBY_PLAY.png
+    injection_time_s: 0.0
+  - screenshot_name: P1_010_WAITING_CANCEL_VISIBLE.png
+    injection_time_s: 1.2
+    expected_state: GAME_WAITING
+    expected_trigger: cancel_detected
+    max_settle_time_s: 2.0
+  - screenshot_name: P1_020_GOOD_LUCK_VISIBLE.png
+    injection_time_s: 4.5
+    expected_state: GAME_STARTING
+    expected_trigger: good_luck_detected
+    max_settle_time_s: 4.0
+  - screenshot_name: P1_030_BATTLE_HUD_MISSILES_4.png
+    injection_time_s: 6.0
+    expected_state: GAME_BATTLE
+    expected_trigger: battle_started
+    max_settle_time_s: 3.0
+  - screenshot_name: P1_040_BATTLE_HUD_MISSILES_0.png
+    injection_time_s: 8.5
+    expected_state: GAME_BATTLE
+    expected_trigger: missiles_empty
+    max_settle_time_s: 2.0
+  - screenshot_name: P1_050_EJECT_DIVE_TRANSITION.png
+    injection_time_s: 9.2
+  - screenshot_name: P1_060_RESPAWN_VISIBLE_NO_HEALTH.png
+    injection_time_s: 12.5
+    expected_state: GAME_BATTLE
+    expected_trigger: respawn_detected
+    max_settle_time_s: 3.0
+  - screenshot_name: P1_070_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png
+    injection_time_s: 16.8
+    expected_state: GAME_BATTLE
+    expected_trigger: restart_last_mission
+    max_settle_time_s: 3.0
+
+PATH2:
+  - screenshot_name: P2_000_BATTLE_HUD_MISSILES_4.png
+    injection_time_s: 0.0
+  - screenshot_name: P2_010_BATTLE_HUD_MISSILES_0.png
+    injection_time_s: 1.6
+    expected_state: GAME_BATTLE
+    expected_trigger: missiles_empty
+    max_settle_time_s: 2.0
+  - screenshot_name: P2_020_MANUAL_TAKEOVER_MOMENT.png
+    injection_time_s: 1.9
+    expected_state: GAME_BATTLE
+    expected_trigger: manual_mode
+    max_settle_time_s: 1.5
+  - screenshot_name: P2_030_GAME_BATTLE_MANUAL_HUD.png
+    injection_time_s: 2.3
+    expected_state: GAME_BATTLE_MANUAL
+    expected_trigger: manual_mode_entered
+    max_settle_time_s: 2.0
+  - screenshot_name: P2_040_RESPAWN_VISIBLE_NO_HEALTH.png
+    injection_time_s: 6.2
+    expected_state: GAME_BATTLE_MANUAL
+    expected_trigger: respawn_detected
+    max_settle_time_s: 3.0
+  - screenshot_name: P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png
+    injection_time_s: 10.1
+    expected_state: GAME_BATTLE
+    expected_trigger: restart_last_mission
+    max_settle_time_s: 3.0
+
+SMOKE_PATH:
+  - screenshot_name: Y_000_LOBBY.png
+    injection_time_s: 0.00
+  - screenshot_name: Y_010_WAITING.png
+    injection_time_s: 0.20
+    expected_state: GAME_WAITING
+    expected_trigger: play_clicked
+    max_settle_time_s: 2.0
+  - screenshot_name: Y_020_STARTING.png
+    injection_time_s: 0.50
+    expected_state: GAME_STARTING
+    expected_trigger: cancel_detected
+    max_settle_time_s: 2.0
+  - screenshot_name: Y_030_BATTLE.png
+    injection_time_s: 0.80
+    expected_state: GAME_BATTLE
+    expected_trigger: good_luck_detected
+    max_settle_time_s: 2.0

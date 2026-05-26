@@ -29,7 +29,9 @@ compatible with the existing performance tracking workflow.
 In scope:
 
 - Scenario format with ordered screenshot frames and per-frame timestamps
-- Replay runner that drives analyzer/main-loop paths without live capture
+- Replay runner that drives the `main.py` orchestration path without live capture
+- Replay-mode input virtualization: keyboard and mouse outputs are stubbed at the OS
+  boundary and recorded as action intents
 - Assertions for expected transition sequence and timeout windows
 - Per-run metrics artifact for transition latency statistics
 
@@ -41,30 +43,135 @@ Out of scope for this ADR:
 
 ## Scenario Model
 
-Each replay scenario contains:
+The top-level replay object is one path.
 
-- Relative frame path
-- Scheduled offset in milliseconds
-- Optional expected state after processing the frame
-- Optional expected trigger event
+Initial path selection is grounded in observed production behavior from
+`wingman.log` (2026-05-25 session), using two recurring high-value sequences:
 
-Example shape:
+- Path 1: standard lobby to battle flow, missile depletion, respawn handling, and
+  automatic mission restart
+- Path 2: missile depletion plus manual takeover, respawn recovery back to
+  `GAME_BATTLE`, and automatic restart
+
+Each path is represented as a dictionary-like mapping in the form:
+
+- `PATH1 = {(SCREENSHOTNAME, TIME_TO_INJECT), ...}`
+
+Where:
+
+- `SCREENSHOTNAME` is the exact screenshot filename, for example `CANCEL.png`
+- `TIME_TO_INJECT` is the total number of seconds after replay start when the screenshot
+  is injected into the test
+
+An implementation may also attach optional per-step expectation fields alongside each
+tuple-derived replay step:
+
+- `expected_state`
+- `expected_trigger`
+- `max_settle_time_s`
+
+All replay screenshots must come from `test_screenshots/integration_test`, and the test
+must use the exact filename as the injection selector. For example, `CANCEL.png` is used
+when the replay needs to inject the `CANCEL` state from `GAME_LOBBY` onto the screen.
+
+The implementation must also create a dictionary of required screenshots for each path.
+If any required screenshots are missing at implementation time, those screenshots will be
+captured after ADR 037 is implemented and then added to the replay fixture set.
+
+Paths model different gameplay sequences and are chosen per replay run.
+
+### Grounded Initial Paths (from wingman.log)
+
+The first implementation MUST ship with the following two paths and expected
+checkpoints.
+
+Observed log anchors used to derive these paths include:
+
+- `GAME_LOBBY -> GAME_WAITING -> GAME_STARTING -> GAME_BATTLE`
+- `MISSILES EMPTY - cancelling mission and ejecting`
+- `GAME_BATTLE -> GAME_BATTLE_MANUAL` (manual takeover path)
+- `RESPAWN DETECTED - Cancelling active missions`
+- `HEALTH ALIVE - restarting mission immediately`
+- `Controller: restarting last mission (J20)`
+
+Relative replay times are intentionally compressed from wall-clock logs while
+preserving event order and critical dwell windows (for example keeping respawn
+visible long enough to cross the alive-false threshold).
+
+Required screenshot schedule:
 
 ```yaml
-scenario: lobby-to-battle
-frames:
-  - at_ms: 0
-    image: LOBBY_PLAY_VISIBLE.png
-    expect_state: GAME_LOBBY
-  - at_ms: 1200
-    image: WAITING_CANCEL_VISIBLE.png
-    expect_trigger: cancel_detected
-    expect_state: GAME_STARTING
-  - at_ms: 3500
-    image: BATTLE_HUD.png
-    expect_trigger: good_luck_detected
-    expect_state: GAME_BATTLE
+PATH1 = {
+  (P1_000_LOBBY_PLAY.png, 0.0),
+  (P1_010_WAITING_CANCEL_VISIBLE.png, 1.2),
+  (P1_020_GOOD_LUCK_VISIBLE.png, 4.5),
+  (P1_030_BATTLE_HUD_MISSILES_4.png, 6.0),
+  (P1_040_BATTLE_HUD_MISSILES_0.png, 8.5),
+  (P1_050_EJECT_DIVE_TRANSITION.png, 9.2),
+  (P1_060_RESPAWN_VISIBLE_NO_HEALTH.png, 12.5),
+  (P1_070_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png, 16.8)
+}
+
+PATH2 = {
+  (P2_000_BATTLE_HUD_MISSILES_4.png, 0.0),
+  (P2_010_BATTLE_HUD_MISSILES_0.png, 1.6),
+  (P2_020_MANUAL_TAKEOVER_MOMENT.png, 1.9),
+  (P2_030_GAME_BATTLE_MANUAL_HUD.png, 2.3),
+  (P2_040_RESPAWN_VISIBLE_NO_HEALTH.png, 6.2),
+  (P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png, 10.1)
+}
 ```
+
+Expected checkpoints for `PATH1`:
+
+- `P1_010_WAITING_CANCEL_VISIBLE.png`: `expected_state=GAME_WAITING`,
+  `expected_trigger=cancel_detected`, `max_settle_time_s=2.0`
+- `P1_020_GOOD_LUCK_VISIBLE.png`: `expected_state=GAME_STARTING`,
+  `expected_trigger=good_luck_detected`, `max_settle_time_s=4.0`
+- `P1_030_BATTLE_HUD_MISSILES_4.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=battle_started`, `max_settle_time_s=3.0`
+- `P1_040_BATTLE_HUD_MISSILES_0.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=missiles_empty`, `max_settle_time_s=2.0`
+- `P1_060_RESPAWN_VISIBLE_NO_HEALTH.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=respawn_detected`, `max_settle_time_s=3.0`
+- `P1_070_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=restart_last_mission`, `max_settle_time_s=3.0`
+
+Expected checkpoints for `PATH2`:
+
+- `P2_010_BATTLE_HUD_MISSILES_0.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=missiles_empty`, `max_settle_time_s=2.0`
+- `P2_020_MANUAL_TAKEOVER_MOMENT.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=manual_mode`, `max_settle_time_s=1.5`
+- `P2_030_GAME_BATTLE_MANUAL_HUD.png`: `expected_state=GAME_BATTLE_MANUAL`,
+  `expected_trigger=manual_mode_entered`, `max_settle_time_s=2.0`
+- `P2_040_RESPAWN_VISIBLE_NO_HEALTH.png`: `expected_state=GAME_BATTLE_MANUAL`,
+  `expected_trigger=respawn_detected`, `max_settle_time_s=3.0`
+- `P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png`: `expected_state=GAME_BATTLE`,
+  `expected_trigger=restart_last_mission`, `max_settle_time_s=3.0`
+
+Pass/fail additions for these grounded paths:
+
+- `PATH1` fails if `restart_last_mission` is not observed after respawn clears.
+- `PATH2` fails if `GAME_BATTLE_MANUAL` is not entered before respawn recovery.
+- `PATH2` fails if recovery does not return to `GAME_BATTLE` before restart.
+
+The chosen path must determine which event sequence is injected for that run, so the same
+scenario can replay a simple lane or a more complex combat lane without changing the test
+fixture layout.
+
+Injected frames persist until replaced by the next scheduled screenshot in the path.
+
+The first implementation should replay through the `main.py` execution path so timing,
+FSM transitions, controller interactions, and OCR scheduling behave as closely as possible
+to a real run, with live capture replaced by scheduled screenshots.
+
+In replay mode, controller output actions must not be sent to the operating system.
+Instead, actions such as key presses and mouse clicks must be simulated and recorded as
+verifiable intent events. This preserves orchestration realism while preventing real
+desktop input side effects during test execution.
+
+All fixtures must be loaded from `test_screenshots/integration_test`.
 
 ## Phased Rollout
 
@@ -80,13 +187,18 @@ Record at least:
 - Event-to-transition latency per trigger
 - Scenario completion time
 - Transition success ratio
+- Controller action-intent trace (for example PLAY-click intent, key-press intent,
+  flare-deploy intent)
 
 Initial regression policy:
 
-- Fail on missing required transition.
-- Fail on unexpected transition order.
+- Fail a path when any required `expected_state` or `expected_trigger` is missed.
+- Fail a path when required transitions occur out of order.
+- Fail a path when a required transition exceeds its declared `max_settle_time_s`.
 - Warn when latency degrades beyond configured threshold until enough baseline data exists.
 - Promote warning to fail once minimum-session baseline criteria are met.
+
+Path pass/fail is evaluated per selected path, not only at the suite level.
 
 ## Architecture
 

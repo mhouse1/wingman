@@ -26,3 +26,11 @@ dev = [
 
 [tool.uv]
 # optional uv-specific configuration can go here
+
+[tool.pytest.ini_options]
+filterwarnings = [
+	"ignore:torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\..*:DeprecationWarning:easyocr\\.detection",
+	"ignore:torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\..*:DeprecationWarning:easyocr\\.recognition",
+	"ignore:torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\..*:DeprecationWarning:torch\\.ao\\.quantization\\.quantize",
+	"ignore:'pin_memory' argument is set as true but no accelerator is found.*:UserWarning",
+]

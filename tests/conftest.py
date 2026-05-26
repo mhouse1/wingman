@@ -1,10 +1,60 @@
 import pytest
 import sys
 import os
+import warnings
+import re
 from pathlib import Path
 import base64
 import json
 from datetime import datetime
+
+_SUPPRESSED_WARNING_PATTERNS = [
+    re.compile(r"torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\.", re.IGNORECASE),
+    re.compile(r"'pin_memory' argument is set as true but no accelerator is found", re.IGNORECASE),
+]
+
+_ORIGINAL_SHOWWARNING = warnings.showwarning
+
+
+def _wingman_showwarning(message, category, filename, lineno, file=None, line=None):
+    text = str(message)
+    if any(pattern.search(text) for pattern in _SUPPRESSED_WARNING_PATTERNS):
+        return
+    _ORIGINAL_SHOWWARNING(message, category, filename, lineno, file=file, line=line)
+
+
+warnings.showwarning = _wingman_showwarning
+
+_pin_memory_filter = "ignore:'pin_memory' argument is set as true but no accelerator is found.*:UserWarning"
+existing_warning_filters = os.environ.get("PYTHONWARNINGS", "")
+if _pin_memory_filter not in existing_warning_filters:
+    os.environ["PYTHONWARNINGS"] = (
+        f"{existing_warning_filters},{_pin_memory_filter}" if existing_warning_filters else _pin_memory_filter
+    )
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\..*",
+    category=DeprecationWarning,
+    module=r"easyocr\\.detection",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\..*",
+    category=DeprecationWarning,
+    module=r"easyocr\\.recognition",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\..*",
+    category=DeprecationWarning,
+    module=r"torch\\.ao\\.quantization\\.quantize",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"'pin_memory' argument is set as true but no accelerator is found.*",
+    category=UserWarning,
+)
 
 # Import WINGMAN_VERSION from main module
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

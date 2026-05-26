@@ -88,7 +88,7 @@ class _AnalyzerStub:
         self.game_state = state
         self.trigger_calls = []
 
-    def _trigger(self, name: str):
+    def trigger_event(self, name: str):
         self.trigger_calls.append(name)
         return True
 
