@@ -246,7 +246,7 @@ class PerformanceTracker:
         fig.update_layout(
             title_text="Test Performance Trends Over Time",
             height=300 * ((n_tests + 1) // 2),
-            showlegend=True,
+            showlegend=False,
             hovermode='x unified'
         )
         
