@@ -28,6 +28,9 @@ dev = [
 # optional uv-specific configuration can go here
 
 [tool.pytest.ini_options]
+markers = [
+	"slow: slow integration tests requiring real OCR screenshots (deselect with -m 'not slow')",
+]
 filterwarnings = [
 	"ignore:torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\..*:DeprecationWarning:easyocr\\.detection",
 	"ignore:torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\..*:DeprecationWarning:easyocr\\.recognition",

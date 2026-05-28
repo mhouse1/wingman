@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.10"
-WINGMAN_VERSION_DETAILS = "new integration tests, replay assertion engine, and mission restart improvements"
+WINGMAN_VERSION = "1.6.11"
+WINGMAN_VERSION_DETAILS = "first release of integration test framework with replay capture/assertion capabilities"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -436,6 +436,21 @@ def main():
                 now_s = replay_capture.elapsed_s()
                 for step in replay_capture.consume_activated_steps():
                     replay_assertions.on_step_activated(step, now_s)
+                    # Report current state before injecting any trigger so that a
+                    # state assertion on this step evaluates against the pre-transition state.
+                    replay_assertions.on_state(analyzer.game_state.name, now_s)
+                    if step.inject_trigger:
+                        logger.info(
+                            "Replay: injecting FSM trigger '%s' at %.2fs",
+                            step.inject_trigger, now_s,
+                        )
+                        analyzer.trigger_event(step.inject_trigger)
+                        # on_event for the fired trigger is called via _on_fsm_transition callback.
+                        # Also report state AFTER the transition so that a state assertion on this
+                        # step can match the post-transition state (e.g. GAME_END_B after
+                        # click_to_detected fires).  If the assertion already passed on the
+                        # pre-transition report this call is a no-op.
+                        replay_assertions.on_state(analyzer.game_state.name, now_s)
 
             game_state = analyzer.analyze_frame(frame)
 
@@ -616,6 +631,8 @@ def main():
                         restart_not_before = time.time() + respawn_fallback_timeout
                         logger.info("Respawn screen active — will restart %.1fs after screen clears (stuck OCR fallback in %.1fs)",
                                     restart_delay_after_unlock, respawn_fallback_timeout)
+                        if replay_assertions is not None and replay_capture is not None:
+                            replay_assertions.on_event("respawn_detected", replay_capture.elapsed_s())
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 

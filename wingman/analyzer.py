@@ -869,6 +869,8 @@ class GameStateAnalyzer:
                 logger.debug("Saved crop overlay to %s", output_path)
             except Exception as e:
                 logger.warning("Failed to save highlighted grid: %s", e)
+
+
         
         return state
     

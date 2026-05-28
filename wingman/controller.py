@@ -256,6 +256,11 @@ class Controller:
                             # Save screenshot with crop overlays
                             cv2.imwrite(str(filename), frame_with_crops)
                             logger.info("Controller: Screenshot saved to %s with crop overlays", filename)
+
+                            # Save raw screenshot (no overlays) for use in test_screenshots/
+                            raw_filename = output_dir / f"screenshot_{timestamp}_raw.png"
+                            cv2.imwrite(str(raw_filename), frame)
+                            logger.info("Controller: Raw screenshot saved to %s", raw_filename)
                         except Exception as e:
                             logger.exception("Controller: Failed to capture screenshot: %s", e)
                     else:

@@ -34,6 +34,9 @@ Use a compatibility-first Mermaid profile for shared docs:
 - Default to syntax that renders across common Mermaid versions/renderers.
 - Keep node labels plain-language; do not put symbolic expressions (for example `>`, `<`, `<=`, `>=`, or punctuation-heavy logic) inside node declarations.
 - Put equations/conditions in nearby bullets or surrounding prose, not in decision-node text.
+- **Forbidden in node labels and edge labels:** `~`, `/`, `+`, `@`, `#`, `;` — these cause silent parse failures across common renderers. Use plain English instead: "and" for `+`, "approx" for `~`, "via" for `/`, "at" for `@`.
+- **Edge labels** (`-->|text|` syntax) must contain only plain alphanumeric text, spaces, hyphens, and periods. No other punctuation.
+- To include a special character in a node label, wrap the label in double quotes: `A["label text"]` — this requires Mermaid v10+; prefer omitting special characters for maximum compatibility.
 
 Advanced Mermaid features are allowed when both conditions are met:
 

@@ -185,6 +185,12 @@ rd:
 y:
 	$(PYTEST_RUN) tests/test_replay_integration_make_y.py -q
 
+# ADR037 real-OCR integration tests (PATH1 + PATH2).
+# Requires real game screenshots in test_screenshots/integration_test/.
+# All-black placeholder screenshots cause tests to skip automatically.
+ocr:
+	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py -m slow -v
+
 # Two commands are available for calibrating crop regions:
 #
 #   make calibrate

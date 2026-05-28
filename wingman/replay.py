@@ -16,6 +16,7 @@ class ReplayStep:
     expected_state: str | None = None
     expected_trigger: str | None = None
     max_settle_time_s: float | None = None
+    inject_trigger: str | None = None  # FSM trigger to fire when this step activates
 
 
 @dataclass
@@ -36,12 +37,14 @@ def _normalize_step(step: Any) -> ReplayStep:
         expected_state = step.get("expected_state")
         expected_trigger = step.get("expected_trigger")
         max_settle = step.get("max_settle_time_s")
+        inject_trigger = step.get("inject_trigger")
         return ReplayStep(
             screenshot_name=str(screenshot),
             injection_time_s=float(inject),
             expected_state=str(expected_state) if expected_state is not None else None,
             expected_trigger=str(expected_trigger) if expected_trigger is not None else None,
             max_settle_time_s=float(max_settle) if max_settle is not None else None,
+            inject_trigger=str(inject_trigger) if inject_trigger is not None else None,
         )
 
     if isinstance(step, (list, tuple)) and len(step) >= 2:
