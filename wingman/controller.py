@@ -122,10 +122,15 @@ class Controller:
         # lets the hooks skip cancel logic for keys the mission pressed itself.
         self._programmatic_key_count = 0
         self._programmatic_key_lock = threading.Lock()
-        
-        # Register hotkey for weapon loop toggle and other hotkeys
-        if keyboard_module and not self._disable_hotkeys:
-            # Exit script hotkey (Backspace)
+
+        # Optional callback fired immediately when Good Luck OCR succeeds, with the
+        # captured frame.  Used by live capture mode to record the fixture at the
+        # moment of detection rather than 13s later when the FSM trigger fires.
+        self._on_good_luck_frame = None
+
+        # Exit script hotkey (Backspace) — always registered regardless of disable_hotkeys
+        # so Backspace terminates wingman in replay and capture modes too.
+        if keyboard_module:
             try:
                 def exit_script_hotkey(e):
                     logger.info("Controller: Backspace key pressed - exiting script")
@@ -136,6 +141,8 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register exit script hotkey")
 
+        # Register hotkey for weapon loop toggle and other hotkeys
+        if keyboard_module and not self._disable_hotkeys:
             # Cancel mission hotkey (End)
             try:
                 self._last_cancel_key_ts = 0.0
@@ -1155,6 +1162,11 @@ class Controller:
                     frame = np.array(s)[:, :, :3]
                 if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame):
                     good_luck_event.set()
+                    if self._on_good_luck_frame is not None:
+                        try:
+                            self._on_good_luck_frame(frame)
+                        except Exception:
+                            logger.exception("Controller: on_good_luck_frame callback error")
             except Exception:
                 logger.exception("Controller: game_starting OCR scan error")
             finally:

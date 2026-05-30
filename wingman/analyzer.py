@@ -19,6 +19,7 @@ from .crop_region import get_crop, load_crops, draw_crops
 
 
 class GameState(Enum):
+    GAME_UNKNOWN         = auto()  # Startup state; classify current frame before normal runtime flow
     GAME_BATTLE          = auto()  # Active gameplay (default); respawn/incoming scanning active
     GAME_END_B           = auto()  # "Click to Continue" detected; clicking in progress
     GAME_LOBBY           = auto()  # Final continue (region 64) clicked; waiting in lobby
@@ -316,6 +317,9 @@ def _respawn_text_matches(text_clean: str) -> bool:
 # Crops that are relevant for each game state.  Only these will be overlaid
 # on debug screenshots — all others are filtered out.
 _STATE_CROPS: "dict[GameState, set[str]]" = {
+    GameState.GAME_UNKNOWN: {
+        "PLAY", "READY", "UNREADY", "click_to", "HEALTH",
+    },
     GameState.GAME_BATTLE: {
         "respawn", "incoming", "click_to",
         "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY",
@@ -349,6 +353,9 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
 # ============================================================================
 
 _FSM_TRANSITIONS = [
+    {"trigger": "unknown_to_end_detected",    "source": "GAME_UNKNOWN",          "dest": "GAME_END_B"},
+    {"trigger": "unknown_to_lobby_detected",  "source": "GAME_UNKNOWN",          "dest": "GAME_LOBBY"},
+    {"trigger": "unknown_to_battle_detected", "source": "GAME_UNKNOWN",          "dest": "GAME_BATTLE"},
     {"trigger": "play_clicked",        "source": "GAME_LOBBY",            "dest": "GAME_WAITING"},
     {"trigger": "cancel_detected",    "source": "GAME_LOBBY",            "dest": "GAME_STARTING"},
     {"trigger": "cancel_detected",    "source": "GAME_WAITING",          "dest": "GAME_STARTING"},
@@ -384,6 +391,7 @@ class GameStateAnalyzer:
             tracker: Optional PerformanceTracker instance (ADR 031)
         """
         self._tracker = tracker
+        startup_cfg = config.get("startup_state_detection", {})
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
 
@@ -451,12 +459,16 @@ class GameStateAnalyzer:
         self._on_lobby_play_click = None         # injected by main.py; called with crop name when PLAY/READY detected
         self._on_lobby_popup_click = None        # injected by main.py; called with popup crop name when a popup is detected
         self._on_fsm_transition = None           # injected by main.py; called after successful state transitions
+        self._on_respawn_detected = None          # injected by main.py; called with the OCR frame when RESPAWN is first detected
+        self._unknown_debounce_required = max(1, int(startup_cfg.get("debounce_consecutive_required", 2)))
+        self._unknown_candidate_state: "GameState | None" = None
+        self._unknown_candidate_count = 0
 
         Machine(
             model=self,
             states=[s.name for s in GameState],
             transitions=_FSM_TRANSITIONS,
-            initial=GameState.GAME_LOBBY.name,
+            initial=GameState.GAME_UNKNOWN.name,
             ignore_invalid_triggers=False,
         )
 
@@ -615,6 +627,14 @@ class GameStateAnalyzer:
         """
         self._on_fsm_transition = callback
 
+    def set_on_respawn_detected(self, callback):
+        """Set callback invoked when RESPAWN OCR succeeds.
+
+        Callback signature: (frame: np.ndarray) where frame is the full BGR frame
+        used for the OCR scan.  Called from the background OCR thread.
+        """
+        self._on_respawn_detected = callback
+
     def trigger_event(self, name: str) -> bool:
         """Dispatch an FSM trigger via the thread-safe trigger wrapper."""
         return self._trigger(name)
@@ -716,6 +736,10 @@ class GameStateAnalyzer:
             self._health_window.clear()
             self._health_ceiling = None
 
+    def on_enter_GAME_UNKNOWN(self):
+        self._unknown_candidate_state = None
+        self._unknown_candidate_count = 0
+
     def on_enter_GAME_STARTING(self):
         pass
 
@@ -801,7 +825,53 @@ class GameStateAnalyzer:
             self._click_to_latest_frame = frame
             self._click_to_frame_ts = time.time()
 
-        # Start background threads once on first frame
+        state = {
+            'is_respawning': False,
+            'respawn_confidence': 0.0,
+            'respawn_method': None,
+            'is_incoming': False,
+            'incoming_confidence': 0.0,
+            'incoming_method': None,
+            'is_click_to': False,
+            'click_to_method': None,
+            'health': None,
+            'game_battle_alive': False,
+            'game_state': self.game_state,
+        }
+
+        if self.game_state == GameState.GAME_UNKNOWN:
+            candidate = self._classify_unknown_state(frame)
+            if candidate is None:
+                self._unknown_candidate_state = None
+                self._unknown_candidate_count = 0
+            elif candidate == self._unknown_candidate_state:
+                self._unknown_candidate_count += 1
+            else:
+                self._unknown_candidate_state = candidate
+                self._unknown_candidate_count = 1
+
+            if (
+                self._unknown_candidate_state is not None
+                and self._unknown_candidate_count >= self._unknown_debounce_required
+            ):
+                trigger_name = {
+                    GameState.GAME_END_B: "unknown_to_end_detected",
+                    GameState.GAME_LOBBY: "unknown_to_lobby_detected",
+                    GameState.GAME_BATTLE: "unknown_to_battle_detected",
+                }[self._unknown_candidate_state]
+                if self._trigger(trigger_name):
+                    logger.info(
+                        "FSM: GAME_UNKNOWN classified as %s via %s",
+                        self.game_state.name,
+                        trigger_name,
+                    )
+                self._unknown_candidate_state = None
+                self._unknown_candidate_count = 0
+
+            state['game_state'] = self.game_state
+            return state
+
+        # Start background threads once on first frame after unknown-state classification.
         if not self._click_to_thread_started:
             self._click_to_thread_started = True
             threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
@@ -817,20 +887,6 @@ class GameStateAnalyzer:
                 target=self._run_game_lobby_quick_scan, daemon=True)
             self._lobby_quick_scan_thread.start()
             logger.info("Lobby quick-scan background thread started")
-
-        state = {
-            'is_respawning': False,
-            'respawn_confidence': 0.0,
-            'respawn_method': None,
-            'is_incoming': False,
-            'incoming_confidence': 0.0,
-            'incoming_method': None,
-            'is_click_to': False,
-            'click_to_method': None,
-            'health': None,
-            'game_battle_alive': False,
-            'game_state': self.game_state,
-        }
 
         respawn_detected, confidence, method = self._detect_respawn(frame)
         
@@ -992,6 +1048,11 @@ class GameStateAnalyzer:
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
                         if self.game_state == GameState.GAME_END_B:
                             self._trigger("respawn_detected")
+                        if self._on_respawn_detected is not None:
+                            try:
+                                self._on_respawn_detected(full_frame)
+                            except Exception:
+                                logger.exception("Analyzer: on_respawn_detected callback error")
 
                     respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
                     with self._ocr_cache_lock:
@@ -1162,7 +1223,7 @@ class GameStateAnalyzer:
         interval = 5.0
         while not self._click_to_stop.wait(timeout=interval):
             state = self.game_state
-            if state in (GameState.GAME_STARTING, GameState.GAME_WAITING):
+            if state in (GameState.GAME_UNKNOWN, GameState.GAME_STARTING, GameState.GAME_WAITING):
                 continue
             if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
                 logger.debug("Click-to OCR skipped: %s state active", state.name)
@@ -1463,8 +1524,64 @@ class GameStateAnalyzer:
             'click_to_method': None,
             'health': None,
             'game_battle_alive': False,
-            'game_state': GameState.GAME_BATTLE,
+            'game_state': GameState.GAME_UNKNOWN,
         }
+
+    def _classify_unknown_state(self, frame) -> "GameState | None":
+        """Classify startup GAME_UNKNOWN frame into a known runtime state.
+
+        Precedence: GAME_END_B > GAME_LOBBY > GAME_BATTLE.
+        """
+        if self.scan_region_for_click_to(frame):
+            return GameState.GAME_END_B
+
+        if self.scan_region_for_play_button(frame) is not None:
+            return GameState.GAME_LOBBY
+
+        health_value = self._scan_region_for_health_value(frame)
+        if health_value is not None:
+            return GameState.GAME_BATTLE
+
+        return None
+
+    def scan_region_for_click_to(self, frame) -> bool:
+        """Synchronously scan the click_to crop for the end-of-round prompt."""
+        if "click_to" not in self.crops:
+            return False
+        executor = self.ocr_executor
+        if executor is None:
+            return False
+        try:
+            region_frame = get_crop(frame, *self.crops["click_to"][:4])
+            detected, _, _ = executor.submit(
+                _process_text_region, region_frame, self.crops["click_to"].text or []
+            ).result(timeout=30)
+            return bool(detected)
+        except Exception as e:
+            logger.debug("Analyzer: click_to scan failed in unknown classification: %s", e)
+            return False
+
+    def _scan_region_for_health_value(self, frame) -> "int | None":
+        """Return numeric health OCR value from HEALTH crop, or None if unavailable."""
+        if "HEALTH" not in self.crops:
+            return None
+        try:
+            health_frame = get_crop(frame, *self.crops["HEALTH"][:4])
+            if not np.any(health_frame):
+                return None
+        except Exception as e:
+            logger.debug("Analyzer: health crop failed in unknown classification: %s", e)
+            return None
+
+        executor = self.ocr_executor
+        if executor is None:
+            return None
+        try:
+            health_value, _ = executor.submit(_process_health_region, health_frame).result(timeout=30)
+            return health_value
+        except Exception as e:
+            logger.debug("Analyzer: health OCR failed in unknown classification: %s", e)
+            return None
     
     def reset_cache(self):
         """Reset OCR caches - useful when switching between different images/scenes."""
