@@ -97,70 +97,78 @@ def _build_test_config(tmp_path: Path) -> Path:
 
 def _build_path1_ocr_yaml(tmp_path: Path) -> Path:
     """Write PATH1_OCR with generous settle windows for real OCR timing."""
-    content = """\
-# PATH1_OCR: real-OCR timing clone of PATH1.
-# Injection times are stretched so EasyOCR initialisation (~5-10 s) completes
-# before the first assertion window opens.
-PATH1_OCR:
-  # LOBBY screenshot stays for 10 s.  OCR warms up; lobby quick-scan detects
-  # PLAY and fires play_clicked -> GAME_WAITING within that window.
-  - screenshot_name: P1_000_LOBBY_PLAY.png
-    injection_time_s: 0.0
-  # WAITING screenshot injected at t=10 s.  CANCEL should be detected within 8 s.
-  - screenshot_name: P1_010_WAITING_CANCEL_VISIBLE.png
-    injection_time_s: 10.0
-    expected_state: GAME_WAITING
-    expected_trigger: cancel_detected
-    max_settle_time_s: 8.0
-  # GOOD_LUCK at t=20 s.  OCR must detect the text within 8 s.
-  - screenshot_name: P1_020_GOOD_LUCK_VISIBLE.png
-    injection_time_s: 20.0
-    expected_state: GAME_STARTING
-    expected_trigger: good_luck_detected
-    max_settle_time_s: 8.0
-  # BATTLE (missiles=4) at t=30 s.  state_enter:game_battle fires immediately.
-  - screenshot_name: P1_030_BATTLE_HUD_MISSILES_4.png
-    injection_time_s: 30.0
-    expected_state: GAME_BATTLE
-    expected_trigger: battle_started
-    max_settle_time_s: 5.0
-  # BATTLE (missiles=0, player still alive — no eject, stays GAME_BATTLE) at t=40 s.
-  # PATH1 exercises the "alive-when-empty" branch; PATH2 exercises eject+manual_takeover.
-  - screenshot_name: P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png
-    injection_time_s: 40.0
-    expected_state: GAME_BATTLE
-    expected_trigger: missiles_empty
-    max_settle_time_s: 8.0
-  # RESPAWN at t=60 s.  Respawn OCR runs in background; allow 12 s.
-  - screenshot_name: P1_050_RESPAWN_VISIBLE_NO_HEALTH.png
-    injection_time_s: 60.0
-    expected_state: GAME_BATTLE
-    expected_trigger: respawn_detected
-    max_settle_time_s: 12.0
-  # ALIVE at t=75 s.  Health OCR detects alive; restart_last_mission fires.
-  - screenshot_name: P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png
-    injection_time_s: 75.0
-    expected_state: GAME_BATTLE
-    expected_trigger: restart_last_mission
-    max_settle_time_s: 12.0
-  # End-of-mission screen at t=88 s.  inject_trigger forces FSM into GAME_END_B.
-  # (P1_060 deadline is t=87 s; 1 s buffer before this step activates.)
-  - screenshot_name: P1_070_CLICK_TO_CONTINUE.png
-    injection_time_s: 88.0
-    expected_state: GAME_END_B
-    expected_trigger: click_to_detected
-    max_settle_time_s: 5.0
-    inject_trigger: click_to_detected
-  # Back to LOBBY at t=89 s.  inject_trigger fires continue_clicked.
-  - screenshot_name: P1_080_LOBBY_AFTER_MISSION.png
-    injection_time_s: 89.0
-    expected_state: GAME_LOBBY
-    expected_trigger: continue_clicked
-    max_settle_time_s: 5.0
-    inject_trigger: continue_clicked
-"""
+    payload = {
+        "PATH1_OCR": [
+            {
+                "screenshot_name": "P1_000_LOBBY_PLAY.png",
+                "injection_time_s": 0.0,
+                "expected_state": "GAME_LOBBY",
+            },
+            {
+                "screenshot_name": "P1_010_WAITING_CANCEL_VISIBLE.png",
+                "injection_time_s": 10.0,
+                "expected_state": "GAME_WAITING",
+                "expected_trigger": "cancel_detected",
+                "max_settle_time_s": 8.0,
+            },
+            {
+                "screenshot_name": "P1_020_GOOD_LUCK_VISIBLE.png",
+                "injection_time_s": 20.0,
+                "expected_state": "GAME_STARTING",
+                "expected_trigger": "good_luck_detected",
+                "max_settle_time_s": 8.0,
+            },
+            {
+                "screenshot_name": "P1_030_BATTLE_HUD_MISSILES_4.png",
+                "injection_time_s": 30.0,
+                "expected_state": "GAME_BATTLE",
+                "expected_trigger": "battle_started",
+                "max_settle_time_s": 5.0,
+            },
+            {
+                "screenshot_name": "P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png",
+                "injection_time_s": 40.0,
+                "expected_state": "GAME_BATTLE",
+                "expected_trigger": "missiles_empty",
+                "max_settle_time_s": 8.0,
+            },
+            {
+                "screenshot_name": "P1_050_RESPAWN_VISIBLE_NO_HEALTH.png",
+                "injection_time_s": 60.0,
+                "expected_state": "GAME_BATTLE",
+                "expected_trigger": "respawn_detected",
+                "max_settle_time_s": 12.0,
+            },
+            {
+                "screenshot_name": "P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png",
+                "injection_time_s": 75.0,
+                "expected_state": "GAME_BATTLE",
+                "expected_trigger": "restart_last_mission",
+                "max_settle_time_s": 12.0,
+            },
+            {
+                "screenshot_name": "P1_070_CLICK_TO_CONTINUE.png",
+                "injection_time_s": 88.0,
+                "expected_state": "GAME_END_B",
+                "expected_trigger": "click_to_detected",
+                "max_settle_time_s": 5.0,
+                "inject_trigger": "click_to_detected",
+            },
+            {
+                "screenshot_name": "P1_080_LOBBY_AFTER_MISSION.png",
+                "injection_time_s": 89.0,
+                "expected_state": "GAME_LOBBY",
+                "expected_trigger": "continue_clicked",
+                "max_settle_time_s": 5.0,
+                "inject_trigger": "continue_clicked",
+            },
+        ]
+    }
     out = tmp_path / "path1_ocr.yaml"
-    out.write_text(content, encoding="utf-8")
+    out.write_text(
+        yaml.dump(payload, default_flow_style=None, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
     return out
 
 

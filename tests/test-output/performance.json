@@ -1,108 +1,186 @@
 {
-  "timestamp": "2026-05-28T05:10:56.747148",
+  "timestamp": "2026-05-29T21:24:29.569119",
   "version": "1.6.11",
   "tests": {
-    "test_wingman_smoke_launch": {
-      "duration": 0.00018970004748553038,
+    "test_live_capture_engine_quality_gate_rejects_black_frame": {
+      "duration": 0.00029150000773370266,
       "runs": 1,
-      "min": 0.00018970004748553038,
-      "max": 0.00018970004748553038
+      "min": 0.00029150000773370266,
+      "max": 0.00029150000773370266
     },
-    "test_level1_static_screenshot": {
-      "duration": 13.072546999901533,
+    "test_live_capture_engine_captures_after_debounce": {
+      "duration": 0.0017239999724552035,
       "runs": 1,
-      "min": 13.072546999901533,
-      "max": 13.072546999901533
+      "min": 0.0017239999724552035,
+      "max": 0.0017239999724552035
+    },
+    "test_live_capture_engine_existing_file_is_terminal_failure": {
+      "duration": 0.0036222999915480614,
+      "runs": 1,
+      "min": 0.0036222999915480614,
+      "max": 0.0036222999915480614
+    },
+    "test_live_capture_engine_summary_records_absolute_timestamps": {
+      "duration": 0.0013100000796839595,
+      "runs": 1,
+      "min": 0.0013100000796839595,
+      "max": 0.0013100000796839595
+    },
+    "test_live_capture_engine_state_enter_trigger_ready_from_current_state": {
+      "duration": 0.0016815999988466501,
+      "runs": 1,
+      "min": 0.0016815999988466501,
+      "max": 0.0016815999988466501
+    },
+    "test_live_capture_engine_auto_resumes_to_matching_state": {
+      "duration": 0.0013877000892534852,
+      "runs": 1,
+      "min": 0.0013877000892534852,
+      "max": 0.0013877000892534852
+    },
+    "test_live_capture_engine_auto_resume_waits_for_known_state": {
+      "duration": 0.0010101000079885125,
+      "runs": 1,
+      "min": 0.0010101000079885125,
+      "max": 0.0010101000079885125
+    },
+    "test_live_capture_engine_lookahead_buffer_captures_next_step": {
+      "duration": 0.002081400016322732,
+      "runs": 1,
+      "min": 0.002081400016322732,
+      "max": 0.002081400016322732
+    },
+    "test_live_capture_engine_lookahead_buffer_chains_two_steps": {
+      "duration": 0.0038373999996110797,
+      "runs": 1,
+      "min": 0.0038373999996110797,
+      "max": 0.0038373999996110797
+    },
+    "test_live_capture_engine_timeout_retry_mode_does_not_fail_or_advance": {
+      "duration": 0.00021410000044852495,
+      "runs": 1,
+      "min": 0.00021410000044852495,
+      "max": 0.00021410000044852495
+    },
+    "test_live_capture_engine_out_of_order_mode_captures_later_step_first": {
+      "duration": 0.0018820000113919377,
+      "runs": 1,
+      "min": 0.0018820000113919377,
+      "max": 0.0018820000113919377
+    },
+    "test_live_capture_engine_reuse_from_copies_existing_file": {
+      "duration": 0.005503499996848404,
+      "runs": 1,
+      "min": 0.005503499996848404,
+      "max": 0.005503499996848404
+    },
+    "test_live_capture_engine_out_of_order_requires_fresh_trigger": {
+      "duration": 0.00033569999504834414,
+      "runs": 1,
+      "min": 0.00033569999504834414,
+      "max": 0.00033569999504834414
     },
     "test_respawn_detection_positive": {
-      "duration": 18.42332156666089,
-      "runs": 3,
-      "min": 2.64715159998741,
-      "max": 42.30010640004184
+      "duration": 21.28420274995733,
+      "runs": 2,
+      "min": 4.58028709993232,
+      "max": 37.98811839998234
     },
     "test_respawn_detection_negative": {
-      "duration": 24.464109266681287,
-      "runs": 3,
-      "min": 12.979401499964297,
-      "max": 30.334808600018732
-    },
-    "test_level2_live_capture": {
-      "duration": 5.656599499983713,
-      "runs": 1,
-      "min": 5.656599499983713,
-      "max": 5.656599499983713
-    },
-    "test_get_frame_and_analyze_frame": {
-      "duration": 0.06704700004775077,
-      "runs": 1,
-      "min": 0.06704700004775077,
-      "max": 0.06704700004775077
-    },
-    "test_level3_unit_ocr": {
-      "duration": 5.537365399999544,
-      "runs": 1,
-      "min": 5.537365399999544,
-      "max": 5.537365399999544
-    },
-    "test_level4_region33_contains_lick_to_c": {
-      "duration": 1.2271376000717282,
+      "duration": 30.26760690001538,
       "runs": 2,
-      "min": 0.17512570007238537,
-      "max": 2.279149500071071
-    },
-    "test_level4_region9_contains_inco": {
-      "duration": 0.16491316670241454,
-      "runs": 3,
-      "min": 0.1625111000612378,
-      "max": 0.1691476000705734
-    },
-    "test_level5_performance_validation": {
-      "duration": 0.010825200006365776,
-      "runs": 1,
-      "min": 0.010825200006365776,
-      "max": 0.010825200006365776
-    },
-    "test_click_through_game_end_transitions_to_lobby": {
-      "duration": 0.0002169000217691064,
-      "runs": 1,
-      "min": 0.0002169000217691064,
-      "max": 0.0002169000217691064
+      "min": 30.160841000033543,
+      "max": 30.374372799997218
     },
     "test_respawn_text_matches": {
-      "duration": 0.0004421111015189025,
+      "duration": 0.0004679777840566304,
       "runs": 9,
-      "min": 0.00025189993903040886,
-      "max": 0.0005344999954104424
+      "min": 0.0002739999908953905,
+      "max": 0.0006262999959290028
     },
     "test_game_starting_blocks_respawn_detection": {
-      "duration": 0.13088250008877367,
+      "duration": 0.15090979996602982,
       "runs": 1,
-      "min": 0.13088250008877367,
-      "max": 0.13088250008877367
+      "min": 0.15090979996602982,
+      "max": 0.15090979996602982
     },
     "test_game_battle_does_not_block_respawn_detection": {
-      "duration": 0.12480660004075617,
+      "duration": 0.14753219997510314,
       "runs": 1,
-      "min": 0.12480660004075617,
-      "max": 0.12480660004075617
+      "min": 0.14753219997510314,
+      "max": 0.14753219997510314
     },
     "test_game_end_b_blocks_background_ocr_scheduling": {
-      "duration": 0.11628770001698285,
+      "duration": 0.1604941999539733,
       "runs": 1,
-      "min": 0.11628770001698285,
-      "max": 0.11628770001698285
+      "min": 0.1604941999539733,
+      "max": 0.1604941999539733
     },
     "test_waiting_cancel_baseline_capture_and_diff": {
-      "duration": 0.0034121000207960606,
+      "duration": 0.004121400066651404,
       "runs": 1,
-      "min": 0.0034121000207960606,
-      "max": 0.0034121000207960606
+      "min": 0.004121400066651404,
+      "max": 0.004121400066651404
     },
     "test_waiting_cancel_diff_none_without_baseline": {
-      "duration": 0.0004754000110551715,
+      "duration": 0.0005865999264642596,
       "runs": 1,
-      "min": 0.0004754000110551715,
-      "max": 0.0004754000110551715
+      "min": 0.0005865999264642596,
+      "max": 0.0005865999264642596
+    },
+    "test_unknown_starts_and_classifies_to_lobby_with_debounce": {
+      "duration": 0.03263699996750802,
+      "runs": 1,
+      "min": 0.03263699996750802,
+      "max": 0.03263699996750802
+    },
+    "test_unknown_precedence_prefers_end_over_lobby_and_battle": {
+      "duration": 0.03964889992494136,
+      "runs": 1,
+      "min": 0.03964889992494136,
+      "max": 0.03964889992494136
+    },
+    "test_unknown_stays_unknown_without_classifier_hit": {
+      "duration": 0.03892760002054274,
+      "runs": 1,
+      "min": 0.03892760002054274,
+      "max": 0.03892760002054274
+    },
+    "test_cleanup_shuts_down_executor": {
+      "duration": 60.12057959998492,
+      "runs": 1,
+      "min": 60.12057959998492,
+      "max": 60.12057959998492
+    },
+    "test_cleanup_signals_click_to_thread": {
+      "duration": 60.1204644999234,
+      "runs": 1,
+      "min": 60.1204644999234,
+      "max": 60.1204644999234
+    },
+    "test_context_manager_calls_cleanup": {
+      "duration": 33.7468151000794,
+      "runs": 1,
+      "min": 33.7468151000794,
+      "max": 33.7468151000794
+    },
+    "test_no_threads_leaked_after_cleanup": {
+      "duration": 24.31966649997048,
+      "runs": 1,
+      "min": 24.31966649997048,
+      "max": 24.31966649997048
+    },
+    "test_trigger_runs_side_effect_callbacks_outside_state_lock": {
+      "duration": 0.001715799910016358,
+      "runs": 1,
+      "min": 0.001715799910016358,
+      "max": 0.001715799910016358
+    },
+    "test_fsm_unattended_lifecycle_and_starting_loop_callbacks": {
+      "duration": 0.0010960000799968839,
+      "runs": 1,
+      "min": 0.0010960000799968839,
+      "max": 0.0010960000799968839
     }
   }
 }

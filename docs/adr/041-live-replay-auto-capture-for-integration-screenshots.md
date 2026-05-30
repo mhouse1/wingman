@@ -19,6 +19,10 @@ Today, screenshot collection is still manual:
 This creates avoidable operator burden and naming risk. The replay model already defines
 exact filenames and expected triggers/states, so capture should be automatable.
 
+With ADR 042, Wingman startup enters `GAME_UNKNOWN` and classifies into a known state.
+Capture mode must therefore tolerate unknown-at-start and then proceed from the detected
+known state without forcing an operator reset.
+
 ## Decision
 
 Add a **live auto-capture mode** that runs Wingman against the real game feed and writes
@@ -29,6 +33,13 @@ The mode captures each step when its condition is satisfied and stores the raw f
 
 - `test_screenshots/integration_test/<screenshot_name>`
 
+Version 1 capture policy in this ADR:
+
+- Save raw PNG only for fixture output.
+- Do not save overlay variants in capture mode.
+- Apply a basic quality gate before accepting a capture:
+  resolution must match the configured capture region and the frame must not be all-black.
+
 This mode is for fixture generation only and does not replace replay test execution.
 
 ## Goals
@@ -37,6 +48,8 @@ This mode is for fixture generation only and does not replace replay test execut
 - Keep capture naming fully deterministic from replay path config.
 - Capture frames from real runtime analyzer/FSM behavior.
 - Support both PATH1 and PATH2 collection in separate runs.
+- Support recovery-first operation where capture can resume after restart/crash from the
+  current on-screen game state.
 
 ## Non-Goals
 
@@ -63,6 +76,29 @@ Optional helper:
 ## Capture Semantics
 
 Each step in the selected path is captured once.
+
+Operational collection model:
+
+- The primary fixture refresh workflow is running `make newpaths CAPTURE_PATH=PATH1`
+  or `make newpaths CAPTURE_PATH=PATH2` while Wingman runs naturally.
+- In this workflow, capture is opportunistic: screenshots may be collected out of
+  path order as states and triggers occur during real gameplay.
+- This is intentional for fixture collection speed and resilience. Deterministic
+  transition order and timing guarantees are validated later by ADR 037 replay assertions.
+
+Non-strict-only policy:
+
+- Capture mode is non-strict by design.
+- Per-step timeouts do not force step failure/advance during collection runs; capture
+  keeps waiting for naturally occurring states and triggers.
+- Out-of-order capture is first-class behavior for fixture refresh workflows.
+
+Startup behavior:
+
+- Capture mode may begin while analyzer state is `GAME_UNKNOWN`.
+- No path step is evaluated as ready until unknown-state classification transitions to a
+  known runtime state.
+- After classification, normal step readiness rules apply.
 
 Step readiness rules:
 
@@ -124,8 +160,9 @@ Summary JSON (`--capture-summary`) includes:
 
 - Default behavior keeps overwrite disabled to prevent accidental fixture clobbering.
 - If target file exists and overwrite disabled, mark step skipped with reason.
-- Fail capture run if any required step not captured.
-- Log explicit operator guidance for next missing step on timeout.
+- Reject candidate frames that fail the quality gate and keep waiting until timeout.
+- Log explicit operator guidance for currently missing steps.
+- Record whether startup required unknown-state classification before first capture step.
 
 ## Alternatives Considered
 
@@ -161,14 +198,14 @@ Trade-offs:
 
 - Running capture mode for PATH1 or PATH2 creates the full expected filename set for that
   path with zero manual rename.
-- Capture summary reports all steps captured or explicit per-step timeout reasons.
+- `make newpaths` can collect required screenshots while Wingman runs naturally,
+  including out-of-order capture when live gameplay does not follow a strict sequence.
+- Capture summary reports per-step capture status and any retry/quality notes for
+  screenshots still pending at run end.
+- Captured fixtures pass the basic quality gate (resolution match and non-black frame).
+- Capture can resume from a warm game session after Wingman restart, including startup
+  from `GAME_UNKNOWN` to the first eligible path step.
 - Existing test commands continue to pass:
   - `make test`
   - `make y`
   - OCR tests remain skippable when placeholders are present.
-
-## Open Questions
-
-- Should capture mode optionally save both raw and overlay versions for review?
-- Do we want a minimal quality check (non-black frame, resolution match) before accepting
-  a captured step?

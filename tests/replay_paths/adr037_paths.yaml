@@ -5,6 +5,7 @@
 PATH1:
   - screenshot_name: P1_000_LOBBY_PLAY.png
     injection_time_s: 0.0
+    expected_state: GAME_LOBBY
   - screenshot_name: P1_010_WAITING_CANCEL_VISIBLE.png
     injection_time_s: 1.2
     expected_state: GAME_WAITING
@@ -47,6 +48,7 @@ PATH1:
     expected_trigger: continue_clicked
     max_settle_time_s: 3.0
     inject_trigger: continue_clicked
+    reuse_from: P1_000_LOBBY_PLAY.png
 
 PATH2:
   - screenshot_name: P2_000_BATTLE_HUD_MISSILES_4.png

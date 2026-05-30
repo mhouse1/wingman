@@ -25,13 +25,17 @@
 #   make r           -> run wingman (INFO console only)
 #   make rd          -> run wingman with DEBUG log written to wingman.log
 #   make y           -> run ADR37 replay integration smoke test (placeholder screenshots)
+#   make newpaths    -> capture screenshots for PATH1 or PATH2 using live Wingman play
+#   make p1          -> capture screenshots for PATH1 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y calibrate calibrate-crop add-crops
+.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y newpaths p1 calibrate calibrate-crop add-crops
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
 PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pytest)
 PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
+CAPTURE_PATH ?= PATH1
+CAPTURE_TIMEOUT_S ?= 120.0
 
 # Generate HTML report for automated levels test
 test:
@@ -190,6 +194,26 @@ y:
 # All-black placeholder screenshots cause tests to skip automatically.
 ocr:
 	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py -m slow -v
+
+# Live capture screenshots for ADR037 replay paths.
+# Example:
+#   make newpaths CAPTURE_PATH=PATH1
+#   make newpaths CAPTURE_PATH=PATH2
+newpaths:
+	$(PYTHON_RUN) -m wingman.main \
+		--config wingman/config.yaml \
+		--capture-path-config tests/replay_paths/adr037_paths.yaml \
+		--capture-path $(CAPTURE_PATH) \
+		--capture-screenshot-dir test_screenshots/integration_test \
+		--capture-overwrite \
+		--capture-allow-inject \
+		--capture-timeout-s $(CAPTURE_TIMEOUT_S) \
+		--capture-summary tests/test-output/capture_summary_$(CAPTURE_PATH).json \
+		--log-level INFO
+
+# Shortcut: refresh PATH1 screenshots.
+p1:
+	$(MAKE) newpaths CAPTURE_PATH=PATH1
 
 # Two commands are available for calibrating crop regions:
 #

@@ -10,6 +10,11 @@ Current tests cover unit behavior and selected static screenshot checks, but the
 single deterministic integration harness that replays a full game-flow timeline and
 measures end-to-end response timing for OCR-driven transitions.
 
+With ADR 042, runtime startup now begins in `GAME_UNKNOWN` and classifies into a known
+state before normal flow continues. Replay fixtures and path assertions must remain
+compatible with this startup model so replay and live capture do not diverge in expected
+state sequencing.
+
 Recent incidents showed that state transitions can fail or stall when signal windows are
 brief. We need a repeatable way to detect this class of regressions before runtime use.
 
@@ -24,6 +29,11 @@ intervals and validates both:
 This harness will run in CI as a deterministic regression gate and will emit artifacts
 compatible with the existing performance tracking workflow.
 
+The replay schedule remains anchored to known gameplay states (`GAME_LOBBY`,
+`GAME_WAITING`, `GAME_STARTING`, `GAME_BATTLE`, `GAME_END_B`) and does not require
+fixture steps for `GAME_UNKNOWN`. Unknown-state startup classification is validated by
+ADR 042 tests, then replay assertions begin from the first known-state step.
+
 ## Scope
 
 In scope:
@@ -34,6 +44,8 @@ In scope:
   boundary and recorded as action intents
 - Assertions for expected transition sequence and timeout windows
 - Per-run metrics artifact for transition latency statistics
+- Compatibility with `GAME_UNKNOWN` startup classification by treating replay assertions
+  as post-classification checks on known states.
 
 Out of scope for this ADR:
 
@@ -80,6 +92,15 @@ If any required screenshots are missing at implementation time, those screenshot
 captured after ADR 037 is implemented and then added to the replay fixture set.
 
 Paths model different gameplay sequences and are chosen per replay run.
+
+Fixture sourcing contract:
+
+- PATH definitions are derived from observed production/runtime behavior in
+  `wingman.log` and kept as the replay source-of-truth contract.
+- Screenshots for those paths are collected via ADR 041 capture workflow (for
+  example `make newpaths CAPTURE_PATH=PATH1`) while Wingman runs naturally.
+- Capture may occur out of order; replay remains deterministic because this ADR
+  enforces strict ordering and timing at test execution time.
 
 ### Grounded Initial Paths (from wingman.log)
 
@@ -289,6 +310,20 @@ within `max_settle_time_s` of the injection time.
 The wiring tier (SMOKE_PATH) may retain a fake analyzer for speed and to avoid GPU
 dependencies in CI. The OCR regression tier requires EasyOCR and curated screenshots and
 may run in a separate, slower CI job.
+
+## Relationship to Live Capture and Unknown Startup
+
+- ADR 041 is the source of truth for live `CAPTURE_PATH` generation.
+- ADR 042 is the source of truth for startup classification from `GAME_UNKNOWN`.
+- ADR 037 consumes fixtures produced by ADR 041 and validates post-classification runtime
+  transitions in deterministic replay.
+
+Cross-ADR contract:
+
+- Live capture may start from any current screen and resume after crash/restart.
+- Live capture may collect required screenshots out of sequence during natural runs.
+- Replay assertions remain deterministic because they evaluate known-state transitions,
+  not unknown-state detection confidence.
 
 ## Phased Rollout
 

@@ -238,3 +238,57 @@ def test_waiting_cancel_diff_none_without_baseline(analyzer: GameStateAnalyzer):
 
     diff = analyzer.compute_waiting_cancel_diff(frame)
     assert diff is None
+
+
+def test_unknown_starts_and_classifies_to_lobby_with_debounce(monkeypatch):
+    a = GameStateAnalyzer(load_config())
+    transitions = []
+    a.set_on_fsm_transition(lambda trigger, _prev, _next, _ts: transitions.append(trigger))
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(a, "scan_region_for_click_to", lambda _frame: False)
+    monkeypatch.setattr(a, "scan_region_for_play_button", lambda _frame: "PLAY")
+    monkeypatch.setattr(a, "_scan_region_for_health_value", lambda _frame: None)
+
+    try:
+        assert a.game_state == GameState.GAME_UNKNOWN
+        a.analyze_frame(frame)
+        assert a.game_state == GameState.GAME_UNKNOWN
+        a.analyze_frame(frame)
+        assert a.game_state == GameState.GAME_LOBBY
+        assert "unknown_to_lobby_detected" in transitions
+    finally:
+        a.cleanup()
+
+
+def test_unknown_precedence_prefers_end_over_lobby_and_battle(monkeypatch):
+    a = GameStateAnalyzer(load_config())
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(a, "scan_region_for_click_to", lambda _frame: True)
+    monkeypatch.setattr(a, "scan_region_for_play_button", lambda _frame: "PLAY")
+    monkeypatch.setattr(a, "_scan_region_for_health_value", lambda _frame: 100)
+
+    try:
+        a.analyze_frame(frame)
+        assert a.game_state == GameState.GAME_UNKNOWN
+        a.analyze_frame(frame)
+        assert a.game_state == GameState.GAME_END_B
+    finally:
+        a.cleanup()
+
+
+def test_unknown_stays_unknown_without_classifier_hit(monkeypatch):
+    a = GameStateAnalyzer(load_config())
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(a, "scan_region_for_click_to", lambda _frame: False)
+    monkeypatch.setattr(a, "scan_region_for_play_button", lambda _frame: None)
+    monkeypatch.setattr(a, "_scan_region_for_health_value", lambda _frame: None)
+
+    try:
+        for _ in range(3):
+            a.analyze_frame(frame)
+            assert a.game_state == GameState.GAME_UNKNOWN
+    finally:
+        a.cleanup()
