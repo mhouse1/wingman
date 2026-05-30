@@ -53,7 +53,7 @@ PATH1:
 PATH2:
   - screenshot_name: P2_000_BATTLE_HUD_MISSILES_4.png
     injection_time_s: 0.0
-    inject_trigger: manual_force_battle
+    expected_state: GAME_BATTLE
   - screenshot_name: P2_010_BATTLE_HUD_MISSILES_0.png
     injection_time_s: 1.6
     expected_state: GAME_BATTLE
@@ -64,7 +64,6 @@ PATH2:
     expected_state: GAME_BATTLE
     expected_trigger: manual_mode
     max_settle_time_s: 1.5
-    inject_trigger: manual_takeover
   - screenshot_name: P2_030_GAME_BATTLE_MANUAL_HUD.png
     injection_time_s: 2.3
     expected_state: GAME_BATTLE_MANUAL

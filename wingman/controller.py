@@ -128,6 +128,12 @@ class Controller:
         # moment of detection rather than 13s later when the FSM trigger fires.
         self._on_good_luck_frame = None
 
+        # Optional callback fired immediately when the player presses a maneuver key
+        # to trigger manual takeover (GAME_BATTLE → GAME_BATTLE_MANUAL).  The frame
+        # is captured BEFORE the FSM transition so the screenshot still shows the
+        # GAME_BATTLE HUD — used by live capture mode for P2_020.
+        self._on_manual_takeover_frame = None
+
         # Exit script hotkey (Backspace) — always registered regardless of disable_hotkeys
         # so Backspace terminates wingman in replay and capture modes too.
         if keyboard_module:
@@ -357,7 +363,23 @@ class Controller:
         if self._analyzer is not None:
             try:
                 if self._analyzer.game_state == GameState.GAME_BATTLE:
+                    # Capture the pre-transition frame for live capture (P2_020).
+                    # Frame is grabbed BEFORE trigger_event so the screenshot still
+                    # shows the GAME_BATTLE HUD.
+                    _mt_frame = None
+                    if self._on_manual_takeover_frame is not None and self._capture is not None:
+                        try:
+                            with mss() as sct:
+                                s = sct.grab(self._capture.get_monitor_rect())
+                                _mt_frame = np.array(s)[:, :, :3]
+                        except Exception:
+                            logger.exception("Controller: failed to capture manual takeover frame")
                     self._analyzer.trigger_event("manual_takeover")
+                    if _mt_frame is not None and self._on_manual_takeover_frame is not None:
+                        try:
+                            self._on_manual_takeover_frame(_mt_frame)
+                        except Exception:
+                            logger.exception("Controller: _on_manual_takeover_frame callback failed")
             except Exception:
                 pass
         return True

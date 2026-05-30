@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.11"
-WINGMAN_VERSION_DETAILS = "fix live capture frame timing: respawn and good-luck screenshots captured via background OCR callback at exact detection frame; remove stale main-loop respawn double-evaluate"
+WINGMAN_VERSION = "1.6.12"
+WINGMAN_VERSION_DETAILS = "fix P2_020 and P2_040 live capture: add _on_manual_takeover_frame callback (controller captures pre-transition GAME_BATTLE frame); evaluate GAME_BATTLE_MANUAL before respawn_reset FSM transition for P2_040"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -322,10 +322,21 @@ def main():
             # the time is_respawning=True surfaces from the cache — this is the only
             # reliable way to get the actual respawn-screen frame.
             _now = time.time()
+            _state = analyzer.game_state.name
             live_capture.on_event("respawn_detected", _now)
-            live_capture.evaluate(rs_frame, "GAME_BATTLE", _now)
-            live_capture.evaluate(rs_frame, "GAME_BATTLE", _now + 1e-6)
+            live_capture.evaluate(rs_frame, _state, _now)
+            live_capture.evaluate(rs_frame, _state, _now + 1e-6)
         analyzer.set_on_respawn_detected(_on_respawn_detected_frame)
+
+        def _on_manual_takeover_frame(mt_frame):
+            # Maneuver key pressed in GAME_BATTLE: frame captured just before the
+            # FSM transition so it still shows the GAME_BATTLE HUD.  Evaluate with
+            # "GAME_BATTLE" explicitly to match P2_020 expected_state.
+            _now = time.time()
+            live_capture.on_event("manual_takeover", _now)
+            live_capture.evaluate(mt_frame, "GAME_BATTLE", _now)
+            live_capture.evaluate(mt_frame, "GAME_BATTLE", _now + 1e-6)
+        ctrl._on_manual_takeover_frame = _on_manual_takeover_frame
 
     def _handle_lobby_popup(popup):
         if not ctrl.popup_click_allowed(popup):
@@ -745,8 +756,15 @@ def main():
                         missile_ignore_until = time.time() + 10.0
                         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
                         ctrl.set_auto_respawn_restart(True)  # always restart after respawn
-                        # Exit manual mode on death — mission restarts when health returns
+                        # Exit manual mode on death — mission restarts when health returns.
+                        # Fire P2_040 capture BEFORE the FSM transition so the evaluate
+                        # runs with state still == GAME_BATTLE_MANUAL.
                         if current_game_state == GameState.GAME_BATTLE_MANUAL:
+                            if live_capture is not None:
+                                _cap_now = time.time()
+                                live_capture.on_event("respawn_detected", _cap_now)
+                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
+                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
                             analyzer.trigger_event("respawn_reset")
                         ctrl.stop_eject_sequence()        # interrupt any in-progress eject_and_dive immediately
                         ctrl.cancel_mission()

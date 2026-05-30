@@ -27,8 +27,9 @@
 #   make y           -> run ADR37 replay integration smoke test (placeholder screenshots)
 #   make newpaths    -> capture screenshots for PATH1 or PATH2 using live Wingman play
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
+#   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y newpaths p1 calibrate calibrate-crop add-crops
+.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y newpaths p1 p2 calibrate calibrate-crop add-crops
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -214,6 +215,10 @@ newpaths:
 # Shortcut: refresh PATH1 screenshots.
 p1:
 	$(MAKE) newpaths CAPTURE_PATH=PATH1
+
+# Shortcut: refresh PATH2 screenshots.
+p2:
+	$(MAKE) newpaths CAPTURE_PATH=PATH2
 
 # Two commands are available for calibrating crop regions:
 #
