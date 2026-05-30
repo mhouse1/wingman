@@ -243,14 +243,22 @@ PATH2_OCR:
 # ---------------------------------------------------------------------------
 
 class FakePerformanceTracker:
-    def __init__(self, *_args, **_kwargs):
-        pass
+    """Stub tracker that records which OCR crops were actually scanned.
 
-    def record_ocr_crop(self, _crop_name: str, _seconds: float) -> None:
-        pass
+    The ``ocr_crops`` dict (crop_name → scan count) lets tests assert that OCR
+    ran for every expected crop, which catches silent failures like a missing
+    method that causes all OCR calls to be swallowed by the exception handler.
+    """
+
+    def __init__(self, *_args, **_kwargs):
+        self.ocr_crops: dict[str, int] = {}  # crop_name → scan count
+        self.reaction_count: int = 0
+
+    def record_ocr_crop(self, crop_name: str, _seconds: float) -> None:
+        self.ocr_crops[crop_name] = self.ocr_crops.get(crop_name, 0) + 1
 
     def record_reaction(self, _seconds: float) -> None:
-        pass
+        self.reaction_count += 1
 
     def on_enter_game_lobby(self) -> None:
         pass
@@ -335,24 +343,44 @@ def _run_replay(
     replay_yaml: Path,
     path_name: str,
     exit_after: float = 15.0,
-) -> tuple[dict, object | None]:
-    """Run wingman_main.main() with the given config and return the assertions payload."""
+) -> tuple[dict, object | None, object | None, FakePerformanceTracker | None]:
+    """Run wingman_main.main() with the given config and return the assertions payload.
+
+    Returns:
+        (payload, engine, analyzer, tracker)
+        - payload: parsed assertions JSON
+        - engine: ReplayAssertionEngine instance (or None)
+        - analyzer: GameStateAnalyzer instance (or None)
+        - tracker: FakePerformanceTracker instance with ocr_crops counts (or None)
+    """
     report = tmp_path / "report.json"
     intents = tmp_path / "intents.json"
     assertions_out = tmp_path / "assertions.json"
 
-    # Capture the ReplayAssertionEngine instance so we can inspect it after main().
+    # Capture live instances of key objects so tests can assert on post-run state.
     saved: dict = {}
     _orig_engine = wingman_main.ReplayAssertionEngine
+    _orig_analyzer = wingman_main.GameStateAnalyzer
 
     class _TrackerEngine(wingman_main.ReplayAssertionEngine):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             saved["engine"] = self
 
+    class _TrackerAnalyzer(wingman_main.GameStateAnalyzer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            saved["analyzer"] = self
+
+    class _TrackerPerf(FakePerformanceTracker):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            saved["tracker"] = self
+
     monkeypatch.setattr(wingman_main, "ReplayAssertionEngine", _TrackerEngine)
+    monkeypatch.setattr(wingman_main, "GameStateAnalyzer", _TrackerAnalyzer)
     monkeypatch.setattr(wingman_main, "Controller", FakeController)
-    monkeypatch.setattr(wingman_main, "PerformanceTracker", FakePerformanceTracker)
+    monkeypatch.setattr(wingman_main, "PerformanceTracker", _TrackerPerf)
 
     old_argv = sys.argv
     sys.argv = [
@@ -372,10 +400,69 @@ def _run_replay(
     finally:
         sys.argv = old_argv
         monkeypatch.setattr(wingman_main, "ReplayAssertionEngine", _orig_engine)
+        monkeypatch.setattr(wingman_main, "GameStateAnalyzer", _orig_analyzer)
 
     assert assertions_out.exists(), "replay_assertions.json was not written"
     payload = json.loads(assertions_out.read_text(encoding="utf-8"))
-    return payload, saved.get("engine")
+    return payload, saved.get("engine"), saved.get("analyzer"), saved.get("tracker")
+
+
+# ---------------------------------------------------------------------------
+# Assertion helpers
+# ---------------------------------------------------------------------------
+
+# All five crops that background OCR scans while in GAME_BATTLE.
+_BATTLE_OCR_CROPS = frozenset({"respawn", "incoming", "health", "ammo_flares", "ammo_missiles"})
+
+
+def _checkpoint_table(assertions: dict) -> str:
+    """Return a human-readable table of checkpoint status for failure messages."""
+    rows = []
+    for cp in assertions.get("checkpoints", []):
+        status = cp.get("status", "?")
+        name = cp.get("screenshot_name", "?")
+        exp_state = cp.get("expected_state") or "-"
+        exp_trig = cp.get("expected_trigger") or "-"
+        state_ok = "ok" if cp.get("state_met_at_s") is not None else "MISS"
+        trig_ok = "ok" if cp.get("trigger_met_at_s") is not None else "MISS"
+        extra = f"  [{cp.get('failure_reason', '')}]" if cp.get("failure_reason") else ""
+        rows.append(
+            f"  {status:7}  {name:<45}"
+            f"  state({state_ok})={exp_state:<25}"
+            f"  trig({trig_ok})={exp_trig}{extra}"
+        )
+    return "\n".join(rows) if rows else "  (no checkpoints)"
+
+
+def _assert_path_passed(assertions: dict, path_name: str) -> None:
+    """Assert the replay path completed with no failures.
+
+    Prints a full per-checkpoint table on failure so it is immediately clear
+    which OCR detection or state transition caused the regression.
+    """
+    table = _checkpoint_table(assertions)
+    assert not assertions.get("has_failures", True), (
+        f"{path_name} assertion failures:\n"
+        + "\n".join(assertions.get("failures", []))
+        + "\n\nCheckpoint table:\n" + table
+    )
+    assert assertions.get("is_complete", False), (
+        f"{path_name} did not complete all checkpoints.\n\nCheckpoint table:\n" + table
+    )
+
+
+def _assert_ocr_ran(tracker: FakePerformanceTracker, crops: frozenset, path_name: str) -> None:
+    """Assert that every expected OCR crop was scanned at least once.
+
+    This guards against silent OCR failures (e.g. a missing tracker method that
+    causes the exception handler to swallow every OCR call).
+    """
+    assert tracker is not None, f"{path_name}: FakePerformanceTracker was not captured"
+    not_scanned = [c for c in sorted(crops) if tracker.ocr_crops.get(c, 0) == 0]
+    assert not not_scanned, (
+        f"{path_name}: OCR crops never scanned: {not_scanned}. "
+        f"Scanned counts: {dict(tracker.ocr_crops)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +487,7 @@ def test_path1_ocr_regression(tmp_path, monkeypatch):
     config_path = _build_test_config(tmp_path)
     replay_yaml = _build_path1_ocr_yaml(tmp_path)
 
-    payload, _engine = _run_replay(
+    payload, _engine, analyzer, tracker = _run_replay(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         config_path=config_path,
@@ -409,13 +496,18 @@ def test_path1_ocr_regression(tmp_path, monkeypatch):
         exit_after=5.0,
     )
 
-    assertions = payload["assertions"]
-    assert not assertions["has_failures"], (
-        "PATH1_OCR has assertion failures:\n" + "\n".join(assertions.get("failures", []))
-    )
-    assert assertions["is_complete"], (
-        "PATH1_OCR did not complete all checkpoints. Results:\n"
-        + json.dumps(assertions.get("results", []), indent=2)
+    _assert_path_passed(payload["assertions"], "PATH1_OCR")
+
+    # Guard: all five GAME_BATTLE OCR crops must have been scanned at least once.
+    # Catches silent OCR failures (swallowed exceptions, missing tracker methods, etc.).
+    _assert_ocr_ran(tracker, _BATTLE_OCR_CROPS, "PATH1_OCR")
+
+    # Final FSM state: PATH1 ends with P1_080 which injects continue_clicked → GAME_LOBBY.
+    # OCR may then detect PLAY in the lobby screenshot and transition to GAME_WAITING
+    # within the exit_after window — both are valid "back in lobby" states.
+    assert analyzer is not None
+    assert analyzer.game_state.name in ("GAME_LOBBY", "GAME_WAITING"), (
+        f"PATH1_OCR: expected final state GAME_LOBBY or GAME_WAITING, got {analyzer.game_state.name}"
     )
 
 
@@ -436,7 +528,7 @@ def test_path2_ocr_regression(tmp_path, monkeypatch):
     config_path = _build_test_config(tmp_path)
     replay_yaml = _build_path2_ocr_yaml(tmp_path)
 
-    payload, _engine = _run_replay(
+    payload, _engine, analyzer, tracker = _run_replay(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         config_path=config_path,
@@ -445,11 +537,15 @@ def test_path2_ocr_regression(tmp_path, monkeypatch):
         exit_after=5.0,
     )
 
-    assertions = payload["assertions"]
-    assert not assertions["has_failures"], (
-        "PATH2_OCR has assertion failures:\n" + "\n".join(assertions.get("failures", []))
-    )
-    assert assertions["is_complete"], (
-        "PATH2_OCR did not complete all checkpoints. Results:\n"
-        + json.dumps(assertions.get("results", []), indent=2)
+    _assert_path_passed(payload["assertions"], "PATH2_OCR")
+
+    # Guard: all five GAME_BATTLE OCR crops must have been scanned at least once.
+    _assert_ocr_ran(tracker, _BATTLE_OCR_CROPS, "PATH2_OCR")
+
+    # Final FSM state: PATH2 ends with P2_070 which injects continue_clicked → GAME_LOBBY.
+    # OCR may then detect PLAY in the lobby screenshot and transition to GAME_WAITING
+    # within the exit_after window — both are valid "back in lobby" states.
+    assert analyzer is not None
+    assert analyzer.game_state.name in ("GAME_LOBBY", "GAME_WAITING"), (
+        f"PATH2_OCR: expected final state GAME_LOBBY or GAME_WAITING, got {analyzer.game_state.name}"
     )
