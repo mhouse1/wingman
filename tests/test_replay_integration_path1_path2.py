@@ -103,6 +103,8 @@ def _build_path1_ocr_yaml(tmp_path: Path) -> Path:
                 "screenshot_name": "P1_000_LOBBY_PLAY.png",
                 "injection_time_s": 0.0,
                 "expected_state": "GAME_LOBBY",
+                "max_settle_time_s": 5.0,
+                "inject_trigger": "manual_reset",
             },
             {
                 "screenshot_name": "P1_010_WAITING_CANCEL_VISIBLE.png",
@@ -117,6 +119,7 @@ def _build_path1_ocr_yaml(tmp_path: Path) -> Path:
                 "expected_state": "GAME_STARTING",
                 "expected_trigger": "good_luck_detected",
                 "max_settle_time_s": 8.0,
+                "inject_trigger": "good_luck_detected",
             },
             {
                 "screenshot_name": "P1_030_BATTLE_HUD_MISSILES_4.png",
@@ -243,10 +246,16 @@ class FakePerformanceTracker:
     def __init__(self, *_args, **_kwargs):
         pass
 
-    def on_enter_game_lobby(self):
+    def record_ocr_crop(self, _crop_name: str, _seconds: float) -> None:
         pass
 
-    def on_session_end(self):
+    def record_reaction(self, _seconds: float) -> None:
+        pass
+
+    def on_enter_game_lobby(self) -> None:
+        pass
+
+    def on_session_end(self) -> None:
         pass
 
 
