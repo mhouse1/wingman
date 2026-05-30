@@ -1397,7 +1397,7 @@ class GameStateAnalyzer:
                             )
                             self._last_lobby_play_click_ts = time.time()
                             if self._on_lobby_play_click:
-                                self._on_lobby_play_click(crop)
+                                self._on_lobby_play_click(crop, frame)
                             self._trigger("play_clicked")
                             handled = True
                             play_clicked_this_cycle = True

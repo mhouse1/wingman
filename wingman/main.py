@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.12"
-WINGMAN_VERSION_DETAILS = "fix P2_020 and P2_040 live capture: add _on_manual_takeover_frame callback (controller captures pre-transition GAME_BATTLE frame); evaluate GAME_BATTLE_MANUAL before respawn_reset FSM transition for P2_040"
+WINGMAN_VERSION = "1.6.13"
+WINGMAN_VERSION_DETAILS = "fix P2_070 live capture: capture lobby screenshot at PLAY-visible moment via _on_lobby_play_click callback (frame passed to callback, evaluate GAME_LOBBY before FSM transitions to GAME_WAITING)"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -302,9 +302,16 @@ def main():
     # Wire FSM entry-hook callbacks (ADR 025) via analyzer public callback setters.
     analyzer.set_on_cancel_mission(ctrl.cancel_mission)
     analyzer.set_on_start_game_starting_loop(ctrl.start_game_starting_loop)
-    analyzer.set_on_lobby_play_click(lambda crop: ctrl.click_crop(
-        analyzer.crops[crop], block=False, count=1, region_name=crop
-    ))
+    def _on_lobby_play_click_cb(crop, frame):
+        ctrl.click_crop(analyzer.crops[crop], block=False, count=1, region_name=crop)
+        if live_capture is not None:
+            # PLAY/READY detected while still in GAME_LOBBY: capture P2_070 at
+            # this exact frame before the FSM transitions to GAME_WAITING.
+            _now = time.time()
+            live_capture.on_event("play_clicked", _now)
+            live_capture.evaluate(frame, "GAME_LOBBY", _now)
+            live_capture.evaluate(frame, "GAME_LOBBY", _now + 1e-6)
+    analyzer.set_on_lobby_play_click(_on_lobby_play_click_cb)
 
     if live_capture is not None:
         def _on_good_luck_frame(gl_frame):

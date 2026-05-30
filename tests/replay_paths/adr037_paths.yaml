@@ -88,7 +88,7 @@ PATH2:
   - screenshot_name: P2_070_LOBBY_AFTER_MISSION.png
     injection_time_s: 16.5
     expected_state: GAME_LOBBY
-    expected_trigger: continue_clicked
+    expected_trigger: play_clicked
     max_settle_time_s: 3.0
     inject_trigger: continue_clicked
 
