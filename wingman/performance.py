@@ -431,19 +431,24 @@ class PerformanceTracker:
             rel_v_mean_str = f"{r_stats_ver['mean']:.2f}s" if r_stats_ver else "n/a"
             delta_ver_str = f"{delta_ver:+.0f}%{arrow_ver}" if delta_ver is not None else "n/a"
 
-            prefix = "⚠️  " if ("⚠️ REGRESSION" in f"{flag_all} {flag_ver}") else "   "
+            if flag_all == flag_ver:
+                inline = f"  {flag_all}" if flag_all else ""
+            else:
+                parts = []
+                if flag_all:
+                    parts.append(f"all:{flag_all}")
+                if flag_ver:
+                    parts.append(f"v{r_ver}:{flag_ver}")
+                inline = ("  " + "  ".join(parts)) if parts else ""
             lines2.append(
-                f"  {prefix}{crop:<14}"
+                f"  {crop:<14}"
                 f"  {c_stats['mean']:.2f}s"
                 f"  {r_stats_all['mean']:.2f}s"
                 f"  {rel_v_mean_str:>8}"
                 f"  {delta_all:+.0f}%{arrow_all:1}"
                 f"  {delta_ver_str:>6}"
+                + inline
             )
-            if flag_all:
-                lines2.append(f"  {'':<18}all: {flag_all}")
-            if flag_ver:
-                lines2.append(f"  {'':<18}v{r_ver}: {flag_ver}")
 
         c_r = current_agg["reaction"]
         r_r_all = release_agg_all["reaction"]
@@ -486,19 +491,24 @@ class PerformanceTracker:
             rel_v_mean_str = f"{r_r_ver['mean']:.2f}s" if r_r_ver else "n/a"
             delta_ver_str = f"{delta_ver:+.0f}%{arrow_ver}" if delta_ver is not None else "n/a"
 
-            prefix = "⚠️  " if ("⚠️ REGRESSION" in f"{flag_all} {flag_ver}") else "   "
+            if flag_all == flag_ver:
+                inline = f"  {flag_all}" if flag_all else ""
+            else:
+                parts = []
+                if flag_all:
+                    parts.append(f"all:{flag_all}")
+                if flag_ver:
+                    parts.append(f"v{r_ver}:{flag_ver}")
+                inline = ("  " + "  ".join(parts)) if parts else ""
             lines2.append(
-                f"  {prefix}{'reaction':<14}"
+                f"  {'reaction':<14}"
                 f"  {c_r['mean']:.2f}s"
                 f"  {r_r_all['mean']:.2f}s"
                 f"  {rel_v_mean_str:>8}"
                 f"  {delta_all:+.0f}%{arrow_all:1}"
                 f"  {delta_ver_str:>6}"
                 f"  ({c_r['n']} events in period)"
+                + inline
             )
-            if flag_all:
-                lines2.append(f"  {'':<18}all: {flag_all}")
-            if flag_ver:
-                lines2.append(f"  {'':<18}v{r_ver}: {flag_ver}")
 
         logger.info("\n".join(lines2))

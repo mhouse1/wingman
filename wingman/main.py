@@ -296,7 +296,7 @@ def main():
         crops=analyzer.crops,
         target_painting_mode=target_painting_mode,
         simulate_os_input=replay_mode,
-        disable_hotkeys=replay_mode,
+        disable_hotkeys=(replay_mode or capture_mode),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via analyzer public callback setters.

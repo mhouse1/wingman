@@ -134,9 +134,10 @@ class Controller:
         # GAME_BATTLE HUD — used by live capture mode for P2_020.
         self._on_manual_takeover_frame = None
 
-        # Exit script hotkey (Backspace) — always registered regardless of disable_hotkeys
-        # so Backspace terminates wingman in replay and capture modes too.
-        if keyboard_module:
+        # Exit script hotkey (Backspace).
+        # Honor disable_hotkeys so replay/capture automation is not interrupted by
+        # ambient keyboard events from the host environment.
+        if keyboard_module and not self._disable_hotkeys:
             try:
                 def exit_script_hotkey(e):
                     logger.info("Controller: Backspace key pressed - exiting script")
@@ -1179,9 +1180,17 @@ class Controller:
             """Run Good Luck OCR in background; sets good_luck_event on detection."""
             try:
                 time.sleep(0.5)  # Allow 'Good Luck' screen to appear before capturing
-                with mss() as sct:
-                    s = sct.grab(self._capture.get_monitor_rect())
-                    frame = np.array(s)[:, :, :3]
+                if self._capture is None:
+                    return
+
+                # Replay capture does not expose monitor geometry. In that mode,
+                # reuse the injected frame source directly instead of grabbing MSS.
+                if hasattr(self._capture, "get_frame") and not hasattr(self._capture, "get_monitor_rect"):
+                    frame = self._capture.get_frame()
+                else:
+                    with mss() as sct:
+                        s = sct.grab(self._capture.get_monitor_rect())
+                        frame = np.array(s)[:, :, :3]
                 if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame):
                     good_luck_event.set()
                     if self._on_good_luck_frame is not None:
