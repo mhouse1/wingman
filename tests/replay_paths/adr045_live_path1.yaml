@@ -1,0 +1,22 @@
+# ADR045 PATH1 live-screen realism lane.
+# injection_time_s is used by the presenter utility for on-screen scheduling.
+
+PATH1_LIVE:
+  - screenshot_name: P1_000_LOBBY_PLAY.png
+    injection_time_s: 0.0
+    expected_state: GAME_LOBBY
+
+  - screenshot_name: P1_010_WAITING_CANCEL_VISIBLE.png
+    injection_time_s: 15.0
+    expected_state: GAME_STARTING
+    expected_trigger: cancel_detected
+
+  - screenshot_name: P1_020_GOOD_LUCK_VISIBLE.png
+    injection_time_s: 30.0
+    expected_state: GAME_BATTLE
+    expected_trigger: good_luck_detected
+
+  - screenshot_name: P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png
+    injection_time_s: 52.0
+    expected_state: GAME_BATTLE
+    expected_trigger: missiles_empty

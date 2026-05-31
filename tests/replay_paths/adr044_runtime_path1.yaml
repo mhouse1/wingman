@@ -1,0 +1,38 @@
+# ADR044 PATH1 runtime gate profile.
+# Tuned for full wingman.main startup where OCR workers and initial state
+# classification can consume the first few seconds.
+
+PATH1_RUNTIME:
+  # Startup frame only: no assertion on this step.
+  - screenshot_name: P1_000_LOBBY_PLAY.png
+    injection_time_s: 0.0
+
+  - screenshot_name: P1_010_WAITING_CANCEL_VISIBLE.png
+    injection_time_s: 15.0
+    expected_state: GAME_STARTING
+    expected_trigger: cancel_detected
+    max_settle_time_s: 10.0
+
+  - screenshot_name: P1_020_GOOD_LUCK_VISIBLE.png
+    injection_time_s: 30.0
+    expected_state: GAME_BATTLE
+    expected_trigger: good_luck_detected
+    max_settle_time_s: 30.0
+
+  - screenshot_name: P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png
+    injection_time_s: 52.0
+    expected_state: GAME_BATTLE
+    expected_trigger: missiles_empty
+    max_settle_time_s: 12.0
+
+  - screenshot_name: P1_050_RESPAWN_VISIBLE_NO_HEALTH.png
+    injection_time_s: 65.0
+
+  - screenshot_name: P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png
+    injection_time_s: 73.0
+
+  - screenshot_name: P1_070_CLICK_TO_CONTINUE.png
+    injection_time_s: 80.0
+
+  - screenshot_name: P1_080_LOBBY_AFTER_MISSION.png
+    injection_time_s: 84.0
