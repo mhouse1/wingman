@@ -1,12 +1,126 @@
 {
-  "timestamp": "2026-05-30T16:53:09.325238",
+  "timestamp": "2026-05-31T09:30:50.691929",
   "version": "1.6.13",
   "tests": {
-    "test_path1_ocr_regression": {
-      "duration": 11.250256099971011,
+    "test_wingman_smoke_launch": {
+      "duration": 0.00011689995881170034,
       "runs": 1,
-      "min": 11.250256099971011,
-      "max": 11.250256099971011
+      "min": 0.00011689995881170034,
+      "max": 0.00011689995881170034
+    },
+    "test_level1_static_screenshot": {
+      "duration": 9.113908600062132,
+      "runs": 1,
+      "min": 9.113908600062132,
+      "max": 9.113908600062132
+    },
+    "test_respawn_detection_positive": {
+      "duration": 9.574733466647254,
+      "runs": 3,
+      "min": 1.689768800046295,
+      "max": 18.647165899979882
+    },
+    "test_respawn_detection_negative": {
+      "duration": 16.068605900004815,
+      "runs": 3,
+      "min": 9.42428309994284,
+      "max": 19.972673800075427
+    },
+    "test_level2_live_capture": {
+      "duration": 4.076889300020412,
+      "runs": 1,
+      "min": 4.076889300020412,
+      "max": 4.076889300020412
+    },
+    "test_get_frame_and_analyze_frame": {
+      "duration": 0.03660429990850389,
+      "runs": 1,
+      "min": 0.03660429990850389,
+      "max": 0.03660429990850389
+    },
+    "test_level3_unit_ocr": {
+      "duration": 4.058958600042388,
+      "runs": 1,
+      "min": 4.058958600042388,
+      "max": 4.058958600042388
+    },
+    "test_level4_region33_contains_lick_to_c": {
+      "duration": 0.7375418500159867,
+      "runs": 2,
+      "min": 0.12865720002446324,
+      "max": 1.3464265000075102
+    },
+    "test_level4_region9_contains_inco": {
+      "duration": 0.13794313332376382,
+      "runs": 3,
+      "min": 0.13263530004769564,
+      "max": 0.14203129999805242
+    },
+    "test_level5_performance_validation": {
+      "duration": 0.0013778000138700008,
+      "runs": 1,
+      "min": 0.0013778000138700008,
+      "max": 0.0013778000138700008
+    },
+    "test_click_through_game_end_transitions_to_lobby": {
+      "duration": 0.00020430004224181175,
+      "runs": 1,
+      "min": 0.00020430004224181175,
+      "max": 0.00020430004224181175
+    },
+    "test_respawn_text_matches": {
+      "duration": 0.00038053332051883143,
+      "runs": 9,
+      "min": 0.00023889995645731688,
+      "max": 0.0006576000014320016
+    },
+    "test_game_starting_blocks_respawn_detection": {
+      "duration": 0.08550439996179193,
+      "runs": 1,
+      "min": 0.08550439996179193,
+      "max": 0.08550439996179193
+    },
+    "test_game_battle_does_not_block_respawn_detection": {
+      "duration": 0.08102609997149557,
+      "runs": 1,
+      "min": 0.08102609997149557,
+      "max": 0.08102609997149557
+    },
+    "test_game_end_b_blocks_background_ocr_scheduling": {
+      "duration": 0.08082310005556792,
+      "runs": 1,
+      "min": 0.08082310005556792,
+      "max": 0.08082310005556792
+    },
+    "test_waiting_cancel_baseline_capture_and_diff": {
+      "duration": 0.0023141000419855118,
+      "runs": 1,
+      "min": 0.0023141000419855118,
+      "max": 0.0023141000419855118
+    },
+    "test_waiting_cancel_diff_none_without_baseline": {
+      "duration": 0.00017749995458871126,
+      "runs": 1,
+      "min": 0.00017749995458871126,
+      "max": 0.00017749995458871126
+    },
+    "test_unknown_starts_and_classifies_to_lobby_with_debounce": {
+      "duration": 0.010425499989651144,
+      "runs": 1,
+      "min": 0.010425499989651144,
+      "max": 0.010425499989651144
+    },
+    "test_unknown_precedence_prefers_end_over_lobby_and_battle": {
+      "duration": 0.00797679997049272,
+      "runs": 1,
+      "min": 0.00797679997049272,
+      "max": 0.00797679997049272
+    },
+    "test_unknown_stays_unknown_without_classifier_hit": {
+      "duration": 0.01234159991145134,
+      "runs": 1,
+      "min": 0.01234159991145134,
+      "max": 0.01234159991145134
     }
   }
 }
