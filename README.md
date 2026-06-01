@@ -2,7 +2,7 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.6.10
+Current version: v1.6.14
 
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
@@ -44,24 +44,22 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 | Offline crop calibration tooling | ✅ |
 | Performance tracking and preview/release chart workflows | ✅ |
 | Replay integration harness with assertion engine (ADR 037) | ✅ |
-| Real screenshot fixtures for full replay PATH1/PATH2 | In Progress |
+| Runtime replay gate (ADR 044, PATH1) | ✅ |
+| Live-screen capture gate (ADR 045, PATH1) | ✅ |
+| Real screenshot OCR integration tests (PATH1/PATH2) | ✅ |
 
 ---
 
-## Why Replay Integration Matters
+## Validation Lanes
 
-This project now includes a timed replay integration harness (ADR 037) that validates:
+Wingman includes layered validation from fast checks to runtime-realistic gates:
 
-- transition sequence correctness
-- transition settle-time budgets
-- action-intent traces in replay mode without real OS input
-
-Current replay assets:
-
-- path config: `tests/replay_paths/adr037_paths.yaml`
-- smoke integration command: `make y`
-
-`make y` currently runs a temporary smoke lane while full screenshot fixtures for grounded PATH1/PATH2 are being built.
+- `make test`: core pytest suite and HTML report.
+- `make rr-path1-gate`: ADR044 runtime replay gate (full `wingman.main` loop + replay assertions validator).
+- `make rr-live-path1-gate`: ADR045 live-screen gate (desktop presenter + real monitor capture + live validator).
+- `make ocr` (or `make ti`): ADR037 PATH1/PATH2 real-OCR integration tests.
+- `make tp`: fast preview bundle (`test` + ADR044 + ADR045 + performance previews).
+- `make tp-full`: full preview bundle (`tp` + ADR037 PATH1/PATH2 OCR lane).
 
 ---
 
@@ -88,12 +86,18 @@ make rd
 ```bash
 make test
 make tp
-make y
+make tp-full
+make rr-path1-gate
+make rr-live-path1-gate
+make ocr
 ```
 
 - `make test`: main automated test report workflow
-- `make tp`: test + performance preview artifacts
-- `make y`: replay smoke integration gate
+- `make tp`: fast preview (test + ADR044/ADR045 gates + performance preview artifacts)
+- `make tp-full`: full preview (adds ADR037 PATH1/PATH2 OCR lane)
+- `make rr-path1-gate`: deterministic runtime replay gate for PATH1
+- `make rr-live-path1-gate`: live-screen runtime gate for PATH1
+- `make ocr`: real-OCR integration tests for PATH1 and PATH2
 
 ---
 
@@ -110,7 +114,9 @@ make y
 | `p` | Manual padlock cooldown trigger |
 | `v` | Save debug screenshot with crop overlays |
 | `b` | Inject simulated respawn OCR result (testing) |
-| `backspace` | Exit script |
+| `backspace` | Exit script (runtime mode) |
+
+Note: automated replay/capture test lanes disable hotkeys to avoid accidental interruption during CI-style runs.
 
 ---
 
@@ -136,10 +142,10 @@ Roadmap doc:
 
 - `docs/PROJECT_AI_ROADMAP.md`
 
-ADR and implementation roadmap references:
+Architecture decisions and workflow docs are tracked under:
 
-- `docs/adr/037-timed-screenshot-replay-integration-testing.md`
-- `docs/workflow/003-adr037-replay-screenshot-roadmap.md`
+- `docs/adr/`
+- `docs/workflow/`
 
 ---
 
