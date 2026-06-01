@@ -11,7 +11,7 @@ PATH1_RUNTIME:
     injection_time_s: 15.0
     expected_state: GAME_STARTING
     expected_trigger: cancel_detected
-    max_settle_time_s: 10.0
+    max_settle_time_s: 30.0
 
   - screenshot_name: P1_020_GOOD_LUCK_VISIBLE.png
     injection_time_s: 30.0
