@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.13"
-WINGMAN_VERSION_DETAILS = "fix P2_070 live capture: capture lobby screenshot at PLAY-visible moment via _on_lobby_play_click callback (frame passed to callback, evaluate GAME_LOBBY before FSM transitions to GAME_WAITING)"
+WINGMAN_VERSION = "1.6.14"
+WINGMAN_VERSION_DETAILS = "no change, just performance capture to histogram"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
