@@ -15,14 +15,15 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.10"
-WINGMAN_VERSION_DETAILS = "new integration tests, replay assertion engine, and mission restart improvements"
+WINGMAN_VERSION = "1.6.14"
+WINGMAN_VERSION_DETAILS = "no change, just performance capture to histogram"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState
 from .performance import PerformanceTracker
 from .replay import (
+    LivePathCaptureEngine,
     ReplayAssertionEngine,
     ScreenshotReplayCapture,
     build_required_screenshot_dictionary,
@@ -142,6 +143,22 @@ def main():
                         help="Where to write recorded replay action intents")
     parser.add_argument("--replay-assertions-output", default="tests/test-output/replay_assertions.json",
                         help="Where to write replay assertion results and timing gates")
+    parser.add_argument("--capture-path-config", default=None,
+                        help="Path to capture config mapping PATH names to replay steps")
+    parser.add_argument("--capture-path", default=None,
+                        help="Capture path name to run")
+    parser.add_argument("--capture-screenshot-dir", default="test_screenshots/integration_test",
+                        help="Directory to write captured screenshots")
+    parser.add_argument("--capture-overwrite", action="store_true",
+                        help="Overwrite existing capture screenshots")
+    parser.add_argument("--capture-timeout-s", type=float, default=20.0,
+                        help="Seconds to wait per capture step before timing out")
+    parser.add_argument("--capture-summary", default="tests/test-output/capture_summary.json",
+                        help="Where to write live capture summary")
+    parser.add_argument("--capture-allow-inject", action="store_true",
+                        help="Allow synthetic inject_trigger use during live capture")
+    parser.add_argument("--capture-start-at-step", default=None,
+                        help="Optional screenshot_name to resume capture from")
     args = parser.parse_args()
 
     console_level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -178,10 +195,15 @@ def main():
 
     exit_requested = threading.Event()
     replay_mode = bool(args.replay_config)
+    capture_mode = bool(args.capture_path_config)
     replay_capture = None
     replay_assertions = None
+    live_capture = None
 
     # Initialize main components
+    if replay_mode and capture_mode:
+        raise ValueError("Use either --replay-config or --capture-path-config, not both")
+
     if replay_mode:
         replay_config_path = Path(args.replay_config)
         replay_screenshot_dir = Path(args.replay_screenshot_dir)
@@ -204,6 +226,29 @@ def main():
             steps=replay_path.steps,
         )
         cap = replay_capture
+    elif capture_mode:
+        capture_config_path = Path(args.capture_path_config)
+        capture_screenshot_dir = Path(args.capture_screenshot_dir)
+        live_path = select_replay_path(capture_config_path, args.capture_path)
+        live_capture = LivePathCaptureEngine(
+            path_name=live_path.path_name,
+            steps=live_path.steps,
+            screenshot_dir=capture_screenshot_dir,
+            region=region,
+            overwrite=args.capture_overwrite,
+            timeout_s=args.capture_timeout_s,
+            allow_inject=args.capture_allow_inject,
+            start_at_step=args.capture_start_at_step,
+            auto_resume=False,
+            timeout_advances=False,
+            out_of_order=True,
+        )
+        cap = Capture(region, monitor_index)
+        logger.info(
+            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict",
+            live_path.path_name,
+            capture_screenshot_dir,
+        )
     else:
         cap = Capture(region, monitor_index)
 
@@ -218,6 +263,7 @@ def main():
 
     # Load mission restart timing from config
     mission_cfg = cfg.get("mission", {})
+    startup_cfg = cfg.get("startup_state_detection", {})
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
@@ -227,6 +273,9 @@ def main():
     waiting_fallback_score_threshold = int(mission_cfg.get("waiting_fallback_score_threshold", 4))
     waiting_fallback_consecutive_required = int(mission_cfg.get("waiting_fallback_consecutive_required", 2))
     waiting_fallback_min_elapsed_s = float(mission_cfg.get("waiting_fallback_min_elapsed_s", 6.0))
+    unknown_max_wait_s = float(startup_cfg.get("unknown_max_wait_s", 90.0))
+    unknown_state_since = 0.0
+    capture_startup_failure_reason: str | None = None
 
     def _on_auto_mission_key():
         """Called when AUTO_MISSION_KEY is pressed. Activates unattended mode for the session."""
@@ -247,15 +296,54 @@ def main():
         crops=analyzer.crops,
         target_painting_mode=target_painting_mode,
         simulate_os_input=replay_mode,
-        disable_hotkeys=replay_mode,
+        disable_hotkeys=(replay_mode or capture_mode),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via analyzer public callback setters.
     analyzer.set_on_cancel_mission(ctrl.cancel_mission)
     analyzer.set_on_start_game_starting_loop(ctrl.start_game_starting_loop)
-    analyzer.set_on_lobby_play_click(lambda crop: ctrl.click_crop(
-        analyzer.crops[crop], block=False, count=1, region_name=crop
-    ))
+    def _on_lobby_play_click_cb(crop, frame):
+        ctrl.click_crop(analyzer.crops[crop], block=False, count=1, region_name=crop)
+        if live_capture is not None:
+            # PLAY/READY detected while still in GAME_LOBBY: capture P2_070 at
+            # this exact frame before the FSM transitions to GAME_WAITING.
+            _now = time.time()
+            live_capture.on_event("play_clicked", _now)
+            live_capture.evaluate(frame, "GAME_LOBBY", _now)
+            live_capture.evaluate(frame, "GAME_LOBBY", _now + 1e-6)
+    analyzer.set_on_lobby_play_click(_on_lobby_play_click_cb)
+
+    if live_capture is not None:
+        def _on_good_luck_frame(gl_frame):
+            # Good Luck OCR succeeded: capture immediately with the detected frame
+            # before the 13s countdown begins and the main loop moves to GAME_BATTLE.
+            _now = time.time()
+            live_capture.on_event("good_luck_detected", _now)
+            live_capture.evaluate(gl_frame, "GAME_STARTING", _now)
+            live_capture.evaluate(gl_frame, "GAME_STARTING", _now + 1e-6)
+        ctrl._on_good_luck_frame = _on_good_luck_frame
+
+        def _on_respawn_detected_frame(rs_frame):
+            # Respawn OCR succeeded in background thread: capture with the exact OCR
+            # frame.  The main loop's `frame` variable is already a newer capture by
+            # the time is_respawning=True surfaces from the cache — this is the only
+            # reliable way to get the actual respawn-screen frame.
+            _now = time.time()
+            _state = analyzer.game_state.name
+            live_capture.on_event("respawn_detected", _now)
+            live_capture.evaluate(rs_frame, _state, _now)
+            live_capture.evaluate(rs_frame, _state, _now + 1e-6)
+        analyzer.set_on_respawn_detected(_on_respawn_detected_frame)
+
+        def _on_manual_takeover_frame(mt_frame):
+            # Maneuver key pressed in GAME_BATTLE: frame captured just before the
+            # FSM transition so it still shows the GAME_BATTLE HUD.  Evaluate with
+            # "GAME_BATTLE" explicitly to match P2_020 expected_state.
+            _now = time.time()
+            live_capture.on_event("manual_takeover", _now)
+            live_capture.evaluate(mt_frame, "GAME_BATTLE", _now)
+            live_capture.evaluate(mt_frame, "GAME_BATTLE", _now + 1e-6)
+        ctrl._on_manual_takeover_frame = _on_manual_takeover_frame
 
     def _handle_lobby_popup(popup):
         if not ctrl.popup_click_allowed(popup):
@@ -304,6 +392,13 @@ def main():
             threading.Thread(target=_click_ready_after_invite, daemon=True).start()
 
     analyzer.set_on_lobby_popup_click(_handle_lobby_popup)
+
+    def _emit_capture_event(event_name: str) -> None:
+        if replay_assertions is not None and replay_capture is not None:
+            replay_assertions.on_event(event_name, replay_capture.elapsed_s())
+        if live_capture is not None:
+            live_capture.on_event(event_name, time.time())
+
     if replay_assertions is not None:
         def _on_fsm_transition(trigger_name, _prev_state_name, next_state_name, _timestamp_s):
             if replay_capture is None:
@@ -313,6 +408,13 @@ def main():
             replay_assertions.on_event(f"state_enter:{next_state_name}", now_s)
 
         analyzer.set_on_fsm_transition(_on_fsm_transition)
+    elif live_capture is not None:
+        def _on_capture_fsm_transition(trigger_name, _prev_state_name, next_state_name, _timestamp_s):
+            now_s = time.time()
+            live_capture.on_event(trigger_name, now_s)
+            live_capture.on_event(f"state_enter:{next_state_name}", now_s)
+
+        analyzer.set_on_fsm_transition(_on_capture_fsm_transition)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -355,8 +457,7 @@ def main():
                 return
             logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
             ctrl.restart_last_mission()
-            if replay_assertions is not None and replay_capture is not None:
-                replay_assertions.on_event("restart_last_mission", replay_capture.elapsed_s())
+            _emit_capture_event("restart_last_mission")
             last_restart_attempt = time.time()
             respawn_state = RespawnState.IDLE
 
@@ -386,8 +487,7 @@ def main():
             logger.debug("No-missiles suppressed — post-respawn grace (%.1fs remaining)",
                          missile_ignore_until - time.time())
             return
-        if replay_assertions is not None and replay_capture is not None:
-            replay_assertions.on_event("missiles_empty", replay_capture.elapsed_s())
+        _emit_capture_event("missiles_empty")
         ctrl.eject_and_dive()
 
     def _deploy_flares_on_new_incoming() -> bool:
@@ -436,8 +536,43 @@ def main():
                 now_s = replay_capture.elapsed_s()
                 for step in replay_capture.consume_activated_steps():
                     replay_assertions.on_step_activated(step, now_s)
+                    # Report current state before injecting any trigger so that a
+                    # state assertion on this step evaluates against the pre-transition state.
+                    replay_assertions.on_state(analyzer.game_state.name, now_s)
+                    if step.inject_trigger:
+                        logger.info(
+                            "Replay: injecting FSM trigger '%s' at %.2fs",
+                            step.inject_trigger, now_s,
+                        )
+                        analyzer.trigger_event(step.inject_trigger)
+                        # on_event for the fired trigger is called via _on_fsm_transition callback.
+                        # Also report state AFTER the transition so that a state assertion on this
+                        # step can match the post-transition state (e.g. GAME_END_B after
+                        # click_to_detected fires).  If the assertion already passed on the
+                        # pre-transition report this call is a no-op.
+                        replay_assertions.on_state(analyzer.game_state.name, now_s)
+
+            if live_capture is not None:
+                now_s = time.time()
+                if live_capture.is_complete():
+                    logger.info("Capture finished — exiting main loop")
+                    break
 
             game_state = analyzer.analyze_frame(frame)
+
+            if live_capture is not None:
+                _now = time.time()
+                live_capture.evaluate(frame, analyzer.game_state.name, _now)
+                live_capture.evaluate(frame, analyzer.game_state.name, _now + 1e-6)
+                pending_inject = live_capture.consume_pending_inject_trigger()
+                if pending_inject is not None:
+                    logger.info("Capture: injecting FSM trigger '%s'", pending_inject)
+                    analyzer.trigger_event(pending_inject)
+                if live_capture.has_failures():
+                    raise RuntimeError(
+                        "Capture failure(s): "
+                        + json.dumps(live_capture.to_dict(), indent=2)
+                    )
 
             if replay_assertions is not None and replay_capture is not None:
                 now_s = replay_capture.elapsed_s()
@@ -450,6 +585,25 @@ def main():
 
             # Log game state transitions
             current_game_state = game_state.get('game_state')
+
+            if current_game_state == GameState.GAME_UNKNOWN:
+                if unknown_state_since == 0.0:
+                    unknown_state_since = time.time()
+                unknown_elapsed = time.time() - unknown_state_since
+                if unknown_elapsed >= unknown_max_wait_s:
+                    capture_startup_failure_reason = f"unknown_timeout_after_{unknown_max_wait_s:.1f}s"
+                    logger.error(
+                        "GAME_UNKNOWN startup classification timeout after %.1fs",
+                        unknown_elapsed,
+                    )
+                    if live_capture is not None:
+                        raise RuntimeError(
+                            "Capture startup classification failure: "
+                            + capture_startup_failure_reason
+                        )
+            else:
+                unknown_state_since = 0.0
+
             if current_game_state != last_game_state:
                 logger.info("\033[96m🎮 Game state: %s → %s\033[0m",
                             last_game_state.name if last_game_state else "UNKNOWN",
@@ -507,6 +661,16 @@ def main():
                             elapsed_waiting)
                         analyzer.trigger_event("cancel_detected")  # on_enter_GAME_STARTING fires game-starting loop
                         _reset_waiting_fallback()
+                        if live_capture is not None:
+                            # on_event("cancel_detected") was already called inside trigger_event
+                            # via _on_capture_fsm_transition.  Evaluate twice here with the
+                            # explicit pre-transition state so the debounce completes on this
+                            # exact CANCEL frame.  The closure-based approach is unreliable
+                            # because trigger_event's post_callbacks run before _on_fsm_transition,
+                            # making the call order non-obvious and error-prone.
+                            _now = time.time()
+                            live_capture.evaluate(frame, "GAME_WAITING", _now)
+                            live_capture.evaluate(frame, "GAME_WAITING", _now + 1e-6)
                     else:
                         crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
                         visible_crop = analyzer.scan_region_for_play_button(frame) if crop else None
@@ -599,8 +763,15 @@ def main():
                         missile_ignore_until = time.time() + 10.0
                         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
                         ctrl.set_auto_respawn_restart(True)  # always restart after respawn
-                        # Exit manual mode on death — mission restarts when health returns
+                        # Exit manual mode on death — mission restarts when health returns.
+                        # Fire P2_040 capture BEFORE the FSM transition so the evaluate
+                        # runs with state still == GAME_BATTLE_MANUAL.
                         if current_game_state == GameState.GAME_BATTLE_MANUAL:
+                            if live_capture is not None:
+                                _cap_now = time.time()
+                                live_capture.on_event("respawn_detected", _cap_now)
+                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
+                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
                             analyzer.trigger_event("respawn_reset")
                         ctrl.stop_eject_sequence()        # interrupt any in-progress eject_and_dive immediately
                         ctrl.cancel_mission()
@@ -616,6 +787,12 @@ def main():
                         restart_not_before = time.time() + respawn_fallback_timeout
                         logger.info("Respawn screen active — will restart %.1fs after screen clears (stuck OCR fallback in %.1fs)",
                                     restart_delay_after_unlock, respawn_fallback_timeout)
+                        _emit_capture_event("respawn_detected")
+                        # Live capture is handled via analyzer.set_on_respawn_detected —
+                        # the callback fires from the background OCR thread with the exact
+                        # respawn-screen frame, avoiding the stale-frame race where the
+                        # main loop's `frame` variable has already advanced past the
+                        # respawn overlay by the time is_respawning surfaces from the cache.
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
@@ -663,6 +840,13 @@ def main():
             if click_to_detected and click_to_ts > last_click_to_alert_ts:
                 logger.info("\033[93m📋 CLICK TO CONTINUE detected in CLICK_TO_CONTINUE region\033[0m")
                 last_click_to_alert_ts = click_to_ts
+                _emit_capture_event("click_to_detected")
+                if live_capture is not None:
+                    # Capture this exact pre-click frame for click_to steps (for example
+                    # P1_070) before click-through advances to later end-screen visuals.
+                    now_s = time.time()
+                    live_capture.evaluate(frame, analyzer.game_state.name, now_s)
+                    live_capture.evaluate(frame, analyzer.game_state.name, now_s + 1e-6)
                 ctrl.cancel_mission()
                 threading.Thread(
                     target=_click_through_game_end,
@@ -732,6 +916,32 @@ def main():
                 encoding="utf-8",
             )
             logger.info("Replay assertions saved to %s", assertions_output)
+        if live_capture is not None:
+            summary_output = Path(args.capture_summary)
+            summary_output.parent.mkdir(parents=True, exist_ok=True)
+            not_updated = live_capture.not_updated_screenshot_names()
+            if not_updated:
+                logger.warning(
+                    "Capture did not update %d screenshot(s): %s",
+                    len(not_updated),
+                    ", ".join(not_updated),
+                )
+            else:
+                logger.info("Capture updated all requested screenshots")
+            summary_output.write_text(
+                json.dumps(
+                    {
+                        "generated_at": time.time(),
+                        "capture_config": args.capture_path_config,
+                        "capture_path": args.capture_path,
+                        "startup_failure_reason": capture_startup_failure_reason,
+                        "summary": live_capture.to_dict(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            logger.info("Capture summary saved to %s", summary_output)
         ctrl.cleanup()
         analyzer.cleanup()
 

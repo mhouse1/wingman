@@ -2,6 +2,7 @@
 tests/test-output/
 # Runtime performance data — accumulates between releases; only release/ is committed
 docs/performance/current/
+docs/performance/performance.db
 # Ignore Python bytecode cache directories and compiled files
 __pycache__/
 **/__pycache__/
@@ -11,3 +12,4 @@ untrack_todo.md
 to_be_added/
 FUTURE/
 wingman.log
+wingman_live.log

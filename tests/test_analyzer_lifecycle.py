@@ -87,9 +87,9 @@ def test_no_threads_leaked_after_cleanup(cfg):
     time.sleep(0.2)
 
     after = threading.active_count()
-    # Allow at most 1 extra lingering daemon thread (background OCR may still be
-    # finishing its current cycle when cleanup is called).
-    assert after <= before + 1, (
+    # Unknown-state startup classification can trigger OCR worker prewarm before
+    # cleanup; allow a small cushion for lingering daemon worker teardown.
+    assert after <= before + 4, (
         f"Thread count did not return to baseline: before={before}, after={after}"
     )
 
@@ -128,6 +128,9 @@ def test_fsm_unattended_lifecycle_and_starting_loop_callbacks(cfg):
     analyzer._on_cancel_mission = _on_cancel
     analyzer._on_start_game_starting_loop = _on_start_loop
 
+    assert analyzer.game_state == GameState.GAME_UNKNOWN
+
+    assert analyzer._trigger("unknown_to_lobby_detected") is True
     assert analyzer.game_state == GameState.GAME_LOBBY
 
     assert analyzer._trigger("play_clicked") is True
@@ -135,7 +138,8 @@ def test_fsm_unattended_lifecycle_and_starting_loop_callbacks(cfg):
 
     assert analyzer._trigger("waiting_timeout") is True
     assert analyzer.game_state == GameState.GAME_LOBBY
-    assert events["cancel"] == 1
+    # unknown_to_lobby_detected and waiting_timeout both enter GAME_LOBBY.
+    assert events["cancel"] == 2
 
     assert analyzer._trigger("cancel_detected") is True
     assert analyzer.game_state == GameState.GAME_STARTING

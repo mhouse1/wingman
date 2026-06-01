@@ -2,7 +2,7 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft    | 2026-05-25 | 1.6.10          |
+| Draft    | 2026-05-28 | 1.6.11          |
 
 ## Context
 
@@ -28,6 +28,9 @@ Primary/secondary precedence:
 
 If either condition is satisfied, fire `cancel_detected` and continue normal flow through
 GAME_STARTING.
+
+With ADR 042, this fallback is explicitly post-classification logic. It must run only
+after startup detection has already promoted `GAME_UNKNOWN` into a known runtime state.
 
 ## Scope
 
@@ -96,6 +99,8 @@ Diff metric:
 ### FSM Behavior
 
 No new states or transitions are introduced.
+
+`GAME_UNKNOWN` behavior is governed by ADR 042 and is intentionally outside this ADR.
 
 Fallback only invokes existing trigger:
 
@@ -194,6 +199,7 @@ Add under `mission` with defaults:
 - Never trigger fallback if baseline is unavailable.
 - If diff computation fails, log and skip poll without changing score.
 - If PLAY/READY becomes visible, reset and allow normal re-click behavior.
+- Never evaluate waiting fallback while `game_state == GAME_UNKNOWN`.
 
 ## Acceptance Criteria
 

@@ -4,7 +4,8 @@
 #   make test1       -> run region 33 continue-text OCR test
 #   make test2       -> run region 9 INCO-text OCR test
 #   make test-perf   -> run tests + generate CSV + chart
-#   make tp              -> run tests + preview chart with uncommitted data
+#   make tp              -> run fast preview (tests + ADR044/ADR045 runtime gates + charts)
+#   make tp-full         -> run full preview (tp + ADR037 PATH1/PATH2 OCR lane)
 #   make test-perf-csv   -> generate performance CSV from git history
 #   make test-perf-chart -> generate performance visualization chart
 #   make runtime-perf-csv-release -> generate runtime release aggregate CSV
@@ -25,13 +26,34 @@
 #   make r           -> run wingman (INFO console only)
 #   make rd          -> run wingman with DEBUG log written to wingman.log
 #   make y           -> run ADR37 replay integration smoke test (placeholder screenshots)
+#   make ti          -> run integration tests (PATH1 + PATH2 real-OCR, alias for make ocr)
+#   make newpaths    -> capture screenshots for PATH1 or PATH2 using live Wingman play
+#   make p1          -> capture screenshots for PATH1 using live Wingman play
+#   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y calibrate calibrate-crop add-crops
+.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y newpaths p1 p2 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
 PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pytest)
 PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
+CAPTURE_PATH ?= PATH1
+CAPTURE_TIMEOUT_S ?= 120.0
+RR_PATH1_LOG ?= wingman.log
+RR_PATH1_ASSERTIONS ?= tests/test-output/replay_assertions.path1.json
+RR_PATH1_INTENTS ?= tests/test-output/replay_action_intents.path1.json
+RR_PATH1_REPORT ?= tests/test-output/replay_required_screenshots.path1.json
+RR_PATH1_SUMMARY ?= tests/test-output/runtime_replay_validation.path1.json
+RR_PATH1_CONFIG ?= tests/replay_paths/adr044_runtime_path1.yaml
+RR_PATH1_NAME ?= PATH1_RUNTIME
+RR_LIVE_PATH1_LOG ?= wingman_live.log
+RR_LIVE_PATH1_CAPTURE_CONFIG ?= tests/replay_paths/adr045_live_path1.yaml
+RR_LIVE_PATH1_NAME ?= PATH1_LIVE
+RR_LIVE_PATH1_CAPTURE_DIR ?= tests/test-output/live_capture_path1
+RR_LIVE_PATH1_CAPTURE_SUMMARY ?= tests/test-output/capture_summary.path1.live.json
+RR_LIVE_PATH1_VALIDATION_SUMMARY ?= tests/test-output/runtime_live_validation.path1.json
+RR_LIVE_PATH1_PRESENTER_LOG ?= tests/test-output/live_presenter.path1.log
+RR_LIVE_PATH1_PRESENTER_GRACE_S ?= 8.0
 
 # Generate HTML report for automated levels test
 test:
@@ -82,17 +104,35 @@ test-perf: test test-perf-csv test-perf-chart
 	@echo ""
 
 # Preview performance trends including current uncommitted data
-tp: test
+# Includes ADR044 PATH1 runtime replay gate and ADR045 live-screen gate.
+tp: test rr-path1-gate rr-live-path1-gate
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
-	@echo "✅ Performance preview complete (test + runtime)!"
+	@echo "✅ Performance preview complete (test + ADR044/ADR045 runtime gates + runtime metrics)!"
 	@echo "📊 View trends: tests/test-output/performance-trends.html"
 	@echo "📈 CSV data: tests/test-output/performance-history.csv"
 	@echo "📊 Runtime preview: docs/performance/runtime-performance-trends.preview.html"
 	@echo "📈 Runtime CSV: docs/performance/current/runtime-performance-preview.csv"
 	@echo ""
 	@echo "⚠️  Chart includes UNCOMMITTED data - run 'make wrelease' to commit and finalize"
+	@echo "🖥️  Live-screen ADR045 lane included in this preview run"
+	@echo ""
+
+# Full preview including ADR037 PATH1/PATH2 real-OCR integration tests.
+tp-full: test rr-path1-gate rr-live-path1-gate ocr
+	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
+	@$(MAKE) runtime-perf-preview
+	@echo ""
+	@echo "✅ Full performance preview complete (test + ADR037 + ADR044/ADR045 runtime gates + runtime metrics)!"
+	@echo "📊 View trends: tests/test-output/performance-trends.html"
+	@echo "📈 CSV data: tests/test-output/performance-history.csv"
+	@echo "📊 Runtime preview: docs/performance/runtime-performance-trends.preview.html"
+	@echo "📈 Runtime CSV: docs/performance/current/runtime-performance-preview.csv"
+	@echo ""
+	@echo "⚠️  Chart includes UNCOMMITTED data - run 'make wrelease' to commit and finalize"
+	@echo "🧪 ADR037 PATH1/PATH2 OCR lane included in this full preview run"
+	@echo "🖥️  Live-screen ADR045 lane included in this full preview run"
 	@echo ""
 
 # Clean test artifacts
@@ -184,6 +224,107 @@ rd:
 # ADR37 replay integration smoke path (temporary until full screenshot catalog exists)
 y:
 	$(PYTEST_RUN) tests/test_replay_integration_make_y.py -q
+
+# ADR037 real-OCR integration tests (PATH1 + PATH2).
+# Requires real game screenshots in test_screenshots/integration_test/.
+# All-black placeholder screenshots cause tests to skip automatically.
+ocr:
+	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py -m slow -v
+
+# Alias for ocr: run integration tests (shorter to type).
+ti:
+	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py -m slow -v
+
+# ADR044 phase 1 runtime lane: run real main loop with replayed PATH1 screenshots.
+rr-path1:
+	mkdir -p tests/test-output
+	rm -f $(RR_PATH1_LOG) $(RR_PATH1_ASSERTIONS) $(RR_PATH1_INTENTS) $(RR_PATH1_REPORT) $(RR_PATH1_SUMMARY)
+	$(PYTHON_RUN) -m wingman.main \
+		--config wingman/config.yaml \
+		--replay-config $(RR_PATH1_CONFIG) \
+		--replay-path $(RR_PATH1_NAME) \
+		--replay-screenshot-dir test_screenshots/integration_test \
+		--replay-exit-after 3.0 \
+		--replay-report $(RR_PATH1_REPORT) \
+		--replay-intents-output $(RR_PATH1_INTENTS) \
+		--replay-assertions-output $(RR_PATH1_ASSERTIONS) \
+		--log-file $(RR_PATH1_LOG)
+
+# ADR044 phase 1 validator: machine-check replay artifacts and runtime log signatures.
+rr-validate-path1:
+	$(PYTHON_RUN) tests/runtime_replay_validate.py \
+		--log-file $(RR_PATH1_LOG) \
+		--assertions-file $(RR_PATH1_ASSERTIONS) \
+		--intents-file $(RR_PATH1_INTENTS) \
+		--summary-out $(RR_PATH1_SUMMARY)
+
+# ADR044 phase 1 gate: execute runtime lane and fail fast on validator mismatch.
+rr-path1-gate: rr-path1 rr-validate-path1
+
+# ADR045 live lane: present timed screenshots on desktop while Wingman captures real monitor frames.
+rr-live-path1:
+	mkdir -p tests/test-output $(RR_LIVE_PATH1_CAPTURE_DIR)
+	rm -f $(RR_LIVE_PATH1_LOG) $(RR_LIVE_PATH1_CAPTURE_SUMMARY) $(RR_LIVE_PATH1_VALIDATION_SUMMARY) $(RR_LIVE_PATH1_PRESENTER_LOG)
+	$(PYTHON_RUN) tests/live_screen_presenter.py \
+		--config wingman/config.yaml \
+		--path-config $(RR_LIVE_PATH1_CAPTURE_CONFIG) \
+		--path $(RR_LIVE_PATH1_NAME) \
+		--screenshot-dir test_screenshots/integration_test \
+		--grace-s $(RR_LIVE_PATH1_PRESENTER_GRACE_S) \
+		> $(RR_LIVE_PATH1_PRESENTER_LOG) 2>&1 & \
+	PRES_PID=$$!; \
+	sleep 2; \
+	if ! kill -0 $$PRES_PID 2>/dev/null; then \
+		echo "Live presenter failed to start; see $(RR_LIVE_PATH1_PRESENTER_LOG)"; \
+		wait $$PRES_PID || true; \
+		exit 1; \
+	fi; \
+	$(PYTHON_RUN) -m wingman.main \
+		--config wingman/config.yaml \
+		--capture-path-config $(RR_LIVE_PATH1_CAPTURE_CONFIG) \
+		--capture-path $(RR_LIVE_PATH1_NAME) \
+		--capture-screenshot-dir $(RR_LIVE_PATH1_CAPTURE_DIR) \
+		--capture-overwrite \
+		--capture-timeout-s 30.0 \
+		--capture-summary $(RR_LIVE_PATH1_CAPTURE_SUMMARY) \
+		--log-file $(RR_LIVE_PATH1_LOG); \
+	STATUS=$$?; \
+	wait $$PRES_PID || true; \
+	exit $$STATUS
+
+# ADR045 live lane validator.
+rr-live-validate-path1:
+	$(PYTHON_RUN) tests/runtime_live_validate.py \
+		--log-file $(RR_LIVE_PATH1_LOG) \
+		--capture-summary $(RR_LIVE_PATH1_CAPTURE_SUMMARY) \
+		--summary-out $(RR_LIVE_PATH1_VALIDATION_SUMMARY)
+
+# ADR045 live lane gate.
+rr-live-path1-gate: rr-live-path1 rr-live-validate-path1
+
+# Live capture screenshots for ADR037 replay paths.
+# Example:
+#   make newpaths CAPTURE_PATH=PATH1
+#   make newpaths CAPTURE_PATH=PATH2
+newpaths:
+	$(PYTHON_RUN) -m wingman.main \
+		--config wingman/config.yaml \
+		--capture-path-config tests/replay_paths/adr037_paths.yaml \
+		--capture-path $(CAPTURE_PATH) \
+		--capture-screenshot-dir test_screenshots/integration_test \
+		--capture-overwrite \
+		--capture-allow-inject \
+		--capture-timeout-s $(CAPTURE_TIMEOUT_S) \
+		--capture-summary tests/test-output/capture_summary_$(CAPTURE_PATH).json \
+		--log-level INFO
+
+# Shortcut: refresh PATH1 screenshots.
+p1:
+	$(MAKE) newpaths CAPTURE_PATH=PATH1
+
+# Shortcut: refresh PATH2 screenshots.
+p2:
+	$(MAKE) newpaths CAPTURE_PATH=PATH2
 
 # Two commands are available for calibrating crop regions:
 #
