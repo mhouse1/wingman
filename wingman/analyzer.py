@@ -35,6 +35,89 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_INCOMING_TEMPLATE_SOURCES = (
+    "test_screenshots/INCOMING3.png",
+)
+_DEFAULT_INCOMING_TEMPLATE_SCALES = (1.0,)
+
+
+def _binarize_template_image(image_bgr: np.ndarray) -> np.ndarray:
+    """Return an Otsu-binarized template image for high-contrast matching."""
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return binary
+
+
+def _resolve_template_source_paths(config_sources: "list[str] | None") -> "list[Path]":
+    """Resolve template source paths relative to repository root when needed."""
+    base_dir = Path(__file__).resolve().parent.parent
+    sources = config_sources or list(_DEFAULT_INCOMING_TEMPLATE_SOURCES)
+    resolved: "list[Path]" = []
+    for entry in sources:
+        p = Path(entry)
+        if not p.is_absolute():
+            p = (base_dir / p).resolve()
+        resolved.append(p)
+    return resolved
+
+
+def _build_incoming_templates(
+    incoming_crop: "tuple[float, float, float, float]",
+    source_paths: "list[Path]",
+    scales: "list[float]",
+) -> "list[tuple[str, np.ndarray]]":
+    """Build binary template variants from configured source screenshots."""
+    templates: "list[tuple[str, np.ndarray]]" = []
+    x1, y1, x2, y2 = incoming_crop
+    for src in source_paths:
+        frame = cv2.imread(str(src))
+        if frame is None:
+            logger.warning("Incoming template source unreadable: %s", src)
+            continue
+        crop = get_crop(frame, x1, y1, x2, y2)
+        if crop.size == 0:
+            logger.warning("Incoming template source crop is empty: %s", src)
+            continue
+
+        base_template_binary = _binarize_template_image(crop)
+        src_stem = src.stem
+        for scale in scales:
+            try:
+                scale_val = float(scale)
+            except (TypeError, ValueError):
+                continue
+            if scale_val <= 0.0:
+                continue
+            scaled_binary = cv2.resize(base_template_binary, None, fx=scale_val, fy=scale_val, interpolation=cv2.INTER_CUBIC)
+            h, w = scaled_binary.shape[:2]
+            if h < 5 or w < 5:
+                continue
+            scale_suffix = int(round(scale_val * 100))
+            templates.append((f"{src_stem}_s{scale_suffix}", scaled_binary))
+    return templates
+
+
+def _match_incoming_template_score(
+    incoming_binary: np.ndarray,
+    templates: "list[tuple[str, np.ndarray]]",
+) -> "tuple[float, str | None]":
+    """Return the best binary-template score and corresponding template label."""
+    best_score = -1.0
+    best_label: "str | None" = None
+    ih, iw = incoming_binary.shape[:2]
+    for label, template_binary in templates:
+        th, tw = template_binary.shape[:2]
+        if th > ih or tw > iw:
+            continue
+        response = cv2.matchTemplate(incoming_binary, template_binary, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(response)
+        score = float(max_val)
+        if score > best_score:
+            best_score = score
+            best_label = label
+    return best_score, best_label
+
 
 def _is_shutdown_runtime_error(exc: Exception) -> bool:
     """Return True for expected RuntimeError messages during interpreter/executor shutdown."""
@@ -127,7 +210,15 @@ def _process_respawn_region(respawn_frame):
     return (False, ocr_time, None)
 
 
-def _process_incoming_region(incoming_frame):
+def _process_incoming_region(
+    incoming_frame,
+    incoming_templates,
+    template_matching_enabled: bool,
+    template_threshold: float,
+    template_near_threshold_low: float,
+    template_near_threshold_high: float,
+    fallback_to_ocr: bool,
+):
     """
     Worker function to process incoming missile region in a thread pool thread.
 
@@ -135,39 +226,69 @@ def _process_incoming_region(incoming_frame):
         incoming_frame: numpy array (BGR) of the incoming region — passed by reference, no copy
 
     Returns:
-        tuple: (detected: bool, ocr_time: float, variant_name: str or None, text_found: str or None, raw_texts: list)
+        dict with incoming template/ocr evaluation details.
     """
+    t_start = time.time()
+
+    # Template-primary detection path.
+    incoming_binary = _binarize_template_image(incoming_frame)
+    template_score = -1.0
+    template_label = None
+    template_hit = False
+    near_threshold = False
+    if template_matching_enabled:
+        template_score, template_label = _match_incoming_template_score(incoming_binary, incoming_templates)
+        template_hit = template_label is not None and template_score >= template_threshold
+        near_threshold = (
+            template_label is not None
+            and template_near_threshold_low <= template_score <= template_near_threshold_high
+        )
+
+    result = {
+        "template_score": template_score,
+        "template_label": template_label,
+        "template_hit": bool(template_hit),
+        "near_threshold": bool(near_threshold),
+        "fallback_used": False,
+        "fallback_hit": False,
+        "fallback_variant": None,
+        "fallback_text": None,
+        "fallback_raw": [],
+        "processing_time": 0.0,
+    }
+
+    if template_hit or not fallback_to_ocr:
+        result["processing_time"] = time.time() - t_start
+        return result
+
     reader = _get_thread_ocr_reader()
     if reader is None:
-        return (False, 0.0, None, None, [])
+        result["processing_time"] = time.time() - t_start
+        return result
 
-    t_start = time.time()
-    
-    # Preprocess incoming region
+    result["fallback_used"] = True
     gray_incoming = cv2.cvtColor(incoming_frame, cv2.COLOR_BGR2GRAY)
-    _, binary_incoming = cv2.threshold(gray_incoming, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
     variants = {
         "gray_up_1p4": cv2.resize(gray_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
-        "binary_otsu_up_1p4": cv2.resize(binary_incoming, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
+        "binary_otsu_up_1p4": cv2.resize(incoming_binary, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC),
     }
-    
-    # Try variants
+
     raw_texts = []
     for variant_name, variant_img in variants.items():
-        results_incoming = reader.readtext(variant_img, detail=0, paragraph=True, workers=0)
-        extracted_text = " ".join(str(result) for result in results_incoming)
+        ocr_results = reader.readtext(variant_img, detail=0, paragraph=True, workers=0)
+        extracted_text = " ".join(str(entry) for entry in ocr_results)
         normalized = " ".join(extracted_text.upper().split()).replace(" ", "")
         if normalized:
             raw_texts.append(f"{variant_name}={normalized!r}")
-
-        # Check for MING or WARNING (incoming missile text)
         if "MING" in normalized or ("ARNING" in normalized and len(normalized) >= 6):
-            ocr_time = time.time() - t_start
-            return (True, ocr_time, variant_name, normalized, raw_texts)
+            result["fallback_hit"] = True
+            result["fallback_variant"] = variant_name
+            result["fallback_text"] = normalized
+            break
 
-    ocr_time = time.time() - t_start
-    return (False, ocr_time, None, None, raw_texts)
+    result["fallback_raw"] = raw_texts
+    result["processing_time"] = time.time() - t_start
+    return result
 
 
 def _process_text_region(frame, text_tokens: "list[str]"):
@@ -362,6 +483,7 @@ _FSM_TRANSITIONS = [
     {"trigger": "waiting_timeout",    "source": "GAME_WAITING",          "dest": "GAME_LOBBY"},
     {"trigger": "good_luck_detected", "source": "GAME_STARTING",         "dest": "GAME_BATTLE"},
     {"trigger": "starting_timeout",   "source": "GAME_STARTING",         "dest": "GAME_STARTING_STALLED"},
+    {"trigger": "starting_stalled_reclassify", "source": "GAME_STARTING_STALLED", "dest": "GAME_UNKNOWN"},
     {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
     {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
     {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL"], "dest": "GAME_END_B"},
@@ -425,6 +547,45 @@ class GameStateAnalyzer:
             'timestamp': 0.0,
         }
         self._incoming_cache_lock = threading.Lock()
+        incoming_cfg = config.get("incoming_detection", {})
+        self._incoming_template_matching_enabled = bool(incoming_cfg.get("incoming_template_matching_enabled", True))
+        self._incoming_template_threshold = float(incoming_cfg.get("incoming_template_threshold", 0.82))
+        self._incoming_template_near_threshold_low = float(incoming_cfg.get("incoming_template_near_threshold_low", 0.76))
+        self._incoming_template_near_threshold_high = float(incoming_cfg.get("incoming_template_near_threshold_high", 0.81))
+        self._incoming_template_fallback_to_ocr = bool(incoming_cfg.get("incoming_template_fallback_to_ocr", True))
+        self._incoming_template_telemetry_info = bool(incoming_cfg.get("incoming_template_telemetry_info", True))
+        self._incoming_debounce_ms = int(incoming_cfg.get("incoming_debounce_ms", 500))
+        self._incoming_debounce_window_s = max(0.0, self._incoming_debounce_ms / 1000.0)
+        template_scales_cfg = incoming_cfg.get("incoming_template_scales", list(_DEFAULT_INCOMING_TEMPLATE_SCALES))
+        template_scales: "list[float]" = []
+        for raw_scale in (template_scales_cfg or []):
+            try:
+                template_scales.append(float(raw_scale))
+            except (TypeError, ValueError):
+                logger.warning("Invalid incoming template scale ignored: %r", raw_scale)
+        if not template_scales:
+            template_scales = list(_DEFAULT_INCOMING_TEMPLATE_SCALES)
+        template_sources_cfg = incoming_cfg.get("incoming_template_sources", list(_DEFAULT_INCOMING_TEMPLATE_SOURCES))
+        self._incoming_templates = _build_incoming_templates(
+            self.crops["incoming"][:4],
+            _resolve_template_source_paths(template_sources_cfg),
+            template_scales,
+        )
+        self._incoming_last_positive_ts = 0.0
+        self._incoming_near_threshold_pending = False
+        self._incoming_near_threshold_pending_ts = 0.0
+
+        if self._incoming_template_matching_enabled:
+            logger.info(
+                "Incoming template matching enabled: templates=%d threshold=%.2f near=[%.2f, %.2f] fallback_to_ocr=%s",
+                len(self._incoming_templates),
+                self._incoming_template_threshold,
+                self._incoming_template_near_threshold_low,
+                self._incoming_template_near_threshold_high,
+                self._incoming_template_fallback_to_ocr,
+            )
+            if not self._incoming_templates:
+                logger.warning("Incoming template matching enabled but no templates were loaded")
         # Signalled by the background OCR thread each time a new incoming result is written.
         # The main loop waits on this event during its sleep interval to react without spinning.
         self.incoming_event = threading.Event()
@@ -786,7 +947,9 @@ class GameStateAnalyzer:
         self._background_ocr_stop.set()
         if self._ocr_executor is not None:
             try:
-                self._ocr_executor.shutdown(wait=False)
+                # Join workers during cleanup so background OCR threads do not linger
+                # across test cases or process shutdown boundaries.
+                self._ocr_executor.shutdown(wait=True, cancel_futures=True)
                 logger.info("ThreadPoolExecutor shut down successfully")
                 if self._tracker is not None:
                     try:
@@ -1032,7 +1195,16 @@ class GameStateAnalyzer:
                     # Submit all tasks to the thread pool for parallel processing.
                     # Numpy arrays are passed by reference — no serialization needed.
                     respawn_future = executor.submit(_process_respawn_region, respawn_frame)
-                    incoming_future = executor.submit(_process_incoming_region, incoming_frame)
+                    incoming_future = executor.submit(
+                        _process_incoming_region,
+                        incoming_frame,
+                        self._incoming_templates,
+                        self._incoming_template_matching_enabled,
+                        self._incoming_template_threshold,
+                        self._incoming_template_near_threshold_low,
+                        self._incoming_template_near_threshold_high,
+                        self._incoming_template_fallback_to_ocr,
+                    )
                     health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
                     ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame) if ammo_flares_frame is not None else None
                     ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame) if ammo_missile_frame is not None else None
@@ -1060,19 +1232,95 @@ class GameStateAnalyzer:
                         self._ocr_cache['timestamp'] = current_time
 
                     # Now wait for incoming — its result is independent of respawn.
-                    incoming_detected, incoming_ocr_time, variant_name, incoming_text, incoming_raw = incoming_future.result(timeout=120)
+                    incoming_eval = incoming_future.result(timeout=120)
+                    incoming_processing_time = float(incoming_eval.get("processing_time", 0.0))
                     if self._tracker:
-                        self._tracker.record_ocr_crop("incoming", incoming_ocr_time)
+                        self._tracker.record_ocr_crop("incoming", incoming_processing_time)
                     t3 = time.time()
 
+                    template_score = float(incoming_eval.get("template_score", -1.0))
+                    template_hit = bool(incoming_eval.get("template_hit", False))
+                    near_threshold = bool(incoming_eval.get("near_threshold", False))
+                    template_label = incoming_eval.get("template_label")
+                    fallback_used = bool(incoming_eval.get("fallback_used", False))
+                    fallback_hit = bool(incoming_eval.get("fallback_hit", False))
+                    fallback_variant = incoming_eval.get("fallback_variant")
+                    fallback_text = incoming_eval.get("fallback_text")
+                    fallback_raw = incoming_eval.get("fallback_raw") or []
+
+                    now_t = time.time()
+                    near_threshold_confirmation = False
+                    if near_threshold:
+                        if (
+                            self._incoming_near_threshold_pending
+                            and (now_t - self._incoming_near_threshold_pending_ts) <= 0.75
+                        ):
+                            near_threshold_confirmation = True
+                            self._incoming_near_threshold_pending = False
+                        else:
+                            self._incoming_near_threshold_pending = True
+                            self._incoming_near_threshold_pending_ts = now_t
+                    elif template_hit:
+                        self._incoming_near_threshold_pending = False
+                    else:
+                        self._incoming_near_threshold_pending = False
+
+                    incoming_detected = False
+                    detection_source = "none"
+                    detected_label = None
+
+                    if template_hit:
+                        incoming_detected = True
+                        detection_source = "template"
+                        detected_label = template_label
+                    elif near_threshold_confirmation:
+                        incoming_detected = True
+                        detection_source = "template"
+                        detected_label = template_label
+                    elif fallback_hit:
+                        incoming_detected = True
+                        detection_source = "ocr_fallback"
+                        detected_label = fallback_text
+
+                    debounce_suppressed = False
+                    if incoming_detected and self._incoming_debounce_window_s > 0.0:
+                        if (now_t - self._incoming_last_positive_ts) < self._incoming_debounce_window_s:
+                            debounce_suppressed = True
+                            incoming_detected = False
+                            detection_source = "none"
+                        else:
+                            self._incoming_last_positive_ts = now_t
+
                     if incoming_detected:
-                        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED (variant=%s) - text='%s'\033[0m", variant_name, incoming_text)
-                    elif incoming_raw:
-                        logger.debug("Analyzer: No match in INCOMING region — raw OCR: %s", ", ".join(incoming_raw))
+                        logger.info(
+                            "\033[95m🚀 INCOMING MISSILE DETECTED (source=%s template=%s score=%.3f text=%s)\033[0m",
+                            detection_source,
+                            template_label,
+                            template_score,
+                            detected_label,
+                        )
+                    elif fallback_raw:
+                        logger.debug("Analyzer: No match in INCOMING region — raw OCR: %s", ", ".join(fallback_raw))
                     else:
                         logger.debug("Analyzer: No text detected in INCOMING region")
 
-                    incoming_result = (True, 1.0, "ocr") if incoming_detected else (False, 0.0, None)
+                    _incoming_log = logger.info if self._incoming_template_telemetry_info else logger.debug
+                    _incoming_log(
+                        "Analyzer: incoming_template detector=incoming_template template_score=%.3f "
+                        "template_threshold=%.3f near_threshold_confirmation=%s detection_source=%s "
+                        "detected=%s debounce_suppressed=%s incoming_processing_ms=%d",
+                        template_score,
+                        self._incoming_template_threshold,
+                        near_threshold_confirmation,
+                        detection_source,
+                        incoming_detected,
+                        debounce_suppressed,
+                        int(incoming_processing_time * 1000),
+                    )
+
+                    incoming_method = detection_source if incoming_detected else None
+                    incoming_conf = template_score if detection_source == "template" else (1.0 if detection_source == "ocr_fallback" else 0.0)
+                    incoming_result = (incoming_detected, float(incoming_conf), incoming_method)
                     with self._incoming_cache_lock:
                         self._incoming_cache['result'] = incoming_result
                         self._incoming_cache['timestamp'] = current_time
@@ -1135,16 +1383,29 @@ class GameStateAnalyzer:
                         flares_value, ammo_flares_ocr_time = ammo_flares_future.result(timeout=120)
                         if self._tracker:
                             self._tracker.record_ocr_crop("ammo_flares", ammo_flares_ocr_time)
+                    else:
+                        flares_value = None
+                    if ammo_missile_future is not None:
+                        missile_value, ammo_missile_ocr_time = ammo_missile_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("ammo_missiles", ammo_missile_ocr_time)
+                    else:
+                        missile_value = None
+
+                    if respawn_detected:
+                        with self._ammo_lock:
+                            self._ammo_flares = None
+                            self._ammo_missiles = None
+                        self.low_flares_event.clear()
+                        self.no_missiles_event.clear()
+                        logger.debug("Analyzer: skipping ammo updates while respawn is detected")
+                    else:
                         if flares_value is not None:
                             with self._ammo_lock:
                                 self._ammo_flares = flares_value
                             logger.info("Ammo flares: %d", flares_value)
                             if flares_value == 2:
                                 self.low_flares_event.set()
-                    if ammo_missile_future is not None:
-                        missile_value, ammo_missile_ocr_time = ammo_missile_future.result(timeout=120)
-                        if self._tracker:
-                            self._tracker.record_ocr_crop("ammo_missiles", ammo_missile_ocr_time)
                         if missile_value is not None:
                             with self._ammo_lock:
                                 self._ammo_missiles = missile_value
@@ -1159,7 +1420,7 @@ class GameStateAnalyzer:
                         "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
                         "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | "
                         "Flares OCR: %.2fs | Missiles OCR: %.2fs | Total: %.2fs",
-                        t1-t0, t2-t1, respawn_ocr_time, incoming_ocr_time, health_ocr_time,
+                        t1-t0, t2-t1, respawn_ocr_time, incoming_processing_time, health_ocr_time,
                         ammo_flares_ocr_time, ammo_missile_ocr_time, t4-t0
                     )
                 elif (state == GameState.GAME_STARTING
@@ -1594,6 +1855,9 @@ class GameStateAnalyzer:
         with self._click_to_cache_lock:
             self._click_to_cache['timestamp'] = 0.0
             self._click_to_cache['result'] = (False, 0.0, None)
+        self._incoming_last_positive_ts = 0.0
+        self._incoming_near_threshold_pending = False
+        self._incoming_near_threshold_pending_ts = 0.0
         logger.debug("OCR caches reset")
 
     def detect_enemy_red(self, frame) -> bool:

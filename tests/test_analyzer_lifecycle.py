@@ -151,3 +151,12 @@ def test_fsm_unattended_lifecycle_and_starting_loop_callbacks(cfg):
     assert analyzer._trigger("starting_recovery") is True
     assert analyzer.game_state == GameState.GAME_STARTING
     assert events["start_loop"] == 2
+
+    assert analyzer._trigger("starting_timeout") is True
+    assert analyzer.game_state == GameState.GAME_STARTING_STALLED
+
+    assert analyzer._trigger("starting_stalled_reclassify") is True
+    assert analyzer.game_state == GameState.GAME_UNKNOWN
+
+    assert analyzer._trigger("unknown_to_lobby_detected") is True
+    assert analyzer.game_state == GameState.GAME_LOBBY
