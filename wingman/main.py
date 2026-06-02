@@ -329,7 +329,7 @@ def main():
             live_capture.on_event("good_luck_detected", _now)
             live_capture.evaluate(gl_frame, "GAME_STARTING", _now)
             live_capture.evaluate(gl_frame, "GAME_STARTING", _now + 1e-6)
-        ctrl._on_good_luck_frame = _on_good_luck_frame
+        ctrl.set_on_good_luck_frame(_on_good_luck_frame)
 
         def _on_respawn_detected_frame(rs_frame):
             # Respawn OCR succeeded in background thread: capture with the exact OCR
@@ -351,7 +351,7 @@ def main():
             live_capture.on_event("manual_takeover", _now)
             live_capture.evaluate(mt_frame, "GAME_BATTLE", _now)
             live_capture.evaluate(mt_frame, "GAME_BATTLE", _now + 1e-6)
-        ctrl._on_manual_takeover_frame = _on_manual_takeover_frame
+        ctrl.set_on_manual_takeover_frame(_on_manual_takeover_frame)
 
     def _handle_lobby_popup(popup):
         if not ctrl.popup_click_allowed(popup):

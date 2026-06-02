@@ -1,42 +1,66 @@
 {
-  "timestamp": "2026-06-02T05:00:49.947919",
+  "timestamp": "2026-06-02T06:52:19.493454",
   "version": "1.6.15",
   "tests": {
-    "test_cleanup_shuts_down_executor": {
-      "duration": 82.90106519986875,
+    "test_wingman_smoke_launch": {
+      "duration": 0.0001346999779343605,
       "runs": 1,
-      "min": 82.90106519986875,
-      "max": 82.90106519986875
+      "min": 0.0001346999779343605,
+      "max": 0.0001346999779343605
     },
-    "test_cleanup_signals_click_to_thread": {
-      "duration": 91.57279450003989,
+    "test_level1_static_screenshot": {
+      "duration": 17.318392100045457,
       "runs": 1,
-      "min": 91.57279450003989,
-      "max": 91.57279450003989
+      "min": 17.318392100045457,
+      "max": 17.318392100045457
     },
-    "test_context_manager_calls_cleanup": {
-      "duration": 59.09385140007362,
+    "test_respawn_detection_positive": {
+      "duration": 21.396690899971873,
       "runs": 1,
-      "min": 59.09385140007362,
-      "max": 59.09385140007362
+      "min": 21.396690899971873,
+      "max": 21.396690899971873
     },
-    "test_no_threads_leaked_after_cleanup": {
-      "duration": 59.954806099878624,
+    "test_respawn_detection_negative": {
+      "duration": 19.38911829981953,
       "runs": 1,
-      "min": 59.954806099878624,
-      "max": 59.954806099878624
+      "min": 19.38911829981953,
+      "max": 19.38911829981953
     },
-    "test_trigger_runs_side_effect_callbacks_outside_state_lock": {
-      "duration": 0.08640299993567169,
+    "test_level2_live_capture": {
+      "duration": 8.04136719997041,
       "runs": 1,
-      "min": 0.08640299993567169,
-      "max": 0.08640299993567169
+      "min": 8.04136719997041,
+      "max": 8.04136719997041
     },
-    "test_fsm_unattended_lifecycle_and_starting_loop_callbacks": {
-      "duration": 0.07216249988414347,
+    "test_get_frame_and_analyze_frame": {
+      "duration": 0.1769644001033157,
       "runs": 1,
-      "min": 0.07216249988414347,
-      "max": 0.07216249988414347
+      "min": 0.1769644001033157,
+      "max": 0.1769644001033157
+    },
+    "test_level3_unit_ocr": {
+      "duration": 6.700795599957928,
+      "runs": 1,
+      "min": 6.700795599957928,
+      "max": 6.700795599957928
+    },
+    "test_level4_region33_contains_lick_to_c": {
+      "duration": 1.645898199873045,
+      "runs": 2,
+      "min": 0.42738249991089106,
+      "max": 2.864413899835199
+    },
+    "test_level4_region9_contains_inco": {
+      "duration": 0.38777136670735973,
+      "runs": 3,
+      "min": 0.3819979999680072,
+      "max": 0.3963649000506848
+    },
+    "test_level5_performance_validation": {
+      "duration": 0.003955200081691146,
+      "runs": 1,
+      "min": 0.003955200081691146,
+      "max": 0.003955200081691146
     }
   }
 }
