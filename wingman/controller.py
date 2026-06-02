@@ -335,6 +335,14 @@ class Controller:
         with self._action_intents_lock:
             return list(self._action_intents)
 
+    def set_on_good_luck_frame(self, callback) -> None:
+        """Register callback fired when Good Luck OCR is detected with frame payload."""
+        self._on_good_luck_frame = callback
+
+    def set_on_manual_takeover_frame(self, callback) -> None:
+        """Register callback fired before manual takeover FSM transition with frame payload."""
+        self._on_manual_takeover_frame = callback
+
     def _handle_maneuver_key_press(self, key_name: str, is_injected: bool = False) -> bool:
         """Handle manual maneuver-key takeover logic.
 
