@@ -321,6 +321,14 @@ def main():
             live_capture.evaluate(frame, "GAME_LOBBY", _now + 1e-6)
     analyzer.set_on_lobby_play_click(_on_lobby_play_click_cb)
 
+    def _on_lobby_no_crops_stalled_cb(consecutive_count):
+        logger.warning(
+            "Lobby quick-scan stall guard: no lobby crops detected for %d consecutive cycles; pressing ESC",
+            consecutive_count,
+        )
+        ctrl.press_escape(hold_seconds=0.05, block=False)
+    analyzer.set_on_lobby_no_crops_stalled(_on_lobby_no_crops_stalled_cb)
+
     if live_capture is not None:
         def _on_good_luck_frame(gl_frame):
             # Good Luck OCR succeeded: capture immediately with the detected frame

@@ -519,6 +519,16 @@ class Controller:
         """Perform a wingsweep maneuver by pressing the configured wingsweep key."""
         self._execute_key_press(WINGSWEEP_KEY, hold_seconds=hold_seconds, block=block, action_name='wingsweep')
 
+    def press_escape(self, hold_seconds: float = 0.05, block: bool = False):
+        """Press Escape once, used by safety-recovery handlers."""
+        self._execute_key_press(
+            'esc',
+            hold_seconds=hold_seconds,
+            block=block,
+            action_name='escape_recovery',
+            ignore_cancel=True,
+        )
+
     def padlock_camera(self, hold_seconds: float = 0.1, block: bool = True):
         """Toggle padlock camera by pressing the configured padlock camera key."""
         self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block, action_name='padlock_camera')
