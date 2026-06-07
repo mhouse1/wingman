@@ -25,6 +25,14 @@ Performance ADRs must include actual log excerpts with timing data, not just est
 
 Do not modify an ADR that has status `Accepted`. If a decision is superseded, write a new ADR and reference the old one. This keeps the decision history intact.
 
+## Command Execution
+
+Always use the project Makefile and bash shell for commands in this repository.
+
+- Prefer `make <target>` for tests, builds, and project tasks.
+- Use bash as the execution shell for terminal commands.
+- Do not bypass the Makefile with ad-hoc `python`, `pytest`, or shell commands when a Makefile target already covers the task.
+
 ## Diagrams
 
 Always use Mermaid for diagrams in documentation. Never use ASCII text diagrams (no box-drawing characters, no `┌─┐` borders, no `→` arrow art). Wrap all diagrams in a fenced code block with the `mermaid` language tag.
