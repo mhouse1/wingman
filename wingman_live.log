@@ -1,238 +1,235 @@
-2026-06-02 03:58:09,851 [INFO] Configuration loaded from wingman/config.yaml
-2026-06-02 03:58:09,851 [INFO] Capture mode enabled: path=PATH1_LIVE, screenshots=tests\test-output\live_capture_path1, mode=non-strict
-2026-06-02 03:58:09,856 [INFO] OCR mode: CPU
-2026-06-02 03:58:09,889 [INFO] Incoming template matching enabled: templates=1 threshold=0.82 near=[0.76, 0.81] fallback_to_ocr=True
-2026-06-02 03:58:09,890 [INFO] Unattended mode enabled from config
-2026-06-02 03:58:09,928 [INFO] Initialized ThreadPoolExecutor with 13 workers for parallel OCR
-2026-06-02 03:58:09,933 [DEBUG] OCR worker pre-warm submitted (13 tasks)
-2026-06-02 03:58:11,484 [INFO] OCR thread 22972: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:14,311 [DEBUG] Analyzer: UNREADY not found
-2026-06-02 03:58:14,311 [INFO] Analyzer: 'PLAY' detected in PLAY crop (text='PLAY')
-2026-06-02 03:58:14,311 [INFO] [96m🎮 Game state: UNKNOWN → GAME_UNKNOWN[0m
-2026-06-02 03:58:14,429 [INFO] OCR thread 16652: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:16,470 [DEBUG] Analyzer: UNREADY not found
-2026-06-02 03:58:16,470 [INFO] Analyzer: 'PLAY' detected in PLAY crop (text='PLAY')
-2026-06-02 03:58:16,472 [DEBUG] Executed machine preparation callbacks before conditions.
-2026-06-02 03:58:16,472 [DEBUG] Initiating transition from state GAME_UNKNOWN to state GAME_LOBBY...
-2026-06-02 03:58:16,472 [DEBUG] Executed callbacks before conditions.
-2026-06-02 03:58:16,472 [DEBUG] Executed callback before transition.
-2026-06-02 03:58:16,472 [DEBUG] Exiting state GAME_UNKNOWN. Processing callbacks...
-2026-06-02 03:58:16,472 [INFO] Finished processing state GAME_UNKNOWN exit callbacks.
-2026-06-02 03:58:16,473 [DEBUG] Entering state GAME_LOBBY. Processing callbacks...
-2026-06-02 03:58:16,473 [INFO] Executed callback 'on_enter_GAME_LOBBY'
-2026-06-02 03:58:16,473 [INFO] Finished processing state GAME_LOBBY enter callbacks.
-2026-06-02 03:58:16,473 [DEBUG] Executed callback after transition.
-2026-06-02 03:58:16,473 [DEBUG] Executed machine finalize callbacks
-2026-06-02 03:58:16,473 [INFO] [91mController: cancel_mission called[0m
-2026-06-02 03:58:16,473 [DEBUG] Controller: weapon loop not running
-2026-06-02 03:58:16,473 [INFO] FSM: GAME_UNKNOWN classified as GAME_LOBBY via unknown_to_lobby_detected
-2026-06-02 03:58:16,719 [INFO] [96m🎮 Game state: GAME_UNKNOWN → GAME_LOBBY[0m
-2026-06-02 03:58:16,720 [INFO] [91mController: cancel_mission called[0m
-2026-06-02 03:58:16,720 [DEBUG] Controller: weapon loop not running
-2026-06-02 03:58:16,752 [DEBUG] Click-to background thread started
-2026-06-02 03:58:16,754 [INFO] Lobby quick-scan background thread started
-2026-06-02 03:58:17,484 [INFO] OCR thread 12184: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:20,064 [INFO] [93m📋 Lobby quick-scan: PLAY detected (text='PLAY') — clicking[0m
-2026-06-02 03:58:20,066 [DEBUG] Executed machine preparation callbacks before conditions.
-2026-06-02 03:58:20,066 [DEBUG] Initiating transition from state GAME_LOBBY to state GAME_WAITING...
-2026-06-02 03:58:20,066 [DEBUG] Executed callbacks before conditions.
-2026-06-02 03:58:20,066 [DEBUG] Executed callback before transition.
-2026-06-02 03:58:20,068 [DEBUG] Exiting state GAME_LOBBY. Processing callbacks...
-2026-06-02 03:58:20,068 [INFO] Finished processing state GAME_LOBBY exit callbacks.
-2026-06-02 03:58:20,068 [DEBUG] Entering state GAME_WAITING. Processing callbacks...
-2026-06-02 03:58:20,068 [INFO] Finished processing state GAME_WAITING enter callbacks.
-2026-06-02 03:58:20,068 [DEBUG] Executed callback after transition.
-2026-06-02 03:58:20,068 [DEBUG] Executed machine finalize callbacks
-2026-06-02 03:58:20,068 [INFO] [93m📋 Clicking PLAY at (2415, 2693) [monitor 1 offset 777,1600] x1[0m
-2026-06-02 03:58:20,068 [DEBUG] Lobby quick-scan: lobby batch completed in 2.31s
-2026-06-02 03:58:20,068 [DEBUG] Lobby quick-scan: popup scan suppressed for 5.0s after PLAY/READY click
-2026-06-02 03:58:20,070 [DEBUG] Lobby quick-scan: cycle completed in 2.31s
-2026-06-02 03:58:20,436 [INFO] OCR thread 27200: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:21,306 [INFO] [96m🎮 Game state: GAME_LOBBY → GAME_WAITING[0m
-2026-06-02 03:58:21,715 [DEBUG] Lobby quick-scan: CANCEL not found in GAME_WAITING
-2026-06-02 03:58:21,715 [DEBUG] Lobby quick-scan: lobby batch completed in 0.64s
-2026-06-02 03:58:21,715 [DEBUG] Lobby quick-scan: popup scan suppressed for 3.3s after PLAY/READY click
-2026-06-02 03:58:21,715 [DEBUG] Lobby quick-scan: cycle completed in 0.64s
-2026-06-02 03:58:22,716 [INFO] OCR thread 23460: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:23,228 [DEBUG] Lobby quick-scan: CANCEL not found in GAME_WAITING
-2026-06-02 03:58:23,228 [DEBUG] Lobby quick-scan: lobby batch completed in 0.50s
-2026-06-02 03:58:23,228 [DEBUG] Lobby quick-scan: popup scan suppressed for 1.8s after PLAY/READY click
-2026-06-02 03:58:23,228 [DEBUG] Lobby quick-scan: cycle completed in 0.50s
-2026-06-02 03:58:24,576 [INFO] Analyzer: CANCEL button detected (text='CANCEL') → matchmaking active
-2026-06-02 03:58:24,578 [INFO] [92m✓ CANCEL detected (3.0s) — matchmaking confirmed → GAME_STARTING[0m
-2026-06-02 03:58:24,578 [DEBUG] Executed machine preparation callbacks before conditions.
-2026-06-02 03:58:24,578 [DEBUG] Initiating transition from state GAME_WAITING to state GAME_STARTING...
-2026-06-02 03:58:24,578 [DEBUG] Executed callbacks before conditions.
-2026-06-02 03:58:24,578 [DEBUG] Executed callback before transition.
-2026-06-02 03:58:24,579 [DEBUG] Exiting state GAME_WAITING. Processing callbacks...
-2026-06-02 03:58:24,579 [INFO] Finished processing state GAME_WAITING exit callbacks.
-2026-06-02 03:58:24,579 [DEBUG] Entering state GAME_STARTING. Processing callbacks...
-2026-06-02 03:58:24,579 [INFO] Executed callback 'on_enter_GAME_STARTING'
-2026-06-02 03:58:24,579 [INFO] Finished processing state GAME_STARTING enter callbacks.
-2026-06-02 03:58:24,579 [DEBUG] Executed callback after transition.
-2026-06-02 03:58:24,579 [DEBUG] Executed machine finalize callbacks
-2026-06-02 03:58:24,581 [INFO] Controller: game_starting loop started - pressing 'u' key every 5s until 'Good Luck' detected
-2026-06-02 03:58:24,589 [INFO] [92m✓ Lobby quick-scan: CANCEL detected in GAME_WAITING (text='CANCEL') → GAME_STARTING[0m
-2026-06-02 03:58:24,589 [DEBUG] Executed machine finalize callbacks
-2026-06-02 03:58:24,589 [WARNING] FSM: ignored invalid trigger 'cancel_detected' from state GameState.GAME_STARTING: "Can't trigger event cancel_detected from state GAME_STARTING!"
-2026-06-02 03:58:24,589 [DEBUG] Lobby quick-scan: lobby batch completed in 0.35s
-2026-06-02 03:58:24,591 [DEBUG] Lobby quick-scan: popup scan suppressed for 0.5s after PLAY/READY click
-2026-06-02 03:58:24,591 [DEBUG] Lobby quick-scan: cycle completed in 0.35s
-2026-06-02 03:58:25,061 [INFO] Controller: game_starting - pressed 'u' key
-2026-06-02 03:58:25,067 [INFO] OCR thread 20360: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:26,055 [INFO] [96m🎮 Game state: GAME_WAITING → GAME_STARTING[0m
-2026-06-02 03:58:26,718 [DEBUG] Analyzer: 'Good Luck' not found in good_luck crop
-2026-06-02 03:58:27,632 [INFO] OCR thread 11288: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:29,174 [INFO] OCR thread 23608: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:30,469 [INFO] Controller: game_starting - pressed 'u' key
-2026-06-02 03:58:30,719 [INFO] OCR thread 6756: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:32,447 [DEBUG] Analyzer: 'Good Luck' not found in good_luck crop
-2026-06-02 03:58:33,387 [INFO] OCR thread 6612: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:34,616 [INFO] Controller: game_starting health-scan fallback armed (10s gate)
-2026-06-02 03:58:34,930 [INFO] OCR thread 25916: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:35,907 [INFO] Controller: game_starting - pressed 'u' key
-2026-06-02 03:58:36,510 [INFO] OCR thread 8140: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:37,495 [DEBUG] Analyzer: 'Good Luck' not found in good_luck crop
-2026-06-02 03:58:38,879 [INFO] OCR thread 12856: initialized EasyOCR reader (CPU)
-2026-06-02 03:58:41,374 [INFO] Controller: game_starting - pressed 'u' key
-2026-06-02 03:58:42,287 [INFO] Analyzer: 'Good Luck' detected in good_luck crop (text='GOODLUCKL')
-2026-06-02 03:58:42,290 [INFO] [92mController: 'Good Luck' detected - waiting 13s before starting 'u' mission[0m
-2026-06-02 03:58:55,402 [INFO] Controller: game_starting - launching J20 mission
-2026-06-02 03:58:55,402 [DEBUG] Executed machine preparation callbacks before conditions.
-2026-06-02 03:58:55,402 [DEBUG] Initiating transition from state GAME_STARTING to state GAME_BATTLE...
-2026-06-02 03:58:55,404 [DEBUG] Executed callbacks before conditions.
-2026-06-02 03:58:55,404 [DEBUG] Executed callback before transition.
-2026-06-02 03:58:55,404 [DEBUG] Exiting state GAME_STARTING. Processing callbacks...
-2026-06-02 03:58:55,404 [INFO] Finished processing state GAME_STARTING exit callbacks.
-2026-06-02 03:58:55,404 [DEBUG] Entering state GAME_BATTLE. Processing callbacks...
-2026-06-02 03:58:55,406 [INFO] Executed callback 'on_enter_GAME_BATTLE'
-2026-06-02 03:58:55,406 [INFO] Finished processing state GAME_BATTLE enter callbacks.
-2026-06-02 03:58:55,406 [DEBUG] Executed callback after transition.
-2026-06-02 03:58:55,406 [DEBUG] Executed machine finalize callbacks
-2026-06-02 03:58:55,406 [INFO] Controller: mission 'j20' started → GAME_BATTLE
-2026-06-02 03:58:55,406 [INFO] [92mController: mission_j20 - starting mission sequence (lock acquired)[0m
-2026-06-02 03:58:55,406 [INFO] Controller: game_starting loop stopped
-2026-06-02 03:58:55,406 [DEBUG] Controller: nose_up - pressing 'i' key for 2.0 seconds
-2026-06-02 03:58:55,406 [DEBUG] Controller: using keyboard library for 'i' press
-2026-06-02 03:58:56,006 [DEBUG] Background OCR scheduled
-2026-06-02 03:58:56,104 [INFO] [96m🎮 Game state: GAME_STARTING → GAME_BATTLE[0m
-2026-06-02 03:58:56,192 [DEBUG] Respawn OCR results: []
-2026-06-02 03:58:56,221 [DEBUG] Analyzer: No text detected in INCOMING region
-2026-06-02 03:58:56,223 [INFO] Analyzer: incoming_template detector=incoming_template template_score=-0.275 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=204
-2026-06-02 03:58:56,223 [DEBUG] Analyzer: Health OCR returned no digits (grace timer started)
-2026-06-02 03:58:56,223 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.18s | Incoming OCR: 0.20s | Health OCR: 0.21s | Flares OCR: 0.13s | Missiles OCR: 0.16s | Total: 0.21s
-2026-06-02 03:58:57,438 [DEBUG] Controller: nose_up complete
-2026-06-02 03:58:57,440 [INFO] Controller: search_and_destroy padlock loop started
-2026-06-02 03:58:57,440 [DEBUG] [94mController: padlock_camera - pressing 'p' key for 0.1 seconds[0m
-2026-06-02 03:58:57,440 [DEBUG] Controller: using keyboard library for 'p' press
-2026-06-02 03:58:57,440 [INFO] Controller: search_and_destroy weapon loop started
-2026-06-02 03:58:57,443 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
-2026-06-02 03:58:57,443 [DEBUG] Controller: using keyboard library for 'f' press
-2026-06-02 03:58:57,442 [INFO] Controller: search_and_destroy_loop started
-2026-06-02 03:58:57,443 [INFO] Controller: mission_j20 background loops started
-2026-06-02 03:58:57,443 [DEBUG] Controller: afterburner - pressing 'e' key for 20.0 seconds
-2026-06-02 03:58:57,443 [DEBUG] Controller: using keyboard library for 'e' press
-2026-06-02 03:58:57,509 [DEBUG] Background OCR scheduled
-2026-06-02 03:58:57,555 [DEBUG] Controller: fire_active_weapon complete
-2026-06-02 03:58:57,555 [DEBUG] [94mController: padlock_camera complete[0m
-2026-06-02 03:58:57,646 [DEBUG] Respawn OCR results: []
-2026-06-02 03:58:57,659 [DEBUG] Analyzer: No text detected in INCOMING region
-2026-06-02 03:58:57,659 [INFO] Analyzer: incoming_template detector=incoming_template template_score=-0.275 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=149
-2026-06-02 03:58:57,659 [DEBUG] Analyzer: Health OCR no digits (1.4s elapsed, 3s threshold)
-2026-06-02 03:58:57,659 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.14s | Incoming OCR: 0.15s | Health OCR: 0.15s | Flares OCR: 0.11s | Missiles OCR: 0.14s | Total: 0.15s
-2026-06-02 03:58:58,638 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
-2026-06-02 03:58:58,639 [DEBUG] Controller: using keyboard library for 'f' press
-2026-06-02 03:58:58,761 [DEBUG] Controller: fire_active_weapon complete
-2026-06-02 03:58:59,009 [DEBUG] Background OCR scheduled
-2026-06-02 03:58:59,143 [DEBUG] Respawn OCR results: []
-2026-06-02 03:58:59,155 [DEBUG] Analyzer: No text detected in INCOMING region
-2026-06-02 03:58:59,155 [INFO] Analyzer: incoming_template detector=incoming_template template_score=-0.275 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=146
-2026-06-02 03:58:59,155 [DEBUG] Analyzer: Health OCR no digits (2.9s elapsed, 3s threshold)
-2026-06-02 03:58:59,155 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.13s | Incoming OCR: 0.15s | Health OCR: 0.14s | Flares OCR: 0.12s | Missiles OCR: 0.13s | Total: 0.15s
-2026-06-02 03:58:59,843 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
-2026-06-02 03:58:59,843 [DEBUG] Controller: using keyboard library for 'f' press
-2026-06-02 03:58:59,950 [DEBUG] Controller: fire_active_weapon complete
-2026-06-02 03:59:00,525 [DEBUG] Background OCR scheduled
-2026-06-02 03:59:00,650 [DEBUG] Respawn OCR results: []
-2026-06-02 03:59:00,674 [DEBUG] Analyzer: No text detected in INCOMING region
-2026-06-02 03:59:00,674 [INFO] Analyzer: incoming_template detector=incoming_template template_score=0.086 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=148
-2026-06-02 03:59:00,674 [INFO] Health: 224 | alive=True
-2026-06-02 03:59:00,674 [INFO] Analyzer: health alive transition False→True — resetting health ceiling
-2026-06-02 03:59:00,674 [INFO] Ammo flares: 6
-2026-06-02 03:59:00,674 [INFO] Ammo missiles: 0
-2026-06-02 03:59:00,674 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.12s | Incoming OCR: 0.15s | Health OCR: 0.14s | Flares OCR: 0.12s | Missiles OCR: 0.13s | Total: 0.15s
-2026-06-02 03:59:01,017 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
-2026-06-02 03:59:01,017 [DEBUG] Controller: using keyboard library for 'f' press
-2026-06-02 03:59:01,136 [DEBUG] Controller: fire_active_weapon complete
-2026-06-02 03:59:01,994 [DEBUG] No-missiles suppressed — post-mission-start grace (0.1s remaining)
-2026-06-02 03:59:02,020 [DEBUG] Background OCR scheduled
-2026-06-02 03:59:02,182 [DEBUG] Respawn OCR results: []
-2026-06-02 03:59:02,191 [DEBUG] Analyzer: No text detected in INCOMING region
-2026-06-02 03:59:02,191 [INFO] Analyzer: incoming_template detector=incoming_template template_score=0.086 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=170
-2026-06-02 03:59:02,192 [INFO] Health: 224 | alive=True
-2026-06-02 03:59:02,194 [INFO] Ammo flares: 6
-2026-06-02 03:59:02,194 [INFO] Ammo missiles: 0
-2026-06-02 03:59:02,194 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.16s | Incoming OCR: 0.17s | Health OCR: 0.17s | Flares OCR: 0.15s | Missiles OCR: 0.16s | Total: 0.17s
-2026-06-02 03:59:02,212 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
-2026-06-02 03:59:02,212 [DEBUG] Controller: using keyboard library for 'f' press
-2026-06-02 03:59:02,322 [DEBUG] Controller: fire_active_weapon complete
-2026-06-02 03:59:03,405 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
-2026-06-02 03:59:03,405 [DEBUG] Controller: using keyboard library for 'f' press
-2026-06-02 03:59:03,498 [DEBUG] No-missiles event awaiting confirmation (1/2)
-2026-06-02 03:59:03,524 [DEBUG] Controller: fire_active_weapon complete
-2026-06-02 03:59:03,526 [DEBUG] Background OCR scheduled
-2026-06-02 03:59:03,650 [DEBUG] Respawn OCR results: []
-2026-06-02 03:59:03,660 [DEBUG] Analyzer: No text detected in INCOMING region
-2026-06-02 03:59:03,660 [INFO] Analyzer: incoming_template detector=incoming_template template_score=0.086 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=134
-2026-06-02 03:59:03,660 [INFO] Health: 224 | alive=True
-2026-06-02 03:59:03,662 [INFO] Ammo flares: 6
-2026-06-02 03:59:03,662 [INFO] Ammo missiles: 0
-2026-06-02 03:59:03,662 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.12s | Incoming OCR: 0.13s | Health OCR: 0.13s | Flares OCR: 0.12s | Missiles OCR: 0.13s | Total: 0.14s
-2026-06-02 03:59:04,018 [DEBUG] [94mController: padlock_camera - pressing 'p' key for 0.1 seconds[0m
-2026-06-02 03:59:04,018 [DEBUG] Controller: using keyboard library for 'p' press
-2026-06-02 03:59:04,142 [DEBUG] [94mController: padlock_camera complete[0m
-2026-06-02 03:59:04,626 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
-2026-06-02 03:59:04,627 [DEBUG] Controller: using keyboard library for 'f' press
-2026-06-02 03:59:04,745 [DEBUG] Controller: fire_active_weapon complete
-2026-06-02 03:59:05,005 [INFO] [91m🚀 MISSILES EMPTY — cancelling mission and ejecting[0m
-2026-06-02 03:59:05,005 [INFO] [91mController: cancel_mission called[0m
-2026-06-02 03:59:05,005 [DEBUG] Controller: weapon loop not running
-2026-06-02 03:59:05,005 [DEBUG] Controller: afterburner cancelled
-2026-06-02 03:59:05,005 [DEBUG] Controller: afterburner complete
-2026-06-02 03:59:05,005 [INFO] Controller: mission cancelled after afterburner
-2026-06-02 03:59:05,005 [INFO] [91mController: mission_j20 - lock released[0m
-2026-06-02 03:59:05,037 [DEBUG] Background OCR scheduled
-2026-06-02 03:59:05,057 [INFO] Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged
-2026-06-02 03:59:05,071 [INFO] Controller: search_and_destroy weapon loop stopped
-2026-06-02 03:59:05,096 [INFO] Controller: search_and_destroy padlock loop stopped
-2026-06-02 03:59:05,176 [DEBUG] Respawn OCR results: []
-2026-06-02 03:59:05,185 [DEBUG] Analyzer: No text detected in INCOMING region
-2026-06-02 03:59:05,185 [INFO] Analyzer: incoming_template detector=incoming_template template_score=0.086 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=148
-2026-06-02 03:59:05,185 [INFO] Health: 224 | alive=True
-2026-06-02 03:59:05,185 [INFO] Analyzer: health alive transition False→True — resetting health ceiling
-2026-06-02 03:59:05,186 [INFO] Ammo flares: 6
-2026-06-02 03:59:05,186 [INFO] Ammo missiles: 0
-2026-06-02 03:59:05,186 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.14s | Incoming OCR: 0.15s | Health OCR: 0.14s | Flares OCR: 0.14s | Missiles OCR: 0.13s | Total: 0.15s
-2026-06-02 03:59:05,207 [INFO] [91mController: mission_j20 - method exiting[0m
-2026-06-02 03:59:06,513 [INFO] [92m💚 HEALTH ALIVE — missiles empty, skipping restart[0m
-2026-06-02 03:59:06,543 [INFO] Capture finished — exiting main loop
-2026-06-02 03:59:06,544 [INFO] Capture updated all requested screenshots
-2026-06-02 03:59:06,544 [INFO] Capture summary saved to tests\test-output\capture_summary.path1.live.json
-2026-06-02 03:59:06,545 [INFO] Controller: all keyboard hooks deregistered
-2026-06-02 03:59:06,545 [INFO] ThreadPoolExecutor shut down successfully
-2026-06-02 03:59:06,548 [INFO] PerformanceTracker: session data written to docs\performance\current\run_20260602_035809.json
-2026-06-02 03:59:06,574 [INFO] [SESSION vs CURRENT PERIOD | this session: 0 rounds 7 cycles | period: 9 sessions 6633 cycles]
+2026-06-08 02:48:36,299 [INFO] Configuration loaded from wingman/config.yaml
+2026-06-08 02:48:36,315 [INFO] Capture mode enabled: path=PATH1_LIVE, screenshots=tests\test-output\live_capture_path1, mode=non-strict
+2026-06-08 02:48:36,315 [INFO] OCR mode: CPU
+2026-06-08 02:48:36,349 [INFO] Incoming template matching enabled: templates=1 threshold=0.82 near=[0.76, 0.81] fallback_to_ocr=True
+2026-06-08 02:48:36,349 [INFO] Unattended mode enabled from config
+2026-06-08 02:48:36,381 [INFO] Initialized ThreadPoolExecutor with 13 workers for parallel OCR
+2026-06-08 02:48:36,381 [DEBUG] OCR worker pre-warm submitted (13 tasks)
+2026-06-08 02:48:37,872 [INFO] OCR thread 30716: initialized EasyOCR reader (CPU)
+2026-06-08 02:48:40,839 [INFO] OCR thread 30448: initialized EasyOCR reader (CPU)
+2026-06-08 02:48:40,982 [DEBUG] Analyzer: UNREADY not found
+2026-06-08 02:48:40,982 [INFO] Analyzer: 'PLAY' detected in PLAY crop (text='PLAY')
+2026-06-08 02:48:40,983 [INFO] [96m🎮 Game state: UNKNOWN → GAME_UNKNOWN[0m
+2026-06-08 02:48:43,730 [DEBUG] Analyzer: UNREADY not found
+2026-06-08 02:48:43,730 [INFO] Analyzer: 'PLAY' detected in PLAY crop (text='PLAY')
+2026-06-08 02:48:43,730 [DEBUG] Executed machine preparation callbacks before conditions.
+2026-06-08 02:48:43,730 [DEBUG] Initiating transition from state GAME_UNKNOWN to state GAME_LOBBY...
+2026-06-08 02:48:43,730 [DEBUG] Executed callbacks before conditions.
+2026-06-08 02:48:43,730 [DEBUG] Executed callback before transition.
+2026-06-08 02:48:43,730 [DEBUG] Exiting state GAME_UNKNOWN. Processing callbacks...
+2026-06-08 02:48:43,730 [INFO] Finished processing state GAME_UNKNOWN exit callbacks.
+2026-06-08 02:48:43,732 [DEBUG] Entering state GAME_LOBBY. Processing callbacks...
+2026-06-08 02:48:43,732 [INFO] Executed callback 'on_enter_GAME_LOBBY'
+2026-06-08 02:48:43,732 [INFO] Finished processing state GAME_LOBBY enter callbacks.
+2026-06-08 02:48:43,732 [DEBUG] Executed callback after transition.
+2026-06-08 02:48:43,732 [DEBUG] Executed machine finalize callbacks
+2026-06-08 02:48:43,732 [INFO] [91mController: cancel_mission called[0m
+2026-06-08 02:48:43,732 [DEBUG] Controller: weapon loop not running
+2026-06-08 02:48:43,732 [INFO] FSM: GAME_UNKNOWN classified as GAME_LOBBY via unknown_to_lobby_detected
+2026-06-08 02:48:43,982 [INFO] [96m🎮 Game state: GAME_UNKNOWN → GAME_LOBBY[0m
+2026-06-08 02:48:43,982 [INFO] [91mController: cancel_mission called[0m
+2026-06-08 02:48:43,982 [DEBUG] Controller: weapon loop not running
+2026-06-08 02:48:44,032 [DEBUG] Click-to background thread started
+2026-06-08 02:48:44,032 [INFO] Lobby quick-scan background thread started
+2026-06-08 02:48:44,090 [INFO] OCR thread 8468: initialized EasyOCR reader (CPU)
+2026-06-08 02:48:46,529 [INFO] OCR thread 21192: initialized EasyOCR reader (CPU)
+2026-06-08 02:48:46,979 [INFO] [93m📋 Lobby quick-scan: PLAY detected (text='PLAY') — clicking[0m
+2026-06-08 02:48:46,981 [DEBUG] Executed machine preparation callbacks before conditions.
+2026-06-08 02:48:46,981 [DEBUG] Initiating transition from state GAME_LOBBY to state GAME_WAITING...
+2026-06-08 02:48:46,981 [DEBUG] Executed callbacks before conditions.
+2026-06-08 02:48:46,981 [DEBUG] Executed callback before transition.
+2026-06-08 02:48:46,981 [DEBUG] Exiting state GAME_LOBBY. Processing callbacks...
+2026-06-08 02:48:46,981 [INFO] Finished processing state GAME_LOBBY exit callbacks.
+2026-06-08 02:48:46,981 [DEBUG] Entering state GAME_WAITING. Processing callbacks...
+2026-06-08 02:48:46,981 [INFO] Finished processing state GAME_WAITING enter callbacks.
+2026-06-08 02:48:46,981 [DEBUG] Executed callback after transition.
+2026-06-08 02:48:46,981 [DEBUG] Executed machine finalize callbacks
+2026-06-08 02:48:46,981 [DEBUG] Lobby quick-scan: lobby batch completed in 1.94s
+2026-06-08 02:48:46,981 [DEBUG] Lobby quick-scan: popup scan suppressed for 5.0s after PLAY/READY click
+2026-06-08 02:48:46,983 [DEBUG] Lobby quick-scan: cycle completed in 1.94s
+2026-06-08 02:48:46,983 [INFO] [93m📋 Clicking PLAY at (2415, 2693) [monitor 1 offset 777,1600] x1[0m
+2026-06-08 02:48:47,046 [INFO] [96m🎮 Game state: GAME_LOBBY → GAME_WAITING[0m
+2026-06-08 02:48:48,989 [DEBUG] Lobby quick-scan: CANCEL not found in GAME_WAITING
+2026-06-08 02:48:48,989 [DEBUG] Lobby quick-scan: lobby batch completed in 1.00s
+2026-06-08 02:48:48,989 [DEBUG] Lobby quick-scan: popup scan suppressed for 3.0s after PLAY/READY click
+2026-06-08 02:48:48,989 [DEBUG] Lobby quick-scan: cycle completed in 1.00s
+2026-06-08 02:48:49,351 [INFO] OCR thread 8156: initialized EasyOCR reader (CPU)
+2026-06-08 02:48:50,379 [INFO] [92m✓ Lobby quick-scan: CANCEL detected in GAME_WAITING (text='CANCEL') → GAME_STARTING[0m
+2026-06-08 02:48:50,380 [DEBUG] Executed machine preparation callbacks before conditions.
+2026-06-08 02:48:50,380 [DEBUG] Initiating transition from state GAME_WAITING to state GAME_STARTING...
+2026-06-08 02:48:50,380 [DEBUG] Executed callbacks before conditions.
+2026-06-08 02:48:50,380 [DEBUG] Executed callback before transition.
+2026-06-08 02:48:50,380 [DEBUG] Exiting state GAME_WAITING. Processing callbacks...
+2026-06-08 02:48:50,380 [INFO] Finished processing state GAME_WAITING exit callbacks.
+2026-06-08 02:48:50,380 [DEBUG] Entering state GAME_STARTING. Processing callbacks...
+2026-06-08 02:48:50,380 [INFO] Executed callback 'on_enter_GAME_STARTING'
+2026-06-08 02:48:50,380 [INFO] Finished processing state GAME_STARTING enter callbacks.
+2026-06-08 02:48:50,380 [DEBUG] Executed callback after transition.
+2026-06-08 02:48:50,380 [DEBUG] Executed machine finalize callbacks
+2026-06-08 02:48:50,382 [DEBUG] Lobby quick-scan: lobby batch completed in 0.39s
+2026-06-08 02:48:50,382 [DEBUG] Lobby quick-scan: popup scan suppressed for 1.6s after PLAY/READY click
+2026-06-08 02:48:50,382 [DEBUG] Lobby quick-scan: cycle completed in 0.39s
+2026-06-08 02:48:50,382 [INFO] Controller: game_starting loop started - pressing 'u' key every 5s until 'Good Luck' detected
+2026-06-08 02:48:50,536 [INFO] Analyzer: CANCEL button detected (text='CANCEL') → matchmaking active
+2026-06-08 02:48:50,536 [INFO] [92m✓ CANCEL detected (3.0s) — matchmaking confirmed → GAME_STARTING[0m
+2026-06-08 02:48:50,538 [DEBUG] Executed machine finalize callbacks
+2026-06-08 02:48:50,538 [WARNING] FSM: ignored invalid trigger 'cancel_detected' from state GameState.GAME_STARTING: "Can't trigger event cancel_detected from state GAME_STARTING!"
+2026-06-08 02:48:50,692 [INFO] Controller: game_starting - pressed 'u' key
+2026-06-08 02:48:51,947 [INFO] [96m🎮 Game state: GAME_WAITING → GAME_STARTING[0m
+2026-06-08 02:48:52,096 [INFO] OCR thread 4788: initialized EasyOCR reader (CPU)
+2026-06-08 02:48:52,477 [DEBUG] Analyzer: 'Good Luck' not found in good_luck crop
+2026-06-08 02:48:54,058 [INFO] OCR thread 8800: initialized EasyOCR reader (CPU)
+2026-06-08 02:48:55,826 [INFO] OCR thread 29976: initialized EasyOCR reader (CPU)
+2026-06-08 02:48:56,156 [INFO] Controller: game_starting - pressed 'u' key
+2026-06-08 02:48:58,242 [DEBUG] Analyzer: 'Good Luck' not found in good_luck crop
+2026-06-08 02:48:58,559 [INFO] OCR thread 32008: initialized EasyOCR reader (CPU)
+2026-06-08 02:49:00,269 [INFO] OCR thread 15080: initialized EasyOCR reader (CPU)
+2026-06-08 02:49:00,494 [INFO] Controller: game_starting health-scan fallback armed (10s gate)
+2026-06-08 02:49:01,564 [INFO] Controller: game_starting - pressed 'u' key
+2026-06-08 02:49:03,487 [DEBUG] Analyzer: 'Good Luck' not found in good_luck crop
+2026-06-08 02:49:03,684 [INFO] OCR thread 24208: initialized EasyOCR reader (CPU)
+2026-06-08 02:49:05,260 [INFO] OCR thread 2848: initialized EasyOCR reader (CPU)
+2026-06-08 02:49:06,918 [INFO] OCR thread 11988: initialized EasyOCR reader (CPU)
+2026-06-08 02:49:07,142 [INFO] Controller: game_starting - pressed 'u' key
+2026-06-08 02:49:08,102 [INFO] Analyzer: 'Good Luck' detected in good_luck crop (text='GOODLUCKL')
+2026-06-08 02:49:08,104 [INFO] [92mController: 'Good Luck' detected - waiting 13s before starting 'u' mission[0m
+2026-06-08 02:49:21,170 [INFO] Controller: game_starting - launching J20 mission
+2026-06-08 02:49:21,170 [DEBUG] Executed machine preparation callbacks before conditions.
+2026-06-08 02:49:21,170 [DEBUG] Initiating transition from state GAME_STARTING to state GAME_BATTLE...
+2026-06-08 02:49:21,170 [DEBUG] Executed callbacks before conditions.
+2026-06-08 02:49:21,170 [DEBUG] Executed callback before transition.
+2026-06-08 02:49:21,170 [DEBUG] Exiting state GAME_STARTING. Processing callbacks...
+2026-06-08 02:49:21,170 [INFO] Finished processing state GAME_STARTING exit callbacks.
+2026-06-08 02:49:21,170 [DEBUG] Entering state GAME_BATTLE. Processing callbacks...
+2026-06-08 02:49:21,170 [INFO] Executed callback 'on_enter_GAME_BATTLE'
+2026-06-08 02:49:21,170 [INFO] Finished processing state GAME_BATTLE enter callbacks.
+2026-06-08 02:49:21,170 [DEBUG] Executed callback after transition.
+2026-06-08 02:49:21,172 [DEBUG] Executed machine finalize callbacks
+2026-06-08 02:49:21,172 [INFO] Controller: mission 'j20' started → GAME_BATTLE
+2026-06-08 02:49:21,172 [INFO] [92mController: mission_j20 - starting mission sequence (lock acquired)[0m
+2026-06-08 02:49:21,173 [INFO] Controller: game_starting loop stopped
+2026-06-08 02:49:21,173 [DEBUG] Controller: nose_up - pressing 'i' key for 2.0 seconds
+2026-06-08 02:49:21,173 [DEBUG] Controller: using keyboard library for 'i' press
+2026-06-08 02:49:21,766 [DEBUG] Background OCR scheduled
+2026-06-08 02:49:21,869 [INFO] [96m🎮 Game state: GAME_STARTING → GAME_BATTLE[0m
+2026-06-08 02:49:21,914 [DEBUG] Respawn OCR results: []
+2026-06-08 02:49:21,939 [DEBUG] Analyzer: No text detected in INCOMING region
+2026-06-08 02:49:21,939 [INFO] Analyzer: incoming_template detector=incoming_template template_score=-0.275 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=173
+2026-06-08 02:49:21,941 [DEBUG] Analyzer: Health OCR returned no digits (grace timer started)
+2026-06-08 02:49:21,941 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.15s | Incoming OCR: 0.17s | Health OCR: 0.17s | Flares OCR: 0.12s | Missiles OCR: 0.16s | Total: 0.18s
+2026-06-08 02:49:23,202 [DEBUG] Controller: nose_up complete
+2026-06-08 02:49:23,202 [INFO] Controller: search_and_destroy padlock loop started
+2026-06-08 02:49:23,202 [DEBUG] [94mController: padlock_camera - pressing 'p' key for 0.1 seconds[0m
+2026-06-08 02:49:23,202 [DEBUG] Controller: using keyboard library for 'p' press
+2026-06-08 02:49:23,202 [INFO] Controller: search_and_destroy weapon loop started
+2026-06-08 02:49:23,202 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
+2026-06-08 02:49:23,202 [DEBUG] Controller: using keyboard library for 'f' press
+2026-06-08 02:49:23,202 [INFO] Controller: search_and_destroy_loop started
+2026-06-08 02:49:23,202 [INFO] Controller: mission_j20 background loops started
+2026-06-08 02:49:23,202 [DEBUG] Controller: afterburner - pressing 'e' key for 20.0 seconds
+2026-06-08 02:49:23,202 [DEBUG] Controller: using keyboard library for 'e' press
+2026-06-08 02:49:23,261 [DEBUG] Background OCR scheduled
+2026-06-08 02:49:23,331 [DEBUG] Controller: fire_active_weapon complete
+2026-06-08 02:49:23,331 [DEBUG] [94mController: padlock_camera complete[0m
+2026-06-08 02:49:23,422 [DEBUG] Respawn OCR results: []
+2026-06-08 02:49:23,432 [DEBUG] Analyzer: No text detected in INCOMING region
+2026-06-08 02:49:23,432 [INFO] Analyzer: incoming_template detector=incoming_template template_score=-0.275 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=171
+2026-06-08 02:49:23,432 [DEBUG] Analyzer: Health OCR no digits (1.5s elapsed, 3s threshold)
+2026-06-08 02:49:23,432 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.16s | Incoming OCR: 0.17s | Health OCR: 0.17s | Flares OCR: 0.12s | Missiles OCR: 0.16s | Total: 0.17s
+2026-06-08 02:49:24,442 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
+2026-06-08 02:49:24,442 [DEBUG] Controller: using keyboard library for 'f' press
+2026-06-08 02:49:24,571 [DEBUG] Controller: fire_active_weapon complete
+2026-06-08 02:49:24,777 [DEBUG] Background OCR scheduled
+2026-06-08 02:49:24,926 [DEBUG] Respawn OCR results: []
+2026-06-08 02:49:24,934 [DEBUG] Analyzer: No text detected in INCOMING region
+2026-06-08 02:49:24,934 [INFO] Analyzer: incoming_template detector=incoming_template template_score=-0.275 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=157
+2026-06-08 02:49:24,943 [DEBUG] Analyzer: Health OCR no digits for 3.0s → game_battle_alive=False
+2026-06-08 02:49:24,943 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.15s | Incoming OCR: 0.16s | Health OCR: 0.17s | Flares OCR: 0.12s | Missiles OCR: 0.15s | Total: 0.17s
+2026-06-08 02:49:25,686 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
+2026-06-08 02:49:25,686 [DEBUG] Controller: using keyboard library for 'f' press
+2026-06-08 02:49:25,814 [DEBUG] Controller: fire_active_weapon complete
+2026-06-08 02:49:26,281 [DEBUG] Background OCR scheduled
+2026-06-08 02:49:26,423 [DEBUG] Respawn OCR results: []
+2026-06-08 02:49:26,451 [DEBUG] Analyzer: No text detected in INCOMING region
+2026-06-08 02:49:26,453 [INFO] Analyzer: incoming_template detector=incoming_template template_score=0.086 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=170
+2026-06-08 02:49:26,453 [INFO] Health: 224 | alive=True
+2026-06-08 02:49:26,453 [INFO] Analyzer: health alive transition False→True — resetting health ceiling
+2026-06-08 02:49:26,453 [INFO] Ammo flares: 6
+2026-06-08 02:49:26,453 [INFO] Ammo missiles: 0
+2026-06-08 02:49:26,453 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.14s | Incoming OCR: 0.17s | Health OCR: 0.16s | Flares OCR: 0.14s | Missiles OCR: 0.15s | Total: 0.17s
+2026-06-08 02:49:26,934 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
+2026-06-08 02:49:26,934 [DEBUG] Controller: using keyboard library for 'f' press
+2026-06-08 02:49:27,062 [DEBUG] Controller: fire_active_weapon complete
+2026-06-08 02:49:27,752 [DEBUG] No-missiles suppressed — post-mission-start grace (0.1s remaining)
+2026-06-08 02:49:27,771 [DEBUG] Background OCR scheduled
+2026-06-08 02:49:27,909 [DEBUG] Respawn OCR results: []
+2026-06-08 02:49:27,923 [DEBUG] Analyzer: No text detected in INCOMING region
+2026-06-08 02:49:27,925 [INFO] Analyzer: incoming_template detector=incoming_template template_score=0.086 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=152
+2026-06-08 02:49:27,932 [INFO] Health: 224 | alive=True
+2026-06-08 02:49:27,932 [INFO] Ammo flares: 6
+2026-06-08 02:49:27,932 [INFO] Ammo missiles: 0
+2026-06-08 02:49:27,932 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.14s | Incoming OCR: 0.15s | Health OCR: 0.16s | Flares OCR: 0.14s | Missiles OCR: 0.16s | Total: 0.16s
+2026-06-08 02:49:28,176 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
+2026-06-08 02:49:28,176 [DEBUG] Controller: using keyboard library for 'f' press
+2026-06-08 02:49:28,305 [DEBUG] Controller: fire_active_weapon complete
+2026-06-08 02:49:29,266 [DEBUG] No-missiles event awaiting confirmation (1/2)
+2026-06-08 02:49:29,295 [DEBUG] Background OCR scheduled
+2026-06-08 02:49:29,423 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
+2026-06-08 02:49:29,423 [DEBUG] Controller: using keyboard library for 'f' press
+2026-06-08 02:49:29,485 [DEBUG] Respawn OCR results: []
+2026-06-08 02:49:29,508 [DEBUG] Analyzer: No text detected in INCOMING region
+2026-06-08 02:49:29,508 [INFO] Analyzer: incoming_template detector=incoming_template template_score=0.086 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=212
+2026-06-08 02:49:29,508 [INFO] Health: 224 | alive=True
+2026-06-08 02:49:29,508 [INFO] Ammo flares: 6
+2026-06-08 02:49:29,508 [INFO] Ammo missiles: 0
+2026-06-08 02:49:29,508 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.19s | Incoming OCR: 0.21s | Health OCR: 0.20s | Flares OCR: 0.19s | Missiles OCR: 0.20s | Total: 0.21s
+2026-06-08 02:49:29,549 [DEBUG] Controller: fire_active_weapon complete
+2026-06-08 02:49:30,015 [DEBUG] [94mController: padlock_camera - pressing 'p' key for 0.1 seconds[0m
+2026-06-08 02:49:30,015 [DEBUG] Controller: using keyboard library for 'p' press
+2026-06-08 02:49:30,144 [DEBUG] [94mController: padlock_camera complete[0m
+2026-06-08 02:49:30,675 [DEBUG] [95mController: fire_active_weapon - pressing 'f' key for 0.1 seconds[0m
+2026-06-08 02:49:30,675 [DEBUG] Controller: using keyboard library for 'f' press
+2026-06-08 02:49:30,771 [INFO] [91m🚀 MISSILES EMPTY — cancelling mission and ejecting[0m
+2026-06-08 02:49:30,771 [INFO] [91mController: cancel_mission called[0m
+2026-06-08 02:49:30,771 [DEBUG] Controller: weapon loop not running
+2026-06-08 02:49:30,771 [DEBUG] Controller: afterburner cancelled
+2026-06-08 02:49:30,771 [DEBUG] Controller: fire_active_weapon cancelled
+2026-06-08 02:49:30,771 [DEBUG] Controller: afterburner complete
+2026-06-08 02:49:30,771 [INFO] Controller: mission cancelled after afterburner
+2026-06-08 02:49:30,771 [DEBUG] Controller: fire_active_weapon complete
+2026-06-08 02:49:30,771 [INFO] [91mController: mission_j20 - lock released[0m
+2026-06-08 02:49:30,793 [DEBUG] Background OCR scheduled
+2026-06-08 02:49:30,817 [INFO] Controller: search_and_destroy padlock loop stopped
+2026-06-08 02:49:30,823 [INFO] Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged
+2026-06-08 02:49:30,881 [INFO] Controller: search_and_destroy weapon loop stopped
+2026-06-08 02:49:30,942 [DEBUG] Respawn OCR results: []
+2026-06-08 02:49:30,974 [INFO] [91mController: mission_j20 - method exiting[0m
+2026-06-08 02:49:30,976 [DEBUG] Analyzer: No text detected in INCOMING region
+2026-06-08 02:49:30,976 [INFO] Analyzer: incoming_template detector=incoming_template template_score=0.086 template_threshold=0.820 near_threshold_confirmation=False detection_source=none detected=False debounce_suppressed=False incoming_processing_ms=182
+2026-06-08 02:49:30,976 [INFO] Health: 224 | alive=True
+2026-06-08 02:49:30,976 [INFO] Analyzer: health alive transition False→True — resetting health ceiling
+2026-06-08 02:49:30,976 [INFO] Ammo flares: 6
+2026-06-08 02:49:30,976 [INFO] Ammo missiles: 0
+2026-06-08 02:49:30,978 [DEBUG] Analyzer: Parallel OCR Timings - Extract: 0.00s, Submit: 0.00s | Respawn OCR: 0.15s | Incoming OCR: 0.18s | Health OCR: 0.16s | Flares OCR: 0.17s | Missiles OCR: 0.17s | Total: 0.18s
+2026-06-08 02:49:32,282 [INFO] [92m💚 HEALTH ALIVE — missiles empty, skipping restart[0m
+2026-06-08 02:49:32,311 [INFO] Capture finished — exiting main loop
+2026-06-08 02:49:32,312 [INFO] Capture updated all requested screenshots
+2026-06-08 02:49:32,312 [INFO] Capture summary saved to tests\test-output\capture_summary.path1.live.json
+2026-06-08 02:49:32,312 [INFO] Controller: all keyboard hooks deregistered
+2026-06-08 02:49:32,362 [INFO] ThreadPoolExecutor shut down successfully
+2026-06-08 02:49:32,367 [INFO] PerformanceTracker: session data written to docs\performance\current\run_20260608_024836.json
+2026-06-08 02:49:32,388 [INFO] [SESSION vs CURRENT PERIOD | this session: 0 rounds 7 cycles | period: 17 sessions 10266 cycles]
   crop                      this session  period mean  delta
-  incoming        mean 0.16s p95 0.20s    0.50s      -68%   ✅ LARGE IMPROVEMENT
-  respawn         mean 0.14s p95 0.18s    0.45s      -69%   ✅ LARGE IMPROVEMENT
-  health          mean 0.15s p95 0.21s    0.46s      -66%   ✅ LARGE IMPROVEMENT
-  ammo_flares     mean 0.13s p95 0.15s    0.40s      -68%   ✅ LARGE IMPROVEMENT
-  ammo_missiles   mean 0.14s p95 0.16s    0.44s      -68%   ✅ LARGE IMPROVEMENT
-2026-06-02 03:59:06,603 [INFO] [PERIOD vs RELEASE (all + version baseline v1.6.14) | current: 9 sessions 6633 cycles | release-all: 103 sessions 32241 cycles | release-v1.6.14: 10 sessions 2806 cycles]
+  incoming        mean 0.17s p95 0.21s    0.81s      -79%   ✅ LARGE IMPROVEMENT
+  respawn         mean 0.15s p95 0.19s    0.76s      -80%   ✅ LARGE IMPROVEMENT
+  health          mean 0.17s p95 0.20s    0.78s      -78%   ✅ LARGE IMPROVEMENT
+  ammo_flares     mean 0.14s p95 0.19s    0.67s      -79%   ✅ LARGE IMPROVEMENT
+  ammo_missiles   mean 0.16s p95 0.20s    0.73s      -78%   ✅ LARGE IMPROVEMENT
+2026-06-08 02:49:32,408 [INFO] [PERIOD vs RELEASE (all + version baseline v1.6.15) | current: 17 sessions 10266 cycles | release-all: 115 sessions 41352 cycles | release-v1.6.15: 12 sessions 9111 cycles]
   crop             current   rel-all     rel-v    Δall      Δv
-  incoming        0.50s  0.68s     0.52s  -27%      -5%  all:✅ IMPROVEMENT
-  respawn         0.45s  0.60s     0.46s  -25%      -2%  all:✅ IMPROVEMENT
-  health          0.46s  0.61s     0.47s  -26%      -2%  all:✅ IMPROVEMENT
-  ammo_flares     0.40s  0.54s     0.41s  -26%      -2%  all:✅ IMPROVEMENT
-  ammo_missiles   0.44s  0.59s     0.45s  -26%      -2%  all:✅ IMPROVEMENT
-  reaction        0.41s  0.69s     0.53s  -40%     -22%  (238 events in period)  all:✅ IMPROVEMENT  v1.6.14:low confidence(v n=238/64)
+  incoming        0.81s  0.64s     0.52s  +27%↑   +57%↑  ⚠️ REGRESSION
+  respawn         0.76s  0.57s     0.47s  +32%↑   +62%↑  ⚠️ REGRESSION
+  health          0.78s  0.58s     0.47s  +33%↑   +64%↑  ⚠️ REGRESSION
+  ammo_flares     0.67s  0.51s     0.41s  +31%↑   +63%↑  ⚠️ REGRESSION
+  ammo_missiles   0.73s  0.56s     0.45s  +31%↑   +62%↑  ⚠️ REGRESSION
+  reaction        0.50s  0.62s     0.39s  -18%    +28%↑  (513 events in period)  v1.6.15:⚠️ REGRESSION
