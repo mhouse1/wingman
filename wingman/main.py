@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.15"
-WINGMAN_VERSION_DETAILS = "implement template matching for static image crops"
+WINGMAN_VERSION = "1.6.16"
+WINGMAN_VERSION_DETAILS = "no changes, performance tracking only: laptop with no external display, fresh boot"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
