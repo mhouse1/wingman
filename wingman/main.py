@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.14"
-WINGMAN_VERSION_DETAILS = "no change, just performance capture to histogram"
+WINGMAN_VERSION = "1.6.15"
+WINGMAN_VERSION_DETAILS = "implement template matching for static image crops"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -268,13 +268,18 @@ def main():
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
     respawn_fallback_timeout = mission_cfg.get("respawn_fallback_timeout", 20.0)
+    no_missiles_consecutive_required = int(mission_cfg.get("no_missiles_consecutive_required", 2))
+    no_missiles_abort_grace_s = float(mission_cfg.get("no_missiles_abort_grace_s", 6.0))
     waiting_fallback_enabled = mission_cfg.get("waiting_fallback_enabled", True)
     waiting_fallback_diff_threshold = float(mission_cfg.get("waiting_fallback_diff_threshold", 0.08))
     waiting_fallback_score_threshold = int(mission_cfg.get("waiting_fallback_score_threshold", 4))
     waiting_fallback_consecutive_required = int(mission_cfg.get("waiting_fallback_consecutive_required", 2))
     waiting_fallback_min_elapsed_s = float(mission_cfg.get("waiting_fallback_min_elapsed_s", 6.0))
+    respawn_clear_stability_s = float(mission_cfg.get("respawn_clear_stability_s", 1.5))
+    starting_stalled_reclassify_after_s = float(mission_cfg.get("starting_stalled_reclassify_after_s", 20.0))
     unknown_max_wait_s = float(startup_cfg.get("unknown_max_wait_s", 90.0))
     unknown_state_since = 0.0
+    startup_classification_complete = False
     capture_startup_failure_reason: str | None = None
 
     def _on_auto_mission_key():
@@ -285,7 +290,9 @@ def main():
 
     # Initialize controller with config-driven weapon loop interval and exit event
     j20_cfg = cfg.get("j20_mission", {})
+    debug_cfg = cfg.get("debug", {})
     target_painting_mode = j20_cfg.get("target_painting_mode", False)
+    capture_with_overlay = bool(debug_cfg.get("capture_with_overlay", True))
     ctrl = Controller(
         region,
         analyzer=analyzer,
@@ -297,6 +304,7 @@ def main():
         target_painting_mode=target_painting_mode,
         simulate_os_input=replay_mode,
         disable_hotkeys=(replay_mode or capture_mode),
+        capture_with_overlay=capture_with_overlay,
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via analyzer public callback setters.
@@ -313,6 +321,14 @@ def main():
             live_capture.evaluate(frame, "GAME_LOBBY", _now + 1e-6)
     analyzer.set_on_lobby_play_click(_on_lobby_play_click_cb)
 
+    def _on_lobby_no_crops_stalled_cb(consecutive_count):
+        logger.warning(
+            "Lobby quick-scan stall guard: no lobby crops detected for %d consecutive cycles; pressing ESC",
+            consecutive_count,
+        )
+        ctrl.press_escape(hold_seconds=0.05, block=False)
+    analyzer.set_on_lobby_no_crops_stalled(_on_lobby_no_crops_stalled_cb)
+
     if live_capture is not None:
         def _on_good_luck_frame(gl_frame):
             # Good Luck OCR succeeded: capture immediately with the detected frame
@@ -321,7 +337,7 @@ def main():
             live_capture.on_event("good_luck_detected", _now)
             live_capture.evaluate(gl_frame, "GAME_STARTING", _now)
             live_capture.evaluate(gl_frame, "GAME_STARTING", _now + 1e-6)
-        ctrl._on_good_luck_frame = _on_good_luck_frame
+        ctrl.set_on_good_luck_frame(_on_good_luck_frame)
 
         def _on_respawn_detected_frame(rs_frame):
             # Respawn OCR succeeded in background thread: capture with the exact OCR
@@ -343,7 +359,7 @@ def main():
             live_capture.on_event("manual_takeover", _now)
             live_capture.evaluate(mt_frame, "GAME_BATTLE", _now)
             live_capture.evaluate(mt_frame, "GAME_BATTLE", _now + 1e-6)
-        ctrl._on_manual_takeover_frame = _on_manual_takeover_frame
+        ctrl.set_on_manual_takeover_frame(_on_manual_takeover_frame)
 
     def _handle_lobby_popup(popup):
         if not ctrl.popup_click_allowed(popup):
@@ -427,11 +443,15 @@ def main():
     last_incoming_alert_ts = 0.0
     missile_ignore_until = 0.0       # suppress missile alerts for 10s after respawn
     last_click_to_alert_ts = 0.0
+    battle_started_ts = 0.0
+    no_missiles_zero_streak = 0
     last_game_state = None
     last_flare_reload_ts = 0.0    # cooldown: don't spam SPECIAL_ABILITY if flares stay at 2
     enemy_last_seen_ts = 0.0      # timestamp of last frame with red in ENEMY_CLOSE_BY (0 = not in battle yet)
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
     game_waiting_since = 0.0      # timestamp of GAME_WAITING entry; used by CANCEL scan + 180s timeout
+    game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
+    respawn_clear_since = 0.0  # timestamp since respawn cache has been continuously false
     last_cancel_scan_ts = 0.0     # last time CANCEL crop was scanned in GAME_WAITING
     last_play_reclick_ts = 0.0    # last time PLAY was re-clicked in GAME_WAITING
     play_reclick_interval = 45.0  # minimum seconds between PLAY re-clicks
@@ -448,6 +468,21 @@ def main():
         nonlocal last_restart_attempt, respawn_state, enemy_last_seen_ts
         analyzer.alive_event.clear()
         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
+
+        # Only early-restart when respawn has remained clear for a short stability window.
+        # This avoids relaunching while respawn OCR/health signals are still flapping.
+        if respawn_clear_since == 0.0:
+            logger.debug("HEALTH ALIVE ignored — respawn clear window not established")
+            return
+        clear_elapsed = time.time() - respawn_clear_since
+        if clear_elapsed < respawn_clear_stability_s:
+            logger.debug(
+                "HEALTH ALIVE deferred — respawn clear stability %.2fs/%.2fs",
+                clear_elapsed,
+                respawn_clear_stability_s,
+            )
+            return
+
         if (analyzer.game_state == GameState.GAME_BATTLE
                 and not ctrl.is_mission_running()
                 and ctrl.is_auto_respawn_restart_enabled()):
@@ -476,17 +511,39 @@ def main():
 
     def _handle_no_missiles():
         """End mission and eject when missile count reaches zero."""
+        nonlocal no_missiles_zero_streak
         analyzer.no_missiles_event.clear()
         if not ctrl.is_mission_running():
+            no_missiles_zero_streak = 0
             return
         currently_respawning, _, _ = analyzer.get_respawn_cache_result()
         if currently_respawning:
             logger.debug("No-missiles suppressed — respawn screen active")
+            no_missiles_zero_streak = 0
+            return
+        if battle_started_ts > 0 and (time.time() - battle_started_ts) < no_missiles_abort_grace_s:
+            logger.debug(
+                "No-missiles suppressed — post-mission-start grace (%.1fs remaining)",
+                no_missiles_abort_grace_s - (time.time() - battle_started_ts),
+            )
+            no_missiles_zero_streak = 0
             return
         if time.time() < missile_ignore_until:
             logger.debug("No-missiles suppressed — post-respawn grace (%.1fs remaining)",
                          missile_ignore_until - time.time())
+            no_missiles_zero_streak = 0
             return
+
+        no_missiles_zero_streak += 1
+        if no_missiles_zero_streak < no_missiles_consecutive_required:
+            logger.debug(
+                "No-missiles event awaiting confirmation (%d/%d)",
+                no_missiles_zero_streak,
+                no_missiles_consecutive_required,
+            )
+            return
+
+        no_missiles_zero_streak = 0
         _emit_capture_event("missiles_empty")
         ctrl.eject_and_dive()
 
@@ -559,6 +616,10 @@ def main():
                     break
 
             game_state = analyzer.analyze_frame(frame)
+            if game_state.get('is_respawning'):
+                respawn_clear_since = 0.0
+            elif respawn_clear_since == 0.0:
+                respawn_clear_since = time.time()
 
             if live_capture is not None:
                 _now = time.time()
@@ -590,7 +651,7 @@ def main():
                 if unknown_state_since == 0.0:
                     unknown_state_since = time.time()
                 unknown_elapsed = time.time() - unknown_state_since
-                if unknown_elapsed >= unknown_max_wait_s:
+                if not startup_classification_complete and unknown_elapsed >= unknown_max_wait_s:
                     capture_startup_failure_reason = f"unknown_timeout_after_{unknown_max_wait_s:.1f}s"
                     logger.error(
                         "GAME_UNKNOWN startup classification timeout after %.1fs",
@@ -610,6 +671,8 @@ def main():
                             current_game_state.name if current_game_state else "UNKNOWN")
                 prev_game_state = last_game_state
                 last_game_state = current_game_state
+                if current_game_state != GameState.GAME_UNKNOWN:
+                    startup_classification_complete = True
                 if current_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
                     # GAME_END_B is not a respawn flow; clear any stale pending-restart
@@ -635,8 +698,20 @@ def main():
                 else:
                     game_waiting_since = 0.0
                     _reset_waiting_fallback()
+                if current_game_state == GameState.GAME_STARTING_STALLED:
+                    game_starting_stalled_since = time.time()
+                else:
+                    game_starting_stalled_since = 0.0
                 if current_game_state == GameState.GAME_BATTLE:
                     enemy_last_seen_ts = time.time()  # assume enemy present on battle entry
+                    battle_started_ts = time.time()
+                    no_missiles_zero_streak = 0
+                elif current_game_state != GameState.GAME_BATTLE:
+                    no_missiles_zero_streak = 0
+
+            missiles_snapshot = analyzer.get_ammo_missiles()
+            if missiles_snapshot is not None and missiles_snapshot > 0:
+                no_missiles_zero_streak = 0
 
 
             # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
@@ -728,6 +803,19 @@ def main():
                 analyzer.trigger_event("manual_reset")
                 game_end_b_since = 0.0
 
+            # GAME_STARTING_STALLED guard: re-enter GAME_UNKNOWN after a short hold so
+            # the unknown-state classifier can route to lobby or battle from live screen state.
+            if (current_game_state == GameState.GAME_STARTING_STALLED
+                    and game_starting_stalled_since > 0
+                    and time.time() - game_starting_stalled_since >= starting_stalled_reclassify_after_s):
+                logger.warning(
+                    "GAME_STARTING_STALLED persisted for %.0fs — reclassifying via GAME_UNKNOWN",
+                    starting_stalled_reclassify_after_s,
+                )
+                analyzer.trigger_event("starting_stalled_reclassify")
+                game_starting_stalled_since = 0.0
+                continue
+
             # Deploy flares immediately when a new incoming OCR result arrives.
             # Higher priority than respawn — must run before the respawn continue.
             _deploy_flares_on_new_incoming()
@@ -796,17 +884,6 @@ def main():
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
-                # Attempt restart while respawn screen is showing (fallback if OCR never clears).
-                # Skips if mission still running or delay not yet elapsed.
-                if (not ctrl.is_mission_running()
-                        and time.time() >= restart_not_before
-                        and time.time() - last_restart_attempt > restart_retry_interval):
-                    logger.info("Attempting to restart mission after respawn...")
-                    if ctrl.restart_last_mission():
-                        logger.info("Restarted last mission after respawn")
-                        respawn_state = RespawnState.IDLE
-                    last_restart_attempt = time.time()
-
                 time.sleep(1)
                 continue
 
@@ -822,6 +899,14 @@ def main():
                     and time.time() >= restart_not_before
                     and time.time() - last_restart_attempt > restart_retry_interval):
                 if not ctrl.is_mission_running():
+                    health_value = game_state.get('health')
+                    if health_value is None or health_value <= 0:
+                        logger.debug(
+                            "Restart deferred — health not confirmed alive (health=%r)",
+                            health_value,
+                        )
+                        last_restart_attempt = time.time()
+                        continue
                     logger.info("Attempting to restart mission (delay expired)...")
                     result = ctrl.restart_last_mission()
                     if result is True:

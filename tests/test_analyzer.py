@@ -12,13 +12,15 @@ import pytest
 import yaml
 import wingman.analyzer as analyzer_module
 
-from wingman.analyzer import GameStateAnalyzer, GameState, _respawn_text_matches
+from wingman.analyzer import GameStateAnalyzer, GameState, _process_incoming_region, _respawn_text_matches
+from wingman.crop_region import get_crop
 from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
     TEST_SCREENSHOT_B,
     TEST_SCREENSHOT_C,
     TEST_SCREENSHOT_D,
+    TEST_SCREENSHOT_INCOMING_3,
 )
 
 
@@ -201,6 +203,76 @@ def test_game_end_b_blocks_background_ocr_scheduling(analyzer: GameStateAnalyzer
     assert result == (False, 0.0, None)
     assert analyzer._background_ocr_running is False
     assert analyzer._background_ocr_thread is None
+
+
+@pytest.mark.parametrize(
+    "image_path",
+    [
+        TEST_SCREENSHOT_INCOMING_3,
+    ],
+)
+def test_incoming_template_detection_positive(analyzer: GameStateAnalyzer, image_path: Path):
+    frame = _load_image(image_path)
+    incoming_crop = get_crop(frame, *analyzer.crops["incoming"][:4])
+
+    result = _process_incoming_region(
+        incoming_crop,
+        analyzer._incoming_templates,
+        True,
+        analyzer._incoming_template_threshold,
+        analyzer._incoming_template_near_threshold_low,
+        analyzer._incoming_template_near_threshold_high,
+        False,
+    )
+
+    assert analyzer._incoming_templates, "Expected incoming templates to load from test_screenshots"
+    assert result["template_hit"] is True
+    assert result["template_score"] >= analyzer._incoming_template_threshold
+    assert result["fallback_used"] is False
+
+
+def test_incoming_template_detection_negative_blank(analyzer: GameStateAnalyzer):
+    frame = _load_image(TEST_SCREENSHOT_INCOMING_3)
+    incoming_crop = get_crop(frame, *analyzer.crops["incoming"][:4])
+    blank_crop = np.zeros_like(incoming_crop)
+
+    result = _process_incoming_region(
+        blank_crop,
+        analyzer._incoming_templates,
+        True,
+        analyzer._incoming_template_threshold,
+        analyzer._incoming_template_near_threshold_low,
+        analyzer._incoming_template_near_threshold_high,
+        False,
+    )
+
+    assert result["template_hit"] is False
+    assert result["fallback_used"] is False
+
+
+def test_incoming_ocr_fallback_when_template_disabled(analyzer: GameStateAnalyzer, monkeypatch):
+    class _StubReader:
+        def readtext(self, _img, detail=0, paragraph=True, workers=0):
+            return ["INCOMING"]
+
+    monkeypatch.setattr(analyzer_module, "_get_thread_ocr_reader", lambda: _StubReader())
+
+    frame = _load_image(TEST_SCREENSHOT_INCOMING_3)
+    incoming_crop = get_crop(frame, *analyzer.crops["incoming"][:4])
+
+    result = _process_incoming_region(
+        incoming_crop,
+        analyzer._incoming_templates,
+        False,
+        analyzer._incoming_template_threshold,
+        analyzer._incoming_template_near_threshold_low,
+        analyzer._incoming_template_near_threshold_high,
+        True,
+    )
+
+    assert result["template_hit"] is False
+    assert result["fallback_used"] is True
+    assert result["fallback_hit"] is True
 
 
 def test_waiting_cancel_baseline_capture_and_diff(analyzer: GameStateAnalyzer):

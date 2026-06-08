@@ -69,7 +69,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -106,6 +106,7 @@ class Controller:
         self._target_painting_mode = target_painting_mode
         self._simulate_os_input = bool(simulate_os_input)
         self._disable_hotkeys = bool(disable_hotkeys)
+        self._capture_with_overlay = bool(capture_with_overlay)
         self._action_intents: list[dict] = []
         self._action_intents_lock = threading.Lock()
 
@@ -255,10 +256,6 @@ class Controller:
                                 # mss returns BGRA, convert to BGR
                                 frame = frame[:, :, :3]
                             
-                            # Draw only state-relevant crop overlays
-                            crops = self._analyzer.crops_for_state()
-                            frame_with_crops = draw_crops(frame, crops)
-
                             # Create output directory if it doesn't exist
                             output_dir = Path("tests/test-output")
                             output_dir.mkdir(parents=True, exist_ok=True)
@@ -267,14 +264,15 @@ class Controller:
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             filename = output_dir / f"screenshot_{timestamp}.png"
 
-                            # Save screenshot with crop overlays
-                            cv2.imwrite(str(filename), frame_with_crops)
-                            logger.info("Controller: Screenshot saved to %s with crop overlays", filename)
+                            if self._capture_with_overlay:
+                                # Draw only state-relevant crop overlays when enabled.
+                                crops = self._analyzer.crops_for_state()
+                                frame = draw_crops(frame, crops)
+                                logger.info("Controller: Screenshot saved to %s with crop overlays", filename)
+                            else:
+                                logger.info("Controller: Screenshot saved to %s without overlays", filename)
 
-                            # Save raw screenshot (no overlays) for use in test_screenshots/
-                            raw_filename = output_dir / f"screenshot_{timestamp}_raw.png"
-                            cv2.imwrite(str(raw_filename), frame)
-                            logger.info("Controller: Raw screenshot saved to %s", raw_filename)
+                            cv2.imwrite(str(filename), frame)
                         except Exception as e:
                             logger.exception("Controller: Failed to capture screenshot: %s", e)
                     else:
@@ -336,6 +334,14 @@ class Controller:
     def get_action_intents(self) -> list[dict]:
         with self._action_intents_lock:
             return list(self._action_intents)
+
+    def set_on_good_luck_frame(self, callback) -> None:
+        """Register callback fired when Good Luck OCR is detected with frame payload."""
+        self._on_good_luck_frame = callback
+
+    def set_on_manual_takeover_frame(self, callback) -> None:
+        """Register callback fired before manual takeover FSM transition with frame payload."""
+        self._on_manual_takeover_frame = callback
 
     def _handle_maneuver_key_press(self, key_name: str, is_injected: bool = False) -> bool:
         """Handle manual maneuver-key takeover logic.
@@ -512,6 +518,16 @@ class Controller:
     def wingsweep(self, hold_seconds: float = 0.5, block: bool = True):
         """Perform a wingsweep maneuver by pressing the configured wingsweep key."""
         self._execute_key_press(WINGSWEEP_KEY, hold_seconds=hold_seconds, block=block, action_name='wingsweep')
+
+    def press_escape(self, hold_seconds: float = 0.05, block: bool = False):
+        """Press Escape once, used by safety-recovery handlers."""
+        self._execute_key_press(
+            'esc',
+            hold_seconds=hold_seconds,
+            block=block,
+            action_name='escape_recovery',
+            ignore_cancel=True,
+        )
 
     def padlock_camera(self, hold_seconds: float = 0.1, block: bool = True):
         """Toggle padlock camera by pressing the configured padlock camera key."""
