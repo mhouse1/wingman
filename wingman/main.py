@@ -15,7 +15,7 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.17"
+WINGMAN_VERSION = "1.6.18"
 WINGMAN_VERSION_DETAILS = "no changes, performance tracking only: laptop with no external display, fresh boot"
 
 from .capture import Capture
