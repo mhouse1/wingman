@@ -2,7 +2,7 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.6.14
+Current version: v1.6.19
 
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
@@ -41,12 +41,23 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 | Health/ammo OCR-driven mission behavior | ✅ |
 | Respawn detection with restart controls | ✅ |
 | Lobby popup handling and click-through end-state handling | ✅ |
+| Game lobby stall guard (v1.6.19) | ✅ |
 | Offline crop calibration tooling | ✅ |
 | Performance tracking and preview/release chart workflows | ✅ |
 | Replay integration harness with assertion engine (ADR 037) | ✅ |
 | Runtime replay gate (ADR 044, PATH1) | ✅ |
 | Live-screen capture gate (ADR 045, PATH1) | ✅ |
 | Real screenshot OCR integration tests (PATH1/PATH2) | ✅ |
+
+---
+
+## Runtime Performance
+
+The chart below tracks loop execution time per release from v1.6.7 through v1.6.19.
+
+Versions v1.6.17–v1.6.19 contain no behavioral changes — they are dedicated performance-tracking releases used to capture a stable baseline before Phase 3 (behavior-tree tactical decisions). v1.6.19 adds an improved game lobby stall guard on top of that baseline.
+
+![Runtime performance trend v1.6.7–v1.6.19](docs/performance/run_time_performance_tracking.png)
 
 ---
 
