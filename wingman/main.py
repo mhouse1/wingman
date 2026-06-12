@@ -3,6 +3,7 @@ import json
 import yaml
 import time
 import logging
+import subprocess
 import threading
 from enum import Enum, auto
 from pathlib import Path
@@ -15,8 +16,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.18"
-WINGMAN_VERSION_DETAILS = "no changes, performance tracking only: laptop with no external display, fresh boot"
+WINGMAN_VERSION = "1.6.19"
+WINGMAN_VERSION_DETAILS = "game_lobby 5 second escape loop to prevent stalling"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -321,14 +322,6 @@ def main():
             live_capture.evaluate(frame, "GAME_LOBBY", _now + 1e-6)
     analyzer.set_on_lobby_play_click(_on_lobby_play_click_cb)
 
-    def _on_lobby_no_crops_stalled_cb(consecutive_count):
-        logger.warning(
-            "Lobby quick-scan stall guard: no lobby crops detected for %d consecutive cycles; pressing ESC",
-            consecutive_count,
-        )
-        ctrl.press_escape(hold_seconds=0.05, block=False)
-    analyzer.set_on_lobby_no_crops_stalled(_on_lobby_no_crops_stalled_cb)
-
     if live_capture is not None:
         def _on_good_luck_frame(gl_frame):
             # Good Luck OCR succeeded: capture immediately with the detected frame
@@ -457,6 +450,17 @@ def main():
     play_reclick_interval = 45.0  # minimum seconds between PLAY re-clicks
     waiting_fallback_score = 0
     waiting_fallback_consecutive = 0
+    lobby_escape_stop: "threading.Event | None" = None
+    lobby_escape_thread: "threading.Thread | None" = None
+    startup_time = time.time()
+    battle_ever_reached = False
+
+    def _stop_lobby_escape_loop():
+        nonlocal lobby_escape_stop, lobby_escape_thread
+        if lobby_escape_stop is not None:
+            lobby_escape_stop.set()
+            lobby_escape_stop = None
+        lobby_escape_thread = None
 
     def _reset_waiting_fallback():
         nonlocal waiting_fallback_score, waiting_fallback_consecutive
@@ -690,6 +694,19 @@ def main():
                         tracker.on_enter_game_lobby()
                     except Exception as e:
                         logger.warning("PerformanceTracker: on_enter_game_lobby failed: %s", e)
+                    _stop_lobby_escape_loop()
+                    _stop_ev = threading.Event()
+                    lobby_escape_stop = _stop_ev
+                    def _lobby_escape_loop(_stop=_stop_ev):
+                        while not _stop.wait(timeout=30.0):
+                            logger.info("GAME_LOBBY escape loop: pressing ESC")
+                            ctrl.press_escape(hold_seconds=0.05, block=False)
+                    lobby_escape_thread = threading.Thread(
+                        target=_lobby_escape_loop, daemon=True, name="lobby-escape-loop"
+                    )
+                    lobby_escape_thread.start()
+                else:
+                    _stop_lobby_escape_loop()
                 if current_game_state == GameState.GAME_WAITING:
                     game_waiting_since = time.time()
                     last_cancel_scan_ts = time.time()         # first scan after 3s, not immediately
@@ -703,11 +720,25 @@ def main():
                 else:
                     game_starting_stalled_since = 0.0
                 if current_game_state == GameState.GAME_BATTLE:
+                    battle_ever_reached = True
                     enemy_last_seen_ts = time.time()  # assume enemy present on battle entry
                     battle_started_ts = time.time()
                     no_missiles_zero_streak = 0
                 elif current_game_state != GameState.GAME_BATTLE:
                     no_missiles_zero_streak = 0
+
+            # Watchdog: if GAME_BATTLE not entered within 10 minutes, shut down wingman and PC.
+            # Skipped in replay/capture modes. Uses `shutdown /s /t 0` which does not require
+            # elevated privileges on Windows — standard users hold SeShutdownPrivilege by default.
+            if (not battle_ever_reached
+                    and not replay_mode and not capture_mode
+                    and time.time() - startup_time > 600.0):
+                logger.warning(
+                    "GAME_BATTLE not reached within 10 minutes of startup — shutting down wingman and computer"
+                )
+                exit_requested.set()
+                subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
+                break
 
             missiles_snapshot = analyzer.get_ammo_missiles()
             if missiles_snapshot is not None and missiles_snapshot > 0:
