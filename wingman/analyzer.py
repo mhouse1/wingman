@@ -608,14 +608,6 @@ class GameStateAnalyzer:
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
         self._shutting_down = False
         self._last_lobby_play_click_ts = 0.0  # reset on GAME_LOBBY re-entry
-        self._lobby_no_crops_consecutive = 0
-        self._lobby_no_crops_escape_threshold = max(
-            1, int(mission_cfg.get("lobby_no_crops_escape_threshold", 10))
-        )
-        self._lobby_no_crops_escape_cooldown_s = float(
-            mission_cfg.get("lobby_no_crops_escape_cooldown_s", 60.0)
-        )
-        self._last_lobby_no_crops_escape_ts = 0.0
         self._waiting_cancel_baseline_gray: "np.ndarray | None" = None
         self._waiting_cancel_baseline_shape: "tuple[int, int] | None" = None
         self._waiting_cancel_baseline_lock = threading.Lock()
@@ -628,7 +620,6 @@ class GameStateAnalyzer:
         self._on_start_game_starting_loop = None  # injected by main.py after construction
         self._on_lobby_play_click = None         # injected by main.py; called with crop name when PLAY/READY detected
         self._on_lobby_popup_click = None        # injected by main.py; called with popup crop name when a popup is detected
-        self._on_lobby_no_crops_stalled = None   # injected by main.py; called after repeated no-crop lobby scans
         self._on_fsm_transition = None           # injected by main.py; called after successful state transitions
         self._on_respawn_detected = None          # injected by main.py; called with the OCR frame when RESPAWN is first detected
         self._unknown_debounce_required = max(1, int(startup_cfg.get("debounce_consecutive_required", 2)))
@@ -790,10 +781,6 @@ class GameStateAnalyzer:
     def set_on_lobby_popup_click(self, callback):
         """Set callback invoked with popup crop names from lobby quick-scan."""
         self._on_lobby_popup_click = callback
-
-    def set_on_lobby_no_crops_stalled(self, callback):
-        """Set callback invoked after repeated no-crop lobby scans."""
-        self._on_lobby_no_crops_stalled = callback
 
     def set_on_fsm_transition(self, callback):
         """Set callback invoked after successful FSM transitions.
@@ -1557,7 +1544,6 @@ class GameStateAnalyzer:
             cycle_start = time.time()
             state = self.game_state
             if state not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
-                self._lobby_no_crops_consecutive = 0
                 continue
 
             executor = self.ocr_executor
@@ -1611,7 +1597,6 @@ class GameStateAnalyzer:
                             logger.warning("Lobby quick-scan: %s result failed: %s", crop, e)
                             continue
                         if detected:
-                            self._lobby_no_crops_consecutive = 0
                             if crop == "UNREADY":
                                 # UNREADY means this player already clicked READY and is waiting
                                 # for squad members. The correct transition is play_clicked →
@@ -1635,7 +1620,6 @@ class GameStateAnalyzer:
                         logger.warning("Lobby quick-scan: CANCEL result failed in GAME_WAITING: %s", e)
                         detected = False
                     if detected:
-                        self._lobby_no_crops_consecutive = 0
                         logger.info(
                             "\033[92m✓ Lobby quick-scan: CANCEL detected in GAME_WAITING (text='%s') → GAME_STARTING\033[0m",
                             text)
@@ -1655,7 +1639,6 @@ class GameStateAnalyzer:
                             continue
                         if not detected:
                             continue
-                        self._lobby_no_crops_consecutive = 0
                         if time.time() - self._last_lobby_play_click_ts < 60.0:
                             logger.debug(
                                 "Lobby quick-scan: %s visible but click suppressed (%.1fs since last click)",
@@ -1684,26 +1667,6 @@ class GameStateAnalyzer:
 
                     if not handled and lobby_futures:
                         logger.info("Lobby quick-scan: no lobby crops detected")
-                        self._lobby_no_crops_consecutive += 1
-                        consecutive = self._lobby_no_crops_consecutive
-                        if (
-                            self._on_lobby_no_crops_stalled is not None
-                            and consecutive >= self._lobby_no_crops_escape_threshold
-                        ):
-                            now = time.time()
-                            elapsed = now - self._last_lobby_no_crops_escape_ts
-                            if elapsed >= self._lobby_no_crops_escape_cooldown_s:
-                                logger.warning(
-                                    "Lobby quick-scan: no lobby crops for %d consecutive cycles — sending ESC recovery",
-                                    consecutive,
-                                )
-                                self._last_lobby_no_crops_escape_ts = now
-                                try:
-                                    self._on_lobby_no_crops_stalled(consecutive)
-                                except Exception:
-                                    logger.exception(
-                                        "Lobby quick-scan: failed to run no-crop stall callback"
-                                    )
 
                 if lobby_futures and lobby_scan_start is not None:
                     logger.debug(
