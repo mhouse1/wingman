@@ -31,7 +31,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y newpaths p1 p2 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti
+.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y newpaths p1 p2 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti preflight
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -54,6 +54,10 @@ RR_LIVE_PATH1_CAPTURE_SUMMARY ?= tests/test-output/capture_summary.path1.live.js
 RR_LIVE_PATH1_VALIDATION_SUMMARY ?= tests/test-output/runtime_live_validation.path1.json
 RR_LIVE_PATH1_PRESENTER_LOG ?= tests/test-output/live_presenter.path1.log
 RR_LIVE_PATH1_PRESENTER_GRACE_S ?= 8.0
+
+# Validate host environment before first run (ADR 047)
+preflight:
+	$(PYTHON_RUN) tests/preflight.py
 
 # Generate HTML report for automated levels test
 test:
@@ -216,10 +220,10 @@ squash:
 
 
 r:
-	wingman.bat
+	$(PYTHON_RUN) -m wingman.main
 
 rd:
-	wingman.bat --log-file wingman.log
+	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
 
 # ADR37 replay integration smoke path (temporary until full screenshot catalog exists)
 y:
