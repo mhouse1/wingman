@@ -303,8 +303,11 @@ rr-live-validate-path1:
 		--capture-summary $(RR_LIVE_PATH1_CAPTURE_SUMMARY) \
 		--summary-out $(RR_LIVE_PATH1_VALIDATION_SUMMARY)
 
-# ADR045 live lane gate.
-rr-live-path1-gate: rr-live-path1 rr-live-validate-path1
+# ADR045 live lane gate — skips gracefully when python3-tk is not installed.
+rr-live-path1-gate:
+	@$(PYTHON_RUN) -c "import tkinter" 2>/dev/null \
+	|| { echo "SKIP: rr-live-path1-gate — python3-tk not installed (sudo apt install python3-tk)"; exit 0; }; \
+	$(MAKE) rr-live-path1 && $(MAKE) rr-live-validate-path1
 
 # Live capture screenshots for ADR037 replay paths.
 # Example:

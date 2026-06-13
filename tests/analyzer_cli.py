@@ -83,6 +83,10 @@ def capture_and_test_with_visualization():
 
     print(f"Capturing screenshot from monitor {monitor_index} region {region}...")
     frame = cap.get_frame()
+    if frame is None:
+        print("SKIP: get_frame() returned None — game window not found (MetalStorm not running)")
+        sys.stdout.flush()
+        os._exit(0)
     output_dir = Path("tests") / "test-output"
     output_dir.mkdir(parents=True, exist_ok=True)
     screenshot_path = str(output_dir / "live_capture.png")

@@ -1326,5 +1326,8 @@ class Controller:
             try:
                 keyboard_module.unhook_all()
                 logger.info("Controller: all keyboard hooks deregistered")
+            except ImportError as exc:
+                # keyboard requires root on Linux; not an error if privileges weren't granted.
+                logger.warning("Controller: keyboard unhook skipped — %s", exc)
             except Exception:
                 logger.exception("Controller: failed to unhook keyboard hooks")
