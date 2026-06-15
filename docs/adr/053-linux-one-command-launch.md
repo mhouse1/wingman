@@ -27,13 +27,26 @@ Approaches tried and ruled out:
 
 | Approach | Result |
 |---|---|
-| `xwininfo -root -tree` | MetalStorm has zero X11 presence (pure Wayland surface via DXVK) |
-| `xdotool search` | 0 windows found |
+| `xwininfo -root -tree` for Wine Desktop | No Wine Desktop window exists — DXVK bypasses XWayland entirely; no X11 surface is created |
+| `xdotool search` | 0 windows found (same reason) |
 | GNOME Shell `Eval` | Returns `(false, '')` — blocked in GNOME 46 |
 | GNOME Shell `Introspect.GetWindows` | `AccessDenied` in GNOME 46 |
 | GNOME Shell `Introspect.GetRunningApplications` | `AccessDenied` in GNOME 46 |
 | PipeWire window picker (`types=2`) | MetalStorm does not appear — DXVK surfaces do not register as `xdg-toplevel` with app-id |
 | Corner-based background detection | Fails when desktop wallpaper is dark and entire screen is covered by apps |
+
+**Why "Wine Desktop" X11 detection works here (and is now the primary method):**
+Classic Wine applications create an X11 "Wine Desktop" window findable via `xwininfo`. Initial investigation concluded that DXVK games had zero X11 presence — but that xwininfo was run while the game was *not running*. When MetalStorm IS running via GE-Proton, `xwininfo -root -tree` reveals:
+
+```
+0x8007fc "Wine Desktop" (mutter-x11-frames):  1948x1266  abs(202,170)
+  └─ 0xe00009 "Wine Desktop" (steam_app_0):   1920x1200  abs(216,219)
+      └─ 0x2600003 "Metalstorm" (steam_app_0): 1920x1200  abs(216,219)
+```
+
+The outer frame (mutter-x11-frames) is the XWayland window decoration. The inner "Metalstorm" window at absolute position (216, 219) is the actual game surface. Even though DXVK renders Wayland surfaces for the game content, Wine's window-management layer still registers XWayland windows with exact position and size.
+
+This is now the **primary detection method** in `_PipeWireBackend._detect_via_x11()`: look for an X11 window titled `"Metalstorm"` or `"Wine Desktop"` with class `steam_app_0` matching the configured game dimensions. The absolute position from xwininfo maps 1:1 to the PipeWire monitor frame coordinates (verified on a 3840×1600 single-monitor setup with 100% scaling). Frame differencing is retained as a fallback for cases where no matching X11 window is found.
 
 **Solution adopted: frame differencing**
 

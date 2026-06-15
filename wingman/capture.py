@@ -141,20 +141,89 @@ class _PipeWireBackend:
         )
         return ok
 
-    def _detect_game_offset(self, frame1):
-        """Detect game window position by frame differencing + HUD verification.
+    def _detect_via_x11(self):
+        """Find the game window position via xwininfo (Wine Desktop / game title).
 
-        Accumulates motion across multiple frame pairs, finds the top motion blobs,
-        and picks the first one whose game-sized crop passes the MetalStorm HUD check.
-        This rejects browser video / YouTube which also produces large motion blobs.
+        Wine/Proton games create XWayland windows even when DXVK renders as a
+        Wayland surface. The outer Wine window-management layer registers an X11
+        window titled 'Metalstorm' or 'Wine Desktop' that xwininfo can locate.
+
+        Returns (ox, oy) absolute top-left in monitor coordinates, or None.
+        """
+        try:
+            result = subprocess.run(
+                ["xwininfo", "-root", "-tree"],
+                capture_output=True, text=True, timeout=5.0,
+            )
+        except Exception as e:
+            logger.debug("PipeWireBackend: xwininfo unavailable: %s", e)
+            return None
+
+        _, _, gw, gh = self.region
+        geom_re = re.compile(r'(\d+)x(\d+)\+\d+\+\d+\s+\+(\d+)\+(\d+)')
+
+        # Prefer the exact game title, then Wine Desktop with matching game class.
+        candidates = []
+        for line in result.stdout.splitlines():
+            if '"Metalstorm"' in line:
+                priority = 0
+            elif '"Wine Desktop"' in line and "steam_app_0" in line:
+                priority = 1
+            else:
+                continue
+            m = geom_re.search(line)
+            if not m:
+                continue
+            w, h = int(m.group(1)), int(m.group(2))
+            ox, oy = int(m.group(3)), int(m.group(4))
+            if w == gw and h == gh:
+                candidates.append((priority, ox, oy, line.strip()))
+
+        if not candidates:
+            logger.debug(
+                "PipeWireBackend: xwininfo: no '%dx%d' window titled Metalstorm "
+                "or Wine Desktop found (game may not be running yet)",
+                gw, gh,
+            )
+            return None
+
+        candidates.sort()
+        _, ox, oy, matched_line = candidates[0]
+        logger.info(
+            "PipeWireBackend: game window found via xwininfo at (%d, %d) — %s",
+            ox, oy, matched_line,
+        )
+        return (ox, oy)
+
+    def _detect_game_offset(self, frame1):
+        """Detect game window position — X11 lookup first, frame-diff fallback.
+
+        Primary: xwininfo finds the 'Metalstorm' / 'Wine Desktop' X11 window and
+        returns its absolute monitor-frame coordinates directly. No motion needed,
+        works on static loading screens, monitor-size agnostic.
+
+        Fallback: frame differencing across multiple frame pairs finds the largest
+        moving region and validates it against MetalStorm's dark HUD signature.
 
         Returns (ox, oy) top-left of the game in the monitor frame, or None.
         """
-        import cv2
         _, _, gw, gh = self.region
         fh, fw = frame1.shape[:2]
 
-        # Accumulate motion over several frame pairs to handle static lobby menus
+        # --- Primary: X11 window lookup ---
+        x11_offset = self._detect_via_x11()
+        if x11_offset is not None:
+            ox, oy = x11_offset
+            if 0 <= ox and ox + gw <= fw and 0 <= oy and oy + gh <= fh:
+                return x11_offset
+            logger.warning(
+                "PipeWireBackend: xwininfo position (%d,%d) out of bounds for %dx%d frame — "
+                "falling back to frame-diff",
+                ox, oy, fw, fh,
+            )
+
+        # --- Fallback: frame differencing + HUD verification ---
+        import cv2
         accumulated = np.zeros((fh, fw), dtype=np.float32)
         prev = frame1
         for gap_ms in (200, 300, 500):
@@ -167,47 +236,43 @@ class _PipeWireBackend:
             prev = curr
 
         motion = (accumulated > 6).astype(np.uint8)
-
         kernel = np.ones((40, 40), np.uint8)
         dilated = cv2.dilate(motion, kernel)
 
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             logger.info(
-                "PipeWireBackend: no motion blobs found in %dx%d frame "
-                "(game may be static/loading or behind another window)",
+                "PipeWireBackend: frame-diff: no motion blobs in %dx%d frame "
+                "(game may be static/loading or fully occluded)",
                 fw, fh,
             )
             return None
 
-        # Check top blobs largest-first; pick the first that passes HUD verification
         min_area = gw * gh * 0.03
         large_blobs = [
             c for c in sorted(contours, key=cv2.contourArea, reverse=True)
             if cv2.contourArea(c) >= min_area
         ]
         logger.info(
-            "PipeWireBackend: %d motion blob(s) above %.0f px² in %dx%d frame",
-            len(large_blobs), min_area, fw, fh,
+            "PipeWireBackend: frame-diff: %d motion blob(s) above %.0f px²",
+            len(large_blobs), min_area,
         )
         for contour in large_blobs:
             area = cv2.contourArea(contour)
             x, y, cw, ch = cv2.boundingRect(contour)
-            # Centre the game window on the motion blob centre
             cx = x + cw // 2
             cy = y + ch // 2
             ox = max(0, min(cx - gw // 2, fw - gw))
             oy = max(0, min(cy - gh // 2, fh - gh))
-
             if self._looks_like_game(prev, ox, oy):
                 logger.info(
-                    "PipeWireBackend: game detected at (%d, %d) in %dx%d monitor "
-                    "(motion blob centre %d,%d area=%.0f)",
+                    "PipeWireBackend: game detected via frame-diff at (%d, %d) in %dx%d monitor "
+                    "(blob centre %d,%d area=%.0f)",
                     ox, oy, fw, fh, cx, cy, area,
                 )
                 return (ox, oy)
             logger.info(
-                "PipeWireBackend: blob at (%d,%d) %dx%d area=%.0f rejected by HUD check",
+                "PipeWireBackend: frame-diff blob at (%d,%d) %dx%d area=%.0f rejected by HUD check",
                 x, y, cw, ch, area,
             )
 
@@ -465,3 +530,17 @@ class Capture:
     def grab_from_thread(self):
         """Thread-safe frame grab for daemon threads."""
         return self._backend.grab_from_thread()
+
+    @property
+    def game_screen_offset(self):
+        """Top-left of the game window in absolute monitor coordinates, or None.
+
+        On Wayland/PipeWire: returns the cached xwininfo/frame-diff position.
+        On Windows/X11/mss: returns None (caller uses mss monitor rect instead).
+        """
+        b = self._backend
+        if hasattr(b, "_configured_offset") and b._configured_offset is not None:
+            return b._configured_offset
+        if hasattr(b, "_game_offset") and b._game_offset is not None:
+            return b._game_offset
+        return None

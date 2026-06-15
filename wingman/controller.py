@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 import threading
@@ -18,6 +19,87 @@ except Exception:
     keyboard_module = None
 
 logger = logging.getLogger(__name__)
+
+
+_WINGMAN_XAUTH = "/tmp/wingman_click_auth.db"
+
+
+def _ensure_xauthority() -> None:
+    """Ensure XAUTHORITY points to an xauth file with an explicit :0 display entry.
+
+    The mutter XWayland auth file uses an empty display number (wildcard) that
+    libX11 accepts but python-xlib does not match. We copy the cookie into a new
+    file with an explicit ':0' entry so python-xlib can connect.
+    """
+    import glob
+    import subprocess
+
+    if os.environ.get("XAUTHORITY") == _WINGMAN_XAUTH and os.path.exists(_WINGMAN_XAUTH):
+        return
+
+    # Locate the mutter XWayland auth file
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    src = None
+    for path in glob.glob(f"/run/user/{uid}/.mutter-Xwaylandauth.*"):
+        src = path
+        break
+    if src is None:
+        src = os.environ.get("XAUTHORITY", "")
+    if not src or not os.path.exists(src):
+        logger.warning("Controller: no XWayland auth file found — click may fail")
+        return
+
+    # Extract the cookie and write a new db with explicit ':0' display number
+    try:
+        r = subprocess.run(
+            ["xauth", "-f", src, "list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        cookie = None
+        for line in r.stdout.splitlines():
+            if "MIT-MAGIC-COOKIE-1" in line:
+                cookie = line.split()[-1]
+                break
+        if not cookie:
+            logger.warning("Controller: could not extract MIT-MAGIC-COOKIE-1 from %s", src)
+            return
+        subprocess.run(
+            ["xauth", "-f", _WINGMAN_XAUTH, "add", ":0", "MIT-MAGIC-COOKIE-1", cookie],
+            check=True, timeout=5,
+        )
+        os.environ["XAUTHORITY"] = _WINGMAN_XAUTH
+        logger.debug("Controller: XAUTHORITY set to %s (explicit :0 entry)", _WINGMAN_XAUTH)
+    except Exception as e:
+        logger.warning("Controller: failed to create xauth db: %s", e)
+
+
+def _linux_click(x: int, y: int, count: int = 1) -> None:
+    """Left-click at absolute screen coordinates via python-xlib XTest.
+
+    Works for XWayland windows (Wine/DXVK games) without root.
+    XAUTHORITY is resolved from the mutter socket if not set in the environment.
+    """
+    _ensure_xauthority()
+    try:
+        from Xlib import display as _xdisplay, X as _X
+        from Xlib.ext import xtest as _xtest
+        display_name = os.environ.get("DISPLAY", ":0").strip()
+        d = _xdisplay.Display(display_name)
+        _xtest.fake_input(d, _X.MotionNotify, x=x, y=y)
+        d.sync()
+        time.sleep(0.05)
+        for i in range(count):
+            _xtest.fake_input(d, _X.ButtonPress, detail=1)
+            d.sync()
+            time.sleep(0.05)
+            _xtest.fake_input(d, _X.ButtonRelease, detail=1)
+            d.sync()
+            if i < count - 1:
+                time.sleep(0.5)
+        d.close()
+    except Exception as e:
+        logger.error("Linux click at (%d, %d) failed: %s", x, y, e)
+
 
 # Key bindings
 NOSE_UP_KEY = 'i'
@@ -1007,15 +1089,44 @@ class Controller:
                     grid_cols=int(grid_cols),
                 )
                 return
-            if sys.platform != "win32":
-                logger.error("click_grid_region: Win32 mouse_event not available on %s", sys.platform)
-                return
             try:
                 if self._capture is None:
                     logger.error("Controller: click_grid_region - no capture reference")
                     return
-                # Create a new mss instance — mss uses thread-local storage so the
-                # main-thread instance cannot be used from a daemon thread.
+                region = self._capture.region
+                cap_w, cap_h = region[2], region[3]
+                cell_w = cap_w / grid_cols
+                cell_h = cap_h / grid_rows
+                row_idx = (region_num - 1) // grid_cols
+                col_idx = (region_num - 1) % grid_cols
+                label = region_name if region_name else str(region_num)
+
+                if sys.platform != "win32":
+                    # Linux: compute absolute coords from game window offset
+                    offset = self._capture.game_screen_offset
+                    if offset is None:
+                        logger.error("click_grid_region: game window offset not known yet")
+                        return
+                    game_ox, game_oy = offset
+                    abs_x = int(game_ox + (col_idx + 0.5) * cell_w)
+                    abs_y = int(game_oy + (row_idx + 0.5) * cell_h)
+                    logger.info("\033[93m📋 Clicking %s at (%d, %d) [game offset %d,%d] x%d\033[0m",
+                                label, abs_x, abs_y, game_ox, game_oy, count)
+                    _linux_click(abs_x, abs_y, count)
+                    if count > 1 and self._ready_button_region:
+                        rbn = self._ready_button_region
+                        row_rb = (rbn - 1) // grid_cols
+                        col_rb = (rbn - 1) % grid_cols
+                        x_rb = int(game_ox + (col_rb + 0.5) * cell_w)
+                        y_rb = int(game_oy + (row_rb + 0.5) * cell_h)
+                        logger.info("\033[93m📋 Clicking ready_button at (%d, %d)\033[0m", x_rb, y_rb)
+                        _linux_click(x_rb, y_rb)
+                        if self._analyzer is not None:
+                            self._analyzer.trigger_event("manual_reset")
+                            logger.info("\033[93m📋 Ready button (region %d) clicked → GAME_LOBBY\033[0m", self._ready_button_region)
+                    return
+
+                # Windows: use win32api
                 with mss() as sct:
                     monitors = sct.monitors
                     monitor_index = self._capture.monitor_index
@@ -1023,18 +1134,10 @@ class Controller:
                         logger.error("Controller: click_grid_region - monitor index %d out of range", monitor_index)
                         return
                     mon = monitors[monitor_index]
-                    region = self._capture.region
                     abs_left = mon["left"] + region[0]
                     abs_top = mon["top"] + region[1]
-                    cap_w = region[2]
-                    cap_h = region[3]
-                cell_w = cap_w / grid_cols
-                cell_h = cap_h / grid_rows
-                row = (region_num - 1) // grid_cols
-                col = (region_num - 1) % grid_cols
-                abs_x = int(abs_left + (col + 0.5) * cell_w)
-                abs_y = int(abs_top + (row + 0.5) * cell_h)
-                label = region_name if region_name else str(region_num)
+                abs_x = int(abs_left + (col_idx + 0.5) * cell_w)
+                abs_y = int(abs_top + (row_idx + 0.5) * cell_h)
                 logger.info("\033[93m📋 Clicking %s at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
                             label, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
                 def _raw_click(x, y):
@@ -1050,7 +1153,6 @@ class Controller:
                         time.sleep(0.5)
 
                 if count > 1 and self._ready_button_region:
-                    # Final click on ready button (lobby/continue button)
                     rbn = self._ready_button_region
                     row_rb = (rbn - 1) // grid_cols
                     col_rb = (rbn - 1) % grid_cols
@@ -1100,13 +1202,28 @@ class Controller:
                     coords={"x1": coords.x1, "y1": coords.y1, "x2": coords.x2, "y2": coords.y2},
                 )
                 return
-            if sys.platform != "win32":
-                logger.error("click_crop: Win32 mouse_event not available on %s", sys.platform)
-                return
             try:
                 if self._capture is None:
                     logger.error("Controller: click_crop - no capture reference")
                     return
+                region = self._capture.region
+                cap_w, cap_h = region[2], region[3]
+                label = region_name or f"({coords.x1:.2f},{coords.y1:.2f})"
+
+                if sys.platform != "win32":
+                    # Linux: compute absolute coords from game window offset
+                    offset = self._capture.game_screen_offset
+                    if offset is None:
+                        logger.error("click_crop: game window offset not known yet")
+                        return
+                    game_ox, game_oy = offset
+                    abs_x, abs_y = crop_centre(coords, cap_w, cap_h, game_ox, game_oy)
+                    logger.info("\033[93m📋 Clicking %s at (%d, %d) [game offset %d,%d] x%d\033[0m",
+                                label, abs_x, abs_y, game_ox, game_oy, count)
+                    _linux_click(abs_x, abs_y, count)
+                    return
+
+                # Windows: use win32api
                 with mss() as sct:
                     monitors = sct.monitors
                     monitor_index = self._capture.monitor_index
@@ -1114,13 +1231,9 @@ class Controller:
                         logger.error("Controller: click_crop - monitor index %d out of range", monitor_index)
                         return
                     mon = monitors[monitor_index]
-                    region = self._capture.region
                     abs_left = mon["left"] + region[0]
                     abs_top = mon["top"] + region[1]
-                    cap_w = region[2]
-                    cap_h = region[3]
                 abs_x, abs_y = crop_centre(coords, cap_w, cap_h, abs_left, abs_top)
-                label = region_name or f"({coords.x1:.2f},{coords.y1:.2f})"
                 logger.info("\033[93m📋 Clicking %s at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
                             label, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
 
