@@ -208,6 +208,10 @@ class ScreenshotReplayCapture:
 
         return self._active_frame.copy()
 
+    def grab_from_thread(self) -> np.ndarray:
+        """Alias for get_frame() — replay frames are already thread-safe."""
+        return self.get_frame()
+
     def consume_activated_steps(self) -> list[ReplayStep]:
         """Return newly activated steps since the last poll, in order."""
         if not self._activated_indices:

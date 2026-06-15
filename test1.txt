@@ -1,0 +1,1 @@
+uv run --active python -m wingman.main

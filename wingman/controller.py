@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 import threading
@@ -18,6 +19,325 @@ except Exception:
     keyboard_module = None
 
 logger = logging.getLogger(__name__)
+
+
+_WINGMAN_XAUTH = "/tmp/wingman_click_auth.db"
+
+
+def _ensure_xauthority() -> None:
+    """Ensure XAUTHORITY points to an xauth file with an explicit :0 display entry.
+
+    The mutter XWayland auth file uses an empty display number (wildcard) that
+    libX11 accepts but python-xlib does not match. We copy the cookie into a new
+    file with an explicit ':0' entry so python-xlib can connect.
+    """
+    import glob
+    import subprocess
+
+    if os.environ.get("XAUTHORITY") == _WINGMAN_XAUTH and os.path.exists(_WINGMAN_XAUTH):
+        return
+
+    # Locate the mutter XWayland auth file
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    src = None
+    for path in glob.glob(f"/run/user/{uid}/.mutter-Xwaylandauth.*"):
+        src = path
+        break
+    if src is None:
+        src = os.environ.get("XAUTHORITY", "")
+    if not src or not os.path.exists(src):
+        logger.warning("Controller: no XWayland auth file found — click may fail")
+        return
+
+    # Extract the cookie and write a new db with explicit ':0' display number
+    try:
+        r = subprocess.run(
+            ["xauth", "-f", src, "list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        cookie = None
+        for line in r.stdout.splitlines():
+            if "MIT-MAGIC-COOKIE-1" in line:
+                cookie = line.split()[-1]
+                break
+        if not cookie:
+            logger.warning("Controller: could not extract MIT-MAGIC-COOKIE-1 from %s", src)
+            return
+        subprocess.run(
+            ["xauth", "-f", _WINGMAN_XAUTH, "add", ":0", "MIT-MAGIC-COOKIE-1", cookie],
+            check=True, timeout=5,
+        )
+        os.environ["XAUTHORITY"] = _WINGMAN_XAUTH
+        logger.debug("Controller: XAUTHORITY set to %s (explicit :0 entry)", _WINGMAN_XAUTH)
+    except Exception as e:
+        logger.warning("Controller: failed to create xauth db: %s", e)
+
+
+def _linux_click(x: int, y: int, count: int = 1) -> None:
+    """Left-click at absolute screen coordinates via python-xlib XTest.
+
+    Works for XWayland windows (Wine/DXVK games) without root.
+    XAUTHORITY is resolved from the mutter socket if not set in the environment.
+    """
+    _ensure_xauthority()
+    try:
+        from Xlib import display as _xdisplay, X as _X
+        from Xlib.ext import xtest as _xtest
+        display_name = os.environ.get("DISPLAY", ":0").strip()
+        d = _xdisplay.Display(display_name)
+        _xtest.fake_input(d, _X.MotionNotify, x=x, y=y)
+        d.sync()
+        time.sleep(0.05)
+        for i in range(count):
+            _xtest.fake_input(d, _X.ButtonPress, detail=1)
+            d.sync()
+            time.sleep(0.05)
+            _xtest.fake_input(d, _X.ButtonRelease, detail=1)
+            d.sync()
+            if i < count - 1:
+                time.sleep(0.5)
+        d.close()
+    except Exception as e:
+        logger.error("Linux click at (%d, %d) failed: %s", x, y, e)
+
+
+# XK name overrides for key names that differ from python-xlib's XK strings
+_XKEY_ALIASES = {
+    "space": "space",
+    "backspace": "BackSpace",
+    "enter": "Return",
+    "escape": "Escape",
+    "tab": "Tab",
+    "shift": "Shift_L",
+    "ctrl": "Control_L",
+    "alt": "Alt_L",
+    "end": "End",
+    "home": "Home",
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+}
+
+
+def _linux_key_event(key: str, event_type) -> None:
+    """Inject a single KeyPress or KeyRelease event via XTest."""
+    _ensure_xauthority()
+    try:
+        from Xlib import display as _xdisplay, X as _X, XK as _XK
+        from Xlib.ext import xtest as _xtest
+        xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
+        keysym = _XK.string_to_keysym(xk_name)
+        if keysym == 0:
+            logger.warning("Linux key: unknown keysym for %r", key)
+            return
+        display_name = os.environ.get("DISPLAY", ":0").strip()
+        d = _xdisplay.Display(display_name)
+        keycode = d.keysym_to_keycode(keysym)
+        if keycode == 0:
+            logger.warning("Linux key: no keycode for keysym %d (%r)", keysym, key)
+            d.close()
+            return
+        _xtest.fake_input(d, event_type, keycode)
+        d.sync()
+        d.close()
+    except Exception as e:
+        logger.error("Linux key event for %r failed: %s", key, e)
+
+
+class _XKeyEvent:
+    """Minimal keyboard event passed to hotkey callbacks, mirroring keyboard.KeyboardEvent."""
+    __slots__ = ("name", "is_injected", "event_type")
+
+    def __init__(self, name: str, is_injected: bool) -> None:
+        self.name = name
+        self.is_injected = is_injected
+        self.event_type = "down"
+
+
+class _LinuxXTestKeyboard:
+    """Drop-in shim for the `keyboard` module on Linux.
+
+    - press / release / press_and_release: XTest injection, no root required.
+    - on_press_key / add_hotkey: XGrabKey passive grab on the root window,
+      no root required. Works for XWayland windows (including Wine/DXVK games).
+      Keys are caught when any XWayland window has focus; native-Wayland windows
+      (e.g. VS Code) will not trigger the grab.
+    - Callbacks receive an _XKeyEvent with .name and .is_injected matching the
+      keyboard.KeyboardEvent interface. XTest-injected events have is_injected=True
+      (X11 send_event bit), so maneuver-key takeover logic ignores them correctly.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, object] = {}        # key_name -> callback, not yet grabbed
+        self._grabbed: dict[int, tuple] = {}          # keycode -> (key_name, callback)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._ctrl_display = None   # used by unhook_all to disable the record context
+        self._record_ctx = None
+
+    # --- Key injection (transient Display, no shared state) ---
+
+    def press(self, key: str) -> None:
+        from Xlib import X as _X
+        _linux_key_event(key, _X.KeyPress)
+
+    def release(self, key: str) -> None:
+        from Xlib import X as _X
+        _linux_key_event(key, _X.KeyRelease)
+
+    def press_and_release(self, key: str) -> None:
+        from Xlib import X as _X
+        _linux_key_event(key, _X.KeyPress)
+        time.sleep(0.05)
+        _linux_key_event(key, _X.KeyRelease)
+
+    # --- Hotkey registration ---
+
+    def on_press_key(self, key: str, callback, suppress=False) -> None:
+        with self._lock:
+            self._pending[key.lower()] = callback
+        self._ensure_listener()
+
+    def add_hotkey(self, key: str, callback, *args, **kwargs) -> None:
+        self.on_press_key(key, callback)
+
+    def unhook_all(self) -> None:
+        self._stop.set()
+        if self._ctrl_display is not None and self._record_ctx is not None:
+            try:
+                self._ctrl_display.record_disable_context(self._record_ctx)
+                self._ctrl_display.flush()
+            except Exception:
+                pass
+
+    # --- Listener thread ---
+
+    def _ensure_listener(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._listener_loop, daemon=True, name="XKeyListener"
+        )
+        self._thread.start()
+
+    def _listener_loop(self) -> None:
+        """Observe keyboard events via XRecord without consuming them.
+
+        XGrabKey was ruled out because it prevents grabbed keys from reaching the
+        game window. XRecord delivers events to our handler non-destructively —
+        the game still receives every keystroke.
+
+        XRecord requires two display connections:
+          d_rec  — creates the context + calls record_enable_context (blocks)
+          d_ctrl — calls record_disable_context to stop d_rec (stored for unhook_all)
+        """
+        _ensure_xauthority()
+        try:
+            from Xlib import display as _xdisplay, X as _X, XK as _XK
+            from Xlib.ext import record as _record
+            from Xlib.protocol import rq as _rq
+
+            display_name = os.environ.get("DISPLAY", ":0").strip()
+
+            # Resolve keycodes for all pending registrations before the blocking loop.
+            d_setup = _xdisplay.Display(display_name)
+            with self._lock:
+                snapshot = dict(self._pending)
+                self._pending.clear()
+            for key_name, callback in snapshot.items():
+                xk_name = _XKEY_ALIASES.get(key_name, key_name)
+                keysym = _XK.string_to_keysym(xk_name)
+                if not keysym:
+                    logger.warning("XKey: unknown keysym for %r", key_name)
+                    continue
+                keycode = d_setup.keysym_to_keycode(keysym)
+                if not keycode:
+                    logger.warning("XKey: no keycode for %r", key_name)
+                    continue
+                self._grabbed[keycode] = (key_name, callback)
+                logger.debug("XKey: registered %r (keycode=%d)", key_name, keycode)
+            d_setup.close()
+
+            # d_rec: owns the recording context (create + enable, blocks)
+            # d_ctrl: used only to disable the context (stored for unhook_all)
+            d_rec = _xdisplay.Display(display_name)
+            d_ctrl = _xdisplay.Display(display_name)
+
+            ctx = d_rec.record_create_context(
+                0,
+                [_record.AllClients],
+                [{
+                    "core_requests": (0, 0),
+                    "core_replies": (0, 0),
+                    "ext_requests": (0, 0, 0, 0),
+                    "ext_replies": (0, 0, 0, 0),
+                    "delivered_events": (0, 0),
+                    "device_events": (_X.KeyPress, _X.KeyPress),
+                    "errors": (0, 0),
+                    "client_started": False,
+                    "client_died": False,
+                }],
+            )
+
+            self._ctrl_display = d_ctrl
+            self._record_ctx = ctx
+
+            _ef = _rq.EventField(None)
+
+            def _record_handler(reply):
+                if reply.category != _record.FromServer:
+                    return
+                data = reply.data
+                while len(data) >= 32:
+                    event, data = _ef.parse_binary_value(
+                        data, d_rec.display, None, None
+                    )
+                    if event.type != _X.KeyPress:
+                        continue
+                    # Pick up any keys registered after the loop started
+                    with self._lock:
+                        new = dict(self._pending)
+                        self._pending.clear()
+                    if new:
+                        d_tmp = _xdisplay.Display(display_name)
+                        for kn, cb in new.items():
+                            xkn = _XKEY_ALIASES.get(kn, kn)
+                            ks = _XK.string_to_keysym(xkn)
+                            kc = d_tmp.keysym_to_keycode(ks) if ks else 0
+                            if kc:
+                                self._grabbed[kc] = (kn, cb)
+                                logger.debug("XKey: registered %r (keycode=%d)", kn, kc)
+                        d_tmp.close()
+
+                    entry = self._grabbed.get(event.detail)
+                    if not entry:
+                        continue
+                    key_name, cb = entry
+                    ev_obj = _XKeyEvent(name=key_name,
+                                        is_injected=bool(event.send_event))
+                    try:
+                        cb(ev_obj)
+                    except Exception as exc:
+                        logger.error("XKey callback error for %r: %s", key_name, exc)
+
+            # Blocks until record_disable_context is called (from unhook_all)
+            d_rec.record_enable_context(ctx, _record_handler)
+            d_rec.record_free_context(ctx)
+            d_rec.close()
+            d_ctrl.close()
+            self._ctrl_display = None
+            self._record_ctx = None
+        except Exception as e:
+            logger.error("XKey listener thread died: %s", e)
+
+
+if sys.platform != "win32":
+    keyboard_module = _LinuxXTestKeyboard()
+    logger.debug("Controller: using XTest keyboard shim (no root required)")
+
 
 # Key bindings
 NOSE_UP_KEY = 'i'
@@ -138,6 +458,9 @@ class Controller:
         # Exit script hotkey (Backspace).
         # Honor disable_hotkeys so replay/capture automation is not interrupted by
         # ambient keyboard events from the host environment.
+        # Probe keyboard access on the first registration; if ImportError (Linux not in
+        # 'input' group), emit one warning and skip all remaining hotkeys.
+        _kbd_ok = True
         if keyboard_module and not self._disable_hotkeys:
             try:
                 def exit_script_hotkey(e):
@@ -146,11 +469,18 @@ class Controller:
                         self._exit_event.set()
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey 'backspace' to exit script")
+            except ImportError as e:
+                logger.warning(
+                    "Controller: keyboard hotkeys disabled — %s  "
+                    "(fix: sudo usermod -aG input $USER then log out and back in)",
+                    e,
+                )
+                _kbd_ok = False
             except Exception:
                 logger.exception("Controller: failed to register exit script hotkey")
 
         # Register hotkey for weapon loop toggle and other hotkeys
-        if keyboard_module and not self._disable_hotkeys:
+        if keyboard_module and not self._disable_hotkeys and _kbd_ok:
             # Cancel mission hotkey (End)
             try:
                 self._last_cancel_key_ts = 0.0
@@ -190,19 +520,27 @@ class Controller:
             try:
                 def start_j20_mission(e):
                     self._auto_respawn_restart = True
-                    if self._analyzer is not None:
-                        current_state = self._analyzer.game_state
-                        if current_state != GameState.GAME_BATTLE:
-                            logger.info(
-                                "Controller: '%s' key pressed — forcing GAME_BATTLE (was %s)",
-                                MISSION_J20_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
-                            )
-                            if not self._analyzer.trigger_event("manual_force_battle"):
-                                logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                        else:
-                            logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
+                    current_state = self._analyzer.game_state if self._analyzer is not None else None
+                    if current_state == GameState.GAME_BATTLE_MANUAL:
+                        # Only force FSM back to GAME_BATTLE when resuming from manual takeover.
+                        logger.info(
+                            "Controller: '%s' key pressed — resuming auto mode from GAME_BATTLE_MANUAL",
+                            MISSION_J20_KEY,
+                        )
+                        if not self._analyzer.trigger_event("manual_force_battle"):
+                            logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
+                    elif current_state == GameState.GAME_STARTING:
+                        # XRecord captures the XTest-injected 'u' from the game_starting loop.
+                        # Ignore it — the loop itself will launch mission_j20 after Good Luck.
+                        logger.debug(
+                            "Controller: '%s' key during GAME_STARTING — XTest echo from game_starting loop, ignoring",
+                            MISSION_J20_KEY,
+                        )
+                        return
                     else:
-                        logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
+                        logger.info("Controller: '%s' key pressed - starting J20 mission (state=%s)",
+                                    MISSION_J20_KEY,
+                                    current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
                     self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
@@ -247,14 +585,7 @@ class Controller:
                     logger.info("Controller: '%s' key pressed - capturing screenshot", CAPTURE_SCREEN_SHOT)
                     if self._capture is not None and self._analyzer is not None:
                         try:
-                            # Create new mss instance for thread-safety (mss uses thread-local storage)
-                            with mss() as sct:
-                                # Get monitor rect from capture instance
-                                monitor = self._capture.get_monitor_rect()
-                                s = sct.grab(monitor)
-                                frame = np.array(s)
-                                # mss returns BGRA, convert to BGR
-                                frame = frame[:, :, :3]
+                            frame = self._capture.grab_from_thread()
                             
                             # Create output directory if it doesn't exist
                             output_dir = Path("tests/test-output")
@@ -376,9 +707,7 @@ class Controller:
                     _mt_frame = None
                     if self._on_manual_takeover_frame is not None and self._capture is not None:
                         try:
-                            with mss() as sct:
-                                s = sct.grab(self._capture.get_monitor_rect())
-                                _mt_frame = np.array(s)[:, :, :3]
+                            _mt_frame = self._capture.grab_from_thread()
                         except Exception:
                             logger.exception("Controller: failed to capture manual takeover frame")
                     self._analyzer.trigger_event("manual_takeover")
@@ -1006,15 +1335,44 @@ class Controller:
                     grid_cols=int(grid_cols),
                 )
                 return
-            if sys.platform != "win32":
-                logger.error("click_grid_region: Win32 mouse_event not available on %s", sys.platform)
-                return
             try:
                 if self._capture is None:
                     logger.error("Controller: click_grid_region - no capture reference")
                     return
-                # Create a new mss instance — mss uses thread-local storage so the
-                # main-thread instance cannot be used from a daemon thread.
+                region = self._capture.region
+                cap_w, cap_h = region[2], region[3]
+                cell_w = cap_w / grid_cols
+                cell_h = cap_h / grid_rows
+                row_idx = (region_num - 1) // grid_cols
+                col_idx = (region_num - 1) % grid_cols
+                label = region_name if region_name else str(region_num)
+
+                if sys.platform != "win32":
+                    # Linux: compute absolute coords from game window offset
+                    offset = self._capture.game_screen_offset
+                    if offset is None:
+                        logger.error("click_grid_region: game window offset not known yet")
+                        return
+                    game_ox, game_oy = offset
+                    abs_x = int(game_ox + (col_idx + 0.5) * cell_w)
+                    abs_y = int(game_oy + (row_idx + 0.5) * cell_h)
+                    logger.info("\033[93m📋 Clicking %s at (%d, %d) [game offset %d,%d] x%d\033[0m",
+                                label, abs_x, abs_y, game_ox, game_oy, count)
+                    _linux_click(abs_x, abs_y, count)
+                    if count > 1 and self._ready_button_region:
+                        rbn = self._ready_button_region
+                        row_rb = (rbn - 1) // grid_cols
+                        col_rb = (rbn - 1) % grid_cols
+                        x_rb = int(game_ox + (col_rb + 0.5) * cell_w)
+                        y_rb = int(game_oy + (row_rb + 0.5) * cell_h)
+                        logger.info("\033[93m📋 Clicking ready_button at (%d, %d)\033[0m", x_rb, y_rb)
+                        _linux_click(x_rb, y_rb)
+                        if self._analyzer is not None:
+                            self._analyzer.trigger_event("manual_reset")
+                            logger.info("\033[93m📋 Ready button (region %d) clicked → GAME_LOBBY\033[0m", self._ready_button_region)
+                    return
+
+                # Windows: use win32api
                 with mss() as sct:
                     monitors = sct.monitors
                     monitor_index = self._capture.monitor_index
@@ -1022,18 +1380,10 @@ class Controller:
                         logger.error("Controller: click_grid_region - monitor index %d out of range", monitor_index)
                         return
                     mon = monitors[monitor_index]
-                    region = self._capture.region
                     abs_left = mon["left"] + region[0]
                     abs_top = mon["top"] + region[1]
-                    cap_w = region[2]
-                    cap_h = region[3]
-                cell_w = cap_w / grid_cols
-                cell_h = cap_h / grid_rows
-                row = (region_num - 1) // grid_cols
-                col = (region_num - 1) % grid_cols
-                abs_x = int(abs_left + (col + 0.5) * cell_w)
-                abs_y = int(abs_top + (row + 0.5) * cell_h)
-                label = region_name if region_name else str(region_num)
+                abs_x = int(abs_left + (col_idx + 0.5) * cell_w)
+                abs_y = int(abs_top + (row_idx + 0.5) * cell_h)
                 logger.info("\033[93m📋 Clicking %s at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
                             label, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
                 def _raw_click(x, y):
@@ -1049,7 +1399,6 @@ class Controller:
                         time.sleep(0.5)
 
                 if count > 1 and self._ready_button_region:
-                    # Final click on ready button (lobby/continue button)
                     rbn = self._ready_button_region
                     row_rb = (rbn - 1) // grid_cols
                     col_rb = (rbn - 1) % grid_cols
@@ -1099,13 +1448,28 @@ class Controller:
                     coords={"x1": coords.x1, "y1": coords.y1, "x2": coords.x2, "y2": coords.y2},
                 )
                 return
-            if sys.platform != "win32":
-                logger.error("click_crop: Win32 mouse_event not available on %s", sys.platform)
-                return
             try:
                 if self._capture is None:
                     logger.error("Controller: click_crop - no capture reference")
                     return
+                region = self._capture.region
+                cap_w, cap_h = region[2], region[3]
+                label = region_name or f"({coords.x1:.2f},{coords.y1:.2f})"
+
+                if sys.platform != "win32":
+                    # Linux: compute absolute coords from game window offset
+                    offset = self._capture.game_screen_offset
+                    if offset is None:
+                        logger.error("click_crop: game window offset not known yet")
+                        return
+                    game_ox, game_oy = offset
+                    abs_x, abs_y = crop_centre(coords, cap_w, cap_h, game_ox, game_oy)
+                    logger.info("\033[93m📋 Clicking %s at (%d, %d) [game offset %d,%d] x%d\033[0m",
+                                label, abs_x, abs_y, game_ox, game_oy, count)
+                    _linux_click(abs_x, abs_y, count)
+                    return
+
+                # Windows: use win32api
                 with mss() as sct:
                     monitors = sct.monitors
                     monitor_index = self._capture.monitor_index
@@ -1113,13 +1477,9 @@ class Controller:
                         logger.error("Controller: click_crop - monitor index %d out of range", monitor_index)
                         return
                     mon = monitors[monitor_index]
-                    region = self._capture.region
                     abs_left = mon["left"] + region[0]
                     abs_top = mon["top"] + region[1]
-                    cap_w = region[2]
-                    cap_h = region[3]
                 abs_x, abs_y = crop_centre(coords, cap_w, cap_h, abs_left, abs_top)
-                label = region_name or f"({coords.x1:.2f},{coords.y1:.2f})"
                 logger.info("\033[93m📋 Clicking %s at (%d, %d) [monitor %d offset %d,%d] x%d\033[0m",
                             label, abs_x, abs_y, monitor_index, mon["left"], mon["top"], count)
 
@@ -1199,14 +1559,7 @@ class Controller:
                 if self._capture is None:
                     return
 
-                # Replay capture does not expose monitor geometry. In that mode,
-                # reuse the injected frame source directly instead of grabbing MSS.
-                if hasattr(self._capture, "get_frame") and not hasattr(self._capture, "get_monitor_rect"):
-                    frame = self._capture.get_frame()
-                else:
-                    with mss() as sct:
-                        s = sct.grab(self._capture.get_monitor_rect())
-                        frame = np.array(s)[:, :, :3]
+                frame = self._capture.grab_from_thread()
                 if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame):
                     good_luck_event.set()
                     if self._on_good_luck_frame is not None:
@@ -1326,5 +1679,8 @@ class Controller:
             try:
                 keyboard_module.unhook_all()
                 logger.info("Controller: all keyboard hooks deregistered")
+            except ImportError as exc:
+                # keyboard requires root on Linux; not an error if privileges weren't granted.
+                logger.warning("Controller: keyboard unhook skipped — %s", exc)
             except Exception:
                 logger.exception("Controller: failed to unhook keyboard hooks")
