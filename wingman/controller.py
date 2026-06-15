@@ -520,19 +520,27 @@ class Controller:
             try:
                 def start_j20_mission(e):
                     self._auto_respawn_restart = True
-                    if self._analyzer is not None:
-                        current_state = self._analyzer.game_state
-                        if current_state != GameState.GAME_BATTLE:
-                            logger.info(
-                                "Controller: '%s' key pressed — forcing GAME_BATTLE (was %s)",
-                                MISSION_J20_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
-                            )
-                            if not self._analyzer.trigger_event("manual_force_battle"):
-                                logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                        else:
-                            logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
+                    current_state = self._analyzer.game_state if self._analyzer is not None else None
+                    if current_state == GameState.GAME_BATTLE_MANUAL:
+                        # Only force FSM back to GAME_BATTLE when resuming from manual takeover.
+                        logger.info(
+                            "Controller: '%s' key pressed — resuming auto mode from GAME_BATTLE_MANUAL",
+                            MISSION_J20_KEY,
+                        )
+                        if not self._analyzer.trigger_event("manual_force_battle"):
+                            logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
+                    elif current_state == GameState.GAME_STARTING:
+                        # XRecord captures the XTest-injected 'u' from the game_starting loop.
+                        # Ignore it — the loop itself will launch mission_j20 after Good Luck.
+                        logger.debug(
+                            "Controller: '%s' key during GAME_STARTING — XTest echo from game_starting loop, ignoring",
+                            MISSION_J20_KEY,
+                        )
+                        return
                     else:
-                        logger.info("Controller: '%s' key pressed - starting J20 mission", MISSION_J20_KEY)
+                        logger.info("Controller: '%s' key pressed - starting J20 mission (state=%s)",
+                                    MISSION_J20_KEY,
+                                    current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
                     self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)

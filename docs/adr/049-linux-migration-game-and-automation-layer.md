@@ -2,7 +2,7 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft | 2026-06-15 | 1.6.19          |
+| Accepted | 2026-06-15 | 1.6.19          |
 
 ## Context
 
@@ -325,86 +325,47 @@ Roll and all other controls work in either mode. See ADR 051 for the full invest
 
 ## Implementation Results
 
-What was actually built differed from the plan in two areas:
+The final implementation differed significantly from the plan. See **ADR 053** for the complete technical record; the summary is below.
 
 | Area | Planned | Actual |
 |---|---|---|
-| Mouse injection | `pynput` | `pynput` (implemented as planned) |
-| Key injection | `keyboard` library, `input` group | Unchanged (implemented as planned) |
-| Screen capture | Keep `mss` + XWayland | `_GstBackend` using GStreamer `ximagesrc` (see ADR 050) |
-| Game launch | Manual (open Heroic, click Play) | `make rg` via `umu-run` (see below) |
+| Mouse injection | `pynput` | `python-xlib` XTest (`Xlib.ext.xtest.fake_input`) |
+| Key injection | `keyboard` library + `input` group | `python-xlib` XTest — no root, no `input` group |
+| Hotkey listening | `keyboard.on_press_key` + `input` group | `python-xlib` XRecord (`Xlib.ext.record`) — non-consuming, no root |
+| Screen capture | `mss` + XWayland | PipeWire XDG Desktop Portal (`_PipeWireBackend`) |
+| Game window position | Manual `config.yaml` | `xwininfo -root -tree` auto-detection (primary) |
+| Game launch | Manual (open Heroic, click Play) | `make r` via `umu-run` (fully automated) |
+
+### Mouse and Keyboard Injection
+
+`pynput` was never installed and was abandoned. `pyautogui` (already in `pyproject.toml`) failed at import time because mutter's XWayland auth file uses a wildcard display number that `python-xlib` cannot match. The fix was to create a temporary xauth file with an explicit `:0` entry, then use `python-xlib` XTest directly for both mouse clicks and key injection. No root, no `sudo`, no `input` group membership is required.
+
+**Hotkey listening** (physical key presses triggering callbacks) was first attempted with `XGrabKey`, which intercepts keys but also prevents them from reaching the game window. The correct solution is the X11 RECORD extension, which observes events non-destructively — the game receives every keystroke and our handler is also called. The `keyboard` module is not used on Linux at all.
 
 ### Screen Capture
 
-`mss` on Wayland returns `None` for all frames, and `xwd` (the original ADR 050 plan)
-raises `BadMatch` from `X_GetImage` even on individual XWayland windows — Mutter blocks
-this path at the compositor level. The final working approach is GStreamer `ximagesrc`,
-which uses the XShm extension and bypasses the compositor restriction. The backend
-(`_GstBackend` in `capture.py`) discovers the Wine Desktop window position via
-`xwininfo` and captures the corresponding screen region via a `gst-launch-1.0` subprocess
-(~51 ms per frame). See ADR 050 for full investigation.
+`mss` on Wayland returns `None` for all frames. The adopted solution is PipeWire via the XDG Desktop Portal ScreenCast API (`types=1`, monitor capture). A restore token saved on first grant skips the permission dialog on all future runs. See ADR 050 for the full investigation of `xwd`, GStreamer, and other approaches that were tried before PipeWire.
+
+### Game Window Position
+
+Wine/Proton registers an XWayland window even for DXVK/Vulkan games. `xwininfo -root -tree` finds the `"Metalstorm"` window and returns its absolute position, which maps 1:1 to PipeWire monitor frame coordinates. This replaces all manual `game_window_offset` configuration.
 
 ### Game Launch Automation
 
-**Problem:** Wingman originally required the user to manually open Heroic Games Launcher
-and click Play before running `make r`.
+`umu-run` (the Proton launcher Heroic uses internally, installed as a standalone zipapp) launches MetalStorm directly without requiring Heroic's UI. `make r` now chains `launch-game` (kill stale instance + `umu-run` in background) → `wait-game` (poll for process + sleep for lobby load) → Wingman start. All paths are configurable via Makefile variables (`UMU_RUN`, `PROTON_ROOT`, `WINE_PREFIX`, `GAME_EXE`).
 
-**Approaches tried:**
-
-| Approach | Result |
-|---|---|
-| `xdg-open "heroic://launch/legendary/<id>"` | Opens Heroic library UI — still requires manual Play click |
-| `flatpak run com.heroicgameslauncher.hgl` | Heroic exits immediately (single-instance guard, or no game auto-start) |
-| `legendary launch` (inside Heroic flatpak sandbox) | `"Game is not currently installed"` — sandbox path mismatch |
-| `umu-run` directly | **Works** — game window appears in ~4 s |
-
-**Solution:** Install `umu-run` (the same Proton launcher Heroic uses internally) as a
-standalone zipapp and invoke it directly:
-
-```bash
-# Install once
-curl -sLO https://github.com/Open-Wine-Components/umu-launcher/releases/download/1.4.0/umu-launcher-1.4.0-zipapp.tar
-tar xf umu-launcher-1.4.0-zipapp.tar
-cp umu/umu-run ~/.local/bin/umu-run
-chmod +x ~/.local/bin/umu-run
-```
-
-The `make launch-game` Makefile target runs:
-
-```bash
-GAMEID=umu-0 \
-PROTONPATH=~/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/proton/GE-Proton-latest \
-WINEPREFIX=~/Games/Heroic/Prefixes/Metalstorm \
-~/.local/bin/umu-run ~/Games/Heroic/Metalstorm/Metalstorm.exe &
-```
-
-`make rg` chains `launch-game` → `wait-game` (polls xwininfo until `Metalstorm` window
-appears, then sleeps 15 s) → `r`. With `umu-run`, the game window is typically visible
-within 4 seconds of launch; the 15-second post-detection wait covers the Unity loading
-screen before the lobby is ready.
-
-All three targets use overridable Makefile variables (`UMU_RUN`, `PROTON_ROOT`,
-`WINE_PREFIX`, `GAME_EXE`) if the Proton or prefix path changes.
-
-**Verified working 2026-06-15:** `make rg` successfully launches MetalStorm via `umu-run`
-and Wingman connects to it. Note that `make r` (without the `g`) is for development use
-when the game is already running — it does not launch the game. Use `make rg` for the
-full unattended workflow.
-
-**VS Code terminal note:** Running `make rg` from the VS Code integrated terminal works
-correctly as long as VS Code is not installed as a snap (the snap sandbox rewrites `$HOME`
-and breaks `umu-shim`). Use GNOME Terminal or another non-snap terminal if you encounter
-path errors from `umu-run`.
+**VS Code terminal note:** `make r` must be run from a non-snap terminal (e.g. GNOME Terminal). VS Code installed as a snap rewrites `$HOME` and breaks `umu-shim`. See ADR 049 Known Gotcha section above.
 
 ---
 
 ## References
 
-- `wingman/controller.py` — `click_grid_region`, `click_crop`
-- `wingman/capture.py` — `_GstBackend`, `_MssBackend`
-- `Makefile` — `launch-game`, `wait-game`, `rg` targets
+- [ADR 014](014-mouse-click-via-win32-mouse-event.md) — mouse click via Win32 mouse_event (original Windows decision)
+- [ADR 047](047-host-environment-preflight-check.md) — host environment pre-flight check
+- [ADR 050](050-wayland-screen-capture.md) — Wayland screen capture (PipeWire backend)
+- [ADR 051](051-linux-pitch-control-joystick-binding.md) — Linux pitch control: joystick binding required
+- [ADR 053](053-linux-one-command-launch.md) — **Full technical record**: window detection, XAUTHORITY, XTest mouse/keyboard injection, XRecord hotkey listening, game auto-launch
+- `wingman/controller.py` — `_LinuxXTestKeyboard`, `_linux_click()`, `_linux_key_event()`
+- `wingman/capture.py` — `_PipeWireBackend`, `_detect_via_x11()`
+- `Makefile` — `launch-game`, `wait-game`, `r` targets
 - `docs/job-aids/011-wingman-keybindings.md` — recommended MetalStorm keybindings
-- ADR 014 — mouse click via Win32 mouse_event (original Windows decision)
-- ADR 047 — host environment pre-flight check
-- ADR 050 — Wayland screen capture (GStreamer ximagesrc backend)
-- ADR 051 — Linux pitch control: joystick binding required

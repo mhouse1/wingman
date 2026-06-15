@@ -14,8 +14,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.19"
-WINGMAN_VERSION_DETAILS = "game_lobby 5 second escape loop to prevent stalling"
+WINGMAN_VERSION = "1.6.20"
+WINGMAN_VERSION_DETAILS = "linux support: capable of running in ubuntu desktop"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON

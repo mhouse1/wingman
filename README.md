@@ -2,7 +2,7 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.6.19
+Current version: v1.6.19 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04).
 
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
@@ -48,6 +48,7 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 | Runtime replay gate (ADR 044, PATH1) | ✅ |
 | Live-screen capture gate (ADR 045, PATH1) | ✅ |
 | Real screenshot OCR integration tests (PATH1/PATH2) | ✅ |
+| Linux support: auto-launch, PipeWire capture, XTest input injection | ✅ |
 
 ---
 
@@ -76,21 +77,32 @@ Wingman includes layered validation from fast checks to runtime-realistic gates:
 
 ## Quick Start
 
-### Setup
+### Prerequisites
 
 ```bash
 uv sync --all-groups
 ```
 
+**Linux only (one-time setup):** See `docs/job-aids/010-run-metalstorm-on-linux.md` for the full checklist. The short version:
+
+1. Install MetalStorm via Heroic Games Launcher (Flatpak) with Proton-GE.
+2. Install `umu-run` standalone — Makefile variables `UMU_RUN`, `PROTON_ROOT`, `WINE_PREFIX`, `GAME_EXE` point to your install.
+3. Run `make r` once to trigger the one-time PipeWire screen-share dialog; subsequent runs skip it automatically.
+4. Set MetalStorm's Controls mode to **Controller / Joystick** in-game settings (required for pitch input under Wine — see ADR 051).
+5. Configure in-game keybindings as described in `docs/job-aids/011-wingman-keybindings.md`.
+
+No `sudo`, no `input` group membership, no root access required.
+
 ### Run
 
 ```bash
-make r
-make rd
+make r     # run Wingman (INFO console only)
+make rd    # run with DEBUG logs written to wingman.log
 ```
 
-- `make r`: run Wingman normally
-- `make rd`: run with DEBUG logs in `wingman.log`
+On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not already running, waits for the lobby to appear, then starts Wingman. No manual game launch step is needed.
+
+On Windows, launch MetalStorm manually before running `make r`.
 
 ### Core Validation Commands
 
@@ -127,6 +139,8 @@ make ocr
 | `b` | Inject simulated respawn OCR result (testing) |
 | `backspace` | Exit script (runtime mode) |
 
+Hotkeys work on Linux without root or `input` group membership — key injection uses XTest and hotkey listening uses the X11 RECORD extension (see ADR 053).
+
 Note: automated replay/capture test lanes disable hotkeys to avoid accidental interruption during CI-style runs.
 
 ---
@@ -162,7 +176,15 @@ Architecture decisions and workflow docs are tracked under:
 
 ## Documentation Index
 
-- Setup and usage: `docs/job-aids/001-setup-and-usage.md`
-- Calibration: `docs/job-aids/006-calibrate-crop-regions.md`
-- Performance workflow: `docs/job-aids/008-performance-regression-workflow.md`
-- Contribution guide: `CONTRIBUTING.md`
+| Document | Description |
+|---|---|
+| `docs/job-aids/001-setup-and-usage.md` | Setup and usage |
+| `docs/job-aids/006-calibrate-crop-regions.md` | Calibration |
+| `docs/job-aids/008-performance-regression-workflow.md` | Performance workflow |
+| `docs/job-aids/010-run-metalstorm-on-linux.md` | Linux setup: Heroic, umu-run, PipeWire grant |
+| `docs/job-aids/011-wingman-keybindings.md` | In-game keybinding configuration (Linux) |
+| `docs/adr/049-linux-migration-game-and-automation-layer.md` | Linux migration decisions and implementation summary |
+| `docs/adr/050-wayland-screen-capture.md` | PipeWire screen capture on GNOME Wayland |
+| `docs/adr/051-linux-pitch-control-joystick-binding.md` | Pitch control: why joystick mode is required under Wine |
+| `docs/adr/053-linux-one-command-launch.md` | Full Linux input stack: window detection, XTest, XRecord |
+| `CONTRIBUTING.md` | Contribution guide |
