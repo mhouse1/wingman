@@ -1,0 +1,1802 @@
+WINE REGISTRY Version 2
+;; All keys relative to REGISTRY\\User\\S-1-5-21-2312641141-2291943251-1000-1000
+
+#arch=win64
+
+[AppEvents\\Schemes\\Apps\\Explorer\\Navigating\\.Current] 1774238072
+#time=1dcba78c213cbe8
+@=""
+
+[Control Panel\\Accessibility\\AudioDescription] 1774238072
+#time=1dcba78c18c528a
+"Locale"=dword:00000000
+"On"="0"
+
+[Control Panel\\Accessibility\\Blind Access] 1774238072
+#time=1dcba78c18c4f92
+"On"="0"
+
+[Control Panel\\Accessibility\\Keyboard Preference] 1774238072
+#time=1dcba78c18c4ba0
+"On"="1"
+
+[Control Panel\\Accessibility\\ShowSounds] 1774238072
+#time=1dcba78c18c5078
+"On"="0"
+
+[Control Panel\\Colors] 1774238072
+#time=1dcba78c21f7416
+"ActiveBorder"="255 255 255"
+"ActiveTitle"="50 150 250"
+"AppWorkSpace"="128 128 128"
+"Background"="37 111 149"
+"ButtonAlternateFace"="255 255 255"
+"ButtonDkShadow"="106 106 106"
+"ButtonFace"="245 245 245"
+"ButtonHilight"="255 255 255"
+"ButtonLight"="227 227 227"
+"ButtonShadow"="166 166 166"
+"ButtonText"="0 0 0"
+"GradientActiveTitle"="50 150 250"
+"GradientInactiveTitle"="128 128 128"
+"GrayText"="106 106 106"
+"Hilight"="48 150 250"
+"HilightText"="255 255 255"
+"HotTrackingColor"="224 224 224"
+"InactiveBorder"="255 255 255"
+"InactiveTitle"="128 128 128"
+"InactiveTitleText"="200 200 200"
+"InfoText"="0 0 0"
+"InfoWindow"="255 255 255"
+"Menu"="255 255 255"
+"MenuBar"="255 255 255"
+"MenuHilight"="48 150 250"
+"MenuText"="0 0 0"
+"Scrollbar"="255 255 255"
+"TitleText"="0 0 0"
+"Window"="255 255 255"
+"WindowFrame"="158 158 158"
+"WindowText"="0 0 0"
+
+[Control Panel\\Desktop] 1774238072
+#time=1dcba78c21f78d0
+"ActiveWndTrackTimeout"=dword:00000000
+"BlockSendInputResets"="0"
+"CaretWidth"=dword:00000001
+"ClickLockTime"=dword:000004b0
+"DoubleClickHeight"="4"
+"DoubleClickWidth"="4"
+"DragFullWindows"="0"
+"DragHeight"="4"
+"DragWidth"="4"
+"FocusBorderHeight"=dword:00000001
+"FocusBorderWidth"=dword:00000001
+"FontSmoothing"="2"
+"FontSmoothingGamma"=dword:00000000
+"FontSmoothingOrientation"=dword:00000001
+"FontSmoothingType"=dword:00000001
+"ForegroundFlashCount"=dword:00000003
+"ForegroundLockTimeout"=dword:00000000
+"IconTitleWrap"="1"
+"LowPowerActive"="0"
+"MenuShowDelay"="400"
+"UserPreferencesMask"=hex:30,00,02,80,12,00,00,00
+"Wallpaper"=""
+"WheelScrollChars"="3"
+"WheelScrollLines"="3"
+
+[Control Panel\\Desktop\\WindowMetrics] 1774238072
+#time=1dcba78c21f7812
+"BorderWidth"="1"
+"CaptionFont"=hex:0a,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,00,\
+  00,00,00,01,00,00,00,00,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+"CaptionHeight"="25"
+"CaptionWidth"="18"
+"IconFont"=hex:08,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,00,00,\
+  00,00,01,00,00,00,00,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+"IconSpacing"="-1125"
+"IconTitleWrap"="1"
+"IconVerticalSpacing"="-1125"
+"MenuFont"=hex:08,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,00,00,\
+  00,00,01,00,00,00,00,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+"MenuHeight"="18"
+"MenuWidth"="18"
+"MessageFont"=hex:08,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,00,\
+  00,00,00,01,00,00,00,00,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+"PaddedBorderWidth"="0"
+"ScrollHeight"="17"
+"ScrollWidth"="17"
+"SmCaptionFont"=hex:08,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,\
+  00,00,00,00,01,00,00,00,00,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+"SmCaptionHeight"="17"
+"SmCaptionWidth"="17"
+"StatusFont"=hex:08,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,00,\
+  00,00,00,01,00,00,00,00,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+
+[Control Panel\\International] 1774238072
+#time=1dcba78c1881ad0
+"iCalendarType"="1"
+"iCountry"="1"
+"iCurrDigits"="2"
+"iCurrency"="0"
+"iDate"="0"
+"iDigits"="2"
+"iFirstDayOfWeek"="6"
+"iFirstWeekOfYear"="0"
+"iLZero"="1"
+"iMeasure"="1"
+"iNegCurr"="0"
+"iNegNumber"="1"
+"iPaperSize"="1"
+"iTime"="0"
+"iTimePrefix"="0"
+"iTLZero"="0"
+"Locale"="00000409"
+"LocaleName"="en-US"
+"NumShape"="1"
+"s1159"="AM"
+"s2359"="PM"
+"sCountry"="United States"
+"sCurrency"="$"
+"sDate"="/"
+"sDecimal"="."
+"sGrouping"="3;0"
+"sLanguage"="ENU"
+"sList"=","
+"sLongDate"="dddd, MMMM d, yyyy"
+"sMonDecimalSep"="."
+"sMonGrouping"="3;0"
+"sMonThousandSep"=","
+"sNativeDigits"="0123456789"
+"sNegativeSign"="-"
+"sPositiveSign"=""
+"sShortDate"="M/d/yyyy"
+"sShortTime"="h:mm tt"
+"sThousand"=","
+"sTime"=":"
+"sTimeFormat"="h:mm:ss tt"
+"sYearMonth"="MMMM yyyy"
+
+[Control Panel\\International\\Geo] 1774238072
+#time=1dcba78c1881b16
+"Name"="US"
+"Nation"="244"
+
+[Control Panel\\International\\\xd83c\xdf0e\xd83c\xdf0f\xd83c\xdf0d] 1774238072
+#time=1dcba78c1881602
+"Currencies"="USD"
+
+[Control Panel\\Keyboard] 1774238072
+#time=1dcba78c18c4bdc
+"KeyboardDelay"="1"
+"KeyboardSpeed"="31"
+
+[Control Panel\\Mouse] 1774238072
+#time=1dcba78c18c512c
+"ActiveWindowTracking"=dword:00000000
+"DoubleClickHeight"="4"
+"DoubleClickSpeed"="500"
+"DoubleClickWidth"="4"
+"MouseHoverHeight"="4"
+"MouseHoverTime"="400"
+"MouseHoverWidth"="4"
+"MouseSensitivity"="10"
+"MouseSpeed"="1"
+"MouseThreshold1"="6"
+"MouseThreshold2"="10"
+"SnapToDefaultButton"="0"
+"SwapMouseButtons"="0"
+
+[Control Panel\\Sound] 1774238072
+#time=1dcba78c18c4484
+"Beep"="Yes"
+
+[Environment] 1774238072
+#time=1dcba78c1efe58e
+"TEMP"="C:\\users\\steamuser\\AppData\\Local\\Temp"
+"TMP"="C:\\users\\steamuser\\AppData\\Local\\Temp"
+
+[Keyboard Layout\\Preload] 1774238072
+#time=1dcba78c18c41e6
+"1"="00000409"
+
+[Software\\Epic Games\\Unreal Engine\\Identifiers] 1781344405
+#time=1dcfb1a7a70934c
+"MachineId"="A08D1FCA4ACBE0D8AE3B84BC8786C397"
+
+[Software\\Microsoft\\Internet Explorer\\Main] 1774238072
+#time=1dcba78c2129c5a
+"Search Page"="https://www.google.com"
+"Start Page"="https://www.winehq.org"
+
+[Software\\Microsoft\\Internet Explorer\\Main\\FeatureControl] 1774238072
+#time=1dcba78c1cf7d44
+
+[Software\\Microsoft\\Internet Explorer\\Settings] 1774238072
+#time=1dcba78c2129cc8
+"Text Color"="0,0,0"
+
+[Software\\Microsoft\\Protected Storage System Provider] 1774238072
+#time=1dcba78c213cc24
+
+[Software\\Microsoft\\SystemCertificates\\CA\\Certificates] 1774238073
+#time=1dcba78c29b860a
+
+[Software\\Microsoft\\SystemCertificates\\CA\\CRLs] 1774238073
+#time=1dcba78c29b8650
+
+[Software\\Microsoft\\SystemCertificates\\CA\\CTLs] 1774238073
+#time=1dcba78c29b8696
+
+[Software\\Microsoft\\SystemCertificates\\My\\Certificates] 1774238073
+#time=1dcba78c29b89fc
+
+[Software\\Microsoft\\SystemCertificates\\My\\CRLs] 1774238073
+#time=1dcba78c29b8a4c
+
+[Software\\Microsoft\\SystemCertificates\\My\\CTLs] 1774238073
+#time=1dcba78c29b8a9c
+
+[Software\\Microsoft\\SystemCertificates\\Root\\Certificates] 1781344395
+#time=1dcfb1a74414264
+
+[Software\\Microsoft\\SystemCertificates\\Root\\CRLs] 1781344395
+#time=1dcfb1a7441435e
+
+[Software\\Microsoft\\SystemCertificates\\Root\\CTLs] 1781344395
+#time=1dcfb1a7441443a
+
+[Software\\Microsoft\\SystemCertificates\\Trust\\Certificates] 1774238073
+#time=1dcba78c29b8cc2
+
+[Software\\Microsoft\\SystemCertificates\\Trust\\CRLs] 1774238073
+#time=1dcba78c29b8d08
+
+[Software\\Microsoft\\SystemCertificates\\Trust\\CTLs] 1774238073
+#time=1dcba78c29b8d4e
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced] 1774238072
+#time=1dcba78c2132468
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts] 1774238072
+#time=1dcba78c21324ae
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders] 1774238072
+#time=1dcba78c1ef6bfe
+"Administrative Tools"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Administrative Tools"
+"AppData"="C:\\users\\steamuser\\AppData\\Roaming"
+"Cache"="C:\\users\\steamuser\\AppData\\Local\\Microsoft\\Windows\\INetCache"
+"Cookies"="C:\\users\\steamuser\\AppData\\Local\\Microsoft\\Windows\\INetCookies"
+"Desktop"="C:\\users\\steamuser\\Desktop"
+"Favorites"="C:\\users\\steamuser\\Favorites"
+"Fonts"="C:\\windows\\Fonts"
+"History"="C:\\users\\steamuser\\AppData\\Local\\Microsoft\\Windows\\History"
+"Local AppData"="C:\\users\\steamuser\\AppData\\Local"
+"My Music"="C:\\users\\steamuser\\Music"
+"My Pictures"="C:\\users\\steamuser\\Pictures"
+"My Videos"="C:\\users\\steamuser\\Videos"
+"NetHood"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\Network Shortcuts"
+"Personal"="C:\\users\\steamuser\\Documents"
+"PrintHood"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\Printer Shortcuts"
+"Programs"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs"
+"Recent"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\Recent"
+"SendTo"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\SendTo"
+"Start Menu"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu"
+"StartUp"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp"
+"Templates"="C:\\users\\steamuser\\AppData\\Roaming\\Microsoft\\Windows\\Templates"
+"{374DE290-123F-4565-9164-39C4925E467B}"="C:\\users\\steamuser\\Downloads"
+"{4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}"="C:\\users\\steamuser\\Saved Games"
+"{56784854-C6CB-462B-8169-88E350ACB882}"="C:\\users\\steamuser\\Contacts"
+"{7D1D3A04-DEBB-4115-95CF-2F29DA2920DA}"="C:\\users\\steamuser\\Searches"
+"{A520A1A4-1780-4FF6-BD18-167343C5AF16}"="C:\\users\\steamuser\\AppData\\LocalLow"
+"{BFB9D5E0-C6A9-404C-B2B2-AE6DB6AF4968}"="C:\\users\\steamuser\\Links"
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders] 1774238072
+#time=1dcba78c1ef6c26
+"__WineVistaPaths"=dword:00000001
+"Administrative Tools"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Administrative Tools"
+"AppData"=str(2):"%USERPROFILE%\\AppData\\Roaming"
+"Cache"=str(2):"%USERPROFILE%\\AppData\\Local\\Microsoft\\Windows\\INetCache"
+"Cookies"=str(2):"%USERPROFILE%\\AppData\\Local\\Microsoft\\Windows\\INetCookies"
+"Desktop"=str(2):"%USERPROFILE%\\Desktop"
+"Favorites"=str(2):"%USERPROFILE%\\Favorites"
+"Fonts"=str(2):"C:\\windows\\Fonts"
+"History"=str(2):"%USERPROFILE%\\AppData\\Local\\Microsoft\\Windows\\History"
+"Local AppData"=str(2):"%USERPROFILE%\\AppData\\Local"
+"My Music"=str(2):"%USERPROFILE%\\Music"
+"My Pictures"=str(2):"%USERPROFILE%\\Pictures"
+"My Videos"=str(2):"%USERPROFILE%\\Videos"
+"NetHood"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Network Shortcuts"
+"Personal"=str(2):"%USERPROFILE%\\Documents"
+"PrintHood"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Printer Shortcuts"
+"Programs"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs"
+"Recent"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Recent"
+"SendTo"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\SendTo"
+"Start Menu"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu"
+"StartUp"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp"
+"Templates"=str(2):"%USERPROFILE%\\AppData\\Roaming\\Microsoft\\Windows\\Templates"
+"{374DE290-123F-4565-9164-39C4925E467B}"=str(2):"%USERPROFILE%\\Downloads"
+"{4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}"=str(2):"%USERPROFILE%\\Saved Games"
+"{56784854-C6CB-462B-8169-88E350ACB882}"=str(2):"%USERPROFILE%\\Contacts"
+"{7D1D3A04-DEBB-4115-95CF-2F29DA2920DA}"=str(2):"%USERPROFILE%\\Searches"
+"{A520A1A4-1780-4FF6-BD18-167343C5AF16}"=str(2):"%USERPROFILE%\\AppData\\LocalLow"
+"{BFB9D5E0-C6A9-404C-B2B2-AE6DB6AF4968}"=str(2):"%USERPROFILE%\\Links"
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings] 1774238073
+#time=1dcba78c2a27d3e
+"ProxyEnable"=dword:00000000
+"User Agent"="Mozilla/4.0 (compatible; MSIE 8.0; Win32)"
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\ZoneMap] 1774238072
+#time=1dcba78c20c2492
+@=""
+"IntranetName"=dword:00000001
+"ProxyByPass"=dword:00000001
+"UNCAsIntranet"=dword:00000001
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\ZoneMap\\Domains] 1774238072
+#time=1dcba78c20c23de
+@=""
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\ZoneMap\\ProtocolDefaults] 1774238072
+#time=1dcba78c20c230c
+@=""
+"@ivt"=dword:00000001
+"file"=dword:00000003
+"ftp"=dword:00000003
+"http"=dword:00000003
+"https"=dword:00000003
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\ZoneMap\\Ranges] 1774238072
+#time=1dcba78c20c24b0
+@=""
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones] 1774238072
+#time=1dcba78c20cd2a2
+@=""
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones\\0] 1774238072
+#time=1dcba78c20c4cec
+@=""
+"1001"=dword:00000000
+"1004"=dword:00000000
+"1200"=dword:00000000
+"1201"=dword:00000001
+"1400"=dword:00000000
+"1402"=dword:00000000
+"1405"=dword:00000000
+"1406"=dword:00000000
+"1407"=dword:00000000
+"1601"=dword:00000000
+"1604"=dword:00000000
+"1605"=dword:00000000
+"1606"=dword:00000000
+"1607"=dword:00000000
+"1608"=dword:00000000
+"1609"=dword:00000001
+"1800"=dword:00000000
+"1802"=dword:00000000
+"1803"=dword:00000000
+"1804"=dword:00000000
+"1805"=dword:00000000
+"1A00"=dword:00000000
+"1A02"=dword:00000000
+"1A03"=dword:00000000
+"1A04"=dword:00000000
+"1A05"=dword:00000000
+"1A06"=dword:00000000
+"1A10"=dword:00000000
+"1C00"=dword:00020000
+"1E05"=dword:00030000
+"CurrentLevel"=dword:00000000
+"Description"="Your computer"
+"DisplayName"="My Computer"
+"Flags"=dword:00000021
+"Icon"="explorer.exe#0100"
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones\\1] 1774238072
+#time=1dcba78c20c7654
+@=""
+"1001"=dword:00000001
+"1004"=dword:00000003
+"1200"=dword:00000000
+"1201"=dword:00000003
+"1400"=dword:00000000
+"1402"=dword:00000000
+"1405"=dword:00000000
+"1406"=dword:00000001
+"1407"=dword:00000000
+"1601"=dword:00000000
+"1604"=dword:00000000
+"1605"=dword:00000000
+"1606"=dword:00000000
+"1607"=dword:00000000
+"1608"=dword:00000000
+"1609"=dword:00000001
+"1800"=dword:00000001
+"1802"=dword:00000000
+"1803"=dword:00000000
+"1804"=dword:00000001
+"1805"=dword:00000000
+"1A00"=dword:00020000
+"1A02"=dword:00000000
+"1A03"=dword:00000000
+"1A04"=dword:00000000
+"1A05"=dword:00000000
+"1A06"=dword:00000000
+"1A10"=dword:00000000
+"1C00"=dword:00020000
+"1E05"=dword:00020000
+"CurrentLevel"=dword:00010500
+"Description"="This zone contains all Web sites that are on your organization's intranet."
+"DisplayName"="Local intranet"
+"Flags"=dword:000000db
+"Icon"="shell32.dll#0018"
+"MinLevel"=dword:00010000
+"RecommendedLevel"=dword:00010500
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones\\2] 1774238072
+#time=1dcba78c20ca6ce
+@=""
+"1001"=dword:00000000
+"1004"=dword:00000001
+"1200"=dword:00000000
+"1201"=dword:00000001
+"1400"=dword:00000000
+"1402"=dword:00000000
+"1405"=dword:00000000
+"1406"=dword:00000000
+"1407"=dword:00000000
+"1601"=dword:00000000
+"1604"=dword:00000000
+"1605"=dword:00000000
+"1606"=dword:00000000
+"1607"=dword:00000000
+"1608"=dword:00000000
+"1609"=dword:00000001
+"1800"=dword:00000000
+"1802"=dword:00000000
+"1803"=dword:00000000
+"1804"=dword:00000000
+"1805"=dword:00000000
+"1A00"=dword:00000000
+"1A02"=dword:00000000
+"1A03"=dword:00000000
+"1A04"=dword:00000000
+"1A05"=dword:00000000
+"1A06"=dword:00000000
+"1A10"=dword:00000000
+"1C00"=dword:00030000
+"1E05"=dword:00030000
+"CurrentLevel"=dword:00010000
+"Description"="This zone contains Web sites that you trust not to damage your computer or data."
+"DisplayName"="Trusted sites"
+"Flags"=dword:00000047
+"Icon"="inetcpl.cpl#00004480"
+"MinLevel"=dword:00010000
+"RecommendedLevel"=dword:00010000
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones\\3] 1774238072
+#time=1dcba78c20cd1bc
+@=""
+"1001"=dword:00000001
+"1004"=dword:00000003
+"1200"=dword:00000000
+"1201"=dword:00000003
+"1400"=dword:00000000
+"1402"=dword:00000000
+"1405"=dword:00000000
+"1406"=dword:00000003
+"1407"=dword:00000000
+"1601"=dword:00000001
+"1604"=dword:00000000
+"1605"=dword:00000000
+"1606"=dword:00000000
+"1607"=dword:00000000
+"1608"=dword:00000000
+"1609"=dword:00000001
+"1800"=dword:00000001
+"1802"=dword:00000000
+"1803"=dword:00000000
+"1804"=dword:00000001
+"1805"=dword:00000001
+"1A00"=dword:00020000
+"1A02"=dword:00000000
+"1A03"=dword:00000000
+"1A04"=dword:00000003
+"1A05"=dword:00000001
+"1A06"=dword:00000000
+"1A10"=dword:00000001
+"1C00"=dword:00010000
+"1E05"=dword:00020000
+"CurrentLevel"=dword:00011000
+"Description"="This zone contains all Web sites you haven't placed in other zones"
+"DisplayName"="Internet"
+"Flags"=dword:00000001
+"Icon"="inetcpl.cpl#001313"
+"MinLevel"=dword:00011000
+"RecommendedLevel"=dword:00011000
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Zones\\4] 1774238072
+#time=1dcba78c20cfc0a
+@=""
+"1001"=dword:00000003
+"1004"=dword:00000003
+"1200"=dword:00000003
+"1201"=dword:00000003
+"1400"=dword:00000003
+"1402"=dword:00000003
+"1405"=dword:00000003
+"1406"=dword:00000003
+"1407"=dword:00000003
+"1601"=dword:00000001
+"1604"=dword:00000001
+"1605"=dword:00000000
+"1606"=dword:00000003
+"1607"=dword:00000003
+"1608"=dword:00000003
+"1609"=dword:00000001
+"1800"=dword:00000003
+"1802"=dword:00000001
+"1803"=dword:00000003
+"1804"=dword:00000003
+"1805"=dword:00000001
+"1A00"=dword:00010000
+"1A02"=dword:00000003
+"1A03"=dword:00000003
+"1A04"=dword:00000003
+"1A05"=dword:00000003
+"1A06"=dword:00000003
+"1A10"=dword:00000003
+"1C00"=dword:00000000
+"1E05"=dword:00010000
+"CurrentLevel"=dword:00012000
+"Description"="This zone contains Web sites that could potentially damage your computer or data."
+"DisplayName"="Restricted sites"
+"Flags"=dword:00000003
+"Icon"="inetcpl.cpl#00004481"
+"MinLevel"=dword:00012000
+"RecommendedLevel"=dword:00012000
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\Run] 1774238072
+#time=1dcba78c21324ea
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\ThemeManager] 1774238072
+#time=1dcba78c21f1548
+"ColorName"="Blue"
+"DllName"="C:\\windows\\resources\\themes\\light\\light.msstyles"
+"FlatMenu"=dword:00000000
+"GradientCaption"=dword:00000001
+"IconTitleFont"=hex:f5,ff,ff,ff,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,\
+  00,00,00,00,01,00,00,00,22,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,6c,00,\
+  20,00,44,00,6c,00,67,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+"LoadedBefore"="1"
+"NonClientMetrics"=hex:f8,01,00,00,01,00,00,00,10,00,00,00,10,00,00,00,12,00,\
+  00,00,12,00,00,00,f5,ff,ff,ff,00,00,00,00,00,00,00,00,00,00,00,00,bc,02,00,\
+  00,00,00,00,01,00,00,00,22,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,6c,00,\
+  20,00,44,00,6c,00,67,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,0f,00,\
+  00,00,0f,00,00,00,f5,ff,ff,ff,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,\
+  00,00,00,00,01,00,00,00,22,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,6c,00,\
+  20,00,44,00,6c,00,67,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,12,00,\
+  00,00,12,00,00,00,f5,ff,ff,ff,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,\
+  00,00,00,00,01,00,00,00,22,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,6c,00,\
+  20,00,44,00,6c,00,67,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,f5,ff,\
+  ff,ff,00,00,00,00,00,00,00,00,00,00,00,00,90,01,00,00,00,00,00,01,00,00,00,\
+  22,54,00,61,00,68,00,6f,00,6d,00,61,00,00,00,6c,00,20,00,44,00,6c,00,67,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,f5,ff,ff,ff,00,00,00,00,00,00,\
+  00,00,00,00,00,00,90,01,00,00,00,00,00,01,00,00,00,22,54,00,61,00,68,00,6f,\
+  00,6d,00,61,00,00,00,6c,00,20,00,44,00,6c,00,67,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,00,00
+"SizeName"="NormalSize"
+"ThemeActive"="1"
+
+[Software\\Microsoft\\Windows\\CurrentVersion\\ThemeManager\\Control Panel\\Colors] 1774238072
+#time=1dcba78c21f1354
+"ActiveBorder"="212 208 200"
+"ActiveTitle"="10 36 106"
+"AppWorkSpace"="128 128 128"
+"Background"="58 110 165"
+"ButtonAlternateFace"="181 181 181"
+"ButtonDkShadow"="64 64 64"
+"ButtonFace"="212 208 200"
+"ButtonHilight"="255 255 255"
+"ButtonLight"="212 208 200"
+"ButtonShadow"="128 128 128"
+"ButtonText"="0 0 0"
+"GradientActiveTitle"="166 202 240"
+"GradientInactiveTitle"="192 192 192"
+"GrayText"="128 128 128"
+"Hilight"="10 36 106"
+"HilightText"="255 255 255"
+"HotTrackingColor"="0 0 200"
+"InactiveBorder"="212 208 200"
+"InactiveTitle"="128 128 128"
+"InactiveTitleText"="212 208 200"
+"InfoText"="0 0 0"
+"InfoWindow"="255 255 225"
+"Menu"="212 208 200"
+"MenuBar"="212 208 200"
+"MenuHilight"="10 36 106"
+"MenuText"="0 0 0"
+"Scrollbar"="212 208 200"
+"TitleText"="255 255 255"
+"Window"="255 255 255"
+"WindowFrame"="0 0 0"
+"WindowText"="0 0 0"
+
+[Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\ftp\\UserChoice] 1774238072
+#time=1dcba78c213d6f6
+"ProgId"="ftp"
+
+[Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice] 1774238072
+#time=1dcba78c213d976
+"ProgId"="http"
+
+[Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice] 1774238072
+#time=1dcba78c213db7e
+"ProgId"="https"
+
+[Software\\Microsoft\\Windows\\Windows Error Reporting\\RuntimeExceptionHelperModules] 1781344394
+#time=1dcfb1a73f7483a
+"S:\\Games\\Heroic\\Metalstorm\\crashpad_wer.dll"=dword:00000001
+
+[Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices] 1781344386
+#time=1dcfb1a6f14d350
+"Brother_MFC_L2690DW"="wineps.drv,CUPS:Brother_MFC_L2690DW"
+
+[Software\\Microsoft\\Windows NT\\CurrentVersion\\PrinterPorts] 1781344386
+#time=1dcfb1a6f14d3e6
+"Brother_MFC_L2690DW"="wineps.drv,CUPS:Brother_MFC_L2690DW,15,45"
+
+[Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows] 1781344386
+#time=1dcfb1a6f15191e
+"device"="Brother_MFC_L2690DW,wineps.drv,CUPS:Brother_MFC_L2690DW"
+
+[Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon] 1774238072
+#time=1dcba78c213262a
+
+[Software\\Starform\\Metalstorm] 1781506933
+#time=1dcfc94e4760aa8
+"air-combat-hangar-default_hangarSortAscending_h2541885268"=dword:00000001
+"air-combat-hangar-default_hangarSortMethod_h1953484341"=hex:48,61,6e,67,61,72,\
+  4c,65,76,65,6c,00
+"air-combat-settings--default_clear-creds_h1484896463"=dword:00000000
+"air-combat-settings--default_gameplayMusicVolume-v2_h3989976402"=hex(4):00,00,\
+  00,00,00,00,00,00
+"air-combat-settings--default_hasEverShowAbilitiesInfoPopup_h2280912453"=dword:00000001
+"air-combat-settings--default_hasEverShownModsInfoPopup_h1200162042"=dword:00000001
+"air-combat-settings--default_hasSelectedControlScheme_h925460729"=dword:00000001
+"air-combat-settings--default_hudFriendlyColor_h3877389307"=hex:23,31,31,34,36,\
+  66,33,66,66,00
+"air-combat-settings--default_inputBindingOverrideIndex_h3949041381"=dword:00000002
+"air-combat-settings--default_inputBindingOverrides1_h1749792473"=hex:7b,22,76,\
+  65,72,73,69,6f,6e,22,3a,32,2c,22,62,69,6e,64,69,6e,67,4f,76,65,72,72,69,64,\
+  65,73,22,3a,22,7b,5c,22,62,69,6e,64,69,6e,67,73,5c,22,3a,5b,7b,5c,22,61,63,\
+  74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,62,61,74,2f,66,69,72,65,47,75,6e,73,5c,\
+  22,2c,5c,22,69,64,5c,22,3a,5c,22,36,34,32,34,64,63,35,34,2d,65,32,63,31,2d,\
+  34,34,61,66,2d,61,32,66,66,2d,33,61,31,38,31,62,31,63,66,62,35,38,5c,22,2c,\
+  5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,61,5c,22,\
+  2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,\
+  22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,\
+  7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,62,61,74,2f,66,69,\
+  72,65,41,63,74,69,76,65,57,65,61,70,6f,6e,5c,22,2c,5c,22,69,64,5c,22,3a,5c,\
+  22,61,35,64,34,33,36,65,62,2d,63,66,62,62,2d,34,65,34,36,2d,38,34,36,35,2d,\
+  33,62,36,63,35,37,65,38,34,32,37,36,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,\
+  22,3c,4b,65,79,62,6f,61,72,64,3e,2f,66,5c,22,2c,5c,22,69,6e,74,65,72,61,63,\
+  74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,\
+  73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,\
+  6e,5c,22,3a,5c,22,43,6f,6d,62,61,74,2f,64,65,70,6c,6f,79,46,6c,61,72,65,73,\
+  5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,36,35,32,31,31,62,37,62,2d,35,34,36,33,\
+  2d,34,61,64,30,2d,38,61,35,63,2d,64,63,31,34,37,31,30,63,31,38,62,37,5c,22,\
+  2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,73,70,\
+  61,63,65,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,\
+  6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,\
+  75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,62,\
+  61,74,2f,73,70,65,63,69,61,6c,41,62,69,6c,69,74,79,5c,22,2c,5c,22,69,64,5c,\
+  22,3a,5c,22,30,35,31,33,31,31,38,34,2d,33,62,64,35,2d,34,61,64,36,2d,62,63,\
+  65,35,2d,34,39,32,39,38,63,66,64,66,34,62,61,5c,22,2c,5c,22,70,61,74,68,5c,\
+  22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,71,5c,22,2c,5c,22,69,6e,74,65,\
+  72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,\
+  63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,\
+  74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,62,61,74,2f,73,65,6c,65,63,74,4e,65,78,\
+  74,57,65,61,70,6f,6e,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,61,66,37,34,31,37,\
+  39,65,2d,35,61,38,38,2d,34,31,38,32,2d,38,31,39,32,2d,61,30,66,37,32,37,66,\
+  34,37,32,31,63,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,\
+  61,72,64,3e,2f,67,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,\
+  3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,\
+  5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,\
+  6c,69,67,68,74,2f,61,66,74,65,72,62,75,72,6e,65,72,5c,22,2c,5c,22,69,64,5c,\
+  22,3a,5c,22,62,32,33,63,61,62,32,33,2d,61,35,63,33,2d,34,35,33,32,2d,61,62,\
+  38,33,2d,36,39,31,33,30,30,39,66,63,66,31,64,5c,22,2c,5c,22,70,61,74,68,5c,\
+  22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,65,5c,22,2c,5c,22,69,6e,74,65,\
+  72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,\
+  63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,\
+  74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,61,69,72,62,72,61,6b,65,5c,\
+  22,2c,5c,22,69,64,5c,22,3a,5c,22,38,66,33,34,66,63,32,62,2d,65,36,61,66,2d,\
+  34,33,65,63,2d,62,31,65,36,2d,65,62,31,66,33,32,34,36,38,35,30,33,5c,22,2c,\
+  5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,64,5c,22,\
+  2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,\
+  22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,\
+  7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,74,6f,\
+  67,67,6c,65,57,69,6e,67,53,77,65,65,70,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,\
+  35,35,63,64,38,32,32,36,2d,33,34,31,63,2d,34,36,37,63,2d,39,65,31,35,2d,65,\
+  64,63,63,34,37,30,37,64,32,30,32,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,\
+  3c,4b,65,79,62,6f,61,72,64,3e,2f,77,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,\
+  69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,\
+  6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,\
+  5c,22,3a,5c,22,46,6c,69,67,68,74,2f,70,69,74,63,68,5c,22,2c,5c,22,69,64,5c,\
+  22,3a,5c,22,64,66,33,62,32,66,30,63,2d,38,33,33,65,2d,34,36,30,33,2d,61,33,\
+  63,62,2d,66,64,38,36,64,37,32,66,37,37,38,32,5c,22,2c,5c,22,70,61,74,68,5c,\
+  22,3a,5c,22,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,\
+  22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,\
+  6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,\
+  67,68,74,2f,70,69,74,63,68,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,33,37,65,30,\
+  37,35,32,34,2d,30,35,39,63,2d,34,61,30,34,2d,61,64,65,32,2d,64,33,33,36,35,\
+  30,31,35,36,36,66,32,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,6e,75,6c,6c,\
+  5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,5c,22,2c,\
+  5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,\
+  7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,70,69,74,63,\
+  68,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,34,33,31,39,30,38,61,65,2d,36,64,35,\
+  34,2d,34,35,64,61,2d,62,61,30,36,2d,63,64,38,35,33,35,61,64,62,37,32,33,5c,\
+  22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6f,\
+  5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,\
+  6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,\
+  5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,\
+  70,69,74,63,68,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,32,64,38,31,37,61,35,32,\
+  2d,33,61,39,37,2d,34,34,34,38,2d,39,31,34,33,2d,63,35,64,32,32,64,65,35,31,\
+  38,63,32,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,\
+  64,3e,2f,6c,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,\
+  22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,\
+  6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,\
+  67,68,74,2f,79,61,77,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,35,39,34,35,63,34,\
+  31,31,2d,65,38,62,62,2d,34,32,31,31,2d,38,34,34,31,2d,32,32,64,37,66,38,61,\
+  33,39,30,63,38,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,\
+  61,72,64,3e,2f,73,65,6d,69,63,6f,6c,6f,6e,5c,22,2c,5c,22,69,6e,74,65,72,61,\
+  63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,\
+  73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,\
+  6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,72,6f,6c,6c,5c,22,2c,5c,22,69,64,\
+  5c,22,3a,5c,22,64,66,38,31,64,30,37,35,2d,62,39,63,35,2d,34,37,66,66,2d,62,\
+  63,64,30,2d,33,38,34,64,39,34,63,32,33,66,39,66,5c,22,2c,5c,22,70,61,74,68,\
+  5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6a,5c,22,2c,5c,22,69,6e,74,\
+  65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,\
+  6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,\
+  63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,72,6f,6c,6c,5c,22,2c,5c,\
+  22,69,64,5c,22,3a,5c,22,30,34,65,62,66,36,66,63,2d,32,39,33,37,2d,34,66,36,\
+  64,2d,62,36,65,64,2d,66,30,30,36,30,64,30,39,34,38,62,34,5c,22,2c,5c,22,70,\
+  61,74,68,5c,22,3a,5c,22,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,\
+  5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,\
+  22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,\
+  22,43,61,6d,65,72,61,2f,70,61,64,6c,6f,63,6b,43,61,6d,65,72,61,5c,22,2c,5c,\
+  22,69,64,5c,22,3a,5c,22,38,37,35,65,37,65,31,38,2d,38,34,33,37,2d,34,64,31,\
+  35,2d,38,32,36,61,2d,36,38,33,32,35,66,37,62,37,32,65,64,5c,22,2c,5c,22,70,\
+  61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,70,5c,22,2c,5c,22,\
+  69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,\
+  22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,\
+  5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,\
+  6e,2f,73,68,6f,77,45,6d,6f,74,65,73,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,34,\
+  36,66,32,30,31,32,62,2d,61,31,36,36,2d,34,37,32,35,2d,39,32,61,62,2d,31,39,\
+  30,31,63,35,64,37,38,30,32,63,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,5c,\
+  22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,\
+  5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,\
+  22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,\
+  61,74,69,6f,6e,2f,65,6d,6f,74,65,31,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,66,\
+  64,35,32,34,31,31,36,2d,39,37,34,64,2d,34,64,38,30,2d,62,63,63,36,2d,61,36,\
+  30,64,66,32,34,31,38,35,39,39,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,\
+  4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,64,31,5c,22,2c,5c,22,69,6e,74,\
+  65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,\
+  6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,\
+  63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,\
+  6d,6f,74,65,32,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,37,61,38,65,35,64,63,35,\
+  2d,61,66,64,31,2d,34,35,64,66,2d,39,39,33,30,2d,64,39,30,39,31,35,36,36,32,\
+  34,31,38,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,\
+  64,3e,2f,6e,75,6d,70,61,64,32,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,\
+  6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,\
+  73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,\
+  3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,33,5c,22,\
+  2c,5c,22,69,64,5c,22,3a,5c,22,35,66,31,65,34,37,30,63,2d,64,30,32,34,2d,34,\
+  38,38,64,2d,62,65,33,63,2d,35,31,34,63,34,61,35,36,61,65,35,65,5c,22,2c,5c,\
+  22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,\
+  61,64,33,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,\
+  6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,\
+  75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,\
+  75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,34,5c,22,2c,5c,22,69,64,5c,22,\
+  3a,5c,22,33,63,30,66,38,34,64,32,2d,65,35,39,37,2d,34,63,33,63,2d,62,39,39,\
+  64,2d,65,37,36,61,39,39,32,62,65,34,33,63,5c,22,2c,5c,22,70,61,74,68,5c,22,\
+  3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,74,5c,22,2c,5c,22,69,6e,74,65,72,\
+  61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,\
+  65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,\
+  69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,\
+  74,65,35,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,31,37,64,64,65,39,32,39,2d,38,\
+  65,32,33,2d,34,65,65,38,2d,39,31,35,32,2d,61,34,65,33,61,66,62,30,31,66,36,\
+  61,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,\
+  2f,75,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,\
+  75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,\
+  6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,\
+  6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,36,5c,22,2c,5c,22,69,64,5c,22,3a,\
+  5c,22,65,33,64,37,39,64,31,31,2d,35,31,33,34,2d,34,32,37,34,2d,39,36,32,35,\
+  2d,30,66,38,35,66,62,38,36,39,66,37,33,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,\
+  5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,64,36,5c,22,2c,5c,22,\
+  69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,\
+  22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,\
+  5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,\
+  6e,2f,65,6d,6f,74,65,37,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,31,37,36,30,30,\
+  38,39,66,2d,36,33,37,32,2d,34,35,32,37,2d,38,36,35,37,2d,38,36,32,33,38,38,\
+  38,61,32,36,35,39,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,\
+  6f,61,72,64,3e,2f,6e,75,6d,70,61,64,37,5c,22,2c,5c,22,69,6e,74,65,72,61,63,\
+  74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,\
+  73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,\
+  6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,\
+  38,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,38,33,36,39,34,66,66,65,2d,31,32,33,\
+  65,2d,34,31,37,33,2d,61,32,38,32,2d,65,34,31,38,65,62,36,32,38,65,64,34,5c,\
+  22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,\
+  75,6d,70,61,64,38,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,\
+  3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,\
+  5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,\
+  6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,39,5c,22,2c,5c,22,69,\
+  64,5c,22,3a,5c,22,65,38,38,35,32,39,33,66,2d,64,39,65,66,2d,34,65,36,32,2d,\
+  61,66,36,37,2d,61,31,39,65,65,32,64,37,66,61,30,66,5c,22,2c,5c,22,70,61,74,\
+  68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,64,39,5c,\
+  22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,\
+  5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,\
+  22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,\
+  61,74,69,6f,6e,2f,65,6d,6f,74,65,31,30,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,\
+  30,32,37,39,31,34,39,62,2d,30,65,66,30,2d,34,63,37,64,2d,61,30,35,37,2d,37,\
+  65,37,63,33,64,65,64,36,38,36,33,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,\
+  3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,64,35,5c,22,2c,5c,22,69,6e,\
+  74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,\
+  72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,\
+  61,63,74,69,6f,6e,5c,22,3a,5c,22,53,69,6d,55,49,2f,7a,6f,6f,6d,4d,69,6e,69,\
+  6d,61,70,49,6e,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,32,30,32,35,62,34,63,64,\
+  2d,65,65,39,34,2d,34,39,62,65,2d,61,62,39,63,2d,36,35,31,36,30,39,33,33,34,\
+  62,33,39,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,5c,22,2c,5c,22,69,6e,74,\
+  65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,\
+  6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,\
+  63,74,69,6f,6e,5c,22,3a,5c,22,53,69,6d,55,49,2f,7a,6f,6f,6d,4d,69,6e,69,6d,\
+  61,70,4f,75,74,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,38,66,65,63,63,34,61,31,\
+  2d,35,34,62,32,2d,34,39,39,62,2d,62,66,66,36,2d,32,31,61,66,64,62,34,36,33,\
+  31,62,35,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,5c,22,2c,5c,22,69,6e,74,\
+  65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,\
+  6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,5d,7d,22,7d,00
+"air-combat-settings--default_inputBindingOverrides2_h1749792474"=hex:7b,22,76,\
+  65,72,73,69,6f,6e,22,3a,32,2c,22,62,69,6e,64,69,6e,67,4f,76,65,72,72,69,64,\
+  65,73,22,3a,22,7b,5c,22,62,69,6e,64,69,6e,67,73,5c,22,3a,5b,7b,5c,22,61,63,\
+  74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,62,61,74,2f,66,69,72,65,47,75,6e,73,5c,\
+  22,2c,5c,22,69,64,5c,22,3a,5c,22,36,34,32,34,64,63,35,34,2d,65,32,63,31,2d,\
+  34,34,61,66,2d,61,32,66,66,2d,33,61,31,38,31,62,31,63,66,62,35,38,5c,22,2c,\
+  5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,61,5c,22,\
+  2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,\
+  22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,\
+  7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,62,61,74,2f,66,69,\
+  72,65,41,63,74,69,76,65,57,65,61,70,6f,6e,5c,22,2c,5c,22,69,64,5c,22,3a,5c,\
+  22,61,35,64,34,33,36,65,62,2d,63,66,62,62,2d,34,65,34,36,2d,38,34,36,35,2d,\
+  33,62,36,63,35,37,65,38,34,32,37,36,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,\
+  22,3c,4b,65,79,62,6f,61,72,64,3e,2f,66,5c,22,2c,5c,22,69,6e,74,65,72,61,63,\
+  74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,\
+  73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,\
+  6e,5c,22,3a,5c,22,43,6f,6d,62,61,74,2f,64,65,70,6c,6f,79,46,6c,61,72,65,73,\
+  5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,36,35,32,31,31,62,37,62,2d,35,34,36,33,\
+  2d,34,61,64,30,2d,38,61,35,63,2d,64,63,31,34,37,31,30,63,31,38,62,37,5c,22,\
+  2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,73,70,\
+  61,63,65,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,\
+  6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,\
+  75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,62,\
+  61,74,2f,73,70,65,63,69,61,6c,41,62,69,6c,69,74,79,5c,22,2c,5c,22,69,64,5c,\
+  22,3a,5c,22,30,35,31,33,31,31,38,34,2d,33,62,64,35,2d,34,61,64,36,2d,62,63,\
+  65,35,2d,34,39,32,39,38,63,66,64,66,34,62,61,5c,22,2c,5c,22,70,61,74,68,5c,\
+  22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,71,5c,22,2c,5c,22,69,6e,74,65,\
+  72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,\
+  63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,\
+  74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,62,61,74,2f,73,65,6c,65,63,74,4e,65,78,\
+  74,57,65,61,70,6f,6e,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,61,66,37,34,31,37,\
+  39,65,2d,35,61,38,38,2d,34,31,38,32,2d,38,31,39,32,2d,61,30,66,37,32,37,66,\
+  34,37,32,31,63,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,\
+  61,72,64,3e,2f,67,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,\
+  3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,\
+  5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,\
+  6c,69,67,68,74,2f,61,66,74,65,72,62,75,72,6e,65,72,5c,22,2c,5c,22,69,64,5c,\
+  22,3a,5c,22,62,32,33,63,61,62,32,33,2d,61,35,63,33,2d,34,35,33,32,2d,61,62,\
+  38,33,2d,36,39,31,33,30,30,39,66,63,66,31,64,5c,22,2c,5c,22,70,61,74,68,5c,\
+  22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,65,5c,22,2c,5c,22,69,6e,74,65,\
+  72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,\
+  63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,\
+  74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,61,69,72,62,72,61,6b,65,5c,\
+  22,2c,5c,22,69,64,5c,22,3a,5c,22,38,66,33,34,66,63,32,62,2d,65,36,61,66,2d,\
+  34,33,65,63,2d,62,31,65,36,2d,65,62,31,66,33,32,34,36,38,35,30,33,5c,22,2c,\
+  5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,64,5c,22,\
+  2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,\
+  22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,\
+  7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,74,6f,\
+  67,67,6c,65,57,69,6e,67,53,77,65,65,70,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,\
+  35,35,63,64,38,32,32,36,2d,33,34,31,63,2d,34,36,37,63,2d,39,65,31,35,2d,65,\
+  64,63,63,34,37,30,37,64,32,30,32,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,\
+  3c,4b,65,79,62,6f,61,72,64,3e,2f,77,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,\
+  69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,\
+  6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,\
+  5c,22,3a,5c,22,46,6c,69,67,68,74,2f,70,69,74,63,68,5c,22,2c,5c,22,69,64,5c,\
+  22,3a,5c,22,64,66,33,62,32,66,30,63,2d,38,33,33,65,2d,34,36,30,33,2d,61,33,\
+  63,62,2d,66,64,38,36,64,37,32,66,37,37,38,32,5c,22,2c,5c,22,70,61,74,68,5c,\
+  22,3a,5c,22,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,\
+  22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,\
+  6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,\
+  67,68,74,2f,70,69,74,63,68,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,34,33,31,39,\
+  30,38,61,65,2d,36,64,35,34,2d,34,35,64,61,2d,62,61,30,36,2d,63,64,38,35,33,\
+  35,61,64,62,37,32,33,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,\
+  62,6f,61,72,64,3e,2f,6b,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,\
+  5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,\
+  22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,\
+  22,46,6c,69,67,68,74,2f,70,69,74,63,68,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,\
+  32,64,38,31,37,61,35,32,2d,33,61,39,37,2d,34,34,34,38,2d,39,31,34,33,2d,63,\
+  35,64,32,32,64,65,35,31,38,63,32,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,\
+  3c,4b,65,79,62,6f,61,72,64,3e,2f,69,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,\
+  69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,\
+  6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,\
+  5c,22,3a,5c,22,46,6c,69,67,68,74,2f,79,61,77,5c,22,2c,5c,22,69,64,5c,22,3a,\
+  5c,22,36,32,64,39,65,65,37,30,2d,32,30,62,37,2d,34,30,31,35,2d,62,32,30,63,\
+  2d,37,31,66,38,61,32,61,34,37,62,39,66,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,\
+  5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,73,65,6d,69,63,6f,6c,6f,6e,5c,22,2c,\
+  5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,\
+  2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,\
+  2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,72,6f,6c,\
+  6c,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,34,33,30,37,64,37,66,38,2d,64,36,34,\
+  66,2d,34,34,32,36,2d,61,32,64,62,2d,37,31,32,36,33,38,32,32,33,63,37,38,5c,\
+  22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,5c,22,2c,5c,22,69,6e,74,65,72,61,63,\
+  74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,\
+  73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,\
+  6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,72,6f,6c,6c,5c,22,2c,5c,22,69,64,5c,\
+  22,3a,5c,22,64,66,38,31,64,30,37,35,2d,62,39,63,35,2d,34,37,66,66,2d,62,63,\
+  64,30,2d,33,38,34,64,39,34,63,32,33,66,39,66,5c,22,2c,5c,22,70,61,74,68,5c,\
+  22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6a,5c,22,2c,5c,22,69,6e,74,65,\
+  72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,\
+  63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,\
+  74,69,6f,6e,5c,22,3a,5c,22,46,6c,69,67,68,74,2f,72,6f,6c,6c,5c,22,2c,5c,22,\
+  69,64,5c,22,3a,5c,22,30,34,65,62,66,36,66,63,2d,32,39,33,37,2d,34,66,36,64,\
+  2d,62,36,65,64,2d,66,30,30,36,30,64,30,39,34,38,62,34,5c,22,2c,5c,22,70,61,\
+  74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6c,5c,22,2c,5c,22,69,\
+  6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,\
+  70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,\
+  22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,61,6d,65,72,61,2f,70,61,64,6c,6f,63,\
+  6b,43,61,6d,65,72,61,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,38,37,35,65,37,65,\
+  31,38,2d,38,34,33,37,2d,34,64,31,35,2d,38,32,36,61,2d,36,38,33,32,35,66,37,\
+  62,37,32,65,64,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,\
+  61,72,64,3e,2f,70,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,\
+  3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,\
+  5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,\
+  6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,31,5c,22,2c,5c,22,69,\
+  64,5c,22,3a,5c,22,66,64,35,32,34,31,31,36,2d,39,37,34,64,2d,34,64,38,30,2d,\
+  62,63,63,36,2d,61,36,30,64,66,32,34,31,38,35,39,39,5c,22,2c,5c,22,70,61,74,\
+  68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,64,31,5c,\
+  22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,\
+  5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,\
+  22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,\
+  61,74,69,6f,6e,2f,65,6d,6f,74,65,32,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,37,\
+  61,38,65,35,64,63,35,2d,61,66,64,31,2d,34,35,64,66,2d,39,39,33,30,2d,64,39,\
+  30,39,31,35,36,36,32,34,31,38,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,\
+  4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,64,32,5c,22,2c,5c,22,69,6e,74,\
+  65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,\
+  6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,\
+  63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,\
+  6d,6f,74,65,33,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,35,66,31,65,34,37,30,63,\
+  2d,64,30,32,34,2d,34,38,38,64,2d,62,65,33,63,2d,35,31,34,63,34,61,35,36,61,\
+  65,35,65,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,\
+  64,3e,2f,6e,75,6d,70,61,64,33,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,\
+  6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,\
+  73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,\
+  3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,34,5c,22,\
+  2c,5c,22,69,64,5c,22,3a,5c,22,33,63,30,66,38,34,64,32,2d,65,35,39,37,2d,34,\
+  63,33,63,2d,62,39,39,64,2d,65,37,36,61,39,39,32,62,65,34,33,63,5c,22,2c,5c,\
+  22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,74,5c,22,2c,\
+  5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,\
+  2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,\
+  2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,\
+  69,6f,6e,2f,65,6d,6f,74,65,35,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,31,37,64,\
+  64,65,39,32,39,2d,38,65,32,33,2d,34,65,65,38,2d,39,31,35,32,2d,61,34,65,33,\
+  61,66,62,30,31,66,36,61,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,\
+  79,62,6f,61,72,64,3e,2f,75,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,\
+  73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,\
+  5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,\
+  5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,36,5c,22,2c,\
+  5c,22,69,64,5c,22,3a,5c,22,65,33,64,37,39,64,31,31,2d,35,31,33,34,2d,34,32,\
+  37,34,2d,39,36,32,35,2d,30,66,38,35,66,62,38,36,39,66,37,33,5c,22,2c,5c,22,\
+  70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,\
+  64,36,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,\
+  75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,\
+  6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,\
+  6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,37,5c,22,2c,5c,22,69,64,5c,22,3a,\
+  5c,22,31,37,36,30,30,38,39,66,2d,36,33,37,32,2d,34,35,32,37,2d,38,36,35,37,\
+  2d,38,36,32,33,38,38,38,61,32,36,35,39,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,\
+  5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,64,37,5c,22,2c,5c,22,\
+  69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,\
+  22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,\
+  5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,\
+  6e,2f,65,6d,6f,74,65,38,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,38,33,36,39,34,\
+  66,66,65,2d,31,32,33,65,2d,34,31,37,33,2d,61,32,38,32,2d,65,34,31,38,65,62,\
+  36,32,38,65,64,34,5c,22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,\
+  6f,61,72,64,3e,2f,6e,75,6d,70,61,64,38,5c,22,2c,5c,22,69,6e,74,65,72,61,63,\
+  74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,\
+  73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,\
+  6e,5c,22,3a,5c,22,43,6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,\
+  39,5c,22,2c,5c,22,69,64,5c,22,3a,5c,22,65,38,38,35,32,39,33,66,2d,64,39,65,\
+  66,2d,34,65,36,32,2d,61,66,36,37,2d,61,31,39,65,65,32,64,37,66,61,30,66,5c,\
+  22,2c,5c,22,70,61,74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,\
+  75,6d,70,61,64,39,5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,\
+  3a,5c,22,6e,75,6c,6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,\
+  5c,22,6e,75,6c,6c,5c,22,7d,2c,7b,5c,22,61,63,74,69,6f,6e,5c,22,3a,5c,22,43,\
+  6f,6d,6d,75,6e,69,63,61,74,69,6f,6e,2f,65,6d,6f,74,65,31,30,5c,22,2c,5c,22,\
+  69,64,5c,22,3a,5c,22,30,32,37,39,31,34,39,62,2d,30,65,66,30,2d,34,63,37,64,\
+  2d,61,30,35,37,2d,37,65,37,63,33,64,65,64,36,38,36,33,5c,22,2c,5c,22,70,61,\
+  74,68,5c,22,3a,5c,22,3c,4b,65,79,62,6f,61,72,64,3e,2f,6e,75,6d,70,61,64,35,\
+  5c,22,2c,5c,22,69,6e,74,65,72,61,63,74,69,6f,6e,73,5c,22,3a,5c,22,6e,75,6c,\
+  6c,5c,22,2c,5c,22,70,72,6f,63,65,73,73,6f,72,73,5c,22,3a,5c,22,6e,75,6c,6c,\
+  5c,22,7d,5d,7d,22,7d,00
+"air-combat-settings--default_inputSystem-v2_h4282496226"=hex:4a,6f,79,73,74,\
+  69,63,6b,00
+"air-combat-settings--default_lastMatchAvFps_h2984942035"=hex(4):00,00,00,e0,\
+  a4,fd,46,40
+"air-combat-settings--default_lastMatchAvgPing_h3649036353"=hex(4):00,00,00,00,\
+  00,00,3e,40
+"air-combat-settings--default_lastMatchPercentBadFrames_h393952115"=hex(4):00,\
+  00,00,e0,ce,4f,45,3f
+"air-combat-settings--default_lastPromptToReviewShowTime_h3065106817"=hex:31,\
+  37,38,31,34,38,34,36,33,39,36,35,37,00
+"air-combat-settings--default_menuSoundVolume-v1_h2220208554"=hex(4):00,00,00,\
+  c0,f9,5b,b5,3f
+"air-combat-settings--default_musicVolume_h1560083537"=hex(4):00,00,00,00,00,\
+  00,00,00
+"client-settings--default_audioVolume-v2_h333210807"=hex(4):00,00,00,40,bc,ed,\
+  c9,3f
+"client-settings--default_auth_token_h2655680140"=hex:7b,22,5f,74,22,3a,22,6f,\
+  72,69,6f,6e,2e,75,6e,69,74,79,69,6e,74,65,67,72,61,74,69,6f,6e,2e,43,61,63,\
+  68,65,64,41,75,74,68,54,6f,6b,65,6e,22,2c,22,75,73,65,72,49,64,22,3a,22,7a,\
+  4e,63,2c,4b,55,56,4c,70,75,4a,2e,4b,6a,39,79,22,2c,22,61,75,74,68,54,6f,6b,\
+  65,6e,22,3a,7b,22,75,6e,73,61,6c,74,65,64,41,75,74,68,54,6f,6b,65,6e,22,3a,\
+  22,66,33,56,34,49,52,47,63,59,62,4b,2d,42,4f,74,69,22,2c,22,75,73,65,72,49,\
+  64,22,3a,22,7a,4e,63,2c,4b,55,56,4c,70,75,4a,2e,4b,6a,39,79,22,2c,22,64,65,\
+  76,69,63,65,49,64,65,6e,74,69,66,69,65,72,22,3a,22,61,32,32,61,66,36,39,34,\
+  35,61,38,63,62,62,30,65,33,38,39,35,36,38,66,62,65,32,31,32,61,38,63,66,66,\
+  30,64,36,64,36,38,61,31,61,31,32,32,38,38,38,65,30,35,34,37,39,61,32,32,30,\
+  35,61,37,64,30,30,22,7d,2c,22,65,6d,61,69,6c,41,64,64,72,65,73,73,22,3a,22,\
+  6d,69,63,68,61,65,6c,68,6f,75,73,65,72,61,40,67,6d,61,69,6c,2e,63,6f,6d,22,\
+  2c,22,6c,6f,67,69,6e,57,61,73,46,72,6f,6d,52,65,67,69,73,74,72,61,74,69,6f,\
+  6e,22,3a,66,61,6c,73,65,7d,00
+"client-settings--default_clientErrorContext_h2243011902"=hex:7b,22,6d,61,74,\
+  63,68,43,6c,69,65,6e,74,45,72,72,6f,72,43,6f,6e,74,65,78,74,22,3a,7b,22,6d,\
+  61,74,63,68,49,64,22,3a,22,44,38,63,79,79,51,59,67,53,56,6a,6d,6a,6a,54,61,\
+  22,2c,22,67,61,6d,65,53,65,72,76,65,72,45,72,72,6f,72,43,6f,6e,74,65,78,74,\
+  22,3a,7b,22,67,61,6d,65,53,65,73,73,69,6f,6e,49,64,22,3a,22,44,38,63,79,79,\
+  51,59,67,53,56,6a,6d,6a,6a,54,61,5f,30,32,64,66,36,37,32,30,2d,38,62,33,34,\
+  2d,34,31,30,31,2d,61,33,34,63,2d,61,30,61,64,61,30,65,39,34,33,30,31,22,2c,\
+  22,72,65,67,69,6f,6e,22,3a,22,75,73,2d,65,61,73,74,2d,32,22,7d,2c,22,61,6e,\
+  61,6c,79,74,69,63,73,44,65,73,63,72,69,70,74,69,6f,6e,22,3a,22,65,76,65,6e,\
+  74,3a,67,65,6e,65,72,61,74,65,64,2d,65,76,65,6e,74,3a,41,72,63,74,69,63,3a,\
+  73,6e,6f,77,3a,63,6f,6e,74,72,6f,6c,3a,61,72,63,61,64,65,3a,35,3a,6e,6f,6e,\
+  65,3a,66,61,6c,73,65,22,7d,2c,22,63,6f,6e,6e,65,63,74,65,64,55,64,70,50,6f,\
+  72,74,22,3a,32,34,30,31,32,2c,22,63,6f,6e,6e,65,63,74,65,64,54,63,70,50,6f,\
+  72,74,22,3a,32,39,30,31,32,2c,22,73,65,73,73,69,6f,6e,49,64,22,3a,22,64,6a,\
+  2e,4d,74,2e,73,44,4c,54,6d,61,43,67,6a,2d,22,2c,22,63,6f,6e,6e,65,63,74,65,\
+  64,48,6f,73,74,49,70,76,34,22,3a,22,31,36,2e,31,34,34,2e,32,33,37,2e,31,36,\
+  30,22,2c,22,61,63,63,6f,75,6e,74,49,64,22,3a,22,42,31,44,6a,66,51,63,63,6b,\
+  2e,45,6b,46,74,70,4a,22,2c,22,63,6f,6e,6e,65,63,74,65,64,48,6f,73,74,49,70,\
+  76,36,22,3a,22,32,36,30,30,3a,31,66,31,34,3a,32,35,36,63,3a,35,64,30,31,3a,\
+  31,31,61,64,3a,61,39,34,32,3a,39,66,66,35,3a,63,66,64,36,22,2c,22,75,73,65,\
+  72,49,64,22,3a,22,7a,4e,63,2c,4b,55,56,4c,70,75,4a,2e,4b,6a,39,79,22,7d,00
+"client-settings--default_find-accounts-for-did_h20320328"=dword:00000000
+"client-settings--default_fullScreenMode_h535174236"=hex:46,75,6c,6c,53,63,72,\
+  65,65,6e,57,69,6e,64,6f,77,00
+"client-settings--default_generatedDeviceIdentifier_h2374521428"=hex:61,32,32,\
+  61,66,36,39,34,35,61,38,63,62,62,30,65,33,38,39,35,36,38,66,62,65,32,31,32,\
+  61,38,63,66,66,30,64,36,64,36,38,61,31,61,31,32,32,38,38,38,65,30,35,34,37,\
+  39,61,32,32,30,35,61,37,64,30,30,00
+"client-settings--default_outbound_email_pin_request_h2879834537"=hex:00
+"client-settings--default_savedClientErrorReportAddress_h2568090844"=hex:68,74,\
+  74,70,73,3a,2f,2f,70,72,6f,64,75,63,74,69,6f,6e,2d,61,69,72,63,6f,6d,62,61,\
+  74,2e,73,74,61,72,66,6f,72,6d,2e,63,6f,00
+"client-settings--default_selectedAccountId_h3889921125"=hex:42,31,44,6a,66,51,\
+  63,63,6b,2e,45,6b,46,74,70,4a,00
+"client-settings--default_selectedRegion_h3669235889"=hex:41,6d,65,72,69,63,61,\
+  73,00
+"client-settings--default_skipAccountFlow-v1_h53291960"=dword:00000001
+"Screenmanager Fullscreen mode Default_h401710285"=dword:00000001
+"Screenmanager Fullscreen mode_h3630240806"=dword:00000001
+"Screenmanager Native RefreshRate Denominator_h3121420550"=dword:00000001
+"Screenmanager Native RefreshRate Numerator_h4243137005"=dword:0000003c
+"Screenmanager Resolution Height Default_h1380706816"=dword:00000300
+"Screenmanager Resolution Height_h2627697771"=dword:000004b0
+"Screenmanager Resolution Use Native Default_h1405981789"=dword:00000001
+"Screenmanager Resolution Use Native_h1405027254"=dword:00000001
+"Screenmanager Resolution Width Default_h680557497"=dword:00000400
+"Screenmanager Resolution Width_h182942802"=dword:00000780
+"Screenmanager Resolution Window Height_h1684712807"=dword:00000640
+"Screenmanager Resolution Window Width_h2524650974"=dword:00000f00
+"Screenmanager Stereo 3D_h1665754519"=dword:00000001
+"Screenmanager Window Position X_h4088080503"=dword:00000000
+"Screenmanager Window Position Y_h4088080502"=dword:00000000
+"unity.cloud_userid_h2665564582"=hex:32,37,62,30,36,34,36,30,39,64,38,36,33,36,\
+  66,34,64,38,63,62,30,66,61,63,36,66,37,62,65,63,39,31,00
+"unity.player_session_count_h922449978"=hex:38,00
+"unity.player_sessionid_h1351336811"=hex:31,30,38,36,36,38,33,34,38,38,34,39,\
+  33,36,35,32,31,31,35,00
+"unity_connect.installation_id_h932087899"=hex:61,31,66,61,32,31,64,34,2d,63,\
+  38,34,30,2d,33,34,62,34,2d,35,61,61,30,2d,64,35,35,37,63,32,36,38,39,32,39,\
+  31,00
+"unity_connect.mega_session_id_h1802243016"=hex:65,37,33,32,32,37,39,35,2d,38,\
+  38,63,33,2d,37,61,37,34,2d,36,38,30,33,2d,61,38,36,64,34,63,64,61,65,38,31,\
+  65,00
+"unity_connect.session_id_h4145606137"=hex:39,36,63,33,36,31,35,35,2d,62,38,64,\
+  37,2d,32,38,34,34,2d,33,61,36,63,2d,31,33,61,63,39,61,65,39,31,35,64,62,00
+"UnityGraphicsQuality_h1669003810"=dword:00000005
+"UnitySelectMonitor_h17969598"=dword:00000000
+
+[Software\\Valve\\Steam] 1774238073
+#time=1dcba78c28c3d30
+"SteamExe"="C:\\Program Files (x86)\\Steam\\Steam.exe"
+"SteamPath"="C:\\Program Files (x86)\\Steam"
+
+[Software\\Valve\\Steam\\ActiveProcess] 1774238072
+#time=1dcba78c21452d4
+"PID"=dword:0000fffe
+"SteamClientDll"="C:\\Program Files (x86)\\Steam\\steamclient.dll"
+"SteamClientDll64"="C:\\Program Files (x86)\\Steam\\steamclient64.dll"
+"SteamPath"="C:\\Program Files (x86)\\Steam"
+
+[Software\\Wine\\AppDefaults\\ActOfWar.exe] 1774238072
+#time=1dcba78c214235e
+"Version"="winxp"
+
+[Software\\Wine\\AppDefaults\\Avengers.exe\\DllOverrides] 1774238072
+#time=1dcba78c2140f5e
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\BlackOps3.exe\\DllOverrides] 1774238072
+#time=1dcba78c21405ea
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\diabotical.exe\\DllOverrides] 1774238072
+#time=1dcba78c213fd52
+"xaudio2_9"="disabled"
+
+[Software\\Wine\\AppDefaults\\DIRT5.exe\\DllOverrides] 1774238072
+#time=1dcba78c21408ec
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\FarCry5.exe\\DllOverrides] 1774238072
+#time=1dcba78c2141d96
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\ffxvi.exe\\DllOverrides] 1774238072
+#time=1dcba78c2141a76
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\ffxvi_demo.exe\\DllOverrides] 1774238072
+#time=1dcba78c2141c10
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\gotg.exe\\DllOverrides] 1774238072
+#time=1dcba78c2140c5c
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\GW2.Main_Win64_Retail.exe\\DllOverrides] 1774238072
+#time=1dcba78c21412ce
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\h1_mp64_ship.exe\\DllOverrides] 1774238072
+#time=1dcba78c2140360
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\h1_sp64_ship.exe\\DllOverrides] 1774238072
+#time=1dcba78c2140202
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\iw7_ship.exe\\DllOverrides] 1774238072
+#time=1dcba78c21404aa
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\Maine-Win64-Shipping.exe\\DllOverrides] 1774238072
+#time=1dcba78c2142ef8
+"SpeechSynthWrapper"="disabled"
+
+[Software\\Wine\\AppDefaults\\msedgewebview2.exe] 1774238072
+#time=1dcba78c2140e0a
+"Version"="win7"
+
+[Software\\Wine\\AppDefaults\\NFS16.exe\\DllOverrides] 1774238072
+#time=1dcba78c214072a
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\Paradox Launcher.exe] 1774238073
+#time=1dcba78c28e3176
+
+[Software\\Wine\\AppDefaults\\Pentiment.exe\\DllOverrides] 1774238072
+#time=1dcba78c2142d86
+"SpeechSynthesisWrapper"="disabled"
+
+[Software\\Wine\\AppDefaults\\rayne1.exe\\DllOverrides] 1774238072
+#time=1dcba78c2141f76
+"d3d8"="native"
+
+[Software\\Wine\\AppDefaults\\rayne2.exe\\DllOverrides] 1774238072
+#time=1dcba78c2142110
+"d3d8"="native"
+
+[Software\\Wine\\AppDefaults\\RDR2.exe\\DllOverrides] 1774238072
+#time=1dcba78c21422fa
+"vulkan-1"="native,builtin"
+
+[Software\\Wine\\AppDefaults\\RelicCardinal.exe\\DllOverrides] 1774238072
+#time=1dcba78c2140db0
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\RiftApart.exe\\DllOverrides] 1774238072
+#time=1dcba78c21418aa
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\s2_mp64_ship.exe\\DllOverrides] 1774238072
+#time=1dcba78c2140090
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\s2_sp64_ship.exe\\DllOverrides] 1774238072
+#time=1dcba78c213fef6
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\ShadowOfWar.exe\\DllOverrides] 1774238072
+#time=1dcba78c214077a
+"amd_ags_x64"="disabled"
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\Spider-Man.exe\\DllOverrides] 1774238072
+#time=1dcba78c2141580
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\starwarssquadrons.exe\\DllOverrides] 1774238072
+#time=1dcba78c21410da
+"atiadlxx"="builtin"
+
+[Software\\Wine\\AppDefaults\\TDUSC.exe\\DllOverrides] 1774238072
+#time=1dcba78c213f83e
+"xinput1_3"="native,builtin"
+
+[Software\\Wine\\AppDefaults\\WRC9.exe\\DllOverrides] 1774238072
+#time=1dcba78c213f9ec
+"xinput1_3"="native,builtin"
+
+[Software\\Wine\\AppDefaults\\WRCG.exe\\DllOverrides] 1774238072
+#time=1dcba78c213fb90
+"xinput1_3"="native,builtin"
+
+[Software\\Wine\\Debug] 1774238072
+#time=1dcba78c2135348
+"RelayExclude"="ntdll.RtlEnterCriticalSection;ntdll.RtlTryEnterCriticalSection;ntdll.RtlLeaveCriticalSection;kernel32.48;kernel32.49;kernel32.94;kernel32.95;kernel32.96;kernel32.97;kernel32.98;kernel32.TlsGetValue;kernel32.TlsSetValue;kernel32.FlsGetValue;kernel32.FlsSetValue;kernel32.SetLastError"
+"RelayFromExclude"="winex11.drv;winemac.drv;user32;gdi32;advapi32;kernel32"
+
+[Software\\Wine\\DllOverrides] 1781344387
+#time=1dcfb1a6f673898
+"*concrt140"="native,builtin"
+"*msvcp140"="native,builtin"
+"*msvcp140_1"="native,builtin"
+"*msvcp140_2"="native,builtin"
+"*msvcp140_atomic_wait"="native,builtin"
+"*msvcp140_codecvt_ids"="native,builtin"
+"*vcamp140"="native,builtin"
+"*vccorlib140"="native,builtin"
+"*vcomp140"="native,builtin"
+"*vcruntime140"="native,builtin"
+"*vcruntime140_1"="native,builtin"
+"api-ms-win-crt-conio-l1-1-0"="native,builtin"
+"api-ms-win-crt-heap-l1-1-0"="native,builtin"
+"api-ms-win-crt-locale-l1-1-0"="native,builtin"
+"api-ms-win-crt-math-l1-1-0"="native,builtin"
+"api-ms-win-crt-runtime-l1-1-0"="native,builtin"
+"api-ms-win-crt-stdio-l1-1-0"="native,builtin"
+"api-ms-win-crt-time-l1-1-0"="native,builtin"
+"atiadlxx"="disabled"
+"atidxx64"="disabled"
+"atl100"="native,builtin"
+"atl110"="native,builtin"
+"atl120"="native,builtin"
+"atl140"="native,builtin"
+"concrt140"="native,builtin"
+"msvcp100"="native,builtin"
+"msvcp110"="native,builtin"
+"msvcp120"="native,builtin"
+"msvcp140"="native,builtin"
+"msvcp140_1"="native,builtin"
+"msvcp140_2"="native,builtin"
+"msvcp140_atomic_wait"="native,builtin"
+"msvcp140_codecvt_ids"="native,builtin"
+"msvcr100"="native,builtin"
+"msvcr110"="native,builtin"
+"msvcr120"="native,builtin"
+"msvcr140"="native,builtin"
+"nvcuda"="disabled"
+"ucrtbase"="native,builtin"
+"vccorlib140"="native,builtin"
+"vcomp100"="native,builtin"
+"vcomp110"="native,builtin"
+"vcomp120"="native,builtin"
+"vcomp140"="native,builtin"
+"vcruntime140"="native,builtin"
+"vcruntime140_1"="native,builtin"
+
+[Software\\Wine\\Drivers\\winepulse.drv\\devices\\0,alsa_output.pci-0000_80_1f.3.hdmi-stereo] 1781344394
+#time=1dcfb1a73c79b44
+"guid"=hex:37,93,4a,26,60,6d,ef,4d,8c,43,58,48,e5,83,5a,5b
+
+[Software\\Wine\\Drivers\\winepulse.drv\\devices\\1,alsa_input.pci-0000_80_1f.3.analog-stereo] 1781344394
+#time=1dcfb1a73c7d596
+"guid"=hex:70,a8,cd,ff,98,1e,f7,48,80,16,37,04,e3,26,d7,d9
+
+[Software\\Wine\\Drivers\\winepulse.drv\\devices\\1,alsa_output.pci-0000_80_1f.3.hdmi-stereo.monitor] 1781344394
+#time=1dcfb1a73c7c1a0
+"guid"=hex:3d,75,06,e3,e8,ab,96,4c,bc,d3,fb,9d,8e,fb,d4,d6
+
+[Software\\Wine\\Explorer] 1781347489
+#time=1dcfb21a8472680
+"Desktop"="Default"
+
+[Software\\Wine\\Explorer\\Desktops] 1781347489
+#time=1dcfb21a8472680
+"Default"="1920x1200"
+
+[Software\\Wine\\Fonts] 1781504648
+#time=1dcfc8f9271c62a
+"Codepages"="1252,437"
+"LogPixels"=dword:00000060
+
+[Software\\Wine\\Fonts\\External Fonts] 1781344375
+#time=1dcfb1a6877041e
+"@Droid Sans Fallback (TrueType)"="Z:\\run\\host\\fonts\\truetype\\droid\\DroidSansFallbackFull.ttf"
+"@Noto Sans CJK HK (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans CJK HK Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans CJK JP (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans CJK JP Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans CJK KR (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans CJK KR Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans CJK SC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans CJK SC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans CJK TC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans CJK TC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans Mono CJK HK (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans Mono CJK HK Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans Mono CJK JP (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans Mono CJK JP Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans Mono CJK KR (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans Mono CJK KR Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans Mono CJK SC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans Mono CJK SC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Sans Mono CJK TC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"@Noto Sans Mono CJK TC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"@Noto Serif CJK HK (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"@Noto Serif CJK HK Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"@Noto Serif CJK JP (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"@Noto Serif CJK JP Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"@Noto Serif CJK KR (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"@Noto Serif CJK KR Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"@Noto Serif CJK SC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"@Noto Serif CJK SC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"@Noto Serif CJK TC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"@Noto Serif CJK TC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"C059-BdIta (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\C059-BdIta.otf"
+"C059-Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\C059-Bold.otf"
+"C059-Italic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\C059-Italic.otf"
+"C059-Roman (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\C059-Roman.otf"
+"D050000L (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\D050000L.otf"
+"DejaVu Sans (TrueType)"="Z:\\usr\\share\\fonts\\truetype\\dejavu\\DejaVuSans.ttf"
+"DejaVu Sans Bold (TrueType)"="Z:\\usr\\share\\fonts\\truetype\\dejavu\\DejaVuSans-Bold.ttf"
+"DejaVu Sans Mono (TrueType)"="Z:\\usr\\share\\fonts\\truetype\\dejavu\\DejaVuSansMono.ttf"
+"DejaVu Sans Mono Bold (TrueType)"="Z:\\usr\\share\\fonts\\truetype\\dejavu\\DejaVuSansMono-Bold.ttf"
+"DejaVu Sans Mono Bold Oblique (TrueType)"="Z:\\run\\host\\fonts\\truetype\\dejavu\\DejaVuSansMono-BoldOblique.ttf"
+"DejaVu Sans Mono Oblique (TrueType)"="Z:\\run\\host\\fonts\\truetype\\dejavu\\DejaVuSansMono-Oblique.ttf"
+"DejaVu Serif (TrueType)"="Z:\\usr\\share\\fonts\\truetype\\dejavu\\DejaVuSerif.ttf"
+"DejaVu Serif Bold (TrueType)"="Z:\\usr\\share\\fonts\\truetype\\dejavu\\DejaVuSerif-Bold.ttf"
+"Droid Sans Fallback (TrueType)"="Z:\\run\\host\\fonts\\truetype\\droid\\DroidSansFallbackFull.ttf"
+"FreeMono (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeMono.ttf"
+"FreeMono Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeMonoBold.ttf"
+"FreeMono Bold Oblique (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeMonoBoldOblique.ttf"
+"FreeMono Oblique (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeMonoOblique.ttf"
+"FreeSans (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeSans.ttf"
+"FreeSans Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeSansBold.ttf"
+"FreeSans Bold Oblique (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeSansBoldOblique.ttf"
+"FreeSans Oblique (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeSansOblique.ttf"
+"FreeSerif (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeSerif.ttf"
+"FreeSerif Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeSerifBold.ttf"
+"FreeSerif Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeSerifBoldItalic.ttf"
+"FreeSerif Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\freefont\\FreeSerifItalic.ttf"
+"Liberation Mono (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationMono-Regular.ttf"
+"Liberation Mono Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationMono-Bold.ttf"
+"Liberation Mono Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationMono-BoldItalic.ttf"
+"Liberation Mono Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationMono-Italic.ttf"
+"Liberation Sans (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSans-Regular.ttf"
+"Liberation Sans Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSans-Bold.ttf"
+"Liberation Sans Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSans-BoldItalic.ttf"
+"Liberation Sans Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSans-Italic.ttf"
+"Liberation Sans Narrow (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSansNarrow-Regular.ttf"
+"Liberation Sans Narrow Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSansNarrow-Bold.ttf"
+"Liberation Sans Narrow Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSansNarrow-BoldItalic.ttf"
+"Liberation Sans Narrow Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSansNarrow-Italic.ttf"
+"Liberation Serif (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSerif-Regular.ttf"
+"Liberation Serif Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSerif-Bold.ttf"
+"Liberation Serif Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSerif-BoldItalic.ttf"
+"Liberation Serif Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\liberation\\LiberationSerif-Italic.ttf"
+"NimbusMonoPS-Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusMonoPS-Bold.otf"
+"NimbusMonoPS-BoldItalic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusMonoPS-BoldItalic.otf"
+"NimbusMonoPS-Italic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusMonoPS-Italic.otf"
+"NimbusMonoPS-Regular (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusMonoPS-Regular.otf"
+"NimbusRoman-Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusRoman-Bold.otf"
+"NimbusRoman-BoldItalic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusRoman-BoldItalic.otf"
+"NimbusRoman-Italic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusRoman-Italic.otf"
+"NimbusRoman-Regular (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusRoman-Regular.otf"
+"NimbusSans-Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusSans-Bold.otf"
+"NimbusSans-BoldItalic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusSans-BoldItalic.otf"
+"NimbusSans-Italic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusSans-Italic.otf"
+"NimbusSans-Regular (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusSans-Regular.otf"
+"NimbusSansNarrow-Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusSansNarrow-Bold.otf"
+"NimbusSansNarrow-BoldOblique (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusSansNarrow-BoldOblique.otf"
+"NimbusSansNarrow-Oblique (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusSansNarrow-Oblique.otf"
+"NimbusSansNarrow-Regular (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\NimbusSansNarrow-Regular.otf"
+"Noto Kufi Arabic Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoKufiArabic-Bold.ttf"
+"Noto Kufi Arabic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoKufiArabic-Regular.ttf"
+"Noto Looped Lao Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoLoopedLao-Bold.ttf"
+"Noto Looped Lao Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoLoopedLao-Regular.ttf"
+"Noto Looped Thai Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoLoopedThai-Bold.ttf"
+"Noto Looped Thai Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoLoopedThai-Regular.ttf"
+"Noto Mono (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoMono-Regular.ttf"
+"Noto Music Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoMusic-Regular.ttf"
+"Noto Naskh Arabic Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoNaskhArabic-Bold.ttf"
+"Noto Naskh Arabic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoNaskhArabic-Regular.ttf"
+"Noto Nastaliq Urdu Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoNastaliqUrdu-Bold.ttf"
+"Noto Nastaliq Urdu Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoNastaliqUrdu-Regular.ttf"
+"Noto Rashi Hebrew Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoRashiHebrew-Bold.ttf"
+"Noto Rashi Hebrew Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoRashiHebrew-Regular.ttf"
+"Noto Sans Adlam Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansAdlam-Bold.ttf"
+"Noto Sans Adlam Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansAdlam-Regular.ttf"
+"Noto Sans Adlam Unjoined Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansAdlamUnjoined-Bold.ttf"
+"Noto Sans Adlam Unjoined Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansAdlamUnjoined-Regular.ttf"
+"Noto Sans Anatolian Hieroglyphs Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansAnatolianHieroglyphs-Regular.ttf"
+"Noto Sans Arabic Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansArabic-Bold.ttf"
+"Noto Sans Arabic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansArabic-Regular.ttf"
+"Noto Sans Armenian Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansArmenian-Bold.ttf"
+"Noto Sans Armenian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansArmenian-Regular.ttf"
+"Noto Sans Avestan Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansAvestan-Regular.ttf"
+"Noto Sans Balinese Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBalinese-Bold.ttf"
+"Noto Sans Balinese Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBalinese-Regular.ttf"
+"Noto Sans Bamum Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBamum-Bold.ttf"
+"Noto Sans Bamum Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBamum-Regular.ttf"
+"Noto Sans Bassa Vah Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBassaVah-Regular.ttf"
+"Noto Sans Batak Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBatak-Regular.ttf"
+"Noto Sans Bengali Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBengali-Bold.ttf"
+"Noto Sans Bengali Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBengali-Regular.ttf"
+"Noto Sans Bhaiksuki Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBhaiksuki-Regular.ttf"
+"Noto Sans Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSans-Bold.ttf"
+"Noto Sans Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSans-BoldItalic.ttf"
+"Noto Sans Brahmi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBrahmi-Regular.ttf"
+"Noto Sans Buginese Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBuginese-Regular.ttf"
+"Noto Sans Buhid Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansBuhid-Regular.ttf"
+"Noto Sans Canadian Aboriginal Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCanadianAboriginal-Bold.ttf"
+"Noto Sans Canadian Aboriginal Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCanadianAboriginal-Regular.ttf"
+"Noto Sans Carian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCarian-Regular.ttf"
+"Noto Sans Caucasian Albanian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCaucasianAlbanian-Regular.ttf"
+"Noto Sans Chakma Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansChakma-Regular.ttf"
+"Noto Sans Cham Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCham-Bold.ttf"
+"Noto Sans Cham Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCham-Regular.ttf"
+"Noto Sans Cherokee Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCherokee-Bold.ttf"
+"Noto Sans Cherokee Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCherokee-Regular.ttf"
+"Noto Sans CJK HK (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans CJK HK Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans CJK JP (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans CJK JP Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans CJK KR (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans CJK KR Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans CJK SC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans CJK SC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans CJK TC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans CJK TC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans Coptic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCoptic-Regular.ttf"
+"Noto Sans Cuneiform Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCuneiform-Regular.ttf"
+"Noto Sans Cypriot Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansCypriot-Regular.ttf"
+"Noto Sans Deseret Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansDeseret-Regular.ttf"
+"Noto Sans Devanagari Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansDevanagari-Bold.ttf"
+"Noto Sans Devanagari Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansDevanagari-Regular.ttf"
+"Noto Sans Display Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansDisplay-Bold.ttf"
+"Noto Sans Display Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansDisplay-BoldItalic.ttf"
+"Noto Sans Display Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansDisplay-Italic.ttf"
+"Noto Sans Display Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansDisplay-Regular.ttf"
+"Noto Sans Duployan Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansDuployan-Regular.ttf"
+"Noto Sans Egyptian Hieroglyphs Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansEgyptianHieroglyphs-Regular.ttf"
+"Noto Sans Elbasan Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansElbasan-Regular.ttf"
+"Noto Sans Elymaic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansElymaic-Regular.ttf"
+"Noto Sans Ethiopic Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansEthiopic-Bold.ttf"
+"Noto Sans Ethiopic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansEthiopic-Regular.ttf"
+"Noto Sans Georgian Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGeorgian-Bold.ttf"
+"Noto Sans Georgian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGeorgian-Regular.ttf"
+"Noto Sans Glagolitic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGlagolitic-Regular.ttf"
+"Noto Sans Gothic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGothic-Regular.ttf"
+"Noto Sans Grantha Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGrantha-Regular.ttf"
+"Noto Sans Gujarati Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGujarati-Bold.ttf"
+"Noto Sans Gujarati Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGujarati-Regular.ttf"
+"Noto Sans Gunjala Gondi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGunjalaGondi-Regular.ttf"
+"Noto Sans Gurmukhi Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGurmukhi-Bold.ttf"
+"Noto Sans Gurmukhi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansGurmukhi-Regular.ttf"
+"Noto Sans Hanifi Rohingya Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansHanifiRohingya-Bold.ttf"
+"Noto Sans Hanifi Rohingya Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansHanifiRohingya-Regular.ttf"
+"Noto Sans Hanunoo Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansHanunoo-Regular.ttf"
+"Noto Sans Hatran Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansHatran-Regular.ttf"
+"Noto Sans Hebrew Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansHebrew-Bold.ttf"
+"Noto Sans Hebrew Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansHebrew-Regular.ttf"
+"Noto Sans Imperial Aramaic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansImperialAramaic-Regular.ttf"
+"Noto Sans Indic Siyaq Numbers Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansIndicSiyaqNumbers-Regular.ttf"
+"Noto Sans Inscriptional Pahlavi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansInscriptionalPahlavi-Regular.ttf"
+"Noto Sans Inscriptional Parthian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansInscriptionalParthian-Regular.ttf"
+"Noto Sans Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSans-Italic.ttf"
+"Noto Sans Javanese Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansJavanese-Bold.ttf"
+"Noto Sans Javanese Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansJavanese-Regular.ttf"
+"Noto Sans Kaithi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKaithi-Regular.ttf"
+"Noto Sans Kannada Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKannada-Bold.ttf"
+"Noto Sans Kannada Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKannada-Regular.ttf"
+"Noto Sans Kayah Li Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKayahLi-Bold.ttf"
+"Noto Sans Kayah Li Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKayahLi-Regular.ttf"
+"Noto Sans Kharoshthi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKharoshthi-Regular.ttf"
+"Noto Sans Khmer Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKhmer-Bold.ttf"
+"Noto Sans Khmer Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKhmer-Regular.ttf"
+"Noto Sans Khojki Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKhojki-Regular.ttf"
+"Noto Sans Khudawadi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansKhudawadi-Regular.ttf"
+"Noto Sans Lao Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLao-Bold.ttf"
+"Noto Sans Lao Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLao-Regular.ttf"
+"Noto Sans Lepcha Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLepcha-Regular.ttf"
+"Noto Sans Limbu Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLimbu-Regular.ttf"
+"Noto Sans Linear A Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLinearA-Regular.ttf"
+"Noto Sans Linear B Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLinearB-Regular.ttf"
+"Noto Sans Lisu Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLisu-Bold.ttf"
+"Noto Sans Lisu Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLisu-Regular.ttf"
+"Noto Sans Lycian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLycian-Regular.ttf"
+"Noto Sans Lydian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansLydian-Regular.ttf"
+"Noto Sans Mahajani Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMahajani-Regular.ttf"
+"Noto Sans Malayalam Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMalayalam-Bold.ttf"
+"Noto Sans Malayalam Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMalayalam-Regular.ttf"
+"Noto Sans Mandaic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMandaic-Regular.ttf"
+"Noto Sans Manichaean Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansManichaean-Regular.ttf"
+"Noto Sans Marchen Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMarchen-Regular.ttf"
+"Noto Sans Masaram Gondi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMasaramGondi-Regular.ttf"
+"Noto Sans Math Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMath-Regular.ttf"
+"Noto Sans Mayan Numerals Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMayanNumerals-Regular.ttf"
+"Noto Sans Medefaidrin Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMedefaidrin-Bold.ttf"
+"Noto Sans Medefaidrin Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMedefaidrin-Regular.ttf"
+"Noto Sans Meetei Mayek Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMeeteiMayek-Bold.ttf"
+"Noto Sans Meetei Mayek Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMeeteiMayek-Regular.ttf"
+"Noto Sans Mende Kikakui Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMendeKikakui-Regular.ttf"
+"Noto Sans Meroitic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMeroitic-Regular.ttf"
+"Noto Sans Miao Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMiao-Regular.ttf"
+"Noto Sans Modi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansModi-Regular.ttf"
+"Noto Sans Mongolian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMongolian-Regular.ttf"
+"Noto Sans Mono Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMono-Bold.ttf"
+"Noto Sans Mono CJK HK (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans Mono CJK HK Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans Mono CJK JP (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans Mono CJK JP Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans Mono CJK KR (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans Mono CJK KR Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans Mono CJK SC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans Mono CJK SC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans Mono CJK TC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Regular.ttc"
+"Noto Sans Mono CJK TC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSansCJK-Bold.ttc"
+"Noto Sans Mono Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMono-Regular.ttf"
+"Noto Sans Mro Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMro-Regular.ttf"
+"Noto Sans Multani Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMultani-Regular.ttf"
+"Noto Sans Myanmar Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMyanmar-Bold.ttf"
+"Noto Sans Myanmar Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansMyanmar-Regular.ttf"
+"Noto Sans Nabataean Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansNabataean-Regular.ttf"
+"Noto Sans New Tai Lue Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansNewTaiLue-Regular.ttf"
+"Noto Sans Newa Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansNewa-Regular.ttf"
+"Noto Sans NKo Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansNKo-Regular.ttf"
+"Noto Sans Nushu Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansNushu-Regular.ttf"
+"Noto Sans Ogham Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOgham-Regular.ttf"
+"Noto Sans Ol Chiki Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOlChiki-Bold.ttf"
+"Noto Sans Ol Chiki Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOlChiki-Regular.ttf"
+"Noto Sans Old Hungarian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOldHungarian-Regular.ttf"
+"Noto Sans Old Italic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOldItalic-Regular.ttf"
+"Noto Sans Old North Arabian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOldNorthArabian-Regular.ttf"
+"Noto Sans Old Permic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOldPermic-Regular.ttf"
+"Noto Sans Old Persian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOldPersian-Regular.ttf"
+"Noto Sans Old Sogdian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOldSogdian-Regular.ttf"
+"Noto Sans Old South Arabian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOldSouthArabian-Regular.ttf"
+"Noto Sans Old Turkic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOldTurkic-Regular.ttf"
+"Noto Sans Oriya Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOriya-Bold.ttf"
+"Noto Sans Oriya Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOriya-Regular.ttf"
+"Noto Sans Osage Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOsage-Regular.ttf"
+"Noto Sans Osmanya Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansOsmanya-Regular.ttf"
+"Noto Sans Pahawh Hmong Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansPahawhHmong-Regular.ttf"
+"Noto Sans Palmyrene Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansPalmyrene-Regular.ttf"
+"Noto Sans Pau Cin Hau Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansPauCinHau-Regular.ttf"
+"Noto Sans PhagsPa Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansPhagsPa-Regular.ttf"
+"Noto Sans Phoenician Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansPhoenician-Regular.ttf"
+"Noto Sans Psalter Pahlavi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansPsalterPahlavi-Regular.ttf"
+"Noto Sans Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSans-Regular.ttf"
+"Noto Sans Rejang Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansRejang-Regular.ttf"
+"Noto Sans Runic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansRunic-Regular.ttf"
+"Noto Sans Samaritan Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSamaritan-Regular.ttf"
+"Noto Sans Saurashtra Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSaurashtra-Regular.ttf"
+"Noto Sans Sharada Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSharada-Regular.ttf"
+"Noto Sans Shavian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansShavian-Regular.ttf"
+"Noto Sans Siddham Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSiddham-Regular.ttf"
+"Noto Sans SignWriting Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSignWriting-Regular.ttf"
+"Noto Sans Sinhala Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSinhala-Bold.ttf"
+"Noto Sans Sinhala Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSinhala-Regular.ttf"
+"Noto Sans Sogdian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSogdian-Regular.ttf"
+"Noto Sans Sora Sompeng Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSoraSompeng-Bold.ttf"
+"Noto Sans Sora Sompeng Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSoraSompeng-Regular.ttf"
+"Noto Sans Soyombo Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSoyombo-Regular.ttf"
+"Noto Sans Sundanese Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSundanese-Bold.ttf"
+"Noto Sans Sundanese Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSundanese-Regular.ttf"
+"Noto Sans Syloti Nagri Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSylotiNagri-Regular.ttf"
+"Noto Sans Symbols Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSymbols-Bold.ttf"
+"Noto Sans Symbols Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSymbols-Regular.ttf"
+"Noto Sans Symbols2 Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSymbols2-Regular.ttf"
+"Noto Sans Syriac Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansSyriac-Regular.ttf"
+"Noto Sans Tagalog Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTagalog-Regular.ttf"
+"Noto Sans Tagbanwa Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTagbanwa-Regular.ttf"
+"Noto Sans Tai Le Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTaiLe-Regular.ttf"
+"Noto Sans Tai Tham Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTaiTham-Bold.ttf"
+"Noto Sans Tai Tham Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTaiTham-Regular.ttf"
+"Noto Sans Tai Viet Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTaiViet-Regular.ttf"
+"Noto Sans Takri Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTakri-Regular.ttf"
+"Noto Sans Tamil Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTamil-Bold.ttf"
+"Noto Sans Tamil Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTamil-Regular.ttf"
+"Noto Sans Tamil Supplement Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTamilSupplement-Regular.ttf"
+"Noto Sans Telugu Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTelugu-Bold.ttf"
+"Noto Sans Telugu Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTelugu-Regular.ttf"
+"Noto Sans Thaana Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansThaana-Bold.ttf"
+"Noto Sans Thaana Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansThaana-Regular.ttf"
+"Noto Sans Thai Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansThai-Bold.ttf"
+"Noto Sans Thai Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansThai-Regular.ttf"
+"Noto Sans Tifinagh Adrar Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghAdrar-Regular.ttf"
+"Noto Sans Tifinagh Agraw Imazighen Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghAgrawImazighen-Regular.ttf"
+"Noto Sans Tifinagh Ahaggar Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghAhaggar-Regular.ttf"
+"Noto Sans Tifinagh Air Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghAir-Regular.ttf"
+"Noto Sans Tifinagh APT Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghAPT-Regular.ttf"
+"Noto Sans Tifinagh Azawagh Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghAzawagh-Regular.ttf"
+"Noto Sans Tifinagh Ghat Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghGhat-Regular.ttf"
+"Noto Sans Tifinagh Hawad Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghHawad-Regular.ttf"
+"Noto Sans Tifinagh Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinagh-Regular.ttf"
+"Noto Sans Tifinagh Rhissa Ixa Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghRhissaIxa-Regular.ttf"
+"Noto Sans Tifinagh SIL Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghSIL-Regular.ttf"
+"Noto Sans Tifinagh Tawellemmet Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTifinaghTawellemmet-Regular.ttf"
+"Noto Sans Tirhuta Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansTirhuta-Regular.ttf"
+"Noto Sans Ugaritic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansUgaritic-Regular.ttf"
+"Noto Sans Vai Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansVai-Regular.ttf"
+"Noto Sans Wancho Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansWancho-Regular.ttf"
+"Noto Sans Warang Citi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansWarangCiti-Regular.ttf"
+"Noto Sans Yi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansYi-Regular.ttf"
+"Noto Sans Zanabazar Square Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSansZanabazarSquare-Regular.ttf"
+"Noto Serif Ahom Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifAhom-Regular.ttf"
+"Noto Serif Armenian Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifArmenian-Bold.ttf"
+"Noto Serif Armenian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifArmenian-Regular.ttf"
+"Noto Serif Balinese Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifBalinese-Regular.ttf"
+"Noto Serif Bengali Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifBengali-Bold.ttf"
+"Noto Serif Bengali Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifBengali-Regular.ttf"
+"Noto Serif Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerif-Bold.ttf"
+"Noto Serif Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerif-BoldItalic.ttf"
+"Noto Serif CJK HK (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"Noto Serif CJK HK Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"Noto Serif CJK JP (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"Noto Serif CJK JP Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"Noto Serif CJK KR (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"Noto Serif CJK KR Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"Noto Serif CJK SC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"Noto Serif CJK SC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"Noto Serif CJK TC (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Regular.ttc"
+"Noto Serif CJK TC Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\noto\\NotoSerifCJK-Bold.ttc"
+"Noto Serif Devanagari Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifDevanagari-Bold.ttf"
+"Noto Serif Devanagari Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifDevanagari-Regular.ttf"
+"Noto Serif Display Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifDisplay-Bold.ttf"
+"Noto Serif Display Bold Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifDisplay-BoldItalic.ttf"
+"Noto Serif Display Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifDisplay-Italic.ttf"
+"Noto Serif Display Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifDisplay-Regular.ttf"
+"Noto Serif Dogra Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifDogra-Regular.ttf"
+"Noto Serif Ethiopic Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifEthiopic-Bold.ttf"
+"Noto Serif Ethiopic Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifEthiopic-Regular.ttf"
+"Noto Serif Georgian Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifGeorgian-Bold.ttf"
+"Noto Serif Georgian Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifGeorgian-Regular.ttf"
+"Noto Serif Grantha Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifGrantha-Regular.ttf"
+"Noto Serif Gujarati Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifGujarati-Bold.ttf"
+"Noto Serif Gujarati Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifGujarati-Regular.ttf"
+"Noto Serif Gurmukhi Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifGurmukhi-Bold.ttf"
+"Noto Serif Gurmukhi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifGurmukhi-Regular.ttf"
+"Noto Serif Hebrew Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifHebrew-Bold.ttf"
+"Noto Serif Hebrew Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifHebrew-Regular.ttf"
+"Noto Serif Hmong Nyiakeng Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifNyiakengPuachueHmong-Bold.ttf"
+"Noto Serif Hmong Nyiakeng Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifNyiakengPuachueHmong-Regular.ttf"
+"Noto Serif Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerif-Italic.ttf"
+"Noto Serif Kannada Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifKannada-Bold.ttf"
+"Noto Serif Kannada Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifKannada-Regular.ttf"
+"Noto Serif Khmer Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifKhmer-Bold.ttf"
+"Noto Serif Khmer Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifKhmer-Regular.ttf"
+"Noto Serif Khojki Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifKhojki-Bold.ttf"
+"Noto Serif Khojki Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifKhojki-Regular.ttf"
+"Noto Serif Lao Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifLao-Bold.ttf"
+"Noto Serif Lao Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifLao-Regular.ttf"
+"Noto Serif Malayalam Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifMalayalam-Bold.ttf"
+"Noto Serif Malayalam Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifMalayalam-Regular.ttf"
+"Noto Serif Myanmar Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifMyanmar-Bold.ttf"
+"Noto Serif Myanmar Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifMyanmar-Regular.ttf"
+"Noto Serif Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerif-Regular.ttf"
+"Noto Serif Sinhala Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifSinhala-Bold.ttf"
+"Noto Serif Sinhala Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifSinhala-Regular.ttf"
+"Noto Serif Tamil Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTamil-Bold.ttf"
+"Noto Serif Tamil Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTamil-Regular.ttf"
+"Noto Serif Tamil Slanted Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTamilSlanted-Bold.ttf"
+"Noto Serif Tamil Slanted Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTamilSlanted-Regular.ttf"
+"Noto Serif Tangut Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTangut-Regular.ttf"
+"Noto Serif Telugu Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTelugu-Bold.ttf"
+"Noto Serif Telugu Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTelugu-Regular.ttf"
+"Noto Serif Thai Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifThai-Bold.ttf"
+"Noto Serif Thai Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifThai-Regular.ttf"
+"Noto Serif Tibetan Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTibetan-Bold.ttf"
+"Noto Serif Tibetan Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifTibetan-Regular.ttf"
+"Noto Serif Yezidi Bold (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifYezidi-Bold.ttf"
+"Noto Serif Yezidi Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoSerifYezidi-Regular.ttf"
+"Noto Traditional Nushu Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\noto\\NotoTraditionalNushu-Regular.ttf"
+"P052-Bold (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\P052-Bold.otf"
+"P052-BoldItalic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\P052-BoldItalic.otf"
+"P052-Italic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\P052-Italic.otf"
+"P052-Roman (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\P052-Roman.otf"
+"Standard Symbols PS (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\StandardSymbolsPS.otf"
+"Ubuntu Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\ubuntu\\Ubuntu-BI.ttf"
+"Ubuntu Mono Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\ubuntu\\UbuntuMono-BI.ttf"
+"Ubuntu Mono Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\ubuntu\\UbuntuMono-B.ttf"
+"Ubuntu Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\ubuntu\\Ubuntu-B.ttf"
+"Ubuntu Sans Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\ubuntu\\UbuntuSans-Italic[wdth,wght].ttf"
+"Ubuntu Sans Mono Italic (TrueType)"="Z:\\run\\host\\fonts\\truetype\\ubuntu\\UbuntuSansMono-Italic[wght].ttf"
+"Ubuntu Sans Mono Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\ubuntu\\UbuntuSansMono[wght].ttf"
+"Ubuntu Sans Regular (TrueType)"="Z:\\run\\host\\fonts\\truetype\\ubuntu\\UbuntuSans[wdth,wght].ttf"
+"URWBookman-Demi (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\URWBookman-Demi.otf"
+"URWBookman-DemiItalic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\URWBookman-DemiItalic.otf"
+"URWBookman-Light (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\URWBookman-Light.otf"
+"URWBookman-LightItalic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\URWBookman-LightItalic.otf"
+"URWGothic-Book (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\URWGothic-Book.otf"
+"URWGothic-BookOblique (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\URWGothic-BookOblique.otf"
+"URWGothic-Demi (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\URWGothic-Demi.otf"
+"URWGothic-DemiOblique (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\URWGothic-DemiOblique.otf"
+"Z003-MediumItalic (TrueType)"="Z:\\run\\host\\fonts\\opentype\\urw-base35\\Z003-MediumItalic.otf"
+
+[Software\\Wine\\Fonts\\Replacements] 1774238072
+#time=1dcba78c2137300
+"Palatino Linotype"="Times New Roman"
+"Segoe UI"="Times New Roman"
+"Segoe UI Semibold"="Times New Roman"
+"Verdana"="Times New Roman"
+
+[Software\\Wine\\WineDbg] 1774238072
+#time=1dcba78c21353b6
+"ShowCrashDialog"=dword:00000000
+
+[Volatile Environment] 1781344376
+#time=1dcfb1a68fb719a
+"APPDATA"="C:\\users\\steamuser\\AppData\\Roaming"
+"CLIENTNAME"="Console"
+"DXVK_ENABLE_NVAPI"="1"
+"DXVK_NVAPI_ALLOW_OTHER_DRIVERS"="1"
+"HOMEDRIVE"="C:"
+"HOMEPATH"="\\users\\steamuser"
+"HOMESHARE"=""
+"LOCALAPPDATA"="C:\\users\\steamuser\\AppData\\Local"
+"LOGONSERVER"="\\\\VEDA"
+"SESSIONNAME"="Console"
+"USERDOMAIN"="VEDA"
+"USERNAME"="steamuser"
+"USERPROFILE"="C:\\users\\steamuser"

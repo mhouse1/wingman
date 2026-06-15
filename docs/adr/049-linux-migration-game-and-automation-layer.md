@@ -2,7 +2,7 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft    | 2026-06-13 | 1.6.19          |
+| Draft | 2026-06-15 | 1.6.19          |
 
 ## Context
 
@@ -177,9 +177,25 @@ check (ADR 047).
 
 ### Decision — Screen Capture
 
-Keep `mss`. On a Wayland desktop, enable XWayland (typically already present on major
-distributions when running a compatibility-mode session). Confirm `DISPLAY` is set
-before launching Wingman.
+`mss` uses `XGetImage` on the X11 root window, which Wayland compositors block as a
+security measure. On a Wayland session (`XDG_SESSION_TYPE=wayland`), `mss` silently
+returns `None` on every frame.
+
+The actual solution is documented in **ADR 050**: MetalStorm runs inside a Wine virtual
+desktop — a 1920×1200 XWayland window — and Wingman captures that specific window using
+`xwd -id <window_id> -silent` (~38 ms per frame). A platform-dispatched backend
+(`_XwdBackend` on Wayland, `_MssBackend` on Windows/X11) was added to `capture.py` so
+the Windows path is unchanged. See ADR 050 for full details.
+
+The Wine virtual desktop requires two registry keys in the Proton prefix:
+
+```
+[Software\Wine\Explorer]
+"Desktop"="Default"
+
+[Software\Wine\Explorer\Desktops]
+"Default"="1920x1200"
+```
 
 ---
 
@@ -195,7 +211,6 @@ In scope:
 
 Out of scope:
 
-- Wayland-native screen capture (XWayland bridge is sufficient for the near term).
 - Multi-monitor layout differences between Windows and Linux (deferred; calibrate
   separately on Linux hardware).
 - CI running on Linux (the test suite mocks OS input via `simulate_os_input`; no
@@ -289,8 +304,107 @@ Trade-offs:
    - Rejected: requires running Wingman inside the Wine environment, which breaks the
      clean separation between the automation layer (host) and the game (Wine).
 
+## In-Game Keybindings — Manual Setup Required
+
+MetalStorm's control bindings must be configured manually after first launch on Linux.
+The full recommended keybinding set is in the job aid:
+
+**`docs/job-aids/011-wingman-keybindings.md`**
+
+### Critical Linux-specific requirement — Pitch control
+
+Under Wine on XWayland, `GetAsyncKeyState` (which MetalStorm uses for continuous pitch
+input) does not reliably read held keys. Keyboard pitch bindings silently do nothing
+regardless of which keys are assigned.
+
+**Fix:** In MetalStorm **Settings → General**, set Controls to **Controller / Joystick**
+mode. Pitch bindings then use the DirectInput device path, which Wine handles correctly.
+Roll and all other controls work in either mode. See ADR 051 for the full investigation.
+
+---
+
+## Implementation Results
+
+What was actually built differed from the plan in two areas:
+
+| Area | Planned | Actual |
+|---|---|---|
+| Mouse injection | `pynput` | `pynput` (implemented as planned) |
+| Key injection | `keyboard` library, `input` group | Unchanged (implemented as planned) |
+| Screen capture | Keep `mss` + XWayland | `_GstBackend` using GStreamer `ximagesrc` (see ADR 050) |
+| Game launch | Manual (open Heroic, click Play) | `make rg` via `umu-run` (see below) |
+
+### Screen Capture
+
+`mss` on Wayland returns `None` for all frames, and `xwd` (the original ADR 050 plan)
+raises `BadMatch` from `X_GetImage` even on individual XWayland windows — Mutter blocks
+this path at the compositor level. The final working approach is GStreamer `ximagesrc`,
+which uses the XShm extension and bypasses the compositor restriction. The backend
+(`_GstBackend` in `capture.py`) discovers the Wine Desktop window position via
+`xwininfo` and captures the corresponding screen region via a `gst-launch-1.0` subprocess
+(~51 ms per frame). See ADR 050 for full investigation.
+
+### Game Launch Automation
+
+**Problem:** Wingman originally required the user to manually open Heroic Games Launcher
+and click Play before running `make r`.
+
+**Approaches tried:**
+
+| Approach | Result |
+|---|---|
+| `xdg-open "heroic://launch/legendary/<id>"` | Opens Heroic library UI — still requires manual Play click |
+| `flatpak run com.heroicgameslauncher.hgl` | Heroic exits immediately (single-instance guard, or no game auto-start) |
+| `legendary launch` (inside Heroic flatpak sandbox) | `"Game is not currently installed"` — sandbox path mismatch |
+| `umu-run` directly | **Works** — game window appears in ~4 s |
+
+**Solution:** Install `umu-run` (the same Proton launcher Heroic uses internally) as a
+standalone zipapp and invoke it directly:
+
+```bash
+# Install once
+curl -sLO https://github.com/Open-Wine-Components/umu-launcher/releases/download/1.4.0/umu-launcher-1.4.0-zipapp.tar
+tar xf umu-launcher-1.4.0-zipapp.tar
+cp umu/umu-run ~/.local/bin/umu-run
+chmod +x ~/.local/bin/umu-run
+```
+
+The `make launch-game` Makefile target runs:
+
+```bash
+GAMEID=umu-0 \
+PROTONPATH=~/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/proton/GE-Proton-latest \
+WINEPREFIX=~/Games/Heroic/Prefixes/Metalstorm \
+~/.local/bin/umu-run ~/Games/Heroic/Metalstorm/Metalstorm.exe &
+```
+
+`make rg` chains `launch-game` → `wait-game` (polls xwininfo until `Metalstorm` window
+appears, then sleeps 15 s) → `r`. With `umu-run`, the game window is typically visible
+within 4 seconds of launch; the 15-second post-detection wait covers the Unity loading
+screen before the lobby is ready.
+
+All three targets use overridable Makefile variables (`UMU_RUN`, `PROTON_ROOT`,
+`WINE_PREFIX`, `GAME_EXE`) if the Proton or prefix path changes.
+
+**Verified working 2026-06-15:** `make rg` successfully launches MetalStorm via `umu-run`
+and Wingman connects to it. Note that `make r` (without the `g`) is for development use
+when the game is already running — it does not launch the game. Use `make rg` for the
+full unattended workflow.
+
+**VS Code terminal note:** Running `make rg` from the VS Code integrated terminal works
+correctly as long as VS Code is not installed as a snap (the snap sandbox rewrites `$HOME`
+and breaks `umu-shim`). Use GNOME Terminal or another non-snap terminal if you encounter
+path errors from `umu-run`.
+
+---
+
 ## References
 
-- `wingman/controller.py` — `click_grid_region` (line 985), `click_crop` (line 1080)
+- `wingman/controller.py` — `click_grid_region`, `click_crop`
+- `wingman/capture.py` — `_GstBackend`, `_MssBackend`
+- `Makefile` — `launch-game`, `wait-game`, `rg` targets
+- `docs/job-aids/011-wingman-keybindings.md` — recommended MetalStorm keybindings
 - ADR 014 — mouse click via Win32 mouse_event (original Windows decision)
 - ADR 047 — host environment pre-flight check
+- ADR 050 — Wayland screen capture (GStreamer ximagesrc backend)
+- ADR 051 — Linux pitch control: joystick binding required

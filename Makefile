@@ -23,15 +23,19 @@
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
-#   make r           -> run wingman (INFO console only)
-#   make rd          -> run wingman with DEBUG log written to wingman.log
+#   make r           -> run wingman (Linux: auto-launches game; Windows: game must be running)
+#   make rd          -> run wingman with DEBUG log to wingman.log (same auto-launch on Linux)
+#   make rg          -> alias for r (backwards compat)
+#   make launch-game -> launch MetalStorm via umu-run in background (kills stale instance first)
+#   make wait-game   -> poll until Metalstorm.exe process is alive, wait for lobby
+#   make setup-capture -> one-time GNOME window picker: select MetalStorm, saves restore token
 #   make y           -> run ADR37 replay integration smoke test (placeholder screenshots)
 #   make ti          -> run integration tests (PATH1 + PATH2 real-OCR, alias for make ocr)
 #   make newpaths    -> capture screenshots for PATH1 or PATH2 using live Wingman play
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd y newpaths p1 p2 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti preflight
+.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd rg launch-game wait-game setup-capture capture-frame find-game y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti preflight
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -219,11 +223,80 @@ squash:
 
 
 
+# On Linux (Wayland): auto-launch MetalStorm and set up PipeWire capture before running.
+# On Windows: just run Wingman (game is started separately).
+UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
+
+ifeq ($(UNAME_S),Linux)
+r: launch-game wait-game
+	$(PYTHON_RUN) -m wingman.main
+
+rd: launch-game wait-game
+	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
+else
 r:
 	$(PYTHON_RUN) -m wingman.main
 
 rd:
 	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
+endif
+
+# Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
+# Always kills any stale instance and relaunches fresh so the window comes to front.
+# NOTE: pattern split via shell variable — literal "Metalstorm.exe" never appears in the
+# recipe shell's cmdline, so pkill cannot match and kill the recipe shell itself.
+PROTON_ROOT    ?= $(HOME)/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/proton/GE-Proton-latest
+WINE_PREFIX    ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
+GAME_EXE       ?= $(HOME)/Games/Heroic/Metalstorm/Metalstorm.exe
+UMU_RUN        ?= $(HOME)/.local/bin/umu-run
+launch-game:
+	@_p=Metalstorm; \
+	 if pgrep -f "$${_p}.exe" > /dev/null 2>&1; then \
+	   echo "MetalStorm running — stopping before fresh launch…"; \
+	   pkill -f "$${_p}.exe" 2>/dev/null || true; \
+	   sleep 5; \
+	 fi
+	@rm -f /tmp/wingman-game-prerunning
+	@GAMEID=umu-0 PROTONPATH="$(PROTON_ROOT)" WINEPREFIX="$(WINE_PREFIX)" \
+	  "$(UMU_RUN)" "$(GAME_EXE)" > /tmp/wingman-game-launch.log 2>&1 & \
+	echo "MetalStorm launching via umu-run (log: /tmp/wingman-game-launch.log)"
+
+# Poll until MetalStorm.exe is alive, then wait for the lobby.
+# 60 s covers slow loading; Wingman also retries detection continuously.
+GAME_WAIT_TIMEOUT_S ?= 120
+GAME_LOBBY_WAIT_S   ?= 60
+wait-game:
+	@echo "Waiting for Metalstorm.exe process (timeout $(GAME_WAIT_TIMEOUT_S) s)…"
+	@timeout $(GAME_WAIT_TIMEOUT_S) bash -c \
+	  'until pgrep -f Metalstorm.exe > /dev/null 2>&1; do sleep 2; done' \
+	  || { echo "ERROR: Metalstorm.exe not found after $(GAME_WAIT_TIMEOUT_S) s"; exit 1; }
+	@echo "Metalstorm.exe detected — waiting $(GAME_LOBBY_WAIT_S) s for game window to appear…"
+	@sleep $(GAME_LOBBY_WAIT_S)
+
+# Capture one native-resolution frame via PipeWire and save to /tmp/wingman_native.png.
+# Run with the game on screen to verify the window capture region.
+capture-frame:
+	$(PYTHON_RUN) wingman/capture_frame_debug.py
+
+# Capture a frame with MetalStorm on screen and overlay a coordinate grid.
+# Open /tmp/wingman_grid.png to find the game window's top-left (x,y) offset,
+# then set game_window_offset in wingman/config.yaml.
+find-game:
+	$(PYTHON_RUN) wingman/find_game_window.py
+
+# rg is now an alias for r on Linux (kept for backwards compatibility).
+rg: r
+
+# One-time GNOME Wayland capture setup (PipeWire portal restore token).
+# One-time setup: GNOME window picker appears; select MetalStorm and click Share.
+# Saves a restore token so future runs skip the dialog.
+# Delete ~/.config/wingman/pw_restore_token.json to re-show the picker.
+setup-capture:
+	@echo "=== Wingman capture setup ==="
+	@echo "A GNOME window picker will appear — select MetalStorm and click Share."
+	@echo "Token saved to ~/.config/wingman/pw_restore_token.json for future runs."
+	@echo ""
+	$(PYTHON_RUN) wingman/portal.py
 
 # ADR37 replay integration smoke path (temporary until full screenshot catalog exists)
 y:
@@ -313,6 +386,7 @@ rr-live-path1-gate:
 # Example:
 #   make newpaths CAPTURE_PATH=PATH1
 #   make newpaths CAPTURE_PATH=PATH2
+#   make newpaths CAPTURE_PATH=PATH3
 newpaths:
 	$(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
@@ -332,6 +406,10 @@ p1:
 # Shortcut: refresh PATH2 screenshots.
 p2:
 	$(MAKE) newpaths CAPTURE_PATH=PATH2
+
+# Shortcut: refresh PATH3 screenshots (full-coverage path, all integration_test screenshots).
+p3:
+	$(MAKE) newpaths CAPTURE_PATH=PATH3
 
 # Two commands are available for calibrating crop regions:
 #

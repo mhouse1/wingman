@@ -67,6 +67,22 @@ def check_package(import_name, label=None, pkg_name=None):
     return _line(PASS, name, ver)
 
 
+def check_xwd_tools():
+    """Check xwd and xwininfo are available on Linux/Wayland (ADR 050)."""
+    if sys.platform == "win32":
+        return []
+    import os
+    if os.environ.get("XDG_SESSION_TYPE", "").lower() != "wayland":
+        return []
+    results = []
+    for tool, pkg in [("gst-launch-1.0", "gstreamer1.0-tools"), ("xwininfo", "x11-utils")]:
+        if not shutil.which(tool):
+            results.append(_line(FAIL, tool, f"not found — sudo apt install {pkg}"))
+        else:
+            results.append(_line(PASS, tool, "(XWayland capture)"))
+    return results
+
+
 def check_keyboard():
     if importlib.util.find_spec("keyboard") is None:
         return _line(FAIL, "keyboard", "not importable — run: uv sync")
@@ -106,6 +122,7 @@ def main():
         check_package("transitions"),
         check_package("plotly"),
         check_package("pandas"),
+        *check_xwd_tools(),
     ]
 
     for _, line in results:

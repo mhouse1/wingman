@@ -138,6 +138,9 @@ class Controller:
         # Exit script hotkey (Backspace).
         # Honor disable_hotkeys so replay/capture automation is not interrupted by
         # ambient keyboard events from the host environment.
+        # Probe keyboard access on the first registration; if ImportError (Linux not in
+        # 'input' group), emit one warning and skip all remaining hotkeys.
+        _kbd_ok = True
         if keyboard_module and not self._disable_hotkeys:
             try:
                 def exit_script_hotkey(e):
@@ -146,11 +149,18 @@ class Controller:
                         self._exit_event.set()
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey 'backspace' to exit script")
+            except ImportError as e:
+                logger.warning(
+                    "Controller: keyboard hotkeys disabled — %s  "
+                    "(fix: sudo usermod -aG input $USER then log out and back in)",
+                    e,
+                )
+                _kbd_ok = False
             except Exception:
                 logger.exception("Controller: failed to register exit script hotkey")
 
         # Register hotkey for weapon loop toggle and other hotkeys
-        if keyboard_module and not self._disable_hotkeys:
+        if keyboard_module and not self._disable_hotkeys and _kbd_ok:
             # Cancel mission hotkey (End)
             try:
                 self._last_cancel_key_ts = 0.0
@@ -247,14 +257,7 @@ class Controller:
                     logger.info("Controller: '%s' key pressed - capturing screenshot", CAPTURE_SCREEN_SHOT)
                     if self._capture is not None and self._analyzer is not None:
                         try:
-                            # Create new mss instance for thread-safety (mss uses thread-local storage)
-                            with mss() as sct:
-                                # Get monitor rect from capture instance
-                                monitor = self._capture.get_monitor_rect()
-                                s = sct.grab(monitor)
-                                frame = np.array(s)
-                                # mss returns BGRA, convert to BGR
-                                frame = frame[:, :, :3]
+                            frame = self._capture.grab_from_thread()
                             
                             # Create output directory if it doesn't exist
                             output_dir = Path("tests/test-output")
@@ -376,9 +379,7 @@ class Controller:
                     _mt_frame = None
                     if self._on_manual_takeover_frame is not None and self._capture is not None:
                         try:
-                            with mss() as sct:
-                                s = sct.grab(self._capture.get_monitor_rect())
-                                _mt_frame = np.array(s)[:, :, :3]
+                            _mt_frame = self._capture.grab_from_thread()
                         except Exception:
                             logger.exception("Controller: failed to capture manual takeover frame")
                     self._analyzer.trigger_event("manual_takeover")
@@ -1199,14 +1200,7 @@ class Controller:
                 if self._capture is None:
                     return
 
-                # Replay capture does not expose monitor geometry. In that mode,
-                # reuse the injected frame source directly instead of grabbing MSS.
-                if hasattr(self._capture, "get_frame") and not hasattr(self._capture, "get_monitor_rect"):
-                    frame = self._capture.get_frame()
-                else:
-                    with mss() as sct:
-                        s = sct.grab(self._capture.get_monitor_rect())
-                        frame = np.array(s)[:, :, :3]
+                frame = self._capture.grab_from_thread()
                 if self._analyzer is not None and self._analyzer.scan_region_for_good_luck(frame):
                     good_luck_event.set()
                     if self._on_good_luck_frame is not None:

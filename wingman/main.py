@@ -7,8 +7,6 @@ import subprocess
 import threading
 from enum import Enum, auto
 from pathlib import Path
-import numpy as np
-from mss import mss
 
 try:
     import colorama
@@ -194,6 +192,13 @@ def main():
     )
     monitor_index = cfg.get("monitor", 1)
 
+    _gwo = cfg.get("game_window_offset", {}) or {}
+    _gwo_x = _gwo.get("x")
+    _gwo_y = _gwo.get("y")
+    game_window_offset = (int(_gwo_x), int(_gwo_y)) if (_gwo_x is not None and _gwo_y is not None) else None
+    if game_window_offset:
+        logger.info("game_window_offset from config: (%d, %d)", *game_window_offset)
+
     exit_requested = threading.Event()
     replay_mode = bool(args.replay_config)
     capture_mode = bool(args.capture_path_config)
@@ -244,14 +249,14 @@ def main():
             timeout_advances=False,
             out_of_order=True,
         )
-        cap = Capture(region, monitor_index)
+        cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
         logger.info(
             "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict",
             live_path.path_name,
             capture_screenshot_dir,
         )
     else:
-        cap = Capture(region, monitor_index)
+        cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
 
     tracker = PerformanceTracker(cfg, version=WINGMAN_VERSION)
     analyzer = GameStateAnalyzer(cfg, tracker=tracker)  # also usable as a context manager via __enter__/__exit__
@@ -377,22 +382,9 @@ def main():
                 return
             def _click_ready_after_invite():
                 time.sleep(1.5)
-                try:
-                    with mss() as sct:
-                        monitors = sct.monitors
-                        if cap.monitor_index < 1 or cap.monitor_index >= len(monitors):
-                            return
-                        mon = monitors[cap.monitor_index]
-                        monitor_rect = {
-                            "left": mon["left"] + cap.region[0],
-                            "top": mon["top"] + cap.region[1],
-                            "width": cap.region[2],
-                            "height": cap.region[3],
-                        }
-                        s = sct.grab(monitor_rect)
-                        new_frame = np.array(s)[:, :, :3]
-                except Exception as e:
-                    logger.warning("INVITED: frame capture failed: %s", e)
+                new_frame = cap.grab_from_thread()
+                if new_frame is None:
+                    logger.warning("INVITED: frame capture returned None")
                     return
                 ready = analyzer.scan_region_for_play_button(new_frame)
                 if ready:
@@ -591,6 +583,7 @@ def main():
             frame = cap.get_frame()
             if frame is None:
                 logger.warning("Frame capture failed (monitor disconnected or region out of bounds) — skipping cycle")
+                time.sleep(loop_interval_sec)
                 continue
 
             if replay_assertions is not None and replay_capture is not None:
