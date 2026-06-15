@@ -101,6 +101,88 @@ def _linux_click(x: int, y: int, count: int = 1) -> None:
         logger.error("Linux click at (%d, %d) failed: %s", x, y, e)
 
 
+# XK name overrides for key names that differ from python-xlib's XK strings
+_XKEY_ALIASES = {
+    "space": "space",
+    "backspace": "BackSpace",
+    "enter": "Return",
+    "escape": "Escape",
+    "tab": "Tab",
+    "shift": "Shift_L",
+    "ctrl": "Control_L",
+    "alt": "Alt_L",
+    "end": "End",
+    "home": "Home",
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+}
+
+
+def _linux_key_event(key: str, event_type) -> None:
+    """Inject a single KeyPress or KeyRelease event via XTest."""
+    _ensure_xauthority()
+    try:
+        from Xlib import display as _xdisplay, X as _X, XK as _XK
+        from Xlib.ext import xtest as _xtest
+        xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
+        keysym = _XK.string_to_keysym(xk_name)
+        if keysym == 0:
+            logger.warning("Linux key: unknown keysym for %r", key)
+            return
+        display_name = os.environ.get("DISPLAY", ":0").strip()
+        d = _xdisplay.Display(display_name)
+        keycode = d.keysym_to_keycode(keysym)
+        if keycode == 0:
+            logger.warning("Linux key: no keycode for keysym %d (%r)", keysym, key)
+            d.close()
+            return
+        _xtest.fake_input(d, event_type, keycode)
+        d.sync()
+        d.close()
+    except Exception as e:
+        logger.error("Linux key event for %r failed: %s", key, e)
+
+
+class _LinuxXTestKeyboard:
+    """Drop-in shim for the `keyboard` module on Linux, using XTest for injection.
+
+    press/release/press_and_release work without root via XTest.
+    Hotkey registration methods (on_press_key, add_hotkey) are no-ops — reading
+    /dev/input still requires the `input` group; see ADR 053 open items.
+    """
+
+    def press(self, key: str) -> None:
+        from Xlib import X as _X
+        _linux_key_event(key, _X.KeyPress)
+
+    def release(self, key: str) -> None:
+        from Xlib import X as _X
+        _linux_key_event(key, _X.KeyRelease)
+
+    def press_and_release(self, key: str) -> None:
+        from Xlib import X as _X
+        _linux_key_event(key, _X.KeyPress)
+        time.sleep(0.05)
+        _linux_key_event(key, _X.KeyRelease)
+
+    # Hotkey listeners require /dev/input access (input group) — no-op on Linux
+    def on_press_key(self, *args, **kwargs):
+        pass
+
+    def add_hotkey(self, *args, **kwargs):
+        pass
+
+    def unhook_all(self, *args, **kwargs):
+        pass
+
+
+if sys.platform != "win32":
+    keyboard_module = _LinuxXTestKeyboard()
+    logger.debug("Controller: using XTest keyboard shim (no root required)")
+
+
 # Key bindings
 NOSE_UP_KEY = 'i'
 NOSE_DOWN_KEY = 'k'
