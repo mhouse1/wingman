@@ -228,18 +228,16 @@ squash:
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
 
 ifeq ($(UNAME_S),Linux)
-r: launch-game wait-game
-	$(PYTHON_RUN) -m wingman.main
-
-rd: launch-game wait-game
-	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
+GAME_LAUNCH_DEPS := launch-game wait-game
 else
-r:
+GAME_LAUNCH_DEPS :=
+endif
+
+r: $(GAME_LAUNCH_DEPS)
 	$(PYTHON_RUN) -m wingman.main
 
-rd:
+rd: $(GAME_LAUNCH_DEPS)
 	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
-endif
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.
@@ -403,11 +401,12 @@ rr-live-path1-gate:
 	$(MAKE) rr-live-path1 && $(MAKE) rr-live-validate-path1
 
 # Live capture screenshots for ADR037 replay paths.
+# On Linux this auto-launches MetalStorm first, same as `make rd` (see GAME_LAUNCH_DEPS above).
 # Example:
 #   make newpaths CAPTURE_PATH=PATH1
 #   make newpaths CAPTURE_PATH=PATH2
 #   make newpaths CAPTURE_PATH=PATH3
-newpaths:
+newpaths: $(GAME_LAUNCH_DEPS)
 	$(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--capture-path-config tests/replay_paths/adr037_paths.yaml \

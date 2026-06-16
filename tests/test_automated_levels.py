@@ -168,7 +168,7 @@ def test_get_frame_and_analyze_frame():
     immediately and schedules background work. Only that synchronous
     return path is timed here (no OCR wait).
     """
-    from wingman.capture import Capture
+    from wingman.capture import Capture, _PipeWireBackend
 
     cfg = load_config()
     region = (
@@ -178,6 +178,18 @@ def test_get_frame_and_analyze_frame():
         cfg["region"]["height"],
     )
     cap = Capture(region, monitor_index=cfg["region"].get("monitor", 1))
+
+    # On the Wayland/PipeWire backend, get_frame() only stays within the
+    # 1.5s tick budget when the game window is already known (configured
+    # offset, or found via the fast ~5ms xwininfo lookup — same path the
+    # main loop relies on after `wait-game`, see ADR 053). Without a window
+    # to find, get_frame() falls back to a deliberate ~1s motion-diff scan
+    # before giving up, which is not representative of steady-state timing.
+    backend = cap._backend
+    if isinstance(backend, _PipeWireBackend) and backend._configured_offset is None:
+        if backend._detect_via_x11() is None:
+            pytest.skip("game window not found via xwininfo — MetalStorm not running")
+
     analyzer = GameStateAnalyzer(cfg)
     analyzer.state = GameState.GAME_BATTLE.name  # force GAME_BATTLE so analyze_frame runs
 
