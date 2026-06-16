@@ -913,6 +913,20 @@ class GameStateAnalyzer:
             if self._health is not None and self._health >= 1:
                 self.alive_event.set()
 
+    def reset_health_for_respawn(self):
+        """Clear health spike filter after a respawn so full-health readings aren't rejected.
+
+        The spike ceiling is set relative to health at time of death (e.g. ceiling=68 when
+        the player died at 28% of 240 max health). Without this reset, the ceiling blocks
+        post-respawn full-health readings (240 > 68×1.5=102) indefinitely.
+        """
+        with self._health_lock:
+            self._health_window.clear()
+            self._health_ceiling = None
+            self._health_no_digits_since = 0.0
+            self._game_battle_alive = False
+        logger.info("Analyzer: health spike filter reset for respawn")
+
     def on_enter_GAME_BATTLE_MANUAL(self):
         logger.info("FSM: entering GAME_BATTLE_MANUAL — manual takeover active, auto-restart suppressed")
 
