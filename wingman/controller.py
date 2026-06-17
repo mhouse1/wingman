@@ -107,6 +107,7 @@ _XKEY_ALIASES = {
     "backspace": "BackSpace",
     "enter": "Return",
     "escape": "Escape",
+    "esc": "Escape",
     "tab": "Tab",
     "shift": "Shift_L",
     "ctrl": "Control_L",
@@ -851,7 +852,7 @@ class Controller:
     def press_escape(self, hold_seconds: float = 0.05, block: bool = False):
         """Press Escape once, used by safety-recovery handlers."""
         self._execute_key_press(
-            'esc',
+            'escape',
             hold_seconds=hold_seconds,
             block=block,
             action_name='escape_recovery',
