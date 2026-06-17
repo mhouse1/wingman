@@ -14,8 +14,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.20"
-WINGMAN_VERSION_DETAILS = "linux support: capable of running in ubuntu desktop"
+WINGMAN_VERSION = "1.6.21"
+WINGMAN_VERSION_DETAILS = "linux: bugfix"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -274,6 +274,7 @@ def main():
     restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
     restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
     respawn_fallback_timeout = mission_cfg.get("respawn_fallback_timeout", 20.0)
+    restart_health_guard_timeout = mission_cfg.get("restart_health_guard_timeout", 12.0)
     no_missiles_consecutive_required = int(mission_cfg.get("no_missiles_consecutive_required", 2))
     no_missiles_abort_grace_s = float(mission_cfg.get("no_missiles_abort_grace_s", 6.0))
     waiting_fallback_enabled = mission_cfg.get("waiting_fallback_enabled", True)
@@ -887,6 +888,7 @@ def main():
                             analyzer.trigger_event("respawn_reset")
                         ctrl.stop_eject_sequence()        # interrupt any in-progress eject_and_dive immediately
                         ctrl.cancel_mission()
+                        analyzer.reset_health_for_respawn()
                         # Wait for mission lock to release before restart
                         logger.info("Waiting for mission lock to release before restart...")
                         for _ in range(50):
@@ -924,13 +926,20 @@ def main():
                     and time.time() - last_restart_attempt > restart_retry_interval):
                 if not ctrl.is_mission_running():
                     health_value = game_state.get('health')
-                    if health_value is None or health_value <= 0:
+                    health_guard_timed_out = (time.time() - restart_not_before) > restart_health_guard_timeout
+                    if (health_value is None or health_value <= 0) and not health_guard_timed_out:
                         logger.debug(
                             "Restart deferred — health not confirmed alive (health=%r)",
                             health_value,
                         )
                         last_restart_attempt = time.time()
                         continue
+                    if health_guard_timed_out and (health_value is None or health_value <= 0):
+                        logger.warning(
+                            "Restart health guard timed out after %.0fs — restarting despite health=%r",
+                            restart_health_guard_timeout,
+                            health_value,
+                        )
                     logger.info("Attempting to restart mission (delay expired)...")
                     result = ctrl.restart_last_mission()
                     if result is True:

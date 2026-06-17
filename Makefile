@@ -35,7 +35,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd rg launch-game wait-game setup-capture capture-frame find-game debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti preflight
+.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti preflight
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -228,18 +228,16 @@ squash:
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
 
 ifeq ($(UNAME_S),Linux)
-r: launch-game wait-game
-	$(PYTHON_RUN) -m wingman.main
-
-rd: launch-game wait-game
-	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
+GAME_LAUNCH_DEPS := launch-game wait-game
 else
-r:
+GAME_LAUNCH_DEPS :=
+endif
+
+r: $(GAME_LAUNCH_DEPS)
 	$(PYTHON_RUN) -m wingman.main
 
-rd:
+rd: $(GAME_LAUNCH_DEPS)
 	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
-endif
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.
@@ -272,6 +270,7 @@ wait-game:
 	  || { echo "ERROR: Metalstorm.exe not found after $(GAME_WAIT_TIMEOUT_S) s"; exit 1; }
 	@echo "Metalstorm.exe detected — waiting $(GAME_LOBBY_WAIT_S) s for game window to appear…"
 	@sleep $(GAME_LOBBY_WAIT_S)
+	@$(MAKE) undecorate-game-window
 
 # Capture one native-resolution frame via PipeWire and save to /tmp/wingman_native.png.
 # Run with the game on screen to verify the window capture region.
@@ -283,6 +282,19 @@ capture-frame:
 # Run with MetalStorm at the lobby to verify crop alignment.
 debug-crops:
 	$(PYTHON_RUN) wingman/debug_crops.py
+
+# Reposition the Wine virtual desktop window via X11 ConfigureWindow (no interactive
+# drag). Do NOT move this window by dragging its title bar — that has caused full
+# desktop freezes on GNOME Wayland requiring a hard power-cycle. See ADR 054.
+# Usage: make move-game-window X=100 Y=100
+move-game-window:
+	$(PYTHON_RUN) -m wingman.move_game_window --x $(X) --y $(Y)
+
+# Strip the Wine virtual desktop window's title bar so there is no drag handle to
+# grab — eliminates the interactive-drag freeze vector at the source. Run
+# automatically by wait-game on every `make r` / `make rd`. See ADR 054.
+undecorate-game-window:
+	@$(PYTHON_RUN) -m wingman.move_game_window --undecorate || true
 
 # Capture a frame with MetalStorm on screen and overlay a coordinate grid.
 # Open /tmp/wingman_grid.png to find the game window's top-left (x,y) offset,
@@ -389,11 +401,12 @@ rr-live-path1-gate:
 	$(MAKE) rr-live-path1 && $(MAKE) rr-live-validate-path1
 
 # Live capture screenshots for ADR037 replay paths.
+# On Linux this auto-launches MetalStorm first, same as `make rd` (see GAME_LAUNCH_DEPS above).
 # Example:
 #   make newpaths CAPTURE_PATH=PATH1
 #   make newpaths CAPTURE_PATH=PATH2
 #   make newpaths CAPTURE_PATH=PATH3
-newpaths:
+newpaths: $(GAME_LAUNCH_DEPS)
 	$(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--capture-path-config tests/replay_paths/adr037_paths.yaml \
