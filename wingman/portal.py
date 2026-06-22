@@ -132,12 +132,20 @@ def acquire_screencast_node():
                 loop.quit()
 
             sub(req3, on_start)
-            call("Start", GLib.Variant("(osa{sv})", (
-                session, "", {"handle_token": GLib.Variant("s", t3)},
-            )))
+            try:
+                call("Start", GLib.Variant("(osa{sv})", (
+                    session, "", {"handle_token": GLib.Variant("s", t3)},
+                )))
+            except Exception as exc:
+                state["error"] = f"Start raised: {exc}"
+                loop.quit()
 
         sub(req2, on_select)
-        call("SelectSources", GLib.Variant("(oa{sv})", (session, sel_opts)))
+        try:
+            call("SelectSources", GLib.Variant("(oa{sv})", (session, sel_opts)))
+        except Exception as exc:
+            state["error"] = f"SelectSources raised: {exc}"
+            loop.quit()
 
     sub(req1, on_create)
     call("CreateSession", GLib.Variant("(a{sv})", ({

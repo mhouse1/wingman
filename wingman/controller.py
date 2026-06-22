@@ -286,6 +286,18 @@ class _LinuxXTestKeyboard:
             self._ctrl_display = d_ctrl
             self._record_ctx = ctx
 
+            # Watcher: unblocks record_enable_context when _stop is set (e.g. on
+            # abnormal exit where cleanup() never runs).
+            def _stop_watcher():
+                self._stop.wait()
+                try:
+                    d_ctrl.record_disable_context(ctx)
+                    d_ctrl.flush()
+                except Exception:
+                    pass
+
+            threading.Thread(target=_stop_watcher, daemon=True, name="XKeyListener-stop").start()
+
             _ef = _rq.EventField(None)
 
             def _record_handler(reply):
@@ -888,9 +900,14 @@ class Controller:
         # Force health state to dead so the False→True transition fires when
         # health is detected again after respawn, triggering mission restart.
         if self._analyzer is not None:
-            with self._analyzer._health_lock:
-                self._analyzer._game_battle_alive = False
-                self._analyzer._health_no_digits_since = 0.0
+            if not self._analyzer._health_lock.acquire(timeout=1.0):
+                logger.warning("eject_and_dive: _health_lock timeout — skipping health reset")
+            else:
+                try:
+                    self._analyzer._game_battle_alive = False
+                    self._analyzer._health_no_digits_since = 0.0
+                finally:
+                    self._analyzer._health_lock.release()
 
         def _is_respawning() -> bool:
             if self._analyzer is None:
@@ -1085,8 +1102,6 @@ class Controller:
         if interval is not None:
             self._weapon_loop_interval = float(interval)
         
-        # Clear mission cancel flag so weapon loop can fire properly
-        self._mission_cancel.clear()
         self._weapon_loop_active = True
         self._weapon_loop_stop.clear()
 
@@ -1095,7 +1110,13 @@ class Controller:
             try:
                 while True:
                     try:
-                        self.fire_active_weapon(hold_seconds=0.1, block=True)
+                        self._execute_key_press(
+                            FIRE_ACTIVE_WEAPON,
+                            hold_seconds=0.1,
+                            block=True,
+                            action_name="fire_active_weapon",
+                            ignore_cancel=True,
+                        )
                     except Exception as e:
                         logger.warning("Controller: weapon loop fire failed: %s", e)
                     if self._weapon_loop_stop.wait(timeout=self._weapon_loop_interval):
@@ -1350,9 +1371,14 @@ class Controller:
 
                 if sys.platform != "win32":
                     # Linux: compute absolute coords from game window offset
-                    offset = self._capture.game_screen_offset
+                    offset = None
+                    for _attempt in range(3):
+                        offset = self._capture.game_screen_offset
+                        if offset is not None:
+                            break
+                        time.sleep(0.05)
                     if offset is None:
-                        logger.error("click_grid_region: game window offset not known yet")
+                        logger.error("click_grid_region: game window offset not known yet (3 retries)")
                         return
                     game_ox, game_oy = offset
                     abs_x = int(game_ox + (col_idx + 0.5) * cell_w)
@@ -1459,9 +1485,14 @@ class Controller:
 
                 if sys.platform != "win32":
                     # Linux: compute absolute coords from game window offset
-                    offset = self._capture.game_screen_offset
+                    offset = None
+                    for _attempt in range(3):
+                        offset = self._capture.game_screen_offset
+                        if offset is not None:
+                            break
+                        time.sleep(0.05)
                     if offset is None:
-                        logger.error("click_crop: game window offset not known yet")
+                        logger.error("click_crop: game window offset not known yet (3 retries)")
                         return
                     game_ox, game_oy = offset
                     abs_x, abs_y = crop_centre(coords, cap_w, cap_h, game_ox, game_oy)

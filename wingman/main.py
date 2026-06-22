@@ -14,8 +14,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.21"
-WINGMAN_VERSION_DETAILS = "linux: bugfix"
+WINGMAN_VERSION = "1.6.22"
+WINGMAN_VERSION_DETAILS = "linux: code-reviewed, bugfixes"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -731,7 +731,10 @@ def main():
                     "GAME_BATTLE not reached within 10 minutes of startup — shutting down wingman and computer"
                 )
                 exit_requested.set()
-                subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
+                if sys.platform == "win32":
+                    subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
+                else:
+                    subprocess.run(["shutdown", "-h", "now"], check=False)
                 break
 
             missiles_snapshot = analyzer.get_ammo_missiles()
@@ -1060,6 +1063,8 @@ def main():
                 encoding="utf-8",
             )
             logger.info("Capture summary saved to %s", summary_output)
+        if hasattr(cap, "cleanup"):
+            cap.cleanup()
         ctrl.cleanup()
         analyzer.cleanup()
 

@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -79,6 +80,8 @@ class _PipeWireBackend:
         self._configured_offset = game_window_offset
         self._game_offset = game_window_offset
         self._miss_count = 0
+        self._detecting = False       # True while background detect thread is running
+        self._detection_warned = False  # True after first "game not found" warning
         self._setup()
 
     def _setup(self):
@@ -299,6 +302,20 @@ class _PipeWireBackend:
         buf.unmap(map_info)
         return arr
 
+    def _detect_and_cache(self, arr):
+        """Background thread: run full detection (X11 + frame-diff) and update _game_offset."""
+        try:
+            offset = self._detect_game_offset(arr)
+            if offset is not None:
+                self._game_offset = offset
+                self._miss_count = 0
+                self._detection_warned = False
+                logger.info("PipeWireBackend: background detection found game at (%d, %d)", *offset)
+        except Exception:
+            logger.exception("PipeWireBackend: background detection error")
+        finally:
+            self._detecting = False
+
     def get_frame(self):
         if self._appsink is None:
             return None
@@ -317,12 +334,24 @@ class _PipeWireBackend:
         if self._configured_offset is not None:
             ox, oy = self._configured_offset
         else:
-            if self._game_offset is None or self._miss_count >= self._REDETECT_AFTER:
-                self._miss_count = 0
-                self._game_offset = self._detect_game_offset(arr)
+            if self._game_offset is None:
+                if self._detecting:
+                    # Background frame-diff detection in progress; yield this tick.
+                    return None
+
+                # Fast path: X11 window lookup (no sleep, no subprocess output to parse).
+                x11 = self._detect_via_x11()
+                if x11 is not None:
+                    ox11, oy11 = x11
+                    if 0 <= ox11 and ox11 + gw <= fw and 0 <= oy11 and oy11 + gh <= fh:
+                        self._game_offset = x11
+                        self._miss_count = 0
+                        self._detection_warned = False
+
                 if self._game_offset is None:
-                    self._miss_count += 1
-                    if self._miss_count == 1:
+                    # Log and save debug frame only on the first miss.
+                    if not self._detection_warned:
+                        self._detection_warned = True
                         logger.warning(
                             "PipeWireBackend: game window not found in %dx%d frame — "
                             "make sure MetalStorm is visible on screen (not minimised). "
@@ -337,6 +366,17 @@ class _PipeWireBackend:
                             _cv2.imwrite("/tmp/wingman_detect_fail.png", _half)
                         except Exception:
                             pass
+                    self._miss_count += 1
+                    # Start background frame-diff detection on first miss and every
+                    # _REDETECT_AFTER non-detecting misses thereafter.
+                    if self._miss_count % self._REDETECT_AFTER == 1:
+                        self._detecting = True
+                        threading.Thread(
+                            target=self._detect_and_cache,
+                            args=(arr,),
+                            daemon=True,
+                            name="PipeWire-detect",
+                        ).start()
                     return None
             ox, oy = self._game_offset
 
@@ -347,6 +387,7 @@ class _PipeWireBackend:
                 ox, oy, gw, gh, fw, fh,
             )
             self._game_offset = None
+            self._miss_count = 0  # reset so detection runs promptly on next frame
             return None
         return cropped
 
@@ -355,7 +396,9 @@ class _PipeWireBackend:
 
     def cleanup(self):
         if self._pipeline:
-            self._pipeline.set_state(__import__("gi.repository.Gst", fromlist=["Gst"]).Gst.State.NULL)
+            self._pipeline.set_state(
+                __import__("gi.repository.Gst", fromlist=["Gst"]).State.NULL
+            )
 
 
 class _GstBackend:
@@ -544,3 +587,8 @@ class Capture:
         if hasattr(b, "_game_offset") and b._game_offset is not None:
             return b._game_offset
         return None
+
+    def cleanup(self):
+        """Stop the backend (pipeline, threads) and release resources."""
+        if hasattr(self._backend, "cleanup"):
+            self._backend.cleanup()
