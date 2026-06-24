@@ -361,6 +361,10 @@ def main():
         ctrl.set_on_manual_takeover_frame(_on_manual_takeover_frame)
 
     def _handle_lobby_popup(popup):
+        current = analyzer.game_state
+        if current not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+            logger.debug("Lobby popup '%s' suppressed — state is %s", popup, current.name)
+            return
         if not ctrl.popup_click_allowed(popup):
             logger.debug("Lobby quick-scan: popup '%s' click suppressed by cooldown", popup)
             return
@@ -693,6 +697,8 @@ def main():
                     lobby_escape_stop = _stop_ev
                     def _lobby_escape_loop(_stop=_stop_ev):
                         while not _stop.wait(timeout=30.0):
+                            if analyzer.game_state != GameState.GAME_LOBBY:
+                                return
                             logger.info("GAME_LOBBY escape loop: pressing ESC")
                             ctrl.press_escape(hold_seconds=0.05, block=False)
                     lobby_escape_thread = threading.Thread(

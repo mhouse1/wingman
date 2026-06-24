@@ -1691,11 +1691,13 @@ class GameStateAnalyzer:
                 # After a PLAY/READY click, skip popup OCR briefly so the main loop can
                 # focus on GAME_WAITING CANCEL detection without spending this cycle on popups.
                 popup_cooldown_remaining = 5.0 - (time.time() - self._last_lobby_play_click_ts)
+                current_state_for_popup_gate = self.game_state
                 do_popup_scan = (
                     bool(popup_crops)
                     and not play_clicked_this_cycle
                     and popup_cooldown_remaining <= 0.0
                     and time.time() - last_popup_scan_ts >= 5.0
+                    and current_state_for_popup_gate in (GameState.GAME_LOBBY, GameState.GAME_WAITING)
                 )
                 if bool(popup_crops) and popup_cooldown_remaining > 0.0:
                     logger.debug(
