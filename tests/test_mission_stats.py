@@ -105,6 +105,20 @@ class TestOutcomeClassification:
         assert result["missions"][0]["outcome"] == "click_to"
         assert result["missions_click_to"] == 1
 
+    def test_click_to_outcome_ordering_race(self, tmp_path):
+        """FSM transition fires from background OCR thread before on_event sets _pending_outcome."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        # Simulate race: transition arrives with trigger_name="click_to_detected" but
+        # _pending_outcome is still None because on_event hasn't run yet.
+        t.on_fsm_transition("click_to_detected", "GAME_BATTLE", "GAME_END_B", ts=10.0)
+        # on_event fires after (too late — mission already ended)
+        t.on_event("click_to_detected", 10.0)
+        result = t.finalize()
+        assert result["missions"][0]["outcome"] == "click_to"
+        assert result["missions_click_to"] == 1
+
     def test_missiles_empty_outcome(self, tmp_path):
         t = _tracker(tmp_path)
         t._startup_done = True

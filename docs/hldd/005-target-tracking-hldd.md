@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-05-22 | 1.6.8           |
+| Draft  | 2026-06-26 | 1.6.22          |
 
 ## Overview
 
@@ -66,6 +66,39 @@ Marker extraction:
 - HSV filter for target marker colors.
 - Prefer locked-target color if available (red), fallback to non-locked target color (green).
 - Extract contour centroids.
+
+#### Target marker visual characteristics
+
+From live gameplay frames (`P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png` and related):
+
+- **Non-locked enemy marker**: tall, narrow, bright-green vertical bar. Typically 3–6% of frame height,
+  width 1–4 px. One bar per visible enemy. Multiple bars present simultaneously at varying
+  distances (near bars are taller; far bars are shorter and may resolve to near-point blobs).
+- **Locked-target marker**: same vertical-bar shape, color shifts toward red/orange.
+  When locked the dashed-circle reticle (see below) also appears.
+- **Lock-on reticle**: a dashed white/green circle that tracks the locked target independently
+  of the bar. The reticle is a separate HUD element — it is **not** the target marker and should
+  not be used as the centroid source. Track the bar, not the reticle.
+- **Yellow proximity dot**: a small solid yellow marker appears below/near the reticle when an
+  enemy is very close (< ~500m). Can be used as a high-confidence "close target" signal.
+- **Blue edge indicators**: thin blue horizontal lines at screen edges indicate enemies outside
+  the FOV. Not useful for screen-space tracking but signal that reacquire should be attempted.
+
+Contour selection implications:
+- Contour aspect ratio filter (tall/thin) eliminates the dashed circle and HUD noise.
+  A contour with height >= 3x width and minimum area of 12 px² is characteristic of the bar.
+- The nearest (tallest) bar is usually the highest-priority target. Nearest-to-last-centroid
+  policy handles the case where multiple bars are present.
+
+#### Respawn recovery
+
+After a `respawn_detected` event (from `MissionStatsTracker`), the tracking state machine
+must return to `Acquiring` regardless of prior state. The respawn blank-screen interval
+(typically 2–4 s) means the local ROI will see no markers; this must not trigger a permanent
+lost-target state. The `lost_timeout_sec` grace window should be long enough to survive the
+respawn blanking without requiring a tuning change. The `Searching → Acquiring` transition
+is gated on `GAME_BATTLE` being active, which handles respawn automatically as long as the
+FSM is still in `GAME_BATTLE` throughout.
 
 Relative-anchor method (ADR023-aligned):
 
@@ -274,12 +307,28 @@ Optional HSV tuning block (if separated from existing enemy HSV keys):
 
 ```yaml
 tracking_hsv:
+  # Locked target bar (red/orange).  Wrap-around hue: also check [170,150,150]-[179,255,255].
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
-  green_lower: [40, 120, 120]
-  green_upper: [80, 255, 255]
+  # Non-locked enemy bar: saturated bright green observed in live frames.
+  green_lower: [45, 150, 150]
+  green_upper: [75, 255, 255]
+  # Yellow close-proximity dot (bonus signal, not required for tracking).
+  yellow_lower: [20, 150, 150]
+  yellow_upper: [35, 255, 255]
+  # Contour aspect ratio filter: reject blobs that aren't taller than wide.
+  # Prevents reticle circle and HUD noise from matching as target markers.
   min_contour_area: 12
+  min_aspect_ratio: 2.5   # height / width >= 2.5 for a valid target bar
 ```
+
+Notes on HSV values:
+- OpenCV HSV uses H: 0–179, S: 0–255, V: 0–255.
+- The bright green bars in live frames land around H: 50–70, S: 180–255, V: 180–255.
+- The `green_lower/upper` range above tightens the original draft (was `[40,120,120]`–`[80,255,255]`)
+  to reduce false positives from green HUD text and foliage in game backgrounds.
+- The `min_aspect_ratio` filter is new: contour height/width >= 2.5 accepts the tall bar,
+  rejects the roughly-circular lock-on reticle and small background blobs.
 
 ---
 
@@ -313,10 +362,19 @@ tracking_hsv:
 - unit test for atomic HUD writer path and filename replace behavior.
 - unit tests for normalized acquisition-region to pixel-rect conversion.
 - unit tests for local ROI expansion/fallback thresholds.
+- regression test on `P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png`: verify marker detected,
+  reticle circle rejected by aspect-ratio filter, centroid outside reticle region.
 
 ---
 
 ## Validation Strategy
+
+0. Reference frame regression (static, fast):
+- use `test_screenshots/integration_test/P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png`
+  as a known-good GAME_BATTLE respawn-cleared frame.
+- verify `detect_enemy_target_x()` returns at least one centroid with confidence >= threshold.
+- verify no centroid falls inside the lock-on reticle region (approx center-left of frame).
+- verify aspect-ratio filter rejects the reticle circle and accepts the tall green bars.
 
 1. Synthetic test frames:
 - move marker from far-left -> center -> far-right,
