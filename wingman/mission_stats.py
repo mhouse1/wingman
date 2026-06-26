@@ -8,7 +8,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _BATTLE_STATES = {"GAME_BATTLE", "GAME_BATTLE_MANUAL"}
-_MISSION_END_STATES = {"GAME_LOBBY", "GAME_END_B", "GAME_WAITING", "GAME_UNKNOWN"}
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -25,8 +24,10 @@ def _fmt_duration(seconds: float) -> str:
 class MissionStatsTracker:
     """Counts per-mission and session-level gameplay events.
 
-    Thread-safety: on_event and on_fsm_transition are called from the main loop thread
-    only (flare events are emitted before the burst daemon thread starts). No lock needed.
+    Thread-safety: on_event is called from the main loop thread only. on_fsm_transition
+    may be called from the background OCR thread (analyzer fires click_to_detected from
+    _run_click_to_in_background); the outcome fallback uses trigger_name to avoid the
+    ordering race rather than relying on _pending_outcome being set first.
 
     Wiring:
       on_event()          — call for named events: respawn_detected, missiles_empty,
@@ -118,7 +119,12 @@ class MissionStatsTracker:
             if self._in_mission:
                 outcome = self._pending_outcome
                 if outcome is None:
-                    outcome = "lobby_exit" if next_state in ("GAME_LOBBY", "GAME_WAITING") else "unknown"
+                    if trigger_name == "click_to_detected":
+                        outcome = "click_to"
+                    elif next_state in ("GAME_LOBBY", "GAME_WAITING"):
+                        outcome = "lobby_exit"
+                    else:
+                        outcome = "unknown"
                 self._end_mission(ts, outcome)
 
     def finalize(self, run_id: str | None = None) -> dict:
@@ -133,7 +139,7 @@ class MissionStatsTracker:
         durations = []
         for m in self._missions:
             outcome = m.get("outcome", "unknown")
-            counts[outcome] = counts.get(outcome, 0) + 1
+            counts[outcome] += 1
             if m.get("duration_s") is not None:
                 durations.append(m["duration_s"])
 
@@ -244,8 +250,8 @@ class MissionStatsTracker:
 
         out_path = out_dir / f"run_{run_id}_stats.json"
         try:
-            out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
             data["stats_path"] = str(out_path)
+            out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
             logger.info("MissionStatsTracker: session stats written to %s", out_path)
         except Exception as e:
             logger.warning("MissionStatsTracker: failed to write %s: %s", out_path, e)

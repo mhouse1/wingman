@@ -82,6 +82,8 @@ class _PipeWireBackend:
         self._miss_count = 0
         self._detecting = False       # True while background detect thread is running
         self._detection_warned = False  # True after first "game not found" warning
+        self._last_frame = None
+        self._last_frame_lock = threading.Lock()
         self._setup()
 
     def _setup(self):
@@ -328,6 +330,8 @@ class _PipeWireBackend:
 
         # Stream is already game-sized (e.g. window capture or same-res monitor)
         if fw == gw and fh == gh:
+            with self._last_frame_lock:
+                self._last_frame = arr
             return arr
 
         # Monitor frame: use configured offset if available
@@ -389,10 +393,13 @@ class _PipeWireBackend:
             self._game_offset = None
             self._miss_count = 0  # reset so detection runs promptly on next frame
             return None
+        with self._last_frame_lock:
+            self._last_frame = cropped
         return cropped
 
     def grab_from_thread(self):
-        return self.get_frame()
+        with self._last_frame_lock:
+            return self._last_frame
 
     def cleanup(self):
         if self._pipeline:
