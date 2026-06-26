@@ -15,11 +15,12 @@ except ImportError:
     colorama = None
 
 WINGMAN_VERSION = "1.6.22"
-WINGMAN_VERSION_DETAILS = "linux: code-reviewed, bugfixes"
+WINGMAN_VERSION_DETAILS = "linux: code-reviewed, bugfixes, statistics"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState
+from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
 from .replay import (
     LivePathCaptureEngine,
@@ -399,11 +400,15 @@ def main():
 
     analyzer.set_on_lobby_popup_click(_handle_lobby_popup)
 
+    stats_tracker: "MissionStatsTracker | None" = None
+
     def _emit_capture_event(event_name: str) -> None:
         if replay_assertions is not None and replay_capture is not None:
             replay_assertions.on_event(event_name, replay_capture.elapsed_s())
         if live_capture is not None:
             live_capture.on_event(event_name, time.time())
+        if stats_tracker is not None:
+            stats_tracker.on_event(event_name, time.time())
 
     if replay_assertions is not None:
         def _on_fsm_transition(trigger_name, _prev_state_name, next_state_name, _timestamp_s):
@@ -421,6 +426,16 @@ def main():
             live_capture.on_event(f"state_enter:{next_state_name}", now_s)
 
         analyzer.set_on_fsm_transition(_on_capture_fsm_transition)
+    else:
+        stats_tracker = MissionStatsTracker(
+            version=WINGMAN_VERSION,
+            output_dir="docs/performance",
+        )
+
+        def _stats_fsm_cb(trigger_name, prev_state_name, next_state_name, timestamp_s):
+            stats_tracker.on_fsm_transition(trigger_name, prev_state_name, next_state_name, timestamp_s)
+
+        analyzer.set_on_fsm_transition(_stats_fsm_cb)
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -509,6 +524,8 @@ def main():
             return
         ctrl.reload_flares()
         last_flare_reload_ts = time.time()
+        if stats_tracker is not None:
+            stats_tracker.on_event("flare_reload", last_flare_reload_ts)
 
     def _handle_no_missiles():
         """End mission and eject when missile count reaches zero."""
@@ -566,6 +583,9 @@ def main():
                 tracker.record_reaction(time.time() - incoming_ts)
             except Exception as e:
                 logger.warning("PerformanceTracker: record_reaction failed: %s", e)
+
+            if stats_tracker is not None:
+                stats_tracker.on_event("flare_burst_deployed", time.time())
 
             def _flare_burst():
                 for _ in range(3):
@@ -1073,6 +1093,12 @@ def main():
             cap.cleanup()
         ctrl.cleanup()
         analyzer.cleanup()
+        if stats_tracker is not None:
+            try:
+                stats_tracker.finalize(run_id=tracker.run_id)
+                stats_tracker.print_summary()
+            except Exception as e:
+                logger.warning("MissionStatsTracker: finalize failed: %s", e)
 
 
 if __name__ == "__main__":

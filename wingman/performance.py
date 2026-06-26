@@ -156,6 +156,7 @@ class PerformanceTracker:
 
         self._lock = threading.Lock()
         self._session_start    = time.time()
+        self.run_id            = time.strftime("%Y%m%d_%H%M%S", time.localtime(self._session_start))
         self._rounds           = 0
 
         # Per-round buffers — cleared after each on_enter_game_lobby() emission
@@ -267,7 +268,7 @@ class PerformanceTracker:
     def _write_run_file(
         self, crops: dict, reaction: list, rounds: int, end_ts: float
     ) -> None:
-        run_id  = time.strftime("%Y%m%d_%H%M%S", time.localtime(self._session_start))
+        run_id  = self.run_id
         out_dir = self._output_dir / "current"
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
