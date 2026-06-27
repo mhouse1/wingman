@@ -138,11 +138,44 @@ incoming_detection:
   - test_screenshots/INCOMING3.png
 mission: {restart_delay_after_unlock: 4.0, restart_retry_interval: 2.0, respawn_fallback_timeout: 20.0,
   weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
-  starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5}
+  starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5,
+  starting_max_wait_s: 90.0}
 aim: {smoothing: 0.25, fire_cooldown: 0.2}
 controls: {left_mouse_button: true, fire_button: left, fire_hold: 2.0}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false, debug_output_dir: tests/test-output}
 j20_mission: {target_painting_mode: false}
+tracking:
+  enabled: false
+  # Fractional coords of the global acquisition scan region (x1,y1,x2,y2).
+  acquisition_region_pct: [0.20, 0.18, 0.80, 0.68]
+  deadband: 0.05
+  kp: 0.30
+  min_hold_sec: 0.08
+  max_hold_sec: 0.35
+  command_cooldown_sec: 0.15
+  lost_timeout_sec: 0.70
+  prefer_red_lock: true
+  local_roi_enabled: true
+  local_roi_scale: 0.22
+  local_roi_min_px: [140, 90]
+  local_roi_expand_factor: 1.25
+  local_roi_max_scale: 0.45
+  local_roi_reacquire_cycles: 3
+tracking_hsv:
+  # All HSV in OpenCV convention: H 0-179, S 0-255, V 0-255
+  # Red: locked target bar (hue wraps; wrap-around range added automatically)
+  red_lower: [0, 150, 150]
+  red_upper: [10, 255, 255]
+  # Green: non-locked enemy bar (tightened from draft to reduce false positives)
+  green_lower: [45, 150, 150]
+  green_upper: [75, 255, 255]
+  min_contour_area: 12
+  # Aspect filter: rejects the dashed lock-on reticle circle (h/w < 2.5)
+  min_aspect_ratio: 2.5
+hud:
+  enabled: true
+  output_path: tests/test-output/live_hud.png
+  interval_sec: 1.0
 performance:
   round_histogram:
     enabled: true

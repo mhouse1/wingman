@@ -67,9 +67,13 @@ def test_is_mission_running_without_keyboard(ctrl):
 
 
 def test_restart_last_mission_no_history(ctrl):
-    """restart_last_mission() returns None when no mission has been started."""
+    """restart_last_mission() defaults to J20 and returns True when no prior mission recorded."""
     result = ctrl.restart_last_mission()
-    assert result is None
+    assert result is True
+    # _last_mission must now be set so future restarts also work
+    with ctrl._last_mission_lock:
+        assert ctrl._last_mission == "j20"
+    ctrl.cancel_mission()  # stop the spawned thread
 
 
 def test_restart_last_mission_returns_false_when_running(ctrl):

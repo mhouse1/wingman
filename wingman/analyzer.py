@@ -806,6 +806,11 @@ class GameStateAnalyzer:
         with self._ammo_lock:
             return self._ammo_missiles
 
+    def get_ammo_flares(self):
+        """Return the latest flare count snapshot."""
+        with self._ammo_lock:
+            return self._ammo_flares
+
     def get_respawn_cache_result(self):
         """Return the cached respawn tuple (is_respawning, confidence, method)."""
         with self._ocr_cache_lock:

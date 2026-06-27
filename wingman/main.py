@@ -21,8 +21,10 @@ WINGMAN_VERSION_DETAILS = "linux: code-reviewed, bugfixes, statistics"
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState
+from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
+from .tracker import TargetTracker
 from .replay import (
     LivePathCaptureEngine,
     ReplayAssertionEngine,
@@ -286,6 +288,7 @@ def main():
     waiting_fallback_min_elapsed_s = float(mission_cfg.get("waiting_fallback_min_elapsed_s", 6.0))
     respawn_clear_stability_s = float(mission_cfg.get("respawn_clear_stability_s", 1.5))
     starting_stalled_reclassify_after_s = float(mission_cfg.get("starting_stalled_reclassify_after_s", 20.0))
+    starting_max_wait_s = float(mission_cfg.get("starting_max_wait_s", 90.0))
     unknown_max_wait_s = float(startup_cfg.get("unknown_max_wait_s", 90.0))
     unknown_state_since = 0.0
     startup_classification_complete = False
@@ -296,6 +299,18 @@ def main():
         if unattended_mode and not unattended_active.is_set():
             unattended_active.set()
             logger.info("Unattended mode activated by M key press")
+
+    # Target tracker and HUD renderer
+    target_tracker = TargetTracker(cfg)
+    hud_renderer = HudRenderer.from_config(cfg)
+    _tracking_cfg = cfg.get("tracking", {})
+    _tracking_ctl_cfg = {
+        "deadband": float(_tracking_cfg.get("deadband", 0.05)),
+        "kp": float(_tracking_cfg.get("kp", 0.30)),
+        "min_hold_sec": float(_tracking_cfg.get("min_hold_sec", 0.08)),
+        "max_hold_sec": float(_tracking_cfg.get("max_hold_sec", 0.35)),
+        "cooldown_sec": float(_tracking_cfg.get("command_cooldown_sec", 0.15)),
+    }
 
     # Initialize controller with config-driven weapon loop interval and exit event
     j20_cfg = cfg.get("j20_mission", {})
@@ -314,6 +329,7 @@ def main():
         simulate_os_input=replay_mode,
         disable_hotkeys=(replay_mode or capture_mode),
         capture_with_overlay=capture_with_overlay,
+        starting_max_wait_s=starting_max_wait_s,
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via analyzer public callback setters.
@@ -451,6 +467,8 @@ def main():
     last_click_to_alert_ts = 0.0
     battle_started_ts = 0.0
     no_missiles_zero_streak = 0
+    missiles_fired_since_padlock = 0   # cumulative missiles fired since last padlock target-switch
+    last_missile_count_for_padlock: "int | None" = None  # previous tick missile count for delta tracking
     last_game_state = None
     last_flare_reload_ts = 0.0    # cooldown: don't spam SPECIAL_ABILITY if flares stay at 2
     enemy_last_seen_ts = 0.0      # timestamp of last frame with red in ENEMY_CLOSE_BY (0 = not in battle yet)
@@ -460,7 +478,9 @@ def main():
     respawn_clear_since = 0.0  # timestamp since respawn cache has been continuously false
     last_cancel_scan_ts = 0.0     # last time CANCEL crop was scanned in GAME_WAITING
     last_play_reclick_ts = 0.0    # last time PLAY was re-clicked in GAME_WAITING
-    play_reclick_interval = 45.0  # minimum seconds between PLAY re-clicks
+    play_reclick_interval = 45.0  # re-click interval when PLAY was absent (matchmaking may be active)
+    play_reclick_missed_interval = 10.0  # re-click interval when PLAY was continuously visible (click missed)
+    play_ever_absent = False      # whether PLAY disappeared at any tick since entering GAME_WAITING
     waiting_fallback_score = 0
     waiting_fallback_consecutive = 0
     lobby_escape_stop: "threading.Event | None" = None
@@ -732,6 +752,7 @@ def main():
                     game_waiting_since = time.time()
                     last_cancel_scan_ts = time.time()         # first scan after 3s, not immediately
                     last_play_reclick_ts = time.time()        # don't re-click immediately either
+                    play_ever_absent = False
                     _reset_waiting_fallback()
                 else:
                     game_waiting_since = 0.0
@@ -745,8 +766,13 @@ def main():
                     enemy_last_seen_ts = time.time()  # assume enemy present on battle entry
                     battle_started_ts = time.time()
                     no_missiles_zero_streak = 0
+                    missiles_fired_since_padlock = 0
+                    last_missile_count_for_padlock = None
                 elif current_game_state != GameState.GAME_BATTLE:
                     no_missiles_zero_streak = 0
+                    _battle_states = {GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL}
+                    if prev_game_state in _battle_states and current_game_state not in _battle_states:
+                        target_tracker.reset()
 
             # Watchdog: if GAME_BATTLE not entered within 10 minutes, shut down wingman and PC.
             # Skipped in replay/capture modes. Uses `shutdown /s /t 0` which does not require
@@ -767,6 +793,20 @@ def main():
             missiles_snapshot = analyzer.get_ammo_missiles()
             if missiles_snapshot is not None and missiles_snapshot > 0:
                 no_missiles_zero_streak = 0
+
+            # Target-spread: when 2 cumulative missiles fired in GAME_BATTLE, press padlock twice
+            # to switch to the next target so missiles are spread across enemy jets.
+            if current_game_state == GameState.GAME_BATTLE and missiles_snapshot is not None:
+                if last_missile_count_for_padlock is not None and missiles_snapshot < last_missile_count_for_padlock:
+                    missiles_fired_since_padlock += last_missile_count_for_padlock - missiles_snapshot
+                    if missiles_fired_since_padlock >= 2:
+                        logger.info("Controller: %d missiles fired — switching padlock target", missiles_fired_since_padlock)
+                        ctrl.padlock_target_switch()
+                        missiles_fired_since_padlock = 0
+                if missiles_snapshot > (last_missile_count_for_padlock or 0):
+                    # Missiles reloaded — reset so we don't carry over a pre-reload partial count
+                    missiles_fired_since_padlock = 0
+                last_missile_count_for_padlock = missiles_snapshot
 
 
             # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
@@ -805,6 +845,8 @@ def main():
                         crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
                         visible_crop = analyzer.scan_region_for_play_button(frame) if crop else None
                         play_visible = visible_crop is not None
+                        if not play_visible:
+                            play_ever_absent = True
 
                         waiting_fallback_score, waiting_fallback_consecutive, fallback_triggered, _ = _update_waiting_fallback(
                             analyzer,
@@ -830,15 +872,20 @@ def main():
                             _reset_waiting_fallback()
                             continue
 
-                        if crop and time.time() - last_play_reclick_ts >= play_reclick_interval:
+                        # Use short interval when PLAY was never absent (click clearly missed).
+                        # Use long interval when PLAY disappeared at some point (matchmaking may still be active).
+                        effective_interval = play_reclick_interval if play_ever_absent else play_reclick_missed_interval
+                        if crop and time.time() - last_play_reclick_ts >= effective_interval:
                             # Only re-click if PLAY/READY is actually visible — clicking PLAY while
                             # matchmaking is in progress cancels it. If PLAY isn't visible the game
                             # is still processing the previous click; leave it alone.
                             if visible_crop:
+                                reason = "click missed" if not play_ever_absent else "returned from matchmaking"
                                 logger.info(
-                                    "GAME_WAITING: CANCEL not found (%.1fs) and %s visible — re-clicking",
-                                    elapsed_waiting, visible_crop)
+                                    "GAME_WAITING: CANCEL not found (%.1fs) and %s visible — re-clicking (%s)",
+                                    elapsed_waiting, visible_crop, reason)
                                 last_play_reclick_ts = time.time()
+                                play_ever_absent = False  # reset: treat next window as a fresh click
                                 ctrl.click_crop(analyzer.crops[visible_crop], block=False, count=1, region_name=visible_crop)
                             else:
                                 logger.debug(
@@ -847,8 +894,9 @@ def main():
                                 last_play_reclick_ts = time.time()  # reset timer to avoid spamming OCR
                         elif crop:
                             logger.debug(
-                                "GAME_WAITING: CANCEL not found (%.1fs) — waiting %.1fs before re-click",
-                                elapsed_waiting, play_reclick_interval - (time.time() - last_play_reclick_ts))
+                                "GAME_WAITING: CANCEL not found (%.1fs) — waiting %.1fs before re-click (%s)",
+                                elapsed_waiting, effective_interval - (time.time() - last_play_reclick_ts),
+                                "click missed" if not play_ever_absent else "returned from matchmaking")
 
             # GAME_END_B stall guard: if click-to OCR cache gets stuck, force recovery
             if (current_game_state == GameState.GAME_END_B
@@ -893,6 +941,36 @@ def main():
                     logger.info("\033[93m↩ No enemy in ENEMY_CLOSE_BY for 30s — disengaging\033[0m")
                     enemy_last_seen_ts = time.time()  # reset to avoid re-triggering
                     ctrl.disengage_roll_right()
+
+            # Target tracking — HSV contour detection + proportional roll correction.
+            # Only active during GAME_BATTLE (not GAME_BATTLE_MANUAL) and only when
+            # a mission is running (safety: no autonomous roll without mission control).
+            tracking_obs: "dict | None" = None
+            if (target_tracker.enabled
+                    and current_game_state == GameState.GAME_BATTLE
+                    and ctrl.is_mission_running()):
+                tracking_obs = target_tracker.update(frame)
+                err = tracking_obs.get("error_norm")
+                if err is not None and tracking_obs.get("visible"):
+                    cmd = ctrl.orient_nose_to_target(err, **_tracking_ctl_cfg)
+                    if cmd is not None:
+                        logger.debug(
+                            "Tracker: roll_%s  err=%.2f  mode=%s",
+                            cmd, err, tracking_obs["mode"],
+                        )
+
+            # HUD renderer — annotated snapshot; always runs in GAME_BATTLE when enabled.
+            if hud_renderer is not None and current_game_state in (
+                GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL
+            ):
+                hud_renderer.maybe_render(
+                    frame,
+                    tracking_obs,
+                    current_game_state.name,
+                    game_state.get("health"),
+                    analyzer.get_ammo_missiles(),
+                    analyzer.get_ammo_flares(),
+                )
 
             # Detect respawn
             if game_state.get('is_respawning'):

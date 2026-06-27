@@ -366,6 +366,7 @@ WINGSWEEP_KEY = 'w'
 SWITCH_WEAPON = 'g'
 SPECIAL_ABILITY = 'q'
 PADLOCK_CAMERA = 'p'
+ALT_FLIGHT_KEYS = ('up', 'down', 'left', 'right')  # Arrow keys also trigger GAME_BATTLE_MANUAL
 TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 MISSION_J20_KEY = 'u'  # Press U to start J20 mission
 MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
@@ -402,7 +403,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -426,11 +427,15 @@ class Controller:
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
 
+        # Target tracking: timestamp of last orient_nose_to_target command
+        self._last_orient_ts: float = 0.0
+
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
         self._weapon_loop_stop = threading.Event()
         self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
+        self._starting_max_wait_s = float(starting_max_wait_s)
 
         # Search-and-destroy loop state (padlock + weapon fire; used during disengage)
         self._sdl_stop: threading.Event | None = None
@@ -518,10 +523,12 @@ class Controller:
                         key_name=getattr(e, 'name', str(e)),
                         is_injected=getattr(e, 'is_injected', False),
                     )
-                for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY):
+                for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY, *ALT_FLIGHT_KEYS):
                     keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
-                logger.info("Controller: registered maneuver keys (%s/%s/%s/%s) to cancel mission on manual press",
-                            NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY)
+                logger.info(
+                    "Controller: registered maneuver keys (%s/%s/%s/%s) and arrow keys to cancel mission on manual press",
+                    NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+                )
             except Exception:
                 logger.exception("Controller: failed to register maneuver key hotkeys")
             try:
@@ -695,9 +702,14 @@ class Controller:
         """
         if is_injected:
             return False
-        with self._programmatic_key_lock:
-            if self._programmatic_key_count > 0:
-                return False
+        # _programmatic_key_count guards against is_injected being unreliable for keys
+        # wingman actually injects (i/j/k/l). Arrow keys are never injected, so skipping
+        # this check lets the user trigger manual takeover during continuous key holds
+        # (afterburner, roll) without needing to find a gap between mission key presses.
+        if key_name not in ALT_FLIGHT_KEYS:
+            with self._programmatic_key_lock:
+                if self._programmatic_key_count > 0:
+                    return False
         if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
             logger.debug(
                 "Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry",
@@ -853,6 +865,44 @@ class Controller:
         """Roll right by holding the configured roll-right key."""
         self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_right')
 
+    def orient_nose_to_target(
+        self,
+        error_norm: float,
+        *,
+        deadband: float = 0.05,
+        kp: float = 0.30,
+        min_hold_sec: float = 0.08,
+        max_hold_sec: float = 0.35,
+        cooldown_sec: float = 0.15,
+    ) -> "str | None":
+        """Apply proportional roll correction toward a target.
+
+        Args:
+            error_norm: Normalized horizontal error in [-1, 1].
+                        Negative = target left of center → roll left.
+                        Positive = target right of center → roll right.
+            deadband:   No-action zone around zero.
+            kp:         Proportional gain; hold_sec = kp * abs(error_norm).
+            min_hold_sec / max_hold_sec: Clamp bounds on the roll hold duration.
+            cooldown_sec: Minimum interval between consecutive roll commands.
+
+        Returns:
+            'left', 'right', or None if suppressed by deadband or cooldown.
+        """
+        if abs(error_norm) <= deadband:
+            return None
+        now = time.time()
+        if now - self._last_orient_ts < cooldown_sec:
+            return None
+        hold = float(min(max(kp * abs(error_norm), min_hold_sec), max_hold_sec))
+        self._last_orient_ts = now
+        if error_norm < 0:
+            self.roll_left(hold_seconds=hold, block=False)
+            return "left"
+        else:
+            self.roll_right(hold_seconds=hold, block=False)
+            return "right"
+
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
         self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares', ignore_cancel=ignore_cancel)
@@ -874,6 +924,21 @@ class Controller:
     def padlock_camera(self, hold_seconds: float = 0.1, block: bool = True):
         """Toggle padlock camera by pressing the configured padlock camera key."""
         self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block, action_name='padlock_camera')
+
+    def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
+        """Press padlock N times to cycle to a new target, then pause the auto-padlock loop briefly.
+
+        Called after every 2 missiles fired to spread shots across enemy jets rather than
+        concentrating all missiles on one target.
+        """
+        def _run():
+            for i in range(presses):
+                if i > 0:
+                    time.sleep(delay_between)
+                self.padlock_camera(hold_seconds=0.1, block=True)
+            # Give the padlock loop a short rest so it doesn't immediately re-lock the old target
+            self._padlock_cooldown_until = max(self._padlock_cooldown_until, time.time() + 2.0)
+        threading.Thread(target=_run, daemon=True).start()
 
     def fire_machine_gun(self, hold_seconds: float = 1.0, block: bool = True):
         """Fire machine gun by holding the configured machine-gun key."""
@@ -1581,6 +1646,11 @@ class Controller:
         Every 5 seconds: press MISSION_J20_KEY and scan the good_luck region for 'Good Luck'.
         Once detected, wait 10 seconds then launch mission_j20.
         """
+        # Clear any stale cancel from prior states (mirrors mission_j20 / mission_loiter pattern).
+        # cancel_mission() is called on on_enter_GAME_LOBBY; without this clear the loop
+        # would see the flag already set and exit immediately.
+        self._mission_cancel.clear()
+
         good_luck_event = threading.Event()
         ocr_running = threading.Event()
 
@@ -1606,12 +1676,13 @@ class Controller:
 
         def _in_starting():
             return (self._analyzer is not None
-                    and self._analyzer.game_state == GameState.GAME_STARTING)
+                    and self._analyzer.game_state == GameState.GAME_STARTING
+                    and not self._mission_cancel.is_set())
 
         def _loop():
             logger.info("Controller: game_starting loop started - pressing '%s' key every 5s until 'Good Luck' detected", MISSION_J20_KEY)
             loop_start = time.time()
-            max_wait = 180  # safety timeout: GAME_STARTING → GAME_STARTING_STALLED if Good Luck never detected
+            max_wait = self._starting_max_wait_s  # safety timeout: GAME_STARTING → GAME_STARTING_STALLED if Good Luck never detected
             health_scan_armed = False
             try:
                 while _in_starting():
@@ -1648,6 +1719,11 @@ class Controller:
                             return
 
                     if not _in_starting():
+                        # If cancel fired while FSM is still GAME_STARTING, push it to stalled.
+                        if (self._mission_cancel.is_set()
+                                and self._analyzer is not None
+                                and self._analyzer.game_state == GameState.GAME_STARTING):
+                            self._analyzer.trigger_event("starting_timeout")
                         return
 
                     if time.time() - loop_start > max_wait:
@@ -1679,12 +1755,11 @@ class Controller:
         threading.Thread(target=_loop, daemon=True).start()
 
     def restart_last_mission(self):
-        """Restart the most recently started mission.
+        """Restart the most recently started mission, defaulting to J20 when none recorded.
 
         Returns:
-            True  — mission was successfully restarted.
+            True  — mission was successfully restarted (or started as j20 default).
             False — mission is currently running (lock held); restart skipped.
-            None  — no previous mission has been recorded; nothing to restart.
         """
         if self.is_mission_running():
             logger.warning("\033[91mController: cannot restart mission - previous mission still in progress (lock held)\033[0m")
@@ -1702,8 +1777,12 @@ class Controller:
             threading.Thread(target=self.mission_loiter, daemon=True).start()
             return True
 
-        logger.info("Controller: no last mission to restart")
-        return None  # None = no previous mission (distinct from False = failed/locked)
+        # No prior mission recorded — reached GAME_BATTLE via GAME_UNKNOWN (Good Luck
+        # not detected, stalled start). Default to j20 rather than doing nothing.
+        logger.info("Controller: no prior mission recorded — defaulting to J20")
+        self._set_last_mission("j20")
+        threading.Thread(target=self.mission_j20, daemon=True).start()
+        return True
 
     def cleanup(self):
         """Deregister all keyboard hooks registered by this controller."""
