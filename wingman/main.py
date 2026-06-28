@@ -737,7 +737,7 @@ def main():
                     _stop_ev = threading.Event()
                     lobby_escape_stop = _stop_ev
                     def _lobby_escape_loop(_stop=_stop_ev):
-                        while not _stop.wait(timeout=30.0):
+                        while not _stop.wait(timeout=45.0):
                             if analyzer.game_state != GameState.GAME_LOBBY:
                                 return
                             logger.info("GAME_LOBBY escape loop: pressing ESC")
