@@ -712,7 +712,7 @@ class Controller:
                     return False
         if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
             logger.debug(
-                "Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry",
+                "Controller: Maneuver key '%s' ignored — within 2s grace period of battle or eject entry",
                 key_name,
             )
             return False
@@ -725,7 +725,7 @@ class Controller:
         self.cancel_mission()
         if self._analyzer is not None:
             try:
-                if self._analyzer.game_state == GameState.GAME_BATTLE:
+                if self._analyzer.game_state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
                     # Capture the pre-transition frame for live capture (P2_020).
                     # Frame is grabbed BEFORE trigger_event so the screenshot still
                     # shows the GAME_BATTLE HUD.
@@ -953,15 +953,19 @@ class Controller:
         logger.info("\033[93m🔥 Reloading flares via SPECIAL_ABILITY key\033[0m")
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
 
-    def eject_and_dive(self):
+    def eject_and_dive(self, on_complete=None):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
         NOSE_DOWN is held for x seconds then released.
         AFTERBURNER is held until respawn is detected (or a 120s safety timeout).
+        on_complete: optional callable invoked in the finally block after all keys are released.
         """
         logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
         self._eject_stop.clear()
+        # Reset the grace-period timestamp so buffered/held flight keys (e.g. 'k' on key-repeat
+        # from normal gameplay) cannot cancel the eject within the first 2 seconds of starting it.
+        self._game_battle_since = time.time()
         # Force health state to dead so the False→True transition fires when
         # health is detected again after respawn, triggering mission restart.
         if self._analyzer is not None:
@@ -973,11 +977,6 @@ class Controller:
                     self._analyzer._health_no_digits_since = 0.0
                 finally:
                     self._analyzer._health_lock.release()
-
-        def _is_respawning() -> bool:
-            if self._analyzer is None:
-                return False
-            return self._analyzer.game_battle_alive
 
         def _run():
             self._ejecting.set()
@@ -1001,31 +1000,28 @@ class Controller:
                     keyboard_module.press(AFTERBURNER_KEY)
                 logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
 
-                # Hold nose-down for 10s then release; afterburner stays on.
-                # Check _eject_stop every 0.25s so End key cancels promptly.
-                if self._eject_stop.wait(timeout=5.0):
-                    logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
-                    return
-                if self._simulate_os_input:
-                    self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
-                else:
-                    try:
-                        keyboard_module.release(NOSE_DOWN_KEY)
-                    except Exception:
-                        pass
-                logger.info("Controller: eject_and_dive — nose-down released, holding afterburner until respawn")
+                # Hold nose-down for 5s then release; afterburner stays on.
+                if not self._eject_stop.wait(timeout=5.0):
+                    if self._simulate_os_input:
+                        self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
+                    else:
+                        try:
+                            keyboard_module.release(NOSE_DOWN_KEY)
+                        except Exception:
+                            pass
+                    logger.info("Controller: eject_and_dive — nose-down released, holding afterburner until respawn")
 
-                # Hold afterburner until respawn detected (max 120s)
-                deadline = time.time() + 120.0
-                while time.time() < deadline:
-                    if self._eject_stop.wait(timeout=0.5):
-                        logger.info("Controller: eject_and_dive — cancelled by End key")
-                        return
-                    if _is_respawning():
-                        logger.info("Controller: eject_and_dive — respawn detected, releasing afterburner")
-                        break
+                    # Hold afterburner until respawn screen detected (stop_eject_sequence sets _eject_stop)
+                    # or 120s safety timeout. _is_respawning() is not used here because the player may be
+                    # alive (health > 0) when the eject starts; relying on it exits the loop immediately.
+                    deadline = time.time() + 120.0
+                    while time.time() < deadline:
+                        if self._eject_stop.wait(timeout=0.5):
+                            break
+                    else:
+                        logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
                 else:
-                    logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
+                    logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
             finally:
                 self._ejecting.clear()
                 if self._simulate_os_input:
@@ -1040,7 +1036,12 @@ class Controller:
                         keyboard_module.release(NOSE_DOWN_KEY)
                     except Exception:
                         pass
-            logger.info("Controller: eject_and_dive complete")
+                logger.info("Controller: eject_and_dive complete")
+                if on_complete is not None:
+                    try:
+                        on_complete()
+                    except Exception:
+                        logger.exception("Controller: eject_and_dive on_complete callback failed")
 
         threading.Thread(target=_run, daemon=True).start()
 

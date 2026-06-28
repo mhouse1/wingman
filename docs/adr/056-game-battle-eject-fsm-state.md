@@ -2,7 +2,7 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft    | 2026-06-28 | 1.6.22          |
+| Draft | 2026-06-28 | 1.6.22          |
 
 ## Context
 
@@ -142,18 +142,19 @@ This ensures `target_tracker.reset()` is not called on the `GAME_BATTLE → GAME
 
 ## Implementation checklist
 
-- [ ] `analyzer.py` — add `GAME_BATTLE_EJECT` to `GameState` enum
-- [ ] `analyzer.py` — add `GAME_BATTLE_EJECT` entry to `_STATE_CROPS`
-- [ ] `analyzer.py` — add `eject_started` and `eject_complete` to FSM transition table
-- [ ] `analyzer.py` — extend `click_to_detected` and `manual_takeover` source lists
-- [ ] `analyzer.py` — add `on_enter_GAME_BATTLE_EJECT` log method
-- [ ] `analyzer.py` — verify `ignore_invalid_triggers` machine config; if absent, guard `eject_complete` callback
-- [ ] `controller.py` — add `on_complete=None` parameter to `eject_and_dive()`; call in `finally`
-- [ ] `controller.py` — extend manual takeover gate from `== GAME_BATTLE` to `in (..., GAME_BATTLE_EJECT)`
-- [ ] `main.py` — fire `eject_started` before `ctrl.eject_and_dive()` in `_handle_no_missiles()`
-- [ ] `main.py` — pass `on_complete` callback to `ctrl.eject_and_dive()`
-- [ ] `main.py` — add `GAME_BATTLE_EJECT` to `_battle_states`
-- [ ] `tests/runtime_replay_validate.py` and `runtime_live_validate.py` — update to expect `GAME_BATTLE_EJECT` state name in transition log markers
+- [x] `analyzer.py` — add `GAME_BATTLE_EJECT` to `GameState` enum
+- [x] `analyzer.py` — add `GAME_BATTLE_EJECT` entry to `_STATE_CROPS`
+- [x] `analyzer.py` — add `eject_started` and `eject_complete` to FSM transition table
+- [x] `analyzer.py` — extend `click_to_detected` and `manual_takeover` source lists
+- [x] `analyzer.py` — add `on_enter_GAME_BATTLE_EJECT` log method
+- [x] `analyzer.py` — `ignore_invalid_triggers=False` confirmed; `eject_complete` callback guarded with state check in `main.py`
+- [x] `controller.py` — add `on_complete=None` parameter to `eject_and_dive()`; call after key release
+- [x] `controller.py` — extend manual takeover gate from `== GAME_BATTLE` to `in (..., GAME_BATTLE_EJECT)`
+- [x] `main.py` — fire `eject_started` before `ctrl.eject_and_dive()` in `_handle_no_missiles()`
+- [x] `main.py` — pass `on_complete` callback to `ctrl.eject_and_dive()`
+- [x] `main.py` — add `GAME_BATTLE_EJECT` to `_battle_states`
+- [x] `analyzer.py` — add `GAME_BATTLE_EJECT` to background OCR state gate so respawn detection runs during eject (without this, eject loop never saw `game_battle_alive=True` and ran until 120s timeout)
+- [x] `tests/runtime_replay_validate.py` and `runtime_live_validate.py` — confirmed no changes needed; `missiles_empty` capture event unchanged; `PASS` after OCR gate fix
 
 ## Consequences
 

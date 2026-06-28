@@ -27,6 +27,7 @@ class GameState(Enum):
     GAME_STARTING        = auto()  # Matchmaking confirmed; waiting for "Good Luck" before launching mission
     GAME_STARTING_STALLED = auto() # GAME_STARTING timed out without "Good Luck" detection
     GAME_BATTLE_MANUAL   = auto()  # Player took manual control; auto-mission restart suppressed
+    GAME_BATTLE_EJECT    = auto()  # Eject sequence active (missiles empty); respawn detection only
 
 try:
     import easyocr
@@ -466,6 +467,9 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
         "respawn", "incoming", "click_to",
         "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY",
     },
+    GameState.GAME_BATTLE_EJECT: {
+        "respawn", "health", "ammo_missiles",
+    },
 }
 
 
@@ -486,9 +490,11 @@ _FSM_TRANSITIONS = [
     {"trigger": "starting_stalled_reclassify", "source": "GAME_STARTING_STALLED", "dest": "GAME_UNKNOWN"},
     {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
     {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
-    {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL"], "dest": "GAME_END_B"},
-    {"trigger": "manual_takeover",    "source": "GAME_BATTLE",            "dest": "GAME_BATTLE_MANUAL"},
+    {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL", "GAME_BATTLE_EJECT"], "dest": "GAME_END_B"},
+    {"trigger": "manual_takeover",    "source": ["GAME_BATTLE", "GAME_BATTLE_EJECT"], "dest": "GAME_BATTLE_MANUAL"},
     {"trigger": "respawn_reset",      "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
+    {"trigger": "eject_started",      "source": "GAME_BATTLE",            "dest": "GAME_BATTLE_EJECT"},
+    {"trigger": "eject_complete",     "source": "GAME_BATTLE_EJECT",      "dest": "GAME_BATTLE"},
     {"trigger": "manual_force_battle", "source": "*",                    "dest": "GAME_BATTLE"},
     {"trigger": "manual_reset",       "source": "*",                     "dest": "GAME_LOBBY"},
     {"trigger": "continue_clicked",   "source": ["GAME_END_B", "GAME_BATTLE_MANUAL"], "dest": "GAME_LOBBY"},
@@ -620,6 +626,7 @@ class GameStateAnalyzer:
         self._on_start_game_starting_loop = None  # injected by main.py after construction
         self._on_lobby_play_click = None         # injected by main.py; called with crop name when PLAY/READY detected
         self._on_lobby_popup_click = None        # injected by main.py; called with popup crop name when a popup is detected
+        self._on_lobby_stall = None              # injected by main.py; called when no lobby crops detected for 10s
         self._on_fsm_transition = None           # injected by main.py; called after successful state transitions
         self._on_respawn_detected = None          # injected by main.py; called with the OCR frame when RESPAWN is first detected
         self._unknown_debounce_required = max(1, int(startup_cfg.get("debounce_consecutive_required", 2)))
@@ -782,6 +789,10 @@ class GameStateAnalyzer:
         """Set callback invoked with popup crop names from lobby quick-scan."""
         self._on_lobby_popup_click = callback
 
+    def set_on_lobby_stall(self, callback):
+        """Set callback invoked when no lobby crops detected for 10s (stall recovery)."""
+        self._on_lobby_stall = callback
+
     def set_on_fsm_transition(self, callback):
         """Set callback invoked after successful FSM transitions.
 
@@ -934,6 +945,9 @@ class GameStateAnalyzer:
 
     def on_enter_GAME_BATTLE_MANUAL(self):
         logger.info("FSM: entering GAME_BATTLE_MANUAL — manual takeover active, auto-restart suppressed")
+
+    def on_enter_GAME_BATTLE_EJECT(self):
+        logger.info("FSM: entering GAME_BATTLE_EJECT — eject sequence active")
 
     def on_enter_GAME_STARTING_STALLED(self):
         logger.warning("FSM: GAME_STARTING → GAME_STARTING_STALLED (Good Luck not detected in time)")
@@ -1203,7 +1217,7 @@ class GameStateAnalyzer:
                     return
 
                 state = self.game_state
-                if state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_END_B):
+                if state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_END_B, GameState.GAME_BATTLE_EJECT):
                     # Extract respawn, incoming, health, and ammo crops (click_to has its own thread)
                     respawn_frame = get_crop(full_frame, *self.crops["respawn"][:4])
                     incoming_frame = get_crop(full_frame, *self.crops["incoming"][:4])
@@ -1526,7 +1540,7 @@ class GameStateAnalyzer:
                     self._click_to_cache['result'] = result
                     self._click_to_cache['timestamp'] = time.time()
                 if click_to_detected:
-                    if self.game_state == GameState.GAME_BATTLE:
+                    if self.game_state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
                         self._trigger("click_to_detected")
                     logger.debug("Analyzer: detected 'Click to' text (matched: '%s') → GAME_END_B", click_to_text)
             except RuntimeError:
@@ -1558,6 +1572,7 @@ class GameStateAnalyzer:
             return
 
         last_popup_scan_ts = 0.0
+        lobby_stall_since = 0.0  # timestamp when stall (no crops detected) first started
 
         while not self._lobby_quick_scan_stop.wait(timeout=1.0):
             cycle_start = time.time()
@@ -1685,7 +1700,22 @@ class GameStateAnalyzer:
                         break
 
                     if not handled and lobby_futures:
-                        logger.info("Lobby quick-scan: no lobby crops detected")
+                        if lobby_stall_since == 0.0:
+                            lobby_stall_since = time.time()
+                        elapsed_stall = time.time() - lobby_stall_since
+                        logger.info(
+                            "Lobby quick-scan: no lobby crops detected (stalled %.1fs)",
+                            elapsed_stall,
+                        )
+                        if elapsed_stall >= 10.0 and self._on_lobby_stall is not None:
+                            logger.info("Lobby quick-scan: stall threshold reached — pressing ESC")
+                            try:
+                                self._on_lobby_stall()
+                            except Exception:
+                                logger.exception("Lobby quick-scan: _on_lobby_stall callback failed")
+                            lobby_stall_since = time.time()  # cooldown: next press after another 10s
+                    elif handled:
+                        lobby_stall_since = 0.0
 
                 if lobby_futures and lobby_scan_start is not None:
                     logger.debug(

@@ -416,6 +416,7 @@ def main():
             threading.Thread(target=_click_ready_after_invite, daemon=True).start()
 
     analyzer.set_on_lobby_popup_click(_handle_lobby_popup)
+    analyzer.set_on_lobby_stall(lambda: ctrl.press_escape(hold_seconds=0.05, block=False))
 
     stats_tracker: "MissionStatsTracker | None" = None
 
@@ -584,7 +585,14 @@ def main():
 
         no_missiles_zero_streak = 0
         _emit_capture_event("missiles_empty")
-        ctrl.eject_and_dive()
+        analyzer.trigger_event("eject_started")
+        ctrl.eject_and_dive(
+            on_complete=lambda: (
+                analyzer.trigger_event("eject_complete")
+                if analyzer.game_state == GameState.GAME_BATTLE_EJECT
+                else None
+            )
+        )
 
     def _deploy_flares_on_new_incoming() -> bool:
         """Deploy flares in a burst when a new incoming OCR detection arrives."""
@@ -770,7 +778,7 @@ def main():
                     last_missile_count_for_padlock = None
                 elif current_game_state != GameState.GAME_BATTLE:
                     no_missiles_zero_streak = 0
-                    _battle_states = {GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL}
+                    _battle_states = {GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_BATTLE_EJECT}
                     if prev_game_state in _battle_states and current_game_state not in _battle_states:
                         target_tracker.reset()
 
