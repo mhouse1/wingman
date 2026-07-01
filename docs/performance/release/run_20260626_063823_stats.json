@@ -1,0 +1,118 @@
+{
+  "wingman_version": "1.6.22",
+  "run_id": "20260626_063823",
+  "session_start_ts": 1782470304.002,
+  "session_duration_s": 3409.4,
+  "missions_started": 9,
+  "missions_click_to": 0,
+  "missions_missiles_empty": 9,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 22,
+  "total_flare_bursts": 59,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 4,
+  "avg_mission_duration_s": 256.2,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1782470435.114,
+      "duration_s": 237.2,
+      "respawn_count": 3,
+      "flare_burst_count": 2,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 1,
+      "start_ts": 1782470755.262,
+      "duration_s": 276.6,
+      "respawn_count": 2,
+      "flare_burst_count": 7,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 1,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 2,
+      "start_ts": 1782471079.925,
+      "duration_s": 245.5,
+      "respawn_count": 4,
+      "flare_burst_count": 21,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 1,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 3,
+      "start_ts": 1782471456.374,
+      "duration_s": 149.2,
+      "respawn_count": 1,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 4,
+      "start_ts": 1782471840.137,
+      "duration_s": 254.6,
+      "respawn_count": 3,
+      "flare_burst_count": 12,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 1,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 5,
+      "start_ts": 1782472151.839,
+      "duration_s": 371.2,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 1,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 6,
+      "start_ts": 1782472705.845,
+      "duration_s": 225.5,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 7,
+      "start_ts": 1782472980.424,
+      "duration_s": 276.2,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 8,
+      "start_ts": 1782473386.828,
+      "duration_s": 270.1,
+      "respawn_count": 2,
+      "flare_burst_count": 17,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "missiles_empty"
+    }
+  ],
+  "stats_path": "docs/performance/current/run_20260626_063823_stats.json"
+}
