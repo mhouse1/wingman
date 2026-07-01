@@ -1,0 +1,18 @@
+{
+  "wingman_version": "1.6.22",
+  "run_id": "20260630_213910",
+  "session_start_ts": 1782869950.749,
+  "session_duration_s": 53.5,
+  "missions_started": 0,
+  "missions_click_to": 0,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 0,
+  "total_flare_bursts": 0,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 0,
+  "avg_mission_duration_s": null,
+  "missions": [],
+  "stats_path": "docs/performance/current/run_20260630_213910_stats.json"
+}

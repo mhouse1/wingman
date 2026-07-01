@@ -286,6 +286,18 @@ class _LinuxXTestKeyboard:
             self._ctrl_display = d_ctrl
             self._record_ctx = ctx
 
+            # Watcher: unblocks record_enable_context when _stop is set (e.g. on
+            # abnormal exit where cleanup() never runs).
+            def _stop_watcher():
+                self._stop.wait()
+                try:
+                    d_ctrl.record_disable_context(ctx)
+                    d_ctrl.flush()
+                except Exception:
+                    pass
+
+            threading.Thread(target=_stop_watcher, daemon=True, name="XKeyListener-stop").start()
+
             _ef = _rq.EventField(None)
 
             def _record_handler(reply):
@@ -354,6 +366,7 @@ WINGSWEEP_KEY = 'w'
 SWITCH_WEAPON = 'g'
 SPECIAL_ABILITY = 'q'
 PADLOCK_CAMERA = 'p'
+ALT_FLIGHT_KEYS = ('up', 'down', 'left', 'right')  # Arrow keys also trigger GAME_BATTLE_MANUAL
 TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 MISSION_J20_KEY = 'u'  # Press U to start J20 mission
 MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
@@ -390,7 +403,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -414,11 +427,15 @@ class Controller:
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
 
+        # Target tracking: timestamp of last orient_nose_to_target command
+        self._last_orient_ts: float = 0.0
+
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
         self._weapon_loop_thread = None
         self._weapon_loop_stop = threading.Event()
         self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
+        self._starting_max_wait_s = float(starting_max_wait_s)
 
         # Search-and-destroy loop state (padlock + weapon fire; used during disengage)
         self._sdl_stop: threading.Event | None = None
@@ -506,10 +523,12 @@ class Controller:
                         key_name=getattr(e, 'name', str(e)),
                         is_injected=getattr(e, 'is_injected', False),
                     )
-                for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY):
+                for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY, *ALT_FLIGHT_KEYS):
                     keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
-                logger.info("Controller: registered maneuver keys (%s/%s/%s/%s) to cancel mission on manual press",
-                            NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY)
+                logger.info(
+                    "Controller: registered maneuver keys (%s/%s/%s/%s) and arrow keys to cancel mission on manual press",
+                    NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+                )
             except Exception:
                 logger.exception("Controller: failed to register maneuver key hotkeys")
             try:
@@ -683,12 +702,17 @@ class Controller:
         """
         if is_injected:
             return False
-        with self._programmatic_key_lock:
-            if self._programmatic_key_count > 0:
-                return False
+        # _programmatic_key_count guards against is_injected being unreliable for keys
+        # wingman actually injects (i/j/k/l). Arrow keys are never injected, so skipping
+        # this check lets the user trigger manual takeover during continuous key holds
+        # (afterburner, roll) without needing to find a gap between mission key presses.
+        if key_name not in ALT_FLIGHT_KEYS:
+            with self._programmatic_key_lock:
+                if self._programmatic_key_count > 0:
+                    return False
         if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
             logger.debug(
-                "Controller: Maneuver key '%s' ignored — within 2s grace period of GAME_BATTLE entry",
+                "Controller: Maneuver key '%s' ignored — within 2s grace period of battle or eject entry",
                 key_name,
             )
             return False
@@ -701,7 +725,7 @@ class Controller:
         self.cancel_mission()
         if self._analyzer is not None:
             try:
-                if self._analyzer.game_state == GameState.GAME_BATTLE:
+                if self._analyzer.game_state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
                     # Capture the pre-transition frame for live capture (P2_020).
                     # Frame is grabbed BEFORE trigger_event so the screenshot still
                     # shows the GAME_BATTLE HUD.
@@ -841,6 +865,44 @@ class Controller:
         """Roll right by holding the configured roll-right key."""
         self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_right')
 
+    def orient_nose_to_target(
+        self,
+        error_norm: float,
+        *,
+        deadband: float = 0.05,
+        kp: float = 0.30,
+        min_hold_sec: float = 0.08,
+        max_hold_sec: float = 0.35,
+        cooldown_sec: float = 0.15,
+    ) -> "str | None":
+        """Apply proportional roll correction toward a target.
+
+        Args:
+            error_norm: Normalized horizontal error in [-1, 1].
+                        Negative = target left of center → roll left.
+                        Positive = target right of center → roll right.
+            deadband:   No-action zone around zero.
+            kp:         Proportional gain; hold_sec = kp * abs(error_norm).
+            min_hold_sec / max_hold_sec: Clamp bounds on the roll hold duration.
+            cooldown_sec: Minimum interval between consecutive roll commands.
+
+        Returns:
+            'left', 'right', or None if suppressed by deadband or cooldown.
+        """
+        if abs(error_norm) <= deadband:
+            return None
+        now = time.time()
+        if now - self._last_orient_ts < cooldown_sec:
+            return None
+        hold = float(min(max(kp * abs(error_norm), min_hold_sec), max_hold_sec))
+        self._last_orient_ts = now
+        if error_norm < 0:
+            self.roll_left(hold_seconds=hold, block=False)
+            return "left"
+        else:
+            self.roll_right(hold_seconds=hold, block=False)
+            return "right"
+
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
         self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares', ignore_cancel=ignore_cancel)
@@ -863,6 +925,21 @@ class Controller:
         """Toggle padlock camera by pressing the configured padlock camera key."""
         self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block, action_name='padlock_camera')
 
+    def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
+        """Press padlock N times to cycle to a new target, then pause the auto-padlock loop briefly.
+
+        Called after every 2 missiles fired to spread shots across enemy jets rather than
+        concentrating all missiles on one target.
+        """
+        def _run():
+            for i in range(presses):
+                if i > 0:
+                    time.sleep(delay_between)
+                self.padlock_camera(hold_seconds=0.1, block=True)
+            # Give the padlock loop a short rest so it doesn't immediately re-lock the old target
+            self._padlock_cooldown_until = max(self._padlock_cooldown_until, time.time() + 2.0)
+        threading.Thread(target=_run, daemon=True).start()
+
     def fire_machine_gun(self, hold_seconds: float = 1.0, block: bool = True):
         """Fire machine gun by holding the configured machine-gun key."""
         self._execute_key_press(FIRE_MACHINE_GUN, hold_seconds=hold_seconds, block=block, action_name='fire_machine_gun')
@@ -876,26 +953,30 @@ class Controller:
         logger.info("\033[93m🔥 Reloading flares via SPECIAL_ABILITY key\033[0m")
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
 
-    def eject_and_dive(self):
+    def eject_and_dive(self, on_complete=None):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
         NOSE_DOWN is held for x seconds then released.
         AFTERBURNER is held until respawn is detected (or a 120s safety timeout).
+        on_complete: optional callable invoked in the finally block after all keys are released.
         """
         logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
         self._eject_stop.clear()
+        # Reset the grace-period timestamp so buffered/held flight keys (e.g. 'k' on key-repeat
+        # from normal gameplay) cannot cancel the eject within the first 2 seconds of starting it.
+        self._game_battle_since = time.time()
         # Force health state to dead so the False→True transition fires when
         # health is detected again after respawn, triggering mission restart.
         if self._analyzer is not None:
-            with self._analyzer._health_lock:
-                self._analyzer._game_battle_alive = False
-                self._analyzer._health_no_digits_since = 0.0
-
-        def _is_respawning() -> bool:
-            if self._analyzer is None:
-                return False
-            return self._analyzer.game_battle_alive
+            if not self._analyzer._health_lock.acquire(timeout=1.0):
+                logger.warning("eject_and_dive: _health_lock timeout — skipping health reset")
+            else:
+                try:
+                    self._analyzer._game_battle_alive = False
+                    self._analyzer._health_no_digits_since = 0.0
+                finally:
+                    self._analyzer._health_lock.release()
 
         def _run():
             self._ejecting.set()
@@ -919,31 +1000,28 @@ class Controller:
                     keyboard_module.press(AFTERBURNER_KEY)
                 logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
 
-                # Hold nose-down for 10s then release; afterburner stays on.
-                # Check _eject_stop every 0.25s so End key cancels promptly.
-                if self._eject_stop.wait(timeout=5.0):
-                    logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
-                    return
-                if self._simulate_os_input:
-                    self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
-                else:
-                    try:
-                        keyboard_module.release(NOSE_DOWN_KEY)
-                    except Exception:
-                        pass
-                logger.info("Controller: eject_and_dive — nose-down released, holding afterburner until respawn")
+                # Hold nose-down for 5s then release; afterburner stays on.
+                if not self._eject_stop.wait(timeout=5.0):
+                    if self._simulate_os_input:
+                        self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
+                    else:
+                        try:
+                            keyboard_module.release(NOSE_DOWN_KEY)
+                        except Exception:
+                            pass
+                    logger.info("Controller: eject_and_dive — nose-down released, holding afterburner until respawn")
 
-                # Hold afterburner until respawn detected (max 120s)
-                deadline = time.time() + 120.0
-                while time.time() < deadline:
-                    if self._eject_stop.wait(timeout=0.5):
-                        logger.info("Controller: eject_and_dive — cancelled by End key")
-                        return
-                    if _is_respawning():
-                        logger.info("Controller: eject_and_dive — respawn detected, releasing afterburner")
-                        break
+                    # Hold afterburner until respawn screen detected (stop_eject_sequence sets _eject_stop)
+                    # or 120s safety timeout. _is_respawning() is not used here because the player may be
+                    # alive (health > 0) when the eject starts; relying on it exits the loop immediately.
+                    deadline = time.time() + 120.0
+                    while time.time() < deadline:
+                        if self._eject_stop.wait(timeout=0.5):
+                            break
+                    else:
+                        logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
                 else:
-                    logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
+                    logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
             finally:
                 self._ejecting.clear()
                 if self._simulate_os_input:
@@ -958,7 +1036,12 @@ class Controller:
                         keyboard_module.release(NOSE_DOWN_KEY)
                     except Exception:
                         pass
-            logger.info("Controller: eject_and_dive complete")
+                logger.info("Controller: eject_and_dive complete")
+                if on_complete is not None:
+                    try:
+                        on_complete()
+                    except Exception:
+                        logger.exception("Controller: eject_and_dive on_complete callback failed")
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1085,8 +1168,6 @@ class Controller:
         if interval is not None:
             self._weapon_loop_interval = float(interval)
         
-        # Clear mission cancel flag so weapon loop can fire properly
-        self._mission_cancel.clear()
         self._weapon_loop_active = True
         self._weapon_loop_stop.clear()
 
@@ -1095,7 +1176,13 @@ class Controller:
             try:
                 while True:
                     try:
-                        self.fire_active_weapon(hold_seconds=0.1, block=True)
+                        self._execute_key_press(
+                            FIRE_ACTIVE_WEAPON,
+                            hold_seconds=0.1,
+                            block=True,
+                            action_name="fire_active_weapon",
+                            ignore_cancel=True,
+                        )
                     except Exception as e:
                         logger.warning("Controller: weapon loop fire failed: %s", e)
                     if self._weapon_loop_stop.wait(timeout=self._weapon_loop_interval):
@@ -1350,9 +1437,14 @@ class Controller:
 
                 if sys.platform != "win32":
                     # Linux: compute absolute coords from game window offset
-                    offset = self._capture.game_screen_offset
+                    offset = None
+                    for _attempt in range(3):
+                        offset = self._capture.game_screen_offset
+                        if offset is not None:
+                            break
+                        time.sleep(0.05)
                     if offset is None:
-                        logger.error("click_grid_region: game window offset not known yet")
+                        logger.error("click_grid_region: game window offset not known yet (3 retries)")
                         return
                     game_ox, game_oy = offset
                     abs_x = int(game_ox + (col_idx + 0.5) * cell_w)
@@ -1459,9 +1551,14 @@ class Controller:
 
                 if sys.platform != "win32":
                     # Linux: compute absolute coords from game window offset
-                    offset = self._capture.game_screen_offset
+                    offset = None
+                    for _attempt in range(3):
+                        offset = self._capture.game_screen_offset
+                        if offset is not None:
+                            break
+                        time.sleep(0.05)
                     if offset is None:
-                        logger.error("click_crop: game window offset not known yet")
+                        logger.error("click_crop: game window offset not known yet (3 retries)")
                         return
                     game_ox, game_oy = offset
                     abs_x, abs_y = crop_centre(coords, cap_w, cap_h, game_ox, game_oy)
@@ -1550,6 +1647,11 @@ class Controller:
         Every 5 seconds: press MISSION_J20_KEY and scan the good_luck region for 'Good Luck'.
         Once detected, wait 10 seconds then launch mission_j20.
         """
+        # Clear any stale cancel from prior states (mirrors mission_j20 / mission_loiter pattern).
+        # cancel_mission() is called on on_enter_GAME_LOBBY; without this clear the loop
+        # would see the flag already set and exit immediately.
+        self._mission_cancel.clear()
+
         good_luck_event = threading.Event()
         ocr_running = threading.Event()
 
@@ -1575,12 +1677,13 @@ class Controller:
 
         def _in_starting():
             return (self._analyzer is not None
-                    and self._analyzer.game_state == GameState.GAME_STARTING)
+                    and self._analyzer.game_state == GameState.GAME_STARTING
+                    and not self._mission_cancel.is_set())
 
         def _loop():
             logger.info("Controller: game_starting loop started - pressing '%s' key every 5s until 'Good Luck' detected", MISSION_J20_KEY)
             loop_start = time.time()
-            max_wait = 180  # safety timeout: GAME_STARTING → GAME_STARTING_STALLED if Good Luck never detected
+            max_wait = self._starting_max_wait_s  # safety timeout: GAME_STARTING → GAME_STARTING_STALLED if Good Luck never detected
             health_scan_armed = False
             try:
                 while _in_starting():
@@ -1617,6 +1720,11 @@ class Controller:
                             return
 
                     if not _in_starting():
+                        # If cancel fired while FSM is still GAME_STARTING, push it to stalled.
+                        if (self._mission_cancel.is_set()
+                                and self._analyzer is not None
+                                and self._analyzer.game_state == GameState.GAME_STARTING):
+                            self._analyzer.trigger_event("starting_timeout")
                         return
 
                     if time.time() - loop_start > max_wait:
@@ -1648,12 +1756,11 @@ class Controller:
         threading.Thread(target=_loop, daemon=True).start()
 
     def restart_last_mission(self):
-        """Restart the most recently started mission.
+        """Restart the most recently started mission, defaulting to J20 when none recorded.
 
         Returns:
-            True  — mission was successfully restarted.
+            True  — mission was successfully restarted (or started as j20 default).
             False — mission is currently running (lock held); restart skipped.
-            None  — no previous mission has been recorded; nothing to restart.
         """
         if self.is_mission_running():
             logger.warning("\033[91mController: cannot restart mission - previous mission still in progress (lock held)\033[0m")
@@ -1671,8 +1778,12 @@ class Controller:
             threading.Thread(target=self.mission_loiter, daemon=True).start()
             return True
 
-        logger.info("Controller: no last mission to restart")
-        return None  # None = no previous mission (distinct from False = failed/locked)
+        # No prior mission recorded — reached GAME_BATTLE via GAME_UNKNOWN (Good Luck
+        # not detected, stalled start). Default to j20 rather than doing nothing.
+        logger.info("Controller: no prior mission recorded — defaulting to J20")
+        self._set_last_mission("j20")
+        threading.Thread(target=self.mission_j20, daemon=True).start()
+        return True
 
     def cleanup(self):
         """Deregister all keyboard hooks registered by this controller."""

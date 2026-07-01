@@ -65,7 +65,7 @@ preflight:
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_mission_cancel.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:

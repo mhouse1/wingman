@@ -61,10 +61,7 @@ def _load_json(path: Path) -> Optional[dict]:
 def _version_sort_key(version: str) -> tuple:
     parts = []
     for token in version.split("."):
-        if token.isdigit():
-            parts.append(int(token))
-        else:
-            parts.append(token)
+        parts.append(int(token) if token.isdigit() else -1)
     return tuple(parts)
 
 
