@@ -234,117 +234,129 @@ class _LinuxXTestKeyboard:
         XRecord requires two display connections:
           d_rec  — creates the context + calls record_enable_context (blocks)
           d_ctrl — calls record_disable_context to stop d_rec (stored for unhook_all)
+
+        The outer loop retries on transient display errors (e.g. XWayland dropping
+        the connection). It exits only when _stop is set (via unhook_all).
         """
-        _ensure_xauthority()
-        try:
-            from Xlib import display as _xdisplay, X as _X, XK as _XK
-            from Xlib.ext import record as _record
-            from Xlib.protocol import rq as _rq
+        while not self._stop.is_set():
+            _ensure_xauthority()
+            try:
+                from Xlib import display as _xdisplay, X as _X, XK as _XK
+                from Xlib.ext import record as _record
+                from Xlib.protocol import rq as _rq
 
-            display_name = os.environ.get("DISPLAY", ":0").strip()
+                display_name = os.environ.get("DISPLAY", ":0").strip()
 
-            # Resolve keycodes for all pending registrations before the blocking loop.
-            d_setup = _xdisplay.Display(display_name)
-            with self._lock:
-                snapshot = dict(self._pending)
-                self._pending.clear()
-            for key_name, callback in snapshot.items():
-                xk_name = _XKEY_ALIASES.get(key_name, key_name)
-                keysym = _XK.string_to_keysym(xk_name)
-                if not keysym:
-                    logger.warning("XKey: unknown keysym for %r", key_name)
-                    continue
-                keycode = d_setup.keysym_to_keycode(keysym)
-                if not keycode:
-                    logger.warning("XKey: no keycode for %r", key_name)
-                    continue
-                self._grabbed[keycode] = (key_name, callback)
-                logger.debug("XKey: registered %r (keycode=%d)", key_name, keycode)
-            d_setup.close()
-
-            # d_rec: owns the recording context (create + enable, blocks)
-            # d_ctrl: used only to disable the context (stored for unhook_all)
-            d_rec = _xdisplay.Display(display_name)
-            d_ctrl = _xdisplay.Display(display_name)
-
-            ctx = d_rec.record_create_context(
-                0,
-                [_record.AllClients],
-                [{
-                    "core_requests": (0, 0),
-                    "core_replies": (0, 0),
-                    "ext_requests": (0, 0, 0, 0),
-                    "ext_replies": (0, 0, 0, 0),
-                    "delivered_events": (0, 0),
-                    "device_events": (_X.KeyPress, _X.KeyPress),
-                    "errors": (0, 0),
-                    "client_started": False,
-                    "client_died": False,
-                }],
-            )
-
-            self._ctrl_display = d_ctrl
-            self._record_ctx = ctx
-
-            # Watcher: unblocks record_enable_context when _stop is set (e.g. on
-            # abnormal exit where cleanup() never runs).
-            def _stop_watcher():
-                self._stop.wait()
-                try:
-                    d_ctrl.record_disable_context(ctx)
-                    d_ctrl.flush()
-                except Exception:
-                    pass
-
-            threading.Thread(target=_stop_watcher, daemon=True, name="XKeyListener-stop").start()
-
-            _ef = _rq.EventField(None)
-
-            def _record_handler(reply):
-                if reply.category != _record.FromServer:
-                    return
-                data = reply.data
-                while len(data) >= 32:
-                    event, data = _ef.parse_binary_value(
-                        data, d_rec.display, None, None
-                    )
-                    if event.type != _X.KeyPress:
+                # Resolve keycodes for pending registrations. On reconnect, _pending is
+                # empty but _grabbed still holds previously resolved keycodes, which are
+                # stable across reconnects to the same X server.
+                d_setup = _xdisplay.Display(display_name)
+                with self._lock:
+                    snapshot = dict(self._pending)
+                    self._pending.clear()
+                for key_name, callback in snapshot.items():
+                    xk_name = _XKEY_ALIASES.get(key_name, key_name)
+                    keysym = _XK.string_to_keysym(xk_name)
+                    if not keysym:
+                        logger.warning("XKey: unknown keysym for %r", key_name)
                         continue
-                    # Pick up any keys registered after the loop started
-                    with self._lock:
-                        new = dict(self._pending)
-                        self._pending.clear()
-                    if new:
-                        d_tmp = _xdisplay.Display(display_name)
-                        for kn, cb in new.items():
-                            xkn = _XKEY_ALIASES.get(kn, kn)
-                            ks = _XK.string_to_keysym(xkn)
-                            kc = d_tmp.keysym_to_keycode(ks) if ks else 0
-                            if kc:
-                                self._grabbed[kc] = (kn, cb)
-                                logger.debug("XKey: registered %r (keycode=%d)", kn, kc)
-                        d_tmp.close()
-
-                    entry = self._grabbed.get(event.detail)
-                    if not entry:
+                    keycode = d_setup.keysym_to_keycode(keysym)
+                    if not keycode:
+                        logger.warning("XKey: no keycode for %r", key_name)
                         continue
-                    key_name, cb = entry
-                    ev_obj = _XKeyEvent(name=key_name,
-                                        is_injected=bool(event.send_event))
+                    self._grabbed[keycode] = (key_name, callback)
+                    logger.debug("XKey: registered %r (keycode=%d)", key_name, keycode)
+                d_setup.close()
+
+                # d_rec: owns the recording context (create + enable, blocks)
+                # d_ctrl: used only to disable the context (stored for unhook_all)
+                d_rec = _xdisplay.Display(display_name)
+                d_ctrl = _xdisplay.Display(display_name)
+
+                ctx = d_rec.record_create_context(
+                    0,
+                    [_record.AllClients],
+                    [{
+                        "core_requests": (0, 0),
+                        "core_replies": (0, 0),
+                        "ext_requests": (0, 0, 0, 0),
+                        "ext_replies": (0, 0, 0, 0),
+                        "delivered_events": (0, 0),
+                        "device_events": (_X.KeyPress, _X.KeyPress),
+                        "errors": (0, 0),
+                        "client_started": False,
+                        "client_died": False,
+                    }],
+                )
+
+                self._ctrl_display = d_ctrl
+                self._record_ctx = ctx
+
+                # Watcher: unblocks record_enable_context when _stop is set (e.g. on
+                # abnormal exit where cleanup() never runs).
+                def _stop_watcher():
+                    self._stop.wait()
                     try:
-                        cb(ev_obj)
-                    except Exception as exc:
-                        logger.error("XKey callback error for %r: %s", key_name, exc)
+                        d_ctrl.record_disable_context(ctx)
+                        d_ctrl.flush()
+                    except Exception:
+                        pass
 
-            # Blocks until record_disable_context is called (from unhook_all)
-            d_rec.record_enable_context(ctx, _record_handler)
-            d_rec.record_free_context(ctx)
-            d_rec.close()
-            d_ctrl.close()
-            self._ctrl_display = None
-            self._record_ctx = None
-        except Exception as e:
-            logger.error("XKey listener thread died: %s", e)
+                threading.Thread(target=_stop_watcher, daemon=True, name="XKeyListener-stop").start()
+
+                _ef = _rq.EventField(None)
+
+                def _record_handler(reply):
+                    if reply.category != _record.FromServer:
+                        return
+                    data = reply.data
+                    while len(data) >= 32:
+                        event, data = _ef.parse_binary_value(
+                            data, d_rec.display, None, None
+                        )
+                        if event.type != _X.KeyPress:
+                            continue
+                        # Pick up any keys registered after the loop started
+                        with self._lock:
+                            new = dict(self._pending)
+                            self._pending.clear()
+                        if new:
+                            d_tmp = _xdisplay.Display(display_name)
+                            for kn, cb in new.items():
+                                xkn = _XKEY_ALIASES.get(kn, kn)
+                                ks = _XK.string_to_keysym(xkn)
+                                kc = d_tmp.keysym_to_keycode(ks) if ks else 0
+                                if kc:
+                                    self._grabbed[kc] = (kn, cb)
+                                    logger.debug("XKey: registered %r (keycode=%d)", kn, kc)
+                            d_tmp.close()
+
+                        entry = self._grabbed.get(event.detail)
+                        if not entry:
+                            continue
+                        key_name, cb = entry
+                        ev_obj = _XKeyEvent(name=key_name,
+                                            is_injected=bool(event.send_event))
+                        try:
+                            cb(ev_obj)
+                        except Exception as exc:
+                            logger.error("XKey callback error for %r: %s", key_name, exc)
+
+                # Blocks until record_disable_context is called (from unhook_all)
+                d_rec.record_enable_context(ctx, _record_handler)
+                d_rec.record_free_context(ctx)
+                d_rec.close()
+                d_ctrl.close()
+                self._ctrl_display = None
+                self._record_ctx = None
+                break  # clean exit: _stop was set via unhook_all
+            except Exception as e:
+                logger.error("XKey listener thread died: %s", e)
+                self._ctrl_display = None
+                self._record_ctx = None
+                if not self._stop.is_set():
+                    logger.info("XKey: reconnecting display in 3s")
+                    self._stop.wait(timeout=3.0)
 
 
 if sys.platform != "win32":

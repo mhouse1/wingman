@@ -60,10 +60,10 @@ class HudRenderer:
 
     @classmethod
     def from_config(cls, config: dict) -> "HudRenderer | None":
-        """Return a HudRenderer if hud.enabled or tracking.enabled is true."""
+        """Return a HudRenderer only when tracking.enabled and hud.enabled are both true."""
         hud_cfg = config.get("hud", {})
         tracking_enabled = bool(config.get("tracking", {}).get("enabled", False))
-        if not bool(hud_cfg.get("enabled", True)) and not tracking_enabled:
+        if not tracking_enabled or not bool(hud_cfg.get("enabled", True)):
             return None
         region = config.get("region", {})
         r_left = int(region.get("left", 0))

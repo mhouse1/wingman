@@ -23,6 +23,7 @@
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
+#   make g           -> launch MetalStorm only, without starting Wingman (Linux only)
 #   make r           -> run wingman (Linux: auto-launches game; Windows: game must be running)
 #   make rd          -> run wingman with DEBUG log to wingman.log (same auto-launch on Linux)
 #   make rg          -> alias for r (backwards compat)
@@ -35,7 +36,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti preflight
+.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash g r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate calibrate-crop add-crops ti preflight
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -232,6 +233,9 @@ GAME_LAUNCH_DEPS := launch-game wait-game
 else
 GAME_LAUNCH_DEPS :=
 endif
+
+# Launch MetalStorm without starting Wingman (Linux: launch-game + wait-game; Windows: no-op).
+g: $(GAME_LAUNCH_DEPS)
 
 r: $(GAME_LAUNCH_DEPS)
 	$(PYTHON_RUN) -m wingman.main
