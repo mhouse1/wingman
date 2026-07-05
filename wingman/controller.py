@@ -659,7 +659,12 @@ class Controller:
 
             # Auto-mission hotkey: force GAME_LOBBY state, then click PLAY/READY
             try:
+                self._last_auto_mission_key_ts = 0.0
                 def auto_mission_key_pressed(_e):
+                    now = time.time()
+                    if now - self._last_auto_mission_key_ts < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_auto_mission_key_ts = now
                     if self._analyzer is None:
                         return
                     if self._analyzer.game_state != GameState.GAME_LOBBY:
