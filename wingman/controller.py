@@ -573,6 +573,11 @@ class Controller:
                         logger.info("Controller: '%s' key pressed - starting J20 mission (state=%s)",
                                     MISSION_J20_KEY,
                                     current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
+                        # Force FSM into GAME_BATTLE so lobby-only background loops (quick-scan
+                        # stall-ESC, GAME_LOBBY escape loop) stop treating this as an idle lobby.
+                        if self._analyzer is not None and current_state != GameState.GAME_BATTLE:
+                            if not self._analyzer.trigger_event("manual_force_battle"):
+                                logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
                     self._set_last_mission("j20")
                     threading.Thread(target=self.mission_j20, daemon=True).start()
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
@@ -685,6 +690,11 @@ class Controller:
                         return
                     logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s (waiting for CANCEL)", AUTO_MISSION_KEY, crop)
                     self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
+                    # Stamp the same cooldown the lobby quick-scan thread checks before it
+                    # clicks PLAY/READY on its own (analyzer.py _last_lobby_play_click_ts).
+                    # Without this, GAME_LOBBY entry resets that timestamp to 0, and the
+                    # quick-scan thread re-clicks the same button ~1s later, undoing this click.
+                    self._analyzer._last_lobby_play_click_ts = time.time()
                 keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
