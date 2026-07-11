@@ -266,7 +266,7 @@ launch-game:
 # Poll until MetalStorm.exe is alive, then wait for the lobby.
 # 60 s covers slow loading; Wingman also retries detection continuously.
 GAME_WAIT_TIMEOUT_S ?= 120
-GAME_LOBBY_WAIT_S   ?= 60
+GAME_LOBBY_WAIT_S   ?= 20
 wait-game:
 	@echo "Waiting for Metalstorm.exe process (timeout $(GAME_WAIT_TIMEOUT_S) s)…"
 	@timeout $(GAME_WAIT_TIMEOUT_S) bash -c \
