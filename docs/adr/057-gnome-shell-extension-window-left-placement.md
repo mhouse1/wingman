@@ -2,7 +2,7 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Accepted | 2026-07-11 | 1.6.23          |
+| Draft | 2026-07-11 | 1.6.23          |
 
 ## Context
 
@@ -150,10 +150,11 @@ It connects to `global.display`'s `window-created` signal, filters for the
 Wine virtual desktop window by WM_CLASS (`steam_app_0` — matches the same
 window `move_game_window.py` targets), waits for that specific window's
 `first-frame` signal so the move happens only once the window is actually
-mapped and rendering, then calls Mutter's own `move_frame(true, 0, 0)`. Because
-this call originates from inside the Shell/compositor itself rather than an
-external X11 client, it is authoritative — there is no redirect/ignore step to
-get past.
+mapped and rendering, then calls Mutter's own `move_frame(true, 0, 0)`. This
+call originates from inside the Shell/compositor itself rather than an
+external X11 client, so unlike Paths 1-2 there is no SubstructureRedirect
+step for Mutter to ignore — but as noted below under Known Issue, that alone
+has not made the result deterministic in practice.
 
 ### Loading the extension (one-time, per machine)
 
@@ -168,11 +169,44 @@ before `gnome-extensions list` showed the extension at all. After that one-time
 logout, it loads automatically on every subsequent login without any further
 manual step.
 
+## Known Issue — Placement Still Not Deterministic
+
+Post-deployment observation: the extension does **not** reliably move the
+window to (0, 0). Sometimes the window lands in the top-left corner as
+intended; usually it does not, and Mutter's own variable placement (the
+original problem from Context) still wins. This ADR is downgraded from
+Accepted back to Draft until the flakiness is root-caused and fixed.
+
+Leading hypotheses (not yet confirmed live):
+
+- **Race with Mutter's own placement pass.** `first-frame` fires when the
+  window's first frame is composited, but Mutter may still apply its own
+  "constrain position" placement logic (centering / anti-overlap / initial
+  placement heuristics) slightly after that point — e.g. on a subsequent
+  `position-changed` or `size-changed` event as Wine's virtual desktop
+  finishes settling into its final 1920x1200 size. If Mutter's placement
+  pass runs after our `move_frame()` call, it silently overrides it. This
+  would explain intermittent success: the move only sticks when it happens
+  to land after Mutter's own placement finishes, not before.
+- **Wrong window matched.** The WM_CLASS filter (`steam_app_0`) may match an
+  earlier transient/placeholder window in Wine's startup sequence (recall
+  `move_game_window.py`'s own detection logic distinguishes a `"Metalstorm"`
+  titled window from a `"Wine Desktop"` + `steam_app_0` titled window as two
+  *different* candidates) rather than the final game window whose position
+  actually matters for capture alignment.
+
+Next step before re-accepting this ADR: reproduce with GNOME Shell's own
+logging (`journalctl --user -f _COMM=gnome-shell`) or temporary `log()` calls
+inside `extension.js` to see whether `_armMove` fires once or multiple times
+per launch, and whether `move_frame` is being called at all versus being
+called and then overridden.
+
 ## Consequences
 
-- MetalStorm's Wine virtual desktop window now reliably lands at (0, 0) on
-  every launch, matching `config.yaml`'s `region: {left: 0, top: 0, ...}`
-  assumption (ADR 050) instead of Mutter's variable placement.
+- MetalStorm's Wine virtual desktop window **sometimes** lands at (0, 0) on
+  launch, matching `config.yaml`'s `region: {left: 0, top: 0, ...}` assumption
+  (ADR 050) — but usually still exhibits Mutter's original variable placement.
+  See Known Issue above; this is not yet a working fix.
 - No changes to the Wingman repo itself were needed or made — `Makefile`,
   `wingman/move_game_window.py`, and the `wait-game` target are unchanged.
   Positioning now happens entirely at the compositor level, transparently to

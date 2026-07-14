@@ -206,17 +206,20 @@ n:
 	git add .
 	git commit -am "new feature"
 
-# Extra words after 'p' are joined as the commit message: make p "my comment"
-ifeq (p,$(firstword $(MAKECMDGOALS)))
+# Capture extra words after 'p' as the commit message (e.g. make p "my message").
+# .DEFAULT absorbs the extra goal at execution time, avoiding eval which parses
+# the string as makefile syntax and breaks on words like "include" or "define".
+ifeq ($(firstword $(MAKECMDGOALS)),p)
   _P_MSG := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
-  ifneq (,$(_P_MSG))
-    $(eval $(_P_MSG):;@:)
+  ifneq ($(_P_MSG),)
+.DEFAULT:
+	@:
   endif
 endif
 
 p:
 	git add .
-	git commit -am "$(if $(_P_MSG),$(_P_MSG),.)"
+	git commit -am "$(if $(_P_MSG),$(_P_MSG),wip)"
 	git push
 
 squash:
