@@ -468,7 +468,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
         "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY",
     },
     GameState.GAME_BATTLE_EJECT: {
-        "respawn", "health", "ammo_missiles",
+        "respawn", "HEALTH", "AMMO_MISSILE",
     },
 }
 
@@ -814,13 +814,25 @@ class GameStateAnalyzer:
 
     def get_ammo_missiles(self):
         """Return the latest missile count snapshot."""
-        with self._ammo_lock:
+        if not self._ammo_lock.acquire(timeout=1.0):
+            logger.warning("get_ammo_missiles: _ammo_lock timeout — returning stale/no value")
+            return None
+        try:
             return self._ammo_missiles
+        finally:
+            if self._ammo_lock.locked():
+                self._ammo_lock.release()
 
     def get_ammo_flares(self):
         """Return the latest flare count snapshot."""
-        with self._ammo_lock:
+        if not self._ammo_lock.acquire(timeout=1.0):
+            logger.warning("get_ammo_flares: _ammo_lock timeout — returning stale/no value")
+            return None
+        try:
             return self._ammo_flares
+        finally:
+            if self._ammo_lock.locked():
+                self._ammo_lock.release()
 
     def get_respawn_cache_result(self):
         """Return the cached respawn tuple (is_respawning, confidence, method)."""
@@ -1577,6 +1589,11 @@ class GameStateAnalyzer:
         while not self._lobby_quick_scan_stop.wait(timeout=1.0):
             cycle_start = time.time()
             state = self.game_state
+            if state != GameState.GAME_LOBBY:
+                # Stall tracking only applies while continuously in GAME_LOBBY — clear it
+                # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
+                # counting fresh instead of comparing against a stale timestamp.
+                lobby_stall_since = 0.0
             if state not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
                 continue
 

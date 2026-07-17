@@ -408,7 +408,9 @@ class TestHudRenderer:
         output = tmp_path / "live_hud.png"
         renderer = HudRenderer(str(output), interval_sec=0.0)
         frame = np.zeros((300, 400, 3), dtype=np.uint8)
-        renderer.maybe_render(frame, None, "GAME_BATTLE", 100, 4, 2)
+        thread = renderer.maybe_render(frame, None, "GAME_BATTLE", 100, 4, 2)
+        assert thread is not None
+        thread.join(timeout=5)
         assert output.exists()
         img = cv2.imread(str(output))
         assert img is not None
@@ -421,11 +423,13 @@ class TestHudRenderer:
         renderer = HudRenderer(str(output), interval_sec=9999.0)
         frame = np.zeros((300, 400, 3), dtype=np.uint8)
         # First call always renders (last_ts=0 → elapsed = now > any interval)
-        renderer.maybe_render(frame, None, "GAME_BATTLE", None, None, None)
+        thread = renderer.maybe_render(frame, None, "GAME_BATTLE", None, None, None)
+        assert thread is not None
+        thread.join(timeout=5)
         assert output.exists()
         mtime_after_first = output.stat().st_mtime_ns
         # Second call immediately: still within the 9999 s interval — no write
-        renderer.maybe_render(frame, None, "GAME_BATTLE", None, None, None)
+        assert renderer.maybe_render(frame, None, "GAME_BATTLE", None, None, None) is None
         assert output.stat().st_mtime_ns == mtime_after_first
 
     def test_from_config_disabled(self):
@@ -492,7 +496,8 @@ class TestHudRenderer:
             "n_detections": 2,
             "roi_rect": (200, 120, 80, 60),
         }
-        renderer.maybe_render(frame, obs, "GAME_BATTLE", 180, 6, 4)
+        thread = renderer.maybe_render(frame, obs, "GAME_BATTLE", 180, 6, 4)
+        thread.join(timeout=5)
         assert output.exists()
 
     def test_atomic_write_no_partial_read(self, tmp_path):
@@ -501,6 +506,7 @@ class TestHudRenderer:
         output = tmp_path / "hud.png"
         renderer = HudRenderer(str(output), interval_sec=0.0)
         frame = np.zeros((300, 400, 3), dtype=np.uint8)
-        renderer.maybe_render(frame, None, "GAME_BATTLE", None, None, None)
+        thread = renderer.maybe_render(frame, None, "GAME_BATTLE", None, None, None)
+        thread.join(timeout=5)
         tmp_file = output.with_suffix(".tmp.png")
         assert not tmp_file.exists(), "tmp file should be consumed by os.replace"

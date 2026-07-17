@@ -982,6 +982,10 @@ def main():
 
             # Detect respawn
             if game_state.get('is_respawning'):
+                # Interrupt any in-progress eject_and_dive immediately on any detected respawn,
+                # independent of the mission-restart dedup cooldown below — a real respawn screen
+                # means afterburner should release now, not hold until the 120s safety timeout.
+                ctrl.stop_eject_sequence()
                 if respawn_state in (RespawnState.IDLE, RespawnState.PENDING_RESTART):
                     if time.time() < respawn_cooldown_until:
                         logger.debug("RESPAWN seen but suppressed by cooldown (%.1fs remaining)",
@@ -1002,7 +1006,6 @@ def main():
                                 live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
                                 live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
                             analyzer.trigger_event("respawn_reset")
-                        ctrl.stop_eject_sequence()        # interrupt any in-progress eject_and_dive immediately
                         ctrl.cancel_mission()
                         analyzer.reset_health_for_respawn()
                         # Wait for mission lock to release before restart
