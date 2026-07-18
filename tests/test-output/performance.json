@@ -1,186 +1,186 @@
 {
-  "timestamp": "2026-07-17T16:29:50.296058",
+  "timestamp": "2026-07-17T17:23:38.745152",
   "version": "1.6.24",
   "tests": {
     "test_wingman_smoke_launch": {
-      "duration": 5.1664013881236315e-05,
+      "duration": 5.37199666723609e-05,
       "runs": 1,
-      "min": 5.1664013881236315e-05,
-      "max": 5.1664013881236315e-05
+      "min": 5.37199666723609e-05,
+      "max": 5.37199666723609e-05
     },
     "test_level1_static_screenshot": {
-      "duration": 7.62411312997574,
+      "duration": 8.214564130001236,
       "runs": 1,
-      "min": 7.62411312997574,
-      "max": 7.62411312997574
+      "min": 8.214564130001236,
+      "max": 8.214564130001236
     },
     "test_respawn_detection_positive": {
-      "duration": 3.390580189996399,
+      "duration": 3.448171634673296,
       "runs": 3,
-      "min": 1.6155872470117174,
-      "max": 6.776113202970009
+      "min": 1.2589605660177767,
+      "max": 7.449646252032835
     },
     "test_respawn_detection_negative": {
-      "duration": 3.5724061419799304,
+      "duration": 3.6492559520023256,
       "runs": 3,
-      "min": 1.5382199169835076,
-      "max": 7.31705560797127
+      "min": 1.463854920992162,
+      "max": 7.519831067009363
     },
     "test_level2_live_capture": {
-      "duration": 1.4453430710127577,
+      "duration": 1.4317098560277373,
       "runs": 1,
-      "min": 1.4453430710127577,
-      "max": 1.4453430710127577
+      "min": 1.4317098560277373,
+      "max": 1.4317098560277373
     },
     "test_get_frame_and_analyze_frame": {
-      "duration": 0.12711472599767148,
+      "duration": 0.11476401402615011,
       "runs": 1,
-      "min": 0.12711472599767148,
-      "max": 0.12711472599767148
+      "min": 0.11476401402615011,
+      "max": 0.11476401402615011
     },
     "test_level3_unit_ocr": {
-      "duration": 3.52133781905286,
+      "duration": 3.4464931869879365,
       "runs": 1,
-      "min": 3.52133781905286,
-      "max": 3.52133781905286
+      "min": 3.4464931869879365,
+      "max": 3.4464931869879365
     },
     "test_level4_region33_contains_lick_to_c": {
-      "duration": 0.5092042345204391,
+      "duration": 1.0101220995129552,
       "runs": 2,
-      "min": 0.0841418890049681,
-      "max": 0.93426658003591
+      "min": 0.10529209498781711,
+      "max": 1.9149521040380932
     },
     "test_level4_region9_contains_inco": {
-      "duration": 0.8159336806663001,
+      "duration": 0.3380848496647862,
       "runs": 3,
-      "min": 0.0790321989916265,
-      "max": 1.3361635809997097
+      "min": 0.0988233580137603,
+      "max": 0.8113647460122593
     },
     "test_level5_performance_validation": {
-      "duration": 0.0007211010088212788,
+      "duration": 0.0007051849970594049,
       "runs": 1,
-      "min": 0.0007211010088212788,
-      "max": 0.0007211010088212788
+      "min": 0.0007051849970594049,
+      "max": 0.0007051849970594049
     },
     "test_click_through_game_end_transitions_to_lobby": {
-      "duration": 7.592601468786597e-05,
+      "duration": 7.302500307559967e-05,
       "runs": 1,
-      "min": 7.592601468786597e-05,
-      "max": 7.592601468786597e-05
+      "min": 7.302500307559967e-05,
+      "max": 7.302500307559967e-05
     },
     "test_respawn_text_matches": {
-      "duration": 7.445999654009938e-05,
+      "duration": 5.918377104939686e-05,
       "runs": 9,
-      "min": 3.828300395980477e-05,
-      "max": 0.00011944799916818738
+      "min": 3.580801421776414e-05,
+      "max": 9.421497816219926e-05
     },
     "test_game_starting_blocks_respawn_detection": {
-      "duration": 0.031454059993848205,
+      "duration": 0.03089956199983135,
       "runs": 1,
-      "min": 0.031454059993848205,
-      "max": 0.031454059993848205
+      "min": 0.03089956199983135,
+      "max": 0.03089956199983135
     },
     "test_game_battle_does_not_block_respawn_detection": {
-      "duration": 0.030774230021052063,
+      "duration": 0.030706369958352298,
       "runs": 1,
-      "min": 0.030774230021052063,
-      "max": 0.030774230021052063
+      "min": 0.030706369958352298,
+      "max": 0.030706369958352298
     },
     "test_game_end_b_blocks_background_ocr_scheduling": {
-      "duration": 0.03043295198585838,
+      "duration": 0.030501583009026945,
       "runs": 1,
-      "min": 0.03043295198585838,
-      "max": 0.03043295198585838
+      "min": 0.030501583009026945,
+      "max": 0.030501583009026945
     },
     "test_incoming_template_detection_positive": {
-      "duration": 0.023040677013341337,
+      "duration": 0.023241535003762692,
       "runs": 1,
-      "min": 0.023040677013341337,
-      "max": 0.023040677013341337
+      "min": 0.023241535003762692,
+      "max": 0.023241535003762692
     },
     "test_incoming_template_detection_negative_blank": {
-      "duration": 0.022752397984731942,
+      "duration": 0.023164479003753513,
       "runs": 1,
-      "min": 0.022752397984731942,
-      "max": 0.022752397984731942
+      "min": 0.023164479003753513,
+      "max": 0.023164479003753513
     },
     "test_incoming_ocr_fallback_when_template_disabled": {
-      "duration": 0.023157350020483136,
+      "duration": 0.02348083903780207,
       "runs": 1,
-      "min": 0.023157350020483136,
-      "max": 0.023157350020483136
+      "min": 0.02348083903780207,
+      "max": 0.02348083903780207
     },
     "test_waiting_cancel_baseline_capture_and_diff": {
-      "duration": 0.0012021390139125288,
+      "duration": 0.001197524950839579,
       "runs": 1,
-      "min": 0.0012021390139125288,
-      "max": 0.0012021390139125288
+      "min": 0.001197524950839579,
+      "max": 0.001197524950839579
     },
     "test_waiting_cancel_diff_none_without_baseline": {
-      "duration": 8.74929828569293e-05,
+      "duration": 8.557800902053714e-05,
       "runs": 1,
-      "min": 8.74929828569293e-05,
-      "max": 8.74929828569293e-05
+      "min": 8.557800902053714e-05,
+      "max": 8.557800902053714e-05
     },
     "test_unknown_starts_and_classifies_to_lobby_with_debounce": {
-      "duration": 0.02884550200542435,
+      "duration": 0.02943085797596723,
       "runs": 1,
-      "min": 0.02884550200542435,
-      "max": 0.02884550200542435
+      "min": 0.02943085797596723,
+      "max": 0.02943085797596723
     },
     "test_unknown_precedence_prefers_end_over_lobby_and_battle": {
-      "duration": 0.029436944983899593,
+      "duration": 0.03046028403332457,
       "runs": 1,
-      "min": 0.029436944983899593,
-      "max": 0.029436944983899593
+      "min": 0.03046028403332457,
+      "max": 0.03046028403332457
     },
     "test_unknown_stays_unknown_without_classifier_hit": {
-      "duration": 0.029262999014463276,
+      "duration": 0.0308571929926984,
       "runs": 1,
-      "min": 0.029262999014463276,
-      "max": 0.029262999014463276
+      "min": 0.0308571929926984,
+      "max": 0.0308571929926984
     },
     "test_cancel_releases_lock_within_two_seconds": {
-      "duration": 0.020591959997545928,
+      "duration": 0.021041614993009716,
       "runs": 1,
-      "min": 0.020591959997545928,
-      "max": 0.020591959997545928
+      "min": 0.021041614993009716,
+      "max": 0.021041614993009716
     },
     "test_cancel_prevents_new_missions": {
-      "duration": 5.108700133860111e-05,
+      "duration": 5.682097980752587e-05,
       "runs": 1,
-      "min": 5.108700133860111e-05,
-      "max": 5.108700133860111e-05
+      "min": 5.682097980752587e-05,
+      "max": 5.682097980752587e-05
     },
     "test_mission_lock_not_held_after_natural_completion": {
-      "duration": 0.20236629800638184,
+      "duration": 0.20173218299169093,
       "runs": 1,
-      "min": 0.20236629800638184,
-      "max": 0.20236629800638184
+      "min": 0.20173218299169093,
+      "max": 0.20173218299169093
     },
     "test_stale_cancel_before_loop_start_does_not_prevent_loop": {
-      "duration": 0.35904527798993513,
+      "duration": 0.35813220095587894,
       "runs": 1,
-      "min": 0.35904527798993513,
-      "max": 0.35904527798993513
+      "min": 0.35813220095587894,
+      "max": 0.35813220095587894
     },
     "test_cancel_during_game_starting_fires_starting_timeout": {
-      "duration": 0.21889530500629917,
+      "duration": 0.2187139099696651,
       "runs": 1,
-      "min": 0.21889530500629917,
-      "max": 0.21889530500629917
+      "min": 0.2187139099696651,
+      "max": 0.2187139099696651
     },
     "test_fsm_transition_away_from_starting_does_not_fire_timeout": {
-      "duration": 0.4584394230041653,
+      "duration": 0.4585240309825167,
       "runs": 1,
-      "min": 0.4584394230041653,
-      "max": 0.4584394230041653
+      "min": 0.4585240309825167,
+      "max": 0.4585240309825167
     },
     "test_starting_max_wait_s_stored_on_controller": {
-      "duration": 0.007541471975855529,
+      "duration": 0.007514242024626583,
       "runs": 1,
-      "min": 0.007541471975855529,
-      "max": 0.007541471975855529
+      "min": 0.007514242024626583,
+      "max": 0.007514242024626583
     }
   }
 }
