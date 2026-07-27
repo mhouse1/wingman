@@ -12,6 +12,7 @@ Usage:
 import logging
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -40,10 +41,13 @@ class HudRenderer:
     """Render and atomic-write an annotated game-frame snapshot on a cadence."""
 
     def __init__(self, output_path: str, interval_sec: float = 1.0,
-                 feh_geometry: str = "") -> None:
+                 feh_geometry: str = "",
+                 acquisition_region_pct: "tuple[float, float, float, float]" = (0.20, 0.18, 0.80, 0.68)) -> None:
         self._output = Path(output_path)
         self._interval = float(interval_sec)
         self._last_ts: float = 0.0
+        self._acq_pct = tuple(float(v) for v in acquisition_region_pct)
+        self._render_lock = threading.Lock()
         if feh_geometry:
             self._launch_feh(feh_geometry)
 
@@ -60,10 +64,11 @@ class HudRenderer:
 
     @classmethod
     def from_config(cls, config: dict) -> "HudRenderer | None":
-        """Return a HudRenderer only when tracking.enabled and hud.enabled are both true."""
+        """Return a HudRenderer when either tracking.enabled or hud.enabled is true."""
         hud_cfg = config.get("hud", {})
         tracking_enabled = bool(config.get("tracking", {}).get("enabled", False))
-        if not tracking_enabled or not bool(hud_cfg.get("enabled", True)):
+        hud_enabled = bool(hud_cfg.get("enabled", True))
+        if not tracking_enabled and not hud_enabled:
             return None
         region = config.get("region", {})
         r_left = int(region.get("left", 0))
@@ -71,10 +76,12 @@ class HudRenderer:
         r_w = int(region.get("width", 1920))
         r_h = int(region.get("height", 1200))
         feh_geometry = f"{r_w // 2}x{r_h // 2}+{r_left + r_w}+{r_top}" if tracking_enabled else ""
+        acq_pct = config.get("tracking", {}).get("acquisition_region_pct", (0.20, 0.18, 0.80, 0.68))
         return cls(
             output_path=hud_cfg.get("output_path", "tests/test-output/live_hud.png"),
             interval_sec=float(hud_cfg.get("interval_sec", 1.0)),
             feh_geometry=feh_geometry,
+            acquisition_region_pct=acq_pct,
         )
 
     def maybe_render(
@@ -85,16 +92,47 @@ class HudRenderer:
         health: "int | None",
         missiles: "int | None",
         flares: "int | None",
-    ) -> None:
-        """Render and write if the cadence interval has elapsed; otherwise no-op."""
+    ) -> "threading.Thread | None":
+        """Render and write on a background thread if the cadence interval has elapsed.
+
+        Render/encode/disk-write is offloaded so the main tick loop is never blocked
+        on it; a non-blocking lock skips a new render while one is still in flight
+        instead of queuing up work. Returns the background thread (mainly so callers
+        such as tests can join() it); production callers can ignore the return value.
+        """
         now = time.time()
         if now - self._last_ts < self._interval:
-            return
+            return None
+        if not self._render_lock.acquire(blocking=False):
+            logger.debug("HudRenderer: previous render still in flight — skipping")
+            return None
         self._last_ts = now
+        thread = threading.Thread(
+            target=self._render_async,
+            args=(frame, tracking_obs, game_state_name, health, missiles, flares, now),
+            daemon=True,
+            name="HudRenderer-write",
+        )
+        thread.start()
+        return thread
+
+    def _render_async(
+        self,
+        frame: np.ndarray,
+        obs: "dict | None",
+        state: str,
+        health: "int | None",
+        missiles: "int | None",
+        flares: "int | None",
+        ts: float,
+    ) -> None:
         try:
-            self._render(frame, tracking_obs, game_state_name, health, missiles, flares, now)
+            self._render(frame, obs, state, health, missiles, flares, ts)
         except Exception as exc:
             logger.debug("HudRenderer: render error: %s", exc)
+        finally:
+            if self._render_lock.locked():
+                self._render_lock.release()
 
     # ------------------------------------------------------------------
     # Internal
@@ -160,10 +198,11 @@ class HudRenderer:
                 _txt(canvas, "R", w - 14, bar_y + 5, _GREY, scale=0.4)
 
         # ── Acquisition region outline ───────────────────────────────────
-        ax1 = int(w * 0.20)
-        ay1 = int(h * 0.18)
-        ax2 = int(w * 0.80)
-        ay2 = int(h * 0.68)
+        acq_x1, acq_y1, acq_x2, acq_y2 = self._acq_pct
+        ax1 = int(w * acq_x1)
+        ay1 = int(h * acq_y1)
+        ax2 = int(w * acq_x2)
+        ay2 = int(h * acq_y2)
         cv2.rectangle(canvas, (ax1, ay1), (ax2, ay2), _CYAN, 1)
         _txt(canvas, "acq", ax1 + 2, ay1 + 14, _CYAN, scale=0.38)
 

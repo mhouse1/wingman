@@ -240,6 +240,9 @@ class _LinuxXTestKeyboard:
         """
         while not self._stop.is_set():
             _ensure_xauthority()
+            d_rec = None
+            d_ctrl = None
+            iter_done = threading.Event()  # wakes _stop_watcher when this iteration ends, so it can't outlive its Display connections
             try:
                 from Xlib import display as _xdisplay, X as _X, XK as _XK
                 from Xlib.ext import record as _record
@@ -293,9 +296,15 @@ class _LinuxXTestKeyboard:
                 self._record_ctx = ctx
 
                 # Watcher: unblocks record_enable_context when _stop is set (e.g. on
-                # abnormal exit where cleanup() never runs).
+                # abnormal exit where cleanup() never runs), or exits without acting
+                # once this iteration has already ended (e.g. a reconnect after a
+                # transient error) so it doesn't linger holding a stale Display.
                 def _stop_watcher():
-                    self._stop.wait()
+                    while not self._stop.is_set() and not iter_done.is_set():
+                        if self._stop.wait(timeout=0.5):
+                            break
+                    if iter_done.is_set() and not self._stop.is_set():
+                        return
                     try:
                         d_ctrl.record_disable_context(ctx)
                         d_ctrl.flush()
@@ -352,6 +361,17 @@ class _LinuxXTestKeyboard:
                 break  # clean exit: _stop was set via unhook_all
             except Exception as e:
                 logger.error("XKey listener thread died: %s", e)
+                iter_done.set()  # let this iteration's _stop_watcher exit instead of leaking
+                if d_rec is not None:
+                    try:
+                        d_rec.close()
+                    except Exception:
+                        pass
+                if d_ctrl is not None:
+                    try:
+                        d_ctrl.close()
+                    except Exception:
+                        pass
                 self._ctrl_display = None
                 self._record_ctx = None
                 if not self._stop.is_set():
@@ -986,7 +1006,14 @@ class Controller:
         NOSE_DOWN is held for x seconds then released.
         AFTERBURNER is held until respawn is detected (or a 120s safety timeout).
         on_complete: optional callable invoked in the finally block after all keys are released.
+
+        No-ops (with a debug log) if an eject sequence is already in progress —
+        callers should not start a second _run() thread racing the first over the
+        same NOSE_DOWN/AFTERBURNER key state.
         """
+        if self._ejecting.is_set():
+            logger.debug("Controller: eject_and_dive already in progress — ignoring duplicate trigger")
+            return
         logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
         self._eject_stop.clear()

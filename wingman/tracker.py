@@ -112,9 +112,12 @@ class TargetTracker:
         if self._mode == TrackMode.SEARCHING:
             self._mode = TrackMode.ACQUIRING
 
+        # LOST_GRACE keeps scanning the (progressively expanded, see _handle_miss)
+        # local ROI around the last-known position instead of falling back to a
+        # full acquisition-region scan — that expansion has no effect otherwise.
         use_roi = (
             self._local_roi_enabled
-            and self._mode == TrackMode.TRACKING
+            and self._mode in (TrackMode.TRACKING, TrackMode.LOST_GRACE)
             and self._roi_rect is not None
         )
         if use_roi:

@@ -12,7 +12,13 @@ import pytest
 import yaml
 import wingman.analyzer as analyzer_module
 
-from wingman.analyzer import GameStateAnalyzer, GameState, _process_incoming_region, _respawn_text_matches
+from wingman.analyzer import (
+    GameStateAnalyzer,
+    GameState,
+    _process_incoming_region,
+    _respawn_text_matches,
+    _split_telemetry_rows,
+)
 from wingman.crop_region import get_crop
 from constants import (
     CONFIG_PATH,
@@ -364,3 +370,35 @@ def test_unknown_stays_unknown_without_classifier_hit(monkeypatch):
             assert a.game_state == GameState.GAME_UNKNOWN
     finally:
         a.cleanup()
+
+
+# --- ALTITUDE_SPEED telemetry row splitter (ADR 038) ---------------------------
+
+def _tbox(x0, y0, x1, y1, text):
+    """detail=1 OCR result: (4-point bbox, text, confidence)."""
+    return ([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], text, 0.9)
+
+
+def test_telemetry_split_labels_in_same_box():
+    # Number and MPH/feet label share one detection box; leading digits win.
+    results = [_tbox(10, 5, 120, 25, "957 MPH"), _tbox(10, 35, 140, 55, "27123 feet")]
+    assert _split_telemetry_rows(results, img_height=60) == (957, 27123)
+
+
+def test_telemetry_split_number_and_label_separate_boxes():
+    results = [
+        _tbox(10, 5, 60, 25, "530"), _tbox(70, 5, 120, 25, "MPH"),
+        _tbox(10, 35, 90, 55, "27681"), _tbox(100, 35, 140, 55, "feet"),
+    ]
+    assert _split_telemetry_rows(results, img_height=60) == (530, 27681)
+
+
+def test_telemetry_split_single_line_assigned_by_crop_half():
+    # Only the speed line visible (upper half) → altitude None, and vice versa.
+    assert _split_telemetry_rows([_tbox(10, 5, 120, 25, "530 MPH")], 60) == (530, None)
+    assert _split_telemetry_rows([_tbox(10, 40, 140, 58, "27681 feet")], 60) == (None, 27681)
+
+
+def test_telemetry_split_ignores_boxes_without_digits_and_empty():
+    assert _split_telemetry_rows([], 60) == (None, None)
+    assert _split_telemetry_rows([_tbox(10, 5, 60, 25, "MPH")], 60) == (None, None)
