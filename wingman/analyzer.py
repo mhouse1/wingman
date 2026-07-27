@@ -1,6 +1,7 @@
 """Game state analyzer for detecting respawn, enemies, and other game conditions."""
 
 import logging
+import re
 import cv2
 import numpy as np
 import threading
@@ -351,6 +352,90 @@ def _process_health_region(health_frame) -> "tuple[int | None, float]":
     return (None, time.time() - t_start)
 
 
+def _row_value(boxes) -> "int | None":
+    """Parse the leading number from one row of x-ordered OCR boxes.
+
+    Boxes are joined left-to-right into a single string, and the first contiguous
+    digit run is taken as the value. Because the numbers are left-aligned and the
+    'MPH'/'feet' labels follow them, this yields the number while ignoring the
+    trailing label — even when the label lands in the same detection box (e.g.
+    '27681 feet' → 27681). Returns None when the row contains no digits.
+    """
+    text = " ".join(str(t) for _, _, t in sorted(boxes, key=lambda b: b[1]))
+    match = re.search(r"\d+", text)
+    return int(match.group()) if match else None
+
+
+def _split_telemetry_rows(ocr_results, img_height) -> "tuple[int | None, int | None]":
+    """Split detail=1 OCR boxes from the ALTITUDE_SPEED crop into (speed, altitude).
+
+    The crop holds two left-aligned numeric lines — speed (MPH) on top, altitude
+    (feet) below. Boxes are grouped into an upper (speed) and lower (altitude) row
+    by bounding-box vertical centre, then each row's leading number is parsed. When
+    only one line is visible (small vertical spread), it is assigned by the half of
+    the crop it occupies. Returns (speed, altitude), each None when that row
+    produced no digits. See ADR 038.
+    """
+    boxes = []
+    for bbox, text, _conf in ocr_results:
+        if not any(c.isdigit() for c in str(text)):
+            continue
+        ys = [pt[1] for pt in bbox]
+        xs = [pt[0] for pt in bbox]
+        boxes.append((sum(ys) / len(ys), min(xs), str(text)))
+    if not boxes:
+        return (None, None)
+
+    y_centers = [b[0] for b in boxes]
+    spread = max(y_centers) - min(y_centers)
+
+    # Single visible line: assign by which half of the crop it sits in.
+    if spread < img_height * 0.25:
+        value = _row_value(boxes)
+        line_y = sum(y_centers) / len(y_centers)
+        return (value, None) if line_y < img_height / 2.0 else (None, value)
+
+    mid_row = (max(y_centers) + min(y_centers)) / 2.0
+    speed_boxes = [b for b in boxes if b[0] <= mid_row]
+    alt_boxes = [b for b in boxes if b[0] > mid_row]
+    return (_row_value(speed_boxes) if speed_boxes else None,
+            _row_value(alt_boxes) if alt_boxes else None)
+
+
+def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None, float]":
+    """Extract speed (MPH) and altitude (feet) from the combined ALTITUDE_SPEED crop.
+
+    A single OCR pass reads both stacked numeric lines; the 'MPH'/'feet' labels are
+    read as text and ignored by taking each row's leading digit run, so they need
+    not be cropped out (a digit allowlist can't exclude them — it forces the label
+    glyphs into junk digits). Boxes are split into speed/altitude rows by vertical
+    position (see ADR 038). Reading both lines in one pass roughly halves the
+    readtext invocations versus two separate per-value crops.
+
+    Args:
+        telemetry_frame: numpy array (BGR) — the extracted ALTITUDE_SPEED crop.
+
+    Returns:
+        tuple: (speed: int | None, altitude: int | None, ocr_time: float)
+    """
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return (None, None, 0.0)
+
+    t_start = time.time()
+    gray = cv2.cvtColor(telemetry_frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    for img in (binary, upscaled):
+        results = reader.readtext(img, detail=1, paragraph=False, workers=0)
+        speed, altitude = _split_telemetry_rows(results, img.shape[0])
+        if speed is not None or altitude is not None:
+            return (speed, altitude, time.time() - t_start)
+
+    return (None, None, time.time() - t_start)
+
+
 def _apply_health_ceiling_filter(
     value: int,
     window: deque,
@@ -663,6 +748,12 @@ class GameStateAnalyzer:
         self.low_flares_event = threading.Event()
         self.no_missiles_event = threading.Event()
 
+        # Flight telemetry (GAME_BATTLE only) — speed (MPH) and altitude (feet),
+        # read together from the combined ALTITUDE_SPEED crop (ADR 038).
+        self._speed: "int | None" = None
+        self._altitude: "int | None" = None
+        self._telemetry_lock = threading.Lock()
+
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
         # Thread pool executor for parallel OCR processing
@@ -833,6 +924,28 @@ class GameStateAnalyzer:
         finally:
             if self._ammo_lock.locked():
                 self._ammo_lock.release()
+
+    def get_speed(self):
+        """Return the latest speed (MPH) snapshot from telemetry OCR."""
+        if not self._telemetry_lock.acquire(timeout=1.0):
+            logger.warning("get_speed: _telemetry_lock timeout — returning stale/no value")
+            return None
+        try:
+            return self._speed
+        finally:
+            if self._telemetry_lock.locked():
+                self._telemetry_lock.release()
+
+    def get_altitude(self):
+        """Return the latest altitude (feet) snapshot from telemetry OCR."""
+        if not self._telemetry_lock.acquire(timeout=1.0):
+            logger.warning("get_altitude: _telemetry_lock timeout — returning stale/no value")
+            return None
+        try:
+            return self._altitude
+        finally:
+            if self._telemetry_lock.locked():
+                self._telemetry_lock.release()
 
     def get_respawn_cache_result(self):
         """Return the cached respawn tuple (is_respawning, confidence, method)."""
@@ -1236,6 +1349,7 @@ class GameStateAnalyzer:
                     health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4]) if "HEALTH" in self.crops else None
                     ammo_flares_frame = get_crop(full_frame, *self.crops["AMMO_FLARES"][:4]) if "AMMO_FLARES" in self.crops else None
                     ammo_missile_frame = get_crop(full_frame, *self.crops["AMMO_MISSILE"][:4]) if "AMMO_MISSILE" in self.crops else None
+                    telemetry_frame = get_crop(full_frame, *self.crops["ALTITUDE_SPEED"][:4]) if "ALTITUDE_SPEED" in self.crops else None
                     t1 = time.time()
 
                     # Submit all tasks to the thread pool for parallel processing.
@@ -1254,6 +1368,7 @@ class GameStateAnalyzer:
                     health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
                     ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame) if ammo_flares_frame is not None else None
                     ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame) if ammo_missile_frame is not None else None
+                    telemetry_future = executor.submit(_process_telemetry_region, telemetry_frame) if telemetry_frame is not None else None
                     t2 = time.time()
 
                     # Wait for respawn result first — update its cache immediately so the
@@ -1459,15 +1574,30 @@ class GameStateAnalyzer:
                             if missile_value == 0:
                                 self.no_missiles_event.set()
 
+                    # Resolve telemetry future — store speed/altitude snapshots.
+                    # Only overwrite on a successful read so a momentary miss (e.g.
+                    # during respawn) keeps the last known value rather than nulling it.
+                    telemetry_ocr_time = 0.0
+                    if telemetry_future is not None:
+                        speed_value, altitude_value, telemetry_ocr_time = telemetry_future.result(timeout=120)
+                        with self._telemetry_lock:
+                            if speed_value is not None:
+                                self._speed = speed_value
+                            if altitude_value is not None:
+                                self._altitude = altitude_value
+                        if speed_value is not None or altitude_value is not None:
+                            logger.debug("Analyzer: Telemetry speed=%s altitude=%s",
+                                         speed_value, altitude_value)
+
                     t4 = time.time()
 
                     # Log timing
                     logger.debug(
                         "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
                         "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | "
-                        "Flares OCR: %.2fs | Missiles OCR: %.2fs | Total: %.2fs",
+                        "Flares OCR: %.2fs | Missiles OCR: %.2fs | Telemetry OCR: %.2fs | Total: %.2fs",
                         t1-t0, t2-t1, respawn_ocr_time, incoming_processing_time, health_ocr_time,
-                        ammo_flares_ocr_time, ammo_missile_ocr_time, t4-t0
+                        ammo_flares_ocr_time, ammo_missile_ocr_time, telemetry_ocr_time, t4-t0
                     )
                 elif (state == GameState.GAME_STARTING
                         and self._game_starting_health_scan_enabled.is_set()

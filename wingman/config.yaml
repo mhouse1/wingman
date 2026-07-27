@@ -2,9 +2,6 @@ unattended_mode: true
 loop_interval_sec: 1.5
 region: {left: 0, top: 0, width: 1920, height: 1200}
 monitor: 1
-# Linux/Wayland: pixel offset of the MetalStorm window within the captured monitor frame.
-# Run 'make find-game' with MetalStorm on screen to get a labelled screenshot, then set x/y here.
-# Leave as null to try visual auto-detection (less reliable when desktop wallpaper is dark).
 game_window_offset: {x: null, y: null}
 enemy_hsv:
   lower: [0, 120, 120]
@@ -115,6 +112,10 @@ crops:
     - [0.5174, 0.4078]
     - [0.7, 0.4767]
     text: [SILVER]
+  ALTITUDE_SPEED:              # combined speed (MPH, top) + altitude (feet, bottom) telemetry — ADR 038
+    coords:
+    - [0.309, 0.626]
+    - [0.362, 0.673]
 respawn_detection:
   use_ocr: true
   use_gpu: false
@@ -134,26 +135,24 @@ incoming_detection:
   incoming_template_telemetry_info: true
   incoming_debounce_ms: 500
   incoming_template_scales: [1.0]
-  incoming_template_sources:
-  - test_screenshots/INCOMING3.png
+  incoming_template_sources: [test_screenshots/INCOMING3.png]
 mission: {restart_delay_after_unlock: 4.0, restart_retry_interval: 2.0, respawn_fallback_timeout: 20.0,
   weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
-  starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5,
-  starting_max_wait_s: 90.0}
+  starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0}
 aim: {smoothing: 0.25, fire_cooldown: 0.2}
 controls: {left_mouse_button: true, fire_button: left, fire_hold: 2.0}
-debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false, debug_output_dir: tests/test-output}
+debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
+  debug_output_dir: tests/test-output}
 j20_mission: {target_painting_mode: false}
 tracking:
   enabled: false
-  # Fractional coords of the global acquisition scan region (x1,y1,x2,y2).
-  acquisition_region_pct: [0.20, 0.18, 0.80, 0.68]
+  acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
   deadband: 0.05
-  kp: 0.30
+  kp: 0.3
   min_hold_sec: 0.08
   max_hold_sec: 0.35
   command_cooldown_sec: 0.15
-  lost_timeout_sec: 0.70
+  lost_timeout_sec: 0.7
   prefer_red_lock: true
   local_roi_enabled: true
   local_roi_scale: 0.22
@@ -162,27 +161,13 @@ tracking:
   local_roi_max_scale: 0.45
   local_roi_reacquire_cycles: 3
 tracking_hsv:
-  # All HSV in OpenCV convention: H 0-179, S 0-255, V 0-255
-  # Red: locked target bar (hue wraps; wrap-around range added automatically)
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
-  # Green: non-locked enemy bar (tightened from draft to reduce false positives)
   green_lower: [45, 150, 150]
   green_upper: [75, 255, 255]
   min_contour_area: 12
-  # Aspect filter: rejects the dashed lock-on reticle circle (h/w < 2.5)
   min_aspect_ratio: 2.5
-hud:
-  enabled: true
-  output_path: tests/test-output/live_hud.png
-  interval_sec: 1.0
+hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
 performance:
-  round_histogram:
-    enabled: true
-    png_enabled: false
-    png_every_n_rounds: 0
-    output_dir: docs/performance
-  regression:
-    min_sessions: 5
-    min_cycles: 1000
-    threshold_pct: 20
+  round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
+  regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}
