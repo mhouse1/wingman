@@ -1,0 +1,63 @@
+{
+  "wingman_version": "1.6.22",
+  "run_id": "20260628_163015",
+  "session_start_ts": 1782678615.793,
+  "session_duration_s": 1434.3,
+  "missions_started": 4,
+  "missions_click_to": 1,
+  "missions_missiles_empty": 3,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 7,
+  "total_flare_bursts": 4,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 7,
+  "avg_mission_duration_s": 207.3,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1782678665.071,
+      "duration_s": 218.0,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 2,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 1,
+      "start_ts": 1782679210.24,
+      "duration_s": 161.7,
+      "respawn_count": 1,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 1,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 2,
+      "start_ts": 1782679434.548,
+      "duration_s": 238.9,
+      "respawn_count": 2,
+      "flare_burst_count": 2,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 2,
+      "outcome": "missiles_empty"
+    },
+    {
+      "index": 3,
+      "start_ts": 1782679745.883,
+      "duration_s": 210.5,
+      "respawn_count": 2,
+      "flare_burst_count": 2,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 2,
+      "outcome": "click_to"
+    }
+  ],
+  "stats_path": "docs\\performance\\current\\run_20260628_163015_stats.json"
+}
