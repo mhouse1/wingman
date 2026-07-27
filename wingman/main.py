@@ -16,7 +16,7 @@ except ImportError:
     colorama = None
 
 WINGMAN_VERSION = "1.6.24"
-WINGMAN_VERSION_DETAILS = "read altitude and determine nose angle"
+WINGMAN_VERSION_DETAILS = "stable release before reading altitude and determine nose angle"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
