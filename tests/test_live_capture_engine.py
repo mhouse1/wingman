@@ -432,3 +432,50 @@ def test_live_capture_engine_out_of_order_requires_fresh_trigger(capture_dir: Pa
     payload = engine.to_dict()
     assert payload["steps"][0]["status"] == "pending"
     assert not (capture_dir / "respawn.png").exists()
+
+
+def test_live_capture_engine_out_of_order_overall_timeout_fails_pending_steps(capture_dir: Path):
+    steps = [
+        ReplayStep(screenshot_name="lobby.png", injection_time_s=0.0, expected_state="GAME_LOBBY"),
+        ReplayStep(
+            screenshot_name="battle.png",
+            injection_time_s=0.0,
+            expected_state="GAME_BATTLE",
+            expected_trigger="missiles_empty",
+        ),
+    ]
+    engine = LivePathCaptureEngine(
+        path_name="PATH1",
+        steps=steps,
+        screenshot_dir=capture_dir,
+        region=(0, 0, 10, 10),
+        overwrite=True,
+        timeout_s=5.0,
+        allow_inject=False,
+        auto_resume=False,
+        timeout_advances=False,
+        out_of_order=True,
+    )
+
+    frame = _frame()
+    engine.evaluate(frame, "GAME_LOBBY", 0.0)
+    engine.evaluate(frame, "GAME_LOBBY", 0.1)  # lobby captured
+
+    # Trigger fires while the state never matches within the freshness window,
+    # so the battle step can never become ready (the ADR045 hang scenario).
+    engine.on_event("missiles_empty", 1.0)
+    engine.evaluate(frame, "GAME_BATTLE_EJECT", 1.0)
+    engine.evaluate(frame, "GAME_BATTLE_EJECT", 1.1)
+    assert not engine.is_complete()
+
+    # Past the lane-wide timeout the pending step fails and the lane completes
+    # instead of looping forever.
+    engine.evaluate(frame, "GAME_BATTLE_EJECT", 5.2)
+
+    assert engine.is_complete()
+    assert engine.has_failures()
+    payload = engine.to_dict()
+    assert payload["steps"][0]["status"] == "captured"
+    assert payload["steps"][1]["status"] == "failed"
+    assert payload["steps"][1]["timeout"] is True
+    assert payload["steps"][1]["notes"] == "timeout_after_5.0s"

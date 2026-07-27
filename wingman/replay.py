@@ -286,6 +286,8 @@ class LivePathCaptureEngine:
 
         self._start_ts: float | None = None
         self._end_ts: float | None = None
+        self._first_evaluate_s: float | None = None
+        self._oo_deadline_s: float = self._timeout_s
         self._current_index = 0
         self._current_started_s: float | None = None
         self._current_injected = False
@@ -568,6 +570,29 @@ class LivePathCaptureEngine:
             return
 
         if self._out_of_order:
+            # Out-of-order mode has no per-step ordering, so the timeout is
+            # lane-wide: the deadline is the last scheduled screenshot
+            # (max injection_time_s) plus timeout_s of slack — timeout_s alone
+            # would expire before late-scheduled steps can even appear. Once
+            # past the deadline, every still-pending step is failed so
+            # is_complete() terminates the main loop instead of waiting
+            # forever on a step whose readiness can never occur. Measured on
+            # caller-supplied now_s, the same clock the sequential per-step
+            # timeout uses.
+            if self._first_evaluate_s is None:
+                self._first_evaluate_s = now_s
+                self._oo_deadline_s = (
+                    max((step.injection_time_s or 0.0) for step in self._steps)
+                    + self._timeout_s
+                )
+            elif now_s - self._first_evaluate_s > self._oo_deadline_s:
+                for result in self._results:
+                    if result.status not in {"captured", "failed", "skipped"}:
+                        result.timeout = True
+                        result.status = "failed"
+                        result.notes = f"timeout_after_{self._oo_deadline_s:.1f}s"
+                self._mark_ended(now_s)
+                return
             normalized_state = _normalize_state(state_name)
             for i, step in enumerate(self._steps):
                 result = self._results[i]
