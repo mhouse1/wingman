@@ -183,15 +183,24 @@ test, 2026-07-27):
   33 of 34 individual rows exact. The one miss truncated a trailing digit
   where the altitude digits touch the `feet` label (`27164` read as `2716`).
 - Final pipeline: HSV mask at 3x is primary; Otsu and gray variants are
-  consulted only when an HSV row is missing or its OCR confidence is below
-  0.6, and a fallback row replaces a present HSV row only when it is both
-  confident and strictly longer in digits. Digit loss is this stack's
-  characteristic error, and row confidence alone cannot separate correct from
-  truncated reads (a correct row scored 0.40 while a truncated one scored
-  0.45), so confidence must never override a present value of equal length.
-  Result: 17 of 17 exact (day 5 of 5, night 12 of 12), mean 0.57 s per frame,
-  p95 1.16 s — accuracy up from 70.6 percent at unchanged mean processing
-  time.
+  consulted only when an HSV row is missing entirely, and a fallback row
+  replaces a present HSV row only when it is both confident and strictly
+  longer in digits. Digit loss is this stack's characteristic error, and row
+  confidence alone cannot separate correct from truncated reads (a correct
+  row scored 0.40 while a truncated one scored 0.45), so confidence must
+  never override a present value of equal length. Result: 16 of 17 exact
+  (94.1 percent; day 4 of 5, night 12 of 12), mean 0.25 s per frame — the one
+  miss is a trailing-digit truncation (27164 as 2716) whose 10x jump the
+  runtime plausibility filter rejects as a spike.
+- A stricter variant that also ran fallback on low-confidence rows scored
+  17 of 17 on the corpus but was rejected after live measurement: real
+  battle frames sit below any usable confidence gate so often that the extra
+  passes ran on most ticks — 1.72 s mean telemetry OCR in-loop (session
+  run_20260728_055827, 1169 cycles), stretching the 1.5 s tick to about
+  2.8 s and roughly doubling incoming-to-flare reaction latency (0.39 s to
+  0.84 s versus the v1.6.24 baseline). Per this ADR's speed-over-perfection
+  decision, corpus perfection is not worth a slower loop when the filter
+  already blocks wrong numbers at runtime (96 rejected in that session).
 
 Acceptance gate: tuning balances read accuracy against per-tick processing
 time rather than chasing perfect reads — the ADR 030 lesson is that a cheap

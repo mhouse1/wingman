@@ -447,16 +447,25 @@ def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None,
     #    bright-terrain backgrounds that wash out grayscale/Otsu contrast on
     #    day maps (corpus: Otsu alone lost leading digits on 3 of 5 day
     #    frames; the HSV pass read 33 of 34 corpus rows exactly).
-    # 2. Otsu binary and plain gray at 2x — fallback, consulted only when an
-    #    HSV row is missing or below the row-confidence gate.
+    # 2. Otsu binary and plain gray at 2x — fallback, consulted ONLY when an
+    #    HSV row is missing entirely. Low confidence deliberately does NOT
+    #    trigger fallback: live frames (motion blur, HUD flicker) sit below
+    #    any usable confidence gate so often that conf-gated fallback ran the
+    #    extra passes on most battle ticks — measured 1.72s mean in-loop
+    #    (session run_20260728_055827), stretching the 1.5s tick to ~2.8s and
+    #    doubling incoming→flare reaction latency. At runtime the ADR 030
+    #    plausibility filter owns wrong-number defense (96 bogus reads
+    #    rejected in that same session); a rare truncated read costs one
+    #    filtered spike, not a wrong value downstream.
     #
-    # Replacement rule: a fallback row replaces a present HSV row only when
-    # the fallback is confident AND strictly longer in digits. Digit LOSS is
-    # this stack's characteristic error (truncation: 27164 read as 2716 when
-    # the digits touch the 'feet' label), while HSV row confidence does not
-    # separate correct from truncated reads (corpus: a correct row at 0.40 vs
-    # a truncated one at 0.45, and one correct row at 0.01) — so confidence
-    # alone must never override a present HSV value with a same-length one.
+    # Replacement rule when a fallback pass does run: a fallback row replaces
+    # a present HSV row only when the fallback is confident AND strictly
+    # longer in digits. Digit LOSS is this stack's characteristic error
+    # (truncation: 27164 read as 2716 when the digits touch the 'feet'
+    # label), while HSV row confidence does not separate correct from
+    # truncated reads (corpus: a correct row at 0.40 vs a truncated one at
+    # 0.45, and one correct row at 0.01) — so confidence alone must never
+    # override a present HSV value with a same-length one.
     hsv = cv2.cvtColor(telemetry_frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, _TELEMETRY_HSV_LOWER, _TELEMETRY_HSV_UPPER)
     hsv_img = cv2.resize(mask, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
@@ -464,10 +473,7 @@ def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None,
     results = reader.readtext(hsv_img, detail=1, paragraph=False, workers=0)
     speed, altitude, speed_conf, alt_conf = _split_telemetry_rows(results, hsv_img.shape[0])
 
-    def _row_needs_fallback(value, conf):
-        return value is None or conf < _TELEMETRY_ROW_CONF_MIN
-
-    if _row_needs_fallback(speed, speed_conf) or _row_needs_fallback(altitude, alt_conf):
+    if speed is None or altitude is None:
         gray = cv2.cvtColor(telemetry_frame, cv2.COLOR_BGR2GRAY)
         upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
         _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -487,8 +493,7 @@ def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None,
             fb_speed, fb_alt, fb_speed_conf, fb_alt_conf = _split_telemetry_rows(fb, img.shape[0])
             speed, speed_conf = _adopt(speed, speed_conf, fb_speed, fb_speed_conf)
             altitude, alt_conf = _adopt(altitude, alt_conf, fb_alt, fb_alt_conf)
-            if not (_row_needs_fallback(speed, speed_conf)
-                    or _row_needs_fallback(altitude, alt_conf)):
+            if speed is not None and altitude is not None:
                 break
 
     return (speed, altitude, time.time() - t_start)
