@@ -404,6 +404,27 @@ def test_telemetry_split_ignores_boxes_without_digits_and_empty():
     assert _split_telemetry_rows([_tbox(10, 5, 60, 25, "MPH")], 60) == (None, None, 0.0, 0.0)
 
 
+def test_telemetry_harvest_never_blocks_and_feeds_filter(analyzer):
+    """ADR 038 safety rule: the tick harvests finished telemetry OCR without
+    waiting; pending futures are left in flight."""
+    from concurrent.futures import Future
+
+    pending = Future()  # never resolved — a slow OCR pass still running
+    analyzer._telemetry_future = pending
+    assert analyzer._harvest_telemetry_future() == 0.0
+    assert analyzer._telemetry_future is pending  # left in flight, not dropped
+
+    done = Future()
+    done.set_result((600, 12000, 0.42))
+    analyzer._telemetry_future = done
+    assert analyzer._harvest_telemetry_future() == 0.42
+    assert analyzer._telemetry_future is None
+
+    snap = analyzer.get_telemetry()
+    assert snap.speed.value == 600
+    assert snap.altitude.value == 12000
+
+
 def test_telemetry_split_row_confidence_is_minimum_of_digit_boxes():
     # One doubtful digit box taints the whole row (conservative min), while
     # the other row keeps its own confidence. The row value stays the leading

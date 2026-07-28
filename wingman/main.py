@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.26"
-WINGMAN_VERSION_DETAILS = "adr38 telemetry ocr fallback only on missing rows - restore tick budget"
+WINGMAN_VERSION = "1.6.27"
+WINGMAN_VERSION_DETAILS = "adr38 async telemetry ocr - tick never blocks on telemetry, every 2nd tick"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON

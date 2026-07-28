@@ -815,8 +815,16 @@ class GameStateAnalyzer:
         # read together from the combined ALTITUDE_SPEED crop (ADR 038).
         # ADR 038: plausibility filter + smoothing + rate live in the pure
         # telemetry module; the analyzer only serializes access.
-        self._telemetry = TelemetryProcessor(config.get("telemetry", {}))
+        _telemetry_cfg = config.get("telemetry", {})
+        self._telemetry = TelemetryProcessor(_telemetry_cfg)
         self._telemetry_lock = threading.Lock()
+        # Non-blocking telemetry OCR (ADR 038 safety rule: never block the
+        # main loop on altitude-speed OCR). The in-flight future is harvested
+        # on a later tick when done; a new one is submitted only when none is
+        # pending and the tick throttle allows.
+        self._telemetry_future = None
+        self._telemetry_tick_counter = 0
+        self._telemetry_every_n_ticks = max(1, int(_telemetry_cfg.get("ocr_every_n_ticks", 2)))
 
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
 
@@ -989,6 +997,41 @@ class GameStateAnalyzer:
             if self._ammo_lock.locked():
                 self._ammo_lock.release()
 
+    def _harvest_telemetry_future(self) -> float:
+        """Collect a finished telemetry OCR pass without blocking (ADR 038).
+
+        Returns the harvested pass's OCR seconds for the tick timing log, or
+        0.0 when nothing was ready. The reading lands one to two ticks after
+        its frame was captured — well inside the staleness budget — and the
+        filter timestamps it at harvest time, so rate derivation stays on one
+        consistent clock.
+        """
+        fut = self._telemetry_future
+        if fut is None or not fut.done():
+            return 0.0
+        self._telemetry_future = None
+        try:
+            speed_value, altitude_value, telemetry_ocr_time = fut.result(timeout=1)
+        except Exception:
+            logger.exception("Analyzer: telemetry OCR pass failed")
+            return 0.0
+        if self._tracker:
+            self._tracker.record_ocr_crop("telemetry", telemetry_ocr_time)
+        _tel_now = time.time()
+        with self._telemetry_lock:
+            rejected_before = self._telemetry.rejected_total
+            self._telemetry.update(speed_value, altitude_value, _tel_now)
+            rejected_after = self._telemetry.rejected_total
+        if rejected_after > rejected_before:
+            logger.warning(
+                "Analyzer: telemetry plausibility filter rejected reading "
+                "(speed_raw=%s altitude_raw=%s, total_rejected=%d)",
+                speed_value, altitude_value, rejected_after)
+        if speed_value is not None or altitude_value is not None:
+            logger.debug("Analyzer: Telemetry speed=%s altitude=%s",
+                         speed_value, altitude_value)
+        return telemetry_ocr_time
+
     def get_telemetry(self):
         """Return one atomic TelemetrySnapshot (speed + altitude + rates).
 
@@ -1116,6 +1159,9 @@ class GameStateAnalyzer:
                 self.alive_event.set()
         with self._telemetry_lock:
             self._telemetry.reset()
+        # Drop any in-flight OCR from the previous battle so its stale frame
+        # cannot seed the freshly reset filter when battle resumes.
+        self._telemetry_future = None
 
     def reset_health_for_respawn(self):
         """Clear health spike filter after a respawn so full-health readings aren't rejected.
@@ -1436,7 +1482,19 @@ class GameStateAnalyzer:
                     health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
                     ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame) if ammo_flares_frame is not None else None
                     ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame) if ammo_missile_frame is not None else None
-                    telemetry_future = executor.submit(_process_telemetry_region, telemetry_frame) if telemetry_frame is not None else None
+                    # Telemetry is fire-and-forget: harvest last submission's
+                    # result if it finished, then maybe submit a fresh frame.
+                    # The tick NEVER waits on telemetry (ADR 038 safety rule) —
+                    # measured on session run_20260728_172933, blocking on it
+                    # made telemetry the critical path on 92% of ticks.
+                    telemetry_ocr_time = self._harvest_telemetry_future()
+                    self._telemetry_tick_counter += 1
+                    if (telemetry_frame is not None
+                            and self._telemetry_future is None
+                            and self._telemetry_tick_counter >= self._telemetry_every_n_ticks):
+                        self._telemetry_tick_counter = 0
+                        self._telemetry_future = executor.submit(
+                            _process_telemetry_region, telemetry_frame)
                     t2 = time.time()
 
                     # Wait for respawn result first — update its cache immediately so the
@@ -1641,28 +1699,6 @@ class GameStateAnalyzer:
                             logger.info("Ammo missiles: %d", missile_value)
                             if missile_value == 0:
                                 self.no_missiles_event.set()
-
-                    # Resolve telemetry future — store speed/altitude snapshots.
-                    # Only overwrite on a successful read so a momentary miss (e.g.
-                    # during respawn) keeps the last known value rather than nulling it.
-                    telemetry_ocr_time = 0.0
-                    if telemetry_future is not None:
-                        speed_value, altitude_value, telemetry_ocr_time = telemetry_future.result(timeout=120)
-                        if self._tracker:
-                            self._tracker.record_ocr_crop("telemetry", telemetry_ocr_time)
-                        _tel_now = time.time()
-                        with self._telemetry_lock:
-                            rejected_before = self._telemetry.rejected_total
-                            self._telemetry.update(speed_value, altitude_value, _tel_now)
-                            rejected_after = self._telemetry.rejected_total
-                        if rejected_after > rejected_before:
-                            logger.warning(
-                                "Analyzer: telemetry plausibility filter rejected reading "
-                                "(speed_raw=%s altitude_raw=%s, total_rejected=%d)",
-                                speed_value, altitude_value, rejected_after)
-                        if speed_value is not None or altitude_value is not None:
-                            logger.debug("Analyzer: Telemetry speed=%s altitude=%s",
-                                         speed_value, altitude_value)
 
                     t4 = time.time()
 

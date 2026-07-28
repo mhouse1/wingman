@@ -180,6 +180,7 @@ telemetry:                          # ADR 038 — altitude/speed signal model
   trend_min_speed_rate_mph_s: 15.0  # |speed rate| below this is 'flat'
   steep_dive_min_sin: 0.5           # |alt_rate/speed| at or above → steep dive/climb band
   level_max_sin: 0.15               # |alt_rate/speed| at or below → level band
+  ocr_every_n_ticks: 2              # submit telemetry OCR every Nth battle tick (async; the tick never waits on it)
   eject_closed_loop:
     enabled: true                   # verify nose-down/afterburner from telemetry during eject
     verify_window_s: 6.0            # time allowed for the steep-dive band to appear after NOSE_DOWN
