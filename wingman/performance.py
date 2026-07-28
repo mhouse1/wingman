@@ -8,7 +8,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_CROPS = ("incoming", "respawn", "health", "ammo_flares", "ammo_missiles")
+_CROPS = ("incoming", "respawn", "health", "ammo_flares", "ammo_missiles", "telemetry")
 
 # (label, lo_inclusive, hi_exclusive)  — hi=None means unbounded upper
 _OCR_BUCKETS = [

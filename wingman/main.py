@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.24"
-WINGMAN_VERSION_DETAILS = "stable release before reading altitude and determine nose angle"
+WINGMAN_VERSION = "1.6.25"
+WINGMAN_VERSION_DETAILS = "adr38 telemetry signals, plausibility filter, closed-loop eject dive"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
@@ -330,6 +330,7 @@ def main():
         disable_hotkeys=(replay_mode or capture_mode),
         capture_with_overlay=capture_with_overlay,
         starting_max_wait_s=starting_max_wait_s,
+        telemetry_cfg=cfg.get("telemetry", {}),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via analyzer public callback setters.

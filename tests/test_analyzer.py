@@ -382,7 +382,7 @@ def _tbox(x0, y0, x1, y1, text):
 def test_telemetry_split_labels_in_same_box():
     # Number and MPH/feet label share one detection box; leading digits win.
     results = [_tbox(10, 5, 120, 25, "957 MPH"), _tbox(10, 35, 140, 55, "27123 feet")]
-    assert _split_telemetry_rows(results, img_height=60) == (957, 27123)
+    assert _split_telemetry_rows(results, img_height=60) == (957, 27123, 0.9, 0.9)
 
 
 def test_telemetry_split_number_and_label_separate_boxes():
@@ -390,15 +390,30 @@ def test_telemetry_split_number_and_label_separate_boxes():
         _tbox(10, 5, 60, 25, "530"), _tbox(70, 5, 120, 25, "MPH"),
         _tbox(10, 35, 90, 55, "27681"), _tbox(100, 35, 140, 55, "feet"),
     ]
-    assert _split_telemetry_rows(results, img_height=60) == (530, 27681)
+    assert _split_telemetry_rows(results, img_height=60) == (530, 27681, 0.9, 0.9)
 
 
 def test_telemetry_split_single_line_assigned_by_crop_half():
     # Only the speed line visible (upper half) → altitude None, and vice versa.
-    assert _split_telemetry_rows([_tbox(10, 5, 120, 25, "530 MPH")], 60) == (530, None)
-    assert _split_telemetry_rows([_tbox(10, 40, 140, 58, "27681 feet")], 60) == (None, 27681)
+    assert _split_telemetry_rows([_tbox(10, 5, 120, 25, "530 MPH")], 60) == (530, None, 0.9, 0.0)
+    assert _split_telemetry_rows([_tbox(10, 40, 140, 58, "27681 feet")], 60) == (None, 27681, 0.0, 0.9)
 
 
 def test_telemetry_split_ignores_boxes_without_digits_and_empty():
-    assert _split_telemetry_rows([], 60) == (None, None)
-    assert _split_telemetry_rows([_tbox(10, 5, 60, 25, "MPH")], 60) == (None, None)
+    assert _split_telemetry_rows([], 60) == (None, None, 0.0, 0.0)
+    assert _split_telemetry_rows([_tbox(10, 5, 60, 25, "MPH")], 60) == (None, None, 0.0, 0.0)
+
+
+def test_telemetry_split_row_confidence_is_minimum_of_digit_boxes():
+    # One doubtful digit box taints the whole row (conservative min), while
+    # the other row keeps its own confidence. The row value stays the leading
+    # digit run of the joined text.
+    results = [
+        _tbox(10, 5, 60, 25, "530"),
+        ([[70, 5], [110, 5], [110, 25], [70, 25]], "4", 0.3),  # stray low-conf digit box
+        _tbox(10, 35, 140, 55, "27123 feet"),
+    ]
+    speed, alt, speed_conf, alt_conf = _split_telemetry_rows(results, img_height=60)
+    assert (speed, alt) == (530, 27123)
+    assert speed_conf == pytest.approx(0.3)
+    assert alt_conf == pytest.approx(0.9)

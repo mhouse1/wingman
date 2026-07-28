@@ -17,6 +17,7 @@ HEALTH_SPIKE_FACTOR = 1.5  # reject readings more than 50 % above the establishe
 from transitions import Machine, MachineError
 
 from .crop_region import get_crop, load_crops, draw_crops
+from .telemetry import TelemetryProcessor
 
 
 class GameState(Enum):
@@ -149,6 +150,13 @@ _thread_local = threading.local()
 # The lock ensures only one thread downloads at a time — subsequent threads find the
 # model already on disk and initialize instantly.
 _ocr_init_lock = threading.Lock()
+
+# ADR 038 telemetry extraction: HSV bounds isolating the green HUD telemetry
+# text (measured on the labeled day/night corpus), and the per-row OCR
+# confidence below which the fallback preprocessing variants are consulted.
+_TELEMETRY_HSV_LOWER = np.array([30, 40, 80], dtype=np.uint8)
+_TELEMETRY_HSV_UPPER = np.array([90, 255, 255], dtype=np.uint8)
+_TELEMETRY_ROW_CONF_MIN = 0.6
 
 # Set from config at startup by GameStateAnalyzer.__init__.
 # False (default) skips the failed GPU probe and goes straight to CPU init.
@@ -352,54 +360,63 @@ def _process_health_region(health_frame) -> "tuple[int | None, float]":
     return (None, time.time() - t_start)
 
 
-def _row_value(boxes) -> "int | None":
+def _row_value(boxes) -> "tuple[int | None, float]":
     """Parse the leading number from one row of x-ordered OCR boxes.
 
     Boxes are joined left-to-right into a single string, and the first contiguous
     digit run is taken as the value. Because the numbers are left-aligned and the
     'MPH'/'feet' labels follow them, this yields the number while ignoring the
     trailing label — even when the label lands in the same detection box (e.g.
-    '27681 feet' → 27681). Returns None when the row contains no digits.
+    '27681 feet' → 27681). Returns (value, confidence); confidence is the
+    minimum OCR confidence across the row's digit boxes (conservative — one
+    doubtful box taints the row), 0.0 when the row has no digits.
     """
-    text = " ".join(str(t) for _, _, t in sorted(boxes, key=lambda b: b[1]))
+    boxes_sorted = sorted(boxes, key=lambda b: b[1])
+    text = " ".join(str(t) for _, _, t, _ in boxes_sorted)
     match = re.search(r"\d+", text)
-    return int(match.group()) if match else None
+    if not match:
+        return (None, 0.0)
+    conf = min(c for _, _, _, c in boxes_sorted)
+    return (int(match.group()), float(conf))
 
 
-def _split_telemetry_rows(ocr_results, img_height) -> "tuple[int | None, int | None]":
-    """Split detail=1 OCR boxes from the ALTITUDE_SPEED crop into (speed, altitude).
+def _split_telemetry_rows(ocr_results, img_height) -> "tuple[int | None, int | None, float, float]":
+    """Split detail=1 OCR boxes from the ALTITUDE_SPEED crop into speed/altitude rows.
 
     The crop holds two left-aligned numeric lines — speed (MPH) on top, altitude
     (feet) below. Boxes are grouped into an upper (speed) and lower (altitude) row
     by bounding-box vertical centre, then each row's leading number is parsed. When
     only one line is visible (small vertical spread), it is assigned by the half of
-    the crop it occupies. Returns (speed, altitude), each None when that row
-    produced no digits. See ADR 038.
+    the crop it occupies. Returns (speed, altitude, speed_conf, alt_conf); values
+    are None (conf 0.0) when that row produced no digits. See ADR 038.
     """
     boxes = []
-    for bbox, text, _conf in ocr_results:
+    for bbox, text, conf in ocr_results:
         if not any(c.isdigit() for c in str(text)):
             continue
         ys = [pt[1] for pt in bbox]
         xs = [pt[0] for pt in bbox]
-        boxes.append((sum(ys) / len(ys), min(xs), str(text)))
+        boxes.append((sum(ys) / len(ys), min(xs), str(text), conf))
     if not boxes:
-        return (None, None)
+        return (None, None, 0.0, 0.0)
 
     y_centers = [b[0] for b in boxes]
     spread = max(y_centers) - min(y_centers)
 
     # Single visible line: assign by which half of the crop it sits in.
     if spread < img_height * 0.25:
-        value = _row_value(boxes)
+        value, conf = _row_value(boxes)
         line_y = sum(y_centers) / len(y_centers)
-        return (value, None) if line_y < img_height / 2.0 else (None, value)
+        if line_y < img_height / 2.0:
+            return (value, None, conf, 0.0)
+        return (None, value, 0.0, conf)
 
     mid_row = (max(y_centers) + min(y_centers)) / 2.0
     speed_boxes = [b for b in boxes if b[0] <= mid_row]
     alt_boxes = [b for b in boxes if b[0] > mid_row]
-    return (_row_value(speed_boxes) if speed_boxes else None,
-            _row_value(alt_boxes) if alt_boxes else None)
+    speed, speed_conf = _row_value(speed_boxes) if speed_boxes else (None, 0.0)
+    alt, alt_conf = _row_value(alt_boxes) if alt_boxes else (None, 0.0)
+    return (speed, alt, speed_conf, alt_conf)
 
 
 def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None, float]":
@@ -423,17 +440,58 @@ def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None,
         return (None, None, 0.0)
 
     t_start = time.time()
-    gray = cv2.cvtColor(telemetry_frame, cv2.COLOR_BGR2GRAY)
-    upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-    _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    for img in (binary, upscaled):
-        results = reader.readtext(img, detail=1, paragraph=False, workers=0)
-        speed, altitude = _split_telemetry_rows(results, img.shape[0])
-        if speed is not None or altitude is not None:
-            return (speed, altitude, time.time() - t_start)
+    # Preprocessing variants in corpus-tuned order (ADR 038 day/night tuning):
+    # 1. HSV green-isolation mask at 3x — primary and trusted. The HUD text is
+    #    the same green day and night, so masking is robust to the
+    #    bright-terrain backgrounds that wash out grayscale/Otsu contrast on
+    #    day maps (corpus: Otsu alone lost leading digits on 3 of 5 day
+    #    frames; the HSV pass read 33 of 34 corpus rows exactly).
+    # 2. Otsu binary and plain gray at 2x — fallback, consulted only when an
+    #    HSV row is missing or below the row-confidence gate.
+    #
+    # Replacement rule: a fallback row replaces a present HSV row only when
+    # the fallback is confident AND strictly longer in digits. Digit LOSS is
+    # this stack's characteristic error (truncation: 27164 read as 2716 when
+    # the digits touch the 'feet' label), while HSV row confidence does not
+    # separate correct from truncated reads (corpus: a correct row at 0.40 vs
+    # a truncated one at 0.45, and one correct row at 0.01) — so confidence
+    # alone must never override a present HSV value with a same-length one.
+    hsv = cv2.cvtColor(telemetry_frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, _TELEMETRY_HSV_LOWER, _TELEMETRY_HSV_UPPER)
+    hsv_img = cv2.resize(mask, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
 
-    return (None, None, time.time() - t_start)
+    results = reader.readtext(hsv_img, detail=1, paragraph=False, workers=0)
+    speed, altitude, speed_conf, alt_conf = _split_telemetry_rows(results, hsv_img.shape[0])
+
+    def _row_needs_fallback(value, conf):
+        return value is None or conf < _TELEMETRY_ROW_CONF_MIN
+
+    if _row_needs_fallback(speed, speed_conf) or _row_needs_fallback(altitude, alt_conf):
+        gray = cv2.cvtColor(telemetry_frame, cv2.COLOR_BGR2GRAY)
+        upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        def _adopt(current, current_conf, candidate, candidate_conf):
+            if candidate is None:
+                return current, current_conf
+            if current is None:
+                return candidate, candidate_conf
+            if (candidate_conf >= _TELEMETRY_ROW_CONF_MIN
+                    and len(str(candidate)) > len(str(current))):
+                return candidate, candidate_conf
+            return current, current_conf
+
+        for img in (binary, upscaled):
+            fb = reader.readtext(img, detail=1, paragraph=False, workers=0)
+            fb_speed, fb_alt, fb_speed_conf, fb_alt_conf = _split_telemetry_rows(fb, img.shape[0])
+            speed, speed_conf = _adopt(speed, speed_conf, fb_speed, fb_speed_conf)
+            altitude, alt_conf = _adopt(altitude, alt_conf, fb_alt, fb_alt_conf)
+            if not (_row_needs_fallback(speed, speed_conf)
+                    or _row_needs_fallback(altitude, alt_conf)):
+                break
+
+    return (speed, altitude, time.time() - t_start)
 
 
 def _apply_health_ceiling_filter(
@@ -750,8 +808,9 @@ class GameStateAnalyzer:
 
         # Flight telemetry (GAME_BATTLE only) — speed (MPH) and altitude (feet),
         # read together from the combined ALTITUDE_SPEED crop (ADR 038).
-        self._speed: "int | None" = None
-        self._altitude: "int | None" = None
+        # ADR 038: plausibility filter + smoothing + rate live in the pure
+        # telemetry module; the analyzer only serializes access.
+        self._telemetry = TelemetryProcessor(config.get("telemetry", {}))
         self._telemetry_lock = threading.Lock()
 
         # Static frame detection: two consecutive identical incoming_region frames → GAME_END
@@ -925,24 +984,19 @@ class GameStateAnalyzer:
             if self._ammo_lock.locked():
                 self._ammo_lock.release()
 
-    def get_speed(self):
-        """Return the latest speed (MPH) snapshot from telemetry OCR."""
-        if not self._telemetry_lock.acquire(timeout=1.0):
-            logger.warning("get_speed: _telemetry_lock timeout — returning stale/no value")
-            return None
-        try:
-            return self._speed
-        finally:
-            if self._telemetry_lock.locked():
-                self._telemetry_lock.release()
+    def get_telemetry(self):
+        """Return one atomic TelemetrySnapshot (speed + altitude + rates).
 
-    def get_altitude(self):
-        """Return the latest altitude (feet) snapshot from telemetry OCR."""
+        Single accessor by design: consumers divide altitude rate by speed for
+        nose-direction estimation, so the pair must come from the same cycle —
+        separate getters could return a torn pair (ADR 038). Returns None on
+        lock timeout.
+        """
         if not self._telemetry_lock.acquire(timeout=1.0):
-            logger.warning("get_altitude: _telemetry_lock timeout — returning stale/no value")
+            logger.warning("get_telemetry: _telemetry_lock timeout — returning no snapshot")
             return None
         try:
-            return self._altitude
+            return self._telemetry.snapshot(time.time())
         finally:
             if self._telemetry_lock.locked():
                 self._telemetry_lock.release()
@@ -1038,6 +1092,8 @@ class GameStateAnalyzer:
         with self._health_lock:
             self._health_window.clear()
             self._health_ceiling = None
+        with self._telemetry_lock:
+            self._telemetry.reset()
 
     def on_enter_GAME_UNKNOWN(self):
         self._unknown_candidate_state = None
@@ -1053,6 +1109,8 @@ class GameStateAnalyzer:
             self._health_ceiling = None
             if self._health is not None and self._health >= 1:
                 self.alive_event.set()
+        with self._telemetry_lock:
+            self._telemetry.reset()
 
     def reset_health_for_respawn(self):
         """Clear health spike filter after a respawn so full-health readings aren't rejected.
@@ -1066,6 +1124,11 @@ class GameStateAnalyzer:
             self._health_ceiling = None
             self._health_no_digits_since = 0.0
             self._game_battle_alive = False
+        # Respawn teleports the aircraft — a legitimate discontinuity the
+        # telemetry plausibility filter would otherwise reject for several
+        # ticks, so recalibrate it alongside the health filter.
+        with self._telemetry_lock:
+            self._telemetry.reset()
         logger.info("Analyzer: health spike filter reset for respawn")
 
     def on_enter_GAME_BATTLE_MANUAL(self):
@@ -1580,11 +1643,18 @@ class GameStateAnalyzer:
                     telemetry_ocr_time = 0.0
                     if telemetry_future is not None:
                         speed_value, altitude_value, telemetry_ocr_time = telemetry_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("telemetry", telemetry_ocr_time)
+                        _tel_now = time.time()
                         with self._telemetry_lock:
-                            if speed_value is not None:
-                                self._speed = speed_value
-                            if altitude_value is not None:
-                                self._altitude = altitude_value
+                            rejected_before = self._telemetry.rejected_total
+                            self._telemetry.update(speed_value, altitude_value, _tel_now)
+                            rejected_after = self._telemetry.rejected_total
+                        if rejected_after > rejected_before:
+                            logger.warning(
+                                "Analyzer: telemetry plausibility filter rejected reading "
+                                "(speed_raw=%s altitude_raw=%s, total_rejected=%d)",
+                                speed_value, altitude_value, rejected_after)
                         if speed_value is not None or altitude_value is not None:
                             logger.debug("Analyzer: Telemetry speed=%s altitude=%s",
                                          speed_value, altitude_value)

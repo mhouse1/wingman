@@ -66,7 +66,7 @@ preflight:
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_mission_cancel.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_mission_cancel.py tests/test_telemetry.py tests/test_eject_closed_loop.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -331,11 +331,11 @@ y:
 # Requires real game screenshots in test_screenshots/integration_test/.
 # All-black placeholder screenshots cause tests to skip automatically.
 ocr:
-	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py -m slow -v
+	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py tests/test_telemetry_corpus.py -m slow -v
 
 # Alias for ocr: run integration tests (shorter to type).
 ti:
-	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py -m slow -v
+	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py tests/test_telemetry_corpus.py -m slow -v
 
 # ADR044 phase 1 runtime lane: run real main loop with replayed PATH1 screenshots.
 rr-path1:

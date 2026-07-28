@@ -107,8 +107,15 @@ def _validate_log(log_text: str, failures: list[str]) -> dict:
     if terminal_total <= 0:
         failures.append("missing terminal eject outcome: neither complete nor cancelled marker found")
 
+    # A respawn-triggered stop during the nose phase is a successful eject —
+    # the ADR038 closed loop can extend the phase past the respawn detection.
+    # Only cancellations with any other reason still require the manual
+    # takeover marker to explain them.
     cancellation_count = terminal_counts["Controller: eject_and_dive — cancelled during nose-down phase"]
-    if cancellation_count > 0 and manual_takeover_count <= 0:
+    respawn_cancel_count = log_text.count(
+        "cancelled during nose-down phase (reason=respawn_detected)"
+    )
+    if cancellation_count - respawn_cancel_count > 0 and manual_takeover_count <= 0:
         failures.append(
             "cancellation observed but missing required manual takeover marker: "
             + MANUAL_TAKEOVER_PATTERN
@@ -123,6 +130,11 @@ def _validate_log(log_text: str, failures: list[str]) -> dict:
 
 
 def main() -> int:
+    # Windows consoles default to cp1252, which cannot encode the em-dash
+    # and arrow characters in the log markers — a failed print must never
+    # mask the validation verdict.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Validate ADR044 runtime replay artifacts")
     parser.add_argument("--log-file", default="wingman.log", help="Path to runtime log file")
     parser.add_argument("--assertions-file", required=True, help="Path to replay assertions JSON file")

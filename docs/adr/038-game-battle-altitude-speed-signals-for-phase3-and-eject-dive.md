@@ -171,12 +171,27 @@ covered.
 filenames and independently verifying each frame visually. Disagreements
 between the filename label, visual inspection, and pipeline OCR are flagged for
 operator review, never silently resolved — each one is either a labeling slip
-or a real OCR failure mode worth keeping. Candidate preprocessing variants, in
-tuning order:
+or a real OCR failure mode worth keeping.
 
-- gray and Otsu-binary (current)
-- HSV green-isolation mask — already verified to isolate the HUD text cleanly
-  on both the existing day and night frames
+Tuning outcome (measured on the 17-frame corpus via the `make ocr` corpus
+test, 2026-07-27):
+
+- gray and Otsu-binary (the prior pipeline): 12 of 17 frames exact
+  (70.6 percent; day 2 of 5). Characteristic failure: digit loss over bright
+  day terrain (`26079` read as `79`, `18638` read as `1`).
+- HSV green-isolation mask (H 30 to 90, S 40 plus, V 80 plus) upscaled 3x:
+  33 of 34 individual rows exact. The one miss truncated a trailing digit
+  where the altitude digits touch the `feet` label (`27164` read as `2716`).
+- Final pipeline: HSV mask at 3x is primary; Otsu and gray variants are
+  consulted only when an HSV row is missing or its OCR confidence is below
+  0.6, and a fallback row replaces a present HSV row only when it is both
+  confident and strictly longer in digits. Digit loss is this stack's
+  characteristic error, and row confidence alone cannot separate correct from
+  truncated reads (a correct row scored 0.40 while a truncated one scored
+  0.45), so confidence must never override a present value of equal length.
+  Result: 17 of 17 exact (day 5 of 5, night 12 of 12), mean 0.57 s per frame,
+  p95 1.16 s — accuracy up from 70.6 percent at unchanged mean processing
+  time.
 
 Acceptance gate: tuning balances read accuracy against per-tick processing
 time rather than chasing perfect reads — the ADR 030 lesson is that a cheap

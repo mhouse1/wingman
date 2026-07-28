@@ -435,7 +435,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -482,8 +482,22 @@ class Controller:
 
         # Eject-and-dive cancellation: set by End key to abort the dive thread early
         self._eject_stop = threading.Event()
+        # Why _eject_stop was set — logged with the cancellation so the ADR044/045
+        # validators can tell a respawn-triggered stop (success) from a manual one.
+        self._eject_stop_reason: str = ""
         # Set while eject_and_dive thread is running; cleared by the thread's finally block.
         self._ejecting = threading.Event()
+
+        # ADR 038 closed-loop eject verification parameters (telemetry: block).
+        _tel_cfg = telemetry_cfg or {}
+        _ecl = _tel_cfg.get("eject_closed_loop", {}) or {}
+        self._eject_cl_enabled = bool(_ecl.get("enabled", True))
+        self._eject_cl_verify_window_s = float(_ecl.get("verify_window_s", 6.0))
+        self._eject_cl_check_interval_s = float(_ecl.get("check_interval_s", 1.5))
+        self._eject_cl_max_corrections = int(_ecl.get("max_corrections", 3))
+        self._eject_nose_hold_s = float(_ecl.get("legacy_nose_hold_s", 5.0))
+        self._eject_steep_min_sin = float(_tel_cfg.get("steep_dive_min_sin", 0.5))
+        self._eject_level_max_sin = float(_tel_cfg.get("level_max_sin", 0.15))
 
         # Tracks how many programmatic key presses are in flight.
         # keyboard.KeyboardEvent has no is_injected attribute, so the getattr guard
@@ -541,6 +555,7 @@ class Controller:
                     self._last_cancel_key_ts = now
                     logger.info("Controller: '%s' key pressed - cancelling mission and disabling auto-respawn restart", CANCEL_MISSION_KEY)
                     self._auto_respawn_restart = False
+                    self._eject_stop_reason = "manual_cancel_key"
                     self._eject_stop.set()
                     self.cancel_mission()
                 keyboard_module.on_press_key(CANCEL_MISSION_KEY, cancel_mission_hotkey, suppress=False)
@@ -768,6 +783,7 @@ class Controller:
 
         logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", key_name)
         self._auto_respawn_restart = False
+        self._eject_stop_reason = "manual_takeover"
         self._eject_stop.set()
         self.cancel_mission()
         if self._analyzer is not None:
@@ -1000,11 +1016,146 @@ class Controller:
         logger.info("\033[93m🔥 Reloading flares via SPECIAL_ABILITY key\033[0m")
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
 
+    def _eject_key(self, press: bool, key: str, note: str = "eject_and_dive") -> None:
+        """Press or release a key inside the eject sequence, honoring replay simulation."""
+        if self._simulate_os_input:
+            self._record_action_intent("key_press" if press else "key_release", key=key, action=note)
+            return
+        if not keyboard_module:
+            return
+        try:
+            (keyboard_module.press if press else keyboard_module.release)(key)
+        except Exception:
+            pass
+
+    def _eject_telemetry(self):
+        """One atomic telemetry snapshot for eject verification, or None."""
+        if self._analyzer is None:
+            return None
+        get_snapshot = getattr(self._analyzer, "get_telemetry", None)
+        if get_snapshot is None:
+            return None
+        try:
+            return get_snapshot()
+        except Exception:
+            logger.exception("Controller: eject telemetry snapshot failed")
+            return None
+
+    def _eject_nose_phase_closed_loop(self) -> bool:
+        """Closed-loop nose-down phase (ADR 038). Returns True when cancelled.
+
+        NOSE_DOWN is already held on entry. Telemetry confirms the steep-dive
+        band (descent rate approx speed times sin(pitch)); when confident
+        evidence says the dive did not establish, corrections are
+        measure-correct-measure: issue a corrective input, re-check whether
+        the descent rate improved, reverse direction if it worsened. Sine is
+        symmetric about vertical, so a shallow descent rate cannot distinguish
+        under- from over-rotation — a blind nose-down re-issue would worsen
+        the over-rotated case (the arena-exit failure).
+
+        Absence of telemetry is never treated as evidence: with no confident
+        reading by the legacy 5 s mark, the phase ends exactly like the old
+        open-loop timer.
+        """
+        from .telemetry import BAND_STEEP_DIVE, BAND_DIVE
+
+        phase_start = time.time()
+        legacy_deadline = phase_start + self._eject_nose_hold_s
+        window_deadline = phase_start + self._eject_cl_verify_window_s
+        corrections = 0
+        last_correction_key = NOSE_DOWN_KEY
+        rate_before_correction: "float | None" = None
+
+        while True:
+            if self._eject_stop.wait(timeout=self._eject_cl_check_interval_s):
+                return True
+
+            snap = self._eject_telemetry()
+            band = None
+            rate = None
+            if snap is not None:
+                band = snap.pitch_band(
+                    steep_min_sin=self._eject_steep_min_sin,
+                    level_max_sin=self._eject_level_max_sin,
+                )
+                if snap.altitude_fresh():
+                    rate = snap.altitude.rate
+
+            if band is None:
+                # No confident evidence — fall back to the legacy timer, never
+                # correct against missing data (ADR 038).
+                if time.time() >= legacy_deadline:
+                    logger.info(
+                        "Controller: eject_and_dive — no confident telemetry by legacy "
+                        "deadline, releasing nose-down on timer")
+                    return False
+                continue
+
+            if band == BAND_STEEP_DIVE:
+                logger.info(
+                    "Controller: eject_and_dive — steep dive confirmed "
+                    "(alt rate %s ft/s after %.1fs, %d correction(s))",
+                    f"{rate:.0f}" if rate is not None else "?",
+                    time.time() - phase_start, corrections)
+                return False
+
+            if time.time() < window_deadline:
+                continue  # give the current input time to take effect
+
+            if corrections >= self._eject_cl_max_corrections:
+                logger.warning(
+                    "Controller: eject_and_dive — correction budget exhausted "
+                    "(band=%s) — releasing nose-down and proceeding", band)
+                return False
+
+            # Measure-correct-measure. A near-zero or climbing rate means the
+            # input never took — unambiguous nose-down re-issue. A shallow
+            # dive whose rate failed to improve after our last correction
+            # means we corrected the wrong way — reverse.
+            if band != BAND_DIVE:
+                correction_key = NOSE_DOWN_KEY
+            elif (corrections > 0 and rate is not None
+                    and rate_before_correction is not None
+                    and rate >= rate_before_correction):
+                correction_key = (NOSE_UP_KEY if last_correction_key == NOSE_DOWN_KEY
+                                  else NOSE_DOWN_KEY)
+            else:
+                correction_key = NOSE_DOWN_KEY
+
+            logger.info(
+                "Controller: eject_and_dive — dive not established (band=%s, "
+                "alt rate %s ft/s) — corrective %s re-issue (%d/%d)",
+                band, f"{rate:.0f}" if rate is not None else "?",
+                "nose-up" if correction_key == NOSE_UP_KEY else "nose-down",
+                corrections + 1, self._eject_cl_max_corrections)
+
+            self._eject_key(False, NOSE_DOWN_KEY)
+            if correction_key == NOSE_DOWN_KEY:
+                # Re-issue: fresh press so a missed key event gets a second edge.
+                if self._eject_stop.wait(timeout=0.2):
+                    return True
+                self._eject_key(True, NOSE_DOWN_KEY)
+            else:
+                # Reverse: brief nose-up tap, then resume holding nose-down.
+                self._eject_key(True, NOSE_UP_KEY)
+                cancelled = self._eject_stop.wait(timeout=0.6)
+                self._eject_key(False, NOSE_UP_KEY)
+                if cancelled:
+                    return True
+                self._eject_key(True, NOSE_DOWN_KEY)
+
+            rate_before_correction = rate
+            last_correction_key = correction_key
+            corrections += 1
+            window_deadline = time.time() + self._eject_cl_verify_window_s
+
     def eject_and_dive(self, on_complete=None):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
-        NOSE_DOWN is held for x seconds then released.
-        AFTERBURNER is held until respawn is detected (or a 120s safety timeout).
+        NOSE_DOWN is held until telemetry confirms a steep dive (closed loop,
+        ADR 038) or the legacy timer expires, then released.
+        AFTERBURNER is held until respawn is detected (or a 120s safety timeout);
+        a speed trend that fails to rise after engagement triggers a bounded re-press.
         on_complete: optional callable invoked in the finally block after all keys are released.
 
         No-ops (with a debug log) if an eject sequence is already in progress —
@@ -1016,6 +1167,7 @@ class Controller:
             return
         logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
+        self._eject_stop_reason = ""
         self._eject_stop.clear()
         # Reset the grace-period timestamp so buffered/held flight keys (e.g. 'k' on key-repeat
         # from normal gameplay) cannot cancel the eject within the first 2 seconds of starting it.
@@ -1054,28 +1206,55 @@ class Controller:
                     keyboard_module.press(AFTERBURNER_KEY)
                 logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
 
-                # Hold nose-down for 5s then release; afterburner stays on.
-                if not self._eject_stop.wait(timeout=5.0):
-                    if self._simulate_os_input:
-                        self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
-                    else:
-                        try:
-                            keyboard_module.release(NOSE_DOWN_KEY)
-                        except Exception:
-                            pass
+                # Nose-down phase: closed-loop steep-dive verification when
+                # enabled (ADR 038), else the legacy fixed 5s hold.
+                if self._eject_cl_enabled:
+                    cancelled = self._eject_nose_phase_closed_loop()
+                else:
+                    cancelled = self._eject_stop.wait(timeout=self._eject_nose_hold_s)
+
+                if not cancelled:
+                    self._eject_key(False, NOSE_DOWN_KEY)
                     logger.info("Controller: eject_and_dive — nose-down released, holding afterburner until respawn")
 
                     # Hold afterburner until respawn screen detected (stop_eject_sequence sets _eject_stop)
                     # or 120s safety timeout. _is_respawning() is not used here because the player may be
                     # alive (health > 0) when the eject starts; relying on it exits the loop immediately.
+                    # ADR 038: a speed trend that fails to rise after engagement means
+                    # the afterburner press was missed — re-press, bounded to 2 attempts.
                     deadline = time.time() + 120.0
+                    ab_represses_left = 2 if self._eject_cl_enabled else 0
+                    next_ab_check = time.time() + self._eject_cl_verify_window_s
                     while time.time() < deadline:
                         if self._eject_stop.wait(timeout=0.5):
                             break
+                        if ab_represses_left > 0 and time.time() >= next_ab_check:
+                            snap = self._eject_telemetry()
+                            if snap is None or not snap.speed_fresh() or snap.speed.rate is None:
+                                # No confident evidence — check again later, never
+                                # correct against missing data.
+                                next_ab_check = time.time() + self._eject_cl_check_interval_s
+                            elif snap.speed.trend == "rising":
+                                ab_represses_left = 0  # engagement verified
+                            else:
+                                logger.info(
+                                    "Controller: eject_and_dive — speed trend %s after "
+                                    "afterburner press — re-pressing", snap.speed.trend)
+                                self._eject_key(False, AFTERBURNER_KEY)
+                                if self._eject_stop.wait(timeout=0.2):
+                                    break
+                                self._eject_key(True, AFTERBURNER_KEY)
+                                ab_represses_left -= 1
+                                next_ab_check = time.time() + self._eject_cl_verify_window_s
                     else:
                         logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
                 else:
-                    logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
+                    # A respawn-triggered stop during the (closed-loop-extended)
+                    # nose phase is a successful eject, not an anomaly — the
+                    # reason lets the ADR044/045 validators tell them apart.
+                    logger.info(
+                        "Controller: eject_and_dive — cancelled during nose-down phase (reason=%s)",
+                        self._eject_stop_reason or "unknown")
             finally:
                 self._ejecting.clear()
                 if self._simulate_os_input:
@@ -1088,6 +1267,12 @@ class Controller:
                         pass
                     try:
                         keyboard_module.release(NOSE_DOWN_KEY)
+                    except Exception:
+                        pass
+                    try:
+                        # A measure-correct-measure reversal may have been
+                        # mid-tap when the sequence was cancelled.
+                        keyboard_module.release(NOSE_UP_KEY)
                     except Exception:
                         pass
                 logger.info("Controller: eject_and_dive complete")
@@ -1682,8 +1867,9 @@ class Controller:
         """Enable or disable automatic restart after respawn."""
         self._auto_respawn_restart = bool(enabled)
 
-    def stop_eject_sequence(self) -> None:
+    def stop_eject_sequence(self, reason: str = "respawn_detected") -> None:
         """Cancel an in-progress eject-and-dive sequence if one is active."""
+        self._eject_stop_reason = reason
         self._eject_stop.set()
 
     def _set_last_mission(self, mission_name: str):

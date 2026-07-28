@@ -168,6 +168,24 @@ tracking_hsv:
   min_contour_area: 12
   min_aspect_ratio: 2.5
 hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
+telemetry:                          # ADR 038 — altitude/speed signal model
+  max_speed_mph: 2000               # absolute envelope; fallback altitude-gate bound when speed is stale
+  max_altitude_ft: 60000            # absolute envelope; readings beyond are never seedable
+  max_speed_change_mph_s: 300       # acceleration envelope for the speed plausibility gate
+  plausibility_margin: 1.5          # slack multiplier on both gates
+  reseed_after_rejections: 3        # consecutive rejections before the seed is discarded
+  smoothing_window: 3               # accepted readings averaged into stable_value
+  stale_after_s: 6.0                # signal age beyond which consumers must not act on it
+  trend_min_alt_rate_fps: 20.0      # |altitude rate| below this is 'flat'
+  trend_min_speed_rate_mph_s: 15.0  # |speed rate| below this is 'flat'
+  steep_dive_min_sin: 0.5           # |alt_rate/speed| at or above → steep dive/climb band
+  level_max_sin: 0.15               # |alt_rate/speed| at or below → level band
+  eject_closed_loop:
+    enabled: true                   # verify nose-down/afterburner from telemetry during eject
+    verify_window_s: 6.0            # time allowed for the steep-dive band to appear after NOSE_DOWN
+    check_interval_s: 1.5           # telemetry poll cadence inside the eject thread
+    max_corrections: 3              # bound on corrective re-issues per eject sequence
+    legacy_nose_hold_s: 5.0         # open-loop hold used when telemetry gives no evidence
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}
