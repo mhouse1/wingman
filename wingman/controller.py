@@ -1419,7 +1419,17 @@ class Controller:
             self.start_search_and_destroy_loop()
             try:
                 keyboard_module.press(ROLL_RIGHT_KEY)
-                self._interruptible_sleep(duration)
+                # NOT _interruptible_sleep: cancel_mission() above set
+                # _mission_cancel, which would abort the roll after
+                # milliseconds and leave the aircraft flying straight out of
+                # the arena (observed 2026-07-28 20:40:03, an 8 ms "roll").
+                # The roll must outlive the cancel it issued; only program
+                # exit interrupts it.
+                deadline = time.time() + duration
+                while time.time() < deadline:
+                    if self._exit_event is not None and self._exit_event.is_set():
+                        break
+                    time.sleep(0.1)
             finally:
                 try:
                     keyboard_module.release(ROLL_RIGHT_KEY)
@@ -1428,11 +1438,22 @@ class Controller:
                 if not self.is_mission_running():
                     self.stop_search_and_destroy_loop()
             logger.info("Controller: disengage_roll_right complete")
+            # The cancelled mission thread may still be tearing down — its
+            # lock releases a few ms after cancel. Wait for it (bounded), or
+            # the not-running check races and the restart is silently skipped,
+            # leaving no mission, no loops, and an uncommanded aircraft.
+            teardown_deadline = time.time() + 5.0
+            while self.is_mission_running() and time.time() < teardown_deadline:
+                time.sleep(0.1)
             with self._last_mission_lock:
                 last_mission = self._last_mission
             if self._auto_respawn_restart and last_mission and not self.is_mission_running():
                 logger.info("Controller: restarting mission after disengage")
                 self.restart_last_mission()
+            elif self.is_mission_running():
+                logger.warning(
+                    "Controller: disengage restart skipped — mission still running "
+                    "after %.0fs teardown wait", 5.0)
 
         threading.Thread(target=_run, daemon=True).start()
 

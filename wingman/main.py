@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.28"
-WINGMAN_VERSION_DETAILS = "adr38 dive tuning - steeper band, consecutive confirm, decay reentry, frame-ts rates"
+WINGMAN_VERSION = "1.6.29"
+WINGMAN_VERSION_DETAILS = "fix disengage roll self-cancel and restart teardown race - no more uncommanded flight"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
