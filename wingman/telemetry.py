@@ -87,7 +87,7 @@ class TelemetrySnapshot:
     def pitch_band(
         self,
         *,
-        steep_min_sin: float = 0.5,
+        steep_min_sin: float = 0.8,
         level_max_sin: float = 0.15,
     ) -> str | None:
         """Classify nose attitude, or None when either signal is missing/stale."""
@@ -105,16 +105,23 @@ def pitch_band(
     speed_mph: float | None,
     alt_rate_fps: float | None,
     *,
-    steep_min_sin: float = 0.5,
+    steep_min_sin: float = 0.8,
     level_max_sin: float = 0.15,
     min_speed_fps: float = 30.0,
 ) -> str | None:
-    """Estimate the nose-attitude band from altitude rate and speed.
+    """Estimate the flight-path-angle band from altitude rate and speed.
 
-    Altitude rate is approximately speed times the sine of the pitch angle, so
-    the ratio alt_rate / speed bounds the attitude without extra HUD parsing.
-    Returns None when inputs are missing or speed is too small for the ratio
-    to be meaningful.
+    Altitude rate is approximately speed times the sine of the flight-path
+    angle, so the ratio alt_rate / speed bounds the attitude without extra
+    HUD parsing. Returns None when inputs are missing or speed is too small
+    for the ratio to be meaningful.
+
+    Two physical caveats (flight-tested, session 2026-07-28): this measures
+    the velocity-vector angle, not nose attitude — they differ by angle of
+    attack, most at low speed; and sine compresses near vertical (sin 75 deg
+    is 0.97), so bands distinguish 30 from 60 degrees but not 75 from 90.
+    The default steep_min_sin of 0.8 (approx 53 degrees) is the steepest
+    band that confirms reliably through OCR noise.
     """
     if speed_mph is None or alt_rate_fps is None:
         return None

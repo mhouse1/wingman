@@ -285,6 +285,33 @@ to the existing timer-driven behavior instead of correcting against stale
 data — correcting on staleness invites oscillation. Phase 3 policies consume
 the same estimate read-only for envelope awareness.
 
+### Flight-Test Findings (2026-07-28)
+
+The first live sessions surfaced four adjustments, all adopted:
+
+- The eject at 19:58:38 confirmed "steep dive" from a single sample 1.5 s
+  after NOSE_DOWN (alt rate -376 ft/s at 294 MPH, ratio 0.87) — but the
+  ratio was inflated by the low-speed transient of a stalled aircraft. The
+  established dive then measured approx -426 ft/s at 460-600 MPH, a 35-40
+  degree flight path, matching the operator's screenshot (430 MPH, 24291
+  feet, approx 30 degrees nose down). Confirmation now requires two
+  consecutive steep samples (`confirm_consecutive`).
+- `steep_dive_min_sin` was 0.5 — sin(30°) — so a 30-degree dive counted as
+  steep by definition. Raised to 0.8 (approx 53 degrees), about the steepest
+  band that still confirms reliably given sine compression near vertical
+  (sin 75° = 0.97) and OCR noise.
+- Confirmation is no longer one-shot: after nose release the hold phase
+  keeps watching the band and re-enters nose-down verification when the dive
+  decays, bounded by `dive_reentries`.
+- Rates are computed on frame-capture timestamps, not async-harvest times:
+  harvest-clock rates produced physically impossible ratios (descent rate
+  exceeding total speed) because the reading lands one to two ticks after
+  its frame.
+
+The estimator measures the flight-path (velocity vector) angle, not nose
+attitude — they differ by angle of attack, largest at low speed. This is
+accepted: the crash-fast objective cares about the velocity vector anyway.
+
 ## Module Placement and Signal API
 
 The filter, smoothing, rate derivation, and pitch-band estimation are pure

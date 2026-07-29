@@ -202,12 +202,18 @@ class TestPitchBand:
         # sin(20°) ≈ 0.342 → ~300 ft/s descent at 600 MPH.
         assert pitch_band(600.0, -300.0) == BAND_DIVE
 
+    def test_30_degree_dive_is_not_steep(self):
+        # sin(30°) = 0.5 → ~440 ft/s at 600 MPH. The flight-tested failure:
+        # with steep_min_sin 0.5 this counted as steep and the eject settled
+        # at a 30-degree dive; the 0.8 default keeps it in the dive band.
+        assert pitch_band(600.0, -440.0) == BAND_DIVE
+
     def test_vertical_dive_at_600mph(self):
         # sin(90°) = 1 → ~880 ft/s descent at 600 MPH.
         assert pitch_band(600.0, -880.0) == BAND_STEEP_DIVE
 
     def test_steep_climb(self):
-        assert pitch_band(600.0, 800.0) == BAND_STEEP_CLIMB
+        assert pitch_band(600.0, 820.0) == BAND_STEEP_CLIMB
 
     def test_shallow_climb(self):
         assert pitch_band(600.0, 300.0) == BAND_CLIMB
@@ -222,7 +228,7 @@ class TestPitchBand:
     def test_snapshot_pitch_band_requires_both_signals_fresh(self):
         p = _proc(stale_after_s=6.0)
         p.update(600, 20000, now_s=0.0)
-        p.update(600, 19000, now_s=1.5)  # ~-667 ft/s → steep dive
+        p.update(600, 18800, now_s=1.5)  # -800 ft/s at 600 MPH → ratio 0.91, steep dive
         assert p.snapshot(2.0).pitch_band() == BAND_STEEP_DIVE
         # Stale snapshot must return None — corrections need contrary
         # evidence, never absence of data (ADR 038).

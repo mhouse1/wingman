@@ -2,6 +2,8 @@ import os
 import time
 import logging
 import threading
+
+from .telemetry import BAND_DIVE, BAND_STEEP_DIVE
 import ctypes
 import sys
 import cv2
@@ -496,7 +498,9 @@ class Controller:
         self._eject_cl_check_interval_s = float(_ecl.get("check_interval_s", 1.5))
         self._eject_cl_max_corrections = int(_ecl.get("max_corrections", 3))
         self._eject_nose_hold_s = float(_ecl.get("legacy_nose_hold_s", 5.0))
-        self._eject_steep_min_sin = float(_tel_cfg.get("steep_dive_min_sin", 0.5))
+        self._eject_cl_confirm_consecutive = max(1, int(_ecl.get("confirm_consecutive", 2)))
+        self._eject_cl_dive_reentries = int(_ecl.get("dive_reentries", 2))
+        self._eject_steep_min_sin = float(_tel_cfg.get("steep_dive_min_sin", 0.8))
         self._eject_level_max_sin = float(_tel_cfg.get("level_max_sin", 0.15))
 
         # Tracks how many programmatic key presses are in flight.
@@ -1057,14 +1061,13 @@ class Controller:
         reading by the legacy 5 s mark, the phase ends exactly like the old
         open-loop timer.
         """
-        from .telemetry import BAND_STEEP_DIVE, BAND_DIVE
-
         phase_start = time.time()
         legacy_deadline = phase_start + self._eject_nose_hold_s
         window_deadline = phase_start + self._eject_cl_verify_window_s
         corrections = 0
         last_correction_key = NOSE_DOWN_KEY
         rate_before_correction: "float | None" = None
+        steep_streak = 0
 
         while True:
             if self._eject_stop.wait(timeout=self._eject_cl_check_interval_s):
@@ -1092,12 +1095,20 @@ class Controller:
                 continue
 
             if band == BAND_STEEP_DIVE:
-                logger.info(
-                    "Controller: eject_and_dive — steep dive confirmed "
-                    "(alt rate %s ft/s after %.1fs, %d correction(s))",
-                    f"{rate:.0f}" if rate is not None else "?",
-                    time.time() - phase_start, corrections)
-                return False
+                # A single steep sample can be a low-speed transient (flight-
+                # tested: a stalled 294 MPH aircraft read ratio 0.87 for one
+                # sample while actually settling into a 35-40 degree dive) —
+                # require consecutive confirmations.
+                steep_streak += 1
+                if steep_streak >= self._eject_cl_confirm_consecutive:
+                    logger.info(
+                        "Controller: eject_and_dive — steep dive confirmed "
+                        "(alt rate %s ft/s after %.1fs, %d correction(s), %d consecutive)",
+                        f"{rate:.0f}" if rate is not None else "?",
+                        time.time() - phase_start, corrections, steep_streak)
+                    return False
+                continue
+            steep_streak = 0
 
             if time.time() < window_deadline:
                 continue  # give the current input time to take effect
@@ -1225,9 +1236,40 @@ class Controller:
                     deadline = time.time() + 120.0
                     ab_represses_left = 2 if self._eject_cl_enabled else 0
                     next_ab_check = time.time() + self._eject_cl_verify_window_s
+                    # Confirmation is not forever: the dive can flatten after
+                    # nose release (flight-tested: a transient-inflated
+                    # confirmation settled into a 35-40 degree dive). Keep
+                    # watching the band and re-enter nose-down verification
+                    # when it decays, bounded by dive_reentries.
+                    dive_reentries_left = (self._eject_cl_dive_reentries
+                                           if self._eject_cl_enabled else 0)
+                    next_dive_check = time.time() + self._eject_cl_check_interval_s
                     while time.time() < deadline:
                         if self._eject_stop.wait(timeout=0.5):
                             break
+                        if dive_reentries_left > 0 and time.time() >= next_dive_check:
+                            snap = self._eject_telemetry()
+                            band = None
+                            if snap is not None:
+                                band = snap.pitch_band(
+                                    steep_min_sin=self._eject_steep_min_sin,
+                                    level_max_sin=self._eject_level_max_sin,
+                                )
+                            if band is None or band == BAND_STEEP_DIVE:
+                                # Missing evidence never triggers corrections.
+                                next_dive_check = time.time() + self._eject_cl_check_interval_s
+                            else:
+                                logger.info(
+                                    "Controller: eject_and_dive — dive decayed after "
+                                    "confirmation (band=%s) — re-entering nose-down "
+                                    "verification (%d re-entry left)", band, dive_reentries_left)
+                                dive_reentries_left -= 1
+                                self._eject_key(True, NOSE_DOWN_KEY)
+                                reentry_cancelled = self._eject_nose_phase_closed_loop()
+                                self._eject_key(False, NOSE_DOWN_KEY)
+                                if reentry_cancelled:
+                                    break
+                                next_dive_check = time.time() + self._eject_cl_verify_window_s
                         if ab_represses_left > 0 and time.time() >= next_ab_check:
                             snap = self._eject_telemetry()
                             if snap is None or not snap.speed_fresh() or snap.speed.rate is None:

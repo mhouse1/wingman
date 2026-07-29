@@ -18,7 +18,7 @@ from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
 class _TelemetryStub:
     """Analyzer stand-in: serves snapshots built from a mutable alt rate."""
 
-    def __init__(self, speed=600, alt_rate=-700.0, available=True):
+    def __init__(self, speed=600, alt_rate=-800.0, available=True):
         self.speed = speed
         self.alt_rate = alt_rate
         self.available = available
@@ -63,7 +63,7 @@ def _intents(ctrl):
 
 
 def test_steep_dive_confirmed_exits_without_corrections(monkeypatch):
-    stub = _TelemetryStub(alt_rate=-700.0)  # ratio -0.795 at 600 MPH → steep dive
+    stub = _TelemetryStub(alt_rate=-800.0)  # ratio -0.91 at 600 MPH → steep dive
     ctrl = _make_ctrl(monkeypatch, stub)
 
     t0 = time.time()

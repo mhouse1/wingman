@@ -823,6 +823,12 @@ class GameStateAnalyzer:
         # on a later tick when done; a new one is submitted only when none is
         # pending and the tick throttle allows.
         self._telemetry_future = None
+        # Capture timestamp of the frame behind the in-flight future. Rates
+        # must be derived from frame times, not harvest times — the async
+        # harvest lands one to two ticks after capture, and rate computed on
+        # harvest clocks produced physically impossible values (descent rate
+        # exceeding total speed, session 2026-07-28).
+        self._telemetry_frame_ts = 0.0
         self._telemetry_tick_counter = 0
         self._telemetry_every_n_ticks = max(1, int(_telemetry_cfg.get("ocr_every_n_ticks", 2)))
 
@@ -1017,10 +1023,13 @@ class GameStateAnalyzer:
             return 0.0
         if self._tracker:
             self._tracker.record_ocr_crop("telemetry", telemetry_ocr_time)
-        _tel_now = time.time()
+        # Timestamp readings with the frame's capture time so rates reflect
+        # real Δaltitude/Δframe-time; signal age then honestly includes the
+        # OCR latency.
+        _frame_ts = self._telemetry_frame_ts or time.time()
         with self._telemetry_lock:
             rejected_before = self._telemetry.rejected_total
-            self._telemetry.update(speed_value, altitude_value, _tel_now)
+            self._telemetry.update(speed_value, altitude_value, _frame_ts)
             rejected_after = self._telemetry.rejected_total
         if rejected_after > rejected_before:
             logger.warning(
@@ -1493,6 +1502,7 @@ class GameStateAnalyzer:
                             and self._telemetry_future is None
                             and self._telemetry_tick_counter >= self._telemetry_every_n_ticks):
                         self._telemetry_tick_counter = 0
+                        self._telemetry_frame_ts = time.time()
                         self._telemetry_future = executor.submit(
                             _process_telemetry_region, telemetry_frame)
                     t2 = time.time()

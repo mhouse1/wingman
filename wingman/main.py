@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.27"
-WINGMAN_VERSION_DETAILS = "adr38 async telemetry ocr - tick never blocks on telemetry, every 2nd tick"
+WINGMAN_VERSION = "1.6.28"
+WINGMAN_VERSION_DETAILS = "adr38 dive tuning - steeper band, consecutive confirm, decay reentry, frame-ts rates"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON

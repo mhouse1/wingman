@@ -178,7 +178,7 @@ telemetry:                          # ADR 038 — altitude/speed signal model
   stale_after_s: 6.0                # signal age beyond which consumers must not act on it
   trend_min_alt_rate_fps: 20.0      # |altitude rate| below this is 'flat'
   trend_min_speed_rate_mph_s: 15.0  # |speed rate| below this is 'flat'
-  steep_dive_min_sin: 0.5           # |alt_rate/speed| at or above → steep dive/climb band
+  steep_dive_min_sin: 0.8           # |alt_rate/speed| at or above → steep band (approx 53 degrees; 0.5 accepted 30-degree dives)
   level_max_sin: 0.15               # |alt_rate/speed| at or below → level band
   ocr_every_n_ticks: 2              # submit telemetry OCR every Nth battle tick (async; the tick never waits on it)
   eject_closed_loop:
@@ -187,6 +187,8 @@ telemetry:                          # ADR 038 — altitude/speed signal model
     check_interval_s: 1.5           # telemetry poll cadence inside the eject thread
     max_corrections: 3              # bound on corrective re-issues per eject sequence
     legacy_nose_hold_s: 5.0         # open-loop hold used when telemetry gives no evidence
+    confirm_consecutive: 2          # steep-band samples required before the dive counts as confirmed
+    dive_reentries: 2               # times the hold phase may re-enter nose-down when the dive decays
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}
