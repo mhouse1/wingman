@@ -7,6 +7,7 @@ of raising AttributeError.
 """
 
 import threading
+import time
 import pytest
 import yaml
 import wingman.controller as controller_module
@@ -177,6 +178,172 @@ def test_maneuver_key_ignores_injected_events(monkeypatch):
     finally:
         if ctrl._mission_lock.locked():
             ctrl._mission_lock.release()
+
+
+def test_maneuver_key_suppressed_for_key_wingman_is_holding(monkeypatch):
+    """A key wingman itself is currently holding (e.g. NOSE_DOWN during an
+    eject correction) must not self-trigger manual takeover."""
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_BATTLE)
+    ctrl = Controller(region, analyzer=analyzer)
+
+    ctrl._mission_lock.acquire(blocking=False)
+    ctrl._inc_programmatic_key("k")
+    try:
+        handled = ctrl._handle_maneuver_key_press("k", is_injected=False)
+        assert handled is False
+        assert ctrl._mission_cancel.is_set() is False
+        assert analyzer.trigger_calls == []
+    finally:
+        ctrl._dec_programmatic_key("k")
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+def test_maneuver_key_not_suppressed_for_different_key_wingman_is_holding(monkeypatch):
+    """Wingman holding one maneuver key (e.g. NOSE_DOWN mid eject-correction)
+    must not swallow the player pressing a *different* maneuver key to take
+    over -- production logs (2026-07-30) showed the player's manual-takeover
+    presses could be silently ignored for the whole multi-second nose-down
+    hold when the guard was a single global counter instead of per-key."""
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_BATTLE)
+    ctrl = Controller(region, analyzer=analyzer)
+
+    ctrl._mission_lock.acquire(blocking=False)
+    ctrl._inc_programmatic_key("k")  # wingman holding NOSE_DOWN, e.g. mid eject correction
+    try:
+        handled = ctrl._handle_maneuver_key_press("l", is_injected=False)  # player: ROLL_RIGHT
+        assert handled is True
+        assert ctrl._mission_cancel.is_set() is True
+        assert analyzer.trigger_calls == ["manual_takeover"]
+    finally:
+        ctrl._dec_programmatic_key("k")
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+def test_post_release_grace_suppresses_stale_autorepeat(monkeypatch):
+    """A maneuver key pressed inside the post-release grace is treated as ours.
+
+    The X server auto-repeats XTest-injected held keys (measured ~25 Hz on this
+    host, send_event=False), so repeats emitted while wingman held NOSE_DOWN can
+    be delivered by the XRecord listener a few ms after wingman released it.
+    Those must not read as player input — that produced three spurious
+    "manual takeover" self-cancels on 2026-07-30.
+    """
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_BATTLE)
+    ctrl = Controller(region, analyzer=analyzer)
+
+    ctrl._mission_lock.acquire(blocking=False)
+    try:
+        # Wingman just released 'k'; the counter is already back to zero.
+        ctrl._arm_release_grace("k")
+        assert ctrl._programmatic_key_counts.get("k", 0) == 0
+        handled = ctrl._handle_maneuver_key_press("k", is_injected=False)
+        assert handled is False, "stale auto-repeat inside grace must not take over"
+        assert analyzer.trigger_calls == []
+
+        # A different key is unaffected — grace is per-key.
+        assert ctrl._handle_maneuver_key_press("l", is_injected=False) is True
+    finally:
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+def test_grace_expires_so_real_presses_still_take_over(monkeypatch):
+    """The grace must be a brief window, not a lasting blind spot."""
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_BATTLE)
+    ctrl = Controller(region, analyzer=analyzer)
+
+    ctrl._mission_lock.acquire(blocking=False)
+    try:
+        ctrl._arm_release_grace("k")
+        assert ctrl._handle_maneuver_key_press("k", is_injected=False) is False
+        # Advance past the window without sleeping.
+        ctrl._prog_release_grace_until["k"] = time.time() - 0.001
+        assert ctrl._handle_maneuver_key_press("k", is_injected=False) is True
+        assert analyzer.trigger_calls == ["manual_takeover"]
+    finally:
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+def test_eject_key_releases_before_dropping_the_guard(monkeypatch):
+    """Ordering is load-bearing: the physical release must precede the decrement.
+
+    Dropping the counter first left the guard at zero while the key was still
+    physically down and auto-repeating, across the whole duration of
+    keyboard release (which opens a fresh X Display connection per call).
+    """
+    events = []
+
+    class _RecordingKbd:
+        def press(self, k):
+            events.append(("press", k, ctrl._programmatic_key_counts.get(k, 0)))
+
+        def release(self, k):
+            events.append(("release", k, ctrl._programmatic_key_counts.get(k, 0)))
+
+        def on_press_key(self, k, cb, suppress=False):
+            pass
+
+        def add_hotkey(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(controller_module, "keyboard_module", _RecordingKbd())
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    ctrl = Controller(region, analyzer=None, disable_hotkeys=True)
+
+    ctrl._eject_key(True, "k")
+    ctrl._eject_key(False, "k")
+
+    assert [(e[0], e[1]) for e in events] == [("press", "k"), ("release", "k")]
+    # The guard must still be held (count >= 1) at the instant of the release.
+    release_count = next(c for kind, _, c in events if kind == "release")
+    assert release_count >= 1, "guard was already zero during the physical release"
+    # And the grace must be armed once the count finally drops.
+    assert ctrl._programmatic_key_counts.get("k", 0) == 0
+    assert ctrl._prog_release_grace_until.get("k", 0.0) > time.time()
+
+
+def test_padlock_hotkey_ignores_wingmans_own_press(monkeypatch):
+    """The padlock loop must not set its own manual-override cooldown.
+
+    padlock_camera() presses 'p' every ~6s; without a guard those echo back
+    through this hook and set a 10s cooldown each time, halving the effective
+    padlock cadence (observed 2026-07-30).
+    """
+    keyboard_stub = _KeyboardStub()
+    monkeypatch.setattr(controller_module, "keyboard_module", keyboard_stub)
+    monkeypatch.setattr(controller_module.threading, "Thread", _ThreadStub)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    ctrl = Controller(region, analyzer=_AnalyzerStub(GameState.GAME_BATTLE))
+
+    handler = keyboard_stub.handlers[controller_module.PADLOCK_CAMERA]
+    ctrl._padlock_cooldown_until = 0.0
+
+    # Wingman's own press: in flight -> must not arm the cooldown.
+    ctrl._inc_programmatic_key(controller_module.PADLOCK_CAMERA)
+    handler(type("_E", (), {"name": controller_module.PADLOCK_CAMERA})())
+    assert ctrl._padlock_cooldown_until == 0.0
+    ctrl._dec_programmatic_key(controller_module.PADLOCK_CAMERA)
+
+    # A genuine manual press still arms it.
+    handler(type("_E", (), {"name": controller_module.PADLOCK_CAMERA})())
+    assert ctrl._padlock_cooldown_until > time.time()
 
 
 def test_j20_hotkey_forces_battle_via_fsm_trigger(monkeypatch):

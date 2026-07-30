@@ -802,11 +802,17 @@ class GameStateAnalyzer:
         # Set by _start_game_starting_loop after the 10-second gate to enable the
         # GAME_STARTING health-only OCR scan (ADR 032 battle-alive fallback).
         self._game_starting_health_scan_enabled = threading.Event()
+        # Last (health, alive) pair actually logged, so unchanged readings
+        # don't reprint every tick -- Health/Ammo were the majority of console
+        # output with nothing new to show.
+        self._last_logged_health = None
 
         # Ammo sub-state (GAME_BATTLE only)
         self._ammo_flares: "int | None" = None   # Last known flare count from OCR
         self._ammo_missiles: "int | None" = None  # Last known missile count from OCR
         self._ammo_lock = threading.Lock()
+        self._last_logged_flares = None
+        self._last_logged_missiles = None
         # Signalled when flares == 2 (reload needed) or missiles == 0 (end mission).
         self.low_flares_event = threading.Event()
         self.no_missiles_event = threading.Event()
@@ -1037,8 +1043,7 @@ class GameStateAnalyzer:
                 "(speed_raw=%s altitude_raw=%s, total_rejected=%d)",
                 speed_value, altitude_value, rejected_after)
         if speed_value is not None or altitude_value is not None:
-            logger.debug("Analyzer: Telemetry speed=%s altitude=%s",
-                         speed_value, altitude_value)
+            logger.info("Altitude: %s | Speed: %s", altitude_value, speed_value)
         return telemetry_ocr_time
 
     def get_telemetry(self):
@@ -1645,7 +1650,9 @@ class GameStateAnalyzer:
                                 self._health = health_value
                                 self._game_battle_alive = alive
                                 self._health_no_digits_since = 0.0
-                            logger.info("Health: %s | alive=%s", health_value, alive)
+                            if (health_value, alive) != self._last_logged_health:
+                                logger.info("Health: %s | alive=%s", health_value, alive)
+                                self._last_logged_health = (health_value, alive)
                             # Signal False → True transition for immediate mission restart.
                             if alive and not prev_alive:
                                 logger.info("Analyzer: health alive transition False→True — resetting health ceiling")
@@ -1695,18 +1702,24 @@ class GameStateAnalyzer:
                             self._ammo_missiles = None
                         self.low_flares_event.clear()
                         self.no_missiles_event.clear()
+                        self._last_logged_flares = None
+                        self._last_logged_missiles = None
                         logger.debug("Analyzer: skipping ammo updates while respawn is detected")
                     else:
                         if flares_value is not None:
                             with self._ammo_lock:
                                 self._ammo_flares = flares_value
-                            logger.info("Ammo flares: %d", flares_value)
+                            if flares_value != self._last_logged_flares:
+                                logger.info("Ammo flares: %d", flares_value)
+                                self._last_logged_flares = flares_value
                             if flares_value == 2:
                                 self.low_flares_event.set()
                         if missile_value is not None:
                             with self._ammo_lock:
                                 self._ammo_missiles = missile_value
-                            logger.info("Ammo missiles: %d", missile_value)
+                            if missile_value != self._last_logged_missiles:
+                                logger.info("Ammo missiles: %d", missile_value)
+                                self._last_logged_missiles = missile_value
                             if missile_value == 0:
                                 self.no_missiles_event.set()
 
@@ -1803,7 +1816,17 @@ class GameStateAnalyzer:
                     self._click_to_cache['result'] = result
                     self._click_to_cache['timestamp'] = time.time()
                 if click_to_detected:
-                    if self.game_state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
+                    # GAME_BATTLE_MANUAL is a legal source for this trigger (see the
+                    # transition table above) and must be included: without it the FSM
+                    # never reached GAME_END_B, so the self-suppression below (which
+                    # skips the scan in GAME_END_B/GAME_LOBBY) never engaged, this
+                    # poller re-detected the same on-screen prompt 5s later, and the
+                    # main loop ran a second full click-through — 7 extra clicks plus a
+                    # stray PLAY click while already in the lobby, followed by a long
+                    # "no lobby crops detected" blackout (2026-07-30 16:39).
+                    if self.game_state in (GameState.GAME_BATTLE,
+                                           GameState.GAME_BATTLE_EJECT,
+                                           GameState.GAME_BATTLE_MANUAL):
                         self._trigger("click_to_detected")
                     logger.debug("Analyzer: detected 'Click to' text (matched: '%s') → GAME_END_B", click_to_text)
             except RuntimeError:

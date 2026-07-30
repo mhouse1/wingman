@@ -113,6 +113,39 @@ class TestPlausibilityFilter:
         p.update(None, 40000, now_s=3.0)          # far beyond envelope bound
         assert p.snapshot(3.0).altitude.value == 9000
 
+    def test_throttled_cadence_does_not_widen_the_speed_gate(self):
+        """Slowing the sampler must not relax the filter.
+
+        Every delta gate is a per-second rate times the real inter-sample gap,
+        so adding ocr_every_n_ticks=2 (v1.6.27) halved telemetry cadence to
+        ~3.0s and thereby doubled every allowance the bounds were sized for at
+        the 1.5s design tick — letting a 1114 -> 8 mph collapse through on
+        2026-07-30. dt is now clamped to max_gate_dt_s.
+        """
+        p = _proc(max_speed_change_mph_s=300.0, plausibility_margin=1.0,
+                  max_gate_dt_s=1.5)
+        p.update(500, None, now_s=0.0)
+        # +800 over a 3.0s gap: inside 300*3.0=900 (what the unclamped gate
+        # would allow) but outside the clamped 300*1.5=450.
+        p.update(1300, None, now_s=3.0)
+        assert p.snapshot(3.0).speed.value == 500, "throttled cadence widened the gate"
+
+    def test_gate_is_skipped_once_the_seed_is_stale(self):
+        """A seed older than stale_after_s says nothing about the present.
+
+        Without this, clamping dt would make the first good reading after any
+        telemetry gap (respawn, OCR downtime, a rejection streak) fail the gate
+        and force a slow reseed — during an eject that is exactly when the dive
+        confirmation needs the signal back.
+        """
+        p = _proc(max_speed_change_mph_s=300.0, plausibility_margin=1.0,
+                  max_gate_dt_s=1.5, stale_after_s=6.0)
+        p.update(500, None, now_s=0.0)
+        # 30s later the aircraft is somewhere else entirely; the stale seed must
+        # not veto the new reading.
+        p.update(1300, None, now_s=30.0)
+        assert p.snapshot(30.0).speed.value == 1300
+
     def test_speed_acceleration_envelope(self):
         p = _proc(max_speed_change_mph_s=300.0, plausibility_margin=1.0)
         p.update(500, None, now_s=0.0)

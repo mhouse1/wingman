@@ -19,7 +19,7 @@ WINGMAN_VERSION = "1.6.29"
 WINGMAN_VERSION_DETAILS = "fix disengage roll self-cancel and restart teardown race - no more uncommanded flight"
 
 from .capture import Capture
-from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
+from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
 from .analyzer import GameStateAnalyzer, GameState
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
@@ -996,37 +996,54 @@ def main():
                         respawn_cooldown_until = time.time() + 10.0
                         missile_ignore_until = time.time() + 10.0
                         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
-                        ctrl.set_auto_respawn_restart(True)  # always restart after respawn
-                        # Exit manual mode on death — mission restarts when health returns.
-                        # Fire P2_040 capture BEFORE the FSM transition so the evaluate
-                        # runs with state still == GAME_BATTLE_MANUAL.
-                        if current_game_state == GameState.GAME_BATTLE_MANUAL:
-                            if live_capture is not None:
-                                _cap_now = time.time()
-                                live_capture.on_event("respawn_detected", _cap_now)
-                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
-                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
-                            analyzer.trigger_event("respawn_reset")
                         ctrl.cancel_mission()
                         analyzer.reset_health_for_respawn()
-                        # Wait for mission lock to release before restart
-                        logger.info("Waiting for mission lock to release before restart...")
-                        for _ in range(50):
-                            if not ctrl.is_mission_running():
-                                break
-                            time.sleep(0.1)
-                        else:
-                            logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
-                        respawn_state = RespawnState.RESPAWNING
-                        restart_not_before = time.time() + respawn_fallback_timeout
-                        logger.info("Respawn screen active — will restart %.1fs after screen clears (stuck OCR fallback in %.1fs)",
-                                    restart_delay_after_unlock, respawn_fallback_timeout)
                         _emit_capture_event("respawn_detected")
                         # Live capture is handled via analyzer.set_on_respawn_detected —
                         # the callback fires from the background OCR thread with the exact
                         # respawn-screen frame, avoiding the stale-frame race where the
                         # main loop's `frame` variable has already advanced past the
                         # respawn overlay by the time is_respawning surfaces from the cache.
+                        if current_game_state == GameState.GAME_BATTLE_MANUAL:
+                            # Manual takeover stays manual through death/respawn -- the
+                            # mission only resumes when the player presses MISSION_J20_KEY
+                            # (start_j20_mission), never automatically. This used to force
+                            # _auto_respawn_restart back on and fire respawn_reset
+                            # unconditionally, so every manual takeover silently reverted to
+                            # auto mode on the next death (observed in production: every
+                            # GAME_BATTLE_MANUAL session exited via respawn, never via the
+                            # resume hotkey -- the flag the player just set to False was
+                            # being overridden a few seconds later regardless of intent).
+                            if live_capture is not None:
+                                _cap_now = time.time()
+                                live_capture.on_event("respawn_detected", _cap_now)
+                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
+                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
+                            logger.info(
+                                "Respawn during manual takeover — staying in GAME_BATTLE_MANUAL, "
+                                "press '%s' to resume the mission sequence", MISSION_J20_KEY)
+                            # Latch the same de-dup state the auto path uses. Without it
+                            # respawn_state stays IDLE, the re-entry guard above keeps
+                            # matching, and this whole block re-fires every 10s (the
+                            # cooldown) for as long as the respawn screen is up. This does
+                            # NOT re-enable auto-restart: both restart paths are gated on
+                            # GAME_BATTLE, which manual mode is not, and respawn_state is
+                            # reset to IDLE on GAME_END_B when the match ends.
+                            respawn_state = RespawnState.RESPAWNING
+                        else:
+                            ctrl.set_auto_respawn_restart(True)  # always restart after respawn
+                            # Wait for mission lock to release before restart
+                            logger.info("Waiting for mission lock to release before restart...")
+                            for _ in range(50):
+                                if not ctrl.is_mission_running():
+                                    break
+                                time.sleep(0.1)
+                            else:
+                                logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
+                            respawn_state = RespawnState.RESPAWNING
+                            restart_not_before = time.time() + respawn_fallback_timeout
+                            logger.info("Respawn screen active — will restart %.1fs after screen clears (stuck OCR fallback in %.1fs)",
+                                        restart_delay_after_unlock, respawn_fallback_timeout)
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 

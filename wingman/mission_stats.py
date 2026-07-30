@@ -7,7 +7,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_BATTLE_STATES = {"GAME_BATTLE", "GAME_BATTLE_MANUAL"}
+# GAME_BATTLE_EJECT is a mid-mission excursion (missiles empty -> dive), not a
+# mission boundary. Omitting it made every eject read as a mission end and the
+# return from it as a new mission start: the 2026-07-30 16:27 session reported
+# "7 missions, avg 1m30s" for 3 real rounds (avg ~4m57s), and undercounted
+# manual takeovers 1-of-4 because _in_mission was already False when the
+# EJECT -> MANUAL transitions arrived.
+_BATTLE_STATES = {"GAME_BATTLE", "GAME_BATTLE_MANUAL", "GAME_BATTLE_EJECT"}
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -105,10 +111,6 @@ class MissionStatsTracker:
         if not self._startup_done and next_state != "GAME_UNKNOWN":
             self._startup_done = True
 
-        if next_state == "GAME_BATTLE_MANUAL" and self._in_mission:
-            self._total_manual_takeovers += 1
-            self._current["manual_takeover_count"] += 1
-
         # Mission start: entering GAME_BATTLE (auto) or GAME_BATTLE_MANUAL from a non-battle state.
         if next_state in _BATTLE_STATES and prev_state not in _BATTLE_STATES:
             if was_startup_done:
@@ -126,6 +128,16 @@ class MissionStatsTracker:
                     else:
                         outcome = "unknown"
                 self._end_mission(ts, outcome)
+
+        # Counted AFTER the start/end handling: a takeover can itself be the
+        # transition that opens a mission (e.g. GAME_BATTLE_EJECT ->
+        # GAME_BATTLE_MANUAL on the first tick after startup), and checking
+        # _in_mission before _start_mission ran dropped 3 of 4 takeovers in the
+        # 2026-07-30 16:27 session.
+        if next_state == "GAME_BATTLE_MANUAL" and prev_state != "GAME_BATTLE_MANUAL":
+            if self._in_mission:
+                self._total_manual_takeovers += 1
+                self._current["manual_takeover_count"] += 1
 
     def finalize(self, run_id: str | None = None) -> dict:
         """Close any open mission, build session dict, write JSON. Returns session dict."""

@@ -154,6 +154,10 @@ class TelemetryProcessor:
         self.max_altitude_ft = float(cfg.get("max_altitude_ft", 60000.0))
         self.max_speed_change_mph_s = float(cfg.get("max_speed_change_mph_s", 300.0))
         self.plausibility_margin = float(cfg.get("plausibility_margin", 1.5))
+        # Upper bound on the dt multiplier in the delta gates — the design tick
+        # the envelopes were tuned against, not the (possibly throttled) real
+        # sample interval. See _gate().
+        self.max_gate_dt_s = float(cfg.get("max_gate_dt_s", 1.5))
         self.reseed_after_rejections = max(1, int(cfg.get("reseed_after_rejections", 3)))
         self.smoothing_window = max(1, int(cfg.get("smoothing_window", 3)))
         self.stale_after_s = float(cfg.get("stale_after_s", 6.0))
@@ -243,8 +247,28 @@ class TelemetryProcessor:
             # stream of absolute-bound garbage must not become the new seed.
             return self._reject(signal, hist, raw, now_s, seedable=False)
 
-        if signal.value is not None and signal.ts is not None:
-            dt = max(now_s - signal.ts, 0.1)  # guard duplicate timestamps
+        # The delta gate only means anything while the seed is still a
+        # trustworthy description of the aircraft. Past stale_after_s the seed
+        # says nothing about the present, so gating against it would reject the
+        # first good reading after any telemetry gap (respawn, OCR downtime,
+        # a rejection streak) and force a slow reseed — during an eject that is
+        # exactly when the dive confirmation needs the signal back.
+        seed_age = None if signal.ts is None else (now_s - signal.ts)
+        seed_usable = (
+            signal.value is not None
+            and seed_age is not None
+            and seed_age <= self.stale_after_s
+        )
+        if seed_usable:
+            dt = max(seed_age, 0.1)  # guard duplicate timestamps
+            # Clamp dt to the cadence these bounds were tuned against. Every gate
+            # here is a per-second rate multiplied by the real inter-sample gap,
+            # so slowing the sampler silently widens the envelope: adding
+            # ocr_every_n_ticks=2 (v1.6.27) halved telemetry cadence to ~3.0s and
+            # thereby DOUBLED every allowance the bounds were sized for at the
+            # 1.5s tick (ADR 038), letting a 1114 -> 8 mph speed collapse through
+            # on 2026-07-30. Throttling the sensor must not relax the filter.
+            dt = min(dt, self.max_gate_dt_s)
             if abs(raw - float(signal.value)) > max_delta_per_s * dt:
                 return self._reject(signal, hist, raw, now_s, seedable=True)
 

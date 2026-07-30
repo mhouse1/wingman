@@ -211,11 +211,12 @@ PATH2_OCR:
     expected_state: GAME_BATTLE_MANUAL
     expected_trigger: respawn_detected
     max_settle_time_s: 12.0
-  # ALIVE at t=52 s.  Health OCR detects alive; restart_last_mission fires.
+  # ALIVE at t=52 s.  Manual takeover stays manual through respawn -- the
+  # mission does not auto-restart; state remains GAME_BATTLE_MANUAL until the
+  # player presses MISSION_J20_KEY.
   - screenshot_name: P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png
     injection_time_s: 52.0
-    expected_state: GAME_BATTLE
-    expected_trigger: restart_last_mission
+    expected_state: GAME_BATTLE_MANUAL
     max_settle_time_s: 12.0
   # End-of-mission screen at t=65 s.  inject_trigger forces FSM into GAME_END_B.
   # (P2_050 deadline is t=64 s; 1 s buffer before this step activates.)
@@ -285,7 +286,7 @@ class FakeController:
     def set_auto_respawn_restart(self, enabled: bool) -> None:
         self._auto_respawn = enabled
 
-    def eject_and_dive(self) -> None:
+    def eject_and_dive(self, on_complete=None) -> None:
         self._mission_running = False
         self._intents.append({"action_type": "eject_and_dive"})
 
@@ -317,6 +318,9 @@ class FakeController:
 
     def disengage_roll_right(self) -> None:
         self._intents.append({"action_type": "disengage_roll_right"})
+
+    def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
+        self._intents.append({"action_type": "padlock_target_switch"})
 
     def popup_click_allowed(self, _popup) -> bool:
         return False
