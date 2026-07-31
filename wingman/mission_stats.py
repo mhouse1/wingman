@@ -119,14 +119,22 @@ class MissionStatsTracker:
         # Mission end: leaving battle for a non-battle state.
         elif prev_state in _BATTLE_STATES and next_state not in _BATTLE_STATES:
             if self._in_mission:
-                outcome = self._pending_outcome
-                if outcome is None:
-                    if trigger_name == "click_to_detected":
-                        outcome = "click_to"
-                    elif next_state in ("GAME_LOBBY", "GAME_WAITING"):
-                        outcome = "lobby_exit"
-                    else:
-                        outcome = "unknown"
+                # The trigger that actually ENDS the mission is authoritative;
+                # _pending_outcome only fills in when the transition itself says
+                # nothing. Since GAME_BATTLE_EJECT became an in-mission state,
+                # "missiles_empty" is a MID-mission signal that survives to the
+                # real end of the round, and checking it first shadowed the
+                # terminal click_to: the 2026-07-30 18:51 session booked all 10
+                # missions as "missiles empty (100%)" despite 10 logged
+                # CLICK TO CONTINUE finishes.
+                if trigger_name == "click_to_detected":
+                    outcome = "click_to"
+                elif self._pending_outcome is not None:
+                    outcome = self._pending_outcome
+                elif next_state in ("GAME_LOBBY", "GAME_WAITING"):
+                    outcome = "lobby_exit"
+                else:
+                    outcome = "unknown"
                 self._end_mission(ts, outcome)
 
         # Counted AFTER the start/end handling: a takeover can itself be the

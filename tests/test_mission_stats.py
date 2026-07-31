@@ -265,6 +265,40 @@ class TestEventCounting:
         result = t.finalize()
         assert result["total_manual_takeovers"] == 1
 
+    def test_click_to_finish_after_an_eject_is_not_booked_as_missiles_empty(self, tmp_path):
+        """The terminal trigger wins over a stale mid-mission pending outcome.
+
+        Since GAME_BATTLE_EJECT became an in-mission state, "missiles_empty" is
+        a mid-mission signal that survives to the end of the round. Checking it
+        before trigger_name made the 2026-07-30 18:51 session report
+        "Missiles empty 10 (100%), Click-to finish 0" despite 10 logged
+        CLICK TO CONTINUE finishes.
+        """
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        # Missiles run out mid-round: eject, die, respawn, keep playing.
+        t.on_event("missiles_empty", 60.0)
+        t.on_fsm_transition("eject_started", "GAME_BATTLE", "GAME_BATTLE_EJECT", 61.0)
+        t.on_fsm_transition("eject_complete", "GAME_BATTLE_EJECT", "GAME_BATTLE", 80.0)
+        # Round actually ends on the click-to-continue screen.
+        t.on_fsm_transition("click_to_detected", "GAME_BATTLE", "GAME_END_B", 300.0)
+        result = t.finalize()
+        assert result["missions_click_to"] == 1
+        assert result["missions_missiles_empty"] == 0
+        # The mid-round fact is still recorded on the mission itself.
+        assert result["missions"][0]["no_missiles_abort"] is True
+
+    def test_missiles_empty_still_used_when_nothing_supersedes_it(self, tmp_path):
+        """_pending_outcome remains the fallback for non-click_to endings."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_event("missiles_empty", 60.0)
+        t.on_fsm_transition("some_other_trigger", "GAME_BATTLE", "GAME_UNKNOWN", 120.0)
+        result = t.finalize()
+        assert result["missions_missiles_empty"] == 1
+
     def test_events_outside_mission_only_go_to_totals(self, tmp_path):
         t = _tracker(tmp_path)
         t._startup_done = True

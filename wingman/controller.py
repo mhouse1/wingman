@@ -1302,7 +1302,24 @@ class Controller:
                     rate = snap.altitude.rate
                     sample_ts = snap.altitude.ts
 
-            if band is None:
+            # Two independent confirmations, either sufficient: the ADR 038 sine
+            # band, or a raw sustained descent rate (unit-independent of the
+            # speed reading, so it still works if HUD speed and altitude are on
+            # different scales — which is what the 0.346 ceiling implies).
+            #
+            # Evaluated BEFORE the band-is-None bail-out on purpose. pitch_band()
+            # returns None whenever EITHER signal is stale, so gating on it first
+            # skipped the descent-rate path exactly when speed was unavailable —
+            # the one case it exists to survive. Measured on the 2026-07-30 18:51
+            # session: 9 samples inside eject windows had a fresh altitude rate
+            # at or beyond the confirm threshold but were discarded because speed
+            # had gone stale.
+            descending_hard = (
+                rate is not None
+                and rate <= -self._eject_cl_confirm_descent_fps
+            )
+
+            if band is None and not descending_hard:
                 # No confident evidence — fall back to the legacy timer, never
                 # correct against missing data (ADR 038).
                 if time.time() >= legacy_deadline:
@@ -1312,15 +1329,6 @@ class Controller:
                     self._eject_phase_exit_reason = "no_telemetry"
                     return False
                 continue
-
-            # Two independent confirmations, either sufficient: the ADR 038 sine
-            # band, or a raw sustained descent rate (unit-independent of the
-            # speed reading, so it still works if HUD speed and altitude are on
-            # different scales — which is what the 0.346 ceiling implies).
-            descending_hard = (
-                rate is not None
-                and rate <= -self._eject_cl_confirm_descent_fps
-            )
             if band == BAND_STEEP_DIVE or descending_hard:
                 # A single steep sample can be a low-speed transient (flight-
                 # tested: a stalled 294 MPH aircraft read ratio 0.87 for one

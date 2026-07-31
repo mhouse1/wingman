@@ -27,14 +27,18 @@ class _TelemetryStub:
         # sensor has not refreshed and the loop is re-reading one physical sample.
         self.freeze_ts = False
         self._frozen_ts = time.time()
+        # When True the speed signal is aged out, so pitch_band() returns None
+        # while altitude stays fresh.
+        self.stale_speed = False
 
     def get_telemetry(self):
         if not self.available:
             return None
         now = time.time()
         sample_ts = self._frozen_ts if self.freeze_ts else now
+        speed_ts = (now - 999.0) if self.stale_speed else sample_ts
         return TelemetrySnapshot(
-            speed=TelemetrySignal(value=self.speed, ts=sample_ts, stable_value=float(self.speed),
+            speed=TelemetrySignal(value=self.speed, ts=speed_ts, stable_value=float(self.speed),
                                    trend=self.speed_trend),
             altitude=TelemetrySignal(value=10000, ts=sample_ts, stable_value=10000.0,
                                      rate=self.alt_rate),
@@ -274,6 +278,27 @@ def test_confirmation_requires_distinct_samples_not_repeated_polls(monkeypatch):
     # And it left promptly on that timer rather than sitting until the 6s
     # staleness horizon — proving the dedup, not staleness, blocked the confirm.
     assert elapsed < 3.0, f"exited via staleness, not dedup (took {elapsed:.1f}s)"
+
+
+def test_descent_rate_confirms_even_when_speed_is_stale(monkeypatch):
+    """ADR 058's descent-rate path must survive a stale SPEED signal.
+
+    pitch_band() returns None when either signal is stale, so evaluating the
+    band bail-out first skipped the descent-rate confirmation exactly when
+    speed was unavailable — the one case it exists to survive. Measured on the
+    2026-07-30 18:51 session: 9 samples inside eject windows had a fresh
+    altitude rate past the confirm threshold but were discarded on stale speed.
+    """
+    stub = _TelemetryStub(alt_rate=-400.0)
+    stub.stale_speed = True  # speed unusable -> pitch_band() returns None
+    ctrl = _make_ctrl(monkeypatch, stub, confirm_descent_fps=250.0,
+                      confirm_consecutive=2, legacy_nose_hold_s=10.0,
+                      verify_window_s=10.0)
+
+    cancelled = ctrl._eject_nose_phase_closed_loop()
+
+    assert cancelled is False
+    assert ctrl._eject_phase_exit_reason == "confirmed"
 
 
 def test_two_distinct_samples_do_confirm(monkeypatch):
