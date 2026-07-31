@@ -622,7 +622,12 @@ class Controller:
                 logger.exception("Controller: failed to register weapon loop hotkey")
 
             try:
+                self._last_j20_key_ts = 0.0
                 def start_j20_mission(e):
+                    now = time.time()
+                    if now - self._last_j20_key_ts < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_j20_key_ts = now
                     self._auto_respawn_restart = True
                     current_state = self._analyzer.game_state if self._analyzer is not None else None
                     if current_state == GameState.GAME_BATTLE_MANUAL:
@@ -1542,10 +1547,66 @@ class Controller:
                             and self._eject_phase_exit_reason == "confirmed")
                         else 0
                     )
+                    # ADR 058 post-release confirmation: the eject typically
+                    # fires from climbing flight and takes ~12s to rotate, so
+                    # the deep dive often establishes only AFTER nose-down is
+                    # released (2026-07-30 18:51 replay: 63 confirm-eligible
+                    # samples post-release vs 4 in-phase). Keep running the same
+                    # 2-distinct-sample check here — observation only, no key
+                    # input — so a real dive is still recorded as confirmed and
+                    # the decay re-entry above becomes reachable. Re-entries are
+                    # granted only with nose-budget headroom; without it a
+                    # re-entry would press the key just to exit on the budget.
+                    confirmed = self._eject_phase_exit_reason == "confirmed"
+                    pr_streak = 0
+                    pr_last_ts: "float | None" = None
                     next_dive_check = time.time() + self._eject_cl_check_interval_s
                     while time.time() < deadline:
                         if self._eject_stop.wait(timeout=0.5):
                             break
+                        if (self._eject_cl_enabled and not confirmed
+                                and time.time() >= next_dive_check):
+                            next_dive_check = time.time() + self._eject_cl_check_interval_s
+                            snap = self._eject_telemetry()
+                            band = None
+                            rate = None
+                            sample_ts = None
+                            if snap is not None:
+                                band = snap.pitch_band(
+                                    steep_min_sin=self._eject_steep_min_sin,
+                                    level_max_sin=self._eject_level_max_sin,
+                                )
+                                if snap.altitude_fresh():
+                                    rate = snap.altitude.rate
+                                    sample_ts = snap.altitude.ts
+                            descending_hard = (
+                                rate is not None
+                                and rate <= -self._eject_cl_confirm_descent_fps
+                            )
+                            if band == BAND_STEEP_DIVE or descending_hard:
+                                if sample_ts is not None and sample_ts == pr_last_ts:
+                                    continue  # same physical reading — not new evidence
+                                pr_last_ts = sample_ts
+                                pr_streak += 1
+                                if pr_streak >= self._eject_cl_confirm_consecutive:
+                                    confirmed = True
+                                    self._eject_phase_exit_reason = "confirmed"
+                                    if not self._eject_nose_budget_exhausted():
+                                        dive_reentries_left = self._eject_cl_dive_reentries
+                                    logger.info(
+                                        "Controller: eject_and_dive — dive confirmed post-release "
+                                        "via %s (alt rate %s ft/s, %d consecutive, %d re-entry available)",
+                                        "steep band" if band == BAND_STEEP_DIVE else "descent rate",
+                                        f"{rate:.0f}" if rate is not None else "?",
+                                        pr_streak, dive_reentries_left)
+                            elif band is not None:
+                                # Contrary evidence resets the streak; MISSING
+                                # evidence does not — absence of telemetry is
+                                # never treated as evidence (ADR 038), matching
+                                # the in-phase streak semantics.
+                                pr_streak = 0
+                                pr_last_ts = None
+                            continue
                         if dive_reentries_left > 0 and time.time() >= next_dive_check:
                             snap = self._eject_telemetry()
                             band = None

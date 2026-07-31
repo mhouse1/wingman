@@ -30,6 +30,11 @@ class _TelemetryStub:
         # When True the speed signal is aged out, so pitch_band() returns None
         # while altitude stays fresh.
         self.stale_speed = False
+        # eject_and_dive() resets health state through these; real Lock so the
+        # timeout-acquire path behaves as in production.
+        self._health_lock = threading.Lock()
+        self._game_battle_alive = False
+        self._health_no_digits_since = 0.0
 
     def get_telemetry(self):
         if not self.available:
@@ -299,6 +304,62 @@ def test_descent_rate_confirms_even_when_speed_is_stale(monkeypatch):
 
     assert cancelled is False
     assert ctrl._eject_phase_exit_reason == "confirmed"
+
+
+def test_stale_speed_and_frozen_altitude_never_corrects(monkeypatch):
+    """Combined missing-evidence path: stale speed AND a frozen altitude sample.
+
+    band is None (stale speed) and descending_hard is True but the sample never
+    refreshes — the loop must fall back to the legacy timer WITHOUT issuing a
+    single corrective input (ADR 038: never correct against missing data), and
+    without confirming off one physical reading.
+    """
+    stub = _TelemetryStub(alt_rate=-400.0)
+    stub.stale_speed = True
+    stub.freeze_ts = True
+    ctrl = _make_ctrl(monkeypatch, stub, confirm_descent_fps=250.0,
+                      confirm_consecutive=2, legacy_nose_hold_s=0.45,
+                      verify_window_s=10.0)
+
+    t0 = time.time()
+    cancelled = ctrl._eject_nose_phase_closed_loop()
+    elapsed = time.time() - t0
+
+    assert cancelled is False
+    assert ctrl._eject_phase_exit_reason == "no_telemetry"
+    assert elapsed < 3.0
+    assert _intents(ctrl) == []  # no corrections against missing data
+
+
+def test_dive_confirms_post_release(monkeypatch):
+    """ADR 058 decision 10: confirmation keeps running after nose release.
+
+    The dive typically establishes after the nose phase ends (63 eligible
+    samples post-release vs 4 in-phase on 2026-07-30). Here the nose phase
+    gives up on the legacy timer with no telemetry, then telemetry comes back
+    deep in the afterburner-hold — the sequence must still record 'confirmed'.
+    """
+    stub = _TelemetryStub(alt_rate=-400.0, available=False)  # nose phase: nothing
+    ctrl = _make_ctrl(monkeypatch, stub, confirm_descent_fps=250.0,
+                      confirm_consecutive=2, legacy_nose_hold_s=0.2,
+                      verify_window_s=10.0)
+
+    ctrl.eject_and_dive()
+    # Nose phase exits on the legacy timer; then the sensor comes back mid-dive.
+    deadline = time.time() + 3.0
+    while time.time() < deadline and ctrl._eject_phase_exit_reason != "no_telemetry":
+        time.sleep(0.02)
+    stub.available = True
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and ctrl._eject_phase_exit_reason != "confirmed":
+        time.sleep(0.02)
+    ctrl.stop_eject_sequence()
+
+    assert ctrl._eject_phase_exit_reason == "confirmed", (
+        f"post-release confirmation never fired (exit reason: "
+        f"{ctrl._eject_phase_exit_reason!r})"
+    )
 
 
 def test_two_distinct_samples_do_confirm(monkeypatch):

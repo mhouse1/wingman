@@ -6,6 +6,7 @@ import time
 import logging
 import subprocess
 import threading
+from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 
@@ -175,6 +176,22 @@ def main():
     handlers = [console_handler]
 
     if args.log_file:
+        # Rotate, never truncate: mode="w" on a fixed filename destroyed two
+        # sessions' forensic records (the 2026-07-30 18:51 log — 21541 lines —
+        # was overwritten before its review could re-verify anything). Rename
+        # the previous log into logs/<stem>_<last-write-time><suffix> before
+        # opening; rename is atomic and a process still holding the old fd is
+        # unaffected. mode="w" is kept for the NEW file so the ADR044/045
+        # replay validators still see only the current run's lines.
+        log_path = Path(args.log_file)
+        try:
+            if log_path.exists() and log_path.stat().st_size > 0:
+                stamp = datetime.fromtimestamp(log_path.stat().st_mtime).strftime("%Y%m%d_%H%M%S")
+                backup_dir = log_path.parent / "logs"
+                backup_dir.mkdir(exist_ok=True)
+                log_path.rename(backup_dir / f"{log_path.stem}_{stamp}{log_path.suffix}")
+        except OSError as e:
+            print(f"WARNING: could not rotate previous log {log_path}: {e}", file=sys.stderr)
         file_handler = logging.FileHandler(args.log_file, mode="w", encoding="utf-8")
         file_handler.setFormatter(fmt)
         file_handler.setLevel(logging.DEBUG)

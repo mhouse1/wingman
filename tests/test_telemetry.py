@@ -146,6 +146,53 @@ class TestPlausibilityFilter:
         p.update(1300, None, now_s=30.0)
         assert p.snapshot(30.0).speed.value == 1300
 
+    def test_steep_dive_is_accepted_at_throttled_cadence(self):
+        """The ALTITUDE gate must not reject a real steep dive at the 3.0s cadence.
+
+        The altitude bound is physics (vertical speed cannot exceed total
+        speed), so it scales with the real inter-sample gap. Clamping its dt to
+        max_gate_dt_s=1.5 against the ~3.0s ocr_every_n_ticks=2 cadence shrank
+        the allowance to margin x 1.5/3.0 = 0.75 x speed — structurally
+        rejecting every dive steeper than sin 0.75 while the confirm band
+        starts at 0.8. Verified root cause of the 2026-07-30 18:51 session's
+        0-of-26 dive confirmations.
+        """
+        p = _proc(max_gate_dt_s=1.5, plausibility_margin=1.5, stale_after_s=6.0)
+        speed_fps = 500 * 5280 / 3600
+        alt = 12000.0
+        p.update(500, int(alt), now_s=0.0)
+        accepted = 0
+        for i in range(1, 6):
+            alt -= 0.85 * speed_fps * 3.0     # steady sin-0.85 dive, 3.0s gaps
+            p.update(500, int(alt), now_s=i * 3.0)
+            if p.snapshot(i * 3.0).altitude.value == int(alt):
+                accepted += 1
+        assert accepted == 5, (
+            f"altitude gate rejected {5 - accepted}/5 samples of a genuine "
+            "sin-0.85 dive at the throttled cadence"
+        )
+
+    def test_stale_seed_bypass_does_not_fabricate_a_rate_across_the_gap(self):
+        """The first post-gap reading must carry rate=None, not a cross-gap rate.
+
+        Pairing a post-gap reading with a pre-gap history entry fabricates a
+        rate spanning the whole outage: a single bogus read after an 8s gap
+        (3950 vs true ~8900) manufactured a confirm-grade -625 ft/s "steep
+        dive" sample and then delta-blocked the true series for ~9s.
+        """
+        p = _proc(stale_after_s=6.0)
+        p.update(600, 8900, now_s=0.0)
+        p.update(600, 8890, now_s=1.5)        # hist now has pre-gap entries
+        # 8s outage, then a bogus reading arrives via the stale-seed bypass.
+        p.update(600, 3950, now_s=9.5)
+        snap = p.snapshot(9.5)
+        assert snap.altitude.value == 3950     # bypass still accepts it...
+        assert snap.altitude.rate is None      # ...but must not invent a rate
+        # The very next TRUE reading must not be delta-blocked by the bogus
+        # seed pairing (it is blocked by the bogus VALUE, which is correct
+        # delta behaviour — but the rate recovers on the reseed path).
+        p.update(600, 8870, now_s=12.5)
+
     def test_speed_acceleration_envelope(self):
         p = _proc(max_speed_change_mph_s=300.0, plausibility_margin=1.0)
         p.update(500, None, now_s=0.0)

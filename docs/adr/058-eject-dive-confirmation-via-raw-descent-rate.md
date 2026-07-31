@@ -64,6 +64,12 @@ ceiling is a units mismatch or a genuine flight-envelope limit is left open; the
 descent-rate path makes the loop functional either way without re-litigating the
 0.8 threshold that ADR 038 derived from flight data.
 
+The descent-rate check is evaluated **before** the missing-telemetry bail-out,
+not after it: `pitch_band()` returns `None` whenever the *speed* signal is
+stale, and bailing on `band is None` first skipped the descent-rate path in
+exactly the case it exists to survive (measured: 9 confirm-grade samples lost
+to stale speed in the 2026-07-30 18:51 session).
+
 **2. Count distinct telemetry samples, not polls.**
 
 The confirmation streak advances only when `snapshot.altitude.ts` differs from
@@ -120,13 +126,48 @@ describes the aircraft — costing a multi-second reseed exactly when the dive
 confirmation needs the signal back. A seed older than `stale_after_s` is now
 treated as no seed.
 
-**8. Clamp the plausibility gate's `dt` to the design tick.**
+**8. Clamp the plausibility gate's `dt` to the design tick — SPEED GATE ONLY.**
 
 Every delta gate is a per-second rate multiplied by the real inter-sample gap, so
 slowing the sampler silently widens the envelope. `ocr_every_n_ticks: 2`
 (v1.6.27, added after ADR 038 sized these bounds at the 1.5 s tick) halved the
 cadence to ~3.0 s and thereby doubled every allowance — a 1114 → 8 mph collapse
-passed the filter on 2026-07-30. `dt` is now capped at `max_gate_dt_s` (1.5 s).
+passed the filter on 2026-07-30. `dt` is capped at `max_gate_dt_s` (1.5 s).
+
+*Revised after the 2026-07-30 18:51 session:* the clamp is correct for the
+**speed** gate (an acceleration envelope tuned at the design tick) but was a
+serious defect on the **altitude** gate, whose bound is physics — vertical speed
+cannot exceed total speed — and therefore scales correctly with the real gap.
+Clamped, the altitude allowance shrank to `margin × clamp / gap = 0.75 × speed`,
+structurally rejecting every dive steeper than sin 0.75 while the confirm band
+starts at 0.8. Verified by replay: a steady sin-0.85 dive lost 8 of 10 samples,
+`altitude.ts` froze (starving the distinct-sample dedup of decision 2), and the
+loop was fed stale level bands that drove 50 blind nose-down re-issues — the
+single mechanism behind that session's 0-of-26 confirmations. The clamp now
+applies per-gate: `max_gate_dt_s` on speed, the real gap (bounded by the
+`stale_after_s` seed-usability check) on altitude.
+
+**9. First post-gap reading never fabricates a rate.**
+
+The stale-seed bypass (decision 7) accepts the first reading after a gap
+unconditionally, but the rate history still held pre-gap entries — so a single
+bogus post-gap read could pair across the gap into a confirm-grade fake steep
+dive (observed in simulation: 3950 vs true 8900 after an 8 s outage → −625 ft/s)
+and then delta-block the true series. The history is cleared on the bypass path;
+the first post-gap sample carries `rate=None` and the next real sample restores
+the rate honestly.
+
+**10. Confirmation continues post-release (observation only).**
+
+The eject typically fires from climbing flight and takes ~12 s to rotate, so the
+deep dive often establishes only after nose-down is released (recovered
+2026-07-30 data: 63 confirm-eligible samples post-release vs 4 in-phase). The
+afterburner-hold loop now runs the same two-distinct-sample check — no key
+input — logging `dive confirmed post-release` and enabling the decay re-entry
+of decision 5, which is granted only when nose-down budget headroom remains.
+`total_nose_budget_s` stays at 20 s: the recovered in-phase data shows a ~12 s
+porpoise oscillation, not slow convergence, so holding longer buys loop exposure
+rather than confirmation.
 
 ## Configuration
 
@@ -156,14 +197,19 @@ telemetry:
 `make test` (eject closed-loop suite) covers each decision:
 
 - `test_sustained_descent_confirms_without_steep_band` — decision 1
+- `test_descent_rate_confirms_even_when_speed_is_stale` — decision 1 (evaluation order)
+- `test_stale_speed_and_frozen_altitude_never_corrects` — decision 1 + ADR 038
+  "never correct against missing data" on the combined missing-evidence path
 - `test_confirmation_requires_distinct_samples_not_repeated_polls` — decisions 2, 6
 - `test_two_distinct_samples_do_confirm` — decision 2 (guards over-strict dedup)
 - `test_descending_and_worsening_reverses_regardless_of_speed_trend` — decision 3
 - `test_climbing_never_reverses_to_nose_up` — decision 3 (backflip regression)
 - `test_total_nose_budget_caps_the_hold` — decision 4
 - `test_nose_budget_ignores_time_when_nose_is_up` — decision 4 (held, not wall clock)
-- `test_throttled_cadence_does_not_widen_the_speed_gate` — decision 8
+- `test_throttled_cadence_does_not_widen_the_speed_gate` — decision 8 (speed gate)
+- `test_steep_dive_is_accepted_at_throttled_cadence` — decision 8 (altitude gate)
 - `test_gate_is_skipped_once_the_seed_is_stale` — decision 7
+- `test_stale_seed_bypass_does_not_fabricate_a_rate_across_the_gap` — decision 9
 
 Live-flight confirmation of the descent-rate threshold is still outstanding; this
 ADR stays `Draft` until a production session shows a confirmed dive.

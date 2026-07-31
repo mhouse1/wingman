@@ -44,7 +44,11 @@ PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pyt
 PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
 CAPTURE_PATH ?= PATH1
 CAPTURE_TIMEOUT_S ?= 120.0
-RR_PATH1_LOG ?= wingman.log
+# Own artifact path, NOT wingman.log: this target rm -f's its log before
+# launching, and pointing it at the production filename silently deleted real
+# session logs every time the gate ran (the 2026-07-30 sessions were lost this
+# way before log rotation existed; rotation cannot defend against a pre-launch rm).
+RR_PATH1_LOG ?= tests/test-output/runtime_replay.path1.log
 RR_PATH1_ASSERTIONS ?= tests/test-output/replay_assertions.path1.json
 RR_PATH1_INTENTS ?= tests/test-output/replay_action_intents.path1.json
 RR_PATH1_REPORT ?= tests/test-output/replay_required_screenshots.path1.json

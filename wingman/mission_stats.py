@@ -2,6 +2,7 @@
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -70,12 +71,29 @@ class MissionStatsTracker:
 
         self._summary: dict | None = None
 
+        # on_event runs on the main loop; on_fsm_transition can arrive from the
+        # analyzer's background click-to thread. Both mutate _current/_in_mission,
+        # so an unlocked check-then-act could KeyError the main loop when a
+        # mission ends between the check and the increment. Bodies are
+        # sub-microsecond dict ops; per repo rules the main-loop side acquires
+        # with a timeout instead of blocking indefinitely.
+        self._lock = threading.Lock()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def on_event(self, event_name: str, ts: float) -> None:
-        """Record a named gameplay event."""
+        """Record a named gameplay event. Called from the main loop."""
+        if not self._lock.acquire(timeout=1.0):
+            logger.warning("MissionStatsTracker: lock timeout — dropping event %s", event_name)
+            return
+        try:
+            self._on_event_locked(event_name, ts)
+        finally:
+            self._lock.release()
+
+    def _on_event_locked(self, event_name: str, ts: float) -> None:
         if event_name == "respawn_detected":
             self._total_respawns += 1
             if self._in_mission:
@@ -103,7 +121,14 @@ class MissionStatsTracker:
     def on_fsm_transition(
         self, trigger_name: str, prev_state: str, next_state: str, ts: float
     ) -> None:
-        """Process an FSM state transition."""
+        """Process an FSM state transition. May arrive from a background thread,
+        which can block briefly (lock holds are sub-microsecond)."""
+        with self._lock:
+            self._on_fsm_transition_locked(trigger_name, prev_state, next_state, ts)
+
+    def _on_fsm_transition_locked(
+        self, trigger_name: str, prev_state: str, next_state: str, ts: float
+    ) -> None:
         # Startup guard: capture whether classification was already done before this
         # transition, then update the flag. A GAME_UNKNOWN → GAME_BATTLE transition
         # clears the guard but must not count as a mission start (bot launched mid-game).
@@ -149,8 +174,24 @@ class MissionStatsTracker:
 
     def finalize(self, run_id: str | None = None) -> dict:
         """Close any open mission, build session dict, write JSON. Returns session dict."""
+        got = self._lock.acquire(timeout=5.0)
+        if not got:
+            # Shutdown must still produce stats; a 5s-held lock here means
+            # something is wedged anyway. Do NOT release a lock we never
+            # acquired — locked() being True could be another thread's hold.
+            logger.warning("MissionStatsTracker: lock timeout in finalize — proceeding unlocked")
+        try:
+            return self._finalize_locked(run_id)
+        finally:
+            if got:
+                self._lock.release()
+
+    def _finalize_locked(self, run_id: str | None = None) -> dict:
         if self._in_mission:
-            self._end_mission(time.time(), "unknown")
+            # Shutdown mid-mission: honour any outcome hint already recorded
+            # (e.g. missiles_empty fired but the round never reached its end
+            # screen) instead of discarding it as "unknown".
+            self._end_mission(time.time(), self._pending_outcome or "unknown")
 
         session_duration = time.time() - self._session_start
         missions_started = len(self._missions)

@@ -393,6 +393,14 @@ class PerformanceTracker:
                 else None
             )
             if not c_stats or not r_stats_all:
+                if c_stats and not r_stats_all:
+                    # Present in the current session but absent from the release
+                    # baseline: silently skipping made the crop invisible to the
+                    # regression gate (the telemetry crop shipped in v1.6.25 and
+                    # was never gated because the baseline predates it).
+                    lines2.append(
+                        f"  {crop:<14} mean {c_stats['mean']:.3f}s — no release baseline, UNGATED"
+                    )
                 continue
             delta_all = (c_stats["mean"] - r_stats_all["mean"]) / max(r_stats_all["mean"], 0.001) * 100
             delta_ver = (

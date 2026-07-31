@@ -173,8 +173,12 @@ telemetry:                          # ADR 038 — altitude/speed signal model
   max_altitude_ft: 60000            # absolute envelope; readings beyond are never seedable
   max_speed_change_mph_s: 300       # acceleration envelope for the speed plausibility gate
   plausibility_margin: 1.5          # slack multiplier on both gates
-  max_gate_dt_s: 1.5                # cap on the dt multiplier in the delta gates: throttling the
-                                    # OCR cadence must not widen the plausibility envelope
+  max_gate_dt_s: 1.5                # cap on the dt multiplier in the SPEED delta gate (an acceleration
+                                    # envelope tuned at the 1.5s tick): throttling the OCR cadence must
+                                    # not widen it. The altitude gate is physics-bound (vertical speed
+                                    # cannot exceed total speed) and uses the real inter-sample gap —
+                                    # clamping it below the ~3.0s cadence rejected every dive steeper
+                                    # than sin 0.75 and zeroed dive confirmations (2026-07-30 18:51)
   reseed_after_rejections: 3        # consecutive rejections before the seed is discarded
   smoothing_window: 3               # accepted readings averaged into stable_value
   stale_after_s: 6.0                # signal age beyond which consumers must not act on it

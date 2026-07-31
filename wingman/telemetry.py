@@ -200,6 +200,10 @@ class TelemetryProcessor:
                 absolute_max=self.max_speed_mph * self.plausibility_margin,
                 max_delta_per_s=self.max_speed_change_mph_s * self.plausibility_margin,
                 trend_min_rate=self.trend_min_speed_rate_mph_s,
+                # The speed bound is an ACCELERATION envelope tuned at the 1.5s
+                # design tick (ADR 038); clamping dt keeps a throttled sampler
+                # from widening it (the 1114 -> 8 mph collapse this caught).
+                gate_dt_cap_s=self.max_gate_dt_s,
             )
         if altitude_raw is not None:
             self._altitude = self._update_signal(
@@ -210,6 +214,19 @@ class TelemetryProcessor:
                 absolute_max=self.max_altitude_ft,
                 max_delta_per_s=self._altitude_bound_fps(now_s) * self.plausibility_margin,
                 trend_min_rate=self.trend_min_alt_rate_fps,
+                # The altitude bound is PHYSICS (vertical speed cannot exceed
+                # total speed), so it scales correctly with the real gap and
+                # must NOT be clamped below the actual sample cadence: with
+                # ocr_every_n_ticks=2 (~3.0s gap), a 1.5s clamp shrank the
+                # allowance to margin x clamp / gap = 0.75 x speed — rejecting
+                # every dive steeper than sin 0.75 while the confirm band
+                # starts at 0.8. Verified against the 2026-07-30 18:51 session:
+                # this one mechanism produced 0 dive confirmations, froze
+                # altitude.ts (starving the confirm dedup), and fed the eject
+                # loop stale level bands that drove 50 blind nose-down
+                # re-issues. Freshness is still bounded: the seed_usable check
+                # below skips the gate entirely past stale_after_s.
+                gate_dt_cap_s=self.stale_after_s,
             )
 
     def snapshot(self, now_s: float) -> TelemetrySnapshot:
@@ -241,6 +258,7 @@ class TelemetryProcessor:
         absolute_max: float,
         max_delta_per_s: float,
         trend_min_rate: float,
+        gate_dt_cap_s: float,
     ) -> TelemetrySignal:
         if raw < 0.0 or raw > absolute_max:
             # Out-of-envelope readings are never seedable — a consistent
@@ -261,16 +279,22 @@ class TelemetryProcessor:
         )
         if seed_usable:
             dt = max(seed_age, 0.1)  # guard duplicate timestamps
-            # Clamp dt to the cadence these bounds were tuned against. Every gate
-            # here is a per-second rate multiplied by the real inter-sample gap,
-            # so slowing the sampler silently widens the envelope: adding
-            # ocr_every_n_ticks=2 (v1.6.27) halved telemetry cadence to ~3.0s and
-            # thereby DOUBLED every allowance the bounds were sized for at the
-            # 1.5s tick (ADR 038), letting a 1114 -> 8 mph speed collapse through
-            # on 2026-07-30. Throttling the sensor must not relax the filter.
-            dt = min(dt, self.max_gate_dt_s)
+            # Cap the dt multiplier per-gate (see the two call sites above):
+            # acceleration-envelope gates must not widen when the sampler is
+            # throttled; physics gates must not shrink below the real cadence.
+            dt = min(dt, gate_dt_cap_s)
             if abs(raw - float(signal.value)) > max_delta_per_s * dt:
                 return self._reject(signal, hist, raw, now_s, seedable=True)
+        elif signal.value is not None:
+            # Stale-seed bypass: the reading is accepted unconditionally, but
+            # the rate history still holds PRE-GAP entries. Pairing the first
+            # post-gap reading with one of those fabricates a rate spanning the
+            # whole gap — a single bogus post-gap read (e.g. 3950 vs true 8900
+            # after an 8s outage) manufactured a confirm-grade -625 ft/s
+            # "steep dive" sample and then delta-blocked the true series for
+            # ~9s. Clear the history so the post-gap reading seeds fresh with
+            # rate=None; the next real sample restores the rate honestly.
+            hist.clear()
 
         return self._accept(hist, raw, now_s, trend_min_rate)
 
