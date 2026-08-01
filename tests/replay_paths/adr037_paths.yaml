@@ -61,7 +61,9 @@ PATH2:
     max_settle_time_s: 2.0
   - screenshot_name: P2_020_MANUAL_TAKEOVER_MOMENT.png
     injection_time_s: 1.9
-    expected_state: GAME_BATTLE
+    # missiles_empty at P2_010 fires eject_started (ADR 056), so the takeover
+    # moment is captured from the EJECT state, not GAME_BATTLE.
+    expected_state: GAME_BATTLE_EJECT
     expected_trigger: manual_mode
     max_settle_time_s: 1.5
   - screenshot_name: P2_030_GAME_BATTLE_MANUAL_HUD.png
@@ -76,7 +78,8 @@ PATH2:
     max_settle_time_s: 3.0
   - screenshot_name: P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png
     injection_time_s: 10.1
-    expected_state: GAME_BATTLE_MANUAL
+    expected_state: GAME_BATTLE
+    expected_trigger: restart_last_mission
     max_settle_time_s: 3.0
   - screenshot_name: P2_060_CLICK_TO_CONTINUE.png
     injection_time_s: 13.5
@@ -93,13 +96,7 @@ PATH2:
 
 PATH3:
   # Full-coverage path: exercises every screenshot in integration_test/.
-  # Sequence: lobby entry (P1) → battle → manual takeover (P2) → respawn (stays
-  # manual) → end/lobby variants. The mission no longer auto-restarts after a
-  # respawn during GAME_BATTLE_MANUAL (it now waits for MISSION_J20_KEY), so
-  # this path can't organically continue through a second P1 battle/respawn
-  # cycle the way it used to -- P1_040/P1_050/P1_060 (which assumed a live
-  # mission was running again) are dropped; P1_070/P2_060/P1_080/P2_070 are
-  # reached the same way PATH2 reaches them, via inject_trigger.
+  # Sequence: lobby entry (P1) → battle → manual takeover (P2) → respawn/end (P1) → lobby variants.
   - screenshot_name: P1_000_LOBBY_PLAY.png
     injection_time_s: 0.0
     expected_state: GAME_LOBBY
@@ -128,7 +125,7 @@ PATH3:
     max_settle_time_s: 2.0
   - screenshot_name: P2_020_MANUAL_TAKEOVER_MOMENT.png
     injection_time_s: 9.8
-    expected_state: GAME_BATTLE
+    expected_state: GAME_BATTLE_EJECT
     expected_trigger: manual_mode
     max_settle_time_s: 1.5
   - screenshot_name: P2_030_GAME_BATTLE_MANUAL_HUD.png
@@ -143,26 +140,43 @@ PATH3:
     max_settle_time_s: 3.0
   - screenshot_name: P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png
     injection_time_s: 18.5
-    expected_state: GAME_BATTLE_MANUAL
+    expected_state: GAME_BATTLE
+    expected_trigger: restart_last_mission
+    max_settle_time_s: 3.0
+  - screenshot_name: P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png
+    injection_time_s: 21.5
+    expected_state: GAME_BATTLE
+    expected_trigger: missiles_empty
+    max_settle_time_s: 2.0
+  - screenshot_name: P1_050_RESPAWN_VISIBLE_NO_HEALTH.png
+    injection_time_s: 25.5
+    expected_state: GAME_BATTLE
+    expected_trigger: respawn_detected
+    max_settle_time_s: 3.0
+  - screenshot_name: P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png
+    injection_time_s: 29.5
+    expected_state: GAME_BATTLE
+    expected_trigger: restart_last_mission
     max_settle_time_s: 3.0
   - screenshot_name: P1_070_CLICK_TO_CONTINUE.png
-    injection_time_s: 21.5
+    injection_time_s: 33.5
     expected_state: GAME_END_B
     expected_trigger: click_to_detected
     max_settle_time_s: 3.0
-    inject_trigger: click_to_detected
+    # No inject_trigger here — P2_060 must capture first while FSM is still in GAME_END_B.
   - screenshot_name: P2_060_CLICK_TO_CONTINUE.png
-    injection_time_s: 23.0
+    injection_time_s: 35.0
     expected_state: GAME_END_B
+    inject_trigger: click_to_detected
   - screenshot_name: P1_080_LOBBY_AFTER_MISSION.png
-    injection_time_s: 25.0
+    injection_time_s: 37.0
     expected_state: GAME_LOBBY
     expected_trigger: continue_clicked
     max_settle_time_s: 3.0
     inject_trigger: continue_clicked
     reuse_from: P1_000_LOBBY_PLAY.png
   - screenshot_name: P2_070_LOBBY_AFTER_MISSION.png
-    injection_time_s: 27.0
+    injection_time_s: 39.0
     expected_state: GAME_LOBBY
 
 SMOKE_PATH:

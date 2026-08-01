@@ -125,28 +125,41 @@ _XKEY_ALIASES = {
 
 
 def _linux_key_event(key: str, event_type) -> None:
-    """Inject a single KeyPress or KeyRelease event via XTest."""
+    """Inject a single KeyPress or KeyRelease event via XTest.
+
+    Retries once on transient failure: each call opens a throwaway Display, so
+    a single failed connection between a press and its release would otherwise
+    leave the key logically held in the X server for the rest of the session
+    (XTest key state is server-side and does not die with this client).
+    """
     _ensure_xauthority()
-    try:
-        from Xlib import display as _xdisplay, X as _X, XK as _XK
-        from Xlib.ext import xtest as _xtest
-        xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
-        keysym = _XK.string_to_keysym(xk_name)
-        if keysym == 0:
-            logger.warning("Linux key: unknown keysym for %r", key)
-            return
-        display_name = os.environ.get("DISPLAY", ":0").strip()
-        d = _xdisplay.Display(display_name)
-        keycode = d.keysym_to_keycode(keysym)
-        if keycode == 0:
-            logger.warning("Linux key: no keycode for keysym %d (%r)", keysym, key)
-            d.close()
-            return
-        _xtest.fake_input(d, event_type, keycode)
-        d.sync()
-        d.close()
-    except Exception as e:
-        logger.error("Linux key event for %r failed: %s", key, e)
+    from Xlib import display as _xdisplay, X as _X, XK as _XK
+    from Xlib.ext import xtest as _xtest
+    xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
+    keysym = _XK.string_to_keysym(xk_name)
+    if keysym == 0:
+        logger.warning("Linux key: unknown keysym for %r", key)
+        return
+    display_name = os.environ.get("DISPLAY", ":0").strip()
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            d = _xdisplay.Display(display_name)
+            try:
+                keycode = d.keysym_to_keycode(keysym)
+                if keycode == 0:
+                    logger.warning("Linux key: no keycode for keysym %d (%r)", keysym, key)
+                    return
+                _xtest.fake_input(d, event_type, keycode)
+                d.sync()
+                return
+            finally:
+                d.close()
+        except Exception as e:
+            last_err = e
+            if attempt == 1:
+                time.sleep(0.05)
+    logger.error("Linux key event for %r failed after retry: %s", key, last_err)
 
 
 class _XKeyEvent:
@@ -490,6 +503,9 @@ class Controller:
         self._eject_stop_reason: str = ""
         # Set while eject_and_dive thread is running; cleared by the thread's finally block.
         self._ejecting = threading.Event()
+        # Handle to the current eject thread so cleanup() can join it briefly
+        # and let its finally block release keys before the process exits.
+        self._eject_thread: "threading.Thread | None" = None
         # Tracks which eject-sequence keys are currently physically held, so
         # _eject_key() calls are idempotent (a cleanup release of an
         # already-released key is a no-op) and _programmatic_key_counts stays
@@ -624,6 +640,17 @@ class Controller:
             try:
                 self._last_j20_key_ts = 0.0
                 def start_j20_mission(e):
+                    # Our own game_starting-loop presses echo back through
+                    # XRecord — recognize them by the programmatic bracket +
+                    # release grace, NOT by FSM state.
+                    with self._programmatic_key_lock:
+                        if (self._programmatic_key_counts.get(MISSION_J20_KEY, 0) > 0
+                                or time.time() < self._prog_release_grace_until.get(
+                                    MISSION_J20_KEY, 0.0)):
+                            logger.debug(
+                                "Controller: '%s' key is wingman's own injected press (echo), ignoring",
+                                MISSION_J20_KEY)
+                            return
                     now = time.time()
                     if now - self._last_j20_key_ts < 0.5:  # debounce: ignore key-repeat
                         return
@@ -638,15 +665,13 @@ class Controller:
                         )
                         if not self._analyzer.trigger_event("manual_force_battle"):
                             logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                    elif current_state == GameState.GAME_STARTING:
-                        # XRecord captures the XTest-injected 'u' from the game_starting loop.
-                        # Ignore it — the loop itself will launch mission_j20 after Good Luck.
-                        logger.debug(
-                            "Controller: '%s' key during GAME_STARTING — XTest echo from game_starting loop, ignoring",
-                            MISSION_J20_KEY,
-                        )
-                        return
                     else:
+                        # NOTE: there is deliberately no GAME_STARTING special
+                        # case anymore. Echoes of wingman's own presses are
+                        # filtered by the programmatic bracket above; a genuine
+                        # 'u' here is the player asking for the mission NOW
+                        # (e.g. after taking over during the Good-Luck wait) and
+                        # must work — the old state-based echo check ate those.
                         logger.info("Controller: '%s' key pressed - starting J20 mission (state=%s)",
                                     MISSION_J20_KEY,
                                     current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
@@ -1325,6 +1350,15 @@ class Controller:
             )
 
             if band is None and not descending_hard:
+                # Speed is stale, but a FRESH altitude rate that is not
+                # confirm-grade is CONTRARY evidence (e.g. climbing at +300
+                # ft/s) — it must break the confirmation streak, or two deep
+                # samples separated by a climb would count as "consecutive".
+                # Only a truly missing sample (rate None) preserves the streak:
+                # absence of telemetry is never evidence (ADR 038).
+                if rate is not None:
+                    steep_streak = 0
+                    last_streak_sample_ts = None
                 # No confident evidence — fall back to the legacy timer, never
                 # correct against missing data (ADR 038).
                 if time.time() >= legacy_deadline:
@@ -1599,9 +1633,11 @@ class Controller:
                                         "steep band" if band == BAND_STEEP_DIVE else "descent rate",
                                         f"{rate:.0f}" if rate is not None else "?",
                                         pr_streak, dive_reentries_left)
-                            elif band is not None:
-                                # Contrary evidence resets the streak; MISSING
-                                # evidence does not — absence of telemetry is
+                            elif band is not None or rate is not None:
+                                # Contrary evidence resets the streak — including
+                                # a fresh non-deep altitude rate with stale speed
+                                # (band None but rate real). Only truly MISSING
+                                # samples preserve it: absence of telemetry is
                                 # never treated as evidence (ADR 038), matching
                                 # the in-phase streak semantics.
                                 pr_streak = 0
@@ -1678,7 +1714,8 @@ class Controller:
                     except Exception:
                         logger.exception("Controller: eject_and_dive on_complete callback failed")
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._eject_thread = threading.Thread(target=_run, daemon=True)
+        self._eject_thread.start()
 
     def start_search_and_destroy_loop(self):
         """Start background padlock + weapon-fire loops.
@@ -1771,6 +1808,12 @@ class Controller:
                 logger.error("Controller: keyboard library not available for disengage_roll_right")
                 return
             self.start_search_and_destroy_loop()
+            # ROLL_RIGHT is a watched maneuver key: without the programmatic
+            # bracket + release grace, its auto-repeats (and the trailing
+            # repeats delivered just after release) read as the PLAYER pressing
+            # 'l' — and the mission this method restarts at the end gets
+            # immediately self-cancelled into manual takeover.
+            self._inc_programmatic_key(ROLL_RIGHT_KEY)
             try:
                 keyboard_module.press(ROLL_RIGHT_KEY)
                 # NOT _interruptible_sleep: cancel_mission() above set
@@ -1789,6 +1832,8 @@ class Controller:
                     keyboard_module.release(ROLL_RIGHT_KEY)
                 except Exception:
                     pass
+                self._arm_release_grace(ROLL_RIGHT_KEY)
+                self._dec_programmatic_key(ROLL_RIGHT_KEY)
                 if not self.is_mission_running():
                     self.stop_search_and_destroy_loop()
             logger.info("Controller: disengage_roll_right complete")
@@ -2272,6 +2317,17 @@ class Controller:
         """Return True when a mission thread currently holds the mission lock."""
         return self._mission_lock.locked()
 
+    def is_mission_teardown_in_progress(self) -> bool:
+        """True while a CANCELLED mission thread still holds the mission lock.
+
+        Distinguishes "a mission is genuinely flying" (lock held, cancel clear)
+        from "the lock is held only because a cancelled thread is unwinding"
+        (lock held, cancel set — clears when the next mission starts). Callers
+        deciding whether to retry a restart need the difference: retrying
+        against teardown is correct; retrying against a live mission loops.
+        """
+        return self._mission_lock.locked() and self._mission_cancel.is_set()
+
     def start_game_starting_loop(self):
         """Public orchestration entrypoint for the GAME_STARTING loop."""
         self._start_game_starting_loop()
@@ -2349,7 +2405,18 @@ class Controller:
                         self._record_action_intent("key_tap", key=MISSION_J20_KEY, action="game_starting_loop")
                         logger.info("Controller: game_starting - simulated '%s' key tap", MISSION_J20_KEY)
                     elif keyboard_module:
-                        keyboard_module.press_and_release(MISSION_J20_KEY)
+                        # Bracket + grace so the XRecord echo of OUR OWN press is
+                        # recognizable as programmatic. The 'u' hotkey used to
+                        # dismiss echoes by FSM state (== GAME_STARTING), which
+                        # also ate GENUINE resume presses whenever the FSM was
+                        # wedged in GAME_STARTING (2026-08-01 02:55: five human
+                        # presses in 3s all logged as "XTest echo ... ignoring").
+                        self._inc_programmatic_key(MISSION_J20_KEY)
+                        try:
+                            keyboard_module.press_and_release(MISSION_J20_KEY)
+                        finally:
+                            self._arm_release_grace(MISSION_J20_KEY)
+                            self._dec_programmatic_key(MISSION_J20_KEY)
                         logger.info("Controller: game_starting - pressed '%s' key", MISSION_J20_KEY)
 
                     # Start async OCR scan if one isn't already running
@@ -2443,7 +2510,41 @@ class Controller:
         return True
 
     def cleanup(self):
-        """Deregister all keyboard hooks registered by this controller."""
+        """Stop injection activity, release held keys, deregister hooks.
+
+        Order matters: XTest-injected key state lives in the X SERVER, not this
+        client, so it survives process exit — and daemon threads die without
+        running their finally blocks. Exiting mid-eject (NOSE_DOWN held, or the
+        120s afterburner hold) therefore left 'k'/'e' logically pressed for the
+        whole X session. Stop the writers first, then release every key this
+        controller can inject, unconditionally (releasing an un-pressed key is
+        a no-op).
+        """
+        # 1. Stop the writers so nothing re-presses after our releases.
+        self._eject_stop_reason = "shutdown"
+        self._eject_stop.set()
+        self.cancel_mission()
+        try:
+            self.stop_search_and_destroy_loop()
+        except Exception:
+            logger.exception("Controller: failed to stop search_and_destroy loops")
+        eject_thread = self._eject_thread
+        if eject_thread is not None and eject_thread.is_alive():
+            eject_thread.join(timeout=1.5)  # let its finally release keys cleanly
+
+        # 2. Belt-and-braces: release every injectable key.
+        if keyboard_module and not self._simulate_os_input:
+            for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+                         AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
+                         DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
+                         PADLOCK_CAMERA, SPECIAL_ABILITY):
+                try:
+                    keyboard_module.release(_key)
+                except Exception:
+                    pass
+            logger.info("Controller: all injectable keys released")
+
+        # 3. Deregister hooks last so the guards above stay active meanwhile.
         if keyboard_module:
             try:
                 keyboard_module.unhook_all()

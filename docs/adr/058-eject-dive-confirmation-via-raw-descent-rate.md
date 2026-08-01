@@ -5,7 +5,7 @@
 | Draft  | 2026-07-30 | 1.6.29          |
 
 Extends [ADR 038](038-game-battle-altitude-speed-signals-for-phase3-and-eject-dive.md)
-(Accepted). ADR 038 is not modified; this ADR adds a second confirmation path and
+(Draft). ADR 038 is not modified; this ADR adds a second confirmation path and
 revises the correction gate, and supersedes ADR 038 only on those two points.
 
 ## Context

@@ -1189,11 +1189,22 @@ class GameStateAnalyzer:
             self._health_ceiling = None
             self._health_no_digits_since = 0.0
             self._game_battle_alive = False
+            # The cached value is from the PREVIOUS life. Leaving it set let
+            # on_enter_GAME_BATTLE (respawn_reset path) re-arm alive_event from
+            # pre-death health whenever health OCR missed the 0 during the death
+            # animation — silently degrading "restart when health returns" to
+            # "restart when the respawn screen clears".
+            self._health = None
         # Respawn teleports the aircraft — a legitimate discontinuity the
         # telemetry plausibility filter would otherwise reject for several
         # ticks, so recalibrate it alongside the health filter.
         with self._telemetry_lock:
             self._telemetry.reset()
+        # Drop any in-flight telemetry OCR: a pre-respawn frame harvested after
+        # this reset would seed the freshly recalibrated filter with pre-death
+        # values and delta-reject genuine post-respawn readings for ~9s
+        # (mirrors the same guard in on_enter_GAME_BATTLE).
+        self._telemetry_future = None
         logger.info("Analyzer: health spike filter reset for respawn")
 
     def on_enter_GAME_BATTLE_MANUAL(self):

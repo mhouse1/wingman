@@ -182,6 +182,85 @@ PATH1:
     assert engine.is_complete() is True
 
 
+def test_replay_assertion_engine_buffers_next_checkpoints_early_trigger(tmp_path: Path):
+    """An FSM cascade delivering the NEXT checkpoint's trigger early must not fail.
+
+    manual_takeover -> state_enter:game_battle_manual arrive back-to-back; the
+    second lands while the first checkpoint is still current. The engine used
+    to hard-fail with "Out-of-order replay trigger" (the PATH2_OCR red lane);
+    now it buffers the early trigger and credits it when the checkpoint
+    becomes current — matching LivePathCaptureEngine's behavior.
+    """
+    steps = load_replay_paths(
+        _write_config(
+            tmp_path,
+            """
+PATH1:
+  - screenshot_name: TAKEOVER.png
+    injection_time_s: 0.0
+    expected_state: GAME_BATTLE
+    expected_trigger: manual_takeover
+    max_settle_time_s: 2.0
+  - screenshot_name: MANUAL_HUD.png
+    injection_time_s: 1.0
+    expected_state: GAME_BATTLE_MANUAL
+    expected_trigger: state_enter:GAME_BATTLE_MANUAL
+    max_settle_time_s: 2.0
+""".strip(),
+        )
+    )["PATH1"]
+    engine = ReplayAssertionEngine("PATH1", steps)
+
+    engine.on_step_activated(steps[0], 0.0)
+    # The current checkpoint is NOT yet complete (its expected_state has not
+    # been observed) when its trigger AND the next checkpoint's cascade event
+    # arrive back-to-back — the exact PATH2_OCR production shape, where the
+    # FSM sat in GAME_BATTLE_EJECT so P2_020's stale expected_state never met.
+    engine.on_event("manual_takeover", 0.2)
+    engine.on_event("state_enter:GAME_BATTLE_MANUAL", 0.201)
+    # Historically the second event hard-failed here ("Out-of-order replay
+    # trigger") even though the run itself was correct.
+    assert engine.has_failures() is False, engine.failures
+    engine.on_state("GAME_BATTLE", 0.3)   # current completes late
+    engine.on_state("GAME_BATTLE_MANUAL", 0.4)
+    engine.on_step_activated(steps[1], 1.0)
+    engine.tick(1.5)
+
+    assert engine.has_failures() is False, engine.failures
+    assert engine.is_complete() is True
+
+
+def test_replay_assertion_engine_still_fails_on_genuinely_out_of_order_trigger(tmp_path: Path):
+    """A trigger matching a checkpoint BEYOND the next is still a hard failure."""
+    steps = load_replay_paths(
+        _write_config(
+            tmp_path,
+            """
+PATH1:
+  - screenshot_name: A.png
+    injection_time_s: 0.0
+    expected_trigger: trigger_a
+    max_settle_time_s: 2.0
+  - screenshot_name: B.png
+    injection_time_s: 1.0
+    expected_trigger: trigger_b
+    max_settle_time_s: 2.0
+  - screenshot_name: C.png
+    injection_time_s: 2.0
+    expected_trigger: trigger_c
+    max_settle_time_s: 2.0
+""".strip(),
+        )
+    )["PATH1"]
+    engine = ReplayAssertionEngine("PATH1", steps)
+
+    engine.on_step_activated(steps[0], 0.0)
+    engine.on_event("trigger_c", 0.1)  # two checkpoints ahead — genuinely wrong
+
+    assert engine.has_failures() is True
+    assert any("Out-of-order" in msg for msg in engine.failures)
+
+
 def test_replay_assertion_engine_fails_on_timeout(tmp_path: Path):
     steps = load_replay_paths(
         _write_config(

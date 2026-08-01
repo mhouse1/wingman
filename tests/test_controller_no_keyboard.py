@@ -346,6 +346,65 @@ def test_padlock_hotkey_ignores_wingmans_own_press(monkeypatch):
     assert ctrl._padlock_cooldown_until > time.time()
 
 
+def test_genuine_u_press_during_game_starting_starts_mission(monkeypatch):
+    """A real 'u' during GAME_STARTING must start the mission, not be eaten.
+
+    The old handler dismissed EVERY 'u' in GAME_STARTING as an XTest echo of
+    the game_starting loop. When a takeover during the Good-Luck wait wedged
+    the FSM in GAME_STARTING, the player's resume presses were all swallowed
+    (2026-08-01 02:55: five presses in 3s, all logged as echo). Echoes are now
+    identified by the programmatic-key bracket instead of FSM state.
+    """
+    keyboard_stub = _KeyboardStub()
+    monkeypatch.setattr(controller_module, "keyboard_module", keyboard_stub)
+    monkeypatch.setattr(controller_module.threading, "Thread", _ThreadStub)
+
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_STARTING)
+    ctrl = Controller(region, analyzer=analyzer)
+    ctrl.mission_j20 = lambda: None
+
+    _ThreadStub.started_targets = []
+    handler = keyboard_stub.handlers[controller_module.MISSION_J20_KEY]
+    handler(type("_Event", (), {"name": controller_module.MISSION_J20_KEY})())
+
+    assert len(_ThreadStub.started_targets) == 1, "genuine 'u' during GAME_STARTING was eaten"
+    assert analyzer.trigger_calls == ["manual_force_battle"]
+
+
+def test_wingmans_own_u_press_is_ignored_as_echo(monkeypatch):
+    """The game_starting loop's own injected 'u' must not re-trigger the handler."""
+    keyboard_stub = _KeyboardStub()
+    monkeypatch.setattr(controller_module, "keyboard_module", keyboard_stub)
+    monkeypatch.setattr(controller_module.threading, "Thread", _ThreadStub)
+
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_STARTING)
+    ctrl = Controller(region, analyzer=analyzer)
+    ctrl.mission_j20 = lambda: None
+    handler = keyboard_stub.handlers[controller_module.MISSION_J20_KEY]
+    event = type("_Event", (), {"name": controller_module.MISSION_J20_KEY})()
+
+    # While the press is in flight (counter held):
+    _ThreadStub.started_targets = []
+    ctrl._inc_programmatic_key(controller_module.MISSION_J20_KEY)
+    handler(event)
+    ctrl._dec_programmatic_key(controller_module.MISSION_J20_KEY)
+    assert _ThreadStub.started_targets == []
+
+    # And within the post-release grace (late XRecord delivery):
+    ctrl._arm_release_grace(controller_module.MISSION_J20_KEY)
+    handler(event)
+    assert _ThreadStub.started_targets == []
+
+    # After the grace expires, a real press works again.
+    ctrl._prog_release_grace_until[controller_module.MISSION_J20_KEY] = time.time() - 0.001
+    handler(event)
+    assert len(_ThreadStub.started_targets) == 1
+
+
 def test_j20_hotkey_forces_battle_via_fsm_trigger(monkeypatch):
     """J20 hotkey should call analyzer trigger path instead of direct FSM state assignment."""
     keyboard_stub = _KeyboardStub()

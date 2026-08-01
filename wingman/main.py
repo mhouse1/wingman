@@ -40,8 +40,7 @@ from .replay import (
 
 class RespawnState(Enum):
     IDLE = auto()            # Normal gameplay
-    RESPAWNING = auto()      # Respawn screen active; mission being cancelled
-    PENDING_RESTART = auto() # Respawn gone; waiting for delay before restarting
+    RESPAWNING = auto()      # Respawn screen active; restart fires on health return
 
 
 def load_config(path):
@@ -221,6 +220,15 @@ def main():
         logger.info("game_window_offset from config: (%d, %d)", *game_window_offset)
 
     exit_requested = threading.Event()
+    # SIGTERM must take the same graceful path as Backspace: daemon threads die
+    # without their finally blocks, and XTest key state lives in the X SERVER —
+    # a hard kill mid-eject leaves NOSE_DOWN/AFTERBURNER pressed for the whole
+    # X session. Route it through exit_requested so cleanup() releases keys.
+    try:
+        import signal
+        signal.signal(signal.SIGTERM, lambda _sig, _frm: exit_requested.set())
+    except (ValueError, OSError):  # non-main thread or unsupported platform
+        pass
     replay_mode = bool(args.replay_config)
     capture_mode = bool(args.capture_path_config)
     replay_capture = None
@@ -292,10 +300,6 @@ def main():
     mission_cfg = cfg.get("mission", {})
     startup_cfg = cfg.get("startup_state_detection", {})
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
-    restart_retry_interval = mission_cfg.get("restart_retry_interval", 2.0)
-    restart_delay_after_unlock = mission_cfg.get("restart_delay_after_unlock", 4.0)
-    respawn_fallback_timeout = mission_cfg.get("respawn_fallback_timeout", 20.0)
-    restart_health_guard_timeout = mission_cfg.get("restart_health_guard_timeout", 12.0)
     no_missiles_consecutive_required = int(mission_cfg.get("no_missiles_consecutive_required", 2))
     no_missiles_abort_grace_s = float(mission_cfg.get("no_missiles_abort_grace_s", 6.0))
     waiting_fallback_enabled = mission_cfg.get("waiting_fallback_enabled", True)
@@ -479,8 +483,6 @@ def main():
     # Mission restart state machine
     respawn_state = RespawnState.IDLE
     respawn_cooldown_until = 0.0  # suppress re-detection for 10s after first trigger
-    last_restart_attempt = 0.0
-    restart_not_before = 0.0
     last_incoming_alert_ts = 0.0
     missile_ignore_until = 0.0       # suppress missile alerts for 10s after respawn
     last_click_to_alert_ts = 0.0
@@ -520,15 +522,24 @@ def main():
         waiting_fallback_consecutive = 0
 
     def _handle_alive_transition():
-        """Restart mission immediately when health transitions dead → alive."""
-        nonlocal last_restart_attempt, respawn_state, enemy_last_seen_ts
+        """Restart mission immediately when health transitions dead → alive.
+
+        This is the ONLY post-respawn restart path (the scheduled/delayed
+        restart machinery was removed 2026-07-31): as soon as health returns,
+        the mission restarts. Because alive_event is one-shot and health often
+        returns while respawn OCR is still flapping, deferrals RE-ARM the event
+        instead of swallowing it — the handler retries every tick until the
+        respawn-clear stability window is met, then restarts.
+        """
+        nonlocal respawn_state, enemy_last_seen_ts
         analyzer.alive_event.clear()
         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
 
         # Only early-restart when respawn has remained clear for a short stability window.
         # This avoids relaunching while respawn OCR/health signals are still flapping.
         if respawn_clear_since == 0.0:
-            logger.debug("HEALTH ALIVE ignored — respawn clear window not established")
+            logger.debug("HEALTH ALIVE deferred — respawn screen still detected")
+            analyzer.alive_event.set()  # retry next tick; do not lose the transition
             return
         clear_elapsed = time.time() - respawn_clear_since
         if clear_elapsed < respawn_clear_stability_s:
@@ -537,11 +548,20 @@ def main():
                 clear_elapsed,
                 respawn_clear_stability_s,
             )
+            analyzer.alive_event.set()  # retry next tick; do not lose the transition
             return
 
         if (analyzer.game_state == GameState.GAME_BATTLE
-                and not ctrl.is_mission_running()
                 and ctrl.is_auto_respawn_restart_enabled()):
+            if ctrl.is_mission_running():
+                if ctrl.is_mission_teardown_in_progress():
+                    # The lock is held only by the CANCELLED mission thread
+                    # unwinding (the v1.6.29 teardown race). With the scheduled
+                    # fallback removed, consuming the event here would lose the
+                    # only remaining restart path for this life — retry instead.
+                    logger.debug("HEALTH ALIVE deferred — cancelled mission still tearing down")
+                    analyzer.alive_event.set()
+                return  # genuine mission running: nothing to restart
             missiles = analyzer.get_ammo_missiles()
             if missiles is not None and missiles == 0:
                 logger.info("\033[92m💚 HEALTH ALIVE — missiles empty, skipping restart\033[0m")
@@ -549,7 +569,6 @@ def main():
             logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
             ctrl.restart_last_mission()
             _emit_capture_event("restart_last_mission")
-            last_restart_attempt = time.time()
             respawn_state = RespawnState.IDLE
 
     def _handle_low_flares():
@@ -572,6 +591,14 @@ def main():
         nonlocal no_missiles_zero_streak
         analyzer.no_missiles_event.clear()
         if not ctrl.is_mission_running():
+            no_missiles_zero_streak = 0
+            return
+        if analyzer.game_state != GameState.GAME_BATTLE:
+            # Ejecting is an auto-mode behavior. Without this gate, the narrow
+            # window where a cancelled mission is still tearing down during a
+            # manual takeover could inject NOSE_DOWN+AFTERBURNER into the
+            # player's manual flight (and fire eject_started from a state
+            # where it is invalid).
             no_missiles_zero_streak = 0
             return
         currently_respawning, _, _ = analyzer.get_respawn_cache_result()
@@ -744,11 +771,18 @@ def main():
                     startup_classification_complete = True
                 if current_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
-                    # GAME_END_B is not a respawn flow; clear any stale pending-restart
-                    # state so we do not relaunch a mission during click-through.
+                    # GAME_END_B is not a respawn flow; clear the respawn latch
+                    # and any pending alive event so the match-end click-through
+                    # cannot relaunch a mission.
                     respawn_state = RespawnState.IDLE
-                    restart_not_before = 0.0
-                    last_restart_attempt = 0.0
+                    analyzer.alive_event.clear()
+                    # A match can end mid-eject with no respawn ever detected —
+                    # only respawn stopped the sequence, so the 120s afterburner
+                    # hold survived into the NEXT match. That stale _ejecting
+                    # flag let a maneuver key trigger "manual takeover" during
+                    # the next round's GAME_STARTING wait, wedging the FSM and
+                    # locking out the 'u' resume (observed 2026-08-01 02:54:55).
+                    ctrl.stop_eject_sequence(reason="match_ended")
                 else:
                     game_end_b_since = 0.0
                 if current_game_state == GameState.GAME_LOBBY:
@@ -1004,7 +1038,7 @@ def main():
                 # independent of the mission-restart dedup cooldown below — a real respawn screen
                 # means afterburner should release now, not hold until the 120s safety timeout.
                 ctrl.stop_eject_sequence()
-                if respawn_state in (RespawnState.IDLE, RespawnState.PENDING_RESTART):
+                if respawn_state == RespawnState.IDLE:
                     if time.time() < respawn_cooldown_until:
                         logger.debug("RESPAWN seen but suppressed by cooldown (%.1fs remaining)",
                                      respawn_cooldown_until - time.time())
@@ -1015,6 +1049,11 @@ def main():
                         enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
                         ctrl.cancel_mission()
                         analyzer.reset_health_for_respawn()
+                        # A death invalidates any pending (re-armed) alive event
+                        # from the previous life — without this, a deferred
+                        # HEALTH ALIVE could restart the mission after the NEXT
+                        # respawn clears but before health actually returns.
+                        analyzer.alive_event.clear()
                         _emit_capture_event("respawn_detected")
                         # Live capture is handled via analyzer.set_on_respawn_detected —
                         # the callback fires from the background OCR thread with the exact
@@ -1022,89 +1061,48 @@ def main():
                         # main loop's `frame` variable has already advanced past the
                         # respawn overlay by the time is_respawning surfaces from the cache.
                         if current_game_state == GameState.GAME_BATTLE_MANUAL:
-                            # Manual takeover stays manual through death/respawn -- the
-                            # mission only resumes when the player presses MISSION_J20_KEY
-                            # (start_j20_mission), never automatically. This used to force
-                            # _auto_respawn_restart back on and fire respawn_reset
-                            # unconditionally, so every manual takeover silently reverted to
-                            # auto mode on the next death (observed in production: every
-                            # GAME_BATTLE_MANUAL session exited via respawn, never via the
-                            # resume hotkey -- the flag the player just set to False was
-                            # being overridden a few seconds later regardless of intent).
+                            # Death ends manual takeover. Fire the P2_040 capture
+                            # BEFORE the FSM transition so the screenshot still
+                            # shows the manual-mode HUD, then return to auto: the
+                            # mission restarts as soon as health returns. (An
+                            # earlier stay-manual-through-respawn design left the
+                            # aircraft flying uncommanded after every death — the
+                            # scheduled restart was GAME_BATTLE-gated and the log
+                            # promised a restart that could never fire, observed
+                            # 2026-07-31 07:42.)
                             if live_capture is not None:
                                 _cap_now = time.time()
                                 live_capture.on_event("respawn_detected", _cap_now)
                                 live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
                                 live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
-                            logger.info(
-                                "Respawn during manual takeover — staying in GAME_BATTLE_MANUAL, "
-                                "press '%s' to resume the mission sequence", MISSION_J20_KEY)
-                            # Latch the same de-dup state the auto path uses. Without it
-                            # respawn_state stays IDLE, the re-entry guard above keeps
-                            # matching, and this whole block re-fires every 10s (the
-                            # cooldown) for as long as the respawn screen is up. This does
-                            # NOT re-enable auto-restart: both restart paths are gated on
-                            # GAME_BATTLE, which manual mode is not, and respawn_state is
-                            # reset to IDLE on GAME_END_B when the match ends.
-                            respawn_state = RespawnState.RESPAWNING
+                            analyzer.trigger_event("respawn_reset")
+                        ctrl.set_auto_respawn_restart(True)  # always restart after respawn
+                        # Wait for the cancelled mission thread to release its lock
+                        # so the health-alive restart can't be skipped by a
+                        # teardown race (is_mission_running would read True).
+                        logger.info("Waiting for mission lock to release before restart...")
+                        for _ in range(50):
+                            if not ctrl.is_mission_running():
+                                break
+                            time.sleep(0.1)
                         else:
-                            ctrl.set_auto_respawn_restart(True)  # always restart after respawn
-                            # Wait for mission lock to release before restart
-                            logger.info("Waiting for mission lock to release before restart...")
-                            for _ in range(50):
-                                if not ctrl.is_mission_running():
-                                    break
-                                time.sleep(0.1)
-                            else:
-                                logger.warning("Timeout waiting for mission lock release; will keep retrying restart.")
-                            respawn_state = RespawnState.RESPAWNING
-                            restart_not_before = time.time() + respawn_fallback_timeout
-                            logger.info("Respawn screen active — will restart %.1fs after screen clears (stuck OCR fallback in %.1fs)",
-                                        restart_delay_after_unlock, respawn_fallback_timeout)
+                            logger.warning("Timeout waiting for mission lock release; restart may be delayed.")
+                        # Latch: dedupes re-detection while the screen persists.
+                        respawn_state = RespawnState.RESPAWNING
+                        logger.info("Respawn screen active — mission restarts when health returns")
 
                 logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
 
                 time.sleep(1)
                 continue
 
-            # Gameplay resumed after respawn — reset delay timer from this point
+            # Respawn screen cleared. No scheduled restart: the health alive
+            # transition (_handle_alive_transition) restarts the mission the
+            # moment health returns — it re-arms itself while respawn OCR is
+            # still flapping, so the one-shot event cannot be lost.
             if respawn_state == RespawnState.RESPAWNING:
-                restart_not_before = time.time() + restart_delay_after_unlock
-                logger.info("\033[92m✓ Gameplay resumed - scheduling restart in %.1fs\033[0m", restart_delay_after_unlock)
-                respawn_state = RespawnState.PENDING_RESTART
-
-            # Retry mission restart if pending and delay has passed (persists across gameplay resume)
-            if (respawn_state == RespawnState.PENDING_RESTART
-                    and current_game_state == GameState.GAME_BATTLE
-                    and time.time() >= restart_not_before
-                    and time.time() - last_restart_attempt > restart_retry_interval):
-                if not ctrl.is_mission_running():
-                    health_value = game_state.get('health')
-                    health_guard_timed_out = (time.time() - restart_not_before) > restart_health_guard_timeout
-                    if (health_value is None or health_value <= 0) and not health_guard_timed_out:
-                        logger.debug(
-                            "Restart deferred — health not confirmed alive (health=%r)",
-                            health_value,
-                        )
-                        last_restart_attempt = time.time()
-                        continue
-                    if health_guard_timed_out and (health_value is None or health_value <= 0):
-                        logger.warning(
-                            "Restart health guard timed out after %.0fs — restarting despite health=%r",
-                            restart_health_guard_timeout,
-                            health_value,
-                        )
-                    logger.info("Attempting to restart mission (delay expired)...")
-                    result = ctrl.restart_last_mission()
-                    if result is True:
-                        logger.info("Restarted last mission after respawn")
-                        respawn_state = RespawnState.IDLE
-                    elif result is None:
-                        logger.info("No previous mission to restart; clearing pending restart")
-                        respawn_state = RespawnState.IDLE
-                    else:
-                        logger.info("Mission restart attempt failed; will retry in %.1fs", restart_retry_interval)
-                    last_restart_attempt = time.time()
+                logger.info("\033[92m✓ Gameplay resumed — mission restarts on health return\033[0m")
+                respawn_state = RespawnState.IDLE
 
             # Log "Click to Continue" prompt when newly detected (informational only).
             click_to_detected, _, _ = analyzer.get_click_to_cache_result()
