@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-08-01 | 1.6.29          |
+| Draft  | 2026-08-02 | 1.6.29          |
 
 Extends [ADR 039](039-reduce-orchestration-coupling-first.md) (Accepted).
 ADR 039 established the `set_on_*` orchestration API to decouple the analyzer
@@ -18,19 +18,29 @@ exists so the refactor can be evaluated and approved (or rejected/deferred)
 before any code changes. Each phase below is independently shippable and
 independently abandonable.
 
+**Revised 2026-08-02** after the ADR 061-064 respawn-detection arc landed.
+All measurements below are re-taken against current code; the arc supplied
+four new pieces of evidence (see "What the 061-064 arc added"), none of
+which change the proposed design — they sharpen the case for it and shift
+which file is under the most pressure.
+
 ## Context
 
-Three structural pressure points have accumulated, measured on v1.6.29:
+Three structural pressure points have accumulated, re-measured 2026-08-02:
 
-| File | Lines (v1.6.23, CR-013) | Lines (v1.6.29) | Growth |
-|------|------------------------|-----------------|--------|
-| `wingman/main.py` | 1195 | 1228 | +3% |
-| `wingman/analyzer.py` | 2076 | 2361 | +14% |
-| `wingman/controller.py` | 1851 | 2555 | +38% |
+| File | v1.6.23 (CR-013) | 2026-08-01 | 2026-08-02 | Growth since CR-013 |
+|------|------------------|------------|------------|---------------------|
+| `wingman/main.py` | 1195 | 1228 | 1292 | +8% |
+| `wingman/analyzer.py` | 2076 | 2361 | **2746** | **+32%** |
+| `wingman/controller.py` | 1851 | 2555 | 2572 | +39% |
 
-**1. `main()` is a single ~1100-line function** (`wingman/main.py:129`) whose
+`analyzer.py` gained 385 lines in the two days of the 061-064 arc alone and
+is now the fastest-growing file in the repo — a reordering versus the
+original draft, where `controller.py` was the outlier.
+
+**1. `main()` is a single ~1140-line function** (`wingman/main.py:148`) whose
 tick loop coordinates every runtime concern through roughly 25 loop-local
-variables (`main.py:484-510`) and 10 nested closure handlers
+variables (`main.py:503-529`) and 10 nested closure handlers
 (`_handle_no_missiles`, `_handle_alive_transition`, `_handle_low_flares`,
 `_deploy_flares_on_new_incoming`, etc.), 6 of which mutate shared state via
 `nonlocal`. Concerns that must not interact still share one namespace:
@@ -46,27 +56,80 @@ variables (`main.py:484-510`) and 10 nested closure handlers
   ADR generalizes.
 
 **2. The analyzer's orchestration hooks are 7 single-slot setters**
-(`analyzer.py:951-984`, from ADR 039) plus ~28 more informal `self._on_*`
-attributes. Two concrete costs, both live today:
+(`analyzer.py:1010-1043`, from ADR 039) plus 28 more informal `self._on_*`
+attributes — both counts unchanged through the arc. Two concrete costs, both
+live today:
 
 - `set_on_fsm_transition` holds **one** callback, so replay assertions, live
   capture, and `MissionStatsTracker` are wired as mutually exclusive
-  `if/elif/else` branches (`main.py:453-478`). Mission statistics are silently
-  not recorded during replay or capture runs — not by design, but because the
-  slot cannot multiplex.
+  `if/elif/else` branches (`main.py:480/487/497`). Mission statistics are
+  silently not recorded during replay or capture runs — not by design, but
+  because the slot cannot multiplex.
 - Registration is stringly and unchecked: a typo'd hook name or a
   double-registration overwriting an earlier subscriber fails silently at
   runtime (the same defect class as CR-013-6's crop-key typo and CR-013's
   duplicate lobby-stall/escape loops).
 
-**3. `controller.py` grew 38% in two weeks** (ADR 058 closed-loop eject).
+**3. `controller.py` grew 39% in two weeks** (ADR 058 closed-loop eject).
 `eject_and_dive` is now a multi-phase stateful sequence (nose-down hold,
 telemetry confirmation, correction budget, post-release observation, decay
-re-entry) implemented as a nested thread function inside a 2555-line class.
+re-entry, and since ADR 058 decision 11 a mid-streak deadline grace)
+implemented as a nested thread function inside a 2572-line class.
 
 The condition stated when this refactor was first proposed — "only pays off if
-more features are planned in this area" — is now met: ADR 055, 056, 058, and
-059 all landed in this code within six weeks.
+more features are planned in this area" — is now met: ADR 055, 056, 058, 059,
+and the 061-064 arc all landed in this code within six weeks.
+
+### What the 061-064 arc added (2026-08-02)
+
+The respawn-detection arc (061 Accepted, 062 Rejected, 063 Accepted, 064
+Accepted) was developed *without* this refactor and is therefore a clean
+natural experiment on whether the problem it describes is real. Four
+findings, all from production evidence:
+
+**A. A shared-mutable-state collision cost five missed detections and was
+fixed with a duplicate field.** The OCR respawn path calls
+`reset_health_for_respawn()`, which zeroes `_health_no_digits_since`. The
+health-respawn detector depended on that same field as its evidence clock,
+so the OCR plumbing silently wiped the evidence of the detector it was being
+measured against — five structural misses in one session. The fix
+(`analyzer.py:843`) was to add a **private duplicate clock** the OCR path
+does not touch. That is precisely the failure mode Phase 2 rule 2 prohibits,
+and the workaround is precisely what "each concern owns its own state" would
+have made unnecessary.
+
+**B. Two concerns interacting through unnamed shared state needed an FSM
+state gate as a discriminator.** Eject sequencing thrashes health state
+(synthetic dead reset, garbage-zero dips at missiles-empty); the respawn
+detector read that thrash as death-then-recovery and produced six false
+fires, all 1-2 s into `GAME_BATTLE_EJECT` (ADR 064 amendment 2). The fix
+gates weak fires on FSM state. It works, but it is a *coordinate check*
+between two concerns that have no explicit interface — the shape Phase 2
+rule 2 replaces with a named event.
+
+**C. The one place the Phase 2 pattern was applied, it worked.** ADR 061
+needed the alive-event disposition logic to be testable, so it was extracted
+as a module-level pure function, `_alive_transition_disposition`
+(`main.py:129`), taking state in and returning a decision — no `nonlocal`,
+no closure capture. It is now covered by four unit tests that run without
+booting the loop, and it made ADR 061 rule 3 ("no silent consumption")
+mechanically checkable. This is a micro-instance of the Phase 2 handler
+extraction, and it is the only part of the arc's main-loop logic that is
+unit-tested.
+
+**D. The respawn plumbing now has two entry points, in the exact block
+CR-013-4 lived in.** `main.py:1088-1092` gates on
+`game_state.get('is_respawning') or health_fallback_respawn`, with the
+fallback arriving via a `threading.Event` reached across module boundaries
+(`analyzer.health_respawn_event`). That event is an ad-hoc, single-purpose
+instance of the cross-module signal Phase 1's registry generalizes — the
+second such signal (after `alive_event`) to be added by hand.
+
+None of this argues the arc should have waited for the refactor: the bugs
+were found in shadow mode at zero operational cost, and the fixes are
+correct. It argues that the *rate* of these coupling questions is not
+declining, and that each is currently answered with a bespoke workaround
+rather than a structural rule.
 
 ## Decision
 
@@ -96,7 +159,7 @@ Properties the current mechanism lacks:
 
 - **Multi-subscriber**: `FSM_TRANSITION` fans out to replay assertions, live
   capture, and stats simultaneously — the `if/elif/else` exclusivity in
-  `main.py:453-478` disappears, and `MissionStatsTracker` records during
+  `main.py:480/487/497` disappears, and `MissionStatsTracker` records during
   replay/capture lanes too.
 - **Registration-time failure**: subscribing to a nonexistent event is an
   `Enum` attribute error at wiring time, not a silent no-op at runtime.
@@ -135,7 +198,7 @@ holds its own private state:
 
 | Handler | Absorbs today's loop state | Absorbs today's closures |
 |---------|---------------------------|--------------------------|
-| `RespawnHandler` | `respawn_state`, `respawn_cooldown_until`, `respawn_clear_since`, `missile_ignore_until` | respawn-detection block, `_handle_alive_transition` |
+| `RespawnHandler` | `respawn_state`, `respawn_cooldown_until`, `respawn_clear_since`, `missile_ignore_until` | respawn-detection block (both OCR and ADR 064 fallback entry points), `_handle_alive_transition` — which keeps calling the already-extracted `_alive_transition_disposition` |
 | `AmmoEventsHandler` | `no_missiles_zero_streak`, `last_flare_reload_ts`, `battle_started_ts`, padlock spread counters | `_handle_no_missiles`, `_handle_low_flares` |
 | `EnemyPresenceHandler` | `enemy_last_seen_ts` | 30 s disengage block |
 | `WaitingFallbackHandler` | `waiting_fallback_score`, `waiting_fallback_consecutive`, `game_waiting_since`, PLAY re-click state | `_update_waiting_fallback` wiring, re-click block |
@@ -157,9 +220,21 @@ Rules that make this safe rather than cosmetic:
    is preserved and stated in each handler's docstring.
 
 `eject_and_dive`'s extraction from `controller.py` into its own module is
-explicitly **out of scope** here — ADR 058 is still stabilizing in production
-and refactoring it now would confound that validation. Revisit after ADR 058
-is Accepted.
+explicitly **out of scope** here — ADR 058 is still `Draft` and stabilizing
+in production (its decision 11 streak-grace amendment landed 2026-08-02 and
+has one session of evidence), so refactoring it now would confound that
+validation. Revisit after ADR 058 is Accepted.
+
+The analyzer's health-respawn detector state (13 fields added by ADR
+062-064: mark tier/timestamp, confirmed-read anchor and history, gap
+instrumentation, fire log, OCR edge log, `health_respawn_event`) is likewise
+**out of scope for Phase 2** — it lives in `analyzer.py`, not the tick loop.
+It is called out here because it is the strongest candidate for a *third*
+phase (a `RespawnDetector` collaborator object inside the analyzer), and
+because finding B above shows it already interacts with eject sequencing
+through state rather than interface. Phase 3 is deliberately not specified
+in this ADR; it should be its own decision once Phases 1-2 have shown their
+cost/benefit in practice.
 
 ## What this ADR does not change
 
@@ -179,9 +254,11 @@ Positive:
   FSM hook), improving ADR 044 gate observability.
 - New features in this area (the active development zone per ADR 055-059)
   get an obvious, small home instead of growing `main()`.
-- Each handler becomes unit-testable without booting the full loop —
-  today only `_update_waiting_fallback` is testable because it is the only
-  module-level pure function of the group.
+- Each handler becomes unit-testable without booting the full loop — today
+  only `_update_waiting_fallback` and `_alive_transition_disposition` are
+  testable, because they are the only module-level pure functions of the
+  group (the latter extracted ad hoc by ADR 061 for exactly this reason —
+  finding C).
 
 Negative / risks:
 
@@ -220,8 +297,10 @@ point with the codebase left consistent.
   extracted handler pinning its current observable behavior.
 - One full live session after Phase 2 with the session summary compared
   against a pre-refactor baseline (mission count, outcomes, respawn count,
-  eject episode structure — the 2026-08-01 03:33 session in
-  `logs/` is the reference).
+  eject episode structure, and the `respawn_shadow` block). The reference is
+  now the 2026-08-02 13:29 dual-mode session — 17 respawns, 16 matched,
+  zero incorrect fallback fires — because it exercises the ADR 064 fallback
+  path that Phase 2's `RespawnHandler` must preserve.
 - Acceptance criterion for flipping this ADR to Accepted: all steps landed,
   gates green, and one clean production session with no behavioral deltas
   attributable to the refactor.
