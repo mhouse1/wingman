@@ -25,7 +25,7 @@ from .analyzer import GameStateAnalyzer, GameState, GameEvent
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
-from .tick_handlers import EnemyPresenceHandler, WaitingFallbackHandler
+from .tick_handlers import AmmoEventsHandler, EnemyPresenceHandler, WaitingFallbackHandler
 from .tracker import TargetTracker
 from .replay import (
     LivePathCaptureEngine,
@@ -270,8 +270,6 @@ def main():
     mission_cfg = cfg.get("mission", {})
     startup_cfg = cfg.get("startup_state_detection", {})
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
-    no_missiles_consecutive_required = int(mission_cfg.get("no_missiles_consecutive_required", 2))
-    no_missiles_abort_grace_s = float(mission_cfg.get("no_missiles_abort_grace_s", 6.0))
     respawn_clear_stability_s = float(mission_cfg.get("respawn_clear_stability_s", 1.5))
     starting_stalled_reclassify_after_s = float(mission_cfg.get("starting_stalled_reclassify_after_s", 20.0))
     starting_max_wait_s = float(mission_cfg.get("starting_max_wait_s", 90.0))
@@ -461,20 +459,18 @@ def main():
     # Mission restart state machine
     respawn_state = RespawnState.IDLE
     respawn_cooldown_until = 0.0  # suppress re-detection for 10s after first trigger
-    last_incoming_alert_ts = 0.0
-    missile_ignore_until = 0.0       # suppress missile alerts for 10s after respawn
     last_click_to_alert_ts = 0.0
-    battle_started_ts = 0.0
-    no_missiles_zero_streak = 0
-    missiles_fired_since_padlock = 0   # cumulative missiles fired since last padlock target-switch
-    last_missile_count_for_padlock: "int | None" = None  # previous tick missile count for delta tracking
     last_game_state = None
-    last_flare_reload_ts = 0.0    # cooldown: don't spam SPECIAL_ABILITY if flares stay at 2
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
     respawn_clear_since = 0.0  # timestamp since respawn cache has been continuously false
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
+    ammo_events = AmmoEventsHandler(
+        analyzer, ctrl, mission_cfg,
+        perf_tracker=tracker, stats_tracker=stats_tracker,
+        emit_capture_event=_emit_capture_event,
+    )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
@@ -570,105 +566,6 @@ def main():
         ctrl.restart_last_mission()
         _emit_capture_event("restart_last_mission")
         respawn_state = RespawnState.IDLE
-
-    def _handle_low_flares():
-        """Press SPECIAL_ABILITY to reload flares when count reaches 2."""
-        nonlocal last_flare_reload_ts
-        analyzer.low_flares_event.clear()
-        if analyzer.game_state != GameState.GAME_BATTLE:
-            return
-        if time.time() - last_flare_reload_ts < 30.0:
-            logger.debug("Low-flares event: reload suppressed by cooldown (%.1fs remaining)",
-                         30.0 - (time.time() - last_flare_reload_ts))
-            return
-        ctrl.reload_flares()
-        last_flare_reload_ts = time.time()
-        stats_tracker.on_event("flare_reload", last_flare_reload_ts)
-
-    def _handle_no_missiles():
-        """End mission and eject when missile count reaches zero."""
-        nonlocal no_missiles_zero_streak
-        analyzer.no_missiles_event.clear()
-        if not ctrl.is_mission_running():
-            no_missiles_zero_streak = 0
-            return
-        if analyzer.game_state != GameState.GAME_BATTLE:
-            # Ejecting is an auto-mode behavior. Without this gate, the narrow
-            # window where a cancelled mission is still tearing down during a
-            # manual takeover could inject NOSE_DOWN+AFTERBURNER into the
-            # player's manual flight (and fire eject_started from a state
-            # where it is invalid).
-            no_missiles_zero_streak = 0
-            return
-        currently_respawning, _, _ = analyzer.get_respawn_cache_result()
-        if currently_respawning:
-            logger.debug("No-missiles suppressed — respawn screen active")
-            no_missiles_zero_streak = 0
-            return
-        if battle_started_ts > 0 and (time.time() - battle_started_ts) < no_missiles_abort_grace_s:
-            logger.debug(
-                "No-missiles suppressed — post-mission-start grace (%.1fs remaining)",
-                no_missiles_abort_grace_s - (time.time() - battle_started_ts),
-            )
-            no_missiles_zero_streak = 0
-            return
-        if time.time() < missile_ignore_until:
-            logger.debug("No-missiles suppressed — post-respawn grace (%.1fs remaining)",
-                         missile_ignore_until - time.time())
-            no_missiles_zero_streak = 0
-            return
-
-        no_missiles_zero_streak += 1
-        if no_missiles_zero_streak < no_missiles_consecutive_required:
-            logger.debug(
-                "No-missiles event awaiting confirmation (%d/%d)",
-                no_missiles_zero_streak,
-                no_missiles_consecutive_required,
-            )
-            return
-
-        no_missiles_zero_streak = 0
-        _emit_capture_event("missiles_empty")
-        analyzer.trigger_event("eject_started")
-        ctrl.eject_and_dive(
-            on_complete=lambda: (
-                analyzer.trigger_event("eject_complete")
-                if analyzer.game_state == GameState.GAME_BATTLE_EJECT
-                else None
-            )
-        )
-
-    def _deploy_flares_on_new_incoming() -> bool:
-        """Deploy flares in a burst when a new incoming OCR detection arrives."""
-        nonlocal last_incoming_alert_ts
-        incoming_detected, _, _ = analyzer.get_incoming_cache_result()
-        incoming_ts = analyzer.get_incoming_cache_timestamp()
-
-        if incoming_detected and incoming_ts > last_incoming_alert_ts:
-            if time.time() < missile_ignore_until:
-                logger.debug("Missile alert suppressed — post-respawn grace period (%.1fs remaining)",
-                             missile_ignore_until - time.time())
-                last_incoming_alert_ts = incoming_ts
-                return False
-            logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
-            last_incoming_alert_ts = incoming_ts
-            try:
-                tracker.record_reaction(time.time() - incoming_ts)
-            except Exception as e:
-                logger.warning("PerformanceTracker: record_reaction failed: %s", e)
-
-            stats_tracker.on_event("flare_burst_deployed", time.time())
-
-            def _flare_burst():
-                for _ in range(3):
-                    ctrl.deploy_flares(hold_seconds=0.05, block=True, ignore_cancel=True)
-                    time.sleep(0.3)
-                logger.info("\033[95m🚀 Flare burst complete\033[0m")
-
-            threading.Thread(target=_flare_burst, daemon=True).start()
-            return True
-
-        return False
 
     try:
         while True:
@@ -807,18 +704,13 @@ def main():
                     _stop_lobby_escape_loop()
                 waiting_fallback.on_state_change(current_game_state, prev_game_state)
                 enemy_presence.on_state_change(current_game_state, prev_game_state)
+                ammo_events.on_state_change(current_game_state, prev_game_state)
                 if current_game_state == GameState.GAME_STARTING_STALLED:
                     game_starting_stalled_since = time.time()
                 else:
                     game_starting_stalled_since = 0.0
                 if current_game_state == GameState.GAME_BATTLE:
                     battle_ever_reached = True
-                    battle_started_ts = time.time()
-                    no_missiles_zero_streak = 0
-                    missiles_fired_since_padlock = 0
-                    last_missile_count_for_padlock = None
-                elif current_game_state != GameState.GAME_BATTLE:
-                    no_missiles_zero_streak = 0
                     _battle_states = {GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_BATTLE_EJECT}
                     if prev_game_state in _battle_states and current_game_state not in _battle_states:
                         target_tracker.reset()
@@ -840,22 +732,7 @@ def main():
                 break
 
             missiles_snapshot = analyzer.get_ammo_missiles()
-            if missiles_snapshot is not None and missiles_snapshot > 0:
-                no_missiles_zero_streak = 0
-
-            # Target-spread: when 2 cumulative missiles fired in GAME_BATTLE, press padlock twice
-            # to switch to the next target so missiles are spread across enemy jets.
-            if current_game_state == GameState.GAME_BATTLE and missiles_snapshot is not None:
-                if last_missile_count_for_padlock is not None and missiles_snapshot < last_missile_count_for_padlock:
-                    missiles_fired_since_padlock += last_missile_count_for_padlock - missiles_snapshot
-                    if missiles_fired_since_padlock >= 2:
-                        logger.info("Controller: %d missiles fired — switching padlock target", missiles_fired_since_padlock)
-                        ctrl.padlock_target_switch()
-                        missiles_fired_since_padlock = 0
-                if missiles_snapshot > (last_missile_count_for_padlock or 0):
-                    # Missiles reloaded — reset so we don't carry over a pre-reload partial count
-                    missiles_fired_since_padlock = 0
-                last_missile_count_for_padlock = missiles_snapshot
+            ammo_events.tick_missile_count(missiles_snapshot, current_game_state)
 
 
             # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
@@ -888,17 +765,14 @@ def main():
 
             # Deploy flares immediately when a new incoming OCR result arrives.
             # Higher priority than respawn — must run before the respawn continue.
-            _deploy_flares_on_new_incoming()
+            ammo_events.deploy_flares_on_new_incoming()
 
             # Restart mission immediately when health transitions dead → alive.
             if analyzer.alive_event.is_set():
                 _handle_alive_transition()
 
             # Ammo events (GAME_BATTLE only).
-            if analyzer.low_flares_event.is_set():
-                _handle_low_flares()
-            if analyzer.no_missiles_event.is_set():
-                _handle_no_missiles()
+            ammo_events.tick_events()
 
             # Enemy presence check: if ENEMY_CLOSE_BY has had no red for 30s, disengage.
             enemy_presence.tick(frame, current_game_state)
@@ -951,7 +825,7 @@ def main():
                     else:
                         logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
                         respawn_cooldown_until = time.time() + 10.0
-                        missile_ignore_until = time.time() + 10.0
+                        ammo_events.suppress_after_respawn(10.0)
                         enemy_presence.arm()  # reset so the idle clock starts fresh after respawn
                         ctrl.cancel_mission()
                         analyzer.reset_health_for_respawn()
@@ -1048,13 +922,10 @@ def main():
                         break
                     analyzer.incoming_event.wait(timeout=remaining)
                     analyzer.incoming_event.clear()
-                    _deploy_flares_on_new_incoming()
+                    ammo_events.deploy_flares_on_new_incoming()
                     if analyzer.alive_event.is_set():
                         _handle_alive_transition()
-                    if analyzer.low_flares_event.is_set():
-                        _handle_low_flares()
-                    if analyzer.no_missiles_event.is_set():
-                        _handle_no_missiles()
+                    ammo_events.tick_events()
     except KeyboardInterrupt:
         logger.info("Exiting")
     except Exception:

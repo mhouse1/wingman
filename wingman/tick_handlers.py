@@ -19,6 +19,7 @@ interaction goes through an explicit argument, a return value, or a
 """
 
 import logging
+import threading
 import time
 
 from .analyzer import GameState
@@ -77,6 +78,194 @@ def update_waiting_fallback(
         and new_consecutive >= consecutive_required
     )
     return new_score, new_consecutive, should_trigger, diff
+
+
+class AmmoEventsHandler:
+    """Flares, missiles, and the padlock target-spread counter.
+
+    Owns: `last_flare_reload_ts`, `no_missiles_zero_streak`, `battle_started_ts`,
+    `missile_ignore_until`, `last_incoming_alert_ts`, and the padlock
+    `missiles_fired_since_padlock` / `last_missile_count_for_padlock` pair.
+
+    The post-respawn suppression window that the respawn flow used to set by
+    writing a shared `missile_ignore_until` is now the explicit
+    `suppress_after_respawn()` call (ADR 060 Phase 2 rule 2).
+
+    Ordering note (preserved): incoming-flare deployment runs FIRST — it is
+    higher priority than respawn and must run before the respawn block's
+    `continue` — then low-flares, then no-missiles.
+    """
+
+    def __init__(self, analyzer, ctrl, mission_cfg, *, perf_tracker=None,
+                 stats_tracker=None, emit_capture_event=None,
+                 flare_reload_cooldown_s: float = 30.0):
+        self._analyzer = analyzer
+        self._ctrl = ctrl
+        self._perf = perf_tracker
+        self._stats = stats_tracker
+        self._emit_capture_event = emit_capture_event or (lambda _name: None)
+        self._flare_reload_cooldown_s = flare_reload_cooldown_s
+
+        self._abort_grace_s = float(mission_cfg.get("no_missiles_abort_grace_s", 6.0))
+        self._consecutive_required = int(
+            mission_cfg.get("no_missiles_consecutive_required", 2))
+        self._padlock_spread_missiles = int(mission_cfg.get("padlock_spread_missiles", 2))
+
+        self._last_flare_reload_ts = 0.0
+        self._zero_streak = 0
+        self._battle_started_ts = 0.0
+        self._ignore_until = 0.0
+        self._last_incoming_alert_ts = 0.0
+        self._fired_since_padlock = 0
+        self._last_missile_count = None
+
+    # -- state --------------------------------------------------------------
+
+    def on_state_change(self, new_state, prev_state=None):
+        if new_state == GameState.GAME_BATTLE:
+            self._battle_started_ts = time.time()
+            self._fired_since_padlock = 0
+            self._last_missile_count = None
+        self._zero_streak = 0
+
+    def suppress_after_respawn(self, seconds: float = 10.0):
+        """Ignore missile/incoming events for `seconds` — called by the respawn flow."""
+        self._ignore_until = time.time() + seconds
+
+    @property
+    def battle_started_ts(self) -> float:
+        return self._battle_started_ts
+
+    # -- tick ---------------------------------------------------------------
+
+    def tick_missile_count(self, missiles_snapshot, current_game_state) -> None:
+        """Zero-streak reset and padlock target-spread bookkeeping."""
+        if missiles_snapshot is not None and missiles_snapshot > 0:
+            self._zero_streak = 0
+
+        # Target-spread: after N cumulative missiles fired in GAME_BATTLE, press
+        # padlock twice to switch target so missiles spread across enemy jets.
+        if current_game_state != GameState.GAME_BATTLE or missiles_snapshot is None:
+            return
+        if self._last_missile_count is not None and missiles_snapshot < self._last_missile_count:
+            self._fired_since_padlock += self._last_missile_count - missiles_snapshot
+            if self._fired_since_padlock >= self._padlock_spread_missiles:
+                logger.info("Controller: %d missiles fired — switching padlock target",
+                            self._fired_since_padlock)
+                self._ctrl.padlock_target_switch()
+                self._fired_since_padlock = 0
+        if missiles_snapshot > (self._last_missile_count or 0):
+            # Missiles reloaded — reset so a pre-reload partial count isn't carried over
+            self._fired_since_padlock = 0
+        self._last_missile_count = missiles_snapshot
+
+    def deploy_flares_on_new_incoming(self) -> bool:
+        """Deploy flares in a burst when a new incoming OCR detection arrives."""
+        incoming_detected, _, _ = self._analyzer.get_incoming_cache_result()
+        incoming_ts = self._analyzer.get_incoming_cache_timestamp()
+
+        if not (incoming_detected and incoming_ts > self._last_incoming_alert_ts):
+            return False
+
+        if time.time() < self._ignore_until:
+            logger.debug("Missile alert suppressed — post-respawn grace period (%.1fs remaining)",
+                         self._ignore_until - time.time())
+            self._last_incoming_alert_ts = incoming_ts
+            return False
+
+        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
+        self._last_incoming_alert_ts = incoming_ts
+        if self._perf is not None:
+            try:
+                self._perf.record_reaction(time.time() - incoming_ts)
+            except Exception as e:
+                logger.warning("PerformanceTracker: record_reaction failed: %s", e)
+        if self._stats is not None:
+            self._stats.on_event("flare_burst_deployed", time.time())
+
+        def _flare_burst():
+            for _ in range(3):
+                self._ctrl.deploy_flares(hold_seconds=0.05, block=True, ignore_cancel=True)
+                time.sleep(0.3)
+            logger.info("\033[95m🚀 Flare burst complete\033[0m")
+
+        threading.Thread(target=_flare_burst, daemon=True).start()
+        return True
+
+    def handle_low_flares(self) -> None:
+        """Press SPECIAL_ABILITY to reload flares when count reaches 2."""
+        self._analyzer.low_flares_event.clear()
+        if self._analyzer.game_state != GameState.GAME_BATTLE:
+            return
+        elapsed = time.time() - self._last_flare_reload_ts
+        if elapsed < self._flare_reload_cooldown_s:
+            logger.debug("Low-flares event: reload suppressed by cooldown (%.1fs remaining)",
+                         self._flare_reload_cooldown_s - elapsed)
+            return
+        self._ctrl.reload_flares()
+        self._last_flare_reload_ts = time.time()
+        if self._stats is not None:
+            self._stats.on_event("flare_reload", self._last_flare_reload_ts)
+
+    def handle_no_missiles(self) -> None:
+        """End mission and eject when missile count reaches zero."""
+        self._analyzer.no_missiles_event.clear()
+        if not self._ctrl.is_mission_running():
+            self._zero_streak = 0
+            return
+        if self._analyzer.game_state != GameState.GAME_BATTLE:
+            # Ejecting is an auto-mode behavior. Without this gate, the narrow
+            # window where a cancelled mission is still tearing down during a
+            # manual takeover could inject NOSE_DOWN+AFTERBURNER into the
+            # player's manual flight (and fire eject_started from a state
+            # where it is invalid).
+            self._zero_streak = 0
+            return
+        currently_respawning, _, _ = self._analyzer.get_respawn_cache_result()
+        if currently_respawning:
+            logger.debug("No-missiles suppressed — respawn screen active")
+            self._zero_streak = 0
+            return
+        if (self._battle_started_ts > 0
+                and (time.time() - self._battle_started_ts) < self._abort_grace_s):
+            logger.debug(
+                "No-missiles suppressed — post-mission-start grace (%.1fs remaining)",
+                self._abort_grace_s - (time.time() - self._battle_started_ts),
+            )
+            self._zero_streak = 0
+            return
+        if time.time() < self._ignore_until:
+            logger.debug("No-missiles suppressed — post-respawn grace (%.1fs remaining)",
+                         self._ignore_until - time.time())
+            self._zero_streak = 0
+            return
+
+        self._zero_streak += 1
+        if self._zero_streak < self._consecutive_required:
+            logger.debug(
+                "No-missiles event awaiting confirmation (%d/%d)",
+                self._zero_streak,
+                self._consecutive_required,
+            )
+            return
+
+        self._zero_streak = 0
+        self._emit_capture_event("missiles_empty")
+        self._analyzer.trigger_event("eject_started")
+        self._ctrl.eject_and_dive(
+            on_complete=lambda: (
+                self._analyzer.trigger_event("eject_complete")
+                if self._analyzer.game_state == GameState.GAME_BATTLE_EJECT
+                else None
+            )
+        )
+
+    def tick_events(self) -> None:
+        """Fire the ammo event handlers whose analyzer events are set."""
+        if self._analyzer.low_flares_event.is_set():
+            self.handle_low_flares()
+        if self._analyzer.no_missiles_event.is_set():
+            self.handle_no_missiles()
 
 
 class EnemyPresenceHandler:

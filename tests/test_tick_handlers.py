@@ -215,3 +215,175 @@ class TestEnemyPresence:
         h.arm()
         h.tick(object(), GameState.GAME_BATTLE_MANUAL)
         assert c.disengages == 0
+
+
+class _AmmoAnalyzerStub:
+    def __init__(self, *, state=GameState.GAME_BATTLE, respawning=False,
+                 incoming=False, incoming_ts=0.0):
+        self.game_state = state
+        self._respawning = respawning
+        self._incoming = incoming
+        self._incoming_ts = incoming_ts
+        self.triggers = []
+        self.low_flares_event = _EventStub()
+        self.no_missiles_event = _EventStub()
+
+    def get_respawn_cache_result(self):
+        return (self._respawning, 0.0, None)
+
+    def get_incoming_cache_result(self):
+        return (self._incoming, 0.0, None)
+
+    def get_incoming_cache_timestamp(self):
+        return self._incoming_ts
+
+    def trigger_event(self, name):
+        self.triggers.append(name)
+        return True
+
+
+class _EventStub:
+    def __init__(self):
+        self._set = False
+
+    def set(self):
+        self._set = True
+
+    def clear(self):
+        self._set = False
+
+    def is_set(self):
+        return self._set
+
+
+class _AmmoCtrlStub:
+    def __init__(self, mission_running=True):
+        self._running = mission_running
+        self.reloads = 0
+        self.ejects = 0
+        self.padlock_switches = 0
+
+    def is_mission_running(self):
+        return self._running
+
+    def reload_flares(self):
+        self.reloads += 1
+
+    def eject_and_dive(self, on_complete=None):
+        self.ejects += 1
+
+    def padlock_target_switch(self):
+        self.padlock_switches += 1
+
+    def deploy_flares(self, **kw):
+        pass
+
+
+def _ammo(analyzer=None, ctrl=None, **cfg):
+    from wingman.tick_handlers import AmmoEventsHandler
+    base = {"no_missiles_abort_grace_s": 0.0, "no_missiles_consecutive_required": 2}
+    base.update(cfg)
+    a = analyzer or _AmmoAnalyzerStub()
+    c = ctrl or _AmmoCtrlStub()
+    return AmmoEventsHandler(a, c, base), a, c
+
+
+class TestNoMissiles:
+    def test_requires_consecutive_confirmations(self):
+        h, a, c = _ammo()
+        h.handle_no_missiles()
+        assert c.ejects == 0            # 1/2 — awaiting confirmation
+        h.handle_no_missiles()
+        assert c.ejects == 1            # 2/2 — fires
+        assert a.triggers == ["eject_started"]
+
+    def test_no_eject_without_running_mission(self):
+        h, _, c = _ammo(ctrl=_AmmoCtrlStub(mission_running=False))
+        h.handle_no_missiles()
+        h.handle_no_missiles()
+        assert c.ejects == 0
+
+    def test_no_eject_outside_game_battle(self):
+        """Eject is auto-mode only — must not inject into a manual flight."""
+        h, _, c = _ammo(_AmmoAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL))
+        h.handle_no_missiles()
+        h.handle_no_missiles()
+        assert c.ejects == 0
+
+    def test_respawn_screen_suppresses(self):
+        h, _, c = _ammo(_AmmoAnalyzerStub(respawning=True))
+        h.handle_no_missiles()
+        h.handle_no_missiles()
+        assert c.ejects == 0
+
+    def test_post_respawn_window_suppresses(self):
+        h, _, c = _ammo()
+        h.suppress_after_respawn(60.0)
+        h.handle_no_missiles()
+        h.handle_no_missiles()
+        assert c.ejects == 0
+
+    def test_positive_missile_count_resets_the_streak(self):
+        h, _, c = _ammo()
+        h.handle_no_missiles()                                   # streak 1
+        h.tick_missile_count(4, GameState.GAME_BATTLE)           # reload → reset
+        h.handle_no_missiles()                                   # streak 1 again
+        assert c.ejects == 0
+
+
+class TestPadlockSpread:
+    def test_two_missiles_fired_switches_target(self):
+        h, _, c = _ammo()
+        h.tick_missile_count(4, GameState.GAME_BATTLE)
+        h.tick_missile_count(3, GameState.GAME_BATTLE)
+        assert c.padlock_switches == 0
+        h.tick_missile_count(2, GameState.GAME_BATTLE)
+        assert c.padlock_switches == 1
+
+    def test_reload_resets_the_partial_count(self):
+        h, _, c = _ammo()
+        h.tick_missile_count(4, GameState.GAME_BATTLE)
+        h.tick_missile_count(3, GameState.GAME_BATTLE)   # 1 fired
+        h.tick_missile_count(4, GameState.GAME_BATTLE)   # reloaded
+        h.tick_missile_count(3, GameState.GAME_BATTLE)   # 1 fired since reload
+        assert c.padlock_switches == 0
+
+    def test_inert_outside_battle(self):
+        h, _, c = _ammo()
+        h.tick_missile_count(4, GameState.GAME_BATTLE_MANUAL)
+        h.tick_missile_count(2, GameState.GAME_BATTLE_MANUAL)
+        assert c.padlock_switches == 0
+
+
+class TestFlares:
+    def test_low_flares_reloads_once_within_cooldown(self):
+        h, _, c = _ammo()
+        h.handle_low_flares()
+        h.handle_low_flares()
+        assert c.reloads == 1
+
+    def test_low_flares_inert_outside_battle(self):
+        h, _, c = _ammo(_AmmoAnalyzerStub(state=GameState.GAME_LOBBY))
+        h.handle_low_flares()
+        assert c.reloads == 0
+
+    def test_incoming_deploys_flares_once_per_detection(self):
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, _ = _ammo(a)
+        assert h.deploy_flares_on_new_incoming() is True
+        assert h.deploy_flares_on_new_incoming() is False   # same timestamp
+
+    def test_incoming_suppressed_after_respawn(self):
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, _ = _ammo(a)
+        h.suppress_after_respawn(60.0)
+        assert h.deploy_flares_on_new_incoming() is False
+
+    def test_tick_events_only_fires_set_events(self):
+        a = _AmmoAnalyzerStub()
+        h, _, c = _ammo(a)
+        h.tick_events()
+        assert c.reloads == 0
+        a.low_flares_event.set()
+        h.tick_events()
+        assert c.reloads == 1
