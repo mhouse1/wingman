@@ -1,8 +1,11 @@
 # ADR 059 — Health-Gated Immediate Mission Restart
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-07-31 | 1.6.29          |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-07-31 | 1.6.29          |
+
+*Accepted 2026-08-02: the manual-mode-death criterion was met three times in
+the 17:13 session — see the Validation section.*
 
 Supersedes the scheduled-restart flow documented in
 [ADR 011](011-respawn-mission-restart-flowchart.md) (the flowchart, delay
@@ -100,17 +103,29 @@ its architecture; recorded here per the superseding-decisions rule:
   "Respawn screen active — mission restarts when health returns" followed by
   "💚 HEALTH ALIVE — restarting mission immediately".
 
-**Status note (2026-08-02): stays Draft — this last criterion is unmet.**
-Everything else is implemented and heavily live-proven: the 16:18 session
-alone shows 15 respawns, 14 immediate restarts, and 11 deferrals correctly
-re-arming the one-shot event. Decision 1 (death ends manual takeover) is the
-exception: `respawn_reset` has fired **zero times across every log in the
-repository**, because no death has happened while in `GAME_BATTLE_MANUAL`
-since the fix landed. That is precisely the scenario this ADR exists to fix
-(the 2026-07-31 07:42 uncommanded-flight incident), so it should not be
-Accepted on unit tests alone
-(`tests/test_tick_handlers.py::test_manual_death_returns_to_auto`).
+**Met 2026-08-02 (17:13 session), three times.** The operator flew manually
+and was destroyed without resuming; each death produced the full sequence:
 
-To close it: take manual control with `i`/`j`/`k`/`l`, then let the aircraft be
-destroyed without pressing `u` to resume. The log should show `respawn_reset`,
-then the two lines above.
+```
+17:19:42  RESPAWN DETECTED - Cancelling active missions
+17:19:42  Initiating transition from GAME_BATTLE_MANUAL to GAME_BATTLE   (respawn_reset)
+17:19:42  Respawn screen active — mission restarts when health returns
+17:19:48  HEALTH ALIVE — restarting mission immediately
+```
+
+Repeated at 17:20:31 -> 17:20:38 and 17:21:10 -> 17:21:17. This is the exact
+scenario behind the 2026-07-31 07:42 uncommanded-flight incident: the aircraft
+returns to auto on death and the mission restarts when health returns, instead
+of flying on with no restart path.
+
+*Note for future log reviews:* `respawn_reset` is a trigger name and is not
+printed — the `transitions` library logs only "Initiating transition from state
+GAME_BATTLE_MANUAL to state GAME_BATTLE" (DEBUG). Grepping for the trigger name
+returns nothing even when it fires. `GAME_BATTLE_MANUAL -> GAME_BATTLE` has
+exactly one trigger in the FSM table, so that transition *is* the evidence; the
+only other way out of manual mode is the `u` resume, which logs its own
+distinct message.
+
+The rest of the ADR is separately well-proven: the 16:18 session shows 15
+respawns, 14 immediate restarts, and 11 deferrals correctly re-arming the
+one-shot event.
