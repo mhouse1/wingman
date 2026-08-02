@@ -192,6 +192,52 @@ is unchanged. The give-up log is also split into its two real cases:
 the racing case) vs "telemetry stopped refreshing" (no new sample for at
 least 4 poll intervals — a genuinely frozen sensor).
 
+**12. A climb after a long nose-down hold is over-rotation — release, do not
+re-issue.** *(Added 2026-08-02 after the 15:34 session.)*
+
+Decision 3 reasons that when the aircraft is climbing, nose-down is
+"unambiguously correct however many times it has failed". That is true of an
+aircraft that never rotated. It is backwards once nose-down has been held long
+enough to rotate *past* vertical, where further nose-down pulls the velocity
+vector back toward the sky — and the loop had no way to tell the two apart.
+
+Measured across 27 production ejects (2026-08-02 14:05 and 15:34 sessions):
+
+| | count |
+|---|---|
+| in-phase dive confirmations | **0 of 27** |
+| post-release confirmations | 16 |
+| holds that dove then climbed while still held | 8 |
+| nose-down re-issued while already climbing | 17 |
+
+The 15:34 session's eject 6 is the clean case, and it rules out the competing
+"the key is not really held" and "no control authority at low speed"
+explanations — it happened at 1264-1782 MPH:
+
+```
+15:47:49  alt 4579  speed 1264   descending -232 ft/s
+15:47:52  alt 3411  speed 1782   descending -389 ft/s   diving hard
+15:47:55  alt 3515  speed 1630   CLIMBING  +35 ft/s     nose-down still held
+15:47:58  alt 4679  speed 1447   CLIMBING +388 ft/s     correction re-issued nose-down
+15:48:03  budget exhausted -> release
+15:48:07  alt 3353  speed 2101   descending -465 ft/s   dives once released
+```
+
+A key that is not pressed cannot produce that reversal, and 1782 MPH is not a
+control-authority problem. The aircraft rotates past the dive attitude; the
+release is what produces the dive.
+
+So: when `alt_rate > 0` and NOSE_DOWN has been continuously held for at least
+`over_rotation_after_s` (default 6.0 s), the nose phase ends immediately with
+exit reason `over_rotation` instead of issuing another nose-down. The release
+path — which produced -311 to -584 ft/s within seconds in every observed case —
+takes over.
+
+`total_nose_budget_s` also drops **20.0 -> 10.0**: the productive descent
+happened in the first 8-11 s of every logged hold, and every second beyond that
+deepened the over-rotation. This is a bound on damage, not a substitute for
+decision 12; the over-rotation exit usually fires first.
+
 ## Configuration
 
 ```yaml
@@ -202,6 +248,8 @@ telemetry:
     total_nose_budget_s: 20.0       # cap on cumulative NOSE_DOWN hold per eject
     streak_grace_s: 4.5             # decision 11: extra distinct-sample wait when the
                                     # deadline expires mid-confirmation-streak
+    total_nose_budget_s: 10.0       # decision 12: cut from 20.0
+    over_rotation_after_s: 6.0      # decision 12: hold after which a climb reads as over-rotation
 ```
 
 ## Consequences
@@ -238,6 +286,9 @@ telemetry:
 - `test_deadline_mid_streak_gets_grace_and_confirms` — decision 11
 - `test_grace_expires_without_new_sample_and_releases` — decision 11 (frozen sensor still bounded)
 - `test_grace_disabled_releases_at_deadline` — decision 11 (config off-switch)
+- `test_climb_after_long_hold_releases_as_over_rotation` — decision 12
+- `test_climb_before_hold_threshold_still_reissues` — decision 12 (decision 3 preserved early)
+- `test_over_rotation_disabled_by_config` — decision 12 (off-switch)
 
 Live-flight confirmation of the descent-rate threshold is still outstanding; this
 ADR stays `Draft` until a production session shows a confirmed dive.

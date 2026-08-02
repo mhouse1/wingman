@@ -515,3 +515,69 @@ def test_cancellation_during_phase_returns_true(monkeypatch):
     ctrl._eject_stop.set()
 
     assert ctrl._eject_nose_phase_closed_loop() is True
+
+
+def test_climb_after_long_hold_releases_as_over_rotation(monkeypatch):
+    """ADR 058 decision 12: climbing after a long continuous nose-down hold is
+    over-rotation — release rather than deepen it. Measured on 2026-08-02 15:47,
+    where a re-issue at +388 ft/s kept the aircraft climbing."""
+    stub = _TelemetryStub(alt_rate=+300.0)   # climbing
+    ctrl = _make_ctrl(monkeypatch, stub, verify_window_s=0.05, legacy_nose_hold_s=30.0,
+                      over_rotation_after_s=0.05, total_nose_budget_s=30.0)
+    # Simulate nose-down already held past the over-rotation threshold.
+    ctrl._eject_nose_held_total_s = 10.0
+    ctrl._eject_nose_down_since = None
+
+    cancelled = ctrl._eject_nose_phase_closed_loop()
+
+    assert cancelled is False
+    assert ctrl._eject_phase_exit_reason == "over_rotation"
+    # No corrective nose-down re-issued — that is the whole point.
+    assert all(i["action_type"] != "key_press" or i["key"] != NOSE_DOWN_KEY
+               for i in _intents(ctrl))
+
+
+def test_climb_before_hold_threshold_still_reissues(monkeypatch):
+    """Decision 3 is preserved early in the hold: a climb before the aircraft
+    could plausibly have over-rotated still gets nose-down."""
+    stub = _TelemetryStub(alt_rate=+300.0)
+    ctrl = _make_ctrl(monkeypatch, stub, verify_window_s=0.05, legacy_nose_hold_s=30.0,
+                      over_rotation_after_s=60.0, max_corrections=1,
+                      total_nose_budget_s=30.0)
+    ctrl._eject_nose_held_total_s = 1.0
+    ctrl._eject_nose_down_since = None
+
+    ctrl._eject_nose_phase_closed_loop()
+
+    assert ctrl._eject_phase_exit_reason != "over_rotation"
+    keys = [(i["action_type"], i["key"]) for i in _intents(ctrl)]
+    assert ("key_press", NOSE_DOWN_KEY) in keys      # re-issued, as decision 3 says
+    assert all(k != NOSE_UP_KEY for _, k in keys)    # never nose-up while climbing
+
+
+def test_over_rotation_disabled_by_config(monkeypatch):
+    stub = _TelemetryStub(alt_rate=+300.0)
+    ctrl = _make_ctrl(monkeypatch, stub, verify_window_s=0.05, legacy_nose_hold_s=30.0,
+                      over_rotation_after_s=0, max_corrections=1,
+                      total_nose_budget_s=30.0)
+    ctrl._eject_nose_held_total_s = 99.0
+    ctrl._eject_nose_down_since = None
+
+    ctrl._eject_nose_phase_closed_loop()
+
+    assert ctrl._eject_phase_exit_reason != "over_rotation"
+
+
+def test_descending_is_never_treated_as_over_rotation(monkeypatch):
+    """A good dive must not be aborted by the new rule however long it is held."""
+    stub = _TelemetryStub(alt_rate=-800.0)   # steep dive → should confirm
+    ctrl = _make_ctrl(monkeypatch, stub, over_rotation_after_s=0.01,
+                      total_nose_budget_s=30.0)
+    # Well past the over-rotation threshold but inside the budget: the rule must
+    # key on the CLIMB, not on how long the key has been held.
+    ctrl._eject_nose_held_total_s = 5.0
+    ctrl._eject_nose_down_since = None
+
+    ctrl._eject_nose_phase_closed_loop()
+
+    assert ctrl._eject_phase_exit_reason == "confirmed"

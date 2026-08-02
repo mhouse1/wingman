@@ -524,7 +524,10 @@ class Controller:
         self._eject_cl_dive_reentries = int(_ecl.get("dive_reentries", 2))
         # ADR 058: raw descent-rate confirmation, independent of the sine-ratio band.
         self._eject_cl_confirm_descent_fps = float(_ecl.get("confirm_descent_fps", 250.0))
-        self._eject_cl_total_nose_budget_s = float(_ecl.get("total_nose_budget_s", 20.0))
+        self._eject_cl_total_nose_budget_s = float(_ecl.get("total_nose_budget_s", 10.0))
+        # ADR 058 d12: continuous nose-down hold after which a CLIMB is read as
+        # over-rotation rather than under-rotation. 0 disables.
+        self._eject_cl_over_rotation_after_s = float(_ecl.get("over_rotation_after_s", 6.0))
         # ADR 058 decision 11: one distinct-sample grace when the legacy deadline
         # expires mid-confirmation-streak. 0 disables.
         self._eject_cl_streak_grace_s = float(_ecl.get("streak_grace_s", 4.5))
@@ -1208,15 +1211,21 @@ class Controller:
             self._eject_nose_held_total_s += now - self._eject_nose_down_since
             self._eject_nose_down_since = None
 
+    def _eject_nose_held_s(self) -> float:
+        """Cumulative seconds NOSE_DOWN has actually been held this eject."""
+        if self._eject_nose_held_total_s is None:
+            return 0.0
+        held = self._eject_nose_held_total_s
+        if self._eject_nose_down_since is not None:
+            held += time.time() - self._eject_nose_down_since
+        return held
+
     def _eject_nose_budget_exhausted(self) -> bool:
         """True when NOSE_DOWN has been held for total_nose_budget_s this eject."""
         if (self._eject_nose_held_total_s is None
                 or self._eject_cl_total_nose_budget_s <= 0):
             return False
-        held = self._eject_nose_held_total_s
-        if self._eject_nose_down_since is not None:
-            held += time.time() - self._eject_nose_down_since
-        return held >= self._eject_cl_total_nose_budget_s
+        return self._eject_nose_held_s() >= self._eject_cl_total_nose_budget_s
 
     def _arm_release_grace(self, key: str) -> None:
         """Suppress maneuver-key takeover for this key briefly after our own release.
@@ -1466,6 +1475,29 @@ class Controller:
                 and rate < 0                              # still descending
                 and rate > rate_before_correction         # but descent got shallower
             )
+
+            # ADR 058 decision 12: a CLIMB after a long continuous nose-down hold
+            # is over-rotation, not under-rotation. The reasoning above ("climbing
+            # -> nose-down is unambiguously correct") holds for an aircraft that
+            # never rotated; it is backwards once we have held nose-down long
+            # enough to rotate past vertical, where more nose-down pulls the
+            # velocity vector further back toward the sky. Measured over 27
+            # production ejects (2026-08-02 14:05 and 15:34 sessions): 0 in-phase
+            # confirmations, 8 holds that dove then climbed while still held, and
+            # 17 nose-down re-issues commanded while already climbing. Releasing
+            # instead reliably produces the dive (-311 to -584 ft/s within
+            # seconds), so hand the phase to the release path rather than
+            # deepening the rotation.
+            if (rate is not None and rate > 0
+                    and self._eject_cl_over_rotation_after_s > 0
+                    and self._eject_nose_held_s() >= self._eject_cl_over_rotation_after_s):
+                logger.warning(
+                    "Controller: eject_and_dive — climbing (alt rate %.0f ft/s) after %.1fs of "
+                    "nose-down — over-rotated, releasing instead of re-issuing",
+                    rate, self._eject_nose_held_s())
+                self._eject_phase_exit_reason = "over_rotation"
+                return False
+
             if over_rotated:
                 correction_key = (NOSE_UP_KEY if last_correction_key == NOSE_DOWN_KEY
                                   else NOSE_DOWN_KEY)
