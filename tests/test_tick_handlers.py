@@ -140,3 +140,78 @@ class TestPlayReclick:
         h.on_state_change(GameState.GAME_WAITING)
         other = _handler(_AnalyzerStub())
         assert other.waiting_since == 0.0  # independent instances share nothing
+
+
+class _EnemyAnalyzerStub:
+    def __init__(self, red=False):
+        self._red = red
+
+    def detect_enemy_red(self, _frame):
+        return self._red
+
+
+class _EnemyCtrlStub:
+    def __init__(self, mission_running=True):
+        self._running = mission_running
+        self.disengages = 0
+
+    def is_mission_running(self):
+        return self._running
+
+    def disengage_roll_right(self):
+        self.disengages += 1
+
+
+class TestEnemyPresence:
+    def _h(self, red=False, mission_running=True, after=30.0):
+        from wingman.tick_handlers import EnemyPresenceHandler
+        a = _EnemyAnalyzerStub(red)
+        c = _EnemyCtrlStub(mission_running)
+        return EnemyPresenceHandler(a, c, disengage_after_s=after), c
+
+    def test_inert_until_armed(self):
+        h, c = self._h(after=0.0)
+        assert h.tick(object(), GameState.GAME_BATTLE) is False
+        assert c.disengages == 0  # clock never armed → no disengage
+
+    def test_battle_entry_arms_the_clock(self):
+        h, _ = self._h()
+        h.on_state_change(GameState.GAME_BATTLE)
+        assert h.last_seen_ts > 0
+
+    def test_non_battle_entry_does_not_arm(self):
+        h, _ = self._h()
+        h.on_state_change(GameState.GAME_LOBBY)
+        assert h.last_seen_ts == 0.0
+
+    def test_red_seen_keeps_resetting_the_clock(self):
+        h, c = self._h(red=True, after=0.0)
+        h.arm()
+        h.tick(object(), GameState.GAME_BATTLE)
+        assert c.disengages == 0  # enemy present → never disengages
+
+    def test_idle_window_triggers_disengage(self):
+        h, c = self._h(red=False, after=0.0)
+        h.arm()
+        h.tick(object(), GameState.GAME_BATTLE)
+        assert c.disengages == 1
+
+    def test_no_disengage_without_running_mission(self):
+        h, c = self._h(red=False, mission_running=False, after=0.0)
+        h.arm()
+        h.tick(object(), GameState.GAME_BATTLE)
+        assert c.disengages == 0
+
+    def test_disengage_resets_clock_so_it_does_not_repeat(self):
+        h, c = self._h(red=False, after=5.0)
+        h.arm()
+        h._last_seen_ts = time.time() - 10.0
+        h.tick(object(), GameState.GAME_BATTLE)
+        h.tick(object(), GameState.GAME_BATTLE)
+        assert c.disengages == 1  # second tick is inside the fresh window
+
+    def test_inert_outside_battle(self):
+        h, c = self._h(red=False, after=0.0)
+        h.arm()
+        h.tick(object(), GameState.GAME_BATTLE_MANUAL)
+        assert c.disengages == 0

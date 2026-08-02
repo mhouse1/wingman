@@ -79,6 +79,50 @@ def update_waiting_fallback(
     return new_score, new_consecutive, should_trigger, diff
 
 
+class EnemyPresenceHandler:
+    """Disengage when ENEMY_CLOSE_BY has shown no red for the idle window.
+
+    Owns: `enemy_last_seen_ts`. The clock is armed on GAME_BATTLE entry and
+    re-armed by the respawn flow — the latter is an explicit `arm()` call from
+    the tick loop rather than a shared variable both concerns write
+    (ADR 060 Phase 2 rule 2).
+
+    Ordering note: runs after the ammo handlers and before target tracking,
+    matching the extracted block's position.
+    """
+
+    def __init__(self, analyzer, ctrl, *, disengage_after_s: float = 30.0):
+        self._analyzer = analyzer
+        self._ctrl = ctrl
+        self._disengage_after_s = disengage_after_s
+        self._last_seen_ts = 0.0   # 0 = not in battle yet
+
+    def arm(self):
+        """Start (or restart) the idle clock — battle entry and post-respawn."""
+        self._last_seen_ts = time.time()
+
+    def on_state_change(self, new_state, prev_state=None):
+        if new_state == GameState.GAME_BATTLE:
+            self.arm()   # assume enemy present on battle entry
+
+    @property
+    def last_seen_ts(self) -> float:
+        return self._last_seen_ts
+
+    def tick(self, frame, current_game_state) -> bool:
+        if current_game_state != GameState.GAME_BATTLE or self._last_seen_ts <= 0:
+            return False
+        if self._analyzer.detect_enemy_red(frame):
+            self._last_seen_ts = time.time()
+        elif (time.time() - self._last_seen_ts >= self._disengage_after_s
+                and self._ctrl.is_mission_running()):
+            logger.info("\033[93m↩ No enemy in ENEMY_CLOSE_BY for %.0fs — disengaging\033[0m",
+                        self._disengage_after_s)
+            self._last_seen_ts = time.time()  # reset to avoid re-triggering
+            self._ctrl.disengage_roll_right()
+        return False
+
+
 class WaitingFallbackHandler:
     """GAME_WAITING confirmation: CANCEL scan, queue-diff fallback, PLAY re-click.
 

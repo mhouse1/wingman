@@ -25,7 +25,7 @@ from .analyzer import GameStateAnalyzer, GameState, GameEvent
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
-from .tick_handlers import WaitingFallbackHandler
+from .tick_handlers import EnemyPresenceHandler, WaitingFallbackHandler
 from .tracker import TargetTracker
 from .replay import (
     LivePathCaptureEngine,
@@ -470,12 +470,12 @@ def main():
     last_missile_count_for_padlock: "int | None" = None  # previous tick missile count for delta tracking
     last_game_state = None
     last_flare_reload_ts = 0.0    # cooldown: don't spam SPECIAL_ABILITY if flares stay at 2
-    enemy_last_seen_ts = 0.0      # timestamp of last frame with red in ENEMY_CLOSE_BY (0 = not in battle yet)
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
     respawn_clear_since = 0.0  # timestamp since respawn cache has been continuously false
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
+    enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
     )
@@ -499,9 +499,9 @@ def main():
         instead of swallowing it — the handler retries every tick until the
         respawn-clear stability window is met, then restarts.
         """
-        nonlocal respawn_state, enemy_last_seen_ts
+        nonlocal respawn_state
         analyzer.alive_event.clear()
-        enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
+        enemy_presence.arm()  # reset so the idle clock starts fresh after respawn
 
         # Only early-restart when respawn has remained clear for a short stability window.
         # This avoids relaunching while respawn OCR/health signals are still flapping.
@@ -806,13 +806,13 @@ def main():
                 else:
                     _stop_lobby_escape_loop()
                 waiting_fallback.on_state_change(current_game_state, prev_game_state)
+                enemy_presence.on_state_change(current_game_state, prev_game_state)
                 if current_game_state == GameState.GAME_STARTING_STALLED:
                     game_starting_stalled_since = time.time()
                 else:
                     game_starting_stalled_since = 0.0
                 if current_game_state == GameState.GAME_BATTLE:
                     battle_ever_reached = True
-                    enemy_last_seen_ts = time.time()  # assume enemy present on battle entry
                     battle_started_ts = time.time()
                     no_missiles_zero_streak = 0
                     missiles_fired_since_padlock = 0
@@ -901,13 +901,7 @@ def main():
                 _handle_no_missiles()
 
             # Enemy presence check: if ENEMY_CLOSE_BY has had no red for 30s, disengage.
-            if current_game_state == GameState.GAME_BATTLE and enemy_last_seen_ts > 0:
-                if analyzer.detect_enemy_red(frame):
-                    enemy_last_seen_ts = time.time()
-                elif time.time() - enemy_last_seen_ts >= 30.0 and ctrl.is_mission_running():
-                    logger.info("\033[93m↩ No enemy in ENEMY_CLOSE_BY for 30s — disengaging\033[0m")
-                    enemy_last_seen_ts = time.time()  # reset to avoid re-triggering
-                    ctrl.disengage_roll_right()
+            enemy_presence.tick(frame, current_game_state)
 
             # Target tracking — HSV contour detection + proportional roll correction.
             # Only active during GAME_BATTLE (not GAME_BATTLE_MANUAL) and only when
@@ -958,7 +952,7 @@ def main():
                         logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
                         respawn_cooldown_until = time.time() + 10.0
                         missile_ignore_until = time.time() + 10.0
-                        enemy_last_seen_ts = time.time()  # reset so 30s clock starts fresh after respawn
+                        enemy_presence.arm()  # reset so the idle clock starts fresh after respawn
                         ctrl.cancel_mission()
                         analyzer.reset_health_for_respawn()
                         # A death invalidates any pending (re-armed) alive event
