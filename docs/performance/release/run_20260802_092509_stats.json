@@ -1,0 +1,87 @@
+{
+  "wingman_version": "1.6.29",
+  "run_id": "20260802_092509",
+  "session_start_ts": 1785677109.93,
+  "session_duration_s": 1476.6,
+  "missions_started": 4,
+  "missions_click_to": 4,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 12,
+  "total_flare_bursts": 0,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 0,
+  "avg_mission_duration_s": 317.1,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1785677153.748,
+      "duration_s": 286.3,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 1,
+      "start_ts": 1785677494.971,
+      "duration_s": 379.5,
+      "respawn_count": 4,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 2,
+      "start_ts": 1785677922.448,
+      "duration_s": 209.8,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 3,
+      "start_ts": 1785678185.167,
+      "duration_s": 392.6,
+      "respawn_count": 4,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "shadow",
+    "shadow_fires": 11,
+    "ocr_respawns": 13,
+    "matched": 11,
+    "matched_within_5s": 9,
+    "false_fires": 0,
+    "missed_ocr_respawns": 2,
+    "fire_deltas_s": [
+      6.48,
+      2.44,
+      3.34,
+      4.38,
+      4.41,
+      2.41,
+      5.86,
+      3.51,
+      3.39,
+      3.99,
+      4.01
+    ],
+    "max_confirmed_gap_s": 11.02,
+    "confirmed_gaps_over_threshold": 12
+  },
+  "stats_path": "docs/performance/current/run_20260802_092509_stats.json"
+}
