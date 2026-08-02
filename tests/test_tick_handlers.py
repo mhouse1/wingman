@@ -599,3 +599,114 @@ class TestRespawnDetection:
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
         assert armed == [1]
         assert suppressed == [10.0]
+
+
+class _TrackerStub:
+    def __init__(self, enabled=True, obs=None):
+        self.enabled = enabled
+        self._obs = obs or {"error_norm": 0.5, "visible": True, "mode": "TRACKING"}
+        self.resets = 0
+        self.updates = 0
+
+    def update(self, _frame):
+        self.updates += 1
+        return self._obs
+
+    def reset(self):
+        self.resets += 1
+
+
+class _HudStub:
+    def __init__(self):
+        self.renders = []
+
+    def maybe_render(self, frame, obs, state, health, missiles, flares):
+        self.renders.append((obs, state))
+
+
+class _TrackCtrlStub:
+    def __init__(self, mission_running=True):
+        self._running = mission_running
+        self.orients = []
+
+    def is_mission_running(self):
+        return self._running
+
+    def orient_nose_to_target(self, err, **kw):
+        self.orients.append(err)
+        return "right"
+
+
+class _TrackAnalyzerStub:
+    def get_ammo_missiles(self):
+        return 4
+
+    def get_ammo_flares(self):
+        return 2
+
+
+def _tracking(tracker=None, hud=None, ctrl=None):
+    from wingman.tick_handlers import TrackingHudHandler
+    t = tracker or _TrackerStub()
+    h = hud or _HudStub()
+    c = ctrl or _TrackCtrlStub()
+    return TrackingHudHandler(t, h, _TrackAnalyzerStub(), c, {}), t, h, c
+
+
+class TestTrackingHud:
+    def test_tracks_and_orients_in_battle(self):
+        handler, t, _, c = _tracking()
+        handler.tick(object(), GameState.GAME_BATTLE, {"health": 100})
+        assert t.updates == 1
+        assert c.orients == [0.5]
+
+    def test_no_autonomous_roll_without_running_mission(self):
+        handler, t, _, c = _tracking(ctrl=_TrackCtrlStub(mission_running=False))
+        handler.tick(object(), GameState.GAME_BATTLE, {"health": 100})
+        assert t.updates == 0
+        assert c.orients == []
+
+    def test_no_tracking_in_manual_mode(self):
+        handler, t, _, c = _tracking()
+        handler.tick(object(), GameState.GAME_BATTLE_MANUAL, {"health": 100})
+        assert t.updates == 0
+
+    def test_disabled_tracker_is_skipped(self):
+        handler, t, _, _ = _tracking(tracker=_TrackerStub(enabled=False))
+        handler.tick(object(), GameState.GAME_BATTLE, {"health": 100})
+        assert t.updates == 0
+
+    def test_hud_renders_in_manual_mode_too(self):
+        handler, _, hud, _ = _tracking()
+        handler.tick(object(), GameState.GAME_BATTLE_MANUAL, {"health": 100})
+        assert len(hud.renders) == 1
+
+    def test_hud_not_rendered_outside_battle(self):
+        handler, _, hud, _ = _tracking()
+        handler.tick(object(), GameState.GAME_LOBBY, {"health": 100})
+        assert hud.renders == []
+
+    def test_hud_receives_the_tracking_observation(self):
+        handler, _, hud, _ = _tracking()
+        handler.tick(object(), GameState.GAME_BATTLE, {"health": 100})
+        obs, state = hud.renders[0]
+        assert obs["mode"] == "TRACKING"
+        assert state == "GAME_BATTLE"
+
+    def test_leaving_battle_resets_the_tracker(self):
+        """Regression: this reset was orphaned into an unreachable branch during
+        the step 2.3 extraction and silently stopped firing."""
+        handler, t, _, _ = _tracking()
+        handler.on_state_change(GameState.GAME_LOBBY, GameState.GAME_BATTLE)
+        assert t.resets == 1
+
+    def test_moving_between_battle_states_does_not_reset(self):
+        handler, t, _, _ = _tracking()
+        handler.on_state_change(GameState.GAME_BATTLE_EJECT, GameState.GAME_BATTLE)
+        handler.on_state_change(GameState.GAME_BATTLE_MANUAL, GameState.GAME_BATTLE_EJECT)
+        assert t.resets == 0
+
+    def test_entering_battle_does_not_reset(self):
+        handler, t, _, _ = _tracking()
+        handler.on_state_change(GameState.GAME_BATTLE, GameState.GAME_LOBBY)
+        assert t.resets == 0

@@ -80,6 +80,74 @@ def update_waiting_fallback(
     return new_score, new_consecutive, should_trigger, diff
 
 
+_BATTLE_STATES = frozenset({
+    GameState.GAME_BATTLE,
+    GameState.GAME_BATTLE_MANUAL,
+    GameState.GAME_BATTLE_EJECT,
+})
+
+
+class TrackingHudHandler:
+    """Target tracking (HSV contour + proportional roll) and the HUD snapshot.
+
+    Owns the TargetTracker and HudRenderer instances and the per-tick tracking
+    observation the HUD consumes, so the two are never wired through a shared
+    loop variable.
+
+    Ordering note (preserved): runs after enemy presence and before respawn
+    detection — the HUD must render before the respawn block's `continue`.
+    """
+
+    def __init__(self, target_tracker, hud_renderer, analyzer, ctrl, tracking_cfg):
+        self._tracker = target_tracker
+        self._hud = hud_renderer
+        self._analyzer = analyzer
+        self._ctrl = ctrl
+        self._ctl_cfg = {
+            "deadband": float(tracking_cfg.get("deadband", 0.05)),
+            "kp": float(tracking_cfg.get("kp", 0.30)),
+            "min_hold_sec": float(tracking_cfg.get("min_hold_sec", 0.08)),
+            "max_hold_sec": float(tracking_cfg.get("max_hold_sec", 0.35)),
+            "cooldown_sec": float(tracking_cfg.get("command_cooldown_sec", 0.15)),
+        }
+
+    def on_state_change(self, new_state, prev_state=None):
+        """Reset tracking when leaving the battle states entirely."""
+        if prev_state in _BATTLE_STATES and new_state not in _BATTLE_STATES:
+            self._tracker.reset()
+
+    def tick(self, frame, current_game_state, game_state) -> bool:
+        # Target tracking — only during GAME_BATTLE (not GAME_BATTLE_MANUAL) and
+        # only when a mission is running: no autonomous roll without mission control.
+        tracking_obs = None
+        if (self._tracker.enabled
+                and current_game_state == GameState.GAME_BATTLE
+                and self._ctrl.is_mission_running()):
+            tracking_obs = self._tracker.update(frame)
+            err = tracking_obs.get("error_norm")
+            if err is not None and tracking_obs.get("visible"):
+                cmd = self._ctrl.orient_nose_to_target(err, **self._ctl_cfg)
+                if cmd is not None:
+                    logger.debug(
+                        "Tracker: roll_%s  err=%.2f  mode=%s",
+                        cmd, err, tracking_obs["mode"],
+                    )
+
+        # HUD renderer — annotated snapshot; always runs in GAME_BATTLE when enabled.
+        if self._hud is not None and current_game_state in (
+            GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL
+        ):
+            self._hud.maybe_render(
+                frame,
+                tracking_obs,
+                current_game_state.name,
+                game_state.get("health"),
+                self._analyzer.get_ammo_missiles(),
+                self._analyzer.get_ammo_flares(),
+            )
+        return False
+
+
 class RespawnHandler:
     """Respawn detection, the post-respawn restart flow, and the alive-event disposition.
 

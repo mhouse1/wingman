@@ -29,6 +29,7 @@ from .tick_handlers import (
     AmmoEventsHandler,
     EnemyPresenceHandler,
     RespawnHandler,
+    TrackingHudHandler,
     WaitingFallbackHandler,
 )
 from .tracker import TargetTracker
@@ -291,14 +292,6 @@ def main():
     # Target tracker and HUD renderer
     target_tracker = TargetTracker(cfg)
     hud_renderer = HudRenderer.from_config(cfg)
-    _tracking_cfg = cfg.get("tracking", {})
-    _tracking_ctl_cfg = {
-        "deadband": float(_tracking_cfg.get("deadband", 0.05)),
-        "kp": float(_tracking_cfg.get("kp", 0.30)),
-        "min_hold_sec": float(_tracking_cfg.get("min_hold_sec", 0.08)),
-        "max_hold_sec": float(_tracking_cfg.get("max_hold_sec", 0.35)),
-        "cooldown_sec": float(_tracking_cfg.get("command_cooldown_sec", 0.15)),
-    }
 
     # Initialize controller with config-driven weapon loop interval and exit event
     j20_cfg = cfg.get("j20_mission", {})
@@ -473,6 +466,9 @@ def main():
         emit_capture_event=_emit_capture_event,
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
+    tracking_hud = TrackingHudHandler(
+        target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
+    )
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,
         enemy_presence=enemy_presence, ammo_events=ammo_events,
@@ -628,15 +624,13 @@ def main():
                 waiting_fallback.on_state_change(current_game_state, prev_game_state)
                 enemy_presence.on_state_change(current_game_state, prev_game_state)
                 ammo_events.on_state_change(current_game_state, prev_game_state)
+                tracking_hud.on_state_change(current_game_state, prev_game_state)
                 if current_game_state == GameState.GAME_STARTING_STALLED:
                     game_starting_stalled_since = time.time()
                 else:
                     game_starting_stalled_since = 0.0
                 if current_game_state == GameState.GAME_BATTLE:
                     battle_ever_reached = True
-                    _battle_states = {GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_BATTLE_EJECT}
-                    if prev_game_state in _battle_states and current_game_state not in _battle_states:
-                        target_tracker.reset()
 
             # Watchdog: if GAME_BATTLE not entered within 10 minutes, shut down wingman and PC.
             # Skipped in replay/capture modes. Uses `shutdown /s /t 0` which does not require
@@ -700,35 +694,7 @@ def main():
             # Enemy presence check: if ENEMY_CLOSE_BY has had no red for 30s, disengage.
             enemy_presence.tick(frame, current_game_state)
 
-            # Target tracking — HSV contour detection + proportional roll correction.
-            # Only active during GAME_BATTLE (not GAME_BATTLE_MANUAL) and only when
-            # a mission is running (safety: no autonomous roll without mission control).
-            tracking_obs: "dict | None" = None
-            if (target_tracker.enabled
-                    and current_game_state == GameState.GAME_BATTLE
-                    and ctrl.is_mission_running()):
-                tracking_obs = target_tracker.update(frame)
-                err = tracking_obs.get("error_norm")
-                if err is not None and tracking_obs.get("visible"):
-                    cmd = ctrl.orient_nose_to_target(err, **_tracking_ctl_cfg)
-                    if cmd is not None:
-                        logger.debug(
-                            "Tracker: roll_%s  err=%.2f  mode=%s",
-                            cmd, err, tracking_obs["mode"],
-                        )
-
-            # HUD renderer — annotated snapshot; always runs in GAME_BATTLE when enabled.
-            if hud_renderer is not None and current_game_state in (
-                GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL
-            ):
-                hud_renderer.maybe_render(
-                    frame,
-                    tracking_obs,
-                    current_game_state.name,
-                    game_state.get("health"),
-                    analyzer.get_ammo_missiles(),
-                    analyzer.get_ammo_flares(),
-                )
+            tracking_hud.tick(frame, current_game_state, game_state)
 
             # Detect respawn — from overlay OCR, or (ADR 064 dual mode) from the
             # health detector's composite evidence when OCR missed the episode.
