@@ -25,6 +25,7 @@ from .analyzer import GameStateAnalyzer, GameState, GameEvent
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
+from .tick_handlers import WaitingFallbackHandler
 from .tracker import TargetTracker
 from .replay import (
     LivePathCaptureEngine,
@@ -74,56 +75,6 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     )
     analyzer.trigger_event("continue_clicked")
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
-
-
-def _update_waiting_fallback(
-    analyzer,
-    frame,
-    elapsed_waiting: float,
-    play_visible: bool,
-    score: int,
-    consecutive: int,
-    *,
-    enabled: bool,
-    diff_threshold: float,
-    score_threshold: int,
-    consecutive_required: int,
-    min_elapsed_s: float,
-    logger,
-):
-    """Update GAME_WAITING fallback confidence and report if promotion should fire."""
-    if not enabled or "CANCEL" not in analyzer.crops or elapsed_waiting < min_elapsed_s:
-        return score, consecutive, False, None
-
-    if play_visible:
-        if score > 0 or consecutive > 0:
-            logger.debug("GAME_WAITING fallback reset: PLAY/READY visible")
-        return 0, 0, False, None
-
-    diff = analyzer.compute_waiting_cancel_diff(frame)
-    if diff is None:
-        return score, consecutive, False, None
-
-    score_step = 1
-    if diff >= diff_threshold:
-        score_step += 1
-
-    new_score = score + score_step
-    new_consecutive = consecutive + 1
-    logger.debug(
-        "GAME_WAITING fallback: play_not_visible=%s diff=%.3f score=%d consecutive=%d",
-        True,
-        diff,
-        new_score,
-        new_consecutive,
-    )
-
-    should_trigger = (
-        new_score >= score_threshold
-        and new_consecutive >= consecutive_required
-    )
-    return new_score, new_consecutive, should_trigger, diff
-
 
 
 def _alive_transition_disposition(state, alive_after_observed_death: bool) -> str:
@@ -321,11 +272,6 @@ def main():
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     no_missiles_consecutive_required = int(mission_cfg.get("no_missiles_consecutive_required", 2))
     no_missiles_abort_grace_s = float(mission_cfg.get("no_missiles_abort_grace_s", 6.0))
-    waiting_fallback_enabled = mission_cfg.get("waiting_fallback_enabled", True)
-    waiting_fallback_diff_threshold = float(mission_cfg.get("waiting_fallback_diff_threshold", 0.08))
-    waiting_fallback_score_threshold = int(mission_cfg.get("waiting_fallback_score_threshold", 4))
-    waiting_fallback_consecutive_required = int(mission_cfg.get("waiting_fallback_consecutive_required", 2))
-    waiting_fallback_min_elapsed_s = float(mission_cfg.get("waiting_fallback_min_elapsed_s", 6.0))
     respawn_clear_stability_s = float(mission_cfg.get("respawn_clear_stability_s", 1.5))
     starting_stalled_reclassify_after_s = float(mission_cfg.get("starting_stalled_reclassify_after_s", 20.0))
     starting_max_wait_s = float(mission_cfg.get("starting_max_wait_s", 90.0))
@@ -526,18 +472,13 @@ def main():
     last_flare_reload_ts = 0.0    # cooldown: don't spam SPECIAL_ABILITY if flares stay at 2
     enemy_last_seen_ts = 0.0      # timestamp of last frame with red in ENEMY_CLOSE_BY (0 = not in battle yet)
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
-    game_waiting_since = 0.0      # timestamp of GAME_WAITING entry; used by CANCEL scan + 180s timeout
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
     respawn_clear_since = 0.0  # timestamp since respawn cache has been continuously false
-    last_cancel_scan_ts = 0.0     # last time CANCEL crop was scanned in GAME_WAITING
-    last_play_reclick_ts = 0.0    # last time PLAY was re-clicked in GAME_WAITING
-    play_reclick_interval = 45.0  # re-click interval when PLAY was absent (matchmaking may be active)
-    play_reclick_missed_interval = 10.0  # re-click interval when PLAY was continuously visible (click missed)
-    play_ever_absent = False      # whether PLAY disappeared at any tick since entering GAME_WAITING
-    waiting_fallback_score = 0
-    waiting_fallback_consecutive = 0
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
+    waiting_fallback = WaitingFallbackHandler(
+        analyzer, ctrl, mission_cfg, live_capture=live_capture,
+    )
     startup_time = time.time()
     battle_ever_reached = False
 
@@ -547,11 +488,6 @@ def main():
             lobby_escape_stop.set()
             lobby_escape_stop = None
         lobby_escape_thread = None
-
-    def _reset_waiting_fallback():
-        nonlocal waiting_fallback_score, waiting_fallback_consecutive
-        waiting_fallback_score = 0
-        waiting_fallback_consecutive = 0
 
     def _handle_alive_transition():
         """Restart mission immediately when health transitions dead → alive.
@@ -848,7 +784,6 @@ def main():
                 else:
                     game_end_b_since = 0.0
                 if current_game_state == GameState.GAME_LOBBY:
-                    game_waiting_since = 0.0
                     if prev_game_state is not None:
                         ctrl.cancel_mission()
                     try:
@@ -870,15 +805,7 @@ def main():
                     lobby_escape_thread.start()
                 else:
                     _stop_lobby_escape_loop()
-                if current_game_state == GameState.GAME_WAITING:
-                    game_waiting_since = time.time()
-                    last_cancel_scan_ts = time.time()         # first scan after 3s, not immediately
-                    last_play_reclick_ts = time.time()        # don't re-click immediately either
-                    play_ever_absent = False
-                    _reset_waiting_fallback()
-                else:
-                    game_waiting_since = 0.0
-                    _reset_waiting_fallback()
+                waiting_fallback.on_state_change(current_game_state, prev_game_state)
                 if current_game_state == GameState.GAME_STARTING_STALLED:
                     game_starting_stalled_since = time.time()
                 else:
@@ -935,90 +862,8 @@ def main():
             # CANCEL visible → matchmaking active → advance to GAME_STARTING.
             # CANCEL absent  → PLAY click missed → re-click PLAY.
             # 180s timeout   → give up, return to GAME_LOBBY.
-            if current_game_state == GameState.GAME_WAITING and game_waiting_since > 0:
-                elapsed_waiting = time.time() - game_waiting_since
-                if elapsed_waiting > 180.0:
-                    logger.warning(
-                        "GAME_WAITING timeout after %.0fs — CANCEL never detected; returning to GAME_LOBBY",
-                        elapsed_waiting)
-                    analyzer.trigger_event("waiting_timeout")
-                    game_waiting_since = 0.0
-                    _reset_waiting_fallback()
-                elif time.time() - last_cancel_scan_ts >= 3.0:
-                    last_cancel_scan_ts = time.time()
-                    cancel_detected = analyzer.scan_region_for_cancel(frame)
-                    if cancel_detected:
-                        logger.info(
-                            "\033[92m✓ CANCEL detected (%.1fs) — matchmaking confirmed → GAME_STARTING\033[0m",
-                            elapsed_waiting)
-                        analyzer.trigger_event("cancel_detected")  # on_enter_GAME_STARTING fires game-starting loop
-                        _reset_waiting_fallback()
-                        if live_capture is not None:
-                            # on_event("cancel_detected") was already called inside trigger_event
-                            # via _on_capture_fsm_transition.  Evaluate twice here with the
-                            # explicit pre-transition state so the debounce completes on this
-                            # exact CANCEL frame.  The closure-based approach is unreliable
-                            # because trigger_event's post_callbacks run before _on_fsm_transition,
-                            # making the call order non-obvious and error-prone.
-                            _now = time.time()
-                            live_capture.evaluate(frame, "GAME_WAITING", _now)
-                            live_capture.evaluate(frame, "GAME_WAITING", _now + 1e-6)
-                    else:
-                        crop = next((c for c in ("PLAY", "READY") if c in analyzer.crops), None)
-                        visible_crop = analyzer.scan_region_for_play_button(frame) if crop else None
-                        play_visible = visible_crop is not None
-                        if not play_visible:
-                            play_ever_absent = True
-
-                        waiting_fallback_score, waiting_fallback_consecutive, fallback_triggered, _ = _update_waiting_fallback(
-                            analyzer,
-                            frame,
-                            elapsed_waiting,
-                            play_visible,
-                            waiting_fallback_score,
-                            waiting_fallback_consecutive,
-                            enabled=waiting_fallback_enabled,
-                            diff_threshold=waiting_fallback_diff_threshold,
-                            score_threshold=waiting_fallback_score_threshold,
-                            consecutive_required=waiting_fallback_consecutive_required,
-                            min_elapsed_s=waiting_fallback_min_elapsed_s,
-                            logger=logger,
-                        )
-
-                        if fallback_triggered:
-                            logger.info(
-                                "\033[92m✓ GAME_WAITING confirmed via QUEUE_FALLBACK (%.1fs) — matchmaking confirmed → GAME_STARTING\033[0m",
-                                elapsed_waiting,
-                            )
-                            analyzer.trigger_event("cancel_detected")
-                            _reset_waiting_fallback()
-                            continue
-
-                        # Use short interval when PLAY was never absent (click clearly missed).
-                        # Use long interval when PLAY disappeared at some point (matchmaking may still be active).
-                        effective_interval = play_reclick_interval if play_ever_absent else play_reclick_missed_interval
-                        if crop and time.time() - last_play_reclick_ts >= effective_interval:
-                            # Only re-click if PLAY/READY is actually visible — clicking PLAY while
-                            # matchmaking is in progress cancels it. If PLAY isn't visible the game
-                            # is still processing the previous click; leave it alone.
-                            if visible_crop:
-                                reason = "click missed" if not play_ever_absent else "returned from matchmaking"
-                                logger.info(
-                                    "GAME_WAITING: CANCEL not found (%.1fs) and %s visible — re-clicking (%s)",
-                                    elapsed_waiting, visible_crop, reason)
-                                last_play_reclick_ts = time.time()
-                                play_ever_absent = False  # reset: treat next window as a fresh click
-                                ctrl.click_crop(analyzer.crops[visible_crop], block=False, count=1, region_name=visible_crop)
-                            else:
-                                logger.debug(
-                                    "GAME_WAITING: CANCEL not found (%.1fs) but PLAY not visible — matchmaking in progress, waiting",
-                                    elapsed_waiting)
-                                last_play_reclick_ts = time.time()  # reset timer to avoid spamming OCR
-                        elif crop:
-                            logger.debug(
-                                "GAME_WAITING: CANCEL not found (%.1fs) — waiting %.1fs before re-click (%s)",
-                                elapsed_waiting, effective_interval - (time.time() - last_play_reclick_ts),
-                                "click missed" if not play_ever_absent else "returned from matchmaking")
+            if waiting_fallback.tick(frame, current_game_state):
+                continue
 
             # GAME_END_B stall guard: if click-to OCR cache gets stuck, force recovery
             if (current_game_state == GameState.GAME_END_B
