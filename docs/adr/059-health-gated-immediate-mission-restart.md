@@ -99,3 +99,18 @@ its architecture; recorded here per the superseding-decisions rule:
 - Live validation: watch a manual-mode death — expect
   "Respawn screen active — mission restarts when health returns" followed by
   "💚 HEALTH ALIVE — restarting mission immediately".
+
+**Status note (2026-08-02): stays Draft — this last criterion is unmet.**
+Everything else is implemented and heavily live-proven: the 16:18 session
+alone shows 15 respawns, 14 immediate restarts, and 11 deferrals correctly
+re-arming the one-shot event. Decision 1 (death ends manual takeover) is the
+exception: `respawn_reset` has fired **zero times across every log in the
+repository**, because no death has happened while in `GAME_BATTLE_MANUAL`
+since the fix landed. That is precisely the scenario this ADR exists to fix
+(the 2026-07-31 07:42 uncommanded-flight incident), so it should not be
+Accepted on unit tests alone
+(`tests/test_tick_handlers.py::test_manual_death_returns_to_auto`).
+
+To close it: take manual control with `i`/`j`/`k`/`l`, then let the aircraft be
+destroyed without pressing `u` to resume. The log should show `respawn_reset`,
+then the two lines above.

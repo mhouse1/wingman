@@ -1,8 +1,12 @@
 # ADR 058 — Eject Dive Confirmation via Raw Descent Rate
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-07-30 | 1.6.29          |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-07-30 | 1.6.29          |
+
+*Accepted 2026-08-02 — all twelve decisions implemented and the stated
+live-flight criterion met. Accepted with a material caveat about which
+mechanism is actually doing the work; see "Acceptance and standing caveat".*
 
 Extends [ADR 038](038-game-battle-altitude-speed-signals-for-phase3-and-eject-dive.md)
 (Draft). ADR 038 is not modified; this ADR adds a second confirmation path and
@@ -290,5 +294,33 @@ telemetry:
 - `test_climb_before_hold_threshold_still_reissues` — decision 12 (decision 3 preserved early)
 - `test_over_rotation_disabled_by_config` — decision 12 (off-switch)
 
-Live-flight confirmation of the descent-rate threshold is still outstanding; this
-ADR stays `Draft` until a production session shows a confirmed dive.
+Live-flight confirmation of the descent-rate threshold was the original
+Draft-exit condition. It is met: production sessions show confirmed dives via
+the descent-rate path repeatedly (16 across the 2026-08-02 sessions alone).
+
+## Acceptance and standing caveat (2026-08-02)
+
+All twelve decisions are implemented and verified in code. The ADR is Accepted
+on that basis and on extensive live evidence — but with one caveat that a
+future reader should not have to rediscover:
+
+**The in-phase closed loop has never once confirmed a dive.** Across roughly 40
+logged production ejects, in-phase confirmations stand at **0**. Every
+confirmation on record comes from decision 10's post-release observation path.
+
+What this ADR actually delivers, then, is a *bounded, self-correcting eject*
+rather than the closed-loop dive verification it set out to build:
+
+- decisions 4 and 12 bound how long nose-down can be held wrongly (20 s -> 10 s,
+  plus early release on the over-rotation signature),
+- decisions 6, 11 and the legacy timer guarantee the phase always terminates,
+- decision 10 confirms the dive that actually happens, after release.
+
+Decision 12's evidence is also thinner than the rest: one session (2026-08-02
+16:18), where it fired twice and halved mean time-to-descent (33-49 s -> 22 s).
+
+If in-phase confirmation matters later, the open question is not the
+thresholds — it is that holding NOSE_DOWN past ~6-10 s rotates the aircraft
+past the dive attitude, so there may be no in-phase window to confirm in. That
+would be a new ADR about *how* to command the dive, not about how to measure
+it.

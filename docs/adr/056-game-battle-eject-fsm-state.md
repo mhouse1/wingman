@@ -2,7 +2,11 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft | 2026-06-28 | 1.6.22          |
+| Accepted | 2026-06-28 | 1.6.22          |
+
+*Accepted 2026-08-02: implemented in full (checklist below all ticked) and
+live-proven across every session since. Two corrections applied at acceptance
+— see "Corrections at acceptance" at the end.*
 
 ## Context
 
@@ -122,21 +126,38 @@ No controller reference is needed in the analyzer. All key management stays in `
 
 ```python
 GameState.GAME_BATTLE_EJECT: {
-    "respawn", "health", "ammo_missiles",
+    "respawn", "HEALTH", "AMMO_MISSILE",
 }
 ```
+
+Crop names are the config keys, which are case-sensitive. An earlier draft of
+this ADR wrote `"health"`/`"ammo_missiles"`; those match no key, so
+`crops_for_state()` silently filtered them out and eject-time debug
+screenshots lost their HEALTH/AMMO overlays. Shipped that way and fixed as
+code-review finding CR-013-6.
 
 Respawn detection must remain active so `eject_complete` fires on respawn. Incoming and other battle scans are naturally suppressed — any branch gating on `GameState.GAME_BATTLE` will not match during eject.
 
 ### `_battle_states` membership
 
-`GAME_BATTLE_EJECT` is added to `_battle_states` in `main.py`:
+`GAME_BATTLE_EJECT` joins the battle-state set used to decide when target
+tracking resets:
 
 ```python
-_battle_states = {GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL, GameState.GAME_BATTLE_EJECT}
+_BATTLE_STATES = frozenset({GAME_BATTLE, GAME_BATTLE_MANUAL, GAME_BATTLE_EJECT})
 ```
 
-This ensures `target_tracker.reset()` is not called on the `GAME_BATTLE → GAME_BATTLE_EJECT` transition (both are "in battle"). The reset correctly fires when leaving `GAME_BATTLE_EJECT` to `GAME_END_B` or `GAME_BATTLE_MANUAL` (neither is in `_battle_states`... wait, `GAME_BATTLE_MANUAL` is — so the reset fires only on `GAME_BATTLE_EJECT → GAME_END_B`).
+`target_tracker.reset()` fires only when moving from a state **in** that set to
+one **outside** it. All three battle states are members, so no reset happens on
+`GAME_BATTLE → GAME_BATTLE_EJECT` or `GAME_BATTLE_EJECT → GAME_BATTLE_MANUAL`;
+it fires on e.g. `GAME_BATTLE_EJECT → GAME_END_B`.
+
+*Location note (2026-08-02):* this set lived in `main.py` as `_battle_states`
+when the ADR was written. ADR 060 Phase 2 moved the rule into
+`TrackingHudHandler.on_state_change()` with the set as
+`tick_handlers._BATTLE_STATES`. (`mission_stats.py` keeps its own
+string-keyed `_BATTLE_STATES` for ADR 059's mission-boundary accounting —
+a separate concern that happens to share the name.)
 
 `GAME_BATTLE_EJECT` is **not** added to health-check, mission-restart, or incoming-alert branches that gate on `GameState.GAME_BATTLE` specifically. Those scans are suppressed during the eject by design.
 
@@ -179,3 +200,20 @@ This ensures `target_tracker.reset()` is not called on the `GAME_BATTLE → GAME
 - `wingman/analyzer.py` — `GameState` enum, `_STATE_CROPS`, FSM transition table, `on_enter_GAME_BATTLE_MANUAL`
 - `wingman/controller.py` — `eject_and_dive()`, `stop_eject_sequence()`, `_check_for_manual_takeover()` line 728
 - `wingman/main.py` — `_handle_no_missiles()`, `_battle_states`
+
+
+## Corrections at acceptance (2026-08-02)
+
+Two places where this document had drifted from the shipped code:
+
+1. **Crop-set snippet documented a defect.** The `_STATE_CROPS` example used
+   lowercase `"health"`/`"ammo_missiles"`, which match no config key. That is
+   what was implemented, and it silently dropped the HEALTH/AMMO overlays from
+   eject-time debug screenshots until CR-013-6 caught it. The snippet now shows
+   the correct `"HEALTH"`/`"AMMO_MISSILE"`.
+2. **`_battle_states` location was stale.** ADR 060 Phase 2 moved the
+   battle-state set and the tracker-reset rule out of `main.py` into
+   `tick_handlers.py`. The section is updated, and its garbled parenthetical
+   about which states are members has been replaced with the actual rule.
+
+Neither correction changes the decision — only its description.
