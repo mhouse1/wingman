@@ -1,8 +1,8 @@
 # ADR 060 — Tick-Loop Handler Objects and Typed Event Registry
 
-| Status   | Date       | Wingman Version |
-|----------|------------|-----------------|
-| Accepted | 2026-08-02 | 1.6.29          |
+| Status | Date       | Wingman Version |
+|--------|------------|-----------------|
+| Draft  | 2026-08-02 | 1.6.29          |
 
 Extends [ADR 039](039-reduce-orchestration-coupling-first.md) (Accepted).
 ADR 039 established the `set_on_*` orchestration API to decouple the analyzer
@@ -13,10 +13,13 @@ consolidation precedent set by [ADR 059](059-health-gated-immediate-mission-rest
 
 ## Status of this document
 
-**Implemented and Accepted 2026-08-02.** All eight steps landed, each as its
-own commit with its gate green before the next began. See "Implementation
-results" at the end for what actually happened, including one regression the
-refactor introduced and caught.
+**Implemented 2026-08-02; still Draft pending live validation.** All eight
+steps landed, each as its own commit with its gate green before the next
+began. The remaining acceptance criterion is one clean production session
+with no behavioural deltas versus the pre-refactor baseline — the gates cover
+replay and capture lanes only, and this refactor touched the riskiest file in
+the repo. See "Implementation results" at the end, including one regression
+the refactor introduced.
 
 **Revised 2026-08-02** after the ADR 061-064 respawn-detection arc landed.
 All measurements in the Context section are as re-taken at that revision; the
