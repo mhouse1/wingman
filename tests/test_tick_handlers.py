@@ -387,3 +387,215 @@ class TestFlares:
         a.low_flares_event.set()
         h.tick_events()
         assert c.reloads == 1
+
+
+class _RespawnAnalyzerStub:
+    def __init__(self, *, state=GameState.GAME_BATTLE, missiles=4,
+                 alive_after_observed_death=False):
+        self.game_state = state
+        self.alive_after_observed_death = alive_after_observed_death
+        self._missiles = missiles
+        self.alive_event = _EventStub()
+        self.health_respawn_event = _EventStub()
+        self.triggers = []
+        self.health_resets = 0
+
+    def get_ammo_missiles(self):
+        return self._missiles
+
+    def reset_health_for_respawn(self):
+        self.health_resets += 1
+
+    def trigger_event(self, name):
+        self.triggers.append(name)
+        return True
+
+
+class _RespawnCtrlStub:
+    def __init__(self, *, mission_running=False, teardown=False, auto_restart=True):
+        self._running = mission_running
+        self._teardown = teardown
+        self._auto = auto_restart
+        self.restarts = 0
+        self.eject_stops = 0
+        self.cancels = 0
+
+    def is_mission_running(self):
+        return self._running
+
+    def is_mission_teardown_in_progress(self):
+        return self._teardown
+
+    def is_auto_respawn_restart_enabled(self):
+        return self._auto
+
+    def restart_last_mission(self):
+        self.restarts += 1
+
+    def stop_eject_sequence(self, **kw):
+        self.eject_stops += 1
+
+    def cancel_mission(self):
+        self.cancels += 1
+
+    def set_auto_respawn_restart(self, v):
+        self._auto = v
+
+
+def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None):
+    from wingman.main import RespawnState, _alive_transition_disposition
+    from wingman.tick_handlers import RespawnHandler
+    a = analyzer or _RespawnAnalyzerStub()
+    c = ctrl or _RespawnCtrlStub()
+    enemy = enemy or SimpleNamespace(arm=lambda: None)
+    ammo = ammo or SimpleNamespace(suppress_after_respawn=lambda s: None)
+    h = RespawnHandler(a, c, {"respawn_clear_stability_s": stability_s},
+                       enemy_presence=enemy, ammo_events=ammo,
+                       disposition_fn=_alive_transition_disposition,
+                       respawn_state_enum=RespawnState)
+    return h, a, c
+
+
+class TestAliveTransitionFlow:
+    """ADR 059/061: the alive event is the only restart path and is never
+    consumed silently."""
+
+    def test_restarts_when_clear_and_stable(self):
+        h, a, c = _respawn()
+        h.note_respawn_screen(False)   # arms the clear clock
+        h.handle_alive_transition()
+        assert c.restarts == 1
+
+    def test_deferral_rearms_the_one_shot_event(self):
+        """Respawn screen still up → must re-arm, never swallow (ADR 059)."""
+        h, a, c = _respawn()
+        h.note_respawn_screen(True)    # clear clock == 0
+        h.handle_alive_transition()
+        assert c.restarts == 0
+        assert a.alive_event.is_set()  # re-armed for the next tick
+
+    def test_stability_window_defers_and_rearms(self):
+        h, a, c = _respawn(stability_s=999.0)
+        h.note_respawn_screen(False)
+        h.handle_alive_transition()
+        assert c.restarts == 0
+        assert a.alive_event.is_set()
+
+    def test_eject_with_observed_death_terminates_eject_and_rearms(self):
+        """ADR 061: the missed-overlay respawn case."""
+        a = _RespawnAnalyzerStub(state=GameState.GAME_BATTLE_EJECT,
+                                 alive_after_observed_death=True)
+        h, a, c = _respawn(a)
+        h.note_respawn_screen(False)
+        h.handle_alive_transition()
+        assert c.eject_stops == 1
+        assert a.alive_event.is_set()   # restart fires once state returns to battle
+        assert c.restarts == 0
+
+    def test_eject_without_observed_death_is_consumed(self):
+        a = _RespawnAnalyzerStub(state=GameState.GAME_BATTLE_EJECT,
+                                 alive_after_observed_death=False)
+        h, a, c = _respawn(a)
+        h.note_respawn_screen(False)
+        h.handle_alive_transition()
+        assert c.eject_stops == 0
+        assert not a.alive_event.is_set()
+
+    def test_manual_state_never_restarts(self):
+        a = _RespawnAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL)
+        h, a, c = _respawn(a)
+        h.note_respawn_screen(False)
+        h.handle_alive_transition()
+        assert c.restarts == 0
+
+    def test_teardown_race_defers_and_rearms(self):
+        """v1.6.29 race: lock held by a CANCELLED mission thread."""
+        h, a, c = _respawn(ctrl=_RespawnCtrlStub(mission_running=True, teardown=True))
+        h.note_respawn_screen(False)
+        h.handle_alive_transition()
+        assert c.restarts == 0
+        assert a.alive_event.is_set()
+
+    def test_genuine_running_mission_consumes_without_rearm(self):
+        h, a, c = _respawn(ctrl=_RespawnCtrlStub(mission_running=True, teardown=False))
+        h.note_respawn_screen(False)
+        h.handle_alive_transition()
+        assert c.restarts == 0
+        assert not a.alive_event.is_set()
+
+    def test_empty_missiles_skips_restart(self):
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=0))
+        h.note_respawn_screen(False)
+        h.handle_alive_transition()
+        assert c.restarts == 0
+
+    def test_auto_restart_disabled_consumes(self):
+        h, a, c = _respawn(ctrl=_RespawnCtrlStub(auto_restart=False))
+        h.note_respawn_screen(False)
+        h.handle_alive_transition()
+        assert c.restarts == 0
+
+
+class TestRespawnDetection:
+    def _gs(self, respawning=True):
+        return {"is_respawning": respawning, "respawn_confidence": 1.0}
+
+    def test_detection_runs_the_flow_and_requests_continue(self):
+        h, a, c = _respawn()
+        assert h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE) is True
+        assert c.cancels == 1
+        assert a.health_resets == 1
+        assert not a.alive_event.is_set()   # stale pending event cleared
+
+    def test_no_respawn_is_a_noop(self):
+        h, a, c = _respawn()
+        assert h.tick_detect(object(), self._gs(False), GameState.GAME_BATTLE) is False
+        assert c.cancels == 0
+
+    def test_eject_is_stopped_even_when_cooldown_suppresses_restart(self):
+        """CR-013-4 regression: the eject interrupt must not be nested under
+        the restart dedup cooldown."""
+        h, a, c = _respawn()
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)   # arms cooldown
+        h.note_gameplay_resumed()
+        c.cancels = 0
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)   # inside cooldown
+        assert c.eject_stops == 2      # stopped both times
+        assert c.cancels == 0          # but the restart flow was suppressed
+
+    def test_health_fallback_event_triggers_the_flow(self):
+        """ADR 064 dual mode: OCR missed the overlay, health evidence fired."""
+        h, a, c = _respawn()
+        a.health_respawn_event.set()
+        assert h.tick_detect(object(), self._gs(False), GameState.GAME_BATTLE) is True
+        assert c.cancels == 1
+        assert not a.health_respawn_event.is_set()   # consumed
+
+    def test_manual_death_returns_to_auto(self):
+        """ADR 059: death ends manual takeover."""
+        h, a, c = _respawn(_RespawnAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL))
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE_MANUAL)
+        assert "respawn_reset" in a.triggers
+
+    def test_latch_dedupes_while_screen_persists(self):
+        h, a, c = _respawn()
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert c.cancels == 1   # RESPAWNING latch blocks the second run
+
+    def test_gameplay_resumed_clears_the_latch(self):
+        from wingman.main import RespawnState
+        h, a, c = _respawn()
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert h.state == RespawnState.RESPAWNING
+        h.note_gameplay_resumed()
+        assert h.state == RespawnState.IDLE
+
+    def test_collaborators_are_called_explicitly_not_via_shared_state(self):
+        """ADR 060 rule 2: cross-concern effects are named calls."""
+        armed, suppressed = [], []
+        h, a, c = _respawn(enemy=SimpleNamespace(arm=lambda: armed.append(1)),
+                           ammo=SimpleNamespace(suppress_after_respawn=suppressed.append))
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert armed == [1]
+        assert suppressed == [10.0]

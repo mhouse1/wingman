@@ -25,7 +25,12 @@ from .analyzer import GameStateAnalyzer, GameState, GameEvent
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
-from .tick_handlers import AmmoEventsHandler, EnemyPresenceHandler, WaitingFallbackHandler
+from .tick_handlers import (
+    AmmoEventsHandler,
+    EnemyPresenceHandler,
+    RespawnHandler,
+    WaitingFallbackHandler,
+)
 from .tracker import TargetTracker
 from .replay import (
     LivePathCaptureEngine,
@@ -270,7 +275,6 @@ def main():
     mission_cfg = cfg.get("mission", {})
     startup_cfg = cfg.get("startup_state_detection", {})
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
-    respawn_clear_stability_s = float(mission_cfg.get("respawn_clear_stability_s", 1.5))
     starting_stalled_reclassify_after_s = float(mission_cfg.get("starting_stalled_reclassify_after_s", 20.0))
     starting_max_wait_s = float(mission_cfg.get("starting_max_wait_s", 90.0))
     unknown_max_wait_s = float(startup_cfg.get("unknown_max_wait_s", 90.0))
@@ -457,13 +461,10 @@ def main():
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
 
     # Mission restart state machine
-    respawn_state = RespawnState.IDLE
-    respawn_cooldown_until = 0.0  # suppress re-detection for 10s after first trigger
     last_click_to_alert_ts = 0.0
     last_game_state = None
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
-    respawn_clear_since = 0.0  # timestamp since respawn cache has been continuously false
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
     ammo_events = AmmoEventsHandler(
@@ -472,6 +473,13 @@ def main():
         emit_capture_event=_emit_capture_event,
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
+    respawn = RespawnHandler(
+        analyzer, ctrl, mission_cfg,
+        enemy_presence=enemy_presence, ammo_events=ammo_events,
+        live_capture=live_capture, emit_capture_event=_emit_capture_event,
+        disposition_fn=_alive_transition_disposition,
+        respawn_state_enum=RespawnState,
+    )
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
     )
@@ -484,88 +492,6 @@ def main():
             lobby_escape_stop.set()
             lobby_escape_stop = None
         lobby_escape_thread = None
-
-    def _handle_alive_transition():
-        """Restart mission immediately when health transitions dead → alive.
-
-        This is the ONLY post-respawn restart path (the scheduled/delayed
-        restart machinery was removed 2026-07-31): as soon as health returns,
-        the mission restarts. Because alive_event is one-shot and health often
-        returns while respawn OCR is still flapping, deferrals RE-ARM the event
-        instead of swallowing it — the handler retries every tick until the
-        respawn-clear stability window is met, then restarts.
-        """
-        nonlocal respawn_state
-        analyzer.alive_event.clear()
-        enemy_presence.arm()  # reset so the idle clock starts fresh after respawn
-
-        # Only early-restart when respawn has remained clear for a short stability window.
-        # This avoids relaunching while respawn OCR/health signals are still flapping.
-        if respawn_clear_since == 0.0:
-            logger.debug("HEALTH ALIVE deferred — respawn screen still detected")
-            analyzer.alive_event.set()  # retry next tick; do not lose the transition
-            return
-        clear_elapsed = time.time() - respawn_clear_since
-        if clear_elapsed < respawn_clear_stability_s:
-            logger.debug(
-                "HEALTH ALIVE deferred — respawn clear stability %.2fs/%.2fs",
-                clear_elapsed,
-                respawn_clear_stability_s,
-            )
-            analyzer.alive_event.set()  # retry next tick; do not lose the transition
-            return
-
-        # Explicit disposition of every case — ADR 061 rule 3: the one-shot
-        # event is never consumed silently (the 2026-08-01 08:00 incident lost
-        # the only restart signal for a life to an unlogged state-gate miss).
-        disposition = _alive_transition_disposition(
-            analyzer.game_state, analyzer.alive_after_observed_death
-        )
-        if disposition == "terminate_eject":
-            # Respawn evidence during an eject: health returned after an OCR-
-            # observed death, so the respawn happened but the overlay was missed.
-            # Stop the eject (releases afterburner; FSM exits GAME_BATTLE_EJECT
-            # via eject_complete) and keep the event armed so the restart fires
-            # through the normal path once state returns to GAME_BATTLE.
-            logger.info(
-                "\033[92m💚 HEALTH ALIVE after observed death during eject — "
-                "terminating eject (respawn overlay missed), re-arming restart\033[0m"
-            )
-            ctrl.stop_eject_sequence()
-            analyzer.alive_event.set()
-            return
-        if disposition == "consume_spurious":
-            logger.debug("HEALTH ALIVE consumed — spurious eject-start transition (no observed death)")
-            return
-        if disposition == "consume_other":
-            logger.debug(
-                "HEALTH ALIVE consumed — state %s does not auto-restart",
-                analyzer.game_state.name,
-            )
-            return
-
-        if not ctrl.is_auto_respawn_restart_enabled():
-            logger.debug("HEALTH ALIVE consumed — auto-respawn restart disabled")
-            return
-        if ctrl.is_mission_running():
-            if ctrl.is_mission_teardown_in_progress():
-                # The lock is held only by the CANCELLED mission thread
-                # unwinding (the v1.6.29 teardown race). With the scheduled
-                # fallback removed, consuming the event here would lose the
-                # only remaining restart path for this life — retry instead.
-                logger.debug("HEALTH ALIVE deferred — cancelled mission still tearing down")
-                analyzer.alive_event.set()
-            else:
-                logger.debug("HEALTH ALIVE consumed — mission already running")
-            return
-        missiles = analyzer.get_ammo_missiles()
-        if missiles is not None and missiles == 0:
-            logger.info("\033[92m💚 HEALTH ALIVE — missiles empty, skipping restart\033[0m")
-            return
-        logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
-        ctrl.restart_last_mission()
-        _emit_capture_event("restart_last_mission")
-        respawn_state = RespawnState.IDLE
 
     try:
         while True:
@@ -607,10 +533,7 @@ def main():
                     break
 
             game_state = analyzer.analyze_frame(frame)
-            if game_state.get('is_respawning'):
-                respawn_clear_since = 0.0
-            elif respawn_clear_since == 0.0:
-                respawn_clear_since = time.time()
+            respawn.note_respawn_screen(bool(game_state.get('is_respawning')))
 
             if live_capture is not None:
                 _now = time.time()
@@ -669,7 +592,7 @@ def main():
                     # GAME_END_B is not a respawn flow; clear the respawn latch
                     # and any pending alive event so the match-end click-through
                     # cannot relaunch a mission.
-                    respawn_state = RespawnState.IDLE
+                    respawn.to_idle()
                     analyzer.alive_event.clear()
                     # A match can end mid-eject with no respawn ever detected —
                     # only respawn stopped the sequence, so the 120s afterburner
@@ -769,7 +692,7 @@ def main():
 
             # Restart mission immediately when health transitions dead → alive.
             if analyzer.alive_event.is_set():
-                _handle_alive_transition()
+                respawn.handle_alive_transition()
 
             # Ammo events (GAME_BATTLE only).
             ammo_events.tick_events()
@@ -809,80 +732,15 @@ def main():
 
             # Detect respawn — from overlay OCR, or (ADR 064 dual mode) from the
             # health detector's composite evidence when OCR missed the episode.
-            health_fallback_respawn = analyzer.health_respawn_event.is_set()
-            if health_fallback_respawn:
-                analyzer.health_respawn_event.clear()
-                logger.info("\033[93m💛 HEALTH-FALLBACK RESPAWN accepted by main loop (ADR 064 dual)\033[0m")
-            if game_state.get('is_respawning') or health_fallback_respawn:
-                # Interrupt any in-progress eject_and_dive immediately on any detected respawn,
-                # independent of the mission-restart dedup cooldown below — a real respawn screen
-                # means afterburner should release now, not hold until the 120s safety timeout.
-                ctrl.stop_eject_sequence()
-                if respawn_state == RespawnState.IDLE:
-                    if time.time() < respawn_cooldown_until:
-                        logger.debug("RESPAWN seen but suppressed by cooldown (%.1fs remaining)",
-                                     respawn_cooldown_until - time.time())
-                    else:
-                        logger.info("\033[91m⚠ RESPAWN DETECTED - Cancelling active missions\033[0m")
-                        respawn_cooldown_until = time.time() + 10.0
-                        ammo_events.suppress_after_respawn(10.0)
-                        enemy_presence.arm()  # reset so the idle clock starts fresh after respawn
-                        ctrl.cancel_mission()
-                        analyzer.reset_health_for_respawn()
-                        # A death invalidates any pending (re-armed) alive event
-                        # from the previous life — without this, a deferred
-                        # HEALTH ALIVE could restart the mission after the NEXT
-                        # respawn clears but before health actually returns.
-                        analyzer.alive_event.clear()
-                        _emit_capture_event("respawn_detected")
-                        # Live capture is handled via analyzer.set_on_respawn_detected —
-                        # the callback fires from the background OCR thread with the exact
-                        # respawn-screen frame, avoiding the stale-frame race where the
-                        # main loop's `frame` variable has already advanced past the
-                        # respawn overlay by the time is_respawning surfaces from the cache.
-                        if current_game_state == GameState.GAME_BATTLE_MANUAL:
-                            # Death ends manual takeover. Fire the P2_040 capture
-                            # BEFORE the FSM transition so the screenshot still
-                            # shows the manual-mode HUD, then return to auto: the
-                            # mission restarts as soon as health returns. (An
-                            # earlier stay-manual-through-respawn design left the
-                            # aircraft flying uncommanded after every death — the
-                            # scheduled restart was GAME_BATTLE-gated and the log
-                            # promised a restart that could never fire, observed
-                            # 2026-07-31 07:42.)
-                            if live_capture is not None:
-                                _cap_now = time.time()
-                                live_capture.on_event("respawn_detected", _cap_now)
-                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
-                                live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
-                            analyzer.trigger_event("respawn_reset")
-                        ctrl.set_auto_respawn_restart(True)  # always restart after respawn
-                        # Wait for the cancelled mission thread to release its lock
-                        # so the health-alive restart can't be skipped by a
-                        # teardown race (is_mission_running would read True).
-                        logger.info("Waiting for mission lock to release before restart...")
-                        for _ in range(50):
-                            if not ctrl.is_mission_running():
-                                break
-                            time.sleep(0.1)
-                        else:
-                            logger.warning("Timeout waiting for mission lock release; restart may be delayed.")
-                        # Latch: dedupes re-detection while the screen persists.
-                        respawn_state = RespawnState.RESPAWNING
-                        logger.info("Respawn screen active — mission restarts when health returns")
-
-                logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m", game_state.get('respawn_confidence', 0) * 100)
-
+            if respawn.tick_detect(frame, game_state, current_game_state):
                 time.sleep(1)
                 continue
 
             # Respawn screen cleared. No scheduled restart: the health alive
-            # transition (_handle_alive_transition) restarts the mission the
-            # moment health returns — it re-arms itself while respawn OCR is
-            # still flapping, so the one-shot event cannot be lost.
-            if respawn_state == RespawnState.RESPAWNING:
-                logger.info("\033[92m✓ Gameplay resumed — mission restarts on health return\033[0m")
-                respawn_state = RespawnState.IDLE
+            # transition restarts the mission the moment health returns — it
+            # re-arms itself while respawn OCR is still flapping, so the
+            # one-shot event cannot be lost.
+            respawn.note_gameplay_resumed()
 
             # Log "Click to Continue" prompt when newly detected (informational only).
             click_to_detected, _, _ = analyzer.get_click_to_cache_result()
@@ -924,7 +782,7 @@ def main():
                     analyzer.incoming_event.clear()
                     ammo_events.deploy_flares_on_new_incoming()
                     if analyzer.alive_event.is_set():
-                        _handle_alive_transition()
+                        respawn.handle_alive_transition()
                     ammo_events.tick_events()
     except KeyboardInterrupt:
         logger.info("Exiting")
