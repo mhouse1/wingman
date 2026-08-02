@@ -122,6 +122,31 @@ respawn_detection:
   ocr_cooldown: 0.2
   text_hsv_lower: [0, 0, 180]
   text_hsv_upper: [180, 50, 255]
+  # ADR 064 mode: ocr | shadow | dual.
+  # shadow = respawn OCR primary; health detector scores itself, acts on nothing.
+  # dual   = health detector additionally fires the respawn plumbing when OCR
+  #          missed the episode. Flip to dual only after Phase A-prime shows
+  #          zero false fires (ADR 064 decision 4).
+  mode: shadow
+health:
+  # Shared no-digits window (ADR 062): health readings absent this long mark
+  # the aircraft not-alive (and the shadow detector's weak death tier).
+  # Raised from the previous hardcoded 3.0s to stay above routine HUD
+  # dropouts while remaining below the ~8s respawn-overlay duration.
+  death_no_digits_s: 6.0
+  # ADR 063 value confirmation: a raw health read becomes the accepted value
+  # only when 2 of the last value_confirm_window reads agree within
+  # value_confirm_tolerance. Reads above max_plausible are discarded outright.
+  max_plausible: 500
+  value_confirm_window: 3
+  value_confirm_tolerance: 15
+  # ADR 064 composite death evidence: weak tier marks after this long without
+  # a CONFIRMED reading (runs through hallucinated overlay digits); halved
+  # when confirmed health dropped by decline_evidence_drop within
+  # decline_evidence_window_s before evidence began.
+  death_no_confirmed_s: 8.0
+  decline_evidence_drop: 80
+  decline_evidence_window_s: 6.0
 incoming_detection:
   incoming_template_matching_enabled: true
   incoming_template_threshold: 0.82

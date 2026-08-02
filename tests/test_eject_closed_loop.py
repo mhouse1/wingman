@@ -35,6 +35,14 @@ class _TelemetryStub:
         self._health_lock = threading.Lock()
         self._game_battle_alive = False
         self._health_no_digits_since = 0.0
+        self._death_observed = False
+
+    def mark_health_dead_synthetic(self):
+        """Mirror GameStateAnalyzer.mark_health_dead_synthetic (ADR 061)."""
+        with self._health_lock:
+            self._game_battle_alive = False
+            self._health_no_digits_since = 0.0
+            self._death_observed = False
 
     def get_telemetry(self):
         if not self.available:

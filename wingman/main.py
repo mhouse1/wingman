@@ -126,6 +126,25 @@ def _update_waiting_fallback(
 
 
 
+def _alive_transition_disposition(state, alive_after_observed_death: bool) -> str:
+    """Classify an alive (dead→alive health) transition by FSM state (ADR 061).
+
+    Returns one of:
+      restart_path     — GAME_BATTLE: run the ADR 059 restart flow.
+      terminate_eject  — GAME_BATTLE_EJECT after an observed death: the respawn
+                         happened but overlay OCR missed it; stop the eject and
+                         keep the event armed.
+      consume_spurious — GAME_BATTLE_EJECT without an observed death: the
+                         synthetic eject-start transition; consume it.
+      consume_other    — any other state (manual, lobby, ...): consume it.
+    """
+    if state == GameState.GAME_BATTLE:
+        return "restart_path"
+    if state == GameState.GAME_BATTLE_EJECT:
+        return "terminate_eject" if alive_after_observed_death else "consume_spurious"
+    return "consume_other"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="wingman/config.yaml")
@@ -551,25 +570,57 @@ def main():
             analyzer.alive_event.set()  # retry next tick; do not lose the transition
             return
 
-        if (analyzer.game_state == GameState.GAME_BATTLE
-                and ctrl.is_auto_respawn_restart_enabled()):
-            if ctrl.is_mission_running():
-                if ctrl.is_mission_teardown_in_progress():
-                    # The lock is held only by the CANCELLED mission thread
-                    # unwinding (the v1.6.29 teardown race). With the scheduled
-                    # fallback removed, consuming the event here would lose the
-                    # only remaining restart path for this life — retry instead.
-                    logger.debug("HEALTH ALIVE deferred — cancelled mission still tearing down")
-                    analyzer.alive_event.set()
-                return  # genuine mission running: nothing to restart
-            missiles = analyzer.get_ammo_missiles()
-            if missiles is not None and missiles == 0:
-                logger.info("\033[92m💚 HEALTH ALIVE — missiles empty, skipping restart\033[0m")
-                return
-            logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
-            ctrl.restart_last_mission()
-            _emit_capture_event("restart_last_mission")
-            respawn_state = RespawnState.IDLE
+        # Explicit disposition of every case — ADR 061 rule 3: the one-shot
+        # event is never consumed silently (the 2026-08-01 08:00 incident lost
+        # the only restart signal for a life to an unlogged state-gate miss).
+        disposition = _alive_transition_disposition(
+            analyzer.game_state, analyzer.alive_after_observed_death
+        )
+        if disposition == "terminate_eject":
+            # Respawn evidence during an eject: health returned after an OCR-
+            # observed death, so the respawn happened but the overlay was missed.
+            # Stop the eject (releases afterburner; FSM exits GAME_BATTLE_EJECT
+            # via eject_complete) and keep the event armed so the restart fires
+            # through the normal path once state returns to GAME_BATTLE.
+            logger.info(
+                "\033[92m💚 HEALTH ALIVE after observed death during eject — "
+                "terminating eject (respawn overlay missed), re-arming restart\033[0m"
+            )
+            ctrl.stop_eject_sequence()
+            analyzer.alive_event.set()
+            return
+        if disposition == "consume_spurious":
+            logger.debug("HEALTH ALIVE consumed — spurious eject-start transition (no observed death)")
+            return
+        if disposition == "consume_other":
+            logger.debug(
+                "HEALTH ALIVE consumed — state %s does not auto-restart",
+                analyzer.game_state.name,
+            )
+            return
+
+        if not ctrl.is_auto_respawn_restart_enabled():
+            logger.debug("HEALTH ALIVE consumed — auto-respawn restart disabled")
+            return
+        if ctrl.is_mission_running():
+            if ctrl.is_mission_teardown_in_progress():
+                # The lock is held only by the CANCELLED mission thread
+                # unwinding (the v1.6.29 teardown race). With the scheduled
+                # fallback removed, consuming the event here would lose the
+                # only remaining restart path for this life — retry instead.
+                logger.debug("HEALTH ALIVE deferred — cancelled mission still tearing down")
+                analyzer.alive_event.set()
+            else:
+                logger.debug("HEALTH ALIVE consumed — mission already running")
+            return
+        missiles = analyzer.get_ammo_missiles()
+        if missiles is not None and missiles == 0:
+            logger.info("\033[92m💚 HEALTH ALIVE — missiles empty, skipping restart\033[0m")
+            return
+        logger.info("\033[92m💚 HEALTH ALIVE — restarting mission immediately\033[0m")
+        ctrl.restart_last_mission()
+        _emit_capture_event("restart_last_mission")
+        respawn_state = RespawnState.IDLE
 
     def _handle_low_flares():
         """Press SPECIAL_ABILITY to reload flares when count reaches 2."""
@@ -1032,8 +1083,13 @@ def main():
                     analyzer.get_ammo_flares(),
                 )
 
-            # Detect respawn
-            if game_state.get('is_respawning'):
+            # Detect respawn — from overlay OCR, or (ADR 064 dual mode) from the
+            # health detector's composite evidence when OCR missed the episode.
+            health_fallback_respawn = analyzer.health_respawn_event.is_set()
+            if health_fallback_respawn:
+                analyzer.health_respawn_event.clear()
+                logger.info("\033[93m💛 HEALTH-FALLBACK RESPAWN accepted by main loop (ADR 064 dual)\033[0m")
+            if game_state.get('is_respawning') or health_fallback_respawn:
                 # Interrupt any in-progress eject_and_dive immediately on any detected respawn,
                 # independent of the mission-restart dedup cooldown below — a real respawn screen
                 # means afterburner should release now, not hold until the 120s safety timeout.
@@ -1212,13 +1268,21 @@ def main():
                 encoding="utf-8",
             )
             logger.info("Capture summary saved to %s", summary_output)
+        # ADR 062 Phase A: per-session shadow-detector agreement summary.
+        # Emitted BEFORE the cleanups — analyzer.cleanup() can block on stuck
+        # OCR futures (the 2026-08-01 10:01 session ended there and lost its
+        # summary and stats JSON), and this only reads analyzer fields.
+        shadow_summary = analyzer.shadow_respawn_summary()
+        if shadow_summary is not None:
+            logger.info("Shadow respawn detector (ADR 062 Phase A): %s", json.dumps(shadow_summary))
         if hasattr(cap, "cleanup"):
             cap.cleanup()
         ctrl.cleanup()
         analyzer.cleanup()
         if stats_tracker is not None:
             try:
-                stats_tracker.finalize(run_id=tracker.run_id)
+                extra = {"respawn_shadow": shadow_summary} if shadow_summary is not None else None
+                stats_tracker.finalize(run_id=tracker.run_id, extra=extra)
                 stats_tracker.print_summary()
             except Exception as e:
                 logger.warning("MissionStatsTracker: finalize failed: %s", e)

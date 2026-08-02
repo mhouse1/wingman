@@ -1,8 +1,13 @@
 # ADR 062 — Health-Signal Respawn Detection, Retiring Respawn OCR
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-01 | 1.6.29          |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Rejected | 2026-08-02 | 1.6.29          |
+
+**Rejected by its own Phase A data (2026-08-02)** — see the Phase A results
+section at the end. Superseded by
+[ADR 064](064-dual-sensor-respawn-detection.md), which abandons the
+OCR-retirement goal and redirects the health signal to an active fallback.
 
 Generalizes [ADR 061](061-eject-termination-via-observed-death-health-signal.md)
 (Draft): the observed-death health signal, introduced there as an
@@ -72,16 +77,35 @@ Two conclusions:
 
 The analyzer marks the aircraft dead when either:
 
-- **Strong:** health OCR reads an explicit numeric value below 1
-  (ADR 061's observed-death signal), or
+- **Strong:** health OCR reads an explicit numeric value below 1, confirmed
+  by the next reading being sub-1 or no-digits (ADR 061's observed-death
+  signal, as amended 2026-08-01 — a lone bounced 0 is an OCR misread, the
+  dominant false-fire source in the 11:01 shadow session), or
 - **Weak:** health digits have been continuously absent for
   `health.death_no_digits_s` (new config key, default **6.0 s** — raised
   from the hardcoded 3.0 s that produced the false-trigger rate above;
   tuned to sit clearly above routine combat dropouts and clearly below the
   ~8 s respawn-overlay duration).
 
+The 6.0 s value is **one shared window** replacing the hardcoded 3.0 s
+everywhere (resolved 2026-08-01 review): the existing no-digits path that
+clears `_game_battle_alive` uses the same config value. Side effects are
+benign and desirable — the alive flag persists ~3 s longer through HUD
+dropouts, suppressing most of the ~12-per-session spurious alive
+transitions measured above; restart timing is unaffected because it keys
+off digits *returning*, not off when dead was marked.
+
 The eject sequence's synthetic health-dead reset (`controller.py:1526`)
 never creates a death mark (ADR 061 decision 1 carries over verbatim).
+
+The shadow detector owns a **private no-digits clock**, driven purely by OCR
+readings (added 2026-08-01 after the 11:01 shadow session): the shared
+`_health_no_digits_since` is zeroed by `reset_health_for_respawn()` when the
+OCR path detects a respawn, which wiped the weak tier's evidence during
+every overlay and produced 5 structural misses in that session. In shadow
+mode the detector must be measurable independently of the OCR plumbing it is
+being compared against; in Phase B the same decoupling keeps the detector
+correct when it is itself the trigger for that reset.
 
 ### 2. Respawn inference replaces respawn OCR
 
@@ -120,18 +144,38 @@ Consumers that read the respawn *screen state* rather than the respawn
 
 ### 4. Staged rollout — measure before removing the net
 
-- **Phase A — shadow mode.** The health-based detector runs alongside
-  respawn OCR, acting on nothing, logging every would-fire decision.
+Phases are switched by a config key (resolved 2026-08-01 review), so any
+phase can be entered or rolled back with a one-line `config.yaml` edit:
+
+```yaml
+respawn_detection:
+  mode: shadow    # ocr | shadow | health | health_only
+```
+
+- `ocr` — pre-062 behavior; health detector off.
+- `shadow` — **Phase A.** The health-based detector runs alongside respawn
+  OCR, acting on nothing, logging every would-fire decision. A shadow fire
+  with no OCR-detected respawn within 15 s is classified a false fire.
   Exit criteria, evaluated over at least 3 sessions and 30 OCR-detected
-  respawns: the shadow detector fires within 5 s of at least 95% of
-  OCR-detected respawns, with at most 1 false fire per session.
-- **Phase B — primary flip.** The health detector drives the plumbing;
-  respawn OCR still runs but only logs disagreement (cheap insurance while
+  respawns: the shadow detector fires within **15 s** of at least 95% of
+  OCR-detected respawns (the `matched` field in the summary), with at most
+  1 false fire per session. *(Amended 2026-08-01 from 5 s: OCR fires at
+  overlay start while health cannot return until the overlay clears ~8 s
+  later, so the shadow fire structurally trails the OCR edge — live matches
+  landed at +4 to +8 s and the deterministic replay lane at +7.3 s. A 5 s
+  window would fail a perfect detector. The `matched_within_5s` field
+  remains in the summary as informational data.)*
+- `health` — **Phase B.** The health detector drives the plumbing; respawn
+  OCR still runs but only logs disagreement (cheap insurance while
   confidence accumulates).
-- **Phase C — retirement.** The respawn crop is dropped from battle OCR
+- `health_only` — **Phase C.** The respawn crop is dropped from battle OCR
   rounds; the ADR 044 replay-gate assertions and P1_050/P2_040 expectations
   are updated in the same change. The crop calibration stays in
   `config.yaml` (dormant) so re-enabling for diagnosis is a one-line change.
+
+The Phase A commit implements `ocr` and `shadow`; `health` and
+`health_only` are accepted but warn and fall back to `shadow` until their
+phases land.
 
 Each phase is a separate commit and a valid stopping point; failing Phase A
 criteria means this ADR is rejected by its own data at near-zero cost.
@@ -169,3 +213,32 @@ criteria means this ADR is rejected by its own data at near-zero cost.
 - Live acceptance for Accepted status: one full session in Phase C with
   respawn count matching observed gameplay and zero unexplained mission
   cancels.
+
+## Phase A results — rejection record (2026-08-02)
+
+Five post-ADR-063 shadow sessions (all of 2026-08-01/02, filtered input):
+
+| Session | OCR respawns | Matched | False fires | Missed |
+|---------|--------------|---------|-------------|--------|
+| 18:40   | 3            | 2       | 0           | 1      |
+| 19:03   | 0            | 0       | 0           | 0      |
+| 19:11   | 5            | 4       | 0           | 1      |
+| 02:51   | 5            | 3       | 0           | 2      |
+| 03:11   | 12           | 9       | 0           | 3      |
+| **Total** | **25**     | **18 (72%)** | **0** | **7** |
+
+The 95%-matched exit criterion was mathematically unreachable at 25/30
+samples (best case 77%) and the miss causes are structural, not tunable:
+
+- ~2 misses were round-end artifacts (no recovery phase existed to detect).
+- The rest split between overlays shorter than the 6 s no-digits window and
+  the decisive failure: during degraded-OCR sessions the sensor
+  **hallucinates digits on the respawn overlay itself**, resetting the
+  absence clock exactly when absence is the signal. Absence cannot be
+  measured by a sensor that fabricates presence.
+
+The false-fire criterion passed perfectly (0 in five sessions), and the
+shadow detector caught two real respawns that respawn OCR missed (the 08:00
+uncommanded-flight incident and the 17:41 event) — evidence that the health
+signal is a high-precision *corroborating* sensor even though it cannot be
+the *primary* one. ADR 064 builds on exactly that.

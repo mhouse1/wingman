@@ -680,6 +680,17 @@ class GameStateAnalyzer:
         # OCR-based respawn detection (looks for "RESPAWN" text)
         self.use_ocr = respawn_cfg.get("use_ocr", True)
 
+        # ADR 064 rollout mode: ocr | shadow | dual.
+        # shadow — health detector scores itself, acts on nothing (Phase A′).
+        # dual   — health detector fires the respawn plumbing when OCR missed (Phase B′).
+        # The dead ADR 062 values (health/health_only) warn and fall back to shadow.
+        mode = str(respawn_cfg.get("mode", "shadow")).lower()
+        if mode not in ("ocr", "shadow", "dual"):
+            log = logger.warning if mode in ("health", "health_only") else logger.error
+            log("respawn_detection.mode=%r not supported (ADR 064: ocr|shadow|dual) — falling back to shadow", mode)
+            mode = "shadow"
+        self._respawn_detection_mode = mode
+
         # Named percentage-coordinate crop regions (ADR 023)
         self.crops = load_crops(config.get("crops", {}))
 
@@ -794,8 +805,56 @@ class GameStateAnalyzer:
         self._game_battle_alive = False    # True when health >= 1 in GAME_BATTLE
         self._health_lock = threading.Lock()
         self._health_no_digits_since = 0.0  # timestamp when health OCR started returning no digits
+        # Shared no-digits window (ADR 062): alive flag clears and the shadow
+        # detector's weak death tier marks after this many seconds without digits.
+        health_cfg = config.get("health", {})
+        self._death_no_digits_s = float(health_cfg.get("death_no_digits_s", 6.0))
+        # ADR 063 value confirmation: a raw read only becomes the health value
+        # when it recurs within the window; garbage fragments never recur.
+        self._health_max_plausible = int(health_cfg.get("max_plausible", 500))
+        self._health_confirm_tolerance = int(health_cfg.get("value_confirm_tolerance", 15))
+        self._health_raw_window: deque = deque(
+            maxlen=max(2, int(health_cfg.get("value_confirm_window", 3))))
+        # ADR 064 composite evidence: weak tier keys on confirmed-reading absence,
+        # halved when confirmed health declined sharply just before evidence began.
+        self._death_no_confirmed_s = float(health_cfg.get("death_no_confirmed_s", 8.0))
+        self._decline_evidence_drop = int(health_cfg.get("decline_evidence_drop", 80))
+        self._decline_evidence_window_s = float(health_cfg.get("decline_evidence_window_s", 6.0))
         self._health_window: deque = deque(maxlen=HEALTH_WINDOW_SIZE)
         self._health_ceiling: "int | None" = None
+        # ADR 061 death provenance: True only when health OCR read a value below
+        # 1 CONFIRMED by the next reading (another sub-1 read or no digits).
+        # A single 0 that bounces straight back to healthy is an OCR misread —
+        # the 2026-08-01 11:01 session produced 5 such bounces in 20 minutes.
+        # The eject's synthetic health-dead reset and the no-digits fallback
+        # never set it.
+        self._death_observed = False
+        self._death_pending = False   # sub-1 read seen, awaiting confirmation
+        # Latched copy of _death_observed at the moment of each alive transition,
+        # so the main loop can ask "was this alive transition preceded by an
+        # observed death" (respawn evidence during GAME_BATTLE_EJECT).
+        self._alive_after_observed_death = False
+        # ADR 062/064 health respawn detector state (shadow: log-only; dual: fires plumbing).
+        self._shadow_mark_tier: "str | None" = None   # "strong" | "weak" | None
+        self._shadow_mark_ts = 0.0
+        # ADR 064 confirmed-absence clock: timestamp of the last ADR-063-CONFIRMED
+        # health reading. Unlike the raw no-digits clock, this runs through both
+        # true digit absence AND hallucinated overlay digits (which never confirm),
+        # and is NOT touched by reset_health_for_respawn() — OCR plumbing wiping
+        # shadow evidence caused 5 structural misses in the 11:01 session.
+        self._last_confirmed_read_ts = 0.0
+        # Recent confirmed (ts, value) pairs for the ADR 064 decline prior.
+        self._confirmed_history: deque = deque(maxlen=10)
+        # Instrumentation: worst mid-battle gap between confirmed reads, and how
+        # many gaps exceeded the evidence window (checks the 8.0s default).
+        self._max_confirmed_gap_s = 0.0
+        self._confirmed_gap_over_threshold = 0
+        self._shadow_fires: "list[tuple[float, str, float]]" = []   # (ts, tier, dead_for_s)
+        self._shadow_ocr_respawn_edges: "list[float]" = []          # rising-edge timestamps
+        self._shadow_prev_ocr_respawn = False
+        # ADR 064 dual mode: set when composite evidence fires while OCR has not
+        # detected the episode; the main loop treats it as respawn-detected.
+        self.health_respawn_event = threading.Event()
         # Signalled when _game_battle_alive transitions False → True.
         # The main loop waits on this event to restart the mission immediately.
         self.alive_event = threading.Event()
@@ -1154,8 +1213,14 @@ class GameStateAnalyzer:
         with self._health_lock:
             self._health_window.clear()
             self._health_ceiling = None
+        self._health_raw_window.clear()
         with self._telemetry_lock:
             self._telemetry.reset()
+        # The background OCR loop does not spin outside battle states, so its
+        # non-battle-branch mark clear never runs — clear here instead. A mark
+        # carried across the lobby fired on the next battle's first health read
+        # (observed 2026-08-01 10:01 session: weak fires with dead_for 84-117s).
+        self._shadow_clear_mark()
 
     def on_enter_GAME_UNKNOWN(self):
         self._unknown_candidate_state = None
@@ -1189,6 +1254,9 @@ class GameStateAnalyzer:
             self._health_ceiling = None
             self._health_no_digits_since = 0.0
             self._game_battle_alive = False
+            # ADR 063: pre-respawn raw reads must not help confirm post-respawn
+            # values across the discontinuity.
+            self._health_raw_window.clear()
             # The cached value is from the PREVIOUS life. Leaving it set let
             # on_enter_GAME_BATTLE (respawn_reset path) re-arm alive_event from
             # pre-death health whenever health OCR missed the 0 during the death
@@ -1226,6 +1294,319 @@ class GameStateAnalyzer:
         """True when the last health reading during GAME_BATTLE was >= 1."""
         with self._health_lock:
             return self._game_battle_alive
+
+    @property
+    def alive_after_observed_death(self) -> bool:
+        """True when the most recent alive transition followed an OBSERVED death.
+
+        Observed means health OCR explicitly read a value below 1 (ADR 061) —
+        the eject sequence's synthetic health-dead reset and the no-digits
+        fallback do not count. Used by the main loop to distinguish a real
+        respawn from the spurious eject-start alive transition.
+        """
+        with self._health_lock:
+            return self._alive_after_observed_death
+
+    def mark_health_dead_synthetic(self):
+        """Force health state to dead WITHOUT marking an observed death (ADR 061).
+
+        Called by eject_and_dive to arm the dead→alive transition that triggers
+        the post-respawn mission restart. Synthetic by definition: it must never
+        count as respawn evidence, so _death_observed is cleared alongside.
+        """
+        if not self._health_lock.acquire(timeout=1.0):
+            logger.warning("mark_health_dead_synthetic: _health_lock timeout — skipping health reset")
+            return
+        try:
+            self._game_battle_alive = False
+            self._health_no_digits_since = 0.0
+            self._death_observed = False
+            self._death_pending = False
+        finally:
+            if self._health_lock.locked():
+                self._health_lock.release()
+
+    def _confirm_health_value(self, raw: int) -> "int | None":
+        """ADR 063 recurrence confirmation: return raw when it recurs, else None.
+
+        A read is confirmed when at least 2 of the last value_confirm_window raw
+        reads (including this one) agree within value_confirm_tolerance. Garbage
+        fragments and concatenations vary read-to-read and never confirm; the
+        true value recurs constantly. Reads above max_plausible are discarded
+        before entering the window so they cannot self-confirm.
+        """
+        if raw > self._health_max_plausible:
+            logger.debug("Analyzer: health read %d over max_plausible %d — discarded",
+                         raw, self._health_max_plausible)
+            return None
+        self._health_raw_window.append(raw)
+        agreeing = sum(
+            1 for m in self._health_raw_window
+            if abs(m - raw) <= self._health_confirm_tolerance
+        )
+        if agreeing >= 2:
+            return raw
+        logger.debug("Analyzer: health read %d unconfirmed (window=%s) — holding previous value",
+                     raw, list(self._health_raw_window))
+        return None
+
+    def _process_health_reading(self, health_value):
+        """Process one health OCR result: spike filter, alive flag, death provenance.
+
+        Extracted from the background OCR loop (ADR 061/062) so the two-tier
+        death marking and the alive-transition latch are unit-testable. Called
+        from the background OCR thread; health_value None means no digits read.
+        Raw values pass the ADR 063 recurrence filter first — an unconfirmed
+        read counts as digits-present (clocks reset) but changes nothing else.
+        """
+        if health_value is not None:
+            health_value = self._confirm_health_value(health_value)
+            if health_value is None:
+                # Digits were present but unconfirmed: reset the raw no-digits
+                # clock (the alive flag claims ABSENCE of digits, and these were
+                # digits) and hold every other piece of state as-is. The ADR 064
+                # confirmed-absence clock deliberately keeps running — garbage
+                # digits hallucinated on the respawn overlay never confirm, so
+                # unconfirmed presence is still evidence-grade absence.
+                with self._health_lock:
+                    self._health_no_digits_since = 0.0
+                self._evaluate_confirmed_absence()
+                return
+        if health_value is not None:
+            # Evaluate the confirmed-absence gap BEFORE moving the anchor: when
+            # this confirmed read is the first in a death-length while (overlay
+            # just cleared), the weak mark must form now so the alive transition
+            # below can fire on it.
+            self._evaluate_confirmed_absence()
+            self._record_confirmed_read(health_value)
+            confirmed_death = False
+            with self._health_lock:
+                health_value, self._health_ceiling = _apply_health_ceiling_filter(
+                    health_value,
+                    self._health_window,
+                    self._health_ceiling,
+                    HEALTH_WINDOW_SIZE,
+                    HEALTH_SPIKE_FACTOR,
+                    self._health,
+                )
+                prev_alive = self._game_battle_alive
+                alive = health_value >= 1 if health_value is not None else False
+                self._health = health_value
+                self._game_battle_alive = alive
+                self._health_no_digits_since = 0.0
+                if health_value is not None and health_value < 1:
+                    # Sub-1 read: confirm on the second consecutive dead-ish
+                    # reading (this one, or a no-digits follow-up below).
+                    if self._death_pending:
+                        self._death_pending = False
+                        self._death_observed = True
+                        confirmed_death = True
+                    else:
+                        self._death_pending = True
+                elif alive and self._death_pending:
+                    # Single 0 bounced straight back to healthy — OCR misread.
+                    self._death_pending = False
+                    logger.debug("Analyzer: single sub-1 health read bounced — death not confirmed")
+            if confirmed_death:
+                self._shadow_mark_death("strong")
+            if (health_value, alive) != self._last_logged_health:
+                logger.info("Health: %s | alive=%s", health_value, alive)
+                self._last_logged_health = (health_value, alive)
+            # Signal False → True transition for immediate mission restart.
+            if alive and not prev_alive:
+                logger.info("Analyzer: health alive transition False→True — resetting health ceiling")
+                with self._health_lock:
+                    self._health_window.clear()
+                    self._health_ceiling = None
+                    # Latch death provenance for this transition (ADR 061).
+                    self._alive_after_observed_death = self._death_observed
+                    self._death_observed = False
+                self.alive_event.set()
+            if alive:
+                self._shadow_maybe_fire()
+        else:
+            # No digits — only clear alive flag after the shared no-digits window.
+            now_t = time.time()
+            with self._health_lock:
+                no_digits_since = self._health_no_digits_since
+                if no_digits_since == 0.0:
+                    self._health_no_digits_since = now_t
+                    no_digits_since = now_t
+                if self._death_pending:
+                    # Sub-1 read followed by digits vanishing (death animation /
+                    # respawn overlay) — that is a confirmed observed death.
+                    self._death_pending = False
+                    self._death_observed = True
+                    confirmed_death = True
+                else:
+                    confirmed_death = False
+            if confirmed_death:
+                self._shadow_mark_death("strong")
+            self._evaluate_confirmed_absence()
+            if no_digits_since == now_t:
+                logger.debug("Analyzer: Health OCR returned no digits (grace timer started)")
+            elif now_t - no_digits_since >= self._death_no_digits_s:
+                with self._health_lock:
+                    self._game_battle_alive = False
+                logger.debug(
+                    "Analyzer: Health OCR no digits for %.1fs → game_battle_alive=False",
+                    now_t - no_digits_since)
+            else:
+                logger.debug(
+                    "Analyzer: Health OCR no digits (%.1fs elapsed, %.1fs threshold)",
+                    now_t - no_digits_since, self._death_no_digits_s)
+
+    # ------------------------------------------------------------------
+    # ADR 062/064 — health respawn detector (shadow scores, dual acts)
+    # ------------------------------------------------------------------
+
+    def _record_confirmed_read(self, value: int) -> None:
+        """Update the ADR 064 confirmed-read anchor, decline history, and gap stats."""
+        now_t = time.time()
+        if self._last_confirmed_read_ts > 0.0:
+            gap = now_t - self._last_confirmed_read_ts
+            if gap > self._max_confirmed_gap_s:
+                self._max_confirmed_gap_s = gap
+            if gap >= self._death_no_confirmed_s:
+                self._confirmed_gap_over_threshold += 1
+        self._last_confirmed_read_ts = now_t
+        self._confirmed_history.append((now_t, value))
+
+    def _decline_before(self, evidence_start: float) -> bool:
+        """True when confirmed health fell by >= decline_evidence_drop in the window before evidence began."""
+        window_start = evidence_start - self._decline_evidence_window_s
+        vals = [v for ts, v in self._confirmed_history if window_start <= ts <= evidence_start]
+        if len(vals) < 2:
+            return False
+        return (max(vals) - vals[-1]) >= self._decline_evidence_drop
+
+    def _evaluate_confirmed_absence(self) -> None:
+        """ADR 064 weak tier: mark death when no CONFIRMED reading for the evidence window.
+
+        Runs through both true digit absence and hallucinated overlay digits
+        (which never confirm). The window halves when confirmed health was in
+        rapid decline just before the last confirmed read — a death prior.
+        """
+        if self._respawn_detection_mode not in ("shadow", "dual"):
+            return
+        anchor = self._last_confirmed_read_ts
+        if anchor <= 0.0:
+            return
+        required = self._death_no_confirmed_s
+        if self._decline_before(anchor):
+            required /= 2.0
+        if time.time() - anchor >= required:
+            self._shadow_mark_death("weak")
+
+    def _shadow_mark_death(self, tier: str):
+        """Record a death mark for the health detector. Strong upgrades weak; weak never downgrades."""
+        if self._respawn_detection_mode not in ("shadow", "dual"):
+            return
+        if self._shadow_mark_tier is None or (tier == "strong" and self._shadow_mark_tier == "weak"):
+            if self._shadow_mark_tier is None:
+                self._shadow_mark_ts = time.time()
+            self._shadow_mark_tier = tier
+            logger.debug("Health respawn detector: death mark set (tier=%s)", tier)
+
+    def _shadow_maybe_fire(self):
+        """Fire the health respawn decision when a confirmed alive read follows a death mark.
+
+        shadow mode: recorded and logged only. dual mode (ADR 064): additionally
+        sets health_respawn_event so the main loop runs the respawn plumbing —
+        unless respawn OCR is currently detecting the overlay (it owns the episode).
+        """
+        if self._respawn_detection_mode not in ("shadow", "dual") or self._shadow_mark_tier is None:
+            return
+        now_t = time.time()
+        dead_for = now_t - self._shadow_mark_ts
+        tier = self._shadow_mark_tier
+        self._shadow_mark_tier = None
+        if dead_for > 30.0:
+            # A real death→respawn cycle inside battle completes well under 30s
+            # (overlay ~8s). A mark this old survived a path that skipped the
+            # battle-exit clear — discard it rather than fire a phantom respawn.
+            logger.debug(
+                "Health respawn detector: stale death mark discarded (tier=%s, %.1fs old)",
+                tier, dead_for,
+            )
+            return
+        self._shadow_fires.append((now_t, tier, dead_for))
+        if self._respawn_detection_mode == "dual":
+            with self._ocr_cache_lock:
+                ocr_currently_detecting = bool(self._ocr_cache['result'][0])
+            if ocr_currently_detecting:
+                logger.info(
+                    "Health respawn detector: evidence fired (tier=%s, dead_for=%.1fs) — OCR owns the episode, standing down",
+                    tier, dead_for,
+                )
+            else:
+                logger.info(
+                    "\033[93m💛 HEALTH RESPAWN FALLBACK firing (tier=%s, dead_for=%.1fs) — OCR missed this respawn (ADR 064 dual)\033[0m",
+                    tier, dead_for,
+                )
+                self.health_respawn_event.set()
+        else:
+            logger.info(
+                "SHADOW respawn detector: would fire (tier=%s, dead_for=%.1fs) — log-only, ADR 064 Phase A'",
+                tier, dead_for,
+            )
+
+    def _shadow_clear_mark(self):
+        """Drop any pending death mark and evidence state (called when leaving battle states)."""
+        if self._shadow_mark_tier is not None:
+            logger.debug("Health respawn detector: death mark cleared (left battle state)")
+            self._shadow_mark_tier = None
+        self._last_confirmed_read_ts = 0.0
+        self._confirmed_history.clear()
+        self.health_respawn_event.clear()
+        with self._health_lock:
+            self._death_pending = False
+
+    def _shadow_record_ocr_respawn(self, respawn_detected: bool):
+        """Record rising edges of OCR respawn detection for agreement matching."""
+        if self._respawn_detection_mode in ("shadow", "dual"):
+            if respawn_detected and not self._shadow_prev_ocr_respawn:
+                self._shadow_ocr_respawn_edges.append(time.time())
+        self._shadow_prev_ocr_respawn = respawn_detected
+
+    def shadow_respawn_summary(self) -> "dict | None":
+        """Return the agreement summary, or None when the health detector is off.
+
+        A fire matched to an OCR rising edge within 15 s counts as agreement;
+        unmatched fires are false fires; unmatched OCR edges are misses. Also
+        reports the ADR 064 confirmed-gap instrumentation used to sanity-check
+        the death_no_confirmed_s default against real data.
+        """
+        if self._respawn_detection_mode not in ("shadow", "dual"):
+            return None
+        edges = list(self._shadow_ocr_respawn_edges)
+        fires = list(self._shadow_fires)
+        deltas = []
+        unmatched_fires = 0
+        remaining_edges = list(edges)
+        for fire_ts, _tier, _dead_for in fires:
+            best = None
+            for e in remaining_edges:
+                d = abs(fire_ts - e)
+                if d <= 15.0 and (best is None or d < abs(fire_ts - best)):
+                    best = e
+            if best is None:
+                unmatched_fires += 1
+            else:
+                deltas.append(round(fire_ts - best, 2))
+                remaining_edges.remove(best)
+        return {
+            "mode": self._respawn_detection_mode,
+            "shadow_fires": len(fires),
+            "ocr_respawns": len(edges),
+            "matched": len(deltas),
+            "matched_within_5s": sum(1 for d in deltas if abs(d) <= 5.0),
+            "false_fires": unmatched_fires,
+            "missed_ocr_respawns": len(remaining_edges),
+            "fire_deltas_s": deltas,
+            "max_confirmed_gap_s": round(self._max_confirmed_gap_s, 2),
+            "confirmed_gaps_over_threshold": self._confirmed_gap_over_threshold,
+        }
 
     def crops_for_state(self, state: "GameState | None" = None) -> "dict[str, CropCoords]":
         """Return only the crops relevant to the given game state.
@@ -1543,6 +1924,7 @@ class GameStateAnalyzer:
                     with self._ocr_cache_lock:
                         self._ocr_cache['result'] = respawn_result
                         self._ocr_cache['timestamp'] = current_time
+                    self._shadow_record_ocr_respawn(respawn_detected)
 
                     # Now wait for incoming — its result is independent of respawn.
                     incoming_eval = incoming_future.result(timeout=120)
@@ -1646,51 +2028,7 @@ class GameStateAnalyzer:
                         health_value, health_ocr_time = health_future.result(timeout=120)
                         if self._tracker:
                             self._tracker.record_ocr_crop("health", health_ocr_time)
-                        if health_value is not None:
-                            with self._health_lock:
-                                health_value, self._health_ceiling = _apply_health_ceiling_filter(
-                                    health_value,
-                                    self._health_window,
-                                    self._health_ceiling,
-                                    HEALTH_WINDOW_SIZE,
-                                    HEALTH_SPIKE_FACTOR,
-                                    self._health,
-                                )
-                                prev_alive = self._game_battle_alive
-                                alive = health_value >= 1 if health_value is not None else False
-                                self._health = health_value
-                                self._game_battle_alive = alive
-                                self._health_no_digits_since = 0.0
-                            if (health_value, alive) != self._last_logged_health:
-                                logger.info("Health: %s | alive=%s", health_value, alive)
-                                self._last_logged_health = (health_value, alive)
-                            # Signal False → True transition for immediate mission restart.
-                            if alive and not prev_alive:
-                                logger.info("Analyzer: health alive transition False→True — resetting health ceiling")
-                                with self._health_lock:
-                                    self._health_window.clear()
-                                    self._health_ceiling = None
-                                self.alive_event.set()
-                        else:
-                            # No digits — only clear alive flag after 3 s of consecutive misses.
-                            now_t = time.time()
-                            with self._health_lock:
-                                no_digits_since = self._health_no_digits_since
-                                if no_digits_since == 0.0:
-                                    self._health_no_digits_since = now_t
-                                    no_digits_since = now_t
-                            if no_digits_since == now_t:
-                                logger.debug("Analyzer: Health OCR returned no digits (grace timer started)")
-                            elif now_t - no_digits_since >= 3.0:
-                                with self._health_lock:
-                                    self._game_battle_alive = False
-                                logger.debug(
-                                    "Analyzer: Health OCR no digits for %.1fs → game_battle_alive=False",
-                                    now_t - no_digits_since)
-                            else:
-                                logger.debug(
-                                    "Analyzer: Health OCR no digits (%.1fs elapsed, 3s threshold)",
-                                    now_t - no_digits_since)
+                        self._process_health_reading(health_value)
                     # Resolve ammo futures and fire events.
                     ammo_flares_ocr_time = 0.0
                     ammo_missile_ocr_time = 0.0
@@ -1752,6 +2090,9 @@ class GameStateAnalyzer:
                     health_future = executor.submit(_process_health_region, health_frame)
                     health_value, _ = health_future.result(timeout=120)
                     if health_value is not None:
+                        # ADR 063: same recurrence confirmation as the battle path.
+                        health_value = self._confirm_health_value(health_value)
+                    if health_value is not None:
                         with self._health_lock:
                             health_value, self._health_ceiling = _apply_health_ceiling_filter(
                                 health_value,
@@ -1766,6 +2107,11 @@ class GameStateAnalyzer:
                                 prev_alive = self._game_battle_alive
                                 self._health = health_value
                                 self._game_battle_alive = True
+                                if not prev_alive:
+                                    # Latch death provenance (ADR 061) — same rule as
+                                    # the battle-state transition site.
+                                    self._alive_after_observed_death = self._death_observed
+                                    self._death_observed = False
                             logger.info(
                                 "Analyzer: health %d detected in GAME_STARTING → game_battle_alive=True",
                                 health_value)
@@ -1773,6 +2119,7 @@ class GameStateAnalyzer:
                                 self.alive_event.set()
                 else:
                     logger.debug("Skipping GAME_BATTLE crop OCR in %s state", state.name)
+                    self._shadow_clear_mark()
                     self._background_ocr_stop.wait(timeout=0.2)
             except Exception as e:
                 if self._background_ocr_stop.is_set() or self._shutting_down or _is_shutdown_runtime_error(e):

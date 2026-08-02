@@ -1518,15 +1518,9 @@ class Controller:
         self._game_battle_since = time.time()
         # Force health state to dead so the False→True transition fires when
         # health is detected again after respawn, triggering mission restart.
+        # Synthetic reset (ADR 061): must not count as an observed death.
         if self._analyzer is not None:
-            if not self._analyzer._health_lock.acquire(timeout=1.0):
-                logger.warning("eject_and_dive: _health_lock timeout — skipping health reset")
-            else:
-                try:
-                    self._analyzer._game_battle_alive = False
-                    self._analyzer._health_no_digits_since = 0.0
-                finally:
-                    self._analyzer._health_lock.release()
+            self._analyzer.mark_health_dead_synthetic()
 
         def _run():
             self._ejecting.set()

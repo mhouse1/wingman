@@ -172,8 +172,13 @@ class MissionStatsTracker:
                 self._total_manual_takeovers += 1
                 self._current["manual_takeover_count"] += 1
 
-    def finalize(self, run_id: str | None = None) -> dict:
-        """Close any open mission, build session dict, write JSON. Returns session dict."""
+    def finalize(self, run_id: str | None = None, extra: "dict | None" = None) -> dict:
+        """Close any open mission, build session dict, write JSON. Returns session dict.
+
+        extra: optional additional top-level sections to embed in the summary
+        (e.g. the ADR 062 shadow-detector agreement block). Keys must not
+        collide with the built-in summary fields.
+        """
         got = self._lock.acquire(timeout=5.0)
         if not got:
             # Shutdown must still produce stats; a 5s-held lock here means
@@ -181,12 +186,12 @@ class MissionStatsTracker:
             # acquired — locked() being True could be another thread's hold.
             logger.warning("MissionStatsTracker: lock timeout in finalize — proceeding unlocked")
         try:
-            return self._finalize_locked(run_id)
+            return self._finalize_locked(run_id, extra)
         finally:
             if got:
                 self._lock.release()
 
-    def _finalize_locked(self, run_id: str | None = None) -> dict:
+    def _finalize_locked(self, run_id: str | None = None, extra: "dict | None" = None) -> dict:
         if self._in_mission:
             # Shutdown mid-mission: honour any outcome hint already recorded
             # (e.g. missiles_empty fired but the round never reached its end
@@ -223,6 +228,10 @@ class MissionStatsTracker:
             "avg_mission_duration_s": round(avg_duration, 1) if avg_duration is not None else None,
             "missions": self._missions,
         }
+        if extra:
+            for key, value in extra.items():
+                if key not in self._summary:
+                    self._summary[key] = value
 
         self._write_json(self._summary)
         return self._summary

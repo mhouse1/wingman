@@ -1,8 +1,8 @@
 # ADR 061 — Eject Termination via Observed-Death Health Signal
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-01 | 1.6.29          |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-01 | 1.6.29          |
 
 Refines [ADR 059](059-health-gated-immediate-mission-restart.md) (Draft):
 extends its alive-event re-arm rule to cover state-gate misses, which ADR 059
@@ -86,7 +86,12 @@ followed by recovery would otherwise fake a respawn.
 
 A new flag alongside `_game_battle_alive` (under `_health_lock`):
 
-- Set **True** only when health OCR reads an explicit numeric value below 1.
+- Set **True** only when health OCR reads an explicit numeric value below 1
+  **confirmed by the next reading being sub-1 or no-digits** (amended
+  2026-08-01 after the 11:01 live session: transient false `Health: 0` reads
+  that bounce straight back to healthy occurred 5 times in 20 minutes; a
+  single unconfirmed 0 would have spuriously terminated an eject the same
+  way. A lone sub-1 read that bounces cancels the pending evidence).
 - Set **False** by the eject's synthetic reset, by the no-digits fallback,
   and whenever the alive transition is consumed as respawn evidence.
 
@@ -126,6 +131,13 @@ reconstruction.
 
 **4. Explicit non-decisions.**
 
+- Eject termination via the health signal fires **only**
+  `stop_eject_sequence()` plus the event re-arm — it does *not* emit the
+  `respawn_detected` plumbing (stats respawn count, missile-ignore window,
+  capture hook). Missed-overlay respawns therefore remain uncounted in
+  session stats until ADR 062 Phase B makes the health signal the primary
+  detector. (Resolved 2026-08-01 review: keep 061 minimal rather than
+  duplicating event-emission logic that ADR 062 restructures.)
 - `GAME_BATTLE_MANUAL` alive transitions are still consumed (now with a log):
   a manually flown aircraft that regains health must not trigger automation.
   ADR 059 decision 1 already routes manual-mode *deaths* back to auto.
@@ -177,3 +189,11 @@ reconstruction.
 - This ADR moves to Accepted only after implementation lands, gates
   (`make tp`) are green, and one live session demonstrates either a
   fallback-path recovery or a full session with zero eject stalls.
+
+**Accepted 2026-08-01** on the zero-eject-stalls criterion: the 11:46 and
+17:34 live sessions ran all eject sequences to clean termination (respawn
+OCR path), and the new disposition logic is visible working in the 17:34
+log — two spurious eject-start alive transitions consumed with the expected
+log lines (17:36:19, 17:36:43), none of them cancelling the eject. The
+fallback branch itself has not yet fired in a live missed-overlay eject;
+its behavior is pinned by unit tests.
