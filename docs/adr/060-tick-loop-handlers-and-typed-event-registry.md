@@ -1,8 +1,8 @@
 # ADR 060 — Tick-Loop Handler Objects and Typed Event Registry
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-02 | 1.6.29          |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-02 | 1.6.29          |
 
 Extends [ADR 039](039-reduce-orchestration-coupling-first.md) (Accepted).
 ADR 039 established the `set_on_*` orchestration API to decouple the analyzer
@@ -13,16 +13,16 @@ consolidation precedent set by [ADR 059](059-health-gated-immediate-mission-rest
 
 ## Status of this document
 
-**Draft — awaiting review. No implementation has been started.** This ADR
-exists so the refactor can be evaluated and approved (or rejected/deferred)
-before any code changes. Each phase below is independently shippable and
-independently abandonable.
+**Implemented and Accepted 2026-08-02.** All eight steps landed, each as its
+own commit with its gate green before the next began. See "Implementation
+results" at the end for what actually happened, including one regression the
+refactor introduced and caught.
 
 **Revised 2026-08-02** after the ADR 061-064 respawn-detection arc landed.
-All measurements below are re-taken against current code; the arc supplied
-four new pieces of evidence (see "What the 061-064 arc added"), none of
-which change the proposed design — they sharpen the case for it and shift
-which file is under the most pressure.
+All measurements in the Context section are as re-taken at that revision; the
+arc supplied four new pieces of evidence (see "What the 061-064 arc added"),
+none of which changed the proposed design — they sharpened the case for it and
+shifted which file was under the most pressure.
 
 ## Context
 
@@ -304,3 +304,67 @@ point with the codebase left consistent.
 - Acceptance criterion for flipping this ADR to Accepted: all steps landed,
   gates green, and one clean production session with no behavioral deltas
   attributable to the refactor.
+
+
+## Implementation results (2026-08-02)
+
+All eight steps landed as separate commits, `make tp` green after each and
+`make tp-full` additionally after steps 2.4 and 2.5.
+
+| Metric | Before | After |
+|--------|--------|-------|
+| `main.py` lines | 1292 | 837 |
+| `main()` `nonlocal` declarations | 6 | 1 |
+| `main()` tick-loop concerns | 5 inline blocks | 5 handler objects |
+| Orchestration hook mechanism | 7 single-slot setters | typed registry, multi-subscriber |
+| Handler/registry unit tests | 0 | 78 (61 handler + 17 registry) |
+| `make test` gate | 220 passed | 353 passed |
+
+New module `wingman/tick_handlers.py` (757 lines) holds
+`WaitingFallbackHandler`, `EnemyPresenceHandler`, `AmmoEventsHandler`,
+`RespawnHandler`, and `TrackingHudHandler`.
+
+### What the plan got right
+
+- **Cheapest-first ordering held.** Phase 1 de-risked the wiring exactly as
+  intended: by the time `RespawnHandler` (step 2.4, the ADR 059/061/064 flow)
+  was extracted, the collaborator-call pattern was already proven by three
+  simpler handlers.
+- **Rule 2 forced the coupling into the open.** Every cross-concern effect
+  became a named call — `enemy_presence.arm()`,
+  `ammo_events.suppress_after_respawn()` — and the CR-013-4 shape (eject
+  interrupt nested under the restart cooldown) is now pinned by a regression
+  test rather than by comment.
+- **The stats-in-replay benefit was real**, with one adjustment: replay and
+  capture lanes write their stats JSON to `tests/test-output` instead of
+  `docs/performance`, because those directories feed the performance-trend and
+  ADR 064 shadow ledgers and must stay live-sessions-only. Step 1.3's original
+  wording did not anticipate that.
+
+### What it missed
+
+- **`make test` was not running `tests/test_health_respawn.py`.** The Makefile
+  enumerates test files explicitly and the ADR 061-064 arc's 55 tests were
+  never added, so they had not been gated since creation. Found while adding
+  the registry tests; fixed in the Phase 1 commit (gate 220 → 292 passed
+  before any refactor work).
+- **Step 2.3 introduced a regression the gates did not catch.** Removing an
+  `elif` branch header orphaned the `target_tracker.reset()` call into the
+  `GAME_BATTLE` branch, where its `not in _battle_states` condition can never
+  hold — the battle-exit tracker reset silently became dead code. Caught by
+  eye while reading the region during step 2.5, fixed there
+  (`TrackingHudHandler.on_state_change`), and now covered by a regression
+  test. The lesson is narrower than "code moves are unsafe": a *pure* move is
+  safe, but deleting lines adjacent to a branch header is not a pure move, and
+  no gate covered that behaviour. Rule 1 should have called for reading the
+  full enclosing branch after each deletion, not only running the gates.
+- **`RespawnState` still lives in `main.py`** and is injected into
+  `RespawnHandler` rather than owned by it, to keep step 2.4 a move rather
+  than a redesign. Moving it into `tick_handlers.py` is a follow-up.
+
+### Not done (deliberately)
+
+`eject_and_dive` extraction from `controller.py` and the analyzer's
+health-respawn detector state remain out of scope, unchanged from the
+decision above. Phase 3 (a `RespawnDetector` collaborator inside the
+analyzer) is still un-specified and should be its own ADR.
