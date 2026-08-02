@@ -1473,9 +1473,16 @@ class GameStateAnalyzer:
         self._confirmed_history.append((now_t, value))
 
     def _decline_before(self, evidence_start: float) -> bool:
-        """True when confirmed health fell by >= decline_evidence_drop in the window before evidence began."""
+        """True when confirmed health fell by >= decline_evidence_drop in the window before evidence began.
+
+        Sub-1 values are excluded: a confirmed 0 is a death claim (the strong
+        tier's business), not a damage-trend datapoint — including it let a
+        garbage-zero dip at eject onset fake a decline and halve the window
+        (2026-08-02 07:58 session false fires).
+        """
         window_start = evidence_start - self._decline_evidence_window_s
-        vals = [v for ts, v in self._confirmed_history if window_start <= ts <= evidence_start]
+        vals = [v for ts, v in self._confirmed_history
+                if window_start <= ts <= evidence_start and v >= 1]
         if len(vals) < 2:
             return False
         return (max(vals) - vals[-1]) >= self._decline_evidence_drop
@@ -1533,6 +1540,18 @@ class GameStateAnalyzer:
             logger.debug(
                 "Health respawn detector: weak evidence without alive transition — "
                 "discarded (mid-combat confirmation gap, not a respawn)")
+            return
+        if tier == "weak" and self.game_state != GameState.GAME_BATTLE:
+            # ADR 064 amendment 2 (2026-08-02, sessions 07:58/09:25): weak fires
+            # are valid only in plain GAME_BATTLE. Eject onset deliberately
+            # thrashes health state (all verified false fires triggered 1-2s
+            # into GAME_BATTLE_EJECT; ADR 061's observed-death path owns eject
+            # termination), and in GAME_BATTLE_MANUAL the operator owns the
+            # aircraft. Real respawns fire in GAME_BATTLE: the OCR/eject paths
+            # exit those states before health returns.
+            logger.debug(
+                "Health respawn detector: weak evidence discarded in %s (fires only in GAME_BATTLE)",
+                self.game_state.name)
             return
         if dead_for > 30.0:
             # A real death→respawn cycle inside battle completes well under 30s

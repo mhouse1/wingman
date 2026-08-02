@@ -87,6 +87,18 @@ abandoned. The overlay is the easiest OCR target in the HUD and measured
    invisible to the weak tier again — the strong tier and respawn OCR
    remain their cover.
 
+5. **Weak-tier fires are valid only in plain `GAME_BATTLE`.**
+   *(Amended 2026-08-02 after Phase A′ sessions 07:58 and 09:25.)*
+   All six of the 07:58 session's post-corroboration false fires triggered
+   1-2 s into `GAME_BATTLE_EJECT` — the eject deliberately thrashes health
+   state (synthetic dead reset, garbage-zero dips during low-health
+   missiles-empty chaos, with the decline prior amplifying them until sub-1
+   values were excluded from it). Real respawns fire in `GAME_BATTLE`: the
+   OCR and eject paths exit `GAME_BATTLE_EJECT`/`GAME_BATTLE_MANUAL` before
+   health returns, so the FSM state at fire time is a clean discriminator
+   in measured data. Eject termination stays owned by ADR 061's
+   observed-death path; manual-mode aircraft stay the operator's.
+
 Instrumentation: the shadow summary additionally records the maximum
 mid-battle confirmed-reading gap per session (`max_confirmed_gap_s`,
 `confirmed_gaps_over_threshold`), which is what caught the 8.0 s

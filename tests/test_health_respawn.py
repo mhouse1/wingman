@@ -370,6 +370,32 @@ class TestCompositeEvidence:
         _feed(a, 250)                   # confirms; gap exceeded window; dead→alive transition
         assert len(a._shadow_fires) == 1
 
+    def test_weak_fire_suppressed_outside_game_battle(self, fast_window_analyzer):
+        """ADR 064 amendment 2: eject onset thrashes health state — all six
+        07:58-session false fires triggered 1-2s into GAME_BATTLE_EJECT."""
+        a = fast_window_analyzer
+        _feed(a, 240, 240, None)
+        time.sleep(0.06)
+        _feed(a, None)                          # weak mark + alive False
+        a.state = GameState.GAME_BATTLE_EJECT.name
+        _feed(a, 250)                           # transition, but wrong state
+        assert a._shadow_fires == []
+        a.state = GameState.GAME_BATTLE.name
+
+    def test_sub1_values_excluded_from_decline_prior(self):
+        a = _make_analyzer(**{
+            "health.death_no_confirmed_s": 0.2,
+            "health.decline_evidence_drop": 80,
+        })
+        try:
+            _feed(a, 250, 250, 0, 0)            # confirmed garbage-zero dip
+            time.sleep(0.12)                    # exceeds half-window only
+            _feed(a, 44)                        # evaluation tick
+            # 250→0 must NOT count as decline (0 is a death claim, not a trend)
+            assert a._shadow_mark_tier is None
+        finally:
+            a.cleanup()
+
     def test_mid_combat_gap_without_transition_never_fires(self, fast_window_analyzer):
         """Regression for the 05:37 session's 9 false fires: a confirmed-read
         gap with digits present throughout (alive never drops) is a garbage
