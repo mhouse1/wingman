@@ -48,7 +48,9 @@ def _feed(a: GameStateAnalyzer, *values):
 
 @pytest.fixture
 def analyzer():
-    a = _make_analyzer()
+    # Pin shadow mode: these tests exercise shadow semantics regardless of the
+    # shipped config default (dual since Phase B-prime, 2026-08-02).
+    a = _make_analyzer(**{"respawn_detection.mode": "shadow"})
     try:
         yield a
     finally:
@@ -59,6 +61,7 @@ def analyzer():
 def fast_window_analyzer():
     """Analyzer with tiny evidence windows so weak-tier tests don't sleep 6-8s."""
     a = _make_analyzer(**{
+        "respawn_detection.mode": "shadow",
         "health.death_no_digits_s": 0.05,
         "health.death_no_confirmed_s": 0.05,
     })
@@ -481,6 +484,19 @@ class TestDualMode:
             _feed(a, 240, 240, 0, 0, 0, 250, 250)
             assert not a.health_respawn_event.is_set()
             assert len(a._shadow_fires) == 1   # still scored
+        finally:
+            a.cleanup()
+
+    def test_dual_stands_down_after_recent_ocr_edge(self):
+        """A slow post-overlay health confirm must not double-fire the plumbing
+        when OCR already detected this episode (seen in the ADR 044 replay lane)."""
+        a = self._dual()
+        try:
+            a._shadow_record_ocr_respawn(True)   # OCR edge ~now
+            a._shadow_record_ocr_respawn(False)
+            _feed(a, 240, 240, 0, 0, 0, 250, 250)
+            assert not a.health_respawn_event.is_set()  # edge within 20s window
+            assert len(a._shadow_fires) == 1            # still scored for the summary
         finally:
             a.cleanup()
 

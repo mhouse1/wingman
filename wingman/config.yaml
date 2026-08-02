@@ -125,9 +125,10 @@ respawn_detection:
   # ADR 064 mode: ocr | shadow | dual.
   # shadow = respawn OCR primary; health detector scores itself, acts on nothing.
   # dual   = health detector additionally fires the respawn plumbing when OCR
-  #          missed the episode. Flip to dual only after Phase A-prime shows
-  #          zero false fires (ADR 064 decision 4).
-  mode: shadow
+  #          missed the episode. Flipped to dual 2026-08-02 (Phase B-prime)
+  #          after Phase A-prime measured 27 of 31 real respawns matched with
+  #          zero false fires across two shipped-logic sessions.
+  mode: dual
 health:
   # Shared no-digits window (ADR 062): health readings absent this long mark
   # the aircraft not-alive (and the shadow detector's weak death tier).

@@ -1566,7 +1566,13 @@ class GameStateAnalyzer:
         if self._respawn_detection_mode == "dual":
             with self._ocr_cache_lock:
                 ocr_currently_detecting = bool(self._ocr_cache['result'][0])
-            if ocr_currently_detecting:
+            last_edge = self._shadow_ocr_respawn_edges[-1] if self._shadow_ocr_respawn_edges else 0.0
+            if ocr_currently_detecting or (now_t - last_edge) < 20.0:
+                # OCR already owns this episode — either the overlay is on
+                # screen now, or its edge fired within the episode window.
+                # Without the edge check, a slow post-overlay health confirm
+                # (>10s, outside the main loop's dedup cooldown) double-fired
+                # the respawn plumbing (observed in the ADR 044 replay lane).
                 logger.info(
                     "Health respawn detector: evidence fired (tier=%s, dead_for=%.1fs) — OCR owns the episode, standing down",
                     tier, dead_for,

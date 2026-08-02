@@ -161,3 +161,15 @@ flowchart TD
   in `shadow` mode.
 - Phase A′/B′ criteria as in decision 4, evaluated from the per-session
   `respawn_shadow` stats blocks.
+
+**Phase A′ passed 2026-08-02; `mode: dual` shipped.** On the final logic
+(corroboration + state gate + decline fix), two pure-auto sessions
+(10:04 and 10:24) measured 27 of 31 real respawns matched (87%, deltas
+2.4-11 s, two strong-tier fires) with **zero false fires**. The earlier
+Phase A′ sessions each exposed one false-fire mechanism, fixed by
+amendments 1 (transition corroboration), 2 (GAME_BATTLE-only state gate),
+and the sub-1 decline exclusion — the "missed" counts in stats blocks
+include overlay-flicker double-edges, so real-respawn matching is scored
+from the log's main-loop events. This ADR moves to Accepted after Phase B′
+live evidence: one fallback-caught respawn with correct restart, or three
+dual-mode sessions with zero incorrect fires.
