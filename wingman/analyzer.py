@@ -31,6 +31,24 @@ class GameState(Enum):
     GAME_BATTLE_MANUAL   = auto()  # Player took manual control; auto-mission restart suppressed
     GAME_BATTLE_EJECT    = auto()  # Eject sequence active (missiles empty); respawn detection only
 
+
+class GameEvent(Enum):
+    """Orchestration events the analyzer publishes (ADR 060 Phase 1).
+
+    Replaces ADR 039's single-slot `set_on_*` setters: subscribing to a
+    nonexistent event is an AttributeError at wiring time rather than a silent
+    runtime no-op, and every event fans out to any number of subscribers.
+    Payloads are documented per event; `emit()` passes them through verbatim.
+    """
+    CANCEL_MISSION = auto()            # ()          — transition requires mission cancel
+    START_GAME_STARTING_LOOP = auto()  # ()          — entered GAME_STARTING
+    LOBBY_PLAY_CLICK = auto()          # (crop, frame)
+    LOBBY_POPUP_CLICK = auto()         # (crop,)
+    LOBBY_STALL = auto()               # ()          — no lobby crops detected for the stall window
+    FSM_TRANSITION = auto()            # (trigger, prev_state_name, next_state_name, ts)
+    RESPAWN_DETECTED = auto()          # (frame,)    — fired from the background OCR thread
+
+
 try:
     import easyocr
 except ImportError:
@@ -781,13 +799,11 @@ class GameStateAnalyzer:
         # Trigger methods (play_clicked, cancel_detected, …) are added to this instance
         # by Machine.__init__. All callers use self._trigger() for thread-safe dispatch.
         self._state_lock = threading.Lock()
-        self._on_cancel_mission = None           # injected by main.py after construction
-        self._on_start_game_starting_loop = None  # injected by main.py after construction
-        self._on_lobby_play_click = None         # injected by main.py; called with crop name when PLAY/READY detected
-        self._on_lobby_popup_click = None        # injected by main.py; called with popup crop name when a popup is detected
-        self._on_lobby_stall = None              # injected by main.py; called when no lobby crops detected for 10s
-        self._on_fsm_transition = None           # injected by main.py; called after successful state transitions
-        self._on_respawn_detected = None          # injected by main.py; called with the OCR frame when RESPAWN is first detected
+        # ADR 060 Phase 1: orchestration subscribers, {GameEvent: [(name, callback)]}.
+        # Registration happens at wiring time; emit() dispatches outside the lock
+        # so a slow subscriber cannot block registration or another emit.
+        self._subscribers: "dict[GameEvent, list[tuple[str, object]]]" = {}
+        self._subscribers_lock = threading.Lock()
         self._unknown_debounce_required = max(1, int(startup_cfg.get("debounce_consecutive_required", 2)))
         self._unknown_candidate_state: "GameState | None" = None
         self._unknown_candidate_count = 0
@@ -985,54 +1001,113 @@ class GameStateAnalyzer:
 
             next_state = self.game_state
             if transitioned and next_state != prev_state:
-                if next_state in (GameState.GAME_LOBBY, GameState.GAME_BATTLE_MANUAL) and self._on_cancel_mission:
-                    post_callbacks.append(self._on_cancel_mission)
-                if next_state == GameState.GAME_STARTING and self._on_start_game_starting_loop:
-                    post_callbacks.append(self._on_start_game_starting_loop)
+                if next_state in (GameState.GAME_LOBBY, GameState.GAME_BATTLE_MANUAL):
+                    post_callbacks.append(GameEvent.CANCEL_MISSION)
+                if next_state == GameState.GAME_STARTING:
+                    post_callbacks.append(GameEvent.START_GAME_STARTING_LOOP)
 
-        for callback in post_callbacks:
-            try:
-                callback()
-            except Exception:
-                logger.exception("FSM: post-transition callback failed for trigger '%s'", trigger_name)
+        # Deferred until the state lock is released: side effects must not run
+        # inside the critical section (unchanged ADR 039 ordering).
+        for event in post_callbacks:
+            self.emit(event)
 
-        if transitioned and next_state != prev_state and self._on_fsm_transition is not None:
-            try:
-                self._on_fsm_transition(trigger_name, prev_state.name, next_state.name, time.time())
-            except Exception:
-                logger.exception("FSM: transition callback failed for trigger '%s'", trigger_name)
+        if transitioned and next_state != prev_state:
+            self.emit(GameEvent.FSM_TRANSITION,
+                      trigger_name, prev_state.name, next_state.name, time.time())
         return transitioned
 
     # ------------------------------------------------------------------
-    # Orchestration public API (ADR 039)
+    # Orchestration public API (ADR 039, mechanism revised by ADR 060 Phase 1)
     # ------------------------------------------------------------------
+
+    def subscribe(self, event: GameEvent, callback, *, name: str, replace: bool = False) -> None:
+        """Register `callback` for `event` under a unique `name`.
+
+        Unlike the single-slot setters this replaces, several subscribers may
+        share one event — FSM_TRANSITION fans out to replay assertions, live
+        capture, and mission stats simultaneously instead of the three being
+        mutually exclusive.
+
+        Raises TypeError for a non-GameEvent, and ValueError when `name` is
+        already registered for this event unless `replace=True` — a silent
+        overwrite is the failure mode this registry exists to prevent.
+        """
+        if not isinstance(event, GameEvent):
+            raise TypeError(f"event must be a GameEvent, got {type(event).__name__}")
+        if not callable(callback):
+            raise TypeError(f"callback for {event.name} is not callable")
+        with self._subscribers_lock:
+            subs = self._subscribers.setdefault(event, [])
+            for i, (existing, _) in enumerate(subs):
+                if existing == name:
+                    if not replace:
+                        raise ValueError(
+                            f"subscriber {name!r} already registered for {event.name}")
+                    subs[i] = (name, callback)
+                    return
+            subs.append((name, callback))
+        logger.debug("Event registry: %r subscribed to %s", name, event.name)
+
+    def unsubscribe(self, event: GameEvent, *, name: str) -> bool:
+        """Remove a subscriber. Returns True when one was removed."""
+        with self._subscribers_lock:
+            subs = self._subscribers.get(event, [])
+            for i, (existing, _) in enumerate(subs):
+                if existing == name:
+                    del subs[i]
+                    return True
+        return False
+
+    def has_subscribers(self, event: GameEvent) -> bool:
+        with self._subscribers_lock:
+            return bool(self._subscribers.get(event))
+
+    def emit(self, event: GameEvent, *args) -> None:
+        """Dispatch `args` to every subscriber of `event`.
+
+        Each callback is isolated: one raising does not prevent the others from
+        running (the try/except that was copy-pasted at every former `_on_*`
+        call site now lives here only). Dispatch happens on a snapshot taken
+        outside the registration lock, so callbacks may subscribe or emit.
+        """
+        with self._subscribers_lock:
+            subs = list(self._subscribers.get(event, ()))
+        for name, callback in subs:
+            try:
+                callback(*args)
+            except Exception:
+                logger.exception("Event %s: subscriber %r failed", event.name, name)
+
+    # -- ADR 039 compatibility shims --------------------------------------
+    # Preserve single-slot replace semantics under a fixed subscriber name, so
+    # existing callers (and tests that re-register) behave exactly as before.
 
     def set_on_cancel_mission(self, callback):
         """Set callback invoked after transitions that must cancel mission logic."""
-        self._on_cancel_mission = callback
+        self.subscribe(GameEvent.CANCEL_MISSION, callback, name="legacy", replace=True)
 
     def set_on_start_game_starting_loop(self, callback):
         """Set callback invoked when entering GAME_STARTING."""
-        self._on_start_game_starting_loop = callback
+        self.subscribe(GameEvent.START_GAME_STARTING_LOOP, callback, name="legacy", replace=True)
 
     def set_on_lobby_play_click(self, callback):
         """Set callback invoked with PLAY/READY crop names from lobby quick-scan."""
-        self._on_lobby_play_click = callback
+        self.subscribe(GameEvent.LOBBY_PLAY_CLICK, callback, name="legacy", replace=True)
 
     def set_on_lobby_popup_click(self, callback):
         """Set callback invoked with popup crop names from lobby quick-scan."""
-        self._on_lobby_popup_click = callback
+        self.subscribe(GameEvent.LOBBY_POPUP_CLICK, callback, name="legacy", replace=True)
 
     def set_on_lobby_stall(self, callback):
         """Set callback invoked when no lobby crops detected for 10s (stall recovery)."""
-        self._on_lobby_stall = callback
+        self.subscribe(GameEvent.LOBBY_STALL, callback, name="legacy", replace=True)
 
     def set_on_fsm_transition(self, callback):
         """Set callback invoked after successful FSM transitions.
 
         Callback signature: (trigger_name, prev_state_name, next_state_name, timestamp_s).
         """
-        self._on_fsm_transition = callback
+        self.subscribe(GameEvent.FSM_TRANSITION, callback, name="legacy", replace=True)
 
     def set_on_respawn_detected(self, callback):
         """Set callback invoked when RESPAWN OCR succeeds.
@@ -1040,7 +1115,7 @@ class GameStateAnalyzer:
         Callback signature: (frame: np.ndarray) where frame is the full BGR frame
         used for the OCR scan.  Called from the background OCR thread.
         """
-        self._on_respawn_detected = callback
+        self.subscribe(GameEvent.RESPAWN_DETECTED, callback, name="legacy", replace=True)
 
     def trigger_event(self, name: str) -> bool:
         """Dispatch an FSM trigger via the thread-safe trigger wrapper."""
@@ -1952,11 +2027,7 @@ class GameStateAnalyzer:
                         logger.debug("Analyzer: detected 'RESPAWN' text (matched: '%s')", respawn_text)
                         if self.game_state == GameState.GAME_END_B:
                             self._trigger("respawn_detected")
-                        if self._on_respawn_detected is not None:
-                            try:
-                                self._on_respawn_detected(full_frame)
-                            except Exception:
-                                logger.exception("Analyzer: on_respawn_detected callback error")
+                        self.emit(GameEvent.RESPAWN_DETECTED, full_frame)
 
                     respawn_result = (True, 1.0, "ocr") if respawn_detected else (False, 0.0, None)
                     with self._ocr_cache_lock:
@@ -2379,8 +2450,7 @@ class GameStateAnalyzer:
                                 crop, text,
                             )
                             self._last_lobby_play_click_ts = time.time()
-                            if self._on_lobby_play_click:
-                                self._on_lobby_play_click(crop, frame)
+                            self.emit(GameEvent.LOBBY_PLAY_CLICK, crop, frame)
                             self._trigger("play_clicked")
                             handled = True
                             play_clicked_this_cycle = True
@@ -2394,12 +2464,9 @@ class GameStateAnalyzer:
                             "Lobby quick-scan: no lobby crops detected (stalled %.1fs)",
                             elapsed_stall,
                         )
-                        if elapsed_stall >= 10.0 and self._on_lobby_stall is not None:
+                        if elapsed_stall >= 10.0 and self.has_subscribers(GameEvent.LOBBY_STALL):
                             logger.info("Lobby quick-scan: stall threshold reached — pressing ESC")
-                            try:
-                                self._on_lobby_stall()
-                            except Exception:
-                                logger.exception("Lobby quick-scan: _on_lobby_stall callback failed")
+                            self.emit(GameEvent.LOBBY_STALL)
                             lobby_stall_since = time.time()  # cooldown: next press after another 10s
                     elif handled:
                         lobby_stall_since = 0.0
@@ -2480,8 +2547,7 @@ class GameStateAnalyzer:
                                     "Lobby quick-scan: popup '%s' detected (text='%s')",
                                     crop, text,
                                 )
-                                if self._on_lobby_popup_click:
-                                    self._on_lobby_popup_click(crop)
+                                self.emit(GameEvent.LOBBY_POPUP_CLICK, crop)
                                 popup_detected = True
                                 break
                             logger.debug("Lobby quick-scan: popup '%s' not found", crop)

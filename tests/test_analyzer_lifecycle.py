@@ -107,7 +107,7 @@ def test_trigger_runs_side_effect_callbacks_outside_state_lock(cfg):
         if ok:
             analyzer._state_lock.release()
 
-    analyzer._on_cancel_mission = _cancel_side_effect
+    analyzer.set_on_cancel_mission(_cancel_side_effect)
 
     assert analyzer._trigger("manual_reset") is True
     assert analyzer.game_state == GameState.GAME_LOBBY
@@ -125,8 +125,8 @@ def test_fsm_unattended_lifecycle_and_starting_loop_callbacks(cfg):
     def _on_start_loop():
         events["start_loop"] += 1
 
-    analyzer._on_cancel_mission = _on_cancel
-    analyzer._on_start_game_starting_loop = _on_start_loop
+    analyzer.set_on_cancel_mission(_on_cancel)
+    analyzer.set_on_start_game_starting_loop(_on_start_loop)
 
     assert analyzer.game_state == GameState.GAME_UNKNOWN
 

@@ -21,7 +21,7 @@ WINGMAN_VERSION_DETAILS = "fix disengage roll self-cancel and restart teardown r
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
-from .analyzer import GameStateAnalyzer, GameState
+from .analyzer import GameStateAnalyzer, GameState, GameEvent
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -373,9 +373,12 @@ def main():
         telemetry_cfg=cfg.get("telemetry", {}),
     )
 
-    # Wire FSM entry-hook callbacks (ADR 025) via analyzer public callback setters.
-    analyzer.set_on_cancel_mission(ctrl.cancel_mission)
-    analyzer.set_on_start_game_starting_loop(ctrl.start_game_starting_loop)
+    # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry
+    # (ADR 060 Phase 1). Every subscriber is named; a duplicate name raises at
+    # wiring time rather than silently replacing an earlier subscriber.
+    analyzer.subscribe(GameEvent.CANCEL_MISSION, ctrl.cancel_mission, name="controller")
+    analyzer.subscribe(GameEvent.START_GAME_STARTING_LOOP,
+                       ctrl.start_game_starting_loop, name="controller")
     def _on_lobby_play_click_cb(crop, frame):
         ctrl.click_crop(analyzer.crops[crop], block=False, count=1, region_name=crop)
         if live_capture is not None:
@@ -385,7 +388,7 @@ def main():
             live_capture.on_event("play_clicked", _now)
             live_capture.evaluate(frame, "GAME_LOBBY", _now)
             live_capture.evaluate(frame, "GAME_LOBBY", _now + 1e-6)
-    analyzer.set_on_lobby_play_click(_on_lobby_play_click_cb)
+    analyzer.subscribe(GameEvent.LOBBY_PLAY_CLICK, _on_lobby_play_click_cb, name="controller")
 
     if live_capture is not None:
         def _on_good_luck_frame(gl_frame):
@@ -407,7 +410,8 @@ def main():
             live_capture.on_event("respawn_detected", _now)
             live_capture.evaluate(rs_frame, _state, _now)
             live_capture.evaluate(rs_frame, _state, _now + 1e-6)
-        analyzer.set_on_respawn_detected(_on_respawn_detected_frame)
+        analyzer.subscribe(GameEvent.RESPAWN_DETECTED, _on_respawn_detected_frame,
+                           name="live_capture")
 
         def _on_manual_takeover_frame(mt_frame):
             # Maneuver key pressed in GAME_BATTLE: frame captured just before the
@@ -456,19 +460,22 @@ def main():
                     ctrl.click_crop(analyzer.crops[ready], block=False, count=1, region_name=ready)
             threading.Thread(target=_click_ready_after_invite, daemon=True).start()
 
-    analyzer.set_on_lobby_popup_click(_handle_lobby_popup)
-    analyzer.set_on_lobby_stall(lambda: ctrl.press_escape(hold_seconds=0.05, block=False))
-
-    stats_tracker: "MissionStatsTracker | None" = None
+    analyzer.subscribe(GameEvent.LOBBY_POPUP_CLICK, _handle_lobby_popup, name="controller")
+    analyzer.subscribe(GameEvent.LOBBY_STALL,
+                       lambda: ctrl.press_escape(hold_seconds=0.05, block=False),
+                       name="controller")
 
     def _emit_capture_event(event_name: str) -> None:
         if replay_assertions is not None and replay_capture is not None:
             replay_assertions.on_event(event_name, replay_capture.elapsed_s())
         if live_capture is not None:
             live_capture.on_event(event_name, time.time())
-        if stats_tracker is not None:
-            stats_tracker.on_event(event_name, time.time())
+        stats_tracker.on_event(event_name, time.time())
 
+    # FSM_TRANSITION subscribers are independent (ADR 060 Phase 1). These were
+    # mutually exclusive if/elif/else branches only because the old single-slot
+    # setter could hold one callback — so mission stats were silently not
+    # recorded during replay and capture runs.
     if replay_assertions is not None:
         def _on_fsm_transition(trigger_name, _prev_state_name, next_state_name, _timestamp_s):
             if replay_capture is None:
@@ -477,24 +484,30 @@ def main():
             replay_assertions.on_event(trigger_name, now_s)
             replay_assertions.on_event(f"state_enter:{next_state_name}", now_s)
 
-        analyzer.set_on_fsm_transition(_on_fsm_transition)
-    elif live_capture is not None:
+        analyzer.subscribe(GameEvent.FSM_TRANSITION, _on_fsm_transition, name="replay_assertions")
+
+    if live_capture is not None:
         def _on_capture_fsm_transition(trigger_name, _prev_state_name, next_state_name, _timestamp_s):
             now_s = time.time()
             live_capture.on_event(trigger_name, now_s)
             live_capture.on_event(f"state_enter:{next_state_name}", now_s)
 
-        analyzer.set_on_fsm_transition(_on_capture_fsm_transition)
-    else:
-        stats_tracker = MissionStatsTracker(
-            version=WINGMAN_VERSION,
-            output_dir="docs/performance",
-        )
+        analyzer.subscribe(GameEvent.FSM_TRANSITION, _on_capture_fsm_transition, name="live_capture")
 
-        def _stats_fsm_cb(trigger_name, prev_state_name, next_state_name, timestamp_s):
-            stats_tracker.on_fsm_transition(trigger_name, prev_state_name, next_state_name, timestamp_s)
+    # Stats run in every lane now. Replay/capture runs write their JSON to
+    # tests/test-output instead of docs/performance: those directories feed the
+    # performance-trend and ADR 064 shadow ledgers, which must contain live
+    # sessions only.
+    _stats_live_lane = replay_assertions is None and live_capture is None
+    stats_tracker = MissionStatsTracker(
+        version=WINGMAN_VERSION,
+        output_dir="docs/performance" if _stats_live_lane else "tests/test-output",
+    )
 
-        analyzer.set_on_fsm_transition(_stats_fsm_cb)
+    def _stats_fsm_cb(trigger_name, prev_state_name, next_state_name, timestamp_s):
+        stats_tracker.on_fsm_transition(trigger_name, prev_state_name, next_state_name, timestamp_s)
+
+    analyzer.subscribe(GameEvent.FSM_TRANSITION, _stats_fsm_cb, name="mission_stats")
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
@@ -634,8 +647,7 @@ def main():
             return
         ctrl.reload_flares()
         last_flare_reload_ts = time.time()
-        if stats_tracker is not None:
-            stats_tracker.on_event("flare_reload", last_flare_reload_ts)
+        stats_tracker.on_event("flare_reload", last_flare_reload_ts)
 
     def _handle_no_missiles():
         """End mission and eject when missile count reaches zero."""
@@ -709,8 +721,7 @@ def main():
             except Exception as e:
                 logger.warning("PerformanceTracker: record_reaction failed: %s", e)
 
-            if stats_tracker is not None:
-                stats_tracker.on_event("flare_burst_deployed", time.time())
+            stats_tracker.on_event("flare_burst_deployed", time.time())
 
             def _flare_burst():
                 for _ in range(3):
