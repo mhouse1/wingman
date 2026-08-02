@@ -16,8 +16,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.6.29"
-WINGMAN_VERSION_DETAILS = "fix disengage roll self-cancel and restart teardown race - no more uncommanded flight"
+WINGMAN_VERSION = "1.7.0"
+WINGMAN_VERSION_DETAILS = "dual-sensor respawn detection, over-rotation eject release, per-concern tick-loop handlers"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
