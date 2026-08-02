@@ -71,10 +71,26 @@ abandoned. The overlay is the easiest OCR target in the HUD and measured
    booster, not a guarantee.)
 3. **Strong tier unchanged** (ADR 061/063: confirmed sub-1 read, then
    evidence-level confirmation).
+4. **Weak-tier fires require the dead→alive transition as corroboration.**
+   *(Amended 2026-08-02 after Phase A′ session 1, the 05:37 session.)*
+   The instrumentation immediately falsified the 8.0 s assumption: real
+   mid-battle confirmed-read gaps reach **11 s** in garbage regimes
+   (15 gaps over threshold in one session), overlapping real-respawn gaps
+   of 8-11.4 s — **gap length alone cannot separate the two.** That session
+   scored 11/12 matched (the recall win the confirmed-absence clock was
+   built for) but 9 false fires, every one a *transition-less* weak fire
+   (alive never dropped — mid-combat gap), while all 11 matches coincided
+   with a real dead→alive transition. Weak evidence therefore only fires
+   on the transition; strong-tier evidence is intrinsic and fires on any
+   confirmed alive read. Accepted trade: respawns whose overlay hallucinates
+   enough digits to keep the raw absence clock reset (the 03:33 class) are
+   invisible to the weak tier again — the strong tier and respawn OCR
+   remain their cover.
 
 Instrumentation: the shadow summary additionally records the maximum
-mid-battle confirmed-reading gap per session, so the 8.0 s default is
-checked against data rather than assumption.
+mid-battle confirmed-reading gap per session (`max_confirmed_gap_s`,
+`confirmed_gaps_over_threshold`), which is what caught the 8.0 s
+miscalibration in one session.
 
 ### 3. Promotion from shadow to active fallback
 

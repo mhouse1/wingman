@@ -169,6 +169,29 @@ of decision 5, which is granted only when nose-down budget headroom remains.
 porpoise oscillation, not slow convergence, so holding longer buys loop exposure
 rather than confirmation.
 
+**11. One distinct-sample grace when the deadline expires mid-streak.**
+*(Added 2026-08-02 after the 05:02 production eject.)*
+
+The confirmation streak counts distinct telemetry samples (decision 2) at a
+~3.0 s refresh cadence, but the loop polls every 1.5 s — so re-reading the
+same sample once is *routine cadence behavior*, not a frozen sensor. The
+same-sample dedup branch conflated the two: with the legacy deadline
+expired, one routine re-poll released nose-down. Measured cost on
+2026-08-02 05:02: the dive was genuinely established (accepted altitude
+rate −351 ft/s, streak 1 of 2) and the phase released **1.2 s before the
+sample that would have completed confirmation** (−412 ft/s at 05:02:24);
+the aircraft then self-leveled at ~2700 ft and flew straight on afterburner
+until operator abort.
+
+When the deadline expires while a streak is live (`steep_streak >= 1`),
+the phase now waits one extra `streak_grace_s` window (default 4.5 s,
+granted once per phase, 0 disables) for the next distinct sample.
+`total_nose_budget_s` still caps the whole sequence, so the safety bound
+is unchanged. The give-up log is also split into its two real cases:
+"legacy deadline expired awaiting next distinct sample" (fresh-ish sample,
+the racing case) vs "telemetry stopped refreshing" (no new sample for at
+least 4 poll intervals — a genuinely frozen sensor).
+
 ## Configuration
 
 ```yaml
@@ -177,6 +200,8 @@ telemetry:
   eject_closed_loop:
     confirm_descent_fps: 250        # raw sustained descent that also confirms a dive
     total_nose_budget_s: 20.0       # cap on cumulative NOSE_DOWN hold per eject
+    streak_grace_s: 4.5             # decision 11: extra distinct-sample wait when the
+                                    # deadline expires mid-confirmation-streak
 ```
 
 ## Consequences
@@ -210,6 +235,9 @@ telemetry:
 - `test_steep_dive_is_accepted_at_throttled_cadence` — decision 8 (altitude gate)
 - `test_gate_is_skipped_once_the_seed_is_stale` — decision 7
 - `test_stale_seed_bypass_does_not_fabricate_a_rate_across_the_gap` — decision 9
+- `test_deadline_mid_streak_gets_grace_and_confirms` — decision 11
+- `test_grace_expires_without_new_sample_and_releases` — decision 11 (frozen sensor still bounded)
+- `test_grace_disabled_releases_at_deadline` — decision 11 (config off-switch)
 
 Live-flight confirmation of the descent-rate threshold is still outstanding; this
 ADR stays `Draft` until a production session shows a confirmed dive.

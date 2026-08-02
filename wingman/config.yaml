@@ -212,6 +212,8 @@ telemetry:                          # ADR 038 — altitude/speed signal model
     max_corrections: 3              # bound on corrective re-issues per eject sequence
     legacy_nose_hold_s: 5.0         # open-loop hold used when telemetry gives no evidence
     confirm_consecutive: 2          # DISTINCT telemetry samples required before the dive counts as confirmed
+    streak_grace_s: 4.5             # ADR 058 d11: extra wait (once per phase) when the legacy deadline
+                                    # expires mid-confirmation-streak; 0 disables
     dive_reentries: 2               # times the hold phase may re-enter nose-down when the dive decays
     confirm_descent_fps: 250        # ADR 058: raw sustained descent (ft/s) that also confirms a dive,
                                     # independent of the speed-ratio band (which never fired in production)

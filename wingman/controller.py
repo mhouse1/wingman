@@ -525,6 +525,9 @@ class Controller:
         # ADR 058: raw descent-rate confirmation, independent of the sine-ratio band.
         self._eject_cl_confirm_descent_fps = float(_ecl.get("confirm_descent_fps", 250.0))
         self._eject_cl_total_nose_budget_s = float(_ecl.get("total_nose_budget_s", 20.0))
+        # ADR 058 decision 11: one distinct-sample grace when the legacy deadline
+        # expires mid-confirmation-streak. 0 disables.
+        self._eject_cl_streak_grace_s = float(_ecl.get("streak_grace_s", 4.5))
         # Cumulative time NOSE_DOWN has actually been held during the current
         # eject. Deliberately not a wall-clock deadline from eject start: the
         # afterburner hold phase runs up to 120s with no key down, and charging
@@ -1301,6 +1304,7 @@ class Controller:
         # reading satisfy confirm_consecutive=2 by being read twice — defeating
         # the exact low-speed-transient protection ADR 038 added it for.
         last_streak_sample_ts: "float | None" = None
+        deadline_grace_granted = False  # ADR 058 decision 11: once per phase
 
         while True:
             if self._eject_stop.wait(timeout=self._eject_cl_check_interval_s):
@@ -1374,16 +1378,35 @@ class Controller:
                 # sample while actually settling into a 35-40 degree dive) —
                 # require consecutive confirmations from DISTINCT samples.
                 if sample_ts is not None and sample_ts == last_streak_sample_ts:
-                    # Same physical reading polled twice — not new evidence. A
-                    # sensor that has stopped refreshing is "no confident
-                    # telemetry" for confirmation purposes, so fall back to the
-                    # legacy timer rather than spinning here until the reading
-                    # ages past stale_after_s (which would silently stretch the
-                    # nose-down hold to the staleness horizon).
+                    # Same physical reading polled twice — not new evidence. At a
+                    # 1.5s poll cadence against ~3.0s telemetry refresh one
+                    # re-poll is ROUTINE, not a frozen sensor — so a deadline hit
+                    # mid-streak earns one distinct-sample grace before giving up
+                    # (ADR 058 decision 11; on 2026-08-02 05:02 the phase
+                    # released 1.2s before the sample that would have confirmed).
                     if time.time() >= legacy_deadline:
-                        logger.info(
-                            "Controller: eject_and_dive — telemetry stopped refreshing "
-                            "before confirmation, releasing nose-down on timer")
+                        sample_age = time.time() - sample_ts
+                        if (steep_streak >= 1
+                                and not deadline_grace_granted
+                                and self._eject_cl_streak_grace_s > 0):
+                            deadline_grace_granted = True
+                            legacy_deadline = time.time() + self._eject_cl_streak_grace_s
+                            logger.info(
+                                "Controller: eject_and_dive — deadline reached mid-confirmation "
+                                "(streak %d/%d, sample age %.1fs) — granting %.1fs distinct-sample grace",
+                                steep_streak, self._eject_cl_confirm_consecutive,
+                                sample_age, self._eject_cl_streak_grace_s)
+                            continue
+                        if sample_age >= 4 * self._eject_cl_check_interval_s:
+                            # Genuinely frozen: no new sample for well past the
+                            # expected refresh cadence.
+                            logger.info(
+                                "Controller: eject_and_dive — telemetry stopped refreshing "
+                                "before confirmation, releasing nose-down on timer")
+                        else:
+                            logger.info(
+                                "Controller: eject_and_dive — legacy deadline expired awaiting "
+                                "next distinct sample, releasing nose-down on timer")
                         self._eject_phase_exit_reason = "no_telemetry"
                         return False
                     continue

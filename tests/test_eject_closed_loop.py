@@ -110,6 +110,72 @@ def test_no_telemetry_falls_back_to_legacy_timer(monkeypatch):
     assert _intents(ctrl) == []      # absence of data never triggers corrections
 
 
+class _ScriptedTsStub(_TelemetryStub):
+    """Stub whose altitude sample timestamp follows an explicit per-call script,
+    so tests can freeze and later refresh the sensor deterministically."""
+
+    def __init__(self, ts_offsets, **kw):
+        super().__init__(**kw)
+        self._offsets = list(ts_offsets)
+        self._base = time.time()
+        self._calls = 0
+
+    def get_telemetry(self):
+        idx = min(self._calls, len(self._offsets) - 1)
+        self._calls += 1
+        ts = self._base + self._offsets[idx]
+        return TelemetrySnapshot(
+            speed=TelemetrySignal(value=self.speed, ts=ts, stable_value=float(self.speed),
+                                   trend=self.speed_trend),
+            altitude=TelemetrySignal(value=10000, ts=ts, stable_value=10000.0,
+                                     rate=self.alt_rate),
+            taken_at_s=time.time(),
+            stale_after_s=6.0,
+        )
+
+
+def test_deadline_mid_streak_gets_grace_and_confirms(monkeypatch):
+    """ADR 058 decision 11: a deadline hit one distinct sample short of
+    confirmation waits one grace window instead of releasing (2026-08-02 05:02:
+    the phase released 1.2s before the sample that would have confirmed)."""
+    # Calls 1-3 return the same sample (streak=1, then routine re-polls past the
+    # deadline); call 4 onward returns a fresh sample that completes the streak.
+    stub = _ScriptedTsStub([0.0, 0.0, 0.0, 0.3, 0.3], alt_rate=-800.0)
+    ctrl = _make_ctrl(monkeypatch, stub, legacy_nose_hold_s=0.15, streak_grace_s=0.4)
+
+    cancelled = ctrl._eject_nose_phase_closed_loop()
+
+    assert cancelled is False
+    assert ctrl._eject_phase_exit_reason == "confirmed"
+
+
+def test_grace_expires_without_new_sample_and_releases(monkeypatch):
+    """A genuinely frozen sensor still releases — one grace window later."""
+    stub = _ScriptedTsStub([0.0], alt_rate=-800.0)   # ts never advances
+    ctrl = _make_ctrl(monkeypatch, stub, legacy_nose_hold_s=0.15, streak_grace_s=0.2)
+
+    t0 = time.time()
+    cancelled = ctrl._eject_nose_phase_closed_loop()
+    elapsed = time.time() - t0
+
+    assert cancelled is False
+    assert ctrl._eject_phase_exit_reason == "no_telemetry"
+    assert elapsed >= 0.3          # legacy window plus the single grace
+    assert elapsed < 1.0           # grace granted once, not repeatedly
+
+
+def test_grace_disabled_releases_at_deadline(monkeypatch):
+    stub = _ScriptedTsStub([0.0], alt_rate=-800.0)
+    ctrl = _make_ctrl(monkeypatch, stub, legacy_nose_hold_s=0.15, streak_grace_s=0)
+
+    t0 = time.time()
+    cancelled = ctrl._eject_nose_phase_closed_loop()
+
+    assert cancelled is False
+    assert ctrl._eject_phase_exit_reason == "no_telemetry"
+    assert time.time() - t0 < 0.3  # no grace extension
+
+
 def test_level_flight_triggers_nose_down_reissue(monkeypatch):
     stub = _TelemetryStub(alt_rate=0.0)  # flying straight — unambiguous
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=1)
@@ -279,7 +345,8 @@ def test_confirmation_requires_distinct_samples_not_repeated_polls(monkeypatch):
     stub = _TelemetryStub(alt_rate=-800.0)  # steep AND past confirm_descent_fps
     stub.freeze_ts = True  # every poll returns the SAME physical sample
     ctrl = _make_ctrl(monkeypatch, stub, confirm_consecutive=2,
-                      legacy_nose_hold_s=0.45, verify_window_s=10.0)
+                      legacy_nose_hold_s=0.45, verify_window_s=10.0,
+                      streak_grace_s=0)  # grace behavior owned by the ADR 058 d11 tests
 
     t0 = time.time()
     cancelled = ctrl._eject_nose_phase_closed_loop()
@@ -327,7 +394,8 @@ def test_stale_speed_and_frozen_altitude_never_corrects(monkeypatch):
     stub.freeze_ts = True
     ctrl = _make_ctrl(monkeypatch, stub, confirm_descent_fps=250.0,
                       confirm_consecutive=2, legacy_nose_hold_s=0.45,
-                      verify_window_s=10.0)
+                      verify_window_s=10.0,
+                      streak_grace_s=0)  # grace behavior owned by the ADR 058 d11 tests
 
     t0 = time.time()
     cancelled = ctrl._eject_nose_phase_closed_loop()

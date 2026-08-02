@@ -1423,7 +1423,7 @@ class GameStateAnalyzer:
                     self._death_observed = False
                 self.alive_event.set()
             if alive:
-                self._shadow_maybe_fire()
+                self._shadow_maybe_fire(transitioned=(not prev_alive))
         else:
             # No digits — only clear alive flag after the shared no-digits window.
             now_t = time.time()
@@ -1508,12 +1508,20 @@ class GameStateAnalyzer:
             self._shadow_mark_tier = tier
             logger.debug("Health respawn detector: death mark set (tier=%s)", tier)
 
-    def _shadow_maybe_fire(self):
+    def _shadow_maybe_fire(self, transitioned: bool = True):
         """Fire the health respawn decision when a confirmed alive read follows a death mark.
 
         shadow mode: recorded and logged only. dual mode (ADR 064): additionally
         sets health_respawn_event so the main loop runs the respawn plumbing —
         unless respawn OCR is currently detecting the overlay (it owns the episode).
+
+        transitioned: whether this read is the dead→alive transition. Weak-tier
+        evidence REQUIRES it (ADR 064 amendment, 2026-08-02 05:37 session): a
+        confirmed-read gap alone also occurs mid-combat in garbage regimes
+        (measured up to 11s, overlapping real-respawn gaps of 8-11.4s), and all
+        9 of that session's false fires were transition-less weak fires while
+        all 11 matches coincided with a real transition. Strong-tier evidence
+        is intrinsic and fires regardless.
         """
         if self._respawn_detection_mode not in ("shadow", "dual") or self._shadow_mark_tier is None:
             return
@@ -1521,6 +1529,11 @@ class GameStateAnalyzer:
         dead_for = now_t - self._shadow_mark_ts
         tier = self._shadow_mark_tier
         self._shadow_mark_tier = None
+        if tier == "weak" and not transitioned:
+            logger.debug(
+                "Health respawn detector: weak evidence without alive transition — "
+                "discarded (mid-combat confirmation gap, not a respawn)")
+            return
         if dead_for > 30.0:
             # A real death→respawn cycle inside battle completes well under 30s
             # (overlay ~8s). A mark this old survived a path that skipped the

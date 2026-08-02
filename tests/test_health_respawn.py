@@ -347,25 +347,42 @@ class TestShadowDetector:
 class TestCompositeEvidence:
     """ADR 064 — confirmed-absence clock, decline prior, dual-mode firing."""
 
-    def test_garbage_overlay_sequence_fires(self, fast_window_analyzer):
-        """Replay of the 03:33 miss class: death → overlay with hallucinated
-        digits → recovery. Must now fire instead of missing."""
+    def test_garbage_overlay_marks_but_needs_transition_to_fire(self, fast_window_analyzer):
+        """The 03:33 class (overlay hallucinating digits so the alive flag never
+        drops): weak evidence forms but is withheld without the dead→alive
+        transition — the trade accepted by the 2026-08-02 amendment after the
+        05:37 session showed transition-less weak fires are 9-for-9 false."""
         a = fast_window_analyzer
         _feed(a, 250, 250)              # anchor established
         time.sleep(0.06)
         _feed(a, 44, None, 6)           # overlay: garbage singles and absence — none confirm
         assert a._shadow_mark_tier == "weak"
-        _feed(a, 250, 250)              # post-respawn recovery confirms
-        assert len(a._shadow_fires) == 1
+        _feed(a, 250, 250)              # recovery confirms, but alive never dropped
+        assert a._shadow_fires == []    # withheld — strong tier / respawn OCR cover this class
 
     def test_fire_on_first_confirmed_read_after_gap(self, fast_window_analyzer):
         """The gap is evaluated at confirm time too — a recovery read arriving
-        after a death-length silence must fire even with no interim reads."""
+        after a death-length absence must fire even with no interim evaluations."""
         a = fast_window_analyzer
-        _feed(a, 240, 240)
+        _feed(a, 240, 240, None)        # absence drops the alive flag (real overlay shape)
         time.sleep(0.06)
-        _feed(a, 250)                   # confirms against the 240s; gap exceeded window
+        _feed(a, None)                  # raw window crossed → alive False
+        _feed(a, 250)                   # confirms; gap exceeded window; dead→alive transition
         assert len(a._shadow_fires) == 1
+
+    def test_mid_combat_gap_without_transition_never_fires(self, fast_window_analyzer):
+        """Regression for the 05:37 session's 9 false fires: a confirmed-read
+        gap with digits present throughout (alive never drops) is a garbage
+        stretch, not a respawn — weak evidence without the dead→alive
+        transition is discarded."""
+        a = fast_window_analyzer
+        _feed(a, 240, 240)              # anchor; alive True
+        time.sleep(0.06)
+        _feed(a, 64)                    # garbage — unconfirmed, digits present, marks weak
+        assert a._shadow_mark_tier == "weak"
+        _feed(a, 240)                   # confirms; NO transition (alive stayed True)
+        assert a._shadow_fires == []    # discarded, not fired
+        assert a._shadow_mark_tier is None
 
     def test_confirmed_stream_never_marks(self, analyzer):
         _feed(analyzer, 240, 240, 240, 238, 240)
