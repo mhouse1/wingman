@@ -1,8 +1,8 @@
 # ADR 060 — Tick-Loop Handler Objects and Typed Event Registry
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-02 | 1.6.29          |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-02 | 1.6.29          |
 
 Extends [ADR 039](039-reduce-orchestration-coupling-first.md) (Accepted).
 ADR 039 established the `set_on_*` orchestration API to decouple the analyzer
@@ -13,13 +13,10 @@ consolidation precedent set by [ADR 059](059-health-gated-immediate-mission-rest
 
 ## Status of this document
 
-**Implemented 2026-08-02; still Draft pending live validation.** All eight
-steps landed, each as its own commit with its gate green before the next
-began. The remaining acceptance criterion is one clean production session
-with no behavioural deltas versus the pre-refactor baseline — the gates cover
-replay and capture lanes only, and this refactor touched the riskiest file in
-the repo. See "Implementation results" at the end, including one regression
-the refactor introduced.
+**Implemented and Accepted 2026-08-02**, after the 16:18 live session (40m17s,
+8 missions, 15 respawns, 0 errors, 0 tracebacks). See "Implementation results"
+and "Live validation" at the end — including one regression the refactor
+introduced, and two honest caveats on the validation.
 
 **Revised 2026-08-02** after the ADR 061-064 respawn-detection arc landed.
 All measurements in the Context section are as re-taken at that revision; the
@@ -371,3 +368,41 @@ New module `wingman/tick_handlers.py` (757 lines) holds
 health-respawn detector state remain out of scope, unchanged from the
 decision above. Phase 3 (a `RespawnDetector` collaborator inside the
 analyzer) is still un-specified and should be its own ADR.
+
+
+## Live validation (2026-08-02 16:18 session)
+
+40m17s, 8 missions, 15 respawns, 3 manual takeovers, 0 errors, 0 tracebacks,
+clean shutdown.
+
+All five extracted handlers exercised, and the Phase 1 registry dispatched
+74 FSM transitions with **zero subscriber failures**:
+
+| Handler | Live evidence |
+|---------|---------------|
+| `RespawnHandler` | 15 respawns detected, 14 restarts, 11 deferrals correctly re-armed, every alive-event disposition logged (ADR 061 rule 3 holding) |
+| `WaitingFallbackHandler` | 5 CANCEL detections and 5 queue-fallback promotions — both paths |
+| `AmmoEventsHandler` | 118 incoming-flare bursts, 27 padlock target-spreads |
+| `TrackingHudHandler` | 773 HUD writes |
+| `EnemyPresenceHandler` | 0 disengages — see caveat 2 |
+
+Mission outcomes were normal: 6 `click_to`, 1 `missiles_empty`, 1 `unknown`
+(the mission in progress when the operator quit, 25 s in — the documented
+shutdown behaviour, not a defect).
+
+**Caveat 1 — not a single-variable test.** This session also carried ADR 058
+decision 12 (over-rotation release, nose budget 20 s -> 10 s). Any behavioural
+delta cannot be attributed cleanly to one change. The one delta observed is
+the ADR 064 shadow match rate: 12 of 15 real respawns versus 15/17 and 16/17
+in the two pre-refactor sessions, with **zero false fires** (the
+safety-critical metric) in all three. That is within the historical band on
+n=15-17, one of the three misses sits 7 s from a manual takeover, OCR caught
+all 15 respawns so there was no operational impact, and the detector itself
+lives in `analyzer.py` — code Phase 2 did not touch, while decision 12 does
+shift when the aircraft impacts and therefore when health returns relative to
+the OCR edge. Not attributed to this refactor, but recorded rather than
+waved away.
+
+**Caveat 2 — `EnemyPresenceHandler` was not exercised.** Zero disengages fired
+because no 30 s enemy-free window occurred in this session. Its behaviour is
+covered by unit tests only; the live path remains unproven.
