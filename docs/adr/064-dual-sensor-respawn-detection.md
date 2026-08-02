@@ -1,8 +1,8 @@
 # ADR 064 — Dual-Sensor Respawn Detection with Composite Health Evidence
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-02 | 1.6.29          |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-02 | 1.6.29          |
 
 Supersedes [ADR 062](062-health-signal-respawn-detection-retiring-respawn-ocr.md)
 (Rejected by its Phase A data): the goal changes from *replacing* respawn OCR
@@ -11,7 +11,12 @@ to *backing it up*. Generalizes [ADR 061](061-eject-termination-via-observed-dea
 confirmed-value stream of [ADR 063](063-health-ocr-value-confirmation-filter.md)
 (Accepted).
 
-**Draft — awaiting review. No implementation started.**
+**Accepted 2026-08-02** on the three-clean-dual-sessions criterion: sessions
+11:59, 12:55, and 13:29 (54 real respawns) ran with the fallback armed and
+recorded zero incorrect fires — 38 of 38 episode stand-downs correct (OCR
+detected first every time; the health detector independently confirmed each
+episode within seconds and yielded). The live fallback-catch case remains
+covered by unit tests and the ADR 044 replay lane's end-to-end demonstration.
 
 ## Context
 
