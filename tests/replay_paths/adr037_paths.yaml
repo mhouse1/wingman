@@ -61,7 +61,9 @@ PATH2:
     max_settle_time_s: 2.0
   - screenshot_name: P2_020_MANUAL_TAKEOVER_MOMENT.png
     injection_time_s: 1.9
-    expected_state: GAME_BATTLE
+    # missiles_empty at P2_010 fires eject_started (ADR 056), so the takeover
+    # moment is captured from the EJECT state, not GAME_BATTLE.
+    expected_state: GAME_BATTLE_EJECT
     expected_trigger: manual_mode
     max_settle_time_s: 1.5
   - screenshot_name: P2_030_GAME_BATTLE_MANUAL_HUD.png
@@ -123,7 +125,7 @@ PATH3:
     max_settle_time_s: 2.0
   - screenshot_name: P2_020_MANUAL_TAKEOVER_MOMENT.png
     injection_time_s: 9.8
-    expected_state: GAME_BATTLE
+    expected_state: GAME_BATTLE_EJECT
     expected_trigger: manual_mode
     max_settle_time_s: 1.5
   - screenshot_name: P2_030_GAME_BATTLE_MANUAL_HUD.png

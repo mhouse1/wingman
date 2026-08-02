@@ -286,6 +286,8 @@ class LivePathCaptureEngine:
 
         self._start_ts: float | None = None
         self._end_ts: float | None = None
+        self._first_evaluate_s: float | None = None
+        self._oo_deadline_s: float = self._timeout_s
         self._current_index = 0
         self._current_started_s: float | None = None
         self._current_injected = False
@@ -568,6 +570,29 @@ class LivePathCaptureEngine:
             return
 
         if self._out_of_order:
+            # Out-of-order mode has no per-step ordering, so the timeout is
+            # lane-wide: the deadline is the last scheduled screenshot
+            # (max injection_time_s) plus timeout_s of slack — timeout_s alone
+            # would expire before late-scheduled steps can even appear. Once
+            # past the deadline, every still-pending step is failed so
+            # is_complete() terminates the main loop instead of waiting
+            # forever on a step whose readiness can never occur. Measured on
+            # caller-supplied now_s, the same clock the sequential per-step
+            # timeout uses.
+            if self._first_evaluate_s is None:
+                self._first_evaluate_s = now_s
+                self._oo_deadline_s = (
+                    max((step.injection_time_s or 0.0) for step in self._steps)
+                    + self._timeout_s
+                )
+            elif now_s - self._first_evaluate_s > self._oo_deadline_s:
+                for result in self._results:
+                    if result.status not in {"captured", "failed", "skipped"}:
+                        result.timeout = True
+                        result.status = "failed"
+                        result.notes = f"timeout_after_{self._oo_deadline_s:.1f}s"
+                self._mark_ended(now_s)
+                return
             normalized_state = _normalize_state(state_name)
             for i, step in enumerate(self._steps):
                 result = self._results[i]
@@ -742,6 +767,13 @@ class ReplayAssertionEngine:
         self._active_index = 0
         self._failures: list[str] = []
         self._event_trace: list[dict[str, Any]] = []
+        # (event, seen_at_s) buffered when a trigger for the IMMEDIATE NEXT
+        # checkpoint arrives while the current one is still active — an FSM
+        # cascade (e.g. manual_takeover -> state_enter:game_battle_manual)
+        # delivers both back-to-back, and hard-failing on the second made the
+        # harness brittle rather than the run wrong. LivePathCaptureEngine
+        # already applies the same tolerance (_pending_next_trigger).
+        self._pending_next_trigger: "tuple[str, float] | None" = None
 
     def _current(self) -> ReplayCheckpointResult | None:
         if self._active_index >= len(self._results):
@@ -756,6 +788,20 @@ class ReplayAssertionEngine:
             if checkpoint.activated_at_s is None:
                 checkpoint.activated_at_s = now_s
             self._active_index += 1
+            self._apply_pending_trigger(now_s)
+
+    def _apply_pending_trigger(self, now_s: float) -> None:
+        """Credit a buffered early trigger to the newly current checkpoint."""
+        if self._pending_next_trigger is None:
+            return
+        event, seen_at_s = self._pending_next_trigger
+        checkpoint = self._current()
+        self._pending_next_trigger = None
+        if (checkpoint is not None
+                and checkpoint.expected_trigger == event
+                and checkpoint.trigger_met_at_s is None):
+            checkpoint.trigger_met_at_s = seen_at_s
+            self._mark_satisfied_if_complete(checkpoint, now_s)
 
     def on_step_activated(self, step: ReplayStep, now_s: float) -> None:
         checkpoint = self._current()
@@ -778,7 +824,18 @@ class ReplayAssertionEngine:
             self._mark_satisfied_if_complete(checkpoint, now_s)
             return
 
-        for future in self._results[self._active_index + 1:]:
+        # The IMMEDIATE NEXT checkpoint's trigger arriving early is an FSM
+        # cascade, not a broken run — buffer it and credit it when that
+        # checkpoint becomes current. Anything further ahead is genuinely
+        # out of order and still fails hard.
+        next_index = self._active_index + 1
+        if next_index < len(self._results):
+            next_cp = self._results[next_index]
+            if next_cp.expected_trigger == normalized_event:
+                self._pending_next_trigger = (normalized_event, now_s)
+                return
+
+        for future in self._results[self._active_index + 2:]:
             if future.expected_trigger == normalized_event:
                 msg = (
                     "Out-of-order replay trigger: "
@@ -819,6 +876,7 @@ class ReplayAssertionEngine:
         )
         self._failures.append(checkpoint.failure_reason)
         self._active_index += 1
+        self._apply_pending_trigger(now_s)
 
     @property
     def failures(self) -> list[str]:

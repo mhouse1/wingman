@@ -25,11 +25,22 @@ PATH1_RUNTIME:
     expected_trigger: missiles_empty
     max_settle_time_s: 12.0
 
+  # The post-eject respawn/restart flow was previously UNASSERTED here — the
+  # health-gated restart could silently stop working while this gate stayed
+  # green. These two expectations pin it: respawn detection, then the
+  # alive-event restart (the ONLY restart path since the scheduled-restart
+  # machinery was removed).
   - screenshot_name: P1_050_RESPAWN_VISIBLE_NO_HEALTH.png
     injection_time_s: 65.0
+    expected_state: GAME_BATTLE
+    expected_trigger: respawn_detected
+    max_settle_time_s: 12.0
 
   - screenshot_name: P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png
     injection_time_s: 73.0
+    expected_state: GAME_BATTLE
+    expected_trigger: restart_last_mission
+    max_settle_time_s: 12.0
 
   - screenshot_name: P1_070_CLICK_TO_CONTINUE.png
     injection_time_s: 80.0

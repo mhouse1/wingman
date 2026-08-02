@@ -44,7 +44,11 @@ PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pyt
 PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
 CAPTURE_PATH ?= PATH1
 CAPTURE_TIMEOUT_S ?= 120.0
-RR_PATH1_LOG ?= wingman.log
+# Own artifact path, NOT wingman.log: this target rm -f's its log before
+# launching, and pointing it at the production filename silently deleted real
+# session logs every time the gate ran (the 2026-07-30 sessions were lost this
+# way before log rotation existed; rotation cannot defend against a pre-launch rm).
+RR_PATH1_LOG ?= tests/test-output/runtime_replay.path1.log
 RR_PATH1_ASSERTIONS ?= tests/test-output/replay_assertions.path1.json
 RR_PATH1_INTENTS ?= tests/test-output/replay_action_intents.path1.json
 RR_PATH1_REPORT ?= tests/test-output/replay_required_screenshots.path1.json
@@ -66,7 +70,7 @@ preflight:
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_mission_cancel.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_tick_handlers.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -331,11 +335,11 @@ y:
 # Requires real game screenshots in test_screenshots/integration_test/.
 # All-black placeholder screenshots cause tests to skip automatically.
 ocr:
-	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py -m slow -v
+	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py tests/test_telemetry_corpus.py -m slow -v
 
 # Alias for ocr: run integration tests (shorter to type).
 ti:
-	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py -m slow -v
+	$(PYTEST_RUN) tests/test_replay_integration_path1_path2.py tests/test_telemetry_corpus.py -m slow -v
 
 # ADR044 phase 1 runtime lane: run real main loop with replayed PATH1 screenshots.
 rr-path1:

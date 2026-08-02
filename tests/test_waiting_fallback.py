@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from wingman.main import _update_waiting_fallback
+from wingman.tick_handlers import update_waiting_fallback as _update_waiting_fallback
 
 
 class _AnalyzerStub:

@@ -207,6 +207,98 @@ class TestEventCounting:
         assert result["total_manual_takeovers"] == 1
         assert result["missions"][0]["manual_takeover_count"] == 1
 
+    def test_eject_excursion_is_one_mission_not_three(self, tmp_path):
+        """GAME_BATTLE_EJECT is a mid-mission excursion, not a mission boundary.
+
+        Omitting it from _BATTLE_STATES made every missiles-empty eject end a
+        mission and the return from it start a new one: the 2026-07-30 16:27
+        session reported 7 missions for 3 real rounds, with a bogus 1m30s
+        average.
+        """
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_fsm_transition("eject_started", "GAME_BATTLE", "GAME_BATTLE_EJECT", 20.0)
+        t.on_fsm_transition("eject_complete", "GAME_BATTLE_EJECT", "GAME_BATTLE", 40.0)
+        _leave_battle(t, ts=300.0)
+        result = t.finalize()
+        assert result["missions_started"] == 1
+        assert len(result["missions"]) == 1
+        # Duration spans the whole round, not a fragment either side of the eject.
+        assert result["missions"][0]["duration_s"] == pytest.approx(300.0)
+
+    def test_takeover_from_eject_state_is_counted(self, tmp_path):
+        """Takeover entered from GAME_BATTLE_EJECT must still count.
+
+        3 of the 4 takeovers in the 2026-07-30 16:27 session arrived as
+        EJECT -> MANUAL and were dropped, because the counter checked
+        _in_mission before the mission-start handling ran.
+        """
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_fsm_transition("eject_started", "GAME_BATTLE", "GAME_BATTLE_EJECT", 20.0)
+        t.on_fsm_transition("manual_takeover", "GAME_BATTLE_EJECT", "GAME_BATTLE_MANUAL", 25.0)
+        _leave_battle(t, next_state="GAME_END_B", ts=60.0)
+        result = t.finalize()
+        assert result["total_manual_takeovers"] == 1
+        assert result["missions"][0]["manual_takeover_count"] == 1
+
+    def test_takeover_that_opens_a_mission_is_counted(self, tmp_path):
+        """A takeover can be the transition that starts the mission."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        t.on_fsm_transition("manual_takeover", "GAME_LOBBY", "GAME_BATTLE_MANUAL", 0.0)
+        t.on_fsm_transition("end_b", "GAME_BATTLE_MANUAL", "GAME_END_B", 30.0)
+        result = t.finalize()
+        assert result["missions_started"] == 1
+        assert result["total_manual_takeovers"] == 1
+
+    def test_repeated_manual_state_does_not_double_count(self, tmp_path):
+        """Only the ENTRY into manual counts, not every transition landing there."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_fsm_transition("manual_takeover", "GAME_BATTLE", "GAME_BATTLE_MANUAL", 2.0)
+        t.on_fsm_transition("noop", "GAME_BATTLE_MANUAL", "GAME_BATTLE_MANUAL", 3.0)
+        _leave_battle(t, next_state="GAME_END_B", ts=10.0)
+        result = t.finalize()
+        assert result["total_manual_takeovers"] == 1
+
+    def test_click_to_finish_after_an_eject_is_not_booked_as_missiles_empty(self, tmp_path):
+        """The terminal trigger wins over a stale mid-mission pending outcome.
+
+        Since GAME_BATTLE_EJECT became an in-mission state, "missiles_empty" is
+        a mid-mission signal that survives to the end of the round. Checking it
+        before trigger_name made the 2026-07-30 18:51 session report
+        "Missiles empty 10 (100%), Click-to finish 0" despite 10 logged
+        CLICK TO CONTINUE finishes.
+        """
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        # Missiles run out mid-round: eject, die, respawn, keep playing.
+        t.on_event("missiles_empty", 60.0)
+        t.on_fsm_transition("eject_started", "GAME_BATTLE", "GAME_BATTLE_EJECT", 61.0)
+        t.on_fsm_transition("eject_complete", "GAME_BATTLE_EJECT", "GAME_BATTLE", 80.0)
+        # Round actually ends on the click-to-continue screen.
+        t.on_fsm_transition("click_to_detected", "GAME_BATTLE", "GAME_END_B", 300.0)
+        result = t.finalize()
+        assert result["missions_click_to"] == 1
+        assert result["missions_missiles_empty"] == 0
+        # The mid-round fact is still recorded on the mission itself.
+        assert result["missions"][0]["no_missiles_abort"] is True
+
+    def test_missiles_empty_still_used_when_nothing_supersedes_it(self, tmp_path):
+        """_pending_outcome remains the fallback for non-click_to endings."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_event("missiles_empty", 60.0)
+        t.on_fsm_transition("some_other_trigger", "GAME_BATTLE", "GAME_UNKNOWN", 120.0)
+        result = t.finalize()
+        assert result["missions_missiles_empty"] == 1
+
     def test_events_outside_mission_only_go_to_totals(self, tmp_path):
         t = _tracker(tmp_path)
         t._startup_done = True

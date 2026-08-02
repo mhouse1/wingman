@@ -2,6 +2,9 @@ import os
 import time
 import logging
 import threading
+import contextlib
+
+from .telemetry import BAND_STEEP_DIVE, TREND_RISING
 import ctypes
 import sys
 import cv2
@@ -122,28 +125,41 @@ _XKEY_ALIASES = {
 
 
 def _linux_key_event(key: str, event_type) -> None:
-    """Inject a single KeyPress or KeyRelease event via XTest."""
+    """Inject a single KeyPress or KeyRelease event via XTest.
+
+    Retries once on transient failure: each call opens a throwaway Display, so
+    a single failed connection between a press and its release would otherwise
+    leave the key logically held in the X server for the rest of the session
+    (XTest key state is server-side and does not die with this client).
+    """
     _ensure_xauthority()
-    try:
-        from Xlib import display as _xdisplay, X as _X, XK as _XK
-        from Xlib.ext import xtest as _xtest
-        xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
-        keysym = _XK.string_to_keysym(xk_name)
-        if keysym == 0:
-            logger.warning("Linux key: unknown keysym for %r", key)
-            return
-        display_name = os.environ.get("DISPLAY", ":0").strip()
-        d = _xdisplay.Display(display_name)
-        keycode = d.keysym_to_keycode(keysym)
-        if keycode == 0:
-            logger.warning("Linux key: no keycode for keysym %d (%r)", keysym, key)
-            d.close()
-            return
-        _xtest.fake_input(d, event_type, keycode)
-        d.sync()
-        d.close()
-    except Exception as e:
-        logger.error("Linux key event for %r failed: %s", key, e)
+    from Xlib import display as _xdisplay, X as _X, XK as _XK
+    from Xlib.ext import xtest as _xtest
+    xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
+    keysym = _XK.string_to_keysym(xk_name)
+    if keysym == 0:
+        logger.warning("Linux key: unknown keysym for %r", key)
+        return
+    display_name = os.environ.get("DISPLAY", ":0").strip()
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            d = _xdisplay.Display(display_name)
+            try:
+                keycode = d.keysym_to_keycode(keysym)
+                if keycode == 0:
+                    logger.warning("Linux key: no keycode for keysym %d (%r)", keysym, key)
+                    return
+                _xtest.fake_input(d, event_type, keycode)
+                d.sync()
+                return
+            finally:
+                d.close()
+        except Exception as e:
+            last_err = e
+            if attempt == 1:
+                time.sleep(0.05)
+    logger.error("Linux key event for %r failed after retry: %s", key, last_err)
 
 
 class _XKeyEvent:
@@ -435,7 +451,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -482,17 +498,74 @@ class Controller:
 
         # Eject-and-dive cancellation: set by End key to abort the dive thread early
         self._eject_stop = threading.Event()
+        # Why _eject_stop was set — logged with the cancellation so the ADR044/045
+        # validators can tell a respawn-triggered stop (success) from a manual one.
+        self._eject_stop_reason: str = ""
         # Set while eject_and_dive thread is running; cleared by the thread's finally block.
         self._ejecting = threading.Event()
+        # Handle to the current eject thread so cleanup() can join it briefly
+        # and let its finally block release keys before the process exits.
+        self._eject_thread: "threading.Thread | None" = None
+        # Tracks which eject-sequence keys are currently physically held, so
+        # _eject_key() calls are idempotent (a cleanup release of an
+        # already-released key is a no-op) and _programmatic_key_counts stays
+        # balanced regardless of which exit path a given eject run takes.
+        self._eject_held_keys: set = set()
 
-        # Tracks how many programmatic key presses are in flight.
+        # ADR 038 closed-loop eject verification parameters (telemetry: block).
+        _tel_cfg = telemetry_cfg or {}
+        _ecl = _tel_cfg.get("eject_closed_loop", {}) or {}
+        self._eject_cl_enabled = bool(_ecl.get("enabled", True))
+        self._eject_cl_verify_window_s = float(_ecl.get("verify_window_s", 6.0))
+        self._eject_cl_check_interval_s = float(_ecl.get("check_interval_s", 1.5))
+        self._eject_cl_max_corrections = int(_ecl.get("max_corrections", 3))
+        self._eject_nose_hold_s = float(_ecl.get("legacy_nose_hold_s", 5.0))
+        self._eject_cl_confirm_consecutive = max(1, int(_ecl.get("confirm_consecutive", 2)))
+        self._eject_cl_dive_reentries = int(_ecl.get("dive_reentries", 2))
+        # ADR 058: raw descent-rate confirmation, independent of the sine-ratio band.
+        self._eject_cl_confirm_descent_fps = float(_ecl.get("confirm_descent_fps", 250.0))
+        self._eject_cl_total_nose_budget_s = float(_ecl.get("total_nose_budget_s", 10.0))
+        # ADR 058 d12: continuous nose-down hold after which a CLIMB is read as
+        # over-rotation rather than under-rotation. 0 disables.
+        self._eject_cl_over_rotation_after_s = float(_ecl.get("over_rotation_after_s", 6.0))
+        # ADR 058 decision 11: one distinct-sample grace when the legacy deadline
+        # expires mid-confirmation-streak. 0 disables.
+        self._eject_cl_streak_grace_s = float(_ecl.get("streak_grace_s", 4.5))
+        # Cumulative time NOSE_DOWN has actually been held during the current
+        # eject. Deliberately not a wall-clock deadline from eject start: the
+        # afterburner hold phase runs up to 120s with no key down, and charging
+        # that to the nose-down budget would make any dive-decay re-entry an
+        # instant no-op. None means "not inside an eject" (no cap) -- unit tests
+        # that drive the phase directly are uncapped unless they opt in.
+        self._eject_nose_held_total_s: "float | None" = None
+        # Timestamp NOSE_DOWN was most recently pressed, or None when it is up.
+        self._eject_nose_down_since: "float | None" = None
+        # Why the last nose phase returned: confirmed / budget_exhausted /
+        # no_telemetry / cancelled. Lets the hold loop tell a real dive
+        # confirmation from a give-up.
+        self._eject_phase_exit_reason: str = ""
+        self._eject_steep_min_sin = float(_tel_cfg.get("steep_dive_min_sin", 0.8))
+        self._eject_level_max_sin = float(_tel_cfg.get("level_max_sin", 0.15))
+
+        # Tracks how many programmatic presses are in flight, per key.
         # keyboard.KeyboardEvent has no is_injected attribute, so the getattr guard
         # in the maneuver hooks always falls back to False and cannot distinguish
-        # machine-generated from human-generated key events.  Incrementing this
-        # counter before keyboard.press() and decrementing after keyboard.release()
-        # lets the hooks skip cancel logic for keys the mission pressed itself.
-        self._programmatic_key_count = 0
+        # machine-generated from human-generated key events. Incrementing a key's
+        # count before keyboard.press() and decrementing after keyboard.release()
+        # lets the hooks skip cancel logic for keys the mission pressed itself --
+        # keyed per-key (not one global count) so wingman holding NOSE_DOWN during
+        # an eject correction doesn't also swallow a player pressing ROLL_RIGHT to
+        # manually take over (observed in production: the player's manual-takeover
+        # keys could be silently ignored for the whole multi-second nose-down hold,
+        # exactly the moments they'd most want to grab control).
+        self._programmatic_key_counts: dict = {}
         self._programmatic_key_lock = threading.Lock()
+        # Per-key deadline until which a maneuver-key press is still treated as
+        # ours. Covers auto-repeat KeyPress events emitted while we held the key
+        # but delivered by the XRecord listener a few ms after we released it
+        # (see _eject_key / _arm_release_grace).
+        self._prog_release_grace_until: dict = {}
+        self._prog_release_grace_s = 0.15
 
         # Optional callback fired immediately when Good Luck OCR succeeds, with the
         # captured frame.  Used by live capture mode to record the fixture at the
@@ -541,6 +614,7 @@ class Controller:
                     self._last_cancel_key_ts = now
                     logger.info("Controller: '%s' key pressed - cancelling mission and disabling auto-respawn restart", CANCEL_MISSION_KEY)
                     self._auto_respawn_restart = False
+                    self._eject_stop_reason = "manual_cancel_key"
                     self._eject_stop.set()
                     self.cancel_mission()
                 keyboard_module.on_press_key(CANCEL_MISSION_KEY, cancel_mission_hotkey, suppress=False)
@@ -570,7 +644,23 @@ class Controller:
                 logger.exception("Controller: failed to register weapon loop hotkey")
 
             try:
+                self._last_j20_key_ts = 0.0
                 def start_j20_mission(e):
+                    # Our own game_starting-loop presses echo back through
+                    # XRecord — recognize them by the programmatic bracket +
+                    # release grace, NOT by FSM state.
+                    with self._programmatic_key_lock:
+                        if (self._programmatic_key_counts.get(MISSION_J20_KEY, 0) > 0
+                                or time.time() < self._prog_release_grace_until.get(
+                                    MISSION_J20_KEY, 0.0)):
+                            logger.debug(
+                                "Controller: '%s' key is wingman's own injected press (echo), ignoring",
+                                MISSION_J20_KEY)
+                            return
+                    now = time.time()
+                    if now - self._last_j20_key_ts < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_j20_key_ts = now
                     self._auto_respawn_restart = True
                     current_state = self._analyzer.game_state if self._analyzer is not None else None
                     if current_state == GameState.GAME_BATTLE_MANUAL:
@@ -581,15 +671,13 @@ class Controller:
                         )
                         if not self._analyzer.trigger_event("manual_force_battle"):
                             logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                    elif current_state == GameState.GAME_STARTING:
-                        # XRecord captures the XTest-injected 'u' from the game_starting loop.
-                        # Ignore it — the loop itself will launch mission_j20 after Good Luck.
-                        logger.debug(
-                            "Controller: '%s' key during GAME_STARTING — XTest echo from game_starting loop, ignoring",
-                            MISSION_J20_KEY,
-                        )
-                        return
                     else:
+                        # NOTE: there is deliberately no GAME_STARTING special
+                        # case anymore. Echoes of wingman's own presses are
+                        # filtered by the programmatic bracket above; a genuine
+                        # 'u' here is the player asking for the mission NOW
+                        # (e.g. after taking over during the Good-Luck wait) and
+                        # must work — the old state-based echo check ate those.
                         logger.info("Controller: '%s' key pressed - starting J20 mission (state=%s)",
                                     MISSION_J20_KEY,
                                     current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
@@ -674,6 +762,15 @@ class Controller:
             # the padlock loop for 10 seconds so it doesn't immediately re-lock.
             try:
                 def padlock_key_pressed(e):
+                    # Only a *manual* press should suppress the loop. Without this
+                    # guard the loop's own padlock_camera() presses echo back through
+                    # this hook and set the 10s cooldown on every tick, halving the
+                    # effective cadence from 6s to ~12s (observed 2026-07-30).
+                    with self._programmatic_key_lock:
+                        if self._programmatic_key_counts.get(PADLOCK_CAMERA, 0) > 0:
+                            return
+                        if time.time() < self._prog_release_grace_until.get(PADLOCK_CAMERA, 0.0):
+                            return
                     cooldown = 10.0
                     self._padlock_cooldown_until = time.time() + cooldown
                     logger.info("Controller: '%s' key pressed manually - padlock loop cooldown set for %.0fs", PADLOCK_CAMERA, cooldown)
@@ -749,13 +846,27 @@ class Controller:
         """
         if is_injected:
             return False
-        # _programmatic_key_count guards against is_injected being unreliable for keys
-        # wingman actually injects (i/j/k/l). Arrow keys are never injected, so skipping
-        # this check lets the user trigger manual takeover during continuous key holds
-        # (afterburner, roll) without needing to find a gap between mission key presses.
+        # _programmatic_key_counts guards against is_injected being unreliable for keys
+        # wingman actually injects (i/j/k/l). Keyed per-key, not one global flag: wingman
+        # holding NOSE_DOWN during an eject correction must not also swallow the player
+        # pressing a *different* maneuver key (e.g. ROLL_RIGHT) to take over. Arrow keys
+        # are never injected, so skipping this check for them lets the user trigger manual
+        # takeover during continuous key holds (afterburner, roll) without needing to find
+        # a gap between mission key presses.
         if key_name not in ALT_FLIGHT_KEYS:
             with self._programmatic_key_lock:
-                if self._programmatic_key_count > 0:
+                if self._programmatic_key_counts.get(key_name, 0) > 0:
+                    return False
+                # Trailing window after our own release: the X server auto-repeats
+                # XTest-injected keys (measured ~25 Hz), and a repeat emitted while
+                # we still held the key can be delivered by the XRecord listener a
+                # few ms after the release drops the count to zero.
+                if time.time() < self._prog_release_grace_until.get(key_name, 0.0):
+                    logger.debug(
+                        "Controller: maneuver key '%s' ignored — within post-release "
+                        "grace of wingman's own key release (stale auto-repeat)",
+                        key_name,
+                    )
                     return False
         if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
             logger.debug(
@@ -768,6 +879,7 @@ class Controller:
 
         logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", key_name)
         self._auto_respawn_restart = False
+        self._eject_stop_reason = "manual_takeover"
         self._eject_stop.set()
         self.cancel_mission()
         if self._analyzer is not None:
@@ -820,6 +932,18 @@ class Controller:
         # Use generic executor to perform the key press
         self._execute_key_press(AFTERBURNER_KEY, hold_seconds=hold_seconds, block=block, action_name='afterburner')
 
+    def _inc_programmatic_key(self, key: str) -> None:
+        with self._programmatic_key_lock:
+            self._programmatic_key_counts[key] = self._programmatic_key_counts.get(key, 0) + 1
+
+    def _dec_programmatic_key(self, key: str) -> None:
+        with self._programmatic_key_lock:
+            remaining = self._programmatic_key_counts.get(key, 0) - 1
+            if remaining <= 0:
+                self._programmatic_key_counts.pop(key, None)
+            else:
+                self._programmatic_key_counts[key] = remaining
+
     def _execute_key_press(self, key: str, hold_seconds: float = 2.5, block: bool = True, action_name: str | None = None, ignore_cancel: bool = False):
         """Generic key press executor used by maneuvers.
 
@@ -871,8 +995,7 @@ class Controller:
                     logger.error("Controller: keyboard library not available for %s", label)
                     return
                 logger.debug("Controller: using keyboard library for '%s' press", key)
-                with self._programmatic_key_lock:
-                    self._programmatic_key_count += 1
+                self._inc_programmatic_key(key)
                 try:
                     keyboard_module.press(key)
                     start = time.time()
@@ -889,8 +1012,11 @@ class Controller:
                         logger.exception("Controller: failed to release '%s' key", key)
                     logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
                 finally:
-                    with self._programmatic_key_lock:
-                        self._programmatic_key_count -= 1
+                    # Same stale-auto-repeat window as _eject_key: the X server
+                    # repeats XTest-held keys, and the last repeats can land just
+                    # after the release. Arm before dropping the count.
+                    self._arm_release_grace(key)
+                    self._dec_programmatic_key(key)
             except Exception:
                 logger.exception("Controller: %s failed", label)
 
@@ -1000,11 +1126,430 @@ class Controller:
         logger.info("\033[93m🔥 Reloading flares via SPECIAL_ABILITY key\033[0m")
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
 
+    def _eject_key(self, press: bool, key: str, note: str = "eject_and_dive") -> None:
+        """Press or release a key inside the eject sequence, honoring replay simulation.
+
+        NOSE_DOWN_KEY/NOSE_UP_KEY are also watched by the maneuver-key hotkey
+        listener as a manual-takeover signal, and is_injected is unreliable for
+        them (see _programmatic_key_counts comment in __init__). Without this,
+        a corrective re-press issued past the 2s grace period is indistinguishable
+        from the player taking over and self-cancels the eject (observed in
+        production logs: every closed-loop correction triggered a spurious
+        "manual takeover" ~0.2-0.5s after the re-press). Held-state is tracked
+        locally so redundant calls (e.g. the cleanup path releasing a key a
+        correction already released) don't double up the per-key counter.
+        AFTERBURNER_KEY is not a watched maneuver key, so it bypasses this.
+
+        Release ordering is load-bearing. Measured on this host (3.0 s XTest-held
+        key, XRecord listening exactly as _LinuxXTestKeyboard does): the X server
+        auto-repeats XTest-injected keys and emits 60 KeyPress events, one every
+        ~40 ms, every one with send_event=False -- indistinguishable from human
+        input. So the guard must not drop while the key is still physically down.
+        Dropping the counter before the release (as this did) left the guard at
+        zero for the whole duration of keyboard_module.release(), which opens a
+        fresh X Display connection per call (_linux_key_event) -- a multi-ms
+        window against a 40 ms repeat period, and the observed cause of three
+        spurious "manual takeover" self-cancels in the 2026-07-30 16:27 session
+        (log 1464/2739/7711, each 2-5 ms after a phase-end release).
+        Physical release first, then a short drain before the guard drops, so
+        repeats already queued in the XRecord pipeline cannot be misread as the
+        player. This covers every release site by construction, including the
+        phase-end releases that sit outside _eject_guard_hold().
+        """
+        # Accounted before the simulate/no-keyboard early returns so the budget
+        # behaves identically in replay and unit tests.
+        if key == NOSE_DOWN_KEY:
+            self._account_nose_hold(press)
+        if self._simulate_os_input:
+            self._record_action_intent("key_press" if press else "key_release", key=key, action=note)
+            return
+        if not keyboard_module:
+            return
+        guarded = key in (NOSE_DOWN_KEY, NOSE_UP_KEY)
+        if not guarded:
+            try:
+                (keyboard_module.press if press else keyboard_module.release)(key)
+            except Exception:
+                pass
+            return
+
+        if press == (key in self._eject_held_keys):
+            return  # already in that state -- avoid double counting
+        if press:
+            self._eject_held_keys.add(key)
+            self._inc_programmatic_key(key)
+            try:
+                keyboard_module.press(key)
+            except Exception:
+                pass
+            return
+
+        self._eject_held_keys.discard(key)
+        try:
+            keyboard_module.release(key)
+        except Exception:
+            pass
+        finally:
+            # Arm the suppression window BEFORE dropping the count so there is no
+            # instant where neither guard is active.
+            self._arm_release_grace(key)
+            self._dec_programmatic_key(key)
+
+    def _account_nose_hold(self, press: bool) -> None:
+        """Accumulate real NOSE_DOWN hold time for the current eject sequence.
+
+        Idempotent: repeated presses/releases of an already-held/already-released
+        key do not double-count. No-op outside an eject (total is None).
+        """
+        if self._eject_nose_held_total_s is None:
+            return
+        now = time.time()
+        if press:
+            if self._eject_nose_down_since is None:
+                self._eject_nose_down_since = now
+        elif self._eject_nose_down_since is not None:
+            self._eject_nose_held_total_s += now - self._eject_nose_down_since
+            self._eject_nose_down_since = None
+
+    def _eject_nose_held_s(self) -> float:
+        """Cumulative seconds NOSE_DOWN has actually been held this eject."""
+        if self._eject_nose_held_total_s is None:
+            return 0.0
+        held = self._eject_nose_held_total_s
+        if self._eject_nose_down_since is not None:
+            held += time.time() - self._eject_nose_down_since
+        return held
+
+    def _eject_nose_budget_exhausted(self) -> bool:
+        """True when NOSE_DOWN has been held for total_nose_budget_s this eject."""
+        if (self._eject_nose_held_total_s is None
+                or self._eject_cl_total_nose_budget_s <= 0):
+            return False
+        return self._eject_nose_held_s() >= self._eject_cl_total_nose_budget_s
+
+    def _arm_release_grace(self, key: str) -> None:
+        """Suppress maneuver-key takeover for this key briefly after our own release.
+
+        The X server stops auto-repeating the moment the release lands, so this
+        only has to outlast delivery of repeats already queued in the XRecord
+        pipeline (measured 2-35 ms under OCR load). Deliberately short: a human
+        press arriving within this window of wingman's own release would be
+        swallowed, and the whole point of the per-key counter is to keep manual
+        takeover responsive.
+        """
+        with self._programmatic_key_lock:
+            self._prog_release_grace_until[key] = time.time() + self._prog_release_grace_s
+
+    @contextlib.contextmanager
+    def _eject_guard_hold(self):
+        """Keep the maneuver-key hotkey guard up across a release/re-press dance.
+
+        _eject_key's own bracketing now covers each individual press/release
+        (including a post-release drain), but the dance briefly has NO key held
+        at all between the release and the re-press. This keeps the guard raised
+        across that whole gap, without holding it up for the full multi-
+        correction phase (which would also block a genuine manual takeover for
+        many seconds). Reserves both NOSE_DOWN_KEY and NOSE_UP_KEY -- the
+        straight-reissue and reversal branches touch different keys and either
+        can run once inside.
+        """
+        for key in (NOSE_DOWN_KEY, NOSE_UP_KEY):
+            self._inc_programmatic_key(key)
+        try:
+            yield
+        finally:
+            for key in (NOSE_DOWN_KEY, NOSE_UP_KEY):
+                self._arm_release_grace(key)
+                self._dec_programmatic_key(key)
+
+    def _eject_telemetry(self):
+        """One atomic telemetry snapshot for eject verification, or None."""
+        if self._analyzer is None:
+            return None
+        get_snapshot = getattr(self._analyzer, "get_telemetry", None)
+        if get_snapshot is None:
+            return None
+        try:
+            return get_snapshot()
+        except Exception:
+            logger.exception("Controller: eject telemetry snapshot failed")
+            return None
+
+    def _eject_nose_phase_closed_loop(self) -> bool:
+        """Closed-loop nose-down phase (ADR 038, revised by ADR 058).
+
+        Returns True when cancelled. The exit reason is left in
+        self._eject_phase_exit_reason so callers can tell a genuine dive
+        confirmation from a give-up.
+
+        NOSE_DOWN is already held on entry. The dive is confirmed either by the
+        sine-ratio steep band (ADR 038) or by a sustained raw descent rate
+        (ADR 058) — the ratio path alone confirmed 0 times in 30 minutes of
+        production flight because the observed max |alt_rate/speed| was 0.346
+        against a 0.8 threshold.
+
+        When confident evidence says the dive did not establish, corrections are
+        measure-correct-measure: issue a corrective input, re-check whether the
+        descent rate improved, reverse direction only on the over-rotation
+        signature (already descending, and the last nose-down made the descent
+        shallower). Never reverse while climbing: sine is symmetric about
+        vertical, so a shallow rate cannot distinguish under- from
+        over-rotation, but the SIGN of the rate can.
+
+        Absence of telemetry is never treated as evidence: with no confident
+        reading by the legacy 5 s mark, the phase ends exactly like the old
+        open-loop timer.
+        """
+        phase_start = time.time()
+        legacy_deadline = phase_start + self._eject_nose_hold_s
+        window_deadline = phase_start + self._eject_cl_verify_window_s
+        corrections = 0
+        last_correction_key = NOSE_DOWN_KEY
+        rate_before_correction: "float | None" = None
+        steep_streak = 0
+        # Confirmation must count DISTINCT telemetry samples, not polls. The
+        # loop polls every check_interval_s (1.5 s) but telemetry only refreshes
+        # every ~3.0 s (ocr_every_n_ticks=2), so counting polls let a single OCR
+        # reading satisfy confirm_consecutive=2 by being read twice — defeating
+        # the exact low-speed-transient protection ADR 038 added it for.
+        last_streak_sample_ts: "float | None" = None
+        deadline_grace_granted = False  # ADR 058 decision 11: once per phase
+
+        while True:
+            if self._eject_stop.wait(timeout=self._eject_cl_check_interval_s):
+                self._eject_phase_exit_reason = "cancelled"
+                return True
+
+            # Hard cap on how long NOSE_DOWN is actually HELD across this whole
+            # eject. corrections resets per phase and the phase re-enters up to
+            # dive_reentries times, which let nose-down stay down ~75 s
+            # continuously (2026-07-30) — long enough to fly a full loop.
+            if self._eject_nose_budget_exhausted():
+                logger.warning(
+                    "Controller: eject_and_dive — total nose-down budget (%.0fs) "
+                    "exhausted — releasing nose-down and proceeding",
+                    self._eject_cl_total_nose_budget_s)
+                self._eject_phase_exit_reason = "nose_budget_exhausted"
+                return False
+
+            snap = self._eject_telemetry()
+            band = None
+            rate = None
+            sample_ts = None
+            if snap is not None:
+                band = snap.pitch_band(
+                    steep_min_sin=self._eject_steep_min_sin,
+                    level_max_sin=self._eject_level_max_sin,
+                )
+                if snap.altitude_fresh():
+                    rate = snap.altitude.rate
+                    sample_ts = snap.altitude.ts
+
+            # Two independent confirmations, either sufficient: the ADR 038 sine
+            # band, or a raw sustained descent rate (unit-independent of the
+            # speed reading, so it still works if HUD speed and altitude are on
+            # different scales — which is what the 0.346 ceiling implies).
+            #
+            # Evaluated BEFORE the band-is-None bail-out on purpose. pitch_band()
+            # returns None whenever EITHER signal is stale, so gating on it first
+            # skipped the descent-rate path exactly when speed was unavailable —
+            # the one case it exists to survive. Measured on the 2026-07-30 18:51
+            # session: 9 samples inside eject windows had a fresh altitude rate
+            # at or beyond the confirm threshold but were discarded because speed
+            # had gone stale.
+            descending_hard = (
+                rate is not None
+                and rate <= -self._eject_cl_confirm_descent_fps
+            )
+
+            if band is None and not descending_hard:
+                # Speed is stale, but a FRESH altitude rate that is not
+                # confirm-grade is CONTRARY evidence (e.g. climbing at +300
+                # ft/s) — it must break the confirmation streak, or two deep
+                # samples separated by a climb would count as "consecutive".
+                # Only a truly missing sample (rate None) preserves the streak:
+                # absence of telemetry is never evidence (ADR 038).
+                if rate is not None:
+                    steep_streak = 0
+                    last_streak_sample_ts = None
+                # No confident evidence — fall back to the legacy timer, never
+                # correct against missing data (ADR 038).
+                if time.time() >= legacy_deadline:
+                    logger.info(
+                        "Controller: eject_and_dive — no confident telemetry by legacy "
+                        "deadline, releasing nose-down on timer")
+                    self._eject_phase_exit_reason = "no_telemetry"
+                    return False
+                continue
+            if band == BAND_STEEP_DIVE or descending_hard:
+                # A single steep sample can be a low-speed transient (flight-
+                # tested: a stalled 294 MPH aircraft read ratio 0.87 for one
+                # sample while actually settling into a 35-40 degree dive) —
+                # require consecutive confirmations from DISTINCT samples.
+                if sample_ts is not None and sample_ts == last_streak_sample_ts:
+                    # Same physical reading polled twice — not new evidence. At a
+                    # 1.5s poll cadence against ~3.0s telemetry refresh one
+                    # re-poll is ROUTINE, not a frozen sensor — so a deadline hit
+                    # mid-streak earns one distinct-sample grace before giving up
+                    # (ADR 058 decision 11; on 2026-08-02 05:02 the phase
+                    # released 1.2s before the sample that would have confirmed).
+                    if time.time() >= legacy_deadline:
+                        sample_age = time.time() - sample_ts
+                        if (steep_streak >= 1
+                                and not deadline_grace_granted
+                                and self._eject_cl_streak_grace_s > 0):
+                            deadline_grace_granted = True
+                            legacy_deadline = time.time() + self._eject_cl_streak_grace_s
+                            logger.info(
+                                "Controller: eject_and_dive — deadline reached mid-confirmation "
+                                "(streak %d/%d, sample age %.1fs) — granting %.1fs distinct-sample grace",
+                                steep_streak, self._eject_cl_confirm_consecutive,
+                                sample_age, self._eject_cl_streak_grace_s)
+                            continue
+                        if sample_age >= 4 * self._eject_cl_check_interval_s:
+                            # Genuinely frozen: no new sample for well past the
+                            # expected refresh cadence.
+                            logger.info(
+                                "Controller: eject_and_dive — telemetry stopped refreshing "
+                                "before confirmation, releasing nose-down on timer")
+                        else:
+                            logger.info(
+                                "Controller: eject_and_dive — legacy deadline expired awaiting "
+                                "next distinct sample, releasing nose-down on timer")
+                        self._eject_phase_exit_reason = "no_telemetry"
+                        return False
+                    continue
+                last_streak_sample_ts = sample_ts
+                steep_streak += 1
+                if steep_streak >= self._eject_cl_confirm_consecutive:
+                    logger.info(
+                        "Controller: eject_and_dive — dive confirmed via %s "
+                        "(alt rate %s ft/s after %.1fs, %d correction(s), %d consecutive)",
+                        "steep band" if band == BAND_STEEP_DIVE else "descent rate",
+                        f"{rate:.0f}" if rate is not None else "?",
+                        time.time() - phase_start, corrections, steep_streak)
+                    self._eject_phase_exit_reason = "confirmed"
+                    return False
+                continue
+            steep_streak = 0
+            last_streak_sample_ts = None
+
+            if time.time() < window_deadline:
+                continue  # give the current input time to take effect
+
+            if corrections >= self._eject_cl_max_corrections:
+                logger.warning(
+                    "Controller: eject_and_dive — correction budget exhausted "
+                    "(band=%s) — releasing nose-down and proceeding", band)
+                self._eject_phase_exit_reason = "budget_exhausted"
+                return False
+
+            # Measure-correct-measure, gated on the OVER-ROTATION signature.
+            #
+            # Reversing to nose-up is only ever right when the aircraft is
+            # already descending AND our last nose-down made the descent
+            # shallower — that is what being past vertical looks like, because
+            # further nose-down rotation there pulls the velocity vector back
+            # toward horizontal. If the aircraft is CLIMBING (rate > 0),
+            # nose-down is unambiguously the correct input no matter how many
+            # times it has failed, and a nose-up tap there pitches it into a
+            # loop. That is exactly what happened on 2026-07-30 06:34:31
+            # (band=level, alt rate +153 ft/s -> nose-up) once an earlier fix
+            # dropped the descending-only condition.
+            #
+            # The previous attempt to re-gate this on speed.trend == rising was
+            # wrong in the other direction: climbing trades speed for altitude,
+            # so "rate worsened" and "speed rising" are anti-correlated by
+            # conservation of energy. In the 2026-07-30 16:27 session the gate
+            # blocked the reversal in all 8 of 8 corrections where the
+            # rate-worsened test passed — nose-up became unreachable and every
+            # eject burned its full correction budget.
+            #
+            # Strict "worse than", not "at least as bad as": a rate that is
+            # merely unchanged is the "missed key event" case the fresh
+            # re-press already exists for, not evidence of the wrong direction.
+            over_rotated = (
+                corrections > 0
+                and rate is not None
+                and rate_before_correction is not None
+                and rate < 0                              # still descending
+                and rate > rate_before_correction         # but descent got shallower
+            )
+
+            # ADR 058 decision 12: a CLIMB after a long continuous nose-down hold
+            # is over-rotation, not under-rotation. The reasoning above ("climbing
+            # -> nose-down is unambiguously correct") holds for an aircraft that
+            # never rotated; it is backwards once we have held nose-down long
+            # enough to rotate past vertical, where more nose-down pulls the
+            # velocity vector further back toward the sky. Measured over 27
+            # production ejects (2026-08-02 14:05 and 15:34 sessions): 0 in-phase
+            # confirmations, 8 holds that dove then climbed while still held, and
+            # 17 nose-down re-issues commanded while already climbing. Releasing
+            # instead reliably produces the dive (-311 to -584 ft/s within
+            # seconds), so hand the phase to the release path rather than
+            # deepening the rotation.
+            if (rate is not None and rate > 0
+                    and self._eject_cl_over_rotation_after_s > 0
+                    and self._eject_nose_held_s() >= self._eject_cl_over_rotation_after_s):
+                logger.warning(
+                    "Controller: eject_and_dive — climbing (alt rate %.0f ft/s) after %.1fs of "
+                    "nose-down — over-rotated, releasing instead of re-issuing",
+                    rate, self._eject_nose_held_s())
+                self._eject_phase_exit_reason = "over_rotation"
+                return False
+
+            if over_rotated:
+                correction_key = (NOSE_UP_KEY if last_correction_key == NOSE_DOWN_KEY
+                                  else NOSE_DOWN_KEY)
+            else:
+                correction_key = NOSE_DOWN_KEY
+
+            logger.info(
+                "Controller: eject_and_dive — dive not established (band=%s, "
+                "alt rate %s ft/s) — corrective %s re-issue (%d/%d)",
+                band, f"{rate:.0f}" if rate is not None else "?",
+                "nose-up" if correction_key == NOSE_UP_KEY else "nose-down",
+                corrections + 1, self._eject_cl_max_corrections)
+
+            # X11 auto-repeat is on for this session (confirmed via `xset q`:
+            # 500ms delay, 33Hz repeat), so a key we are holding keeps
+            # generating fresh KeyPress events at the OS level the whole time
+            # it's down. _eject_key's own press/release bracketing protects a
+            # stable hold, but the instant we release() here, any repeat
+            # event already in flight from the X server can be delivered a
+            # few ms late — after our release already dropped the guard to
+            # zero — and gets mistaken for the player taking over (observed
+            # in production: self-cancel 2-6ms after this exact release,
+            # right in the release/re-press gap). _eject_guard_hold keeps the
+            # guard up across the whole dance so that race can't land.
+            with self._eject_guard_hold():
+                self._eject_key(False, NOSE_DOWN_KEY)
+                if correction_key == NOSE_DOWN_KEY:
+                    # Re-issue: fresh press so a missed key event gets a second edge.
+                    if self._eject_stop.wait(timeout=0.2):
+                        return True
+                    self._eject_key(True, NOSE_DOWN_KEY)
+                else:
+                    # Reverse: brief nose-up tap, then resume holding nose-down.
+                    self._eject_key(True, NOSE_UP_KEY)
+                    cancelled = self._eject_stop.wait(timeout=0.6)
+                    self._eject_key(False, NOSE_UP_KEY)
+                    if cancelled:
+                        return True
+                    self._eject_key(True, NOSE_DOWN_KEY)
+
+            rate_before_correction = rate
+            last_correction_key = correction_key
+            corrections += 1
+            window_deadline = time.time() + self._eject_cl_verify_window_s
+
     def eject_and_dive(self, on_complete=None):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
-        NOSE_DOWN is held for x seconds then released.
-        AFTERBURNER is held until respawn is detected (or a 120s safety timeout).
+        NOSE_DOWN is held until telemetry confirms a steep dive (closed loop,
+        ADR 038) or the legacy timer expires, then released.
+        AFTERBURNER is held until respawn is detected (or a 120s safety timeout);
+        a speed trend that fails to rise after engagement triggers a bounded re-press.
         on_complete: optional callable invoked in the finally block after all keys are released.
 
         No-ops (with a debug log) if an eject sequence is already in progress —
@@ -1016,80 +1561,201 @@ class Controller:
             return
         logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
+        self._eject_stop_reason = ""
         self._eject_stop.clear()
+        self._eject_held_keys.clear()
+        self._eject_phase_exit_reason = ""
+        # Opens the nose-down budget for this sequence (None = not in an eject).
+        self._eject_nose_held_total_s = 0.0
+        self._eject_nose_down_since = None
         # Reset the grace-period timestamp so buffered/held flight keys (e.g. 'k' on key-repeat
         # from normal gameplay) cannot cancel the eject within the first 2 seconds of starting it.
         self._game_battle_since = time.time()
         # Force health state to dead so the False→True transition fires when
         # health is detected again after respawn, triggering mission restart.
+        # Synthetic reset (ADR 061): must not count as an observed death.
         if self._analyzer is not None:
-            if not self._analyzer._health_lock.acquire(timeout=1.0):
-                logger.warning("eject_and_dive: _health_lock timeout — skipping health reset")
-            else:
-                try:
-                    self._analyzer._game_battle_alive = False
-                    self._analyzer._health_no_digits_since = 0.0
-                finally:
-                    self._analyzer._health_lock.release()
+            self._analyzer.mark_health_dead_synthetic()
 
         def _run():
             self._ejecting.set()
             try:
-                if self._simulate_os_input:
-                    self._record_action_intent("key_press", key=NOSE_DOWN_KEY, action="eject_and_dive")
-                else:
-                    if not keyboard_module:
-                        logger.error("Controller: keyboard library not available for eject_and_dive")
-                        return
-                    keyboard_module.press(NOSE_DOWN_KEY)
+                if not self._simulate_os_input and not keyboard_module:
+                    logger.error("Controller: keyboard library not available for eject_and_dive")
+                    return
+                self._eject_key(True, NOSE_DOWN_KEY)
                 # Wait for the mission thread to fully exit before pressing
                 # AFTERBURNER so its _execute_key_press finally block can't
                 # release the key after we press it.
                 mission_exit_deadline = time.time() + 2.0
                 while self.is_mission_running() and time.time() < mission_exit_deadline:
                     time.sleep(0.05)
-                if self._simulate_os_input:
-                    self._record_action_intent("key_press", key=AFTERBURNER_KEY, action="eject_and_dive")
-                else:
-                    keyboard_module.press(AFTERBURNER_KEY)
+                self._eject_key(True, AFTERBURNER_KEY)
                 logger.info("Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged")
 
-                # Hold nose-down for 5s then release; afterburner stays on.
-                if not self._eject_stop.wait(timeout=5.0):
-                    if self._simulate_os_input:
-                        self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
-                    else:
-                        try:
-                            keyboard_module.release(NOSE_DOWN_KEY)
-                        except Exception:
-                            pass
+                # Nose-down phase: closed-loop steep-dive verification when
+                # enabled (ADR 038), else the legacy fixed 5s hold.
+                if self._eject_cl_enabled:
+                    cancelled = self._eject_nose_phase_closed_loop()
+                else:
+                    cancelled = self._eject_stop.wait(timeout=self._eject_nose_hold_s)
+
+                if not cancelled:
+                    self._eject_key(False, NOSE_DOWN_KEY)
                     logger.info("Controller: eject_and_dive — nose-down released, holding afterburner until respawn")
 
                     # Hold afterburner until respawn screen detected (stop_eject_sequence sets _eject_stop)
                     # or 120s safety timeout. _is_respawning() is not used here because the player may be
                     # alive (health > 0) when the eject starts; relying on it exits the loop immediately.
+                    # ADR 038: a speed trend that fails to rise after engagement means
+                    # the afterburner press was missed — re-press, bounded to 2 attempts.
                     deadline = time.time() + 120.0
+                    ab_represses_left = 2 if self._eject_cl_enabled else 0
+                    next_ab_check = time.time() + self._eject_cl_verify_window_s
+                    # Confirmation is not forever: the dive can flatten after
+                    # nose release (flight-tested: a transient-inflated
+                    # confirmation settled into a 35-40 degree dive). Keep
+                    # watching the band and re-enter nose-down verification
+                    # when it decays, bounded by dive_reentries.
+                    #
+                    # Only meaningful after a REAL confirmation. Re-entering
+                    # after a give-up (budget exhausted / no telemetry) just
+                    # re-ran the same failing loop and logged "dive decayed
+                    # after confirmation" when nothing was ever confirmed
+                    # (2026-07-30) — and, with the nose-down budget, would spend
+                    # the remaining cap re-holding a key that already failed.
+                    dive_reentries_left = (
+                        self._eject_cl_dive_reentries
+                        if (self._eject_cl_enabled
+                            and self._eject_phase_exit_reason == "confirmed")
+                        else 0
+                    )
+                    # ADR 058 post-release confirmation: the eject typically
+                    # fires from climbing flight and takes ~12s to rotate, so
+                    # the deep dive often establishes only AFTER nose-down is
+                    # released (2026-07-30 18:51 replay: 63 confirm-eligible
+                    # samples post-release vs 4 in-phase). Keep running the same
+                    # 2-distinct-sample check here — observation only, no key
+                    # input — so a real dive is still recorded as confirmed and
+                    # the decay re-entry above becomes reachable. Re-entries are
+                    # granted only with nose-budget headroom; without it a
+                    # re-entry would press the key just to exit on the budget.
+                    confirmed = self._eject_phase_exit_reason == "confirmed"
+                    pr_streak = 0
+                    pr_last_ts: "float | None" = None
+                    next_dive_check = time.time() + self._eject_cl_check_interval_s
                     while time.time() < deadline:
                         if self._eject_stop.wait(timeout=0.5):
                             break
+                        if (self._eject_cl_enabled and not confirmed
+                                and time.time() >= next_dive_check):
+                            next_dive_check = time.time() + self._eject_cl_check_interval_s
+                            snap = self._eject_telemetry()
+                            band = None
+                            rate = None
+                            sample_ts = None
+                            if snap is not None:
+                                band = snap.pitch_band(
+                                    steep_min_sin=self._eject_steep_min_sin,
+                                    level_max_sin=self._eject_level_max_sin,
+                                )
+                                if snap.altitude_fresh():
+                                    rate = snap.altitude.rate
+                                    sample_ts = snap.altitude.ts
+                            descending_hard = (
+                                rate is not None
+                                and rate <= -self._eject_cl_confirm_descent_fps
+                            )
+                            if band == BAND_STEEP_DIVE or descending_hard:
+                                if sample_ts is not None and sample_ts == pr_last_ts:
+                                    continue  # same physical reading — not new evidence
+                                pr_last_ts = sample_ts
+                                pr_streak += 1
+                                if pr_streak >= self._eject_cl_confirm_consecutive:
+                                    confirmed = True
+                                    self._eject_phase_exit_reason = "confirmed"
+                                    if not self._eject_nose_budget_exhausted():
+                                        dive_reentries_left = self._eject_cl_dive_reentries
+                                    logger.info(
+                                        "Controller: eject_and_dive — dive confirmed post-release "
+                                        "via %s (alt rate %s ft/s, %d consecutive, %d re-entry available)",
+                                        "steep band" if band == BAND_STEEP_DIVE else "descent rate",
+                                        f"{rate:.0f}" if rate is not None else "?",
+                                        pr_streak, dive_reentries_left)
+                            elif band is not None or rate is not None:
+                                # Contrary evidence resets the streak — including
+                                # a fresh non-deep altitude rate with stale speed
+                                # (band None but rate real). Only truly MISSING
+                                # samples preserve it: absence of telemetry is
+                                # never treated as evidence (ADR 038), matching
+                                # the in-phase streak semantics.
+                                pr_streak = 0
+                                pr_last_ts = None
+                            continue
+                        if dive_reentries_left > 0 and time.time() >= next_dive_check:
+                            snap = self._eject_telemetry()
+                            band = None
+                            if snap is not None:
+                                band = snap.pitch_band(
+                                    steep_min_sin=self._eject_steep_min_sin,
+                                    level_max_sin=self._eject_level_max_sin,
+                                )
+                            if band is None or band == BAND_STEEP_DIVE:
+                                # Missing evidence never triggers corrections.
+                                next_dive_check = time.time() + self._eject_cl_check_interval_s
+                            else:
+                                logger.info(
+                                    "Controller: eject_and_dive — dive decayed after "
+                                    "confirmation (band=%s) — re-entering nose-down "
+                                    "verification (%d re-entry left)", band, dive_reentries_left)
+                                dive_reentries_left -= 1
+                                self._eject_key(True, NOSE_DOWN_KEY)
+                                reentry_cancelled = self._eject_nose_phase_closed_loop()
+                                self._eject_key(False, NOSE_DOWN_KEY)
+                                if reentry_cancelled:
+                                    break
+                                next_dive_check = time.time() + self._eject_cl_verify_window_s
+                        if ab_represses_left > 0 and time.time() >= next_ab_check:
+                            snap = self._eject_telemetry()
+                            if snap is None or not snap.speed_fresh() or snap.speed.rate is None:
+                                # No confident evidence — check again later, never
+                                # correct against missing data.
+                                next_ab_check = time.time() + self._eject_cl_check_interval_s
+                            elif snap.speed.trend == TREND_RISING:
+                                ab_represses_left = 0  # engagement verified
+                            else:
+                                logger.info(
+                                    "Controller: eject_and_dive — speed trend %s after "
+                                    "afterburner press — re-pressing", snap.speed.trend)
+                                self._eject_key(False, AFTERBURNER_KEY)
+                                if self._eject_stop.wait(timeout=0.2):
+                                    break
+                                self._eject_key(True, AFTERBURNER_KEY)
+                                ab_represses_left -= 1
+                                next_ab_check = time.time() + self._eject_cl_verify_window_s
                     else:
                         logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
                 else:
-                    logger.info("Controller: eject_and_dive — cancelled during nose-down phase")
+                    # A respawn-triggered stop during the (closed-loop-extended)
+                    # nose phase is a successful eject, not an anomaly — the
+                    # reason lets the ADR044/045 validators tell them apart.
+                    logger.info(
+                        "Controller: eject_and_dive — cancelled during nose-down phase (reason=%s)",
+                        self._eject_stop_reason or "unknown")
             finally:
                 self._ejecting.clear()
+                self._eject_nose_held_total_s = None
+                self._eject_nose_down_since = None
                 if self._simulate_os_input:
                     self._record_action_intent("key_release", key=AFTERBURNER_KEY, action="eject_and_dive")
                     self._record_action_intent("key_release", key=NOSE_DOWN_KEY, action="eject_and_dive")
                 else:
-                    try:
-                        keyboard_module.release(AFTERBURNER_KEY)
-                    except Exception:
-                        pass
-                    try:
-                        keyboard_module.release(NOSE_DOWN_KEY)
-                    except Exception:
-                        pass
+                    self._eject_key(False, AFTERBURNER_KEY)
+                    self._eject_key(False, NOSE_DOWN_KEY)
+                    # A measure-correct-measure reversal may have been
+                    # mid-tap when the sequence was cancelled; _eject_key is a
+                    # no-op if NOSE_UP was already released.
+                    self._eject_key(False, NOSE_UP_KEY)
                 logger.info("Controller: eject_and_dive complete")
                 if on_complete is not None:
                     try:
@@ -1097,7 +1763,8 @@ class Controller:
                     except Exception:
                         logger.exception("Controller: eject_and_dive on_complete callback failed")
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._eject_thread = threading.Thread(target=_run, daemon=True)
+        self._eject_thread.start()
 
     def start_search_and_destroy_loop(self):
         """Start background padlock + weapon-fire loops.
@@ -1190,22 +1857,51 @@ class Controller:
                 logger.error("Controller: keyboard library not available for disengage_roll_right")
                 return
             self.start_search_and_destroy_loop()
+            # ROLL_RIGHT is a watched maneuver key: without the programmatic
+            # bracket + release grace, its auto-repeats (and the trailing
+            # repeats delivered just after release) read as the PLAYER pressing
+            # 'l' — and the mission this method restarts at the end gets
+            # immediately self-cancelled into manual takeover.
+            self._inc_programmatic_key(ROLL_RIGHT_KEY)
             try:
                 keyboard_module.press(ROLL_RIGHT_KEY)
-                self._interruptible_sleep(duration)
+                # NOT _interruptible_sleep: cancel_mission() above set
+                # _mission_cancel, which would abort the roll after
+                # milliseconds and leave the aircraft flying straight out of
+                # the arena (observed 2026-07-28 20:40:03, an 8 ms "roll").
+                # The roll must outlive the cancel it issued; only program
+                # exit interrupts it.
+                deadline = time.time() + duration
+                while time.time() < deadline:
+                    if self._exit_event is not None and self._exit_event.is_set():
+                        break
+                    time.sleep(0.1)
             finally:
                 try:
                     keyboard_module.release(ROLL_RIGHT_KEY)
                 except Exception:
                     pass
+                self._arm_release_grace(ROLL_RIGHT_KEY)
+                self._dec_programmatic_key(ROLL_RIGHT_KEY)
                 if not self.is_mission_running():
                     self.stop_search_and_destroy_loop()
             logger.info("Controller: disengage_roll_right complete")
+            # The cancelled mission thread may still be tearing down — its
+            # lock releases a few ms after cancel. Wait for it (bounded), or
+            # the not-running check races and the restart is silently skipped,
+            # leaving no mission, no loops, and an uncommanded aircraft.
+            teardown_deadline = time.time() + 5.0
+            while self.is_mission_running() and time.time() < teardown_deadline:
+                time.sleep(0.1)
             with self._last_mission_lock:
                 last_mission = self._last_mission
             if self._auto_respawn_restart and last_mission and not self.is_mission_running():
                 logger.info("Controller: restarting mission after disengage")
                 self.restart_last_mission()
+            elif self.is_mission_running():
+                logger.warning(
+                    "Controller: disengage restart skipped — mission still running "
+                    "after %.0fs teardown wait", 5.0)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1670,6 +2366,17 @@ class Controller:
         """Return True when a mission thread currently holds the mission lock."""
         return self._mission_lock.locked()
 
+    def is_mission_teardown_in_progress(self) -> bool:
+        """True while a CANCELLED mission thread still holds the mission lock.
+
+        Distinguishes "a mission is genuinely flying" (lock held, cancel clear)
+        from "the lock is held only because a cancelled thread is unwinding"
+        (lock held, cancel set — clears when the next mission starts). Callers
+        deciding whether to retry a restart need the difference: retrying
+        against teardown is correct; retrying against a live mission loops.
+        """
+        return self._mission_lock.locked() and self._mission_cancel.is_set()
+
     def start_game_starting_loop(self):
         """Public orchestration entrypoint for the GAME_STARTING loop."""
         self._start_game_starting_loop()
@@ -1682,8 +2389,9 @@ class Controller:
         """Enable or disable automatic restart after respawn."""
         self._auto_respawn_restart = bool(enabled)
 
-    def stop_eject_sequence(self) -> None:
+    def stop_eject_sequence(self, reason: str = "respawn_detected") -> None:
         """Cancel an in-progress eject-and-dive sequence if one is active."""
+        self._eject_stop_reason = reason
         self._eject_stop.set()
 
     def _set_last_mission(self, mission_name: str):
@@ -1746,7 +2454,18 @@ class Controller:
                         self._record_action_intent("key_tap", key=MISSION_J20_KEY, action="game_starting_loop")
                         logger.info("Controller: game_starting - simulated '%s' key tap", MISSION_J20_KEY)
                     elif keyboard_module:
-                        keyboard_module.press_and_release(MISSION_J20_KEY)
+                        # Bracket + grace so the XRecord echo of OUR OWN press is
+                        # recognizable as programmatic. The 'u' hotkey used to
+                        # dismiss echoes by FSM state (== GAME_STARTING), which
+                        # also ate GENUINE resume presses whenever the FSM was
+                        # wedged in GAME_STARTING (2026-08-01 02:55: five human
+                        # presses in 3s all logged as "XTest echo ... ignoring").
+                        self._inc_programmatic_key(MISSION_J20_KEY)
+                        try:
+                            keyboard_module.press_and_release(MISSION_J20_KEY)
+                        finally:
+                            self._arm_release_grace(MISSION_J20_KEY)
+                            self._dec_programmatic_key(MISSION_J20_KEY)
                         logger.info("Controller: game_starting - pressed '%s' key", MISSION_J20_KEY)
 
                     # Start async OCR scan if one isn't already running
@@ -1840,7 +2559,41 @@ class Controller:
         return True
 
     def cleanup(self):
-        """Deregister all keyboard hooks registered by this controller."""
+        """Stop injection activity, release held keys, deregister hooks.
+
+        Order matters: XTest-injected key state lives in the X SERVER, not this
+        client, so it survives process exit — and daemon threads die without
+        running their finally blocks. Exiting mid-eject (NOSE_DOWN held, or the
+        120s afterburner hold) therefore left 'k'/'e' logically pressed for the
+        whole X session. Stop the writers first, then release every key this
+        controller can inject, unconditionally (releasing an un-pressed key is
+        a no-op).
+        """
+        # 1. Stop the writers so nothing re-presses after our releases.
+        self._eject_stop_reason = "shutdown"
+        self._eject_stop.set()
+        self.cancel_mission()
+        try:
+            self.stop_search_and_destroy_loop()
+        except Exception:
+            logger.exception("Controller: failed to stop search_and_destroy loops")
+        eject_thread = self._eject_thread
+        if eject_thread is not None and eject_thread.is_alive():
+            eject_thread.join(timeout=1.5)  # let its finally release keys cleanly
+
+        # 2. Belt-and-braces: release every injectable key.
+        if keyboard_module and not self._simulate_os_input:
+            for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+                         AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
+                         DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
+                         PADLOCK_CAMERA, SPECIAL_ABILITY):
+                try:
+                    keyboard_module.release(_key)
+                except Exception:
+                    pass
+            logger.info("Controller: all injectable keys released")
+
+        # 3. Deregister hooks last so the guards above stay active meanwhile.
         if keyboard_module:
             try:
                 keyboard_module.unhook_all()

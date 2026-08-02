@@ -2,12 +2,19 @@
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_BATTLE_STATES = {"GAME_BATTLE", "GAME_BATTLE_MANUAL"}
+# GAME_BATTLE_EJECT is a mid-mission excursion (missiles empty -> dive), not a
+# mission boundary. Omitting it made every eject read as a mission end and the
+# return from it as a new mission start: the 2026-07-30 16:27 session reported
+# "7 missions, avg 1m30s" for 3 real rounds (avg ~4m57s), and undercounted
+# manual takeovers 1-of-4 because _in_mission was already False when the
+# EJECT -> MANUAL transitions arrived.
+_BATTLE_STATES = {"GAME_BATTLE", "GAME_BATTLE_MANUAL", "GAME_BATTLE_EJECT"}
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -64,12 +71,29 @@ class MissionStatsTracker:
 
         self._summary: dict | None = None
 
+        # on_event runs on the main loop; on_fsm_transition can arrive from the
+        # analyzer's background click-to thread. Both mutate _current/_in_mission,
+        # so an unlocked check-then-act could KeyError the main loop when a
+        # mission ends between the check and the increment. Bodies are
+        # sub-microsecond dict ops; per repo rules the main-loop side acquires
+        # with a timeout instead of blocking indefinitely.
+        self._lock = threading.Lock()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def on_event(self, event_name: str, ts: float) -> None:
-        """Record a named gameplay event."""
+        """Record a named gameplay event. Called from the main loop."""
+        if not self._lock.acquire(timeout=1.0):
+            logger.warning("MissionStatsTracker: lock timeout — dropping event %s", event_name)
+            return
+        try:
+            self._on_event_locked(event_name, ts)
+        finally:
+            self._lock.release()
+
+    def _on_event_locked(self, event_name: str, ts: float) -> None:
         if event_name == "respawn_detected":
             self._total_respawns += 1
             if self._in_mission:
@@ -97,17 +121,20 @@ class MissionStatsTracker:
     def on_fsm_transition(
         self, trigger_name: str, prev_state: str, next_state: str, ts: float
     ) -> None:
-        """Process an FSM state transition."""
+        """Process an FSM state transition. May arrive from a background thread,
+        which can block briefly (lock holds are sub-microsecond)."""
+        with self._lock:
+            self._on_fsm_transition_locked(trigger_name, prev_state, next_state, ts)
+
+    def _on_fsm_transition_locked(
+        self, trigger_name: str, prev_state: str, next_state: str, ts: float
+    ) -> None:
         # Startup guard: capture whether classification was already done before this
         # transition, then update the flag. A GAME_UNKNOWN → GAME_BATTLE transition
         # clears the guard but must not count as a mission start (bot launched mid-game).
         was_startup_done = self._startup_done
         if not self._startup_done and next_state != "GAME_UNKNOWN":
             self._startup_done = True
-
-        if next_state == "GAME_BATTLE_MANUAL" and self._in_mission:
-            self._total_manual_takeovers += 1
-            self._current["manual_takeover_count"] += 1
 
         # Mission start: entering GAME_BATTLE (auto) or GAME_BATTLE_MANUAL from a non-battle state.
         if next_state in _BATTLE_STATES and prev_state not in _BATTLE_STATES:
@@ -117,20 +144,59 @@ class MissionStatsTracker:
         # Mission end: leaving battle for a non-battle state.
         elif prev_state in _BATTLE_STATES and next_state not in _BATTLE_STATES:
             if self._in_mission:
-                outcome = self._pending_outcome
-                if outcome is None:
-                    if trigger_name == "click_to_detected":
-                        outcome = "click_to"
-                    elif next_state in ("GAME_LOBBY", "GAME_WAITING"):
-                        outcome = "lobby_exit"
-                    else:
-                        outcome = "unknown"
+                # The trigger that actually ENDS the mission is authoritative;
+                # _pending_outcome only fills in when the transition itself says
+                # nothing. Since GAME_BATTLE_EJECT became an in-mission state,
+                # "missiles_empty" is a MID-mission signal that survives to the
+                # real end of the round, and checking it first shadowed the
+                # terminal click_to: the 2026-07-30 18:51 session booked all 10
+                # missions as "missiles empty (100%)" despite 10 logged
+                # CLICK TO CONTINUE finishes.
+                if trigger_name == "click_to_detected":
+                    outcome = "click_to"
+                elif self._pending_outcome is not None:
+                    outcome = self._pending_outcome
+                elif next_state in ("GAME_LOBBY", "GAME_WAITING"):
+                    outcome = "lobby_exit"
+                else:
+                    outcome = "unknown"
                 self._end_mission(ts, outcome)
 
-    def finalize(self, run_id: str | None = None) -> dict:
-        """Close any open mission, build session dict, write JSON. Returns session dict."""
+        # Counted AFTER the start/end handling: a takeover can itself be the
+        # transition that opens a mission (e.g. GAME_BATTLE_EJECT ->
+        # GAME_BATTLE_MANUAL on the first tick after startup), and checking
+        # _in_mission before _start_mission ran dropped 3 of 4 takeovers in the
+        # 2026-07-30 16:27 session.
+        if next_state == "GAME_BATTLE_MANUAL" and prev_state != "GAME_BATTLE_MANUAL":
+            if self._in_mission:
+                self._total_manual_takeovers += 1
+                self._current["manual_takeover_count"] += 1
+
+    def finalize(self, run_id: str | None = None, extra: "dict | None" = None) -> dict:
+        """Close any open mission, build session dict, write JSON. Returns session dict.
+
+        extra: optional additional top-level sections to embed in the summary
+        (e.g. the ADR 062 shadow-detector agreement block). Keys must not
+        collide with the built-in summary fields.
+        """
+        got = self._lock.acquire(timeout=5.0)
+        if not got:
+            # Shutdown must still produce stats; a 5s-held lock here means
+            # something is wedged anyway. Do NOT release a lock we never
+            # acquired — locked() being True could be another thread's hold.
+            logger.warning("MissionStatsTracker: lock timeout in finalize — proceeding unlocked")
+        try:
+            return self._finalize_locked(run_id, extra)
+        finally:
+            if got:
+                self._lock.release()
+
+    def _finalize_locked(self, run_id: str | None = None, extra: "dict | None" = None) -> dict:
         if self._in_mission:
-            self._end_mission(time.time(), "unknown")
+            # Shutdown mid-mission: honour any outcome hint already recorded
+            # (e.g. missiles_empty fired but the round never reached its end
+            # screen) instead of discarding it as "unknown".
+            self._end_mission(time.time(), self._pending_outcome or "unknown")
 
         session_duration = time.time() - self._session_start
         missions_started = len(self._missions)
@@ -162,6 +228,10 @@ class MissionStatsTracker:
             "avg_mission_duration_s": round(avg_duration, 1) if avg_duration is not None else None,
             "missions": self._missions,
         }
+        if extra:
+            for key, value in extra.items():
+                if key not in self._summary:
+                    self._summary[key] = value
 
         self._write_json(self._summary)
         return self._summary

@@ -122,25 +122,44 @@ respawn_detection:
   ocr_cooldown: 0.2
   text_hsv_lower: [0, 0, 180]
   text_hsv_upper: [180, 50, 255]
-  text_threshold: 0.001
-  bar_hsv_lower: [80, 100, 100]
-  bar_hsv_upper: [100, 255, 255]
-  bar_threshold: 0.0005
+  # ADR 064 mode: ocr | shadow | dual.
+  # shadow = respawn OCR primary; health detector scores itself, acts on nothing.
+  # dual   = health detector additionally fires the respawn plumbing when OCR
+  #          missed the episode. Flipped to dual 2026-08-02 (Phase B-prime)
+  #          after Phase A-prime measured 27 of 31 real respawns matched with
+  #          zero false fires across two shipped-logic sessions.
+  mode: dual
+health:
+  # Shared no-digits window (ADR 062): health readings absent this long mark
+  # the aircraft not-alive (and the shadow detector's weak death tier).
+  # Raised from the previous hardcoded 3.0s to stay above routine HUD
+  # dropouts while remaining below the ~8s respawn-overlay duration.
+  death_no_digits_s: 6.0
+  # ADR 063 value confirmation: a raw health read becomes the accepted value
+  # only when 2 of the last value_confirm_window reads agree within
+  # value_confirm_tolerance. Reads above max_plausible are discarded outright.
+  max_plausible: 500
+  value_confirm_window: 3
+  value_confirm_tolerance: 15
+  # ADR 064 composite death evidence: weak tier marks after this long without
+  # a CONFIRMED reading (runs through hallucinated overlay digits); halved
+  # when confirmed health dropped by decline_evidence_drop within
+  # decline_evidence_window_s before evidence began.
+  death_no_confirmed_s: 8.0
+  decline_evidence_drop: 80
+  decline_evidence_window_s: 6.0
 incoming_detection:
   incoming_template_matching_enabled: true
   incoming_template_threshold: 0.82
   incoming_template_near_threshold_low: 0.76
   incoming_template_near_threshold_high: 0.81
   incoming_template_fallback_to_ocr: true
-  incoming_template_telemetry_info: true
+  incoming_template_telemetry_info: false
   incoming_debounce_ms: 500
   incoming_template_scales: [1.0]
   incoming_template_sources: [test_screenshots/INCOMING3.png]
-mission: {restart_delay_after_unlock: 4.0, restart_retry_interval: 2.0, respawn_fallback_timeout: 20.0,
-  weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
+mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0}
-aim: {smoothing: 0.25, fire_cooldown: 0.2}
-controls: {left_mouse_button: true, fire_button: left, fire_hold: 2.0}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
 j20_mission: {target_painting_mode: false}
@@ -168,6 +187,43 @@ tracking_hsv:
   min_contour_area: 12
   min_aspect_ratio: 2.5
 hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
+telemetry:                          # ADR 038 — altitude/speed signal model
+  max_speed_mph: 2000               # absolute envelope; fallback altitude-gate bound when speed is stale
+  max_altitude_ft: 60000            # absolute envelope; readings beyond are never seedable
+  max_speed_change_mph_s: 300       # acceleration envelope for the speed plausibility gate
+  plausibility_margin: 1.5          # slack multiplier on both gates
+  max_gate_dt_s: 1.5                # cap on the dt multiplier in the SPEED delta gate (an acceleration
+                                    # envelope tuned at the 1.5s tick): throttling the OCR cadence must
+                                    # not widen it. The altitude gate is physics-bound (vertical speed
+                                    # cannot exceed total speed) and uses the real inter-sample gap —
+                                    # clamping it below the ~3.0s cadence rejected every dive steeper
+                                    # than sin 0.75 and zeroed dive confirmations (2026-07-30 18:51)
+  reseed_after_rejections: 3        # consecutive rejections before the seed is discarded
+  smoothing_window: 3               # accepted readings averaged into stable_value
+  stale_after_s: 6.0                # signal age beyond which consumers must not act on it
+  trend_min_alt_rate_fps: 20.0      # |altitude rate| below this is 'flat'
+  trend_min_speed_rate_mph_s: 15.0  # |speed rate| below this is 'flat'
+  steep_dive_min_sin: 0.8           # |alt_rate/speed| at or above → steep band (approx 53 degrees; 0.5 accepted 30-degree dives)
+  level_max_sin: 0.15               # |alt_rate/speed| at or below → level band
+  ocr_every_n_ticks: 2              # submit telemetry OCR every Nth battle tick (async; the tick never waits on it)
+  eject_closed_loop:
+    enabled: true                   # verify nose-down/afterburner from telemetry during eject
+    verify_window_s: 6.0            # time allowed for the steep-dive band to appear after NOSE_DOWN
+    check_interval_s: 1.5           # telemetry poll cadence inside the eject thread
+    max_corrections: 3              # bound on corrective re-issues per eject sequence
+    legacy_nose_hold_s: 5.0         # open-loop hold used when telemetry gives no evidence
+    confirm_consecutive: 2          # DISTINCT telemetry samples required before the dive counts as confirmed
+    streak_grace_s: 4.5             # ADR 058 d11: extra wait (once per phase) when the legacy deadline
+                                    # expires mid-confirmation-streak; 0 disables
+    dive_reentries: 2               # times the hold phase may re-enter nose-down when the dive decays
+    confirm_descent_fps: 250        # ADR 058: raw sustained descent (ft/s) that also confirms a dive,
+                                    # independent of the speed-ratio band (which never fired in production)
+    total_nose_budget_s: 10.0        # ADR 058 d12: cap on cumulative NOSE_DOWN hold per eject.
+                                    # Cut from 20.0 — across 27 logged ejects the productive
+                                    # descent happened in the first ~8-11s and the hold then
+                                    # over-rotated into a climb; 0 in-phase confirmations ever.
+    over_rotation_after_s: 6.0      # ADR 058 d12: continuous nose-down hold after which a climb
+                                    # is treated as over-rotation (release, don't re-issue)
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}

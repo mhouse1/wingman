@@ -16,7 +16,10 @@ PATH1_LIVE:
     expected_state: GAME_BATTLE
     expected_trigger: good_luck_detected
 
+  # Since ADR056 the missiles_empty emit and the eject_started FSM transition
+  # happen in the same tick, so the state observed inside the 2s trigger
+  # freshness window is GAME_BATTLE_EJECT, never GAME_BATTLE.
   - screenshot_name: P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png
     injection_time_s: 52.0
-    expected_state: GAME_BATTLE
+    expected_state: GAME_BATTLE_EJECT
     expected_trigger: missiles_empty

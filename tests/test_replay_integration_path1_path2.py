@@ -75,11 +75,6 @@ def _build_test_config(tmp_path: Path) -> Path:
 
     mission = cfg.setdefault("mission", {})
     mission["waiting_fallback_enabled"] = False
-    # Long fallback timeout ensures the path-based alive_event fires first,
-    # before the fallback restart loop fires (which has no replay_assertions hook).
-    mission["respawn_fallback_timeout"] = 60.0
-    mission["restart_delay_after_unlock"] = 1.0
-    mission["restart_retry_interval"] = 1.0
 
     debug = cfg.setdefault("debug", {})
     debug["show_window"] = False
@@ -193,9 +188,12 @@ PATH2_OCR:
     expected_trigger: missiles_empty
     max_settle_time_s: 10.0
   # Manual takeover: inject_trigger fires manual_takeover immediately.
+  # missiles_empty at P2_010 fires eject_started (ADR 056), so the FSM sits in
+  # GAME_BATTLE_EJECT here — the old GAME_BATTLE expectation could never be met
+  # and masked the real flow behind an out-of-order harness failure.
   - screenshot_name: P2_020_MANUAL_TAKEOVER_MOMENT.png
     injection_time_s: 20.0
-    expected_state: GAME_BATTLE
+    expected_state: GAME_BATTLE_EJECT
     expected_trigger: manual_mode
     max_settle_time_s: 5.0
     inject_trigger: manual_takeover
@@ -211,7 +209,8 @@ PATH2_OCR:
     expected_state: GAME_BATTLE_MANUAL
     expected_trigger: respawn_detected
     max_settle_time_s: 12.0
-  # ALIVE at t=52 s.  Health OCR detects alive; restart_last_mission fires.
+  # ALIVE at t=52 s.  Death ended manual takeover at P2_040 (respawn_reset),
+  # so health returning restarts the mission immediately via the alive event.
   - screenshot_name: P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png
     injection_time_s: 52.0
     expected_state: GAME_BATTLE
@@ -279,23 +278,37 @@ class FakeController:
     def is_mission_running(self) -> bool:
         return self._mission_running
 
+    def is_mission_teardown_in_progress(self) -> bool:
+        return False  # stub teardown is instantaneous
+
     def is_auto_respawn_restart_enabled(self) -> bool:
         return self._auto_respawn
 
     def set_auto_respawn_restart(self, enabled: bool) -> None:
         self._auto_respawn = enabled
 
-    def eject_and_dive(self) -> None:
+    def eject_and_dive(self, on_complete=None) -> None:
         self._mission_running = False
         self._intents.append({"action_type": "eject_and_dive"})
+        # The real controller invokes on_complete when the eject SEQUENCE ends
+        # (respawn stop / cancel), not synchronously. Ignoring it left the FSM
+        # in GAME_BATTLE_EJECT forever — the true cause of PATH1_OCR's
+        # "timeout waiting for state=game_battle" at P1_050.
+        self._eject_on_complete = on_complete
+
+    def _fire_eject_complete(self) -> None:
+        cb, self._eject_on_complete = getattr(self, "_eject_on_complete", None), None
+        if cb is not None:
+            cb()
 
     def restart_last_mission(self) -> bool:
         self._mission_running = True
         self._intents.append({"action_type": "restart_last_mission"})
         return True
 
-    def stop_eject_sequence(self) -> None:
+    def stop_eject_sequence(self, reason: str = "respawn_detected") -> None:
         self._intents.append({"action_type": "stop_eject_sequence"})
+        self._fire_eject_complete()
 
     # --- Clicks / crops ---
     def click_crop(self, _crop, block=False, count=1, region_name=None) -> None:
@@ -308,6 +321,7 @@ class FakeController:
 
     def cancel_mission(self) -> None:
         self._intents.append({"action_type": "cancel_mission"})
+        self._fire_eject_complete()
 
     def deploy_flares(self, hold_seconds=0.05, block=True, ignore_cancel=True) -> None:
         self._intents.append({"action_type": "deploy_flares"})
@@ -317,6 +331,9 @@ class FakeController:
 
     def disengage_roll_right(self) -> None:
         self._intents.append({"action_type": "disengage_roll_right"})
+
+    def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
+        self._intents.append({"action_type": "padlock_target_switch"})
 
     def popup_click_allowed(self, _popup) -> bool:
         return False
