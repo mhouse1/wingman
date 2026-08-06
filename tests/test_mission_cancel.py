@@ -107,14 +107,31 @@ def test_mission_lock_not_held_after_natural_completion(ctrl, monkeypatch):
 # GAME_STARTING loop cancellation tests (stall bug fix)
 # ---------------------------------------------------------------------------
 
+class _FrameStub:
+    """Capture stand-in: grab_from_thread returns a sentinel frame."""
+
+    def grab_from_thread(self):
+        return object()
+
+
 class _StartingAnalyzerStub:
     """Minimal analyzer stub that stays in GAME_STARTING until told otherwise."""
 
     def __init__(self):
         self.game_state = GameState.GAME_STARTING
         self.game_battle_alive = False
+        self.good_luck = False
         self._game_starting_health_scan_enabled = threading.Event()
         self.trigger_calls: list[str] = []
+
+    def scan_region_for_good_luck(self, _frame):
+        return self.good_luck
+
+    def arm_starting_health_scan(self):
+        self._game_starting_health_scan_enabled.set()
+
+    def disarm_starting_health_scan(self):
+        self._game_starting_health_scan_enabled.clear()
 
     def trigger_event(self, name: str):
         self.trigger_calls.append(name)
@@ -212,3 +229,64 @@ def test_starting_max_wait_s_stored_on_controller(monkeypatch):
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
     ctrl = Controller(region, starting_max_wait_s=42.5)
     assert ctrl._starting_max_wait_s == 42.5
+
+
+def test_good_luck_wait_is_bypassed_by_battle_alive(monkeypatch):
+    """The post-'Good Luck' settle must end early once the aircraft is in the world.
+
+    Before 2026-08-05 this loop polled only _in_starting(), so no signal could
+    shorten it and nothing scanned the screen during the window at all.
+    """
+    analyzer = _StartingAnalyzerStub()
+    ctrl = _make_starting_ctrl(monkeypatch, analyzer)
+    ctrl._good_luck_wait_s = 30.0        # long enough that a full wait would be obvious
+    ctrl._starting_max_wait_s = 60.0
+    monkeypatch.setattr(ctrl, "mission_j20", lambda: None)
+
+    analyzer.good_luck = True             # OCR scan will set good_luck_event
+    ctrl._capture = _FrameStub()
+    ctrl.start_game_starting_loop()
+
+    time.sleep(1.0)                       # past the scan's 0.5s settle
+    analyzer.game_battle_alive = True     # aircraft is in the world
+    deadline = time.time() + 5.0
+    while time.time() < deadline and "good_luck_detected" not in analyzer.trigger_calls:
+        time.sleep(0.05)
+
+    assert "good_luck_detected" in analyzer.trigger_calls, (
+        "battle-alive must cut the Good-Luck wait short instead of sleeping the full window")
+    analyzer.game_state = GameState.GAME_LOBBY
+    time.sleep(0.2)
+
+
+def test_good_luck_bypass_can_be_disabled(monkeypatch):
+    """With the bypass off the wait runs its full length (the pre-2026-08-05 behaviour)."""
+    analyzer = _StartingAnalyzerStub()
+    ctrl = _make_starting_ctrl(monkeypatch, analyzer)
+    ctrl._good_luck_wait_s = 1.5
+    ctrl._good_luck_bypass_on_alive = False
+    ctrl._starting_max_wait_s = 60.0
+    monkeypatch.setattr(ctrl, "mission_j20", lambda: None)
+
+    analyzer.good_luck = True
+    ctrl._capture = _FrameStub()
+    ctrl.start_game_starting_loop()
+    analyzer.game_battle_alive = True     # would bypass if enabled
+
+    time.sleep(1.2)
+    assert "good_luck_detected" not in analyzer.trigger_calls, (
+        "bypass disabled → the wait must not be cut short")
+
+    deadline = time.time() + 4.0
+    while time.time() < deadline and "good_luck_detected" not in analyzer.trigger_calls:
+        time.sleep(0.05)
+    assert "good_luck_detected" in analyzer.trigger_calls, "full wait should still launch"
+    analyzer.game_state = GameState.GAME_LOBBY
+    time.sleep(0.2)
+
+
+def test_good_luck_wait_config_defaults(monkeypatch):
+    analyzer = _StartingAnalyzerStub()
+    ctrl = _make_starting_ctrl(monkeypatch, analyzer)
+    assert ctrl._good_luck_wait_s == 13.0
+    assert ctrl._good_luck_bypass_on_alive is True

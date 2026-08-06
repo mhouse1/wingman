@@ -874,6 +874,18 @@ class GameStateAnalyzer:
         # Signalled when _game_battle_alive transitions False → True.
         # The main loop waits on this event to restart the mission immediately.
         self.alive_event = threading.Event()
+        # Instrumentation for the GAME_STARTING health probe (2026-08-05): how many
+        # attempts, when the scan armed, and when a raw value first appeared. These
+        # answer "how early is HEALTH readable after Good Luck", which no existing
+        # measurement covers.
+        self._starting_scan_attempts = 0
+        self._starting_scan_armed_ts = 0.0
+        self._starting_probe_last_ts = 0.0
+        self._starting_probe_running = False
+        self._starting_probe_interval_s = float(
+            config.get("mission", {}).get("starting_health_probe_interval_s", 0.75))
+        self._starting_scan_first_ts = 0.0
+        self._starting_scan_first_raw_ts = 0.0
         # Set by _start_game_starting_loop after the 10-second gate to enable the
         # GAME_STARTING health-only OCR scan (ADR 032 battle-alive fallback).
         self._game_starting_health_scan_enabled = threading.Event()
@@ -1381,6 +1393,110 @@ class GameStateAnalyzer:
         """
         with self._health_lock:
             return self._alive_after_observed_death
+
+    def _schedule_starting_health_probe(self, frame):
+        """Run the armed GAME_STARTING HEALTH probe on a background thread.
+
+        Deliberately separate from the battle OCR path (ADR 032, made reachable
+        2026-08-05): it scans HEALTH only, never touches the respawn/incoming
+        caches, and returns nothing — so a stale battle respawn result cannot
+        leak into GAME_STARTING. Self-throttled; the caller is the per-tick
+        analyze_frame.
+        """
+        if self._shutting_down or "HEALTH" not in self.crops:
+            return
+        now = time.time()
+        if now - self._starting_probe_last_ts < self._starting_probe_interval_s:
+            return
+        if self._starting_probe_running:
+            return
+        executor = self.ocr_executor
+        if executor is None:
+            return
+        self._starting_probe_last_ts = now
+        self._starting_probe_running = True
+
+        def _probe():
+            try:
+                health_frame = get_crop(frame, *self.crops["HEALTH"][:4])
+                raw, _ = _process_health_region(health_frame)
+                self._starting_scan_attempts += 1
+                since_arm = now - (self._starting_scan_armed_ts or now)
+                if raw is None:
+                    logger.info(
+                        "GAME_STARTING health probe #%d (+%.1fs since armed): no digits",
+                        self._starting_scan_attempts, since_arm)
+                    return
+                if self._starting_scan_first_raw_ts == 0.0:
+                    self._starting_scan_first_raw_ts = time.time()
+                logger.info(
+                    "GAME_STARTING health probe #%d (+%.1fs since armed): raw=%s",
+                    self._starting_scan_attempts, since_arm, raw)
+                confirmed = self._confirm_health_value(raw)
+                if confirmed is None:
+                    logger.info(
+                        "GAME_STARTING health probe #%d: raw=%s UNCONFIRMED "
+                        "(ADR 063 needs a second agreeing read)",
+                        self._starting_scan_attempts, raw)
+                    return
+                if confirmed < 1:
+                    return
+                with self._health_lock:
+                    prev_alive = self._game_battle_alive
+                    self._health = confirmed
+                    self._game_battle_alive = True
+                    if not prev_alive:
+                        self._alive_after_observed_death = self._death_observed
+                        self._death_observed = False
+                logger.info(
+                    "\033[92mAnalyzer: health %d confirmed in GAME_STARTING "
+                    "(+%.1fs since armed) → game_battle_alive=True\033[0m",
+                    confirmed, since_arm)
+                if not prev_alive:
+                    self.alive_event.set()
+            except Exception:
+                logger.exception("Analyzer: GAME_STARTING health probe failed")
+            finally:
+                self._starting_probe_running = False
+
+        threading.Thread(target=_probe, daemon=True, name="starting-health-probe").start()
+
+    def arm_starting_health_scan(self):
+        """Enable the GAME_STARTING health-only probe and reset its instrumentation.
+
+        Public entry point so the controller does not poke the private Event
+        (the coupling CR-013 flagged elsewhere).
+        """
+        self._starting_scan_attempts = 0
+        self._starting_scan_armed_ts = time.time()
+        self._starting_probe_last_ts = 0.0
+        self._starting_scan_first_ts = 0.0
+        self._starting_scan_first_raw_ts = 0.0
+        self._game_starting_health_scan_enabled.set()
+
+    def disarm_starting_health_scan(self):
+        """Disable the probe and report what it saw (2026-08-05 instrumentation).
+
+        The summary line is the measurement that matters: how long after arming
+        the HEALTH crop first produced a raw value. Until that number exists there
+        is no basis for shortening the post-Good-Luck wait.
+        """
+        was_armed = self._game_starting_health_scan_enabled.is_set()
+        self._game_starting_health_scan_enabled.clear()
+        if not was_armed or self._starting_scan_armed_ts == 0.0:
+            return
+        armed_for = time.time() - self._starting_scan_armed_ts
+        if self._starting_scan_first_raw_ts > 0.0:
+            first_raw = self._starting_scan_first_raw_ts - self._starting_scan_armed_ts
+            logger.info(
+                "GAME_STARTING health probe summary: %d attempts over %.1fs — "
+                "first raw read at +%.1fs",
+                self._starting_scan_attempts, armed_for, first_raw)
+        else:
+            logger.info(
+                "GAME_STARTING health probe summary: %d attempts over %.1fs — "
+                "NO raw read at any point",
+                self._starting_scan_attempts, armed_for)
 
     def mark_health_dead_synthetic(self):
         """Force health state to dead WITHOUT marking an observed death (ADR 061).
@@ -1910,8 +2026,21 @@ class GameStateAnalyzer:
         """
         # Skip OCR entirely outside active battle — no respawn/incoming events are
         # relevant in these states, and transitions are driven externally.
+        #
+        # ONE exception (2026-08-05): GAME_STARTING while the battle-alive health
+        # probe is armed. Scheduling background OCR is the only path that reaches
+        # _run_ocr_in_background, so this early return made ADR 032's probe
+        # unreachable — it logged "0 attempts" over an 18.8s armed window. The
+        # probe still scans HEALTH only; the respawn/incoming work stays skipped
+        # because _run_ocr_in_background branches on state, and this call returns
+        # the same negative respawn result either way.
         if self.game_state in (GameState.GAME_END_B, GameState.GAME_LOBBY,
-                               GameState.GAME_WAITING, GameState.GAME_STARTING):
+                               GameState.GAME_WAITING):
+            return (False, 0.0, None)
+        if self.game_state == GameState.GAME_STARTING:
+            if not self._game_starting_health_scan_enabled.is_set():
+                return (False, 0.0, None)
+            self._schedule_starting_health_probe(frame)
             return (False, 0.0, None)
 
         # Check if we can use cached result (throttle OCR)
@@ -2191,41 +2320,11 @@ class GameStateAnalyzer:
                         t1-t0, t2-t1, respawn_ocr_time, incoming_processing_time, health_ocr_time,
                         ammo_flares_ocr_time, ammo_missile_ocr_time, telemetry_ocr_time, t4-t0
                     )
-                elif (state == GameState.GAME_STARTING
-                        and self._game_starting_health_scan_enabled.is_set()
-                        and "HEALTH" in self.crops):
-                    # Health-only scan for the battle-alive fallback (ADR 032).
-                    health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4])
-                    health_future = executor.submit(_process_health_region, health_frame)
-                    health_value, _ = health_future.result(timeout=120)
-                    if health_value is not None:
-                        # ADR 063: same recurrence confirmation as the battle path.
-                        health_value = self._confirm_health_value(health_value)
-                    if health_value is not None:
-                        with self._health_lock:
-                            health_value, self._health_ceiling = _apply_health_ceiling_filter(
-                                health_value,
-                                self._health_window,
-                                self._health_ceiling,
-                                HEALTH_WINDOW_SIZE,
-                                HEALTH_SPIKE_FACTOR,
-                                self._health,
-                            )
-                        if health_value is not None and health_value >= 1:
-                            with self._health_lock:
-                                prev_alive = self._game_battle_alive
-                                self._health = health_value
-                                self._game_battle_alive = True
-                                if not prev_alive:
-                                    # Latch death provenance (ADR 061) — same rule as
-                                    # the battle-state transition site.
-                                    self._alive_after_observed_death = self._death_observed
-                                    self._death_observed = False
-                            logger.info(
-                                "Analyzer: health %d detected in GAME_STARTING → game_battle_alive=True",
-                                health_value)
-                            if not prev_alive:
-                                self.alive_event.set()
+                # NOTE: the GAME_STARTING health-probe branch that used to live here
+                # was removed 2026-08-05. It was unreachable — _detect_respawn_ocr
+                # returns before scheduling background OCR in that state — and is now
+                # served by _schedule_starting_health_probe(), which scans HEALTH only
+                # and never touches the respawn/incoming caches.
                 else:
                     logger.debug("Skipping GAME_BATTLE crop OCR in %s state", state.name)
                     self._shadow_clear_mark()

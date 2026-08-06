@@ -16,8 +16,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.7.0"
-WINGMAN_VERSION_DETAILS = "dual-sensor respawn detection, over-rotation eject release, per-concern tick-loop handlers"
+WINGMAN_VERSION = "1.7.1"
+WINGMAN_VERSION_DETAILS = "performance validation only, no major changes"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
@@ -311,6 +311,8 @@ def main():
         disable_hotkeys=(replay_mode or capture_mode),
         capture_with_overlay=capture_with_overlay,
         starting_max_wait_s=starting_max_wait_s,
+        good_luck_wait_s=float(mission_cfg.get("good_luck_wait_s", 13.0)),
+        good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
         telemetry_cfg=cfg.get("telemetry", {}),
     )
 
