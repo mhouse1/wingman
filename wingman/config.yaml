@@ -166,7 +166,11 @@ mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_mis
   good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true,
   # Cadence of the GAME_STARTING battle-alive HEALTH probe (ADR 032). Only runs
   # while armed; HEALTH crop only, so lobby/matchmaking OCR stays skipped.
-  starting_health_probe_interval_s: 0.75}
+  # 0.75 -> 0.4 (2026-08-07): ADR 063 needs two agreeing reads, so the probe
+  # cadence sets the floor on how fast battle-alive can be confirmed. The 02:42
+  # session measured first-raw-read landing ~1.5s before the bypass fired —
+  # that gap was two probe intervals, not game state.
+  starting_health_probe_interval_s: 0.4}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
 j20_mission: {target_painting_mode: false}
