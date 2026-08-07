@@ -1963,8 +1963,15 @@ class Controller:
             self._weapon_loop_thread.join(timeout=2.0)
             self._weapon_loop_thread = None
 
-    def toggle_weapon_loop(self):
-        """Toggle the weapon loop on/off. Bound to hotkey 'x'."""
+    def toggle_weapon_loop(self, _event=None):
+        """Toggle the weapon loop on/off. Bound to hotkey 'x'.
+
+        Accepts the key event the listener passes. On Linux, add_hotkey routes
+        to on_press_key, whose callbacks are invoked as cb(event) — so the
+        no-argument form raised "takes 1 positional argument but 2 were given"
+        on every press and the toggle never fired (2026-08-07 log). Kept
+        optional so direct calls still work.
+        """
         logger.debug("Controller: toggle_weapon_loop called (current state: %s)", self._weapon_loop_active)
         if self._weapon_loop_active:
             logger.info("Controller: toggling weapon loop OFF")
