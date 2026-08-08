@@ -1,183 +1,190 @@
-# ADR 028 — Minimap Enemy Bearing and Overhead Attack Positioning
+# ADR 028 — Minimap Ring-Engage Navigation
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
 | Draft    | 2026-08-08 | 1.7.1           |
 
-> **Revision note (2026-08-08):** this Draft originally specified "Enemy Quadrant
-> Detection and Nose Orientation" — a 3×3 quadrant split of the `ENEMY_CLOSE_BY`
-> crop driving a fixed roll-decision table. It is revised in place (permitted:
-> the ADR never left `Draft` and no part of the quadrant design was implemented).
-> The filename keeps its original slug. Drivers for the revision: the measured
-> single-combined-crop result in ADR 038, the Design 005 screen-space tracker
-> (which already implements continuous roll correction), and direct inspection
-> of the minimap in archived battle frames. The companion HLDD
-> ([Design 003](../hldd/003-enemy-quadrant-detection-hldd.md)) was revised
+> **Revision note:** third in-place revision of this Draft (permitted: never
+> `Accepted`; the filename keeps its original slug). Revision 1 specified a
+> 3×3 quadrant split of `ENEMY_CLOSE_BY` (never implemented). Revision 2
+> replaced it with a single `MINIMAP` crop and an overhead-attack phase
+> machine gated on `attack_altitude` — implemented and flown on 2026-08-08 in
+> one dry-run and one live session. Revision 3 (this text) replaces the
+> overhead phase machine with mission-agnostic **ring-engage navigation**,
+> motivated by those sessions' measurements. The sensor decision (single
+> minimap crop, HSV component scan, vector-EMA smoothing) is unchanged and
+> carries its evidence forward. Companion HLDD:
+> [Design 003](../hldd/003-enemy-quadrant-detection-hldd.md), revised
 > together with this ADR.
 
 ## Context
 
-The J20 tactic this feature supports: climb to high altitude, then position the
-aircraft directly above clustered enemy fighters and hold missile lock. The
-near-vertical engagement geometry forces defenders into high-AOA climbs that
-most airframes cannot sustain, raising their stall probability, while
-maximising target-painting buff uptime (ADR 027). **The effectiveness of the
-overhead position is a gameplay hypothesis, not a measured fact** — this ADR
-therefore includes instrumentation as part of the decision (§6), and cannot go
-`Accepted` without live measurements, per the performance-ADR evidence rule.
+The revision-2 tactic — climb to `attack_altitude`, then position directly
+above the enemy cluster — was implemented and flown. Its sensor pipeline
+worked (bearing available on every battle tick of both sessions; the field-
+proven `enemy_hsv` mask and component area band rejected the locked-target
+ring and route-line overlays). The tactic layer did not survive contact with
+the data:
 
-Why the quadrant revision was replaced:
-
-1. **Range.** `ENEMY_CLOSE_BY` (coords `0.8764–0.9521 × 0.0822–0.1856`) is a
-   small box at the *centre of the minimap*. Quadrant-splitting it yields
-   bearing only for enemies already near own position — nothing guides the
-   aircraft toward a cluster elsewhere on the map. The capability the tactic
-   actually needs is *navigation to the cluster*, which requires the whole
-   minimap.
-2. **Crop-consolidation precedent (ADR 038).** Replacing two overlapping
-   OCR crops with one combined `ALTITUDE_SPEED` crop roughly halved effective
-   OCR cost and eliminated an overlap misread (`27681` read as `2768`). The
-   precedent transfers in structure, not mechanism: OCR crops save per-call
-   dispatch, while HSV mask cost scales with area and stays sub-millisecond
-   either way. The single-region win here is one calibration, one detection
-   pass serving every consumer, and centroid post-processing that sub-crops
-   cannot do — an icon straddling a sub-crop boundary splits its pixel mass
-   across regions, whereas a centroid bins cleanly.
-3. **Duplication.** The quadrant→roll table coarsely duplicated what
-   `Controller.orient_nose_to_target(error_norm)` (Design 005, implemented in
-   `controller.py`) already does with continuous proportional control,
-   deadband, hold clamping, and cooldown. This revision reuses it as the
-   actuator instead.
-4. **The altitude section was stale.** The quadrant draft specified a new
-   `ALTITUDE` OCR crop read via `_process_health_region`. ADR 038 has since
-   replaced altitude/speed reading with the combined `ALTITUDE_SPEED` crop and
-   the atomic `get_telemetry()` snapshot. This revision consumes that.
-
-Verified minimap properties (frames `P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png`
-and `P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png`, 1920×1200):
-
-- Circular map in the top-right HUD corner (the top-left holds the kill feed).
-  Position must be confirmed per device/HUD layout before calibration.
-- **Heading-up rotation**: the compass letters sit at different rim positions
-  in the two frames while the own-ship marker and view-cone wedge stay fixed
-  at centre pointing up. Therefore an icon's angle from the up-axis *is* its
-  relative bearing, own position is the map centre, and icons converging on
-  centre means directly overhead. No compass math is needed.
-- Red icons are enemies; blue icons are friendlies. Other artifacts share the
-  region: rim compass letters, capture-point ring badges (red or blue), wreck
-  markers, green pickup crosses, and route lines — these must be filtered.
+1. **The altitude gate starved the tactic.** Live session 2026-08-08 09:00:
+   74% of battle ticks idled in Climb; mean altitude 4291 against an 8000
+   gate because the J20 mission's eject-dive cycle keeps the aircraft low.
+   Lowering the gate to 7000 would have added only 6 eligible ticks of 97 —
+   the gate, not the threshold value, is the flaw.
+2. **The eject cycle preempts positioning.** Both at-altitude engagement
+   windows ended in a mission eject within seconds (09:04:55, 09:15:09). A
+   tactic that needs long dwell at a precise station fights the mission
+   profile.
+3. **A precise radius latch fights the signal.** The overhead entry radius
+   (0.12) sat inside the centroid jitter band: the dry run showed a raw
+   glitch ejecting a genuine hold (radius 0.11 → 0.49 in one tick), and after
+   EMA smoothing was added, the live run showed the inverse — a genuine
+   overhead pass (raw radius 0.048) filtered out by the smoothing lag
+   (smoothed 0.19). Thresholds of that precision are the wrong quantization
+   for this signal.
+4. **Whole-map centroid allows identity capture.** With one surviving blob,
+   the steering reference hopped between icons (raw radius 0.58 → 0.99 at
+   bearing ≈ 0°), dragging navigation toward a receding straggler.
+5. **The preprogrammed path leaves the arena.** Independently of the tactic,
+   the scripted mission path sometimes carries the aircraft outside the
+   battle area. Enemies only render inside the arena, so navigation that
+   continuously steers toward detected enemies bounds the excursion — now
+   stated as requirement **FR-005** (`docs/requirements/002-functional.sdoc`).
+6. **Phase 3 needs a mission-agnostic primitive.** The ADR 024 behavior tree
+   will invoke engage behavior from a tree node; the policy must not be
+   welded to the J20 mission script.
 
 ## Decision
 
-### 1. Single `MINIMAP` crop
+### 1. Three equal-width range rings
 
-A new calibrated crop `MINIMAP` bounds the full minimap circle. In step 1,
-`ENEMY_CLOSE_BY` and `detect_enemy_red` remain untouched — both crops are numpy
-slices of the same captured frame, so the second region adds no capture cost.
-In step 2, once live logs show equivalence, the 30-second disengage boolean is
-derived from the minimap scan (`radius_frac <= minimap.close_radius_frac`) and
-the `ENEMY_CLOSE_BY` crop is retired, leaving one region serving both
-consumers.
+The minimap disc is divided into three rings of equal radial width on the
+normalised radius: **short** (0–1/3), **mid** (1/3–2/3), **long** (2/3–1).
+Equal *width*, not equal *area*, is deliberate: what matters is travel
+distance to the contact, and the long ring covering 56% of map area is
+irrelevant to that. Ring membership (~0.33-wide bands) is coarse enough to
+sit outside the measured jitter band that broke the 0.12 overhead latch.
 
-### 2. `detect_enemy_map_bearing(frame)` (analyzer)
+### 2. Ring-engage policy
 
-Returns `{bearing_deg, radius_frac, blob_count, pixel_count}`, or a fail-safe
-all-`None`/zeros result if the crop is missing or an exception occurs.
-Pipeline: circular mask (excludes corners and rim letters) → `enemy_hsv` red
-mask including the hue wrap-around band — the identical, field-proven mask
-`detect_enemy_red` already runs on this same minimap surface — → connected-
-component area band (`min_blob_px`–`max_blob_px`) rejecting badges, wreck
-markers, and residual rim art → pixel-mass centroid of surviving components →
-polar conversion. `bearing_deg` is measured from the up-axis (positive
-clockwise, range −180…180); `radius_frac` is normalised to the mask radius.
+Evaluated every battle tick from per-ring red-icon counts:
 
-### 3. Overhead navigation phases
+| Priority | Condition                                        | Behaviour                              |
+|----------|--------------------------------------------------|----------------------------------------|
+| 1        | short-ring count at or above `short_ring_min_count` | **Orbit**: open-loop periodic roll (fixed direction) |
+| 2        | mid ring occupied                                | **Engage mid**: steer toward the mid-ring centroid |
+| 3        | long ring occupied                               | **Engage long**: steer toward the long-ring centroid |
+| 4        | no enemies detected                              | Idle — no command                      |
 
-A pure-logic navigator (no threads, no locks) consumes `(bearing_deg,
-radius_frac)` plus the `get_telemetry()` snapshot each battle tick:
+Mid beats long because it is reachable soonest; short beats both because the
+fight is already here (nearest-first doctrine — `short_ring_min_count` is a
+config threshold, not a hardcoded rule, so the Phase 3 tree can tune
+aggression). Orbit replaces the overhead hold: it needs no precise station,
+tolerates the own-ship marker occluding icons at map centre, and constant
+turning is itself a defensive posture (a measurable hypothesis, like the
+original AOA claim).
 
-| Phase    | Condition                                        | Behaviour                                   |
-|----------|--------------------------------------------------|---------------------------------------------|
-| Climb    | altitude below `attack_altitude`                 | no steering; existing mission profile climbs |
-| Steer    | bearing outside deadzone                         | roll toward cluster via `orient_nose_to_target` |
-| Approach | bearing inside deadzone, radius above threshold  | fly straight                                |
-| Overhead | radius at or below `overhead_radius_frac`        | hold; exit only above `overhead_exit_frac`  |
+### 3. Per-ring bearing, smoothed within a selection
 
-The Overhead exit hysteresis exists because the own-ship marker occludes enemy
-icons exactly at arrival — a raw threshold would flicker.
+The steering reference is the area-weighted centroid of the **selected ring
+only** — a long-range straggler cannot capture navigation while the mid ring
+is occupied (fixes context item 4). The centroid vector is smoothed by the
+existing `MinimapEma` (vector-space; bearing angles cannot be averaged
+across the ±180° wrap), and the EMA is **reseeded only when the selection
+jumps to a genuinely different target** — a bearing change beyond
+`ema_reseed_angle_deg`. Averaging across a target switch would blend two
+different objects, but a single contact crossing a ring boundary keeps its
+smoothing: the first live session (2026-08-08) showed that
+reseed-on-every-ring-change turned mid↔long boundary flaps into raw-sample
+steering reversals. Mode changes into and out of Orbit are debounced
+(`ring_debounce_ticks`) instead of radius-hysteresis-latched.
 
-### 4. Actuation reuse
+### 4. No altitude precondition; safety floors retained
 
-`error_norm = clamp(bearing_deg / 90, −1, 1)` is fed to the existing
-`Controller.orient_nose_to_target`, whose deadband, gain, hold clamps, and
-cooldown are already parameters — coarse-navigation gains come from config.
-No new key-injection logic is added.
+Navigation is active at any altitude (`attack_altitude` and the
+`overhead_*` latch parameters are retired). Two gates carry forward
+unchanged, both exercised in the live session: steering is suppressed when
+the telemetry snapshot is missing/stale (5 ticks) and below
+`min_safe_altitude` (3 ticks, CFIT floor). Altitude management itself
+belongs to the mission profile today and to the behavior tree in Phase 3 —
+this policy only commands the roll axis.
 
-### 5. Safety gates
+### 5. Mission-agnostic intent API — not an FSM state
 
-- `j20_mission.attack_mode` (default `false`) master switch, plus a
-  `attack_mode_dry_run` log-only mode for tuning.
-- Active only in `GAME_BATTLE`; suppressed in `GAME_BATTLE_MANUAL` (manual
-  takeover always wins, consistent with ADR 027).
-- Telemetry snapshot `None`/stale, or altitude below
-  `j20_mission.min_safe_altitude` → suppress all steering (CFIT fail-safe,
-  carried over unchanged from the quadrant draft).
-- Terrain avoidance active (Design 001 `_terrain_avoiding`) → suppress.
+The policy is a pure object (`EngageNavigator` in `wingman/engage_nav.py`):
+`update(components, altitude, now) → Intent`, where an Intent is `steer`
+(normalised error), `orbit` (direction), or `none` (reason). The tick
+handler translates intents into controller calls; the J20 mission invokes it
+today, and the ADR 024 behavior tree's engage node (working name
+`GAME_BATTLE_ENGAGE`) invokes the same object later. **`GAME_BATTLE_ENGAGE`
+is a tree node, not a `transitions` FSM state**: the FSM states are
+screen-derived facts, and mixing agent intent into them would force every
+screen-detection path to enumerate intent states.
 
-### 6. Instrumentation (part of the decision)
+### 6. Actuation
 
-- Per-cycle DEBUG log: bearing, radius, phase, issued command.
-- Per-mission summary: percent of battle time per phase, mean `radius_frac`.
-- Effectiveness A/B, `attack_mode` on vs off: deaths and outcomes per mission
-  via MissionStatsTracker (ADR 055), incoming-detection rate from the existing
-  PerformanceTracker histograms. These measurements are the acceptance
-  evidence for this ADR.
+Steer intents reuse `Controller.orient_nose_to_target` with the coarse gains
+(`error_norm = clamp(bearing/90, −1, 1)`); the shared cooldown timestamp
+still arbitrates against the Design 005 fine-tracking loop (terminal loop
+wins). Orbit intents issue an open-loop `roll_<direction>` hold every
+`orbit_roll_interval_s` — the one genuinely new actuation pattern, to be
+validated in dry-run before live flight.
+
+### 7. Instrumentation (unchanged, still the acceptance evidence)
+
+Per-tick DEBUG (mode, reason, ring counts, error, altitude), INFO on mode
+change, per-mission phase-uptime summary, and the MissionStatsTracker /
+incoming-rate A/B against `attack_mode` off. This ADR cannot go `Accepted`
+without those live measurements. FR-005 adds an observable: excursions
+outside the arena under ring-engage versus the preprogrammed path.
 
 ## Consequences
 
 **Positive**
 
-- Whole-map 360° enemy awareness at zero additional capture cost (numpy slice
-  of the already-grabbed frame) — the aircraft can navigate *to* the fight,
-  not merely nudge when enemies are already close.
-- One calibrated region and one detection pass; continuous bearing replaces
-  five coarse buckets; no icon-straddles-a-boundary failure mode.
-- Reuses the field-proven `enemy_hsv` mask (already validated on this exact
-  surface) and the tested `orient_nose_to_target` controller.
-- "Directly overhead" is directly observable (icons at map centre) — the
-  tactic's goal state needs no inference.
-- Changing bearing granularity later (sectors, per-blob tracking) is a code
-  change with no recalibration.
+- Engagement is no longer starved: every battle tick with detection is
+  actionable (25% eligibility → ~100% of GAME_BATTLE time).
+- Ring quantization matches the signal's noise; the two measured
+  latch-failure modes (false eject, missed arrival) are structurally gone.
+- Ring-restricted centroids end identity capture by stragglers.
+- Continuous enemy-directed steering bounds arena excursions (FR-005) —
+  enemies only exist inside the arena.
+- The policy object slots directly under the Phase 3 tree; sensor, EMA,
+  safety gates, dry-run mode, and controller arbitration all carry forward.
 
 **Negative / Trade-offs**
 
-- `MINIMAP` must be calibrated per device/HUD layout.
-- Red artifacts (enemy-held capture badges, wreck markers) can contaminate the
-  centroid; v1 mitigates with the component area band and accepts residual
-  noise until live data sizes the problem.
-- The heading-up assumption is load-bearing: if the game offers a north-up
-  minimap setting, the bearing math breaks. Verify the setting is fixed.
-- Minimap zoom/range behaviour is unverified; if range changes with altitude
-  or map, `radius_frac` thresholds need per-map review.
-- Step 2 (retiring `ENEMY_CLOSE_BY`) changes the source of a verified
-  behaviour — gated on logged equivalence, not assumed.
+- Orbit-roll flight dynamics are unvalidated (open-loop roll cadence vs the
+  game's bank/turn model) — dry-run first.
+- A single short-ring straggler overrules a mid-ring furball at the default
+  threshold of 1 — consistent with nearest-first, revisitable via config.
+- Arena containment is achieved *indirectly*: there is no arena-boundary
+  sensor, so FR-005 is verified by outcome (excursion observations), not by
+  a boundary check. A map-edge detector is deferred future work.
+- Ring semantics inherit the unresolved minimap zoom/world-scale question.
 
 ## Alternatives Considered
 
-**3×3 quadrant split of `ENEMY_CLOSE_BY`** (the previous revision of this ADR)
-— rejected: bearing range limited to the map centre, five-bucket coarseness,
-and a roll table that duplicates the Design 005 controller.
+**Overhead phase machine with altitude gate and radius latch** (revision 2)
+— superseded by measurement: 25% engagement, latch failures in both
+directions, eject-cycle preemption.
 
-**Screen-space tracking alone (Design 005)** — complementary, not sufficient:
-world-view markers exist only inside the view frustum, so it cannot steer
-toward a cluster behind the aircraft or across the map. Design 003 gets the
-aircraft to the fight; Design 005 handles terminal alignment.
+**3×3 quadrant split of `ENEMY_CLOSE_BY`** (revision 1) — superseded before
+implementation: range-limited to the map centre, coarse, duplicated the
+Design 005 controller.
 
-**Compass-heading OCR and fixed headings** — still rejected: adds OCR load and
-heading-tracking state, and is far more brittle than direct icon detection.
+**Equal-area rings** — rejected: travel time scales with radial distance,
+not covered area; equal-area boundaries (0.58/0.82) would make "short"
+misleadingly wide.
 
-**North-up bearing math via rim-letter OCR** — unnecessary: the map is
-verified heading-up, so relative bearing is geometric.
+**`GAME_BATTLE_ENGAGE` as an FSM state** — rejected: the `transitions` FSM
+encodes screen-derived facts; intent lives in the mission script today and
+the ADR 024 tree tomorrow. The name survives as the tree node.
 
-**Health drops as an altitude proxy** — still rejected: damage as the safety
-signal arrives after the crash.
+**Arena-boundary detection from minimap terrain pixels** — deferred: no
+reliable boundary rendering is known; enemy-directed steering achieves the
+containment outcome without a new sensor. Revisit if FR-005 observations
+show excursions despite engagement.
+
+**Health drops as an altitude proxy** — still rejected (damage arrives after
+the crash).

@@ -77,3 +77,18 @@ first-raw-read time on disarm.
 probe that never ran and a probe that ran and saw nothing produced identical
 logs: silence. This requirement is what makes FR-004 falsifiable in
 production.
+
+## Aircraft remains inside the battle arena
+
+**UID**: FR-005
+
+**Statement**: During GAME_BATTLE, wingman shall continuously steer the aircraft toward
+detected enemy positions, so that the aircraft does not fly outside the
+battle arena.
+
+**Rationale**: ADR 028 (minimap ring-engage navigation). The preprogrammed mission path
+sometimes carried the aircraft outside the battle area. Enemies only render
+inside the arena, so navigation that always steers toward detected enemies
+bounds the excursion. No arena-boundary sensor exists; the requirement is
+verified by outcome (excursion observations with ring-engage on vs off).
+Implemented by EngageNavigator.update (wingman/engage_nav.py).

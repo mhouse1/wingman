@@ -28,6 +28,7 @@ from .performance import PerformanceTracker
 from .tick_handlers import (
     AmmoEventsHandler,
     EnemyPresenceHandler,
+    EngageNavHandler,
     RespawnHandler,
     TrackingHudHandler,
     WaitingFallbackHandler,
@@ -470,6 +471,7 @@ def main():
         emit_capture_event=_emit_capture_event,
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
+    engage_nav = EngageNavHandler(analyzer, ctrl, j20_cfg, cfg.get("minimap", {}))
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
     )
@@ -627,6 +629,7 @@ def main():
                     _stop_lobby_escape_loop()
                 waiting_fallback.on_state_change(current_game_state, prev_game_state)
                 enemy_presence.on_state_change(current_game_state, prev_game_state)
+                engage_nav.on_state_change(current_game_state, prev_game_state)
                 ammo_events.on_state_change(current_game_state, prev_game_state)
                 tracking_hud.on_state_change(current_game_state, prev_game_state)
                 if current_game_state == GameState.GAME_STARTING_STALLED:
@@ -697,6 +700,10 @@ def main():
 
             # Enemy presence check: if ENEMY_CLOSE_BY has had no red for 30s, disengage.
             enemy_presence.tick(frame, current_game_state)
+
+            # Ring-engage navigation (Design 003, FR-005) — before fine tracking
+            # so the shared orient_nose_to_target cooldown lets the terminal loop win.
+            engage_nav.tick(frame, current_game_state)
 
             tracking_hud.tick(frame, current_game_state, game_state)
 

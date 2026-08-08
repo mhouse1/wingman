@@ -668,6 +668,105 @@ _FSM_TRANSITIONS = [
 ]
 
 
+def _minimap_circle_mask(width: int, height: int, radius_px: float) -> np.ndarray:
+    """uint8 disc mask (255 inside) centred on the crop (Design 003).
+
+    Excludes the bounding-box corners — the live game world renders behind the
+    circular minimap — and, via the configured inset radius, the rim compass
+    letters.
+    """
+    cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
+    yy, xx = np.ogrid[:height, :width]
+    dist_sq = (xx - cx) ** 2 + (yy - cy) ** 2
+    return ((dist_sq <= radius_px ** 2) * 255).astype(np.uint8)
+
+
+def _scan_minimap_components(
+    crop,
+    hsv_lower,
+    hsv_upper,
+    mask_radius_frac: float,
+    min_blob_px: int,
+    max_blob_px: int,
+    circle_mask=None,
+):
+    """Per-component polar scan of the minimap crop (Design 003 revision 3).
+
+    Returns a list of ``(bearing_deg, radius_frac, area_px)`` tuples, one per
+    red component surviving the circle mask and the area band — the band
+    rejects rim art, ring badges, and the red locked-target ring and
+    route-line overlays, which are large or elongated components.
+    ``bearing_deg`` is measured from the up-axis, positive clockwise, in
+    (−180, 180]; on the heading-up minimap this is the bearing relative to
+    the aircraft nose. Empty list when nothing survives.
+    """
+    height, width = crop.shape[:2]
+    radius_px = mask_radius_frac * min(width, height) / 2.0
+    if radius_px <= 0:
+        return []
+    if circle_mask is None:
+        circle_mask = _minimap_circle_mask(width, height, radius_px)
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+    # Always include the wrap-around red range (hue 170–180), as detect_enemy_red does
+    wrap_lower = np.array([170, hsv_lower[1], hsv_lower[2]], dtype=np.uint8)
+    wrap_upper = np.array([180, hsv_upper[1], hsv_upper[2]], dtype=np.uint8)
+    mask |= cv2.inRange(hsv, wrap_lower, wrap_upper)
+    mask &= circle_mask
+    n_labels, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    centre_x = (width - 1) / 2.0
+    centre_y = (height - 1) / 2.0
+    components = []
+    for label in range(1, n_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_blob_px or area > max_blob_px:
+            continue
+        blob_x, blob_y = centroids[label]
+        dx = blob_x - centre_x
+        dy = blob_y - centre_y
+        bearing_deg = float(np.degrees(np.arctan2(dx, -dy)))
+        radius_frac = min(1.0, float(np.hypot(dx, dy)) / radius_px)
+        components.append((bearing_deg, radius_frac, area))
+    return components
+
+
+def _scan_minimap_red(
+    crop,
+    hsv_lower,
+    hsv_upper,
+    mask_radius_frac: float,
+    min_blob_px: int,
+    max_blob_px: int,
+    circle_mask=None,
+):
+    """Whole-map red-icon centroid — the aggregate of _scan_minimap_components.
+
+    Kept from Design 003 revision 2 for the frame regression tests and the
+    planned ENEMY_CLOSE_BY consolidation. Returns
+    ``(bearing_deg, radius_frac, blob_count, pixel_count)``, or
+    ``(None, None, 0, 0)`` when nothing survives the filters.
+    """
+    components = _scan_minimap_components(
+        crop, hsv_lower, hsv_upper, mask_radius_frac,
+        min_blob_px, max_blob_px, circle_mask,
+    )
+    if not components:
+        return None, None, 0, 0
+    total_area = 0
+    sum_x = 0.0
+    sum_y = 0.0
+    for bearing_deg, radius_frac, area in components:
+        theta = np.radians(bearing_deg)
+        sum_x += area * radius_frac * np.sin(theta)
+        sum_y += area * radius_frac * np.cos(theta)
+        total_area += area
+    x = sum_x / total_area
+    y = sum_y / total_area
+    bearing_deg = float(np.degrees(np.arctan2(x, y)))
+    radius_frac = min(1.0, float(np.hypot(x, y)))
+    return bearing_deg, radius_frac, len(components), total_area
+
+
 # ============================================================================
 # GameStateAnalyzer Class
 # ============================================================================
@@ -716,6 +815,13 @@ class GameStateAnalyzer:
         enemy_hsv_cfg = config.get("enemy_hsv", {})
         self._enemy_hsv_lower = np.array(enemy_hsv_cfg.get("lower", [0, 120, 120]), dtype=np.uint8)
         self._enemy_hsv_upper = np.array(enemy_hsv_cfg.get("upper", [10, 255, 255]), dtype=np.uint8)
+
+        # MINIMAP red-icon scan parameters (Design 003 / ADR 028)
+        minimap_cfg = config.get("minimap", {})
+        self._minimap_mask_radius_frac = float(minimap_cfg.get("mask_radius_frac", 0.93))
+        self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
+        self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
+        self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
         
         # OCR result caching for performance (avoid running OCR every frame)
         self._ocr_cache = {
@@ -2793,6 +2899,76 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.warning("Analyzer: detect_enemy_red failed: %s", e)
             return False
+
+    def detect_enemy_map_bearing(self, frame) -> dict:
+        """Scan the MINIMAP crop for red enemy icons → relative bearing and distance.
+
+        Pure HSV mask + connected components — no OCR, runs synchronously on
+        the calling thread (same cost class as detect_enemy_red). The circle
+        mask is cached per crop geometry. Fail-safe: missing crop or any
+        exception returns bearing/radius None with zero counts.
+        Design 003 / ADR 028.
+        """
+        empty = {"bearing_deg": None, "radius_frac": None, "blob_count": 0, "pixel_count": 0}
+        if "MINIMAP" not in self.crops:
+            return empty
+        try:
+            crop = get_crop(frame, *self.crops["MINIMAP"][:4])
+            height, width = crop.shape[:2]
+            cache = self._minimap_circle_cache
+            if cache is None or cache[0] != width or cache[1] != height:
+                radius_px = self._minimap_mask_radius_frac * min(width, height) / 2.0
+                cache = (width, height, _minimap_circle_mask(width, height, radius_px))
+                self._minimap_circle_cache = cache
+            bearing_deg, radius_frac, blob_count, pixel_count = _scan_minimap_red(
+                crop,
+                self._enemy_hsv_lower,
+                self._enemy_hsv_upper,
+                self._minimap_mask_radius_frac,
+                self._minimap_min_blob_px,
+                self._minimap_max_blob_px,
+                circle_mask=cache[2],
+            )
+            return {
+                "bearing_deg": bearing_deg,
+                "radius_frac": radius_frac,
+                "blob_count": blob_count,
+                "pixel_count": pixel_count,
+            }
+        except Exception as e:
+            logger.warning("Analyzer: detect_enemy_map_bearing failed: %s", e)
+            return empty
+
+    def detect_enemy_map_components(self, frame) -> "list | None":
+        """Per-component polar scan of the MINIMAP crop (Design 003 revision 3).
+
+        Returns a list of ``(bearing_deg, radius_frac, area_px)`` tuples —
+        possibly empty (scan worked, nothing red) — or ``None`` when the crop
+        is missing or the scan raises (fail-safe). Ring binning is
+        policy-side: ``engage_nav.bin_rings``.
+        """
+        if "MINIMAP" not in self.crops:
+            return None
+        try:
+            crop = get_crop(frame, *self.crops["MINIMAP"][:4])
+            height, width = crop.shape[:2]
+            cache = self._minimap_circle_cache
+            if cache is None or cache[0] != width or cache[1] != height:
+                radius_px = self._minimap_mask_radius_frac * min(width, height) / 2.0
+                cache = (width, height, _minimap_circle_mask(width, height, radius_px))
+                self._minimap_circle_cache = cache
+            return _scan_minimap_components(
+                crop,
+                self._enemy_hsv_lower,
+                self._enemy_hsv_upper,
+                self._minimap_mask_radius_frac,
+                self._minimap_min_blob_px,
+                self._minimap_max_blob_px,
+                circle_mask=cache[2],
+            )
+        except Exception as e:
+            logger.warning("Analyzer: detect_enemy_map_components failed: %s", e)
+            return None
 
     def scan_region_for_good_luck(self, frame) -> bool:
         """Synchronously scan the good_luck crop for 'Good Luck' text via OCR pool.
