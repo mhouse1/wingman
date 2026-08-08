@@ -17,7 +17,7 @@ except ImportError:
     colorama = None
 
 WINGMAN_VERSION = "1.7.1"
-WINGMAN_VERSION_DETAILS = "performance validation only, no major changes"
+WINGMAN_VERSION_DETAILS = "implement requirements using strictdoc, performance validation only, no major changes"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
