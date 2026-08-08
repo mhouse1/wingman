@@ -423,3 +423,17 @@ def test_j20_hotkey_forces_battle_via_fsm_trigger(monkeypatch):
 
     assert analyzer.trigger_calls == ["manual_force_battle"]
     assert len(_ThreadStub.started_targets) == 1
+
+
+def test_toggle_weapon_loop_accepts_a_key_event(ctrl):
+    """Regression: the Linux XKey listener invokes hotkey callbacks as cb(event).
+
+    toggle_weapon_loop took no event arg, so every 'x' press raised
+    "takes 1 positional argument but 2 were given" and the toggle never fired
+    (2026-08-07 session log). Both call forms must work.
+    """
+    from types import SimpleNamespace
+    ctrl.toggle_weapon_loop()                                              # direct call
+    assert ctrl._weapon_loop_active is True
+    ctrl.toggle_weapon_loop(SimpleNamespace(name="x", is_injected=False))  # hotkey call
+    assert ctrl._weapon_loop_active is False

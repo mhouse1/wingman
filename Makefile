@@ -68,9 +68,21 @@ RR_LIVE_PATH1_PRESENTER_GRACE_S ?= 8.0
 preflight:
 	$(PYTHON_RUN) tests/preflight.py
 
+# Requirements gate (research 002 / ADR 066): validates the .sdoc documents and
+# the @relation() source markers in wingman/. Exits 1 on any dangling relation
+# in either direction. Fast (~4s), runs inside make tp.
+reqs-gate:
+	uv run strictdoc export . --formats=markdown --output-dir tests/test-output/strictdoc
+	@echo "PASS: requirements + source traceability validated"
+
+# Regenerate the committed markdown export beside the .sdoc sources.
+reqs: reqs-gate
+	cp tests/test-output/strictdoc/markdown/docs/requirements/*.md docs/requirements/
+	@echo "docs/requirements markdown export refreshed"
+
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_tick_handlers.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -118,7 +130,7 @@ test-perf: test test-perf-csv test-perf-chart
 
 # Preview performance trends including current uncommitted data
 # Includes ADR044 PATH1 runtime replay gate and ADR045 live-screen gate.
-tp: test rr-path1-gate rr-live-path1-gate
+tp: test reqs-gate rr-path1-gate rr-live-path1-gate
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""

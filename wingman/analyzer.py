@@ -668,6 +668,105 @@ _FSM_TRANSITIONS = [
 ]
 
 
+def _minimap_circle_mask(width: int, height: int, radius_px: float) -> np.ndarray:
+    """uint8 disc mask (255 inside) centred on the crop (Design 003).
+
+    Excludes the bounding-box corners — the live game world renders behind the
+    circular minimap — and, via the configured inset radius, the rim compass
+    letters.
+    """
+    cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
+    yy, xx = np.ogrid[:height, :width]
+    dist_sq = (xx - cx) ** 2 + (yy - cy) ** 2
+    return ((dist_sq <= radius_px ** 2) * 255).astype(np.uint8)
+
+
+def _scan_minimap_components(
+    crop,
+    hsv_lower,
+    hsv_upper,
+    mask_radius_frac: float,
+    min_blob_px: int,
+    max_blob_px: int,
+    circle_mask=None,
+):
+    """Per-component polar scan of the minimap crop (Design 003 revision 3).
+
+    Returns a list of ``(bearing_deg, radius_frac, area_px)`` tuples, one per
+    red component surviving the circle mask and the area band — the band
+    rejects rim art, ring badges, and the red locked-target ring and
+    route-line overlays, which are large or elongated components.
+    ``bearing_deg`` is measured from the up-axis, positive clockwise, in
+    (−180, 180]; on the heading-up minimap this is the bearing relative to
+    the aircraft nose. Empty list when nothing survives.
+    """
+    height, width = crop.shape[:2]
+    radius_px = mask_radius_frac * min(width, height) / 2.0
+    if radius_px <= 0:
+        return []
+    if circle_mask is None:
+        circle_mask = _minimap_circle_mask(width, height, radius_px)
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+    # Always include the wrap-around red range (hue 170–180), as detect_enemy_red does
+    wrap_lower = np.array([170, hsv_lower[1], hsv_lower[2]], dtype=np.uint8)
+    wrap_upper = np.array([180, hsv_upper[1], hsv_upper[2]], dtype=np.uint8)
+    mask |= cv2.inRange(hsv, wrap_lower, wrap_upper)
+    mask &= circle_mask
+    n_labels, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    centre_x = (width - 1) / 2.0
+    centre_y = (height - 1) / 2.0
+    components = []
+    for label in range(1, n_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_blob_px or area > max_blob_px:
+            continue
+        blob_x, blob_y = centroids[label]
+        dx = blob_x - centre_x
+        dy = blob_y - centre_y
+        bearing_deg = float(np.degrees(np.arctan2(dx, -dy)))
+        radius_frac = min(1.0, float(np.hypot(dx, dy)) / radius_px)
+        components.append((bearing_deg, radius_frac, area))
+    return components
+
+
+def _scan_minimap_red(
+    crop,
+    hsv_lower,
+    hsv_upper,
+    mask_radius_frac: float,
+    min_blob_px: int,
+    max_blob_px: int,
+    circle_mask=None,
+):
+    """Whole-map red-icon centroid — the aggregate of _scan_minimap_components.
+
+    Kept from Design 003 revision 2 for the frame regression tests and the
+    planned ENEMY_CLOSE_BY consolidation. Returns
+    ``(bearing_deg, radius_frac, blob_count, pixel_count)``, or
+    ``(None, None, 0, 0)`` when nothing survives the filters.
+    """
+    components = _scan_minimap_components(
+        crop, hsv_lower, hsv_upper, mask_radius_frac,
+        min_blob_px, max_blob_px, circle_mask,
+    )
+    if not components:
+        return None, None, 0, 0
+    total_area = 0
+    sum_x = 0.0
+    sum_y = 0.0
+    for bearing_deg, radius_frac, area in components:
+        theta = np.radians(bearing_deg)
+        sum_x += area * radius_frac * np.sin(theta)
+        sum_y += area * radius_frac * np.cos(theta)
+        total_area += area
+    x = sum_x / total_area
+    y = sum_y / total_area
+    bearing_deg = float(np.degrees(np.arctan2(x, y)))
+    radius_frac = min(1.0, float(np.hypot(x, y)))
+    return bearing_deg, radius_frac, len(components), total_area
+
+
 # ============================================================================
 # GameStateAnalyzer Class
 # ============================================================================
@@ -716,6 +815,13 @@ class GameStateAnalyzer:
         enemy_hsv_cfg = config.get("enemy_hsv", {})
         self._enemy_hsv_lower = np.array(enemy_hsv_cfg.get("lower", [0, 120, 120]), dtype=np.uint8)
         self._enemy_hsv_upper = np.array(enemy_hsv_cfg.get("upper", [10, 255, 255]), dtype=np.uint8)
+
+        # MINIMAP red-icon scan parameters (Design 003 / ADR 028)
+        minimap_cfg = config.get("minimap", {})
+        self._minimap_mask_radius_frac = float(minimap_cfg.get("mask_radius_frac", 0.93))
+        self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
+        self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
+        self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
         
         # OCR result caching for performance (avoid running OCR every frame)
         self._ocr_cache = {
@@ -874,6 +980,18 @@ class GameStateAnalyzer:
         # Signalled when _game_battle_alive transitions False → True.
         # The main loop waits on this event to restart the mission immediately.
         self.alive_event = threading.Event()
+        # Instrumentation for the GAME_STARTING health probe (2026-08-05): how many
+        # attempts, when the scan armed, and when a raw value first appeared. These
+        # answer "how early is HEALTH readable after Good Luck", which no existing
+        # measurement covers.
+        self._starting_scan_attempts = 0
+        self._starting_scan_armed_ts = 0.0
+        self._starting_probe_last_ts = 0.0
+        self._starting_probe_running = False
+        self._starting_probe_interval_s = float(
+            config.get("mission", {}).get("starting_health_probe_interval_s", 0.75))
+        self._starting_scan_first_ts = 0.0
+        self._starting_scan_first_raw_ts = 0.0
         # Set by _start_game_starting_loop after the 10-second gate to enable the
         # GAME_STARTING health-only OCR scan (ADR 032 battle-alive fallback).
         self._game_starting_health_scan_enabled = threading.Event()
@@ -1171,13 +1289,24 @@ class GameStateAnalyzer:
             rejected_before = self._telemetry.rejected_total
             self._telemetry.update(speed_value, altitude_value, _frame_ts)
             rejected_after = self._telemetry.rejected_total
+            snap = self._telemetry.snapshot(_frame_ts)
         if rejected_after > rejected_before:
             logger.warning(
                 "Analyzer: telemetry plausibility filter rejected reading "
                 "(speed_raw=%s altitude_raw=%s, total_rejected=%d)",
                 speed_value, altitude_value, rejected_after)
         if speed_value is not None or altitude_value is not None:
-            logger.info("Altitude: %s | Speed: %s", altitude_value, speed_value)
+            angle = snap.pitch_angle_deg()
+            if angle is not None:
+                band = snap.pitch_band(
+                    steep_min_sin=self._telemetry.steep_min_sin,
+                    level_max_sin=self._telemetry.level_max_sin,
+                )
+                nose = f"{angle:+.0f}\N{DEGREE SIGN} ({band})"
+            else:
+                nose = "n/a"
+            logger.info("Altitude: %s | Speed: %s | Nose: %s",
+                        altitude_value, speed_value, nose)
         return telemetry_ocr_time
 
     def get_telemetry(self):
@@ -1382,6 +1511,114 @@ class GameStateAnalyzer:
         with self._health_lock:
             return self._alive_after_observed_death
 
+    def _schedule_starting_health_probe(self, frame):
+        """Run the armed GAME_STARTING HEALTH probe on a background thread.
+
+        Deliberately separate from the battle OCR path (ADR 032, made reachable
+        2026-08-05): it scans HEALTH only, never touches the respawn/incoming
+        caches, and returns nothing — so a stale battle respawn result cannot
+        leak into GAME_STARTING. Self-throttled; the caller is the per-tick
+        analyze_frame.
+
+        @relation(FR-004, scope=function)
+        """
+        if self._shutting_down or "HEALTH" not in self.crops:
+            return
+        now = time.time()
+        if now - self._starting_probe_last_ts < self._starting_probe_interval_s:
+            return
+        if self._starting_probe_running:
+            return
+        executor = self.ocr_executor
+        if executor is None:
+            return
+        self._starting_probe_last_ts = now
+        self._starting_probe_running = True
+
+        def _probe():
+            try:
+                health_frame = get_crop(frame, *self.crops["HEALTH"][:4])
+                raw, _ = _process_health_region(health_frame)
+                self._starting_scan_attempts += 1
+                since_arm = now - (self._starting_scan_armed_ts or now)
+                if raw is None:
+                    logger.info(
+                        "GAME_STARTING health probe #%d (+%.1fs since armed): no digits",
+                        self._starting_scan_attempts, since_arm)
+                    return
+                if self._starting_scan_first_raw_ts == 0.0:
+                    self._starting_scan_first_raw_ts = time.time()
+                logger.info(
+                    "GAME_STARTING health probe #%d (+%.1fs since armed): raw=%s",
+                    self._starting_scan_attempts, since_arm, raw)
+                confirmed = self._confirm_health_value(raw)
+                if confirmed is None:
+                    logger.info(
+                        "GAME_STARTING health probe #%d: raw=%s UNCONFIRMED "
+                        "(ADR 063 needs a second agreeing read)",
+                        self._starting_scan_attempts, raw)
+                    return
+                if confirmed < 1:
+                    return
+                with self._health_lock:
+                    prev_alive = self._game_battle_alive
+                    self._health = confirmed
+                    self._game_battle_alive = True
+                    if not prev_alive:
+                        self._alive_after_observed_death = self._death_observed
+                        self._death_observed = False
+                logger.info(
+                    "\033[92mAnalyzer: health %d confirmed in GAME_STARTING "
+                    "(+%.1fs since armed) → game_battle_alive=True\033[0m",
+                    confirmed, since_arm)
+                if not prev_alive:
+                    self.alive_event.set()
+            except Exception:
+                logger.exception("Analyzer: GAME_STARTING health probe failed")
+            finally:
+                self._starting_probe_running = False
+
+        threading.Thread(target=_probe, daemon=True, name="starting-health-probe").start()
+
+    def arm_starting_health_scan(self):
+        """Enable the GAME_STARTING health-only probe and reset its instrumentation.
+
+        Public entry point so the controller does not poke the private Event
+        (the coupling CR-013 flagged elsewhere).
+        """
+        self._starting_scan_attempts = 0
+        self._starting_scan_armed_ts = time.time()
+        self._starting_probe_last_ts = 0.0
+        self._starting_scan_first_ts = 0.0
+        self._starting_scan_first_raw_ts = 0.0
+        self._game_starting_health_scan_enabled.set()
+
+    def disarm_starting_health_scan(self):
+        """Disable the probe and report what it saw (2026-08-05 instrumentation).
+
+        The summary line is the measurement that matters: how long after arming
+        the HEALTH crop first produced a raw value. Until that number exists there
+        is no basis for shortening the post-Good-Luck wait.
+
+        @relation(FR-004.1, scope=function)
+        """
+        was_armed = self._game_starting_health_scan_enabled.is_set()
+        self._game_starting_health_scan_enabled.clear()
+        if not was_armed or self._starting_scan_armed_ts == 0.0:
+            return
+        armed_for = time.time() - self._starting_scan_armed_ts
+        if self._starting_scan_first_raw_ts > 0.0:
+            first_raw = self._starting_scan_first_raw_ts - self._starting_scan_armed_ts
+            logger.info(
+                "GAME_STARTING health probe summary: %d attempts over %.1fs — "
+                "first raw read at +%.1fs",
+                self._starting_scan_attempts, armed_for, first_raw)
+        else:
+            logger.info(
+                "GAME_STARTING health probe summary: %d attempts over %.1fs — "
+                "NO raw read at any point",
+                self._starting_scan_attempts, armed_for)
+
     def mark_health_dead_synthetic(self):
         """Force health state to dead WITHOUT marking an observed death (ADR 061).
 
@@ -1409,6 +1646,8 @@ class GameStateAnalyzer:
         fragments and concatenations vary read-to-read and never confirm; the
         true value recurs constantly. Reads above max_plausible are discarded
         before entering the window so they cannot self-confirm.
+
+        @relation(SAF-004, scope=function)
         """
         if raw > self._health_max_plausible:
             logger.debug("Analyzer: health read %d over max_plausible %d — discarded",
@@ -1596,6 +1835,8 @@ class GameStateAnalyzer:
         shadow mode: recorded and logged only. dual mode (ADR 064): additionally
         sets health_respawn_event so the main loop runs the respawn plumbing —
         unless respawn OCR is currently detecting the overlay (it owns the episode).
+
+        @relation(SAF-003, scope=function)
 
         transitioned: whether this read is the dead→alive transition. Weak-tier
         evidence REQUIRES it (ADR 064 amendment, 2026-08-02 05:37 session): a
@@ -1910,8 +2151,21 @@ class GameStateAnalyzer:
         """
         # Skip OCR entirely outside active battle — no respawn/incoming events are
         # relevant in these states, and transitions are driven externally.
+        #
+        # ONE exception (2026-08-05): GAME_STARTING while the battle-alive health
+        # probe is armed. Scheduling background OCR is the only path that reaches
+        # _run_ocr_in_background, so this early return made ADR 032's probe
+        # unreachable — it logged "0 attempts" over an 18.8s armed window. The
+        # probe still scans HEALTH only; the respawn/incoming work stays skipped
+        # because _run_ocr_in_background branches on state, and this call returns
+        # the same negative respawn result either way.
         if self.game_state in (GameState.GAME_END_B, GameState.GAME_LOBBY,
-                               GameState.GAME_WAITING, GameState.GAME_STARTING):
+                               GameState.GAME_WAITING):
+            return (False, 0.0, None)
+        if self.game_state == GameState.GAME_STARTING:
+            if not self._game_starting_health_scan_enabled.is_set():
+                return (False, 0.0, None)
+            self._schedule_starting_health_probe(frame)
             return (False, 0.0, None)
 
         # Check if we can use cached result (throttle OCR)
@@ -2191,41 +2445,11 @@ class GameStateAnalyzer:
                         t1-t0, t2-t1, respawn_ocr_time, incoming_processing_time, health_ocr_time,
                         ammo_flares_ocr_time, ammo_missile_ocr_time, telemetry_ocr_time, t4-t0
                     )
-                elif (state == GameState.GAME_STARTING
-                        and self._game_starting_health_scan_enabled.is_set()
-                        and "HEALTH" in self.crops):
-                    # Health-only scan for the battle-alive fallback (ADR 032).
-                    health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4])
-                    health_future = executor.submit(_process_health_region, health_frame)
-                    health_value, _ = health_future.result(timeout=120)
-                    if health_value is not None:
-                        # ADR 063: same recurrence confirmation as the battle path.
-                        health_value = self._confirm_health_value(health_value)
-                    if health_value is not None:
-                        with self._health_lock:
-                            health_value, self._health_ceiling = _apply_health_ceiling_filter(
-                                health_value,
-                                self._health_window,
-                                self._health_ceiling,
-                                HEALTH_WINDOW_SIZE,
-                                HEALTH_SPIKE_FACTOR,
-                                self._health,
-                            )
-                        if health_value is not None and health_value >= 1:
-                            with self._health_lock:
-                                prev_alive = self._game_battle_alive
-                                self._health = health_value
-                                self._game_battle_alive = True
-                                if not prev_alive:
-                                    # Latch death provenance (ADR 061) — same rule as
-                                    # the battle-state transition site.
-                                    self._alive_after_observed_death = self._death_observed
-                                    self._death_observed = False
-                            logger.info(
-                                "Analyzer: health %d detected in GAME_STARTING → game_battle_alive=True",
-                                health_value)
-                            if not prev_alive:
-                                self.alive_event.set()
+                # NOTE: the GAME_STARTING health-probe branch that used to live here
+                # was removed 2026-08-05. It was unreachable — _detect_respawn_ocr
+                # returns before scheduling background OCR in that state — and is now
+                # served by _schedule_starting_health_probe(), which scans HEALTH only
+                # and never touches the respawn/incoming caches.
                 else:
                     logger.debug("Skipping GAME_BATTLE crop OCR in %s state", state.name)
                     self._shadow_clear_mark()
@@ -2686,6 +2910,76 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.warning("Analyzer: detect_enemy_red failed: %s", e)
             return False
+
+    def detect_enemy_map_bearing(self, frame) -> dict:
+        """Scan the MINIMAP crop for red enemy icons → relative bearing and distance.
+
+        Pure HSV mask + connected components — no OCR, runs synchronously on
+        the calling thread (same cost class as detect_enemy_red). The circle
+        mask is cached per crop geometry. Fail-safe: missing crop or any
+        exception returns bearing/radius None with zero counts.
+        Design 003 / ADR 028.
+        """
+        empty = {"bearing_deg": None, "radius_frac": None, "blob_count": 0, "pixel_count": 0}
+        if "MINIMAP" not in self.crops:
+            return empty
+        try:
+            crop = get_crop(frame, *self.crops["MINIMAP"][:4])
+            height, width = crop.shape[:2]
+            cache = self._minimap_circle_cache
+            if cache is None or cache[0] != width or cache[1] != height:
+                radius_px = self._minimap_mask_radius_frac * min(width, height) / 2.0
+                cache = (width, height, _minimap_circle_mask(width, height, radius_px))
+                self._minimap_circle_cache = cache
+            bearing_deg, radius_frac, blob_count, pixel_count = _scan_minimap_red(
+                crop,
+                self._enemy_hsv_lower,
+                self._enemy_hsv_upper,
+                self._minimap_mask_radius_frac,
+                self._minimap_min_blob_px,
+                self._minimap_max_blob_px,
+                circle_mask=cache[2],
+            )
+            return {
+                "bearing_deg": bearing_deg,
+                "radius_frac": radius_frac,
+                "blob_count": blob_count,
+                "pixel_count": pixel_count,
+            }
+        except Exception as e:
+            logger.warning("Analyzer: detect_enemy_map_bearing failed: %s", e)
+            return empty
+
+    def detect_enemy_map_components(self, frame) -> "list | None":
+        """Per-component polar scan of the MINIMAP crop (Design 003 revision 3).
+
+        Returns a list of ``(bearing_deg, radius_frac, area_px)`` tuples —
+        possibly empty (scan worked, nothing red) — or ``None`` when the crop
+        is missing or the scan raises (fail-safe). Ring binning is
+        policy-side: ``engage_nav.bin_rings``.
+        """
+        if "MINIMAP" not in self.crops:
+            return None
+        try:
+            crop = get_crop(frame, *self.crops["MINIMAP"][:4])
+            height, width = crop.shape[:2]
+            cache = self._minimap_circle_cache
+            if cache is None or cache[0] != width or cache[1] != height:
+                radius_px = self._minimap_mask_radius_frac * min(width, height) / 2.0
+                cache = (width, height, _minimap_circle_mask(width, height, radius_px))
+                self._minimap_circle_cache = cache
+            return _scan_minimap_components(
+                crop,
+                self._enemy_hsv_lower,
+                self._enemy_hsv_upper,
+                self._minimap_mask_radius_frac,
+                self._minimap_min_blob_px,
+                self._minimap_max_blob_px,
+                circle_mask=cache[2],
+            )
+        except Exception as e:
+            logger.warning("Analyzer: detect_enemy_map_components failed: %s", e)
+            return None
 
     def scan_region_for_good_luck(self, frame) -> bool:
         """Synchronously scan the good_luck crop for 'Good Luck' text via OCR pool.

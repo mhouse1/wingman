@@ -18,6 +18,7 @@ from wingman.telemetry import (
     TREND_UNKNOWN,
     TelemetryProcessor,
     TelemetrySnapshot,
+    pitch_angle_deg,
     pitch_band,
 )
 
@@ -313,6 +314,36 @@ class TestPitchBand:
         # Stale snapshot must return None — corrections need contrary
         # evidence, never absence of data (ADR 038).
         assert p.snapshot(20.0).pitch_band() is None
+
+
+class TestPitchAngleDeg:
+    def test_level_flight_is_zero(self):
+        assert pitch_angle_deg(600.0, 0.0) == pytest.approx(0.0)
+
+    def test_30_degree_dive(self):
+        # sin(30°) = 0.5 → -440 ft/s at 600 MPH (880 ft/s).
+        assert pitch_angle_deg(600.0, -440.0) == pytest.approx(-30.0, abs=0.1)
+
+    def test_30_degree_climb(self):
+        assert pitch_angle_deg(600.0, 440.0) == pytest.approx(30.0, abs=0.1)
+
+    def test_ratio_past_vertical_saturates_at_90(self):
+        # OCR noise can produce alt rate above total speed; asin must not raise.
+        assert pitch_angle_deg(600.0, -1200.0) == pytest.approx(-90.0)
+
+    def test_missing_inputs_return_none(self):
+        assert pitch_angle_deg(None, -300.0) is None
+        assert pitch_angle_deg(600.0, None) is None
+
+    def test_too_slow_for_meaningful_ratio(self):
+        assert pitch_angle_deg(10.0, -10.0) is None
+
+    def test_snapshot_pitch_angle_requires_both_signals_fresh(self):
+        p = _proc(stale_after_s=6.0)
+        p.update(600, 20000, now_s=0.0)
+        p.update(600, 19340, now_s=1.5)  # -440 ft/s at 600 MPH → -30°
+        assert p.snapshot(2.0).pitch_angle_deg() == pytest.approx(-30.0, abs=0.1)
+        assert p.snapshot(20.0).pitch_angle_deg() is None
 
 
 # ---------------------------------------------------------------------------

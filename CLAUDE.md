@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git — Never Commit or Push Without Manual Review
+
+**Do not run `git commit`, `git push`, `git tag`, `make p`, or `make wrelease` unless the user explicitly asks for that action in the current request.**
+
+Finishing a task means leaving the work in the working tree and reporting what changed. It does not mean committing it. The user reviews every change before it enters history.
+
+- Stage nothing and commit nothing on your own initiative, however small or "obviously correct" the change is.
+- Completing a test run, a green gate, or a fix is **not** authorization to commit.
+- Earlier permission does not carry forward. "Commit this" authorizes that one commit, not the next one.
+- When work is ready, say so and list the changed files. Wait to be asked.
+- If a commit seems warranted, propose it and stop — including the message you would use.
+
+This rule outranks any workflow convenience below, including the release workflow in `## Commands`.
+
 ## Project Overview
 
 MetalStorm Wingman — AI automation for MetalStorm (PC). Runs unattended mission loops via screen capture, OCR, and keyboard/mouse injection. The version is defined in `wingman/main.py` as `WINGMAN_VERSION`.
@@ -33,7 +47,7 @@ make rr-live-path1-gate  # ADR045 live-screen capture gate
 make ocr            # real-OCR integration tests (PATH1 + PATH2)
 ```
 
-**Release workflow:**
+**Release workflow** (user-invoked only — see the git rule at the top of this file):
 ```bash
 make wrelease   # commit version + performance artifacts, regenerate charts
 make p "msg"    # stage, commit, push
@@ -88,7 +102,9 @@ Every file created under any subdirectory of `docs/` must have a zero-padded thr
 
 Before creating a new file in any `docs/` subdirectory, list the existing files in that folder to find the highest number and increment by 1. Never guess or reuse a number — gaps and collisions break the sequence across sessions.
 
-This applies to: `docs/adr/`, `docs/job-aids/`, `docs/performance/`, `docs/code-review/`, and any future subdirectory under `docs/`.
+Prefer the **Glob tool** over a shell `ls` for this listing. Glob results do not depend on the shell's working directory or on quoting, so the count cannot come back silently wrong. This is the one documented exception to `## Command Execution` below.
+
+This applies to: `docs/adr/`, `docs/job-aids/`, `docs/performance/`, `docs/code-review/`, `docs/hldd/`, `docs/requirements/`, `docs/research/`, `docs/workflow/`, and any future subdirectory under `docs/`.
 
 ## ADR — Sequential Numbering
 
@@ -189,6 +205,14 @@ All new documents (job aids, performance docs, code reviews, ADRs, and any other
 - **ADRs** must start as `Draft` when first created.
 - Update an ADR to `Accepted` only after implementation is complete.
 
+## Architecture Documents (HLDD)
+
+Architecture documents live in `docs/hldd/`. Each file covers the high-level design for a subsystem or feature.
+
+Files follow the standard sequential numbering rule with an `-hldd` suffix: `001-terrain-avoidance-hldd.md`, `002-alpha-strike-hldd.md`, etc. The title line uses `# Design NNN — <Title>`, not `# HLDD NNN`.
+
+Architecture documents must include the standard heading format with version and date — read `WINGMAN_VERSION` from `wingman/main.py`, never guess it. Use `Draft` status for new documents; update to `Active` once reviewed.
+
 ## Code Review Todos
 
 Review files live in `docs/code-review/` and are numbered sequentially (`001-2026-03.md`, `002-…`, etc.). Each file covers one review cycle.
@@ -202,3 +226,17 @@ After closure:
 - Record later status changes in a new review-cycle file, not by rewriting the old file.
 - Reference the original item ID and mark the current disposition explicitly: `Resolved`, `Deferred`, `Superseded`, or `Closed as stale`.
 - Treat the latest review file as the authoritative source for current disposition.
+
+## Requirements Documents
+
+Requirements live in `docs/requirements/` and are managed with StrictDoc, pinned to `strictdoc==0.27.1` (see ADR 066). Files follow the standard sequential numbering rule: `001-safety.sdoc`, `002-functional.sdoc`, etc.
+
+**The `.sdoc` file is the source of truth. The `.md` beside it is a generated export — never hand-edit it.** Regenerate with `make reqs` after any `.sdoc` change; `make reqs-gate` validates both directions and runs inside `make tp`.
+
+- Requirements state the property only. Reference the governing ADR for rationale and evidence.
+- Tuning values live in `wingman/config.yaml`, never in a requirement statement.
+- Identity lives in the `UID`/`PREFIX` fields, not the filename — renumbering a file does not renumber its requirements.
+- Source traceability uses `relation(UID, scope=function)` markers in docstrings. Deleting a marked function or its requirement fails the gate with exit 1.
+- The generated `.md` exports are the documented exception to `## Document Heading Format` — StrictDoc controls their layout, so they carry no status table.
+
+Use `Draft` status for new requirements; update to `Active` once reviewed and baselined. If a requirement is obsoleted, update the status and note the reason — do not delete it.

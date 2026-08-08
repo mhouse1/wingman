@@ -381,7 +381,7 @@ Player presses NOSE_UP / NOSE_DOWN / ROLL_LEFT / ROLL_RIGHT during GAME_BATTLE
 | [025](adr/025-formalise-game-state-machine.md) | Formal FSM via `transitions` library |
 | [026](adr/026-game-lobby-state-machine-sequence.md) | GAME_LOBBY state machine sequence (superseded by ADR 029) |
 | [027](adr/027-j20-target-painting-mode.md) | J20 target painting mode |
-| [028](adr/028-enemy-quadrant-detection-and-nose-orientation.md) | Enemy quadrant detection and nose orientation (Draft) |
+| [028](adr/028-enemy-quadrant-detection-and-nose-orientation.md) | Minimap enemy bearing and overhead attack positioning (Draft) |
 | [029](adr/029-game-lobby-quick-scan-thread.md) | GAME_LOBBY dedicated quick-scan background thread |
 | [030](adr/030-health-ceiling-from-repeated-readings.md) | Health ceiling spike filter from rolling OCR window |
 | [031](adr/031-round-end-histogram-reporting.md) | Round-end OCR timing histogram on GAME_LOBBY entry (Draft) |

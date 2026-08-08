@@ -3,7 +3,8 @@
     "allow": [
       "Bash(wc -l /c/dev-tools/github/wingman/tests/*.py)",
       "Bash(uv run:*)",
-      "Bash(python -m pytest tests/test_automated_levels.py::test_respawn_detection_positive -s)"
+      "Bash(python -m pytest tests/test_automated_levels.py::test_respawn_detection_positive -s)",
+      "Bash(uv python *)"
     ]
   }
 }

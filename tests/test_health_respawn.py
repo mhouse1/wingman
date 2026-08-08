@@ -560,3 +560,71 @@ class TestStatsExtraSection:
         t = MissionStatsTracker(version="test", output_dir=str(tmp_path))
         summary = t.finalize(run_id="unittest", extra={"missions_started": 999})
         assert summary["missions_started"] == 0
+
+
+class TestStartingHealthProbe:
+    """ADR 032 battle-alive probe, made reachable 2026-08-05.
+
+    It was dead code: _detect_respawn_ocr returned early for GAME_STARTING before
+    scheduling any OCR, so the probe branch never ran (measured: "0 attempts over
+    18.8s"). These tests pin that it now runs, and that it stays narrow.
+    """
+
+    def _analyzer(self):
+        a = _make_analyzer()
+        a.state = GameState.GAME_STARTING.name
+        return a
+
+    def test_probe_does_not_run_until_armed(self):
+        a = self._analyzer()
+        try:
+            a._detect_respawn_ocr(object())
+            assert a._starting_probe_last_ts == 0.0   # never scheduled
+        finally:
+            a.cleanup()
+
+    def test_arming_allows_the_probe_to_schedule(self):
+        a = self._analyzer()
+        try:
+            a.arm_starting_health_scan()
+            assert a._game_starting_health_scan_enabled.is_set()
+            assert a._starting_probe_last_ts == 0.0   # throttle reset so first tick probes
+        finally:
+            a.cleanup()
+
+    def test_probe_never_reports_a_respawn(self):
+        """The probe must not leak a stale battle respawn result into GAME_STARTING."""
+        a = self._analyzer()
+        try:
+            with a._ocr_cache_lock:
+                a._ocr_cache['result'] = (True, 1.0, "ocr")   # stale battle detection
+                a._ocr_cache['timestamp'] = time.time()
+            a.arm_starting_health_scan()
+            detected, conf, method = a._detect_respawn_ocr(object())
+            assert detected is False and conf == 0.0 and method is None
+        finally:
+            a.cleanup()
+
+    def test_lobby_and_waiting_still_skip_ocr_entirely(self):
+        a = _make_analyzer()
+        try:
+            a.arm_starting_health_scan()   # armed, but wrong state
+            for st in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+                a.state = st.name
+                a._starting_probe_last_ts = 0.0
+                a._detect_respawn_ocr(object())
+                assert a._starting_probe_last_ts == 0.0, f"probe must not run in {st.name}"
+        finally:
+            a.cleanup()
+
+    def test_disarm_reports_a_summary_and_stops_the_probe(self):
+        a = self._analyzer()
+        try:
+            a.arm_starting_health_scan()
+            a.disarm_starting_health_scan()
+            assert not a._game_starting_health_scan_enabled.is_set()
+            a._starting_probe_last_ts = 0.0
+            a._detect_respawn_ocr(object())
+            assert a._starting_probe_last_ts == 0.0   # disarmed → no scheduling
+        finally:
+            a.cleanup()

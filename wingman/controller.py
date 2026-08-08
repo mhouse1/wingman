@@ -401,10 +401,10 @@ if sys.platform != "win32":
 
 
 # Key bindings
-NOSE_UP_KEY = 'i'
-NOSE_DOWN_KEY = 'k'
-ROLL_LEFT_KEY = 'j'
-ROLL_RIGHT_KEY = 'l'
+NOSE_UP_KEY = 'i' # FLIGHT_CONTROL_KEY
+NOSE_DOWN_KEY = 'k' # FLIGHT_CONTROL_KEY
+ROLL_LEFT_KEY = 'j' # FLIGHT_CONTROL_KEY
+ROLL_RIGHT_KEY = 'l' # FLIGHT_CONTROL_KEY
 AFTERBURNER_KEY = 'e'
 AIRBRAKE_KEY = 'd'
 DEPLOY_FLARES_KEY = 'space'
@@ -451,7 +451,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -484,6 +484,10 @@ class Controller:
         self._weapon_loop_stop = threading.Event()
         self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
         self._starting_max_wait_s = float(starting_max_wait_s)
+        # Post-"Good Luck" settle before launching the mission. Interruptible:
+        # a battle-alive signal ends it early (2026-08-05).
+        self._good_luck_wait_s = float(good_luck_wait_s)
+        self._good_luck_bypass_on_alive = bool(good_luck_bypass_on_alive)
 
         # Search-and-destroy loop state (padlock + weapon fire; used during disengage)
         self._sdl_stop: threading.Event | None = None
@@ -843,6 +847,10 @@ class Controller:
 
         Returns True when the key press triggered mission cancel/manual takeover,
         otherwise False.
+
+        @relation(SAF-001, scope=function)
+        @relation(SAF-001.1, scope=function)
+        @relation(SAF-001.2, scope=function)
         """
         if is_injected:
             return False
@@ -1200,6 +1208,8 @@ class Controller:
 
         Idempotent: repeated presses/releases of an already-held/already-released
         key do not double-count. No-op outside an eject (total is None).
+
+        @relation(SAF-005, scope=function)
         """
         if self._eject_nose_held_total_s is None:
             return
@@ -1959,8 +1969,15 @@ class Controller:
             self._weapon_loop_thread.join(timeout=2.0)
             self._weapon_loop_thread = None
 
-    def toggle_weapon_loop(self):
-        """Toggle the weapon loop on/off. Bound to hotkey 'x'."""
+    def toggle_weapon_loop(self, _event=None):
+        """Toggle the weapon loop on/off. Bound to hotkey 'x'.
+
+        Accepts the key event the listener passes. On Linux, add_hotkey routes
+        to on_press_key, whose callbacks are invoked as cb(event) — so the
+        no-argument form raised "takes 1 positional argument but 2 were given"
+        on every press and the toggle never fired (2026-08-07 log). Kept
+        optional so direct calls still work.
+        """
         logger.debug("Controller: toggle_weapon_loop called (current state: %s)", self._weapon_loop_active)
         if self._weapon_loop_active:
             logger.info("Controller: toggling weapon loop OFF")
@@ -2407,7 +2424,10 @@ class Controller:
         """Background loop active in GAME_STARTING state.
 
         Every 5 seconds: press MISSION_J20_KEY and scan the good_luck region for 'Good Luck'.
-        Once detected, wait 10 seconds then launch mission_j20.
+        Once detected, wait good_luck_wait_s (interruptible on battle-alive
+        evidence) then launch mission_j20.
+
+        @relation(FR-003, scope=function)
         """
         # Clear any stale cancel from prior states (mirrors mission_j20 / mission_loiter pattern).
         # cancel_mission() is called on on_enter_GAME_LOBBY; without this clear the loop
@@ -2481,7 +2501,7 @@ class Controller:
                         if not health_scan_armed and time.time() - loop_start >= 10.0:
                             health_scan_armed = True
                             if self._analyzer is not None:
-                                self._analyzer._game_starting_health_scan_enabled.set()
+                                self._analyzer.arm_starting_health_scan()
                                 logger.info("Controller: game_starting health-scan fallback armed (10s gate)")
                         if health_scan_armed and self._analyzer is not None and self._analyzer.game_battle_alive:
                             logger.info(
@@ -2507,12 +2527,32 @@ class Controller:
                         return
 
                     if good_luck_event.is_set():
-                        good_luck_wait = 13
+                        good_luck_wait = self._good_luck_wait_s
                         logger.info("\033[92mController: 'Good Luck' detected - waiting %ds before starting '%s' mission\033[0m", good_luck_wait, MISSION_J20_KEY)
-                        for _ in range(good_luck_wait * 10):  # N * 0.1s = Ns
+                        # The wait is interruptible: game_battle_alive means the
+                        # aircraft is already in the world, so there is nothing left
+                        # to wait for. Previously this polled only _in_starting(),
+                        # so no signal could shorten it — and nothing scanned the
+                        # screen during the window at all (2026-08-05 review).
+                        gl_start = time.time()
+                        bypassed = False
+                        for _ in range(int(good_luck_wait * 10)):  # N * 0.1s = Ns
                             if not _in_starting():
                                 return
+                            if (self._good_luck_bypass_on_alive
+                                    and self._analyzer is not None
+                                    and self._analyzer.game_battle_alive):
+                                logger.info(
+                                    "\033[92mController: game_battle_alive after %.1fs of the %ds "
+                                    "Good-Luck wait — bypassing the remainder\033[0m",
+                                    time.time() - gl_start, good_luck_wait)
+                                bypassed = True
+                                break
                             time.sleep(0.1)
+                        if not bypassed:
+                            logger.info(
+                                "Controller: Good-Luck wait ran the full %ds without a "
+                                "battle-alive signal", good_luck_wait)
                         if _in_starting():
                             logger.info("Controller: game_starting - launching J20 mission")
                             self._analyzer.trigger_event("good_luck_detected")
@@ -2523,7 +2563,7 @@ class Controller:
                 logger.exception("Controller: game_starting loop error")
             finally:
                 if self._analyzer is not None:
-                    self._analyzer._game_starting_health_scan_enabled.clear()
+                    self._analyzer.disarm_starting_health_scan()
                 logger.info("Controller: game_starting loop stopped")
 
         threading.Thread(target=_loop, daemon=True).start()

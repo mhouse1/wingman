@@ -127,8 +127,8 @@ Root: Execute Mission
 ```
 
 **Current state:** ADR 024 written (Draft). Planned using the `py_trees` library. Health,
-ammo, and enemy proximity are already detected — the perception inputs exist. ADR 028 (enemy
-quadrant detection and nose orientation, Draft) is the next perception building block that
+ammo, and enemy proximity are already detected — the perception inputs exist. ADR 028 (minimap
+enemy bearing and overhead attack positioning, Draft) is the next perception building block that
 feeds Phase 3 tactics. The remaining work is replacing the fixed mission sequence with a tree.
 
 **Estimated effort:** 30–60 hours
@@ -200,7 +200,7 @@ formation flying. Centralized training, decentralized execution.
 | 6 (Multi-Agent) | 100–150h | Fleet tactics | Research |
 
 **Practical recommendation:** Phase 3 (behavior trees) is the highest-leverage next step —
-the perception inputs already exist, ADR 028 (enemy quadrant detection) will add the final
+the perception inputs already exist, ADR 028 (minimap enemy bearing) will add the final
 spatial input it needs. Phases 4–6 are worthwhile for ML research but overkill for a game bot.
 
 ---
@@ -231,9 +231,9 @@ Wall-clock time = max of concurrent crop scans (5 crops: respawn, incoming, heal
 
 ### Next Steps
 
-1. **Phase 3 — Behavior trees** (30–60h): ADR 024 written; ADR 028 (enemy quadrant) the remaining perception input
+1. **Phase 3 — Behavior trees** (30–60h): ADR 024 written; ADR 028 (minimap enemy bearing) the remaining perception input
 2. **ADR 031 — Round-end histogram** (Draft): implement in-process OCR timing summary on GAME_LOBBY entry
-3. **ADR 028 — Enemy quadrant detection** (Draft): spatial awareness for Phase 3 tactics
+3. **ADR 028 — Minimap enemy bearing** (Draft): spatial awareness for Phase 3 tactics
 4. **Enable GPU** (zero code changes): significant OCR latency reduction if CUDA is available
 5. **Phase 4+ RL**: save for research/ML portfolio work
 

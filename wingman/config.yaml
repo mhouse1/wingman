@@ -112,42 +112,23 @@ crops:
     - [0.5174, 0.4078]
     - [0.7, 0.4767]
     text: [SILVER]
-  ALTITUDE_SPEED:              # combined speed (MPH, top) + altitude (feet, bottom) telemetry — ADR 038
+  ALTITUDE_SPEED:
     coords:
     - [0.309, 0.626]
     - [0.362, 0.673]
+  MINIMAP:
+    coords:
+    - [0.8319, 0.0044]
+    - [0.9986, 0.2689]
 respawn_detection:
   use_ocr: true
   use_gpu: false
   ocr_cooldown: 0.2
   text_hsv_lower: [0, 0, 180]
   text_hsv_upper: [180, 50, 255]
-  # ADR 064 mode: ocr | shadow | dual.
-  # shadow = respawn OCR primary; health detector scores itself, acts on nothing.
-  # dual   = health detector additionally fires the respawn plumbing when OCR
-  #          missed the episode. Flipped to dual 2026-08-02 (Phase B-prime)
-  #          after Phase A-prime measured 27 of 31 real respawns matched with
-  #          zero false fires across two shipped-logic sessions.
   mode: dual
-health:
-  # Shared no-digits window (ADR 062): health readings absent this long mark
-  # the aircraft not-alive (and the shadow detector's weak death tier).
-  # Raised from the previous hardcoded 3.0s to stay above routine HUD
-  # dropouts while remaining below the ~8s respawn-overlay duration.
-  death_no_digits_s: 6.0
-  # ADR 063 value confirmation: a raw health read becomes the accepted value
-  # only when 2 of the last value_confirm_window reads agree within
-  # value_confirm_tolerance. Reads above max_plausible are discarded outright.
-  max_plausible: 500
-  value_confirm_window: 3
-  value_confirm_tolerance: 15
-  # ADR 064 composite death evidence: weak tier marks after this long without
-  # a CONFIRMED reading (runs through hallucinated overlay digits); halved
-  # when confirmed health dropped by decline_evidence_drop within
-  # decline_evidence_window_s before evidence began.
-  death_no_confirmed_s: 8.0
-  decline_evidence_drop: 80
-  decline_evidence_window_s: 6.0
+health: {death_no_digits_s: 6.0, max_plausible: 500, value_confirm_window: 3, value_confirm_tolerance: 15,
+  death_no_confirmed_s: 8.0, decline_evidence_drop: 80, decline_evidence_window_s: 6.0}
 incoming_detection:
   incoming_template_matching_enabled: true
   incoming_template_threshold: 0.82
@@ -159,10 +140,32 @@ incoming_detection:
   incoming_template_scales: [1.0]
   incoming_template_sources: [test_screenshots/INCOMING3.png]
 mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
-  starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0}
+  starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0,
+  good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true, starting_health_probe_interval_s: 0.4}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
-j20_mission: {target_painting_mode: false}
+j20_mission:
+  target_painting_mode: false
+  attack_mode: true                # Design 003 — ring-engage navigation master switch
+  attack_mode_dry_run: false       # log-only mode: compute intents, inject nothing
+  min_safe_altitude: 500           # CFIT floor — all steering suppressed below
+  bearing_deadzone_deg: 12         # no roll inside this bearing error
+  short_ring_min_count: 1          # short-ring contacts required to orbit
+  ring_debounce_ticks: 2           # consecutive ticks to enter or leave orbit
+  ema_reseed_angle_deg: 60         # reseed steering EMA only on target jumps beyond this
+  orbit_direction: right           # fixed orbit roll direction (right or left)
+  orbit_roll_hold_s: 0.3           # roll hold per orbit correction
+  orbit_roll_interval_s: 2.0       # cadence of orbit corrections
+  coarse_kp: 0.5                   # gains passed to orient_nose_to_target
+  coarse_min_hold_s: 0.15
+  coarse_max_hold_s: 0.6
+  coarse_cooldown_s: 2.0
+minimap:                           # Design 003 — MINIMAP red-icon scan
+  mask_radius_frac: 0.93           # circle mask radius as fraction of half the shorter side
+  min_blob_px: 4                   # component area band for enemy icons
+  max_blob_px: 120
+  ema_alpha: 0.4                   # centroid-vector smoothing (dry-run 2026-08-08 jitter finding)
+  ema_reset_after_s: 5.0           # reseed EMA after a detection gap this long
 tracking:
   enabled: false
   acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
@@ -187,43 +190,23 @@ tracking_hsv:
   min_contour_area: 12
   min_aspect_ratio: 2.5
 hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
-telemetry:                          # ADR 038 — altitude/speed signal model
-  max_speed_mph: 2000               # absolute envelope; fallback altitude-gate bound when speed is stale
-  max_altitude_ft: 60000            # absolute envelope; readings beyond are never seedable
-  max_speed_change_mph_s: 300       # acceleration envelope for the speed plausibility gate
-  plausibility_margin: 1.5          # slack multiplier on both gates
-  max_gate_dt_s: 1.5                # cap on the dt multiplier in the SPEED delta gate (an acceleration
-                                    # envelope tuned at the 1.5s tick): throttling the OCR cadence must
-                                    # not widen it. The altitude gate is physics-bound (vertical speed
-                                    # cannot exceed total speed) and uses the real inter-sample gap —
-                                    # clamping it below the ~3.0s cadence rejected every dive steeper
-                                    # than sin 0.75 and zeroed dive confirmations (2026-07-30 18:51)
-  reseed_after_rejections: 3        # consecutive rejections before the seed is discarded
-  smoothing_window: 3               # accepted readings averaged into stable_value
-  stale_after_s: 6.0                # signal age beyond which consumers must not act on it
-  trend_min_alt_rate_fps: 20.0      # |altitude rate| below this is 'flat'
-  trend_min_speed_rate_mph_s: 15.0  # |speed rate| below this is 'flat'
-  steep_dive_min_sin: 0.8           # |alt_rate/speed| at or above → steep band (approx 53 degrees; 0.5 accepted 30-degree dives)
-  level_max_sin: 0.15               # |alt_rate/speed| at or below → level band
-  ocr_every_n_ticks: 2              # submit telemetry OCR every Nth battle tick (async; the tick never waits on it)
-  eject_closed_loop:
-    enabled: true                   # verify nose-down/afterburner from telemetry during eject
-    verify_window_s: 6.0            # time allowed for the steep-dive band to appear after NOSE_DOWN
-    check_interval_s: 1.5           # telemetry poll cadence inside the eject thread
-    max_corrections: 3              # bound on corrective re-issues per eject sequence
-    legacy_nose_hold_s: 5.0         # open-loop hold used when telemetry gives no evidence
-    confirm_consecutive: 2          # DISTINCT telemetry samples required before the dive counts as confirmed
-    streak_grace_s: 4.5             # ADR 058 d11: extra wait (once per phase) when the legacy deadline
-                                    # expires mid-confirmation-streak; 0 disables
-    dive_reentries: 2               # times the hold phase may re-enter nose-down when the dive decays
-    confirm_descent_fps: 250        # ADR 058: raw sustained descent (ft/s) that also confirms a dive,
-                                    # independent of the speed-ratio band (which never fired in production)
-    total_nose_budget_s: 10.0        # ADR 058 d12: cap on cumulative NOSE_DOWN hold per eject.
-                                    # Cut from 20.0 — across 27 logged ejects the productive
-                                    # descent happened in the first ~8-11s and the hold then
-                                    # over-rotated into a climb; 0 in-phase confirmations ever.
-    over_rotation_after_s: 6.0      # ADR 058 d12: continuous nose-down hold after which a climb
-                                    # is treated as over-rotation (release, don't re-issue)
+telemetry:
+  max_speed_mph: 2000
+  max_altitude_ft: 60000
+  max_speed_change_mph_s: 300
+  plausibility_margin: 1.5
+  max_gate_dt_s: 1.5
+  reseed_after_rejections: 3
+  smoothing_window: 3
+  stale_after_s: 6.0
+  trend_min_alt_rate_fps: 20.0
+  trend_min_speed_rate_mph_s: 15.0
+  steep_dive_min_sin: 0.8
+  level_max_sin: 0.15
+  ocr_every_n_ticks: 2
+  eject_closed_loop: {enabled: true, verify_window_s: 6.0, check_interval_s: 1.5,
+    max_corrections: 3, legacy_nose_hold_s: 5.0, confirm_consecutive: 2, streak_grace_s: 4.5,
+    dive_reentries: 2, confirm_descent_fps: 250, total_nose_budget_s: 10.0, over_rotation_after_s: 6.0}
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}

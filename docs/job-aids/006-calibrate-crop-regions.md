@@ -48,7 +48,7 @@ calibration:
 
 1. **Get the game screen visible.** Navigate the game to the screen state where the new region appears.
 
-2. **Take a reference screenshot** and save it to `tests/test_screenshots/`. Filename should describe the screen state (e.g., `respawn_screen.png`). The screenshot must be taken while `config.yaml region:` has its current dimensions — note the width × height.
+2. **Take a reference screenshot** and save it to `test_screenshots/`. Filename should describe the screen state (e.g., `respawn_screen.png`). The screenshot must be taken while `config.yaml region:` has its current dimensions — note the width × height.
 
 3. **Add a `crops:` entry** in `config.yaml`:
    ```yaml
@@ -77,7 +77,7 @@ calibration:
 
 Use this when setting up on a new machine or after a full config reset.
 
-1. **Capture reference screenshots** for every game screen state that contains crops. Save each to `tests/test_screenshots/` with the current `config.yaml region:` in effect.
+1. **Capture reference screenshots** for every game screen state that contains crops. Save each to `test_screenshots/` with the current `config.yaml region:` in effect.
 
 2. **Populate `tests/calibration_map.yaml`** — one entry per screenshot, listing all crop names visible in that screen state. Add the region dimensions as a comment.
 

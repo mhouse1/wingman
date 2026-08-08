@@ -23,6 +23,7 @@ import threading
 import time
 
 from .analyzer import GameState
+from .engage_nav import EngageNavigator
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,8 @@ class RespawnHandler:
         returns while respawn OCR is still flapping, deferrals RE-ARM the event
         instead of swallowing it — the handler retries every tick until the
         respawn-clear stability window is met, then restarts.
+
+        @relation(SAF-002, scope=function)
         """
         analyzer, ctrl = self._analyzer, self._ctrl
         analyzer.alive_event.clear()
@@ -597,6 +600,106 @@ class EnemyPresenceHandler:
                         self._disengage_after_s)
             self._last_seen_ts = time.time()  # reset to avoid re-triggering
             self._ctrl.disengage_roll_right()
+        return False
+
+
+class EngageNavHandler:
+    """Minimap ring-engage navigation (Design 003 / ADR 028, FR-005).
+
+    Each GAME_BATTLE tick: per-component minimap scan + telemetry altitude →
+    EngageNavigator intent → actuation. Steer intents go through
+    Controller.orient_nose_to_target with coarse gains; orbit intents issue an
+    open-loop roll hold on a cadence timer. Gated off by default
+    (`j20_mission.attack_mode`); `attack_mode_dry_run` logs intents without
+    touching keys.
+
+    Arbitration with target tracking: steer intents share
+    orient_nose_to_target's single cooldown timestamp, so a fresh
+    fine-tracking roll suppresses coarse rolls for coarse_cooldown_s while a
+    coarse roll blocks fine rolls only for the much shorter tracking cooldown
+    — the terminal loop wins whenever both want the roll axis. Terrain
+    avoidance (Design 001) is not implemented yet; its suppression gate is
+    added when it lands.
+
+    Ordering note: runs after enemy presence and before target tracking.
+    """
+
+    def __init__(self, analyzer, ctrl, j20_cfg, minimap_cfg=None):
+        self._analyzer = analyzer
+        self._ctrl = ctrl
+        self._enabled = bool(j20_cfg.get("attack_mode", False))
+        self._dry_run = bool(j20_cfg.get("attack_mode_dry_run", False))
+        self._nav = EngageNavigator(j20_cfg, minimap_cfg)
+        self._ctl_cfg = {
+            "deadband": self._nav.deadband_norm,
+            "kp": float(j20_cfg.get("coarse_kp", 0.5)),
+            "min_hold_sec": float(j20_cfg.get("coarse_min_hold_s", 0.15)),
+            "max_hold_sec": float(j20_cfg.get("coarse_max_hold_s", 0.6)),
+            "cooldown_sec": float(j20_cfg.get("coarse_cooldown_s", 2.0)),
+        }
+        self._orbit_hold_s = float(j20_cfg.get("orbit_roll_hold_s", 0.3))
+        self._orbit_interval_s = float(j20_cfg.get("orbit_roll_interval_s", 2.0))
+        self._last_orbit_roll_ts = 0.0
+        self._last_mode = self._nav.mode
+
+    def on_state_change(self, new_state, prev_state=None):
+        """Restart from idle when leaving the battle states entirely."""
+        if prev_state in _BATTLE_STATES and new_state not in _BATTLE_STATES:
+            self._nav.reset()
+            self._last_orbit_roll_ts = 0.0
+            self._last_mode = self._nav.mode
+
+    def tick(self, frame, current_game_state) -> bool:
+        if (not self._enabled
+                or current_game_state != GameState.GAME_BATTLE
+                or not self._ctrl.is_mission_running()):
+            return False
+        components = self._analyzer.detect_enemy_map_components(frame)
+        snapshot = self._analyzer.get_telemetry()
+        altitude = None
+        if snapshot is not None and snapshot.altitude_fresh():
+            altitude = snapshot.altitude.stable_value
+        now = time.time()
+        intent = self._nav.update(components, altitude, now)
+        if intent.mode != self._last_mode:
+            logger.info(
+                "EngageNav: mode %s → %s (%s)",
+                self._last_mode, intent.mode, intent.reason,
+            )
+            self._last_mode = intent.mode
+        rings = self._nav.last_rings
+        logger.debug(
+            "EngageNav: mode=%s kind=%s reason=%s err=%s rings=%s/%s/%s comps=%s alt=%s",
+            intent.mode, intent.kind, intent.reason, intent.error_norm,
+            rings["short"].count if rings else None,
+            rings["mid"].count if rings else None,
+            rings["long"].count if rings else None,
+            len(components) if components is not None else None, altitude,
+        )
+        if intent.kind == "steer":
+            if self._dry_run:
+                logger.info(
+                    "EngageNav[dry-run]: would roll err=%.2f (%s)",
+                    intent.error_norm, intent.mode,
+                )
+            else:
+                cmd = self._ctrl.orient_nose_to_target(intent.error_norm, **self._ctl_cfg)
+                if cmd is not None:
+                    logger.debug("EngageNav: roll_%s err=%.2f", cmd, intent.error_norm)
+        elif intent.kind == "orbit":
+            if now - self._last_orbit_roll_ts >= self._orbit_interval_s:
+                self._last_orbit_roll_ts = now
+                if self._dry_run:
+                    logger.info(
+                        "EngageNav[dry-run]: would orbit roll_%s hold=%.2fs",
+                        intent.direction, self._orbit_hold_s,
+                    )
+                elif intent.direction == "left":
+                    self._ctrl.roll_left(hold_seconds=self._orbit_hold_s, block=False)
+                    logger.debug("EngageNav: orbit roll_left")
+                else:
+                    self._ctrl.roll_right(hold_seconds=self._orbit_hold_s, block=False)
+                    logger.debug("EngageNav: orbit roll_right")
         return False
 
 

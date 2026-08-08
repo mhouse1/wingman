@@ -16,8 +16,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.7.0"
-WINGMAN_VERSION_DETAILS = "dual-sensor respawn detection, over-rotation eject release, per-concern tick-loop handlers"
+WINGMAN_VERSION = "1.7.1"
+WINGMAN_VERSION_DETAILS = "implement requirements using strictdoc, minimap integration, bugfixes"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
@@ -28,6 +28,7 @@ from .performance import PerformanceTracker
 from .tick_handlers import (
     AmmoEventsHandler,
     EnemyPresenceHandler,
+    EngageNavHandler,
     RespawnHandler,
     TrackingHudHandler,
     WaitingFallbackHandler,
@@ -94,6 +95,8 @@ def _alive_transition_disposition(state, alive_after_observed_death: bool) -> st
       consume_spurious — GAME_BATTLE_EJECT without an observed death: the
                          synthetic eject-start transition; consume it.
       consume_other    — any other state (manual, lobby, ...): consume it.
+    
+    @relation(SAF-002, scope=function)
     """
     if state == GameState.GAME_BATTLE:
         return "restart_path"
@@ -311,6 +314,8 @@ def main():
         disable_hotkeys=(replay_mode or capture_mode),
         capture_with_overlay=capture_with_overlay,
         starting_max_wait_s=starting_max_wait_s,
+        good_luck_wait_s=float(mission_cfg.get("good_luck_wait_s", 13.0)),
+        good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
         telemetry_cfg=cfg.get("telemetry", {}),
     )
 
@@ -466,6 +471,7 @@ def main():
         emit_capture_event=_emit_capture_event,
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
+    engage_nav = EngageNavHandler(analyzer, ctrl, j20_cfg, cfg.get("minimap", {}))
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
     )
@@ -623,6 +629,7 @@ def main():
                     _stop_lobby_escape_loop()
                 waiting_fallback.on_state_change(current_game_state, prev_game_state)
                 enemy_presence.on_state_change(current_game_state, prev_game_state)
+                engage_nav.on_state_change(current_game_state, prev_game_state)
                 ammo_events.on_state_change(current_game_state, prev_game_state)
                 tracking_hud.on_state_change(current_game_state, prev_game_state)
                 if current_game_state == GameState.GAME_STARTING_STALLED:
@@ -693,6 +700,10 @@ def main():
 
             # Enemy presence check: if ENEMY_CLOSE_BY has had no red for 30s, disengage.
             enemy_presence.tick(frame, current_game_state)
+
+            # Ring-engage navigation (Design 003, FR-005) — before fine tracking
+            # so the shared orient_nose_to_target cooldown lets the terminal loop win.
+            engage_nav.tick(frame, current_game_state)
 
             tracking_hud.tick(frame, current_game_state, game_state)
 
