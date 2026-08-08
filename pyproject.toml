@@ -16,6 +16,7 @@ dependencies = [
 	"easyocr",
 	"colorama",
 	"transitions",
+	"py-trees>=2.5.0",
 ]
 
 [dependency-groups]

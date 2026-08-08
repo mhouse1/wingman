@@ -27,6 +27,11 @@ import math
 from dataclasses import dataclass, field
 
 MPH_TO_FPS = 5280.0 / 3600.0
+# The HUD telemetry block is actually metric (speed "KPH", altitude "m") —
+# see pitch_angle_deg(). The mph/ft naming across this module and its config
+# keys predates that discovery; the filter envelopes are tuned in raw display
+# units, so only ratio-based consumers care about the distinction.
+KPH_TO_MPS = 1000.0 / 3600.0
 
 # Pitch bands returned by pitch_band(). Sine is symmetric about vertical, so a
 # shallow band cannot distinguish under-rotation from over-rotation past
@@ -109,34 +114,36 @@ class TelemetrySnapshot:
 
 
 def pitch_band(
-    speed_mph: float | None,
-    alt_rate_fps: float | None,
+    speed_kph: float | None,
+    alt_rate_mps: float | None,
     *,
     steep_min_sin: float = 0.8,
     level_max_sin: float = 0.15,
-    min_speed_fps: float = 30.0,
+    min_speed_mps: float = 10.0,
 ) -> str | None:
     """Estimate the flight-path-angle band from altitude rate and speed.
 
     Altitude rate is approximately speed times the sine of the flight-path
     angle, so the ratio alt_rate / speed bounds the attitude without extra
-    HUD parsing. Returns None when inputs are missing or speed is too small
-    for the ratio to be meaningful.
+    HUD parsing. Units are METRIC (HUD shows KPH and meters — ADR 067);
+    speed converts at KPH_TO_MPS. Returns None when inputs are missing or
+    speed is too small for the ratio to be meaningful.
 
-    Two physical caveats (flight-tested, session 2026-07-28): this measures
-    the velocity-vector angle, not nose attitude — they differ by angle of
-    attack, most at low speed; and sine compresses near vertical (sin 75 deg
-    is 0.97), so bands distinguish 30 from 60 degrees but not 75 from 90.
-    The default steep_min_sin of 0.8 (approx 53 degrees) is the steepest
-    band that confirms reliably through OCR noise.
+    Physical caveats: this measures the velocity-vector angle, not nose
+    attitude — they differ by angle of attack, most at low speed. And the
+    displayed speed under-represents actual motion during hard maneuvers
+    (ADR 067 replay: eject descents sustain ratios of 1.2 to 2.9), so past
+    the clamp the ratio is an ordinal steepness signal, not a sine. The
+    steep_min_sin default of 0.8 (approx 53 degrees) separated 83 percent
+    of 495 archived eject windows from normal flight in the ADR 067 replay.
     """
-    if speed_mph is None or alt_rate_fps is None:
+    if speed_kph is None or alt_rate_mps is None:
         return None
-    speed_fps = speed_mph * MPH_TO_FPS
-    if speed_fps < min_speed_fps:
+    speed_mps = speed_kph * KPH_TO_MPS
+    if speed_mps < min_speed_mps:
         return None
-    ratio = alt_rate_fps / speed_fps
-    ratio = max(-1.5, min(1.5, ratio))  # OCR noise can push past ±1
+    ratio = alt_rate_mps / speed_mps
+    ratio = max(-1.5, min(1.5, ratio))  # displayed speed can undershoot real motion
     if ratio <= -steep_min_sin:
         return BAND_STEEP_DIVE
     if ratio < -level_max_sin:
@@ -149,26 +156,64 @@ def pitch_band(
 
 
 def pitch_angle_deg(
-    speed_mph: float | None,
-    alt_rate_fps: float | None,
+    speed_kph: float | None,
+    alt_rate_mps: float | None,
     *,
-    min_speed_fps: float = 30.0,
+    min_speed_mps: float = 10.0,
 ) -> float | None:
     """Flight-path angle in degrees from altitude rate and speed.
+
+    The HUD units are METRIC — the telemetry block reads "NNNN KPH" over
+    "NNNN m" (verified against the integration screenshots, e.g.
+    P1_030_BATTLE_HUD_MISSILES_4.png: "1022 KPH / 554 m"), so the altitude
+    rate is m/s and speed converts at 1/3.6, not the mph-to-fps factor the
+    legacy naming elsewhere in this module assumes. Using MPH_TO_FPS here
+    compresses the ratio by 3.6 x 1.4667 = 5.3x — the "systematically
+    compressed by a units mismatch" case ADR 058 anticipated.
 
     Same physics and caveats as pitch_band(): angle = asin(alt_rate / speed)
     is the velocity-vector angle averaged over the OCR cadence, not
     instantaneous nose attitude, and it compresses near vertical. The ratio
-    is clamped to plus/minus 1 before asin so OCR noise past vertical
-    saturates at 90 degrees instead of raising ValueError.
+    is clamped to plus/minus 1 before asin so a stalled or falling aircraft
+    (vertical rate exceeding displayed forward speed) saturates at 90
+    degrees instead of raising ValueError.
     """
-    if speed_mph is None or alt_rate_fps is None:
+    if speed_kph is None or alt_rate_mps is None:
         return None
-    speed_fps = speed_mph * MPH_TO_FPS
-    if speed_fps < min_speed_fps:
+    speed_mps = speed_kph * KPH_TO_MPS
+    if speed_mps < min_speed_mps:
         return None
-    ratio = max(-1.0, min(1.0, alt_rate_fps / speed_fps))
+    ratio = max(-1.0, min(1.0, alt_rate_mps / speed_mps))
     return math.degrees(math.asin(ratio))
+
+
+def pitch_band_from_angle_deg(
+    angle_deg: float | None,
+    *,
+    steep_min_sin: float = 0.8,
+    level_max_sin: float = 0.15,
+) -> str | None:
+    """Band label for a corrected flight-path angle.
+
+    pitch_band() itself still computes its ratio with the legacy MPH_TO_FPS
+    conversion that the eject thresholds were flight-tuned against, so it
+    cannot be reused for display next to the corrected angle without the two
+    disagreeing. This maps the corrected angle onto the same documented band
+    boundaries (level_max_sin 0.15 approx 8.6 deg, steep_min_sin 0.8 approx
+    53 deg).
+    """
+    if angle_deg is None:
+        return None
+    sin_angle = math.sin(math.radians(angle_deg))
+    if sin_angle <= -steep_min_sin:
+        return BAND_STEEP_DIVE
+    if sin_angle < -level_max_sin:
+        return BAND_DIVE
+    if sin_angle <= level_max_sin:
+        return BAND_LEVEL
+    if sin_angle < steep_min_sin:
+        return BAND_CLIMB
+    return BAND_STEEP_CLIMB
 
 
 class TelemetryProcessor:

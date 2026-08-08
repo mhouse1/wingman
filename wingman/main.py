@@ -27,8 +27,8 @@ from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
 from .tick_handlers import (
     AmmoEventsHandler,
+    BehaviorTreeHandler,
     EnemyPresenceHandler,
-    EngageNavHandler,
     RespawnHandler,
     TrackingHudHandler,
     WaitingFallbackHandler,
@@ -471,7 +471,9 @@ def main():
         emit_capture_event=_emit_capture_event,
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
-    engage_nav = EngageNavHandler(analyzer, ctrl, j20_cfg, cfg.get("minimap", {}))
+    behavior_tree = BehaviorTreeHandler(
+        analyzer, ctrl, cfg.get("behavior_tree", {}), j20_cfg, cfg.get("minimap", {}),
+    )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
     )
@@ -629,7 +631,7 @@ def main():
                     _stop_lobby_escape_loop()
                 waiting_fallback.on_state_change(current_game_state, prev_game_state)
                 enemy_presence.on_state_change(current_game_state, prev_game_state)
-                engage_nav.on_state_change(current_game_state, prev_game_state)
+                behavior_tree.on_state_change(current_game_state, prev_game_state)
                 ammo_events.on_state_change(current_game_state, prev_game_state)
                 tracking_hud.on_state_change(current_game_state, prev_game_state)
                 if current_game_state == GameState.GAME_STARTING_STALLED:
@@ -698,12 +700,17 @@ def main():
             # Ammo events (GAME_BATTLE only).
             ammo_events.tick_events()
 
-            # Enemy presence check: if ENEMY_CLOSE_BY has had no red for 30s, disengage.
-            enemy_presence.tick(frame, current_game_state)
+            # Legacy ENEMY_CLOSE_BY disengage — suppressed while the behavior
+            # tree owns geometry (ADR 024 3.1a): its 10 s scripted roll fights
+            # the Engage leaf. The Disengage leaf inherits the job in 3.1b.
+            if not behavior_tree.active:
+                enemy_presence.tick(frame, current_game_state)
 
-            # Ring-engage navigation (Design 003, FR-005) — before fine tracking
-            # so the shared orient_nose_to_target cooldown lets the terminal loop win.
-            engage_nav.tick(frame, current_game_state)
+            # ADR 024 behavior tree: tactic selection every tick; in active
+            # mode the Engage selection also drives ring-engage geometry
+            # (Design 003, FR-005) — before fine tracking so the shared
+            # orient_nose_to_target cooldown lets the terminal loop win.
+            behavior_tree.tick(frame, current_game_state, game_state)
 
             tracking_hud.tick(frame, current_game_state, game_state)
 

@@ -17,7 +17,7 @@ HEALTH_SPIKE_FACTOR = 1.5  # reject readings more than 50 % above the establishe
 from transitions import Machine, MachineError
 
 from .crop_region import get_crop, load_crops, draw_crops
-from .telemetry import TelemetryProcessor
+from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
 
 
 class GameState(Enum):
@@ -1298,10 +1298,7 @@ class GameStateAnalyzer:
         if speed_value is not None or altitude_value is not None:
             angle = snap.pitch_angle_deg()
             if angle is not None:
-                band = snap.pitch_band(
-                    steep_min_sin=self._telemetry.steep_min_sin,
-                    level_max_sin=self._telemetry.level_max_sin,
-                )
+                band = pitch_band_from_angle_deg(angle)
                 nose = f"{angle:+.0f}\N{DEGREE SIGN} ({band})"
             else:
                 nose = "n/a"

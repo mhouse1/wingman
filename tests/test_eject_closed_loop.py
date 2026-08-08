@@ -87,7 +87,7 @@ def _intents(ctrl):
 
 
 def test_steep_dive_confirmed_exits_without_corrections(monkeypatch):
-    stub = _TelemetryStub(alt_rate=-800.0)  # ratio -0.91 at 600 MPH → steep dive
+    stub = _TelemetryStub(alt_rate=-800.0)  # far past steep at 600 KPH (167 m/s)
     ctrl = _make_ctrl(monkeypatch, stub)
 
     t0 = time.time()
@@ -190,12 +190,12 @@ def test_level_flight_triggers_nose_down_reissue(monkeypatch):
 
 
 def test_shallow_dive_not_improving_reverses_to_nose_up(monkeypatch):
-    # Shallow dive (-200 ft/s at 600 MPH → ratio -0.23, dive band). First
+    # Shallow dive (-60 m/s at 600 KPH → ratio -0.36, dive band). First
     # correction is nose-down; the rate then worsens WITH a rising speed
     # trend (the past-vertical-over-rotation signature: gravity/afterburner
     # still accelerating it), so measure-correct-measure must reverse to a
     # nose-up tap.
-    stub = _TelemetryStub(alt_rate=-200.0)
+    stub = _TelemetryStub(alt_rate=-60.0)
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
 
     result = {}
@@ -215,7 +215,7 @@ def test_shallow_dive_not_improving_reverses_to_nose_up(monkeypatch):
         time.sleep(0.02)
     else:
         pytest.fail("first corrective nose-down re-issue never happened")
-    stub.alt_rate = -150.0  # worse than the -200 before the correction
+    stub.alt_rate = -45.0  # worse than the -60 before the correction
     stub.speed_trend = "rising"
 
     thread.join(timeout=5.0)
@@ -236,7 +236,7 @@ def test_climbing_never_reverses_to_nose_up(monkeypatch):
     corrective nose-up") after an earlier fix dropped the descending-only
     condition, and the tap pitched the aircraft into a loop.
     """
-    stub = _TelemetryStub(alt_rate=-50.0)  # shallow descent, level band at 600 MPH
+    stub = _TelemetryStub(alt_rate=-20.0)  # shallow descent, level band at 600 KPH
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
 
     result = {}
@@ -255,7 +255,7 @@ def test_climbing_never_reverses_to_nose_up(monkeypatch):
         time.sleep(0.02)
     else:
         pytest.fail("first corrective nose-down re-issue never happened")
-    # Now CLIMBING (+100 ft/s): worse than the -50 before the correction, but
+    # Now CLIMBING (+100 m/s): worse than the -20 before the correction, but
     # the sign of the rate says "still going up", so nose-up must not fire.
     stub.alt_rate = 100.0
     stub.speed_trend = "rising"
@@ -279,7 +279,7 @@ def test_descending_and_worsening_reverses_regardless_of_speed_trend(monkeypatch
     dive. Descending + descent-got-shallower is the over-rotation signature on
     its own.
     """
-    stub = _TelemetryStub(alt_rate=-200.0, speed_trend="falling")
+    stub = _TelemetryStub(alt_rate=-60.0, speed_trend="falling")
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
 
     result = {}
@@ -299,7 +299,7 @@ def test_descending_and_worsening_reverses_regardless_of_speed_trend(monkeypatch
     else:
         pytest.fail("first corrective nose-down re-issue never happened")
     # Still descending, but the descent got shallower after our nose-down.
-    stub.alt_rate = -150.0
+    stub.alt_rate = -45.0
 
     thread.join(timeout=5.0)
     assert not thread.is_alive()
@@ -313,12 +313,12 @@ def test_descending_and_worsening_reverses_regardless_of_speed_trend(monkeypatch
 def test_sustained_descent_confirms_without_steep_band(monkeypatch):
     """ADR 058: a raw sustained descent confirms even when the sine band cannot.
 
-    At 600 MPH (880 ft/s) a -300 ft/s descent is ratio -0.34 — the DIVE band,
-    nowhere near steep_min_sin 0.8. Production flight never exceeded 0.346 in
-    30 minutes, so the ratio path alone confirmed 0 times; the raw descent
-    rate is the reachable signal.
+    At 1800 KPH (500 m/s) a -300 m/s descent is ratio -0.6 — the DIVE band,
+    under steep_min_sin 0.8, yet past the raw confirm threshold. The raw
+    descent-rate path must confirm on its own; historically it was the only
+    reachable signal (ADR 058), and it remains the high-speed fallback.
     """
-    stub = _TelemetryStub(alt_rate=-300.0)
+    stub = _TelemetryStub(speed=1800, alt_rate=-300.0)
     ctrl = _make_ctrl(monkeypatch, stub, confirm_descent_fps=250.0)
 
     cancelled = ctrl._eject_nose_phase_closed_loop()

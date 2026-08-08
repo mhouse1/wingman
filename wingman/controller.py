@@ -2115,9 +2115,8 @@ class Controller:
                 if self._mission_cancel.is_set():
                     logger.info("Controller: mission cancelled after afterburner")
                     return
-                # Roll right and afterburner
-                self.roll_right(50, block=False)
-                logger.info("\033[91mController: initiating roll_right while afterburner loop is active\033[0m")
+                # Geometry belongs to the Engage leaf (ADR 024 3.1a) — the
+                # scripted roll holds are gone; afterburner and weapon loops remain.
                 self.afterburner(10)
                 if not self._interruptible_sleep(10, check_interval=1.0):
                     logger.info("Controller: mission cancelled during afterburner recharge")
@@ -2128,11 +2127,11 @@ class Controller:
                     logger.info("Controller: mission cancelled during afterburner recharge")
                     return
                 self.afterburner(10)
-                logger.info("\033[91mController: initiating final roll right 300 sec \033[0m")
-
-                self.roll_right(300)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_right")
+                # Loiter for the same 300 s window the final scripted roll used
+                # to hold — geometry is owned by the Engage leaf (ADR 024 3.1a).
+                logger.info("Controller: mission_j20 - loiter phase (geometry owned by Engage leaf)")
+                if not self._interruptible_sleep(300, check_interval=1.0):
+                    logger.info("Controller: mission cancelled during loiter")
                     return
 
                 self.stop_search_and_destroy_loop()
