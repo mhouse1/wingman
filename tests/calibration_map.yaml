@@ -25,3 +25,5 @@ calibration:
     crops: [PLAY]
   - screenshot: UNREADY.png  # 1920×1200 — event refresh popup
     crops: [event_refresh, event_refresh_dismiss]
+  - screenshot: MINIMAP.png           # 1920×1200 — battle minimap, top-right circle
+    crops: [MINIMAP]

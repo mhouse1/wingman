@@ -1,166 +1,302 @@
-# Design 003 — Enemy Quadrant Detection and Nose Orientation: High-Level Design Document
+# Design 003 — Minimap Enemy Bearing and Overhead Attack Positioning
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-05-04 | 1.6.5           |
+| Draft  | 2026-08-08 | 1.7.1           |
+
+> **Revision note (2026-08-08):** this Draft previously described a 3×3
+> quadrant split of the `ENEMY_CLOSE_BY` crop with a fixed roll table. It is
+> revised in place (the document never left `Draft`; none of the quadrant
+> design was implemented) and the filename keeps its original slug. The
+> previous revision's Altitude OCR section is superseded by ADR 038's combined
+> `ALTITUDE_SPEED` crop and `get_telemetry()`. Companion decision record:
+> [ADR 028](../adr/028-enemy-quadrant-detection-and-nose-orientation.md),
+> revised together with this document.
 
 ## Overview
 
-This document describes the enemy quadrant detection and nose-orientation capability for Wingman's J20 attack mode. The goal is to determine *where* enemies are relative to the aircraft and issue corrective roll inputs so the J20 maintains a vertical stack above clustered enemies — maximising stall-geometry and target-painting buff uptime (ADR 027).
+Goal (unchanged from ADR 027/028): in J20 attack mode, reach high altitude and
+hold position directly above clustered enemy fighters. The near-vertical
+engagement geometry forces defenders into high-AOA climbs — hard for most
+airframes to sustain — while maximising target-painting buff uptime.
 
-The existing `ENEMY_CLOSE_BY` crop returns a single boolean (red pixels present or absent), sufficient for the 30-second disengage timer but providing no directional information. This design extends that crop into five named quadrants and adds a roll-correction loop gated on an altitude safety guard.
+This revision replaces the quadrant grid with **one large `MINIMAP` crop**:
+the full minimap circle is scanned once per battle tick, enemy icons are
+reduced to a cluster centroid, and the centroid's polar position (relative
+bearing + normalised distance) drives a phase-based overhead navigator.
 
-ADR reference: [ADR 028](../adr/028-enemy-quadrant-detection-and-nose-orientation.md)
+**Division of labour with Design 005 (screen-space target tracking):**
 
----
+- Design 003 (this document) — *coarse navigation*: whole-map, 360°, gets the
+  aircraft above the cluster. Works regardless of where the nose points.
+- Design 005 — *terminal alignment*: continuous screen-space error on visible
+  target markers, frustum-limited, fine-grained.
+- Both actuate through the same `Controller.orient_nose_to_target(error_norm)`
+  helper (implemented; proportional gain, deadband, hold clamps, cooldown).
 
-## Quadrant Layout
+## Sensor — the Minimap
 
-The `ENEMY_CLOSE_BY` crop pixel array is divided into thirds horizontally and vertically. Five named sub-regions are extracted:
+Properties verified on archived frames
+`P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png` and
+`P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png` (1920×1200):
+
+- Circular map in the **top-right** HUD corner (top-left holds the kill feed).
+  Confirm per-device HUD layout before calibrating.
+- **Heading-up rotation**: compass letters occupy different rim positions in
+  the two frames while the own-ship marker and view-cone wedge stay fixed at
+  centre pointing up. Consequences:
+  - icon angle from the up-axis = relative bearing to the nose;
+  - map centre = own position, so icon distance from centre = horizontal
+    separation, and icons converging on centre = directly overhead;
+  - no compass reading or heading state is required.
+- Red icons are enemies, blue are friendlies. Sharing the region: rim compass
+  letters, capture-point ring badges (red or blue), wreck markers, green
+  pickup crosses, route lines. These are filter targets, not signals.
+- The existing `ENEMY_CLOSE_BY` crop (`0.8764–0.9521 × 0.0822–0.1856`) is a
+  small box at the centre of this same minimap — today's "enemy close by"
+  boolean already reads minimap icons near own position. The `MINIMAP` crop is
+  a widening of a proven sensor, not a new kind of surface, and the
+  `enemy_hsv` mask is already field-validated on it.
+
+### Why one crop
+
+ADR 038 measured the consolidation win for OCR crops (fixed per-call dispatch
+dominates small crops; one combined crop roughly halved cost and removed an
+overlap misread). For an HSV mask the cost scales with area instead, so the
+mechanism differs — the single-region win here is:
+
+- one calibrated region instead of five quadrant sub-regions;
+- one detection pass whose output serves every consumer (bearing, distance,
+  and eventually the close-by boolean);
+- centroid post-processing in code: an icon straddling a sub-crop boundary
+  splits its pixel mass across regions, while a centroid bins cleanly, and
+  granularity changes (sectors, per-blob tracking) become code-only changes
+  with no recalibration.
+
+## Detection Pipeline — `detect_enemy_map_bearing` (analyzer.py)
+
+Signature: `detect_enemy_map_bearing(frame) → dict`
+
+Output: `{bearing_deg, radius_frac, blob_count, pixel_count}` —
+`bearing_deg ∈ (−180, 180]` measured from the up-axis, positive clockwise;
+`radius_frac ∈ [0, 1]` normalised to the mask radius. Fail-safe: missing crop
+or any exception returns `bearing_deg=None, radius_frac=None` with zero
+counts (consistent with the `detect_enemy_red` pattern).
+
+Steps, all on the numpy slice of the already-captured frame:
+
+1. Extract `MINIMAP` crop via `get_crop`.
+2. Apply a circular mask of radius `minimap.mask_radius_frac` × half the
+   crop's shorter side, centred on the crop — excludes the square corners and
+   the rim compass letters.
+3. Red HSV mask: `enemy_hsv` band plus the hue wrap-around range, exactly as
+   `detect_enemy_red` does today.
+4. Connected components with stats; keep components with area in
+   `minimap.min_blob_px … minimap.max_blob_px` — rejects rim art, the larger
+   ring badges, and the locked-target ring and route-line overlays the game
+   draws in red on the map (both are large or elongated components — see
+   `test_screenshots/MINIMAP.png`); wreck markers mostly fall outside the red
+   band.
+5. Pixel-mass centroid over surviving components → polar conversion.
+
+v1 uses the pixel-mass centroid (simplest, matches "fly to the cluster"). If
+live logs show lone stragglers dragging the centroid off the main cluster,
+switch to the median of component centroids — a code-only change.
+
+## Overhead Navigator (new module `wingman/overhead_nav.py`)
+
+A small pure-logic class — no threads, no locks, no I/O — so it is fully unit
+testable. `update(bearing_deg, radius_frac, telemetry, now) → command` is
+called once per battle tick from the main loop; the main loop actuates.
 
 ```mermaid
-graph TD
-    subgraph ENEMY_CLOSE_BY crop
-        N["N — top row, centre column"]
-        W["W — middle row, left column"]
-        C["CENTER — middle row, centre column"]
-        E["E — middle row, right column"]
-        S["S — bottom row, centre column"]
-    end
+stateDiagram-v2
+    [*] --> Climb
+    Climb --> Steer : attack altitude reached
+    Steer --> Approach : bearing inside deadzone
+    Approach --> Steer : bearing outside deadzone
+    Approach --> Overhead : radius inside overhead threshold
+    Overhead --> Steer : radius outside exit threshold
+    Steer --> Climb : altitude below attack altitude
 ```
 
-| Quadrant | Row slice   | Col slice   |
-|----------|-------------|-------------|
-| N        | top 1/3     | middle 1/3  |
-| S        | bottom 1/3  | middle 1/3  |
-| E        | middle 1/3  | right 1/3   |
-| W        | middle 1/3  | left 1/3    |
-| CENTER   | middle 1/3  | middle 1/3  |
+| Phase    | Condition                                            | Behaviour                                        |
+|----------|------------------------------------------------------|--------------------------------------------------|
+| Climb    | altitude below `attack_altitude`                     | no steering; the existing mission profile climbs |
+| Steer    | bearing outside `bearing_deadzone_deg`               | roll toward cluster via `orient_nose_to_target`  |
+| Approach | bearing inside deadzone, radius above threshold      | fly straight, keep scanning                      |
+| Overhead | `radius_frac` at or below `overhead_radius_frac`     | hold — no roll; padlock/tracking loop owns the terminal engagement |
 
-The dominant quadrant is the one with the highest red-pixel count. Ties default to CENTER (no roll issued).
+Details:
 
----
-
-## Roll-to-Enemy Decision Table
-
-| Dominant quadrant | Action                                       |
-|-------------------|----------------------------------------------|
-| E                 | `roll_right(hold_seconds=0.3)`               |
-| W                 | `roll_left(hold_seconds=0.3)`                |
-| N or CENTER       | no action (already on-target or centred)     |
-| S                 | `roll_right(hold_seconds=0.6)` (partial reversal) |
-
-The `S` hold duration is longer to initiate a partial heading reversal rather than a full 180°. Both values are tunable via config.
-
----
+- **Actuation mapping**: `error_norm = clamp(bearing_deg / 90, −1, 1)` fed to
+  `orient_nose_to_target` with the coarse gains from config (deadband is
+  `bearing_deadzone_deg / 90`). Bearings beyond ±90° saturate the correction —
+  a cluster behind the aircraft produces successive max-hold rolls until it
+  swings into the forward semicircle, which subsumes the old "South partial
+  reversal" rule.
+- **Arrival hysteresis**: enter Overhead at `overhead_radius_frac`, leave only
+  above `overhead_exit_frac` (enter < exit). The own-ship marker occludes
+  enemy icons exactly at arrival, so detection may momentarily drop out; a
+  detection gap while in Overhead holds the state for `overhead_grace_s`
+  rather than resetting.
+- **No pitch control**: unchanged from the previous revision — only the roll
+  axis is commanded. Climb is the mission profile's job; nose-down onto the
+  cluster is intentionally excluded.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    CAP[Frame Capture\ncap.grab_frame] --> OCR[Background OCR Batch\nmain loop]
-    OCR --> EQ[detect_enemy_quadrant\nanalyzer.py]
-    OCR --> ALT[Altitude OCR\n_process_health_region]
-    EQ --> DOM[Dominant Quadrant]
-    ALT --> GUARD[Altitude Guard\n>= min_safe_altitude?]
-    DOM --> ORIENT[orient_nose_to_enemy\ncontroller.py]
-    GUARD -->|pass| ORIENT
-    GUARD -->|fail / None| SUPPRESS[Suppress roll\nfail-safe]
-    ORIENT -->|cooldown check| ROLL[roll_left / roll_right\nkey hold]
-    ROLL --> GAME[Game]
+    CAP[Full frame capture] --> MM[Minimap crop slice]
+    MM --> MASK[Circle mask and red HSV mask]
+    MASK --> COMP[Component area filter]
+    COMP --> POLAR[Centroid to bearing and radius]
+    CAP --> TEL[Telemetry OCR combined crop]
+    TEL --> SNAP[Telemetry snapshot]
+    POLAR --> NAV[Overhead navigator]
+    SNAP --> NAV
+    GUARD[Safety gates] --> NAV
+    NAV -->|steer| ERR[Bearing to error norm]
+    ERR --> ORIENT[Controller orient nose to target]
+    NAV -->|climb or approach or overhead| NOOP[No roll command]
+    ORIENT --> GAME[Game]
 ```
 
-### `detect_enemy_quadrant` (analyzer.py)
+Conditions live in the phase table above, not in node labels (Mermaid
+compatibility profile).
 
-- Signature: `detect_enemy_quadrant(frame) → dict[str, int]`
-- Returns pixel counts for keys `{N, S, E, W, CENTER}`.
-- Returns all-zeros dict if the crop is unavailable or an exception occurs (fail-safe).
-- The existing boolean check at call sites becomes `sum(counts.values()) > 0` — `detect_enemy_red` remains callable unchanged.
-- Re-uses the existing `ENEMY_CLOSE_BY` HSV pipeline; no new screen region is required for the enemy scan itself.
+## Safety Gates
 
-### `orient_nose_to_enemy` (controller.py)
+Steering is suppressed — navigator returns no command — when any of:
 
-- Accepts `dominant_quadrant: str` and `altitude: int | None`.
-- Checks `analyzer.game_state != GAME_BATTLE_MANUAL` before issuing any roll (consistent with ADR 027 pattern).
-- Suppresses if `altitude is None` or `altitude < min_safe_altitude`.
-- Enforces a per-call cooldown (`attack_mode_cooldown`, default `4.0 s`) to prevent roll thrashing.
-- Issues `roll_right` / `roll_left` hold via existing controller key-hold helpers.
+1. FSM state is not `GAME_BATTLE`, or is `GAME_BATTLE_MANUAL` (manual takeover
+   always wins, consistent with ADR 027).
+2. `j20_mission.attack_mode` is false.
+3. Telemetry snapshot is `None` or stale, or altitude is below
+   `j20_mission.min_safe_altitude` — the CFIT fail-safe carried over from the
+   previous revision.
+4. Terrain avoidance (Design 001) is mid-manoeuvre (`_terrain_avoiding`).
+5. `orient_nose_to_target`'s own cooldown — one roll source, one rate limit.
 
-### Altitude OCR
+`attack_mode_dry_run: true` computes and logs commands without key injection
+(the Design 005 validation pattern) for live tuning.
 
-- New calibrated crop `ALTITUDE` reads the in-game altitude indicator via `_process_health_region` (existing numeric OCR helper supporting single- and multi-digit reads).
-- Extracted value is the altitude in game units (integer).
-- Read in the existing main-loop OCR batch alongside `AMMO_MISSILE` / `HEALTH`.
-- Result stored in `analyzer._altitude` behind `analyzer._altitude_lock` (consistent with existing pattern for shared OCR results).
-- Main loop reads `analyzer._altitude` before calling `orient_nose_to_enemy`.
+## Feasibility
 
----
-
-## Altitude Guard
-
-The altitude guard prevents controlled flight into terrain (CFIT) during roll corrections:
-
-| Condition                            | Outcome                  |
-|--------------------------------------|--------------------------|
-| `altitude >= min_safe_altitude`      | Roll permitted           |
-| `altitude < min_safe_altitude`       | Roll suppressed          |
-| OCR returns `None` (read failure)    | Roll suppressed (fail-safe) |
-
-`min_safe_altitude` defaults to `500` game units and is tunable per device/map via config.
-
----
-
-## Feasibility Assessment
-
-**Verdict: High feasibility. Negligible additional CPU cost.**
-
-| Operation | Estimated time per frame |
+| Operation | Estimate per battle tick |
 |---|---|
-| `detect_enemy_quadrant` (numpy slicing + count) | < 0.1 ms |
-| Altitude OCR (re-uses `_process_health_region`) | Already in OCR batch — no extra cost |
-| `orient_nose_to_enemy` (decision + key hold) | < 0.1 ms |
+| Minimap slice + circle mask + HSV masks (about 250×250 px) | well under 1 ms |
+| Connected components with stats | well under 1 ms |
+| Navigator decision | negligible |
 
-Quadrant detection adds at most one extra numpy array split and five `np.count_nonzero` calls on an already-captured crop — effectively zero marginal CPU overhead.
+Same order as today's `detect_enemy_red`; no OCR is added, so the telemetry
+cadence (`telemetry.ocr_every_n_ticks`) and tick budget are unaffected.
+Actual timings must be recorded via `PerformanceTracker` before the ADR is
+promoted — estimates are not acceptance evidence.
 
-**Constraints:**
+## Instrumentation and Success Metrics
 
-- **`ALTITUDE` crop calibration required**: must be calibrated per device/resolution. Until calibrated, `attack_mode` defaults to suppressed (altitude reads `None`).
-- **Roll hold durations are approximate**: 0.3 s / 0.6 s are starting values. Actual angular correction depends on in-game roll rate and load-out. These require tuning.
-- **No pitch correction**: only azimuth (roll) is corrected. Nose-down manoeuvres at low altitude are more dangerous than beneficial and are intentionally excluded.
-- **CENTER / N suppression**: no roll fires when enemies are ahead or centred. This is correct for the tactic (already positioned) — the padlock loop maintains lock in this case.
+- Per-cycle DEBUG log: `bearing / radius / phase / command`.
+- Per-mission summary: percent of battle time per phase, mean `radius_frac`.
+- Effectiveness A/B (`attack_mode` on vs off) — the acceptance evidence:
+  - deaths and outcomes per mission via MissionStatsTracker (ADR 055);
+  - incoming-detection rate per minute from PerformanceTracker histograms.
 
----
+The overhead-position safety claim stays a hypothesis until these numbers
+exist.
 
 ## Configuration Additions
 
 ```yaml
+crops:
+  MINIMAP:                # full minimap circle bounding box — tight fit: circle
+    coords:               #   touching all four sides, margins symmetric (mask
+    - [0.0, 0.0]          #   centre and radius derive from this rectangle);
+    - [0.0, 0.0]          #   live values in config.yaml, calibrated 2026-08-08;
+                          #   recalibrate with make calibrate-crop CROP=MINIMAP
+
 j20_mission:
-  attack_mode: false               # master switch for roll-to-enemy behaviour
-  attack_mode_cooldown: 4.0        # minimum seconds between roll corrections
-  attack_mode_roll_s_hold: 0.6     # hold duration (s) for South (partial reversal)
-  min_safe_altitude: 500           # altitude floor below which rolls are suppressed
+  attack_mode: false            # master switch for overhead navigation
+  attack_mode_dry_run: false    # log-only mode: compute commands, inject nothing
+  attack_altitude: 8000         # climb precondition, telemetry units (starting value)
+  min_safe_altitude: 500        # CFIT floor - all steering suppressed below
+  bearing_deadzone_deg: 12      # no roll inside this bearing error
+  overhead_radius_frac: 0.12    # radius at or below this counts as overhead
+  overhead_exit_frac: 0.25      # hysteresis exit threshold (must exceed enter)
+  overhead_grace_s: 2.0         # detection-gap tolerance while in Overhead
+  coarse_kp: 0.5                # gains passed to orient_nose_to_target
+  coarse_min_hold_s: 0.15
+  coarse_max_hold_s: 0.6
+  coarse_cooldown_s: 2.0
+
+minimap:
+  mask_radius_frac: 0.93        # circle mask radius as a fraction of half the
+                                #   crop's shorter side — excludes bounding-box
+                                #   corners and rim compass letters
+  min_blob_px: 4                # component area band for enemy icons
+  max_blob_px: 120
+  close_radius_frac: 0.3        # step 2 only: enemy-close-by equivalence radius
 ```
 
-A new `ALTITUDE` entry is also required in the `crops` section of `config.yaml` (device-specific geometry, calibrated via the standard crop calibration job aid).
-
----
+All values are starting points; tuning lives here, never in requirements.
 
 ## Integration Points
 
-| Component     | Change                                                                                          |
-|---------------|-------------------------------------------------------------------------------------------------|
-| `analyzer.py` | Add `detect_enemy_quadrant(frame)`; add `_altitude` / `_altitude_lock`; read `ALTITUDE` crop in OCR batch |
-| `controller.py` | Add `orient_nose_to_enemy(dominant_quadrant, altitude)`; enforce cooldown and altitude guard   |
-| `main.py`     | Replace `detect_enemy_red` call with `detect_enemy_quadrant`; pass altitude to `orient_nose_to_enemy` |
-| `config.yaml` | Add `j20_mission.attack_mode*` keys and `ALTITUDE` crop geometry                              |
-| FSM           | No FSM changes — feature is gated by `attack_mode` config flag within existing battle state    |
+| Component | Change |
+|---|---|
+| `analyzer.py` | Add `detect_enemy_map_bearing(frame)`; reuse `enemy_hsv` mask constants |
+| `wingman/overhead_nav.py` | New: pure-logic `OverheadNavigator` |
+| `controller.py` | None — `orient_nose_to_target` is reused as-is |
+| `main.py` | Battle tick: call detection + navigator, actuate, honour dry-run |
+| `config.yaml` | `MINIMAP` crop, `j20_mission.attack_mode*` keys, `minimap` block |
+| FSM | No changes — feature gated by config inside existing battle state |
+| `ENEMY_CLOSE_BY` | Step 1: untouched. Step 2 (after logged equivalence): derive the close-by boolean from `radius_frac` and retire the crop |
 
----
+## Validation Strategy
+
+1. **Static frame regression**: run the pipeline on the `MINIMAP` region of
+   `P1_040` and `P1_060`; assert nonzero enemy blobs and hand-labelled bearing
+   sectors match. `test_screenshots/MINIMAP.png` adds the hard case: a
+   locked-target ring and route line render red on the map — assert the area
+   band rejects both while the enemy icons survive.
+2. **Synthetic minimap unit tests**: blobs drawn at known angles/radii →
+   bearing and radius within tolerance; badge-sized blobs rejected by the area
+   band; empty map → fail-safe output; occlusion sequence → Overhead held
+   through the grace window; hysteresis enter/exit ordering.
+3. **Dry-run live session**: `attack_mode_dry_run` on; verify logged phases
+   and commands against what a human would fly; tune deadzone and gains.
+4. **Controlled live flight**: conservative gains; confirm climb → steer →
+   overhead sequence and no CFIT-guard violations.
+5. **A/B measurement**: per the instrumentation section, on vs off across
+   missions; results recorded in the ADR before promotion.
 
 ## Open Questions
 
-1. **`ALTITUDE` crop geometry**: must be calibrated per device. The numeric altitude display position varies between game versions and screen resolutions. Use the existing crop calibration job aid.
-2. **Roll hold tuning**: 0.3 s and 0.6 s starting values need in-game validation. Log the dominant quadrant and resulting heading change to calibrate `K_roll` empirically.
-3. **Roll key conflicts**: confirm that roll-left / roll-right keys are not also bound to manoeuvre-cancel actions (same concern as terrain avoidance, Design 001). If they are dual-bound, a key-hold sequence rather than a tap may be needed.
-4. **Ties between quadrants**: current tie-break defaults to CENTER (no action). If two off-axis quadrants (e.g. E and W) tie, a smarter default (e.g. prefer the last-fired direction) may reduce oscillation.
-5. **Interaction with terrain avoidance**: if Design 001 terrain avoidance is active simultaneously, its `_terrain_avoiding` flag should also suppress `orient_nose_to_enemy` to prevent conflicting roll inputs.
+1. **Altitude units**: config and ADR 038 use feet; archived frames show the
+   HUD in metres (`8248 m`). Confirm the live HUD unit setting and align
+   `attack_altitude` / `min_safe_altitude` values with it.
+2. **Minimap zoom/range**: is the map radius a fixed world distance across
+   maps and altitudes? If not, `radius_frac` thresholds need per-map review.
+3. **North-up option**: does the game offer a north-up minimap setting? The
+   design requires heading-up; assert or document the required setting.
+4. **Icon taxonomy**: enemy ground units and structures may also render red.
+   v1 steers to the all-red centroid; distinguishing fighters (shape/size
+   classification) is follow-on work once live crops are archived.
+5. **Roll-only turning dynamics**: mapping bearing error to roll holds assumes
+   the arcade flight model converts bank into heading change (same assumption
+   as Design 005). Validate in the dry-run session.
+6. **Handoff to Design 005**: when Overhead is reached, the padlock/tracking
+   loop owns terminal alignment. Exact arbitration (who may roll, when) is an
+   implementation decision — proposal: navigator suppresses itself in
+   Overhead, so only one roll source is ever active.
+
+## Related Documents
+
+- [ADR 027 — J20 target painting mode](../adr/027-j20-target-painting-mode.md)
+- [ADR 028 — Minimap enemy bearing and overhead attack positioning](../adr/028-enemy-quadrant-detection-and-nose-orientation.md)
+- [ADR 038 — Battle altitude/speed telemetry](../adr/038-game-battle-altitude-speed-signals-for-phase3-and-eject-dive.md)
+- [ADR 055 — MissionStatsTracker](../adr/055-mission-level-statistics-tracker.md)
+- [Design 001 — Terrain avoidance](001-terrain-avoidance-hldd.md)
+- [Design 005 — Screen-space target tracking](005-target-tracking-hldd.md)
+- [architecture.md](../architecture.md)
