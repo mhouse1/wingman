@@ -23,6 +23,7 @@ rather than a rolling ceiling:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 MPH_TO_FPS = 5280.0 / 3600.0
@@ -100,6 +101,12 @@ class TelemetrySnapshot:
             level_max_sin=level_max_sin,
         )
 
+    def pitch_angle_deg(self) -> float | None:
+        """Flight-path angle in degrees, or None when either signal is missing/stale."""
+        if not (self.speed_fresh() and self.altitude_fresh()):
+            return None
+        return pitch_angle_deg(self.speed.stable_value, self.altitude.rate)
+
 
 def pitch_band(
     speed_mph: float | None,
@@ -139,6 +146,29 @@ def pitch_band(
     if ratio < steep_min_sin:
         return BAND_CLIMB
     return BAND_STEEP_CLIMB
+
+
+def pitch_angle_deg(
+    speed_mph: float | None,
+    alt_rate_fps: float | None,
+    *,
+    min_speed_fps: float = 30.0,
+) -> float | None:
+    """Flight-path angle in degrees from altitude rate and speed.
+
+    Same physics and caveats as pitch_band(): angle = asin(alt_rate / speed)
+    is the velocity-vector angle averaged over the OCR cadence, not
+    instantaneous nose attitude, and it compresses near vertical. The ratio
+    is clamped to plus/minus 1 before asin so OCR noise past vertical
+    saturates at 90 degrees instead of raising ValueError.
+    """
+    if speed_mph is None or alt_rate_fps is None:
+        return None
+    speed_fps = speed_mph * MPH_TO_FPS
+    if speed_fps < min_speed_fps:
+        return None
+    ratio = max(-1.0, min(1.0, alt_rate_fps / speed_fps))
+    return math.degrees(math.asin(ratio))
 
 
 class TelemetryProcessor:

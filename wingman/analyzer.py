@@ -1289,13 +1289,24 @@ class GameStateAnalyzer:
             rejected_before = self._telemetry.rejected_total
             self._telemetry.update(speed_value, altitude_value, _frame_ts)
             rejected_after = self._telemetry.rejected_total
+            snap = self._telemetry.snapshot(_frame_ts)
         if rejected_after > rejected_before:
             logger.warning(
                 "Analyzer: telemetry plausibility filter rejected reading "
                 "(speed_raw=%s altitude_raw=%s, total_rejected=%d)",
                 speed_value, altitude_value, rejected_after)
         if speed_value is not None or altitude_value is not None:
-            logger.info("Altitude: %s | Speed: %s", altitude_value, speed_value)
+            angle = snap.pitch_angle_deg()
+            if angle is not None:
+                band = snap.pitch_band(
+                    steep_min_sin=self._telemetry.steep_min_sin,
+                    level_max_sin=self._telemetry.level_max_sin,
+                )
+                nose = f"{angle:+.0f}\N{DEGREE SIGN} ({band})"
+            else:
+                nose = "n/a"
+            logger.info("Altitude: %s | Speed: %s | Nose: %s",
+                        altitude_value, speed_value, nose)
         return telemetry_ocr_time
 
     def get_telemetry(self):
