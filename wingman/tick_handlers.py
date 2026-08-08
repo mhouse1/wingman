@@ -218,6 +218,8 @@ class RespawnHandler:
         returns while respawn OCR is still flapping, deferrals RE-ARM the event
         instead of swallowing it — the handler retries every tick until the
         respawn-clear stability window is met, then restarts.
+
+        @relation(SAF-002, scope=function)
         """
         analyzer, ctrl = self._analyzer, self._ctrl
         analyzer.alive_event.clear()

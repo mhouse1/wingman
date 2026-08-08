@@ -22,6 +22,7 @@ dependencies = [
 dev = [
 	"pytest",
 	"pytest-html",
+	"strictdoc==0.27.1",
 ]
 
 [tool.uv]

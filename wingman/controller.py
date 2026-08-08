@@ -401,10 +401,10 @@ if sys.platform != "win32":
 
 
 # Key bindings
-NOSE_UP_KEY = 'i'
-NOSE_DOWN_KEY = 'k'
-ROLL_LEFT_KEY = 'j'
-ROLL_RIGHT_KEY = 'l'
+NOSE_UP_KEY = 'i' # FLIGHT_CONTROL_KEY
+NOSE_DOWN_KEY = 'k' # FLIGHT_CONTROL_KEY
+ROLL_LEFT_KEY = 'j' # FLIGHT_CONTROL_KEY
+ROLL_RIGHT_KEY = 'l' # FLIGHT_CONTROL_KEY
 AFTERBURNER_KEY = 'e'
 AIRBRAKE_KEY = 'd'
 DEPLOY_FLARES_KEY = 'space'
@@ -847,6 +847,10 @@ class Controller:
 
         Returns True when the key press triggered mission cancel/manual takeover,
         otherwise False.
+
+        @relation(SAF-001, scope=function)
+        @relation(SAF-001.1, scope=function)
+        @relation(SAF-001.2, scope=function)
         """
         if is_injected:
             return False
@@ -1204,6 +1208,8 @@ class Controller:
 
         Idempotent: repeated presses/releases of an already-held/already-released
         key do not double-count. No-op outside an eject (total is None).
+
+        @relation(SAF-005, scope=function)
         """
         if self._eject_nose_held_total_s is None:
             return
@@ -2418,7 +2424,10 @@ class Controller:
         """Background loop active in GAME_STARTING state.
 
         Every 5 seconds: press MISSION_J20_KEY and scan the good_luck region for 'Good Luck'.
-        Once detected, wait 10 seconds then launch mission_j20.
+        Once detected, wait good_luck_wait_s (interruptible on battle-alive
+        evidence) then launch mission_j20.
+
+        @relation(FR-003, scope=function)
         """
         # Clear any stale cancel from prior states (mirrors mission_j20 / mission_loiter pattern).
         # cancel_mission() is called on on_enter_GAME_LOBBY; without this clear the loop

@@ -94,6 +94,8 @@ def _alive_transition_disposition(state, alive_after_observed_death: bool) -> st
       consume_spurious — GAME_BATTLE_EJECT without an observed death: the
                          synthetic eject-start transition; consume it.
       consume_other    — any other state (manual, lobby, ...): consume it.
+    
+    @relation(SAF-002, scope=function)
     """
     if state == GameState.GAME_BATTLE:
         return "restart_path"

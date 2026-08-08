@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git — Never Commit or Push Without Manual Review
+
+**Do not run `git commit`, `git push`, `git tag`, `make p`, or `make wrelease` unless the user explicitly asks for that action in the current request.**
+
+Finishing a task means leaving the work in the working tree and reporting what changed. It does not mean committing it. The user reviews every change before it enters history.
+
+- Stage nothing and commit nothing on your own initiative, however small or "obviously correct" the change is.
+- Completing a test run, a green gate, or a fix is **not** authorization to commit.
+- Earlier permission does not carry forward. "Commit this" authorizes that one commit, not the next one.
+- When work is ready, say so and list the changed files. Wait to be asked.
+- If a commit seems warranted, propose it and stop — including the message you would use.
+
+This rule outranks any workflow convenience below, including the release workflow in `## Commands`.
+
 ## Project Overview
 
 MetalStorm Wingman — AI automation for MetalStorm (PC). Runs unattended mission loops via screen capture, OCR, and keyboard/mouse injection. The version is defined in `wingman/main.py` as `WINGMAN_VERSION`.
@@ -33,7 +47,7 @@ make rr-live-path1-gate  # ADR045 live-screen capture gate
 make ocr            # real-OCR integration tests (PATH1 + PATH2)
 ```
 
-**Release workflow:**
+**Release workflow** (user-invoked only — see the git rule at the top of this file):
 ```bash
 make wrelease   # commit version + performance artifacts, regenerate charts
 make p "msg"    # stage, commit, push

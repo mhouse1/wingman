@@ -1402,6 +1402,8 @@ class GameStateAnalyzer:
         caches, and returns nothing — so a stale battle respawn result cannot
         leak into GAME_STARTING. Self-throttled; the caller is the per-tick
         analyze_frame.
+
+        @relation(FR-004, scope=function)
         """
         if self._shutting_down or "HEALTH" not in self.crops:
             return
@@ -1480,6 +1482,8 @@ class GameStateAnalyzer:
         The summary line is the measurement that matters: how long after arming
         the HEALTH crop first produced a raw value. Until that number exists there
         is no basis for shortening the post-Good-Luck wait.
+
+        @relation(FR-004.1, scope=function)
         """
         was_armed = self._game_starting_health_scan_enabled.is_set()
         self._game_starting_health_scan_enabled.clear()
@@ -1525,6 +1529,8 @@ class GameStateAnalyzer:
         fragments and concatenations vary read-to-read and never confirm; the
         true value recurs constantly. Reads above max_plausible are discarded
         before entering the window so they cannot self-confirm.
+
+        @relation(SAF-004, scope=function)
         """
         if raw > self._health_max_plausible:
             logger.debug("Analyzer: health read %d over max_plausible %d — discarded",
@@ -1712,6 +1718,8 @@ class GameStateAnalyzer:
         shadow mode: recorded and logged only. dual mode (ADR 064): additionally
         sets health_respawn_event so the main loop runs the respawn plumbing —
         unless respawn OCR is currently detecting the overlay (it owns the episode).
+
+        @relation(SAF-003, scope=function)
 
         transitioned: whether this read is the dead→alive transition. Weak-tier
         evidence REQUIRES it (ADR 064 amendment, 2026-08-02 05:37 session): a
