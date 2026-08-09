@@ -200,5 +200,51 @@ What the flight confirms:
   there. With decision 5 the wasted reversal is gone, so the budget should not
   bind in the same way.
 
-- Pending for Accepted: one further live session on the decision 5 fix showing
-  an eject reaching the target with no nose-up reversal short of it.
+### Live validation flight 2026-08-09 04:42 (decision 5)
+
+Three ejects on the decision 5 fix. The reversal defect did not recur and the
+stated behaviour was met on every one:
+
+| Measure | Result |
+|---------|--------|
+| Nose-up reversals short of target | 0 (was the 03:52 defect) |
+| Over-rotation releases | 0 (was the original defect) |
+| Corrections issued | 8, all nose-down — correct direction throughout |
+| Ejects reaching -90 degrees | 3 of 3 |
+| Confirmed via target angle | 2 of 3, both at -90 degrees |
+
+The third eject is the clearest trace of decision 1 working: engaged at +41
+degrees and 989 KPH, the loop kept commanding nose-down against a +160 m/s
+climb — the exact condition the old guard released on — then rotated -16, -36,
+-66, -90 over nine seconds.
+
+**Open issue — the 20 s budget now binds on every eject.** All three hit it.
+Eject 3 reached -90 degrees 2.6 s before the budget expired, one telemetry
+sample short of the two needed to confirm; ejects 1 and 2 confirmed, decayed to
+-37 and -50 degrees, correctly took a re-entry, and then exhausted the budget
+2-5 s later. Rotation from a fast climb to vertical measures about 19 s, so 20 s
+leaves no headroom for the 6 s two-sample confirmation or any re-entry. Raising
+it to approximately 30 s is the indicated next step; deferred pending an
+operator decision, since the budget is the backstop against flying a full loop.
+
+### Implementation defect found in production 2026-08-09 08:09
+
+Decision 1's prior-descent check compared `altitude.rate` without a None guard.
+`altitude_fresh()` does not imply a numeric rate — rate is None until two
+accepted readings exist, which recurs after every telemetry gap. The result was
+a `TypeError` that killed the eject thread mid-sequence:
+
+```
+File "wingman/controller.py", line 1744, in _run
+    if rate < 0:
+TypeError: '<' not supported between instances of 'NoneType' and 'int'
+```
+
+The `finally` block still released AFTERBURNER, NOSE_DOWN and NOSE_UP and
+logged `eject_and_dive complete`, so no key was left held — but post-release
+monitoring, re-entry and the afterburner hold were all lost for that eject.
+Fixed at both sites; two regression tests cover the nose phase and the
+post-release watcher, and both were verified to fail without the guard.
+
+- Pending for Accepted: a live session on the crash fix confirming an eject
+  runs its full post-release sequence through a telemetry gap.

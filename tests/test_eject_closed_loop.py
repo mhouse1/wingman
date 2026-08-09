@@ -659,6 +659,44 @@ def test_shallow_dive_never_reverses_before_target_reached(monkeypatch):
         "reversed to nose-up while short of the dive target")
 
 
+def test_fresh_altitude_with_no_rate_does_not_crash_nose_phase(monkeypatch):
+    """Regression: altitude_fresh() does not imply altitude.rate is a number.
+
+    rate stays None until two accepted readings exist — a fresh seed, or after
+    the history is cleared following a telemetry gap. Production crash
+    2026-08-09 08:09:11 (TypeError: '<' not supported between NoneType and int)
+    killed the eject thread mid-sequence when the prior-descent check compared
+    it directly.
+    """
+    stub = _TelemetryStub(alt_rate=None)
+    ctrl = _make_ctrl(monkeypatch, stub, legacy_nose_hold_s=0.2, verify_window_s=0.05)
+
+    cancelled = ctrl._eject_nose_phase_closed_loop()
+
+    assert cancelled is False
+    assert ctrl._eject_descended_since_press is False  # no evidence either way
+
+
+def test_fresh_altitude_with_no_rate_does_not_crash_post_release(monkeypatch):
+    """Same regression on the post-release watcher, where it actually fired."""
+    stub = _TelemetryStub(alt_rate=None)
+    ctrl = _make_ctrl(monkeypatch, stub, legacy_nose_hold_s=0.2, verify_window_s=0.05,
+                      check_interval_s=0.05, total_nose_budget_s=30.0)
+
+    errors = []
+    original_hook = threading.excepthook
+    threading.excepthook = lambda args: errors.append(args.exc_value)
+    try:
+        ctrl.eject_and_dive()
+        time.sleep(1.5)
+        ctrl.stop_eject_sequence()
+        time.sleep(0.5)
+    finally:
+        threading.excepthook = original_hook
+
+    assert not errors, f"eject thread raised: {errors!r}"
+
+
 def test_prior_descent_flag_set_by_descending_sample(monkeypatch):
     """The flag that gates over-rotation is set by observed descent, so a real
     dive-then-climb sequence still reaches the ADR 058 d12 release."""
