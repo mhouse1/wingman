@@ -197,6 +197,9 @@ def test_shallow_dive_not_improving_reverses_to_nose_up(monkeypatch):
     # nose-up tap.
     stub = _TelemetryStub(alt_rate=-60.0)
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
+    # ADR 068: the reversal is only reachable once the dive target has been
+    # reached — this test exercises the reversal, so grant that precondition.
+    ctrl._eject_reached_target_dive = True
 
     result = {}
 
@@ -281,6 +284,7 @@ def test_descending_and_worsening_reverses_regardless_of_speed_trend(monkeypatch
     """
     stub = _TelemetryStub(alt_rate=-60.0, speed_trend="falling")
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
+    ctrl._eject_reached_target_dive = True  # ADR 068 reversal precondition
 
     result = {}
 
@@ -520,13 +524,20 @@ def test_cancellation_during_phase_returns_true(monkeypatch):
 def test_climb_after_long_hold_releases_as_over_rotation(monkeypatch):
     """ADR 058 decision 12: climbing after a long continuous nose-down hold is
     over-rotation — release rather than deepen it. Measured on 2026-08-02 15:47,
-    where a re-issue at +388 ft/s kept the aircraft climbing."""
+    where a re-issue at +388 m/s kept the aircraft climbing.
+
+    ADR 068: only once the aircraft has actually rotated DOWN at some point —
+    'dove then climbed' is the over-rotation signature, and the prior-descent
+    flag is what distinguishes it from a momentum zoom climb.
+    """
     stub = _TelemetryStub(alt_rate=+300.0)   # climbing
     ctrl = _make_ctrl(monkeypatch, stub, verify_window_s=0.05, legacy_nose_hold_s=30.0,
                       over_rotation_after_s=0.05, total_nose_budget_s=30.0)
-    # Simulate nose-down already held past the over-rotation threshold.
+    # Simulate nose-down already held past the over-rotation threshold, having
+    # passed through a descent on the way (the 'dove then climbed' case).
     ctrl._eject_nose_held_total_s = 10.0
     ctrl._eject_nose_down_since = None
+    ctrl._eject_descended_since_press = True
 
     cancelled = ctrl._eject_nose_phase_closed_loop()
 
@@ -535,6 +546,129 @@ def test_climb_after_long_hold_releases_as_over_rotation(monkeypatch):
     # No corrective nose-down re-issued — that is the whole point.
     assert all(i["action_type"] != "key_press" or i["key"] != NOSE_DOWN_KEY
                for i in _intents(ctrl))
+
+
+def test_zoom_climb_without_prior_descent_is_not_over_rotation(monkeypatch):
+    """ADR 068 regression: an eject fired from a fast climb must keep commanding
+    nose-down, not release.
+
+    Flight-tested 2026-08-09 03:31:54 — the guard fired at 6.1s against a
+    +236 m/s climb the aircraft had NEVER descended from, released nose-down,
+    and the eject settled at 38 degrees for 30s until the operator pressed
+    nose-down manually and got the 90 degree dive immediately. Rotating past
+    vertical requires passing through a dive first; a flight path that has only
+    ever climbed is under-rotated.
+    """
+    stub = _TelemetryStub(alt_rate=+236.0)   # climbing, never descended
+    ctrl = _make_ctrl(monkeypatch, stub, verify_window_s=0.05, legacy_nose_hold_s=30.0,
+                      over_rotation_after_s=0.05, max_corrections=1,
+                      total_nose_budget_s=30.0)
+    ctrl._eject_nose_held_total_s = 10.0   # well past the over-rotation threshold
+    ctrl._eject_nose_down_since = None
+    assert ctrl._eject_descended_since_press is False
+
+    ctrl._eject_nose_phase_closed_loop()
+
+    assert ctrl._eject_phase_exit_reason != "over_rotation"
+    keys = [(i["action_type"], i["key"]) for i in _intents(ctrl)]
+    assert ("key_press", NOSE_DOWN_KEY) in keys    # kept commanding the dive
+    assert all(k != NOSE_UP_KEY for _, k in keys)  # never nose-up while climbing
+
+
+def test_shallow_dive_post_release_triggers_reentry(monkeypatch, caplog):
+    """ADR 068: a dive that stalls short of the target must get another
+    nose-down hold, not be abandoned.
+
+    Flight-tested 2026-08-09 03:31: after the nose phase gave up, the aircraft
+    settled at 38 degrees and glided there for 30s with no further input,
+    because re-entry was granted only after a confirmation that never came.
+    -103 m/s at 600 KPH is that same 38-degree attitude: short of the 75-degree
+    target and short of the raw descent threshold, so only the re-entry path
+    can act on it.
+    """
+    stub = _TelemetryStub(speed=600, alt_rate=-103.0)
+    ctrl = _make_ctrl(monkeypatch, stub, legacy_nose_hold_s=0.2, verify_window_s=0.05,
+                      max_corrections=1, confirm_descent_fps=250.0,
+                      total_nose_budget_s=30.0, dive_reentries=2,
+                      check_interval_s=0.05)
+
+    with caplog.at_level("INFO"):
+        ctrl.eject_and_dive()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if any("dive short of target" in r.message for r in caplog.records):
+                break
+            time.sleep(0.05)
+        ctrl.stop_eject_sequence()
+
+    assert any("dive short of target" in r.message for r in caplog.records), (
+        "shallow post-release dive never re-entered nose-down verification")
+
+
+def test_reentry_never_fires_on_missing_telemetry(monkeypatch, caplog):
+    """The widened re-entry must still honour ADR 038: absence of data is never
+    evidence. With no telemetry at all, no re-entry may be spent."""
+    stub = _TelemetryStub(available=False)
+    ctrl = _make_ctrl(monkeypatch, stub, legacy_nose_hold_s=0.2, verify_window_s=0.05,
+                      total_nose_budget_s=30.0, dive_reentries=2, check_interval_s=0.05)
+
+    with caplog.at_level("INFO"):
+        ctrl.eject_and_dive()
+        time.sleep(1.5)
+        ctrl.stop_eject_sequence()
+
+    assert not any("re-entering nose-down" in r.message for r in caplog.records)
+
+
+def test_shallow_dive_never_reverses_before_target_reached(monkeypatch):
+    """ADR 068 regression: no nose-up while short of the dive target.
+
+    Flight-tested 2026-08-09 03:52:34 — at -37 degrees, a descent that got
+    10 m/s shallower tripped the over-rotation reversal and the nose-up tap took
+    the eject to -11 degrees, away from the dive it was commanded to establish.
+    An aircraft that has never reached near-vertical cannot be past vertical, so
+    nose-down stays unambiguously correct.
+    """
+    stub = _TelemetryStub(alt_rate=-60.0)  # ~-21 degrees at 600 KPH
+    ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
+    assert ctrl._eject_reached_target_dive is False
+
+    result = {}
+
+    def _run():
+        result["cancelled"] = ctrl._eject_nose_phase_closed_loop()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if any(i["key"] == NOSE_DOWN_KEY and i["action_type"] == "key_release"
+               for i in _intents(ctrl)):
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("first corrective nose-down re-issue never happened")
+    stub.alt_rate = -45.0  # descent got shallower — the ADR 058 reversal trigger
+
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+
+    keys = [(i["action_type"], i["key"]) for i in _intents(ctrl)]
+    assert all(k != NOSE_UP_KEY for _, k in keys), (
+        "reversed to nose-up while short of the dive target")
+
+
+def test_prior_descent_flag_set_by_descending_sample(monkeypatch):
+    """The flag that gates over-rotation is set by observed descent, so a real
+    dive-then-climb sequence still reaches the ADR 058 d12 release."""
+    stub = _TelemetryStub(alt_rate=-40.0)  # descending, but short of the target
+    ctrl = _make_ctrl(monkeypatch, stub, verify_window_s=0.05, legacy_nose_hold_s=1.0,
+                      max_corrections=1, total_nose_budget_s=30.0)
+
+    ctrl._eject_nose_phase_closed_loop()
+
+    assert ctrl._eject_descended_since_press is True
 
 
 def test_climb_before_hold_threshold_still_reissues(monkeypatch):
