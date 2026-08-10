@@ -4,10 +4,13 @@ Exercises Controller._eject_descent_control with a stub analyzer serving
 scripted TelemetrySnapshots. simulate_os_input records key intents so
 actuation is observable without a keyboard.
 
-The criterion under test is the raw altitude RATE, never the flight-path
-angle: the angle ratio saturates at 90 degrees exactly when the aircraft is
-accelerating hardest (ADR 069 Fault A), which is why it stopped being the
-control signal.
+The criterion under test is the flight-path ANGLE (ADR 069 d1, revised): a
+rate target alone is satisfied by SPEED, so a shallow dive that accelerates
+meets any rate bar while flying across the arena. The stub flies at 600 KPH
+(166.7 m/s), so an altitude rate of R m/s reads as asin(R / 166.7):
+
+    -165 m/s -> -82 deg   -151 m/s -> -65 deg (target)   -136 m/s -> -55 deg (floor)
+    -144 m/s -> -60 deg (inside the deadband)   -122 m/s -> -47 deg (shallow-but-fast)
 """
 
 import threading
@@ -86,6 +89,8 @@ def _make_ctrl(monkeypatch, stub, **ecl_overrides):
         "enabled": True,
         "check_interval_s": 0.05,
         "confirm_consecutive": 2,
+        "target_dive_angle_deg": 65.0,
+        "dive_angle_floor_deg": 55.0,
         "descent_target_mps": 100.0,
         "descent_floor_mps": 50.0,
         "rotation_pulse_s": 0.05,
@@ -206,8 +211,8 @@ def test_pulses_are_bounded_by_the_budget(monkeypatch, caplog):
 # Ballistic descent (d1, d3)
 # ---------------------------------------------------------------------------
 
-def test_target_rate_establishes_descent_and_releases_nose(monkeypatch, caplog):
-    stub = _TelemetryStub(alt_rate=-130.0)     # past the 100 target
+def test_target_angle_establishes_dive_and_releases_nose(monkeypatch, caplog):
+    stub = _TelemetryStub(alt_rate=-165.0)     # -82 deg, past the -75 target
     ctrl = _make_ctrl(monkeypatch, stub)
 
     with caplog.at_level("INFO"):
@@ -219,14 +224,14 @@ def test_target_rate_establishes_descent_and_releases_nose(monkeypatch, caplog):
         assert ("key_press", NOSE_DOWN_KEY) not in _keys(ctrl)
         _stop(ctrl, thread, result)
 
-    assert any("descent established" in r.message for r in caplog.records)
+    assert any("dive established" in r.message for r in caplog.records)
 
 
 def test_single_sub_floor_sample_does_not_resume_rotation(monkeypatch):
     """One shallow sample is noise; the old decay detector fired on exactly
     this and produced an 18 s limit cycle."""
     # establish (2 samples), one dip, then back at target
-    stub = _SequencedRateStub([-130.0, -130.0, -130.0, -20.0, -130.0, -130.0])
+    stub = _SequencedRateStub([-165.0, -165.0, -165.0, -20.0, -165.0, -165.0])
     ctrl = _make_ctrl(monkeypatch, stub)
 
     thread, result = _descent_in_thread(ctrl)
@@ -237,7 +242,7 @@ def test_single_sub_floor_sample_does_not_resume_rotation(monkeypatch):
 
 
 def test_sustained_degradation_resumes_rotation(monkeypatch, caplog):
-    stub = _SequencedRateStub([-130.0, -130.0, -130.0, -20.0, -20.0, -20.0, -20.0])
+    stub = _SequencedRateStub([-165.0, -165.0, -165.0, -20.0, -20.0, -20.0, -20.0])
     ctrl = _make_ctrl(monkeypatch, stub)
 
     with caplog.at_level("INFO"):
@@ -246,7 +251,7 @@ def test_sustained_degradation_resumes_rotation(monkeypatch, caplog):
         assert _wait_for(lambda: ("key_press", NOSE_DOWN_KEY) in _keys(ctrl))
         _stop(ctrl, thread, result)
 
-    assert any("descent degraded" in r.message for r in caplog.records)
+    assert any("dive shallow" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +271,7 @@ def test_afterburner_not_engaged_while_shallow(monkeypatch):
 
 
 def test_afterburner_engages_once_descending(monkeypatch):
-    stub = _TelemetryStub(alt_rate=-130.0)
+    stub = _TelemetryStub(alt_rate=-165.0)
     ctrl = _make_ctrl(monkeypatch, stub)
 
     thread, result = _descent_in_thread(ctrl)
@@ -276,7 +281,7 @@ def test_afterburner_engages_once_descending(monkeypatch):
 
 
 def test_afterburner_released_if_descent_goes_shallow(monkeypatch):
-    stub = _SequencedRateStub([-130.0, -130.0, -130.0, -5.0, -5.0, -5.0])
+    stub = _SequencedRateStub([-165.0, -165.0, -165.0, -5.0, -5.0, -5.0])
     ctrl = _make_ctrl(monkeypatch, stub)
 
     thread, result = _descent_in_thread(ctrl)
@@ -351,7 +356,7 @@ def test_no_telemetry_never_actuates(monkeypatch):
 def test_telemetry_loss_after_established_keeps_the_verdict(monkeypatch, caplog):
     """A dive that WAS established and then loses telemetry must not be
     downgraded to a give-up — the eject succeeded."""
-    stub = _TelemetryStub(alt_rate=-130.0)
+    stub = _TelemetryStub(alt_rate=-165.0)
     ctrl = _make_ctrl(monkeypatch, stub)
 
     with caplog.at_level("INFO"):
@@ -381,7 +386,7 @@ def test_fresh_altitude_with_no_rate_does_not_crash(monkeypatch):
 
 def test_frozen_sensor_is_not_new_evidence(monkeypatch):
     """Re-polling one physical sample must not advance any streak."""
-    stub = _TelemetryStub(alt_rate=-130.0)
+    stub = _TelemetryStub(alt_rate=-165.0)
     stub.freeze_ts = True
     ctrl = _make_ctrl(monkeypatch, stub)
 
@@ -398,7 +403,7 @@ def test_frozen_sensor_is_not_new_evidence(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_cancellation_returns_true(monkeypatch):
-    stub = _TelemetryStub(alt_rate=-130.0)
+    stub = _TelemetryStub(alt_rate=-165.0)
     ctrl = _make_ctrl(monkeypatch, stub)
     ctrl._eject_stop.set()
 
@@ -407,7 +412,7 @@ def test_cancellation_returns_true(monkeypatch):
 
 
 def test_wall_clock_backstop_ends_the_sequence(monkeypatch):
-    stub = _TelemetryStub(alt_rate=-130.0)     # would stay ballistic forever
+    stub = _TelemetryStub(alt_rate=-165.0)     # would stay ballistic forever
     ctrl = _make_ctrl(monkeypatch, stub, eject_max_s=0.3)
 
     t0 = time.time()
@@ -423,7 +428,7 @@ def test_wall_clock_backstop_ends_the_sequence(monkeypatch):
 def test_eject_and_dive_releases_every_key(monkeypatch):
     """Whatever the descent controller does, the finally block must leave no
     flight key held."""
-    stub = _TelemetryStub(alt_rate=-130.0)
+    stub = _TelemetryStub(alt_rate=-165.0)
     ctrl = _make_ctrl(monkeypatch, stub, eject_max_s=0.3)
 
     ctrl.eject_and_dive()
@@ -432,3 +437,79 @@ def test_eject_and_dive_releases_every_key(monkeypatch):
     keys = _keys(ctrl)
     for key in (NOSE_DOWN_KEY, AFTERBURNER_KEY):
         assert ("key_release", key) in keys, f"{key} never released"
+
+
+# ---------------------------------------------------------------------------
+# ADR 069 d1 revision — a rate target alone is satisfied by SPEED
+# ---------------------------------------------------------------------------
+
+def test_shallow_but_fast_dive_is_not_established(monkeypatch):
+    """Flight-tested 2026-08-10 18:36: a -47 degree dive accelerating to 1576
+    KPH held -187 to -309 m/s — three times the rate target — while flying 7 km
+    ACROSS the arena. Meeting the rate bar must not end rotation when the
+    flight path is still shallow."""
+    # -122 m/s at the stub's 600 KPH is -47 deg: past descent_target_mps (100),
+    # shallower than dive_angle_floor_deg (60).
+    stub = _TelemetryStub(alt_rate=-122.0)
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    thread, result = _descent_in_thread(ctrl)
+    # It must keep rotating, not settle.
+    assert _wait_for(lambda: ("key_press", NOSE_DOWN_KEY) in _keys(ctrl))
+    assert ctrl._eject_phase_exit_reason != "established"
+    _stop(ctrl, thread, result)
+
+
+def test_shallow_but_fast_dive_does_not_engage_afterburner(monkeypatch):
+    """Burner in a shallow dive is what crosses the arena — gate it on the
+    angle for the same reason the criterion is."""
+    stub = _TelemetryStub(alt_rate=-122.0)     # -47 deg, fast
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    thread, result = _descent_in_thread(ctrl)
+    assert _wait_for(lambda: ("key_press", NOSE_DOWN_KEY) in _keys(ctrl))
+    assert ("key_press", AFTERBURNER_KEY) not in _keys(ctrl)
+    _stop(ctrl, thread, result)
+
+
+def test_established_dive_that_sags_shallow_resumes_rotation(monkeypatch, caplog):
+    """The reported failure: established, then the game flattens it to -47 and
+    the controller sat there because the rate still looked fine."""
+    # establish at -82 deg, then sag to -47 deg while still fast.
+    stub = _SequencedRateStub([-165.0, -165.0, -165.0, -122.0, -122.0, -122.0, -122.0])
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    with caplog.at_level("INFO"):
+        thread, result = _descent_in_thread(ctrl)
+        assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "established")
+        assert _wait_for(lambda: ("key_press", NOSE_DOWN_KEY) in _keys(ctrl)), \
+            "sagging to -47 deg did not resume rotation"
+        _stop(ctrl, thread, result)
+
+    assert any("dive shallow" in r.message for r in caplog.records)
+
+
+def test_deadband_between_target_and_floor_is_left_alone(monkeypatch):
+    """Between -65 and -55 the aircraft is steep enough; pulsing at every
+    degree of sag is what produced the ADR 068 limit cycle."""
+    # establish at -82, then sit at -60 deg (-144 m/s) — inside the deadband.
+    stub = _SequencedRateStub([-165.0, -165.0, -165.0, -144.0, -144.0, -144.0, -144.0])
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    thread, result = _descent_in_thread(ctrl)
+    assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "established")
+    time.sleep(0.4)
+    assert ("key_press", NOSE_DOWN_KEY) not in _keys(ctrl)
+    _stop(ctrl, thread, result)
+
+
+def test_rate_fallback_when_angle_unavailable(monkeypatch):
+    """With speed stale the angle is None; the rate criterion carries the
+    decision rather than blocking it."""
+    stub = _TelemetryStub(alt_rate=-165.0)
+    stub.stale_speed = True                    # pitch_angle_deg() -> None
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    thread, result = _descent_in_thread(ctrl)
+    assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "established")
+    _stop(ctrl, thread, result)

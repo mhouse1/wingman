@@ -545,10 +545,13 @@ class Controller:
         # ADR 058 d12 / ADR 068 d1 (carried forward): continuous nose-down hold
         # after which a CLIMB is read as over-rotation. 0 disables.
         self._eject_cl_over_rotation_after_s = float(_ecl.get("over_rotation_after_s", 6.0))
-        # Observability only under ADR 069 — the release criterion is the rate,
-        # not this angle. Retained for the over-rotation guard and logging.
+        # ADR 069 d1 (revised): the flight-path angle IS the criterion — the
+        # dive must reach the target, and rotation resumes once it sags past
+        # the floor. The band between them is the anti-flapping deadband.
         self._eject_cl_target_dive_angle_deg = float(
             _ecl.get("target_dive_angle_deg", 75.0))
+        self._eject_cl_dive_angle_floor_deg = float(
+            _ecl.get("dive_angle_floor_deg", 60.0))
         # ADR 068 d1: True once ANY descending sample has been seen during the
         # CURRENT rotation attempt. The over-rotation guard requires it —
         # rotating past vertical means passing THROUGH a dive, so a flight path
@@ -1376,12 +1379,30 @@ class Controller:
                 # over-rotation (ADR 068 d1, carried forward).
                 self._eject_descended_since_press = True
 
-            # ADR 069 d8: burner is gated on descending flight. Engaged while
-            # shallow it accelerates the aircraft ACROSS the map, which is the
-            # arena-exit failure (Roadmap 001 M1).
-            self._eject_manage_afterburner(rate)
+            # ADR 069 d8: burner is gated on STEEP descending flight. Engaged
+            # while shallow it accelerates the aircraft ACROSS the map, which
+            # is the arena-exit failure (Roadmap 001 M1).
+            self._eject_manage_afterburner(rate, angle)
 
-            if rate <= -self._eject_cl_descent_target_mps:
+            # ADR 069 d1 (revised): the criterion is the ANGLE, with the rate
+            # as a fallback only when the angle is unavailable.
+            #
+            # Rate alone is satisfied by SPEED, not by attitude: measured
+            # 2026-08-10 18:36, a -47 degree dive accelerating to 1576 KPH held
+            # -187 to -309 m/s — three times the 100 m/s target — while the
+            # flight path stayed shallow. That descends fast and flies 7 km
+            # ACROSS the arena doing it; the same altitude at -75 degrees costs
+            # 2 km. The original decision made rate the criterion to escape the
+            # saturated angle, but d6 in this same ADR fixed the angle, so d1
+            # was compensating for a defect that no longer exists.
+            if angle is not None:
+                at_target = angle <= -self._eject_cl_target_dive_angle_deg
+                shallow = angle > -self._eject_cl_dive_angle_floor_deg
+            else:
+                at_target = rate <= -self._eject_cl_descent_target_mps
+                shallow = rate > -self._eject_cl_descent_floor_mps
+
+            if at_target:
                 below_floor_streak = 0
                 climb_streak = 0
                 at_target_streak += 1
@@ -1390,26 +1411,29 @@ class Controller:
                     self._eject_phase_exit_reason = "established"
                     self._eject_key(False, NOSE_DOWN_KEY)
                     logger.info(
-                        "Controller: eject_and_dive — descent established "
-                        "(%.0f m/s, nose %s, %d pulse(s), %.1fs) — ballistic, "
+                        "Controller: eject_and_dive — dive established "
+                        "(nose %s, %.0f m/s, %d pulse(s), %.1fs) — ballistic, "
                         "nose-down released",
-                        rate, f"{angle:+.0f}deg" if angle is not None else "?",
-                        pulses, time.time() - start)
+                        f"{angle:+.0f}deg" if angle is not None else "?",
+                        rate, pulses, time.time() - start)
                 continue
 
             at_target_streak = 0
 
             if established:
-                # Only a SUSTAINED shortfall means the descent genuinely
-                # degraded; one sample is noise (the old decay detector fired
-                # on angle artifacts every few seconds).
-                if rate > -self._eject_cl_descent_floor_mps:
+                # Between the target and the floor is a deliberate deadband:
+                # the aircraft is steep enough to be left alone, and pulsing at
+                # every degree of sag is what produced the ADR 068 limit cycle.
+                # Only a SUSTAINED shallow reading resumes rotation.
+                if shallow:
                     below_floor_streak += 1
                     if below_floor_streak < self._eject_cl_confirm_consecutive:
                         continue
                     logger.info(
-                        "Controller: eject_and_dive — descent degraded to %.0f m/s "
-                        "(%d consecutive) — resuming rotation", rate, below_floor_streak)
+                        "Controller: eject_and_dive — dive shallow (nose %s, "
+                        "%.0f m/s, %d consecutive) — resuming rotation",
+                        f"{angle:+.0f}deg" if angle is not None else "?",
+                        rate, below_floor_streak)
                     established = False
                     below_floor_streak = 0
                 else:
@@ -1468,17 +1492,24 @@ class Controller:
             return True
         return self._eject_stop.wait(timeout=self._eject_cl_observe_after_pulse_s)
 
-    def _eject_manage_afterburner(self, rate: "float | None") -> None:
-        """Engage AFTERBURNER only while descending (ADR 069 d8).
+    def _eject_manage_afterburner(self, rate: "float | None",
+                                  angle: "float | None" = None) -> None:
+        """Engage AFTERBURNER only while STEEPLY descending (ADR 069 d8).
 
         Burner during shallow or climbing flight is what carries the aircraft
-        out of the arena; during an established descent it accelerates the
-        dive (speed climbed 481 to 1286 KPH across the 2026-08-10 ballistic
-        phase). Missing telemetry changes nothing — never act on absent data.
+        out of the arena; during a steep dive it accelerates the descent
+        (speed climbed 481 to 1286 KPH across the 2026-08-10 ballistic phase).
+        Gated on the angle when available for the same reason the dive
+        criterion is: a shallow dive at 1500 KPH satisfies any rate test while
+        crossing the map. Missing telemetry changes nothing — never act on
+        absent data.
         """
         if rate is None:
             return
-        descending = rate <= -self._eject_cl_descent_floor_mps
+        if angle is not None:
+            descending = angle <= -self._eject_cl_dive_angle_floor_deg
+        else:
+            descending = rate <= -self._eject_cl_descent_floor_mps
         if descending and not self._eject_ab_engaged:
             self._eject_key(True, AFTERBURNER_KEY)
             self._eject_ab_engaged = True

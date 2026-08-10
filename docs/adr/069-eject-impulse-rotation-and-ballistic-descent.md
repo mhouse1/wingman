@@ -100,11 +100,14 @@ the only thing that stopped the limit cycle.
 
 ## Decision
 
-**1. Steer and confirm on descent RATE, not flight-path angle.**
+**1. Confirm on the flight-path ANGLE, with descent rate as the fallback.**
+*(Revised 2026-08-10 — see "Revision: rate alone is satisfied by speed".)*
 
-The eject's goal is to reach the ground quickly. Altitude rate measures that
-directly, needs no speed reading, and is immune to Fault A. `descent_target_mps`
-(default 100) confirms; the angle becomes an observability signal only.
+The dive must reach `target_dive_angle_deg` (75) to count as established, and
+rotation resumes once it sags past `dive_angle_floor_deg` (60); the band
+between them is a deliberate anti-flapping deadband. `descent_target_mps` /
+`descent_floor_mps` remain as the fallback criterion for when the angle is
+unavailable (stale speed), where a rate test is better than no test.
 
 **2. Impulse rotation, not continuous hold.**
 
@@ -213,8 +216,139 @@ Both remain provisional until multi-session live data exists (see plan item 3).
    engaged` → `rotation pulse 1/4` → `rotation pulse 2/4` → `cancelled during
    descent (reason=respawn_detected)`), with pulses spaced 7.0 s apart exactly
    as the pulse plus observation gap plus check interval predict.
-3. Live sessions showing: descent rate sustained near the ballistic figures
-   above, no limit cycling, no arena exits, and time-from-eject-to-respawn
-   reduced against the v1.7.2 baseline recorded here.
-4. Tune `descent_target_mps` / `descent_floor_mps` from that data and record the
-   before/after excerpts here per the performance-ADR evidence rule.
+3. ~~Live sessions showing sustained descent rates, no limit cycling, and
+   reduced time-to-respawn.~~ **Done 2026-08-10** — see below.
+4. Re-validate `max_rotation_pulses: 6` (raised from 4 on this evidence) and
+   revisit `descent_target_mps` / `descent_floor_mps`, which the live data did
+   not challenge.
+
+### Live validation session 2026-08-10 08:52 (6h 11m, 21 missions, 52 ejects)
+
+Zero errors, zero tracebacks, one manual takeover. Every failure mode this ADR
+targets is absent:
+
+| Measure | v1.7.2 (ADR 068 hold design) | v1.7.2 + ADR 069 |
+|---------|------------------------------|------------------|
+| Limit-cycle events (`descent degraded`) | 9-26 per session | **0** |
+| False over-rotation aborts | 2-7 per session | **0** |
+| Eject duration | mean 63-69 s | **mean 39 s, p50 42 s** |
+| Ballistic descending rate | -117 m/s (corpus median) | **-219 m/s median** |
+| Nose readings saturated at -90 | dominant | **4.2%** (65 of 1546) |
+
+Descent established in 39 of 52 ejects, median 17 s. Afterburner gating fired
+50 engagements and 3 shallow-descent releases. One eject, from the hardest
+starting state observed (a +339 m/s zoom climb):
+
+```
+08:53:49  descent control engaged (impulse rotation, target 100 m/s)
+08:53:51  rotation pulse 1/4 (rate 339 m/s, nose +59deg)
+08:53:58  rotation pulse 2/4 (rate 213 m/s, nose +59deg)
+08:54:05  rotation pulse 3/4 (rate  17 m/s, nose +14deg)
+08:54:12  rotation pulse 4/4 (rate -36 m/s, nose -52deg)
+08:54:19  descending (-129 m/s) — afterburner engaged
+08:54:20  descent established (-177 m/s, nose -63deg, 4 pulse(s), 31.0s) — ballistic
+          10263 -> 9606 -> 8777 -> 7769 -> 6605 -> 5210 -> 3037 m
+          speed  713 ->  899 -> 1115 -> 1334 -> 1549 -> 1940 -> 3277 KPH
+08:54:43  cancelled during descent (reason=respawn_detected)
+```
+
+Three decisions are visible working in that one trace: the burner stayed OFF
+through the entire 30 s climb (d8 — under the old design it burned from the
+eject command, which is what crossed the arena); the angles read -50 to -65
+instead of pinning at -90 (d6), with -90 appearing only on the final genuinely
+near-vertical sample; and one establishment held to impact with no decay cycle
+(d3/d4).
+
+**Tuning change from this data:** `max_rotation_pulses` 4 -> 6. Twelve ejects
+needed all four pulses and four (8%) exhausted them without establishing —
+rotating out of a hard zoom climb costs 4 pulses at ~7 s each. With zero
+over-rotation events recorded, the tight budget was not buying safety.
+
+**Open observation:** 10 of 52 ejects (19%) ended on `telemetry lost during
+descent` rather than respawn detection. They still completed; whether this is
+OCR dropout during high-speed descent or a genuine gap deserves its own look.
+
+## Revision: rate alone is satisfied by speed (2026-08-10)
+
+The first live sessions on the rate criterion exposed a defect in decision 1 as
+originally written. Two ejects established and then flew the whole descent at
+-40 to -47 degrees, and the controller did nothing, because the rate target was
+being met — by speed, not by attitude:
+
+```
+18:36:40  descent established (-149 m/s, nose -51deg, 2 pulse(s), 18.5s) — ballistic
+18:36:43  Altitude: 9757 | Speed:  806 | Nose: -47deg      rate -187 m/s  (target -100: MET)
+18:36:49  Altitude: 8571 | Speed: 1026 | Nose: -47deg      rate -234 m/s  (MET)
+18:36:55  Altitude: 7106 | Speed: 1253 | Nose: -47deg      rate -278 m/s  (MET)
+18:37:01  Altitude: 5347 | Speed: 1576 | Nose: -45deg      rate -309 m/s  (MET)
+```
+
+The rate is three times the target and rising, while the flight path never
+gets steeper. The cost is horizontal: that 7545 m of descent at -47 degrees
+carries the aircraft **7036 m across the arena**. The same altitude at -75
+degrees costs 2022 m, and at -90 degrees, nothing.
+
+The error is self-inflicted and specific: decision 1 chose rate *because* the
+angle was saturating (Fault A) — but decision 6, in this same ADR, fixed the
+angle by dividing with instantaneous speed. Verified against the trace above,
+the angle is now truthful and stable (-47.5, -46.9, -47.7, -46.9, -47.2, -44.8
+computed independently from altitude and speed). Decision 1 was compensating
+for a defect that decision 6 had already removed.
+
+Consequent changes:
+
+- The criterion is the angle (decision 1 above); rate becomes the fallback.
+- Afterburner gating moves to the angle for the same reason — burner in a
+  shallow dive is precisely what crosses the arena (decision 8).
+- `max_rotation_pulses` 6 -> 12: pulses now MAINTAIN the dive through the
+  descent, not merely establish it once. Still bounded per pulse, still gated
+  by the over-rotation guard (0 misfires in 52 ejects) and by `eject_max_s`.
+
+Regression coverage added: a shallow-but-fast dive (-47 degrees at a rate past
+the target) must neither establish nor engage the burner, an established dive
+that sags to -47 must resume rotation, and the -75/-60 deadband must be left
+alone. All three fail against the rate-only criterion and pass against the
+angle one.
+
+**Still unproven:** whether the aircraft can *sustain* -75 degrees, or whether
+the game's auto-level will pull it shallower between pulses and produce
+repeated maintenance pulsing. The trace shows pulses reaching -66 and -71
+transiently before sagging, so the deadband may need widening or the target
+lowering. Live evidence decides it.
+
+### Calibration: -75 is not reachable; the target is -65 (2026-08-10 18:50)
+
+The first session on the angle criterion established **zero** dives in 8 ejects
+and pulsed 49 times. The flight path oscillates rather than settling:
+
+```
+18:52:55  Nose -70   18:53:04  Nose -72   18:53:16  Nose -62
+18:52:58  Nose -56   18:53:07  Nose -53   18:53:19  Nose -75
+18:53:01  Nose -55   18:53:10  Nose -45   18:53:22  Nose -71
+```
+
+It touches -75 and even -90, but never on two consecutive samples, so
+`confirm_consecutive: 2` never fires. Across 84 in-eject descending samples the
+median is **-58**; only 11.9% reach -75, 28.6% reach -65, 47.6% reach -60. Per
+eject, two consecutive samples reach -75 in 2 of 8, -65 in 6 of 8, -60 in 7 of 8.
+
+Two corrections follow:
+
+- **`target_dive_angle_deg` 75 -> 65.** The game will not hold the aircraft near
+  vertical between pulses; -65 is the steepest target that establishes reliably.
+  (Note the log rounds `-74.5` to `-75`, so logged values overstate what the
+  code sees — the real -75 hit rate is below even the 2 of 8 above.)
+- **`dive_angle_floor_deg` 60 -> 55.** The floor must be steeper than the -47
+  sag that prompted the revision, or the reported failure sits inside the
+  deadband uncorrected. The remaining 10 degree band absorbs normal
+  oscillation.
+
+Horizontal cost at the new target: 0.47 m per metre of descent at -65, against
+0.93 at -47 — roughly half the lateral travel, which is the arena-exit measure
+this milestone (Roadmap 001 M1) actually cares about.
+
+**Honest limitation:** -90 degrees, the intuitive goal, is not achievable with
+impulse control in this flight model. The aircraft oscillates around a -58
+median regardless of pulse cadence. Holding it steeper would require the
+continuous nose-down that Fault B showed produces a high-drag mush descending
+at *half* the rate. -65 is the best available trade, not the ideal.
