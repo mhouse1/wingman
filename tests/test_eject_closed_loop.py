@@ -11,7 +11,7 @@ import time
 import pytest
 
 import wingman.controller as controller_module
-from wingman.controller import Controller, NOSE_DOWN_KEY, NOSE_UP_KEY
+from wingman.controller import AFTERBURNER_KEY, Controller, NOSE_DOWN_KEY, NOSE_UP_KEY
 from wingman.telemetry import TelemetrySignal, TelemetrySnapshot, TREND_UNKNOWN
 
 
@@ -23,6 +23,9 @@ class _TelemetryStub:
         self.alt_rate = alt_rate
         self.available = available
         self.speed_trend = speed_trend
+        # Speed-rate value for the afterburner-verification checks; None means
+        # "no confident evidence" and the check re-polls instead of acting.
+        self.speed_rate = None
         # When True every snapshot carries the SAME altitude timestamp, i.e. the
         # sensor has not refreshed and the loop is re-reading one physical sample.
         self.freeze_ts = False
@@ -52,7 +55,7 @@ class _TelemetryStub:
         speed_ts = (now - 999.0) if self.stale_speed else sample_ts
         return TelemetrySnapshot(
             speed=TelemetrySignal(value=self.speed, ts=speed_ts, stable_value=float(self.speed),
-                                   trend=self.speed_trend),
+                                   rate=self.speed_rate, trend=self.speed_trend),
             altitude=TelemetrySignal(value=10000, ts=sample_ts, stable_value=10000.0,
                                      rate=self.alt_rate),
             taken_at_s=now,
@@ -77,7 +80,9 @@ def _make_ctrl(monkeypatch, stub, **ecl_overrides):
         capture=None,
         simulate_os_input=True,
         disable_hotkeys=True,
-        telemetry_cfg={"eject_closed_loop": ecl},
+        # stale_after_s scales the hold loop's telemetry-loss tolerance down to
+        # test speed (production 6.0s against a 1.5s check interval).
+        telemetry_cfg={"eject_closed_loop": ecl, "stale_after_s": 0.3},
     )
 
 
@@ -86,16 +91,72 @@ def _intents(ctrl):
         return list(ctrl._action_intents)
 
 
-def test_steep_dive_confirmed_exits_without_corrections(monkeypatch):
+_LIVE_PHASES = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_phase_threads():
+    """Stop any phase thread a failed test left running (CR-014-12): a leaked
+    thread polls the stub every 50ms for the rest of the pytest process."""
+    yield
+    while _LIVE_PHASES:
+        ctrl, thread = _LIVE_PHASES.pop()
+        ctrl._eject_stop.set()
+        thread.join(timeout=1.0)
+
+
+def _phase_in_thread(ctrl):
+    """Run the nose phase on a thread — under ADR 068 d6 a confirmed dive
+    HOLDS instead of returning, so confirmation tests must observe the state
+    mid-phase and end the hold with the stop event."""
+    result = {}
+
+    def _run():
+        result["cancelled"] = ctrl._eject_nose_phase_closed_loop()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    _LIVE_PHASES.append((ctrl, thread))
+    return thread, result
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _saw_nose_down_reissue(ctrl):
+    return any(i["key"] == NOSE_DOWN_KEY and i["action_type"] == "key_release"
+               for i in _intents(ctrl))
+
+
+def _stop_phase(ctrl, thread, result, expect_cancelled=True):
+    """Shared hold-teardown epilogue (CR-014-12)."""
+    ctrl._eject_stop.set()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    if expect_cancelled:
+        assert result["cancelled"] is True
+
+
+def test_steep_dive_confirms_and_holds_until_stopped(monkeypatch):
+    """ADR 068 d6: confirmation no longer releases the key — the game
+    auto-levels the moment pitch input stops, so the phase holds through the
+    descent until the stop event (respawn) ends it."""
     stub = _TelemetryStub(alt_rate=-800.0)  # far past steep at 600 KPH (167 m/s)
     ctrl = _make_ctrl(monkeypatch, stub)
 
-    t0 = time.time()
-    cancelled = ctrl._eject_nose_phase_closed_loop()
+    thread, result = _phase_in_thread(ctrl)
+    assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "confirmed")
+    time.sleep(0.3)
+    assert thread.is_alive()          # still holding through the descent
+    assert _intents(ctrl) == []       # no corrective inputs issued
 
-    assert cancelled is False
-    assert time.time() - t0 < 1.0
-    assert _intents(ctrl) == []  # no corrective inputs issued
+    _stop_phase(ctrl, thread, result)  # the stop event ends the hold
 
 
 def test_no_telemetry_falls_back_to_legacy_timer(monkeypatch):
@@ -197,27 +258,16 @@ def test_shallow_dive_not_improving_reverses_to_nose_up(monkeypatch):
     # nose-up tap.
     stub = _TelemetryStub(alt_rate=-60.0)
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
-    # ADR 068: the reversal is only reachable once the dive target has been
-    # reached — this test exercises the reversal, so grant that precondition.
-    ctrl._eject_reached_target_dive = True
 
-    result = {}
-
-    def _run():
-        result["cancelled"] = ctrl._eject_nose_phase_closed_loop()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
+    thread, result = _phase_in_thread(ctrl)
 
     # Wait for the first (nose-down) correction to appear, then worsen the rate.
-    deadline = time.time() + 3.0
-    while time.time() < deadline:
-        if any(i["key"] == NOSE_DOWN_KEY and i["action_type"] == "key_release"
-               for i in _intents(ctrl)):
-            break
-        time.sleep(0.02)
-    else:
-        pytest.fail("first corrective nose-down re-issue never happened")
+    assert _wait_for(lambda: _saw_nose_down_reissue(ctrl)), \
+        "first corrective nose-down re-issue never happened"
+    # ADR 068: the reversal is only reachable once the dive target has been
+    # reached in THIS attempt (the phase resets the flag on entry) — this test
+    # exercises the reversal itself, so grant that precondition mid-phase.
+    ctrl._eject_reached_target_dive = True
     stub.alt_rate = -45.0  # worse than the -60 before the correction
     stub.speed_trend = "rising"
 
@@ -242,22 +292,10 @@ def test_climbing_never_reverses_to_nose_up(monkeypatch):
     stub = _TelemetryStub(alt_rate=-20.0)  # shallow descent, level band at 600 KPH
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
 
-    result = {}
+    thread, result = _phase_in_thread(ctrl)
 
-    def _run():
-        result["cancelled"] = ctrl._eject_nose_phase_closed_loop()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    deadline = time.time() + 3.0
-    while time.time() < deadline:
-        if any(i["key"] == NOSE_DOWN_KEY and i["action_type"] == "key_release"
-               for i in _intents(ctrl)):
-            break
-        time.sleep(0.02)
-    else:
-        pytest.fail("first corrective nose-down re-issue never happened")
+    assert _wait_for(lambda: _saw_nose_down_reissue(ctrl)), \
+        "first corrective nose-down re-issue never happened"
     # Now CLIMBING (+100 m/s): worse than the -20 before the correction, but
     # the sign of the rate says "still going up", so nose-up must not fire.
     stub.alt_rate = 100.0
@@ -284,24 +322,12 @@ def test_descending_and_worsening_reverses_regardless_of_speed_trend(monkeypatch
     """
     stub = _TelemetryStub(alt_rate=-60.0, speed_trend="falling")
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
-    ctrl._eject_reached_target_dive = True  # ADR 068 reversal precondition
 
-    result = {}
+    thread, result = _phase_in_thread(ctrl)
 
-    def _run():
-        result["cancelled"] = ctrl._eject_nose_phase_closed_loop()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    deadline = time.time() + 3.0
-    while time.time() < deadline:
-        if any(i["key"] == NOSE_DOWN_KEY and i["action_type"] == "key_release"
-               for i in _intents(ctrl)):
-            break
-        time.sleep(0.02)
-    else:
-        pytest.fail("first corrective nose-down re-issue never happened")
+    assert _wait_for(lambda: _saw_nose_down_reissue(ctrl)), \
+        "first corrective nose-down re-issue never happened"
+    ctrl._eject_reached_target_dive = True  # ADR 068 reversal precondition (mid-phase)
     # Still descending, but the descent got shallower after our nose-down.
     stub.alt_rate = -45.0
 
@@ -325,11 +351,10 @@ def test_sustained_descent_confirms_without_steep_band(monkeypatch):
     stub = _TelemetryStub(speed=1800, alt_rate=-300.0)
     ctrl = _make_ctrl(monkeypatch, stub, confirm_descent_fps=250.0)
 
-    cancelled = ctrl._eject_nose_phase_closed_loop()
-
-    assert cancelled is False
-    assert ctrl._eject_phase_exit_reason == "confirmed"
+    thread, result = _phase_in_thread(ctrl)
+    assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "confirmed")
     assert _intents(ctrl) == []  # confirmed outright, no corrective inputs
+    _stop_phase(ctrl, thread, result)
 
 
 def test_confirmation_requires_distinct_samples_not_repeated_polls(monkeypatch):
@@ -379,10 +404,9 @@ def test_descent_rate_confirms_even_when_speed_is_stale(monkeypatch):
                       confirm_consecutive=2, legacy_nose_hold_s=10.0,
                       verify_window_s=10.0)
 
-    cancelled = ctrl._eject_nose_phase_closed_loop()
-
-    assert cancelled is False
-    assert ctrl._eject_phase_exit_reason == "confirmed"
+    thread, result = _phase_in_thread(ctrl)
+    assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "confirmed")
+    _stop_phase(ctrl, thread, result)
 
 
 def test_stale_speed_and_frozen_altitude_never_corrects(monkeypatch):
@@ -452,10 +476,9 @@ def test_two_distinct_samples_do_confirm(monkeypatch):
     ctrl = _make_ctrl(monkeypatch, stub, confirm_consecutive=2,
                       legacy_nose_hold_s=10.0, verify_window_s=10.0)
 
-    cancelled = ctrl._eject_nose_phase_closed_loop()
-
-    assert cancelled is False
-    assert ctrl._eject_phase_exit_reason == "confirmed"
+    thread, result = _phase_in_thread(ctrl)
+    assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "confirmed")
+    _stop_phase(ctrl, thread, result)
 
 
 def test_total_nose_budget_caps_the_hold(monkeypatch):
@@ -530,22 +553,24 @@ def test_climb_after_long_hold_releases_as_over_rotation(monkeypatch):
     'dove then climbed' is the over-rotation signature, and the prior-descent
     flag is what distinguishes it from a momentum zoom climb.
     """
-    stub = _TelemetryStub(alt_rate=+300.0)   # climbing
+    # The descent must be OBSERVED in this attempt (per-phase evidence scoping,
+    # ADR 068): start descending, then flip to a climb while still held.
+    stub = _TelemetryStub(alt_rate=-60.0)
     ctrl = _make_ctrl(monkeypatch, stub, verify_window_s=0.05, legacy_nose_hold_s=30.0,
-                      over_rotation_after_s=0.05, total_nose_budget_s=30.0)
-    # Simulate nose-down already held past the over-rotation threshold, having
-    # passed through a descent on the way (the 'dove then climbed' case).
+                      over_rotation_after_s=0.05, max_corrections=99,
+                      total_nose_budget_s=30.0)
+    # Simulate nose-down already held past the over-rotation threshold.
     ctrl._eject_nose_held_total_s = 10.0
     ctrl._eject_nose_down_since = None
-    ctrl._eject_descended_since_press = True
 
-    cancelled = ctrl._eject_nose_phase_closed_loop()
+    thread, result = _phase_in_thread(ctrl)
+    assert _wait_for(lambda: ctrl._eject_descended_since_press)
+    stub.alt_rate = +300.0   # dove, then climbing while held — past vertical
 
-    assert cancelled is False
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    assert result["cancelled"] is False
     assert ctrl._eject_phase_exit_reason == "over_rotation"
-    # No corrective nose-down re-issued — that is the whole point.
-    assert all(i["action_type"] != "key_press" or i["key"] != NOSE_DOWN_KEY
-               for i in _intents(ctrl))
 
 
 def test_zoom_climb_without_prior_descent_is_not_over_rotation(monkeypatch):
@@ -573,6 +598,118 @@ def test_zoom_climb_without_prior_descent_is_not_over_rotation(monkeypatch):
     keys = [(i["action_type"], i["key"]) for i in _intents(ctrl)]
     assert ("key_press", NOSE_DOWN_KEY) in keys    # kept commanding the dive
     assert all(k != NOSE_UP_KEY for _, k in keys)  # never nose-up while climbing
+
+
+def test_decay_while_held_reestablishes_without_leaving_phase(monkeypatch, caplog):
+    """ADR 068 d6/d7: a dive that decays while held hands back to a FRESH
+    establishment cycle — fresh correction budget (CR-014-3), fresh evidence
+    scoping — and re-confirms without the phase ever returning. Runs at the
+    production-scale correction budget, not a masking override."""
+    stub = _TelemetryStub(alt_rate=-170.0)  # ratio > 1 at 600 KPH → -90°, at target
+    ctrl = _make_ctrl(monkeypatch, stub, max_corrections=3)
+
+    with caplog.at_level("INFO"):
+        thread, result = _phase_in_thread(ctrl)
+        assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "confirmed")
+        stub.alt_rate = -60.0   # game forces the dive shallow while held
+        assert _wait_for(lambda: any("dive decayed while held" in r.message
+                                     for r in caplog.records))
+        stub.alt_rate = -170.0  # rotation takes — back at target
+        assert _wait_for(lambda: sum("dive confirmed" in r.message
+                                     for r in caplog.records) >= 2)
+        assert thread.is_alive()  # never left the phase
+        _stop_phase(ctrl, thread, result)
+
+
+class _SequencedRateStub(_TelemetryStub):
+    """Stub whose alt_rate follows a per-call script (last value repeats)."""
+
+    def __init__(self, rates, **kw):
+        super().__init__(alt_rate=rates[0], **kw)
+        self._rates = list(rates)
+        self._rate_calls = 0
+
+    def get_telemetry(self):
+        idx = min(self._rate_calls, len(self._rates) - 1)
+        self._rate_calls += 1
+        self.alt_rate = self._rates[idx]
+        return super().get_telemetry()
+
+
+def test_hold_survives_one_spurious_climb_sample(monkeypatch, caplog):
+    """CR-014-5: aborting a held dive demands the same distinct-sample streak
+    as confirming one — a single spurious positive-rate OCR sample must not
+    release the key."""
+    # Confirm on two -170 samples, one +300 outlier, then back at target.
+    stub = _SequencedRateStub([-170.0, -170.0, -170.0, +300.0, -170.0])
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    with caplog.at_level("INFO"):
+        thread, result = _phase_in_thread(ctrl)
+        assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "confirmed")
+        time.sleep(0.4)  # several polls, spanning the outlier
+        assert thread.is_alive(), "one spurious climb sample aborted the hold"
+        assert not any("over-rotated" in r.message for r in caplog.records)
+        _stop_phase(ctrl, thread, result)
+
+
+def test_hold_releases_on_sustained_climb(monkeypatch):
+    """Companion: a REAL climb (two distinct samples) after the confirmed
+    descent is over-rotation and must release."""
+    stub = _SequencedRateStub([-170.0, -170.0, -170.0, +300.0, +300.0])
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    thread, result = _phase_in_thread(ctrl)
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    assert result["cancelled"] is False
+    assert ctrl._eject_phase_exit_reason == "over_rotation"
+
+
+def test_hold_telemetry_loss_releases_but_keeps_confirmed(monkeypatch, caplog):
+    """CR-014-1: a confirmed hold tolerates a brief telemetry dropout, and a
+    sustained loss releases with exit_reason still 'confirmed' so the watcher
+    arms decay re-entry — not the misleading legacy 'no_telemetry' give-up."""
+    stub = _TelemetryStub(alt_rate=-800.0)
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    with caplog.at_level("INFO"):
+        thread, result = _phase_in_thread(ctrl)
+        assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "confirmed")
+
+        stub.available = False   # brief dropout, shorter than stale_after_s (0.3)
+        time.sleep(0.15)
+        stub.available = True
+        time.sleep(0.15)
+        assert thread.is_alive(), "brief telemetry dropout released the hold"
+
+        stub.available = False   # sustained loss
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+
+    assert result["cancelled"] is False
+    assert ctrl._eject_phase_exit_reason == "confirmed"
+    assert any("telemetry lost during held dive" in r.message
+               for r in caplog.records)
+
+
+def test_afterburner_repressed_during_hold(monkeypatch, caplog):
+    """CR-014-4: afterburner engagement is verified DURING the hold — the
+    post-release watcher never runs on the dominant respawn-ended path."""
+    stub = _TelemetryStub(alt_rate=-800.0, speed_trend="flat")
+    stub.speed_rate = 0.0  # confident evidence: speed measured, not rising
+    ctrl = _make_ctrl(monkeypatch, stub)
+    ctrl._eject_ab_represses_left = 2  # normally armed by eject_and_dive()
+
+    with caplog.at_level("INFO"):
+        thread, result = _phase_in_thread(ctrl)
+        assert _wait_for(lambda: any(
+            i["key"] == AFTERBURNER_KEY and i["action_type"] == "key_press"
+            for i in _intents(ctrl))), "afterburner never re-pressed during hold"
+        _stop_phase(ctrl, thread, result)
+
+    assert ctrl._eject_ab_represses_left == 1
+    assert any("re-pressing afterburner" in r.message for r in caplog.records)
 
 
 def test_shallow_dive_post_release_triggers_reentry(monkeypatch, caplog):
@@ -633,22 +770,10 @@ def test_shallow_dive_never_reverses_before_target_reached(monkeypatch):
     ctrl = _make_ctrl(monkeypatch, stub, max_corrections=2)
     assert ctrl._eject_reached_target_dive is False
 
-    result = {}
+    thread, result = _phase_in_thread(ctrl)
 
-    def _run():
-        result["cancelled"] = ctrl._eject_nose_phase_closed_loop()
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    deadline = time.time() + 3.0
-    while time.time() < deadline:
-        if any(i["key"] == NOSE_DOWN_KEY and i["action_type"] == "key_release"
-               for i in _intents(ctrl)):
-            break
-        time.sleep(0.02)
-    else:
-        pytest.fail("first corrective nose-down re-issue never happened")
+    assert _wait_for(lambda: _saw_nose_down_reissue(ctrl)), \
+        "first corrective nose-down re-issue never happened"
     stub.alt_rate = -45.0  # descent got shallower — the ADR 058 reversal trigger
 
     thread.join(timeout=5.0)
@@ -742,7 +867,7 @@ def test_over_rotation_disabled_by_config(monkeypatch):
 
 def test_descending_is_never_treated_as_over_rotation(monkeypatch):
     """A good dive must not be aborted by the new rule however long it is held."""
-    stub = _TelemetryStub(alt_rate=-800.0)   # steep dive → should confirm
+    stub = _TelemetryStub(alt_rate=-800.0)   # steep dive → confirms and holds
     ctrl = _make_ctrl(monkeypatch, stub, over_rotation_after_s=0.01,
                       total_nose_budget_s=30.0)
     # Well past the over-rotation threshold but inside the budget: the rule must
@@ -750,6 +875,7 @@ def test_descending_is_never_treated_as_over_rotation(monkeypatch):
     ctrl._eject_nose_held_total_s = 5.0
     ctrl._eject_nose_down_since = None
 
-    ctrl._eject_nose_phase_closed_loop()
-
-    assert ctrl._eject_phase_exit_reason == "confirmed"
+    thread, result = _phase_in_thread(ctrl)
+    assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "confirmed")
+    assert ctrl._eject_phase_exit_reason != "over_rotation"
+    _stop_phase(ctrl, thread, result)

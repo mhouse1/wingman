@@ -2,7 +2,14 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft    | 2026-08-08 | 1.7.1           |
+| Accepted | 2026-08-09 | 1.7.1           |
+
+*Accepted 2026-08-09 — all three rollout phases implemented and validated:
+shadow session 2026-08-08 17:32 (843 ticks, 8/8 eject agreement), 3.1a live
+cutover 2026-08-08, 3.1b validated by the ADR 044 replay gate plus the
+2026-08-09 19:02 live session (10/10 ejects BT-driven, zero false Eject
+selections in 31 minutes — the shadow-session stale-ammo hazard closed by
+the debounced-verdict gate). Evade actuation deferred to Phase 4 by design.*
 
 > **Revision note (2026-08-08):** in-place revision of this Draft (first
 > written 2026-04-19 at v1.6.6). The architecture stands; three deltas from
@@ -290,13 +297,47 @@ debounce and post-respawn suppression before it actuates.
    tick is suppressed in active mode (its 10 s scripted roll fights the
    Engage leaf)
 
-**Phase 3.1b (tactic-lifecycle cutover — gated):**
+**Phase 3.1b (tactic-lifecycle cutover — done 2026-08-09):**
 
-7. Eject/Disengage/Evade leaves wire their `start_fn`/`terminate` to
-   Controller tactics and the corresponding legacy paths retire
-   (`_handle_no_missiles`-equivalent, `EnemyPresenceHandler`). Gate: the
-   Eject condition must consume debounced ammo (the shadow finding above),
-   not the raw snapshot read.
+7. Eject and Disengage leaves actuate in active mode; the gate is satisfied
+   by construction:
+
+   - **Eject** — `AmmoEventsHandler` keeps the two-consecutive debounce and
+     every suppression gate (respawn screen, battle-start grace, post-respawn
+     grace) and, with `bt_owns_eject`, raises a sticky
+     `missiles_empty_confirmed` verdict instead of actuating. The Eject
+     leaf's condition consumes that verdict — never the raw snapshot read —
+     and its `start_fn` is the same `fire_eject()` (capture event, FSM
+     `eject_started`, `eject_and_dive`) the legacy path used, so one
+     implementation serves both modes. Pending verdicts are cleared on state
+     change and respawn suppression, closing the stale-post-respawn hazard
+     from the shadow session. `terminate` is deliberately a no-op: the
+     selector switching to Idle means the FSM entered GAME_BATTLE_EJECT —
+     the tactic succeeding, not being pre-empted.
+   - **Disengage** — fires `disengage_roll_right` with the legacy
+     fire-once-and-reset semantics (the start re-arms the absence clock);
+     the respawn flow re-arms the clock through
+     `BehaviorTreeHandler.arm_absence_clock()`, the analogue of the retired
+     handler's `arm()`. `EnemyPresenceHandler` now ticks only in off/shadow
+     modes.
+   - **Evade** — remains selection-only by design: the threshold is unset
+     pending calibration and no Controller evade tactic exists yet; wiring
+     it is Phase 4 work.
+
+   Validation: unit tests at node and handler level (actuation on confirmed
+   verdict only, no re-start while running, switch-away does not cancel,
+   suppression clears pending verdicts), and the ADR 044 runtime replay gate
+   green with the eject firing through the BT leaf in the real main loop.
+
+   **Live validation (2026-08-09 19:02, 31 min):** 10 of 10 ejects fired
+   through the Eject leaf (`MISSILES EMPTY` and the `tactic → Eject`
+   selection logged on the same millisecond — actuation inside the tree
+   tick); zero `selected=Eject` ticks with `respawn=True`, confirming the
+   debounced-verdict gate closed the shadow session's stale-ammo hazard;
+   all ejects completed autonomously, 5/5 missions click-to-finish, zero
+   errors. Zero Disengage selections — contested airspace kept the rings
+   occupied, consistent with the legacy handler's behavior in the same
+   conditions.
 
 `Tactic.EVADE` threshold is set to `None` (disabled) until calibrated on real gameplay data. The node exists in the tree; it simply returns `FAILURE` immediately when threshold is unset.
 

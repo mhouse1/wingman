@@ -24,6 +24,8 @@ import time
 
 from .analyzer import GameState
 from .behavior_tree import (
+    TACTIC_DISENGAGE,
+    TACTIC_EJECT,
     TACTIC_ENGAGE,
     AnalyzerSnapshot,
     build_tree,
@@ -174,12 +176,13 @@ class RespawnHandler:
     """
 
     def __init__(self, analyzer, ctrl, mission_cfg, *, enemy_presence, ammo_events,
-                 live_capture=None, emit_capture_event=None, disposition_fn,
-                 respawn_state_enum, cooldown_s: float = 10.0):
+                 behavior_tree=None, live_capture=None, emit_capture_event=None,
+                 disposition_fn, respawn_state_enum, cooldown_s: float = 10.0):
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._enemy_presence = enemy_presence
         self._ammo_events = ammo_events
+        self._behavior_tree = behavior_tree
         self._live_capture = live_capture
         self._emit_capture_event = emit_capture_event or (lambda _name: None)
         self._disposition_fn = disposition_fn
@@ -232,6 +235,8 @@ class RespawnHandler:
         analyzer, ctrl = self._analyzer, self._ctrl
         analyzer.alive_event.clear()
         self._enemy_presence.arm()  # reset so the idle clock starts fresh after respawn
+        if self._behavior_tree is not None:
+            self._behavior_tree.arm_absence_clock()  # 3.1b analogue (ADR 024)
 
         # Only early-restart when respawn has remained clear for a short stability window.
         # This avoids relaunching while respawn OCR/health signals are still flapping.
@@ -330,6 +335,8 @@ class RespawnHandler:
                 self._cooldown_until = time.time() + self._cooldown_s
                 self._ammo_events.suppress_after_respawn(self._cooldown_s)
                 self._enemy_presence.arm()  # reset so the idle clock starts fresh after respawn
+                if self._behavior_tree is not None:
+                    self._behavior_tree.arm_absence_clock()  # 3.1b analogue (ADR 024)
                 ctrl.cancel_mission()
                 analyzer.reset_health_for_respawn()
                 # A death invalidates any pending (re-armed) alive event from the
@@ -396,13 +403,22 @@ class AmmoEventsHandler:
 
     def __init__(self, analyzer, ctrl, mission_cfg, *, perf_tracker=None,
                  stats_tracker=None, emit_capture_event=None,
-                 flare_reload_cooldown_s: float = 30.0):
+                 flare_reload_cooldown_s: float = 30.0,
+                 bt_owns_eject: bool = False):
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._perf = perf_tracker
         self._stats = stats_tracker
         self._emit_capture_event = emit_capture_event or (lambda _name: None)
         self._flare_reload_cooldown_s = flare_reload_cooldown_s
+        # ADR 024 3.1b: when the behavior tree owns eject actuation, a
+        # confirmed no-missiles event raises a sticky flag for the Eject leaf
+        # instead of firing eject_and_dive here. The debounce and every
+        # suppression gate stay in this handler either way — the BT consumes
+        # only the confirmed verdict, never the raw zero read (the 2026-08-08
+        # shadow-session gate).
+        self._bt_owns_eject = bool(bt_owns_eject)
+        self._missiles_empty_confirmed = False
 
         self._abort_grace_s = float(mission_cfg.get("no_missiles_abort_grace_s", 6.0))
         self._consecutive_required = int(
@@ -425,10 +441,12 @@ class AmmoEventsHandler:
             self._fired_since_padlock = 0
             self._last_missile_count = None
         self._zero_streak = 0
+        self._missiles_empty_confirmed = False
 
     def suppress_after_respawn(self, seconds: float = 10.0):
         """Ignore missile/incoming events for `seconds` — called by the respawn flow."""
         self._ignore_until = time.time() + seconds
+        self._missiles_empty_confirmed = False
 
     @property
     def battle_started_ts(self) -> float:
@@ -548,6 +566,26 @@ class AmmoEventsHandler:
             return
 
         self._zero_streak = 0
+        if self._bt_owns_eject:
+            # ADR 024 3.1b: hand the confirmed verdict to the Eject leaf. The
+            # flag is sticky until consumed (the BT ticks later in the same
+            # loop iteration) and cleared by any suppression reset above.
+            self._missiles_empty_confirmed = True
+            return
+        self.fire_eject()
+
+    def consume_missiles_empty_confirmed(self) -> bool:
+        """Return-and-clear the confirmed no-missiles verdict (ADR 024 3.1b)."""
+        confirmed = self._missiles_empty_confirmed
+        self._missiles_empty_confirmed = False
+        return confirmed
+
+    def fire_eject(self) -> None:
+        """Actuate the eject sequence: capture event, FSM transition, dive.
+
+        One implementation for both callers — the legacy no-missiles path and
+        the behavior tree's Eject leaf (ADR 024 3.1b).
+        """
         self._emit_capture_event("missiles_empty")
         self._analyzer.trigger_event("eject_started")
         self._ctrl.eject_and_dive(
@@ -621,10 +659,12 @@ class BehaviorTreeHandler:
       EngageNavigator: steer via orient_nose_to_target with coarse gains,
       orbit via the open-loop roll cadence. This absorbs the retired
       EngageNavHandler; one minimap scan per tick serves both the snapshot
-      and the actuation. The Eject/Disengage/Evade leaves stay
-      selection-only until Phase 3.1b — gated on the 2026-08-08 shadow
-      finding that stale post-respawn missiles==0 selects Eject for a tick
-      or two before ammo refreshes.
+      and the actuation. With an ammo handler wired (3.1b), the Eject leaf
+      actuates via AmmoEventsHandler.fire_eject on the DEBOUNCED
+      missiles_empty_confirmed verdict — never the raw zero read (the
+      2026-08-08 shadow-session gate) — and the Disengage leaf fires
+      disengage_roll_right with legacy fire-once-and-reset semantics.
+      Evade stays selection-only: threshold unset, no Controller tactic.
 
     Arbitration with target tracking is unchanged: steer intents share
     orient_nose_to_target's single cooldown timestamp, so the fine tracking
@@ -635,12 +675,14 @@ class BehaviorTreeHandler:
     the EngageNavigator, and the orbit cadence timer.
     """
 
-    def __init__(self, analyzer, ctrl, bt_cfg, j20_cfg=None, minimap_cfg=None):
+    def __init__(self, analyzer, ctrl, bt_cfg, j20_cfg=None, minimap_cfg=None,
+                 ammo_events=None):
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._mode = str(bt_cfg.get("mode", "off")).lower()
         self._enemy_last_seen_ts = 0.0
         self._last_selection = "none"
+        self._ammo_events = ammo_events
         j20_cfg = j20_cfg or {}
         self._dry_run = bool(j20_cfg.get("attack_mode_dry_run", False))
         self._nav = EngageNavigator(j20_cfg, minimap_cfg)
@@ -656,8 +698,29 @@ class BehaviorTreeHandler:
         self._last_orbit_roll_ts = 0.0
         self._last_nav_mode = self._nav.mode
         if self.enabled:
-            self._tree = build_tree(bt_cfg)
+            # ADR 024 3.1b: in active mode with an ammo handler wired, the
+            # Eject and Disengage leaves actuate their Controller tactics.
+            actuators = None
+            if self.active and ammo_events is not None:
+                actuators = {
+                    TACTIC_EJECT: (ammo_events.fire_eject, ctrl.is_ejecting),
+                    TACTIC_DISENGAGE: (self._start_disengage,
+                                       ctrl.is_disengage_running),
+                }
+            self._tree = build_tree(bt_cfg, actuators=actuators)
             self._writer = make_snapshot_writer()
+
+    def _start_disengage(self) -> None:
+        """Disengage leaf start_fn: fire the roll, then re-arm the absence
+        clock — the legacy handler's fire-once-and-reset semantics, so the
+        next disengage requires a fresh full absence window."""
+        self._ctrl.disengage_roll_right()
+        self._enemy_last_seen_ts = time.time()
+
+    def arm_absence_clock(self) -> None:
+        """Restart the enemy-absence clock — called by the respawn flow, the
+        3.1b analogue of EnemyPresenceHandler.arm()."""
+        self._enemy_last_seen_ts = time.time()
 
     @property
     def enabled(self) -> bool:
@@ -691,6 +754,10 @@ class BehaviorTreeHandler:
             altitude = snapshot_obj.altitude.stable_value
         is_respawning, _, _ = self._analyzer.get_respawn_cache_result()
         incoming, _, _ = self._analyzer.get_incoming_cache_result()
+        missiles_empty_confirmed = False
+        if self.active and self._ammo_events is not None:
+            missiles_empty_confirmed = (
+                self._ammo_events.consume_missiles_empty_confirmed())
         snap = AnalyzerSnapshot(
             health=game_state.get("health"),
             missiles=self._analyzer.get_ammo_missiles(),
@@ -704,6 +771,7 @@ class BehaviorTreeHandler:
             incoming_detected=bool(incoming),
             mission_running=self._ctrl.is_mission_running(),
             game_state=current_game_state,
+            missiles_empty_confirmed=missiles_empty_confirmed,
         )
         self._writer.set("snapshot", snap)
         self._tree.tick()

@@ -51,6 +51,11 @@ class AnalyzerSnapshot:
     incoming_detected: bool
     mission_running: bool
     game_state: GameState
+    # ADR 024 3.1b: AmmoEventsHandler's debounced no-missiles verdict — the
+    # streak plus every suppression gate (respawn, grace windows) already
+    # applied. The actuating Eject leaf consumes THIS, never the raw
+    # ``missiles`` read (the 2026-08-08 shadow-session gate).
+    missiles_empty_confirmed: bool = False
 
     @property
     def contacts(self) -> int:
@@ -112,8 +117,12 @@ class ConditionTactic(py_trees.behaviour.Behaviour):
         return py_trees.common.Status.RUNNING
 
     def terminate(self, new_status: py_trees.common.Status) -> None:
-        # Phase 3.1: cancel the running Controller tactic when the selector
-        # switches away (new_status == INVALID). Shadow phase: nothing to stop.
+        # Deliberately a no-op for the 3.1b tactics. Eject: the selector
+        # switching to Idle means the FSM entered GAME_BATTLE_EJECT — that is
+        # the tactic SUCCEEDING, not being pre-empted, and cancelling would
+        # abort the dive just started. Disengage: the roll is a one-shot
+        # maneuver that completes on its own. Engage geometry is stopped by
+        # the navigator reset on state exit, not by leaf termination.
         pass
 
 
@@ -129,6 +138,12 @@ def is_respawning(snapshot: AnalyzerSnapshot) -> bool:
 
 def is_missiles_empty(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.missiles == 0
+
+
+def is_eject_confirmed(snapshot: AnalyzerSnapshot) -> bool:
+    """The debounced verdict — used instead of the raw read once the Eject
+    leaf actuates (ADR 024 3.1b gate)."""
+    return snapshot.missiles_empty_confirmed
 
 
 def make_evade_condition(health_threshold: "int | None"):
@@ -153,12 +168,37 @@ def always(snapshot: AnalyzerSnapshot) -> bool:
     return True
 
 
-def build_tree(bt_cfg: dict, clock=time.time) -> py_trees.trees.BehaviourTree:
-    """Construct the ADR 024 selector. Pure construction — no analyzer refs."""
+def build_tree(bt_cfg: dict, clock=time.time,
+               actuators: "dict | None" = None) -> py_trees.trees.BehaviourTree:
+    """Construct the ADR 024 selector. Pure construction — no analyzer refs.
+
+    ``actuators`` (Phase 3.1b) maps tactic name → ``(start_fn, is_running_fn)``
+    for the leaves that actuate Controller tactics; absent entries stay
+    selection-only. When the Eject leaf actuates, its condition switches from
+    the raw missiles read to the debounced ``missiles_empty_confirmed``
+    verdict — the shadow-session gate. Evade remains selection-only: no
+    Controller tactic exists for it, and its threshold is unset until
+    calibrated (ADR 024).
+    """
     disengage_after_s = float(bt_cfg.get("disengage_after_s", 30.0))
     disengage_hold_s = float(bt_cfg.get("disengage_hold_s", 10.0))
     evade_hold_s = float(bt_cfg.get("evade_hold_s", 10.0))
     evade_threshold = bt_cfg.get("evade_health_threshold")
+    actuators = actuators or {}
+    eject_fns = actuators.get(TACTIC_EJECT)
+    disengage_fns = actuators.get(TACTIC_DISENGAGE)
+
+    if eject_fns is not None:
+        eject_leaf = ConditionTactic(TACTIC_EJECT, is_eject_confirmed,
+                                     start_fn=eject_fns[0],
+                                     is_running_fn=eject_fns[1])
+    else:
+        eject_leaf = ConditionTactic(TACTIC_EJECT, is_missiles_empty)
+
+    disengage_kwargs = {}
+    if disengage_fns is not None:
+        disengage_kwargs = {"start_fn": disengage_fns[0],
+                            "is_running_fn": disengage_fns[1]}
 
     root = py_trees.composites.Selector(
         name="TacticSelector",
@@ -166,7 +206,7 @@ def build_tree(bt_cfg: dict, clock=time.time) -> py_trees.trees.BehaviourTree:
         children=[
             ConditionTactic(TACTIC_IDLE, is_idle),
             ConditionTactic(TACTIC_RESPAWN_WAIT, is_respawning),
-            ConditionTactic(TACTIC_EJECT, is_missiles_empty),
+            eject_leaf,
             MinimumHold(
                 TACTIC_EVADE,
                 ConditionTactic(f"{TACTIC_EVADE}Condition",
@@ -176,7 +216,8 @@ def build_tree(bt_cfg: dict, clock=time.time) -> py_trees.trees.BehaviourTree:
             MinimumHold(
                 TACTIC_DISENGAGE,
                 ConditionTactic(f"{TACTIC_DISENGAGE}Condition",
-                                make_disengage_condition(disengage_after_s)),
+                                make_disengage_condition(disengage_after_s),
+                                **disengage_kwargs),
                 hold_s=disengage_hold_s, clock=clock,
             ),
             ConditionTactic(TACTIC_ENGAGE, has_contacts),

@@ -279,13 +279,13 @@ class _AmmoCtrlStub:
         pass
 
 
-def _ammo(analyzer=None, ctrl=None, **cfg):
+def _ammo(analyzer=None, ctrl=None, bt_owns_eject=False, **cfg):
     from wingman.tick_handlers import AmmoEventsHandler
     base = {"no_missiles_abort_grace_s": 0.0, "no_missiles_consecutive_required": 2}
     base.update(cfg)
     a = analyzer or _AmmoAnalyzerStub()
     c = ctrl or _AmmoCtrlStub()
-    return AmmoEventsHandler(a, c, base), a, c
+    return AmmoEventsHandler(a, c, base, bt_owns_eject=bt_owns_eject), a, c
 
 
 class TestNoMissiles:
@@ -329,6 +329,51 @@ class TestNoMissiles:
         h.tick_missile_count(4, GameState.GAME_BATTLE)           # reload → reset
         h.handle_no_missiles()                                   # streak 1 again
         assert c.ejects == 0
+
+
+class TestNoMissilesBtOwnsEject:
+    """ADR 024 3.1b: with bt_owns_eject the handler keeps the debounce and
+    every suppression gate but hands the confirmed verdict to the Eject leaf
+    instead of actuating."""
+
+    def test_confirmation_raises_flag_without_actuating(self):
+        h, a, c = _ammo(bt_owns_eject=True)
+        h.handle_no_missiles()
+        assert h.consume_missiles_empty_confirmed() is False  # 1/2 — not yet
+        h.handle_no_missiles()
+        assert c.ejects == 0                                  # BT owns actuation
+        assert a.triggers == []                               # no FSM event either
+        assert h.consume_missiles_empty_confirmed() is True
+        assert h.consume_missiles_empty_confirmed() is False  # consumed once
+
+    def test_fire_eject_actuates_the_shared_path(self):
+        h, a, c = _ammo(bt_owns_eject=True)
+        h.fire_eject()
+        assert c.ejects == 1
+        assert a.triggers == ["eject_started"]
+
+    def test_suppression_gates_still_apply(self):
+        h, _, c = _ammo(bt_owns_eject=True)
+        h.suppress_after_respawn(60.0)
+        h.handle_no_missiles()
+        h.handle_no_missiles()
+        assert h.consume_missiles_empty_confirmed() is False
+
+    def test_respawn_suppression_clears_a_pending_verdict(self):
+        """A confirmed-but-unconsumed verdict must not survive into the next
+        life — the exact stale-ammo hazard the 3.1b gate exists for."""
+        h, _, _ = _ammo(bt_owns_eject=True)
+        h.handle_no_missiles()
+        h.handle_no_missiles()
+        h.suppress_after_respawn(10.0)
+        assert h.consume_missiles_empty_confirmed() is False
+
+    def test_state_change_clears_a_pending_verdict(self):
+        h, _, _ = _ammo(bt_owns_eject=True)
+        h.handle_no_missiles()
+        h.handle_no_missiles()
+        h.on_state_change(GameState.GAME_BATTLE)
+        assert h.consume_missiles_empty_confirmed() is False
 
 
 class TestPadlockSpread:

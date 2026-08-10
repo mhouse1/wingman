@@ -510,6 +510,9 @@ class Controller:
         # Handle to the current eject thread so cleanup() can join it briefly
         # and let its finally block release keys before the process exits.
         self._eject_thread: "threading.Thread | None" = None
+        # Handle to the current disengage_roll_right maneuver thread
+        # (ADR 024 3.1b — liveness for the Disengage leaf).
+        self._disengage_thread: "threading.Thread | None" = None
         # Tracks which eject-sequence keys are currently physically held, so
         # _eject_key() calls are idempotent (a cleanup release of an
         # already-released key is a no-op) and _programmatic_key_counts stays
@@ -539,19 +542,33 @@ class Controller:
         # expressed as 75-80 rather than 90.
         self._eject_cl_target_dive_angle_deg = float(
             _ecl.get("target_dive_angle_deg", 75.0))
-        # ADR 068: True once ANY descending sample has been seen since nose-down
-        # was first pressed this eject. The over-rotation guard requires it —
-        # rotating past vertical means passing THROUGH a dive, so a flight path
-        # that has only ever climbed is under-rotated, not over-rotated.
+        # ADR 068: True once ANY descending sample has been seen during the
+        # CURRENT rotation attempt (reset at each nose-phase entry). The
+        # over-rotation guard requires it — rotating past vertical means
+        # passing THROUGH a dive, so a flight path that has only ever climbed
+        # is under-rotated, not over-rotated.
         self._eject_descended_since_press = False
-        # ADR 068: True once the dive target angle has actually been reached this
-        # eject. The nose-up reversal requires it: you cannot be PAST vertical
-        # without having got near it, and the flight-path angle alone cannot tell
+        # ADR 068: True once the dive target angle has been reached during the
+        # CURRENT rotation attempt (reset at each nose-phase entry). The
+        # nose-up reversal requires it: you cannot be PAST vertical without
+        # having got near it, and the flight-path angle alone cannot tell
         # "rotated to 37 degrees" from "rotated past vertical and back to 37".
         self._eject_reached_target_dive = False
         # ADR 058 decision 11: one distinct-sample grace when the legacy deadline
         # expires mid-confirmation-streak. 0 disables.
         self._eject_cl_streak_grace_s = float(_ecl.get("streak_grace_s", 4.5))
+        # ADR 068 d7 (CR-014): safety cap on one continuous held descent, and
+        # the staleness horizon the hold loop tolerates before releasing —
+        # taken from the telemetry contract, not a coincidentally-equal
+        # constant (CR-014-6).
+        self._eject_cl_hold_max_s = float(_ecl.get("hold_max_s", 120.0))
+        self._eject_tel_stale_after_s = float(_tel_cfg.get("stale_after_s", 6.0))
+        # Afterburner re-press budget for the current eject, shared between the
+        # hold loop and the post-release watcher (CR-014-4).
+        self._eject_ab_represses_left = 0
+        # Held time credited back for holding an established dive, so the
+        # rotation budget only bounds rotation attempts (CR-014-9).
+        self._eject_nose_hold_credit_s = 0.0
         # Cumulative time NOSE_DOWN has actually been held during the current
         # eject. Deliberately not a wall-clock deadline from eject start: the
         # afterburner hold phase runs up to 120s with no key down, and charging
@@ -1239,13 +1256,15 @@ class Controller:
             self._eject_nose_down_since = None
 
     def _eject_nose_held_s(self) -> float:
-        """Cumulative seconds NOSE_DOWN has actually been held this eject."""
+        """Cumulative seconds NOSE_DOWN has actually been held this eject,
+        minus time credited for holding an already-established dive — the
+        budget bounds rotation attempts, not productive descent (CR-014-9)."""
         if self._eject_nose_held_total_s is None:
             return 0.0
         held = self._eject_nose_held_total_s
         if self._eject_nose_down_since is not None:
             held += time.time() - self._eject_nose_down_since
-        return held
+        return max(0.0, held - self._eject_nose_hold_credit_s)
 
     def _eject_nose_budget_exhausted(self) -> bool:
         """True when NOSE_DOWN has been held for total_nose_budget_s this eject."""
@@ -1303,17 +1322,51 @@ class Controller:
             return None
 
     def _eject_nose_phase_closed_loop(self) -> bool:
-        """Closed-loop nose-down phase (ADR 038, revised by ADR 058).
+        """Closed-loop nose-down phase (ADR 038, revised by ADR 058/067/068).
 
         Returns True when cancelled. The exit reason is left in
         self._eject_phase_exit_reason so callers can tell a genuine dive
         confirmation from a give-up.
 
-        NOSE_DOWN is already held on entry. The dive is confirmed either by the
-        sine-ratio steep band (ADR 038) or by a sustained raw descent rate
-        (ADR 058) — the ratio path alone confirmed 0 times in 30 minutes of
-        production flight because the observed max |alt_rate/speed| was 0.346
-        against a 0.8 threshold.
+        NOSE_DOWN is already held on entry. The phase alternates two loops
+        (ADR 068 decision 7 / CR-014): _eject_establish_dive_once rotates until
+        the dive confirms — corrected flight-path angle at target (ADR 067) or
+        a sustained raw descent rate (ADR 058) — then
+        _eject_hold_established_dive keeps the key down through the descent,
+        because the game auto-levels the moment pitch input stops (17 decay
+        cycles against 15 confirmations, 2026-08-09 10:16 session). A decay
+        while held starts a fresh establishment cycle with fresh evidence
+        scoping and a fresh correction budget. The phase ends on cancellation
+        (respawn), the over-rotation guard, the rotation budget, telemetry
+        loss, or the hold safety timeout.
+        """
+        self._eject_phase_exit_reason = ""
+        while True:
+            if self._eject_establish_dive_once():
+                return True
+            if self._eject_phase_exit_reason != "confirmed":
+                return False
+            hold_outcome = self._eject_hold_established_dive()
+            if hold_outcome == "cancelled":
+                self._eject_phase_exit_reason = "cancelled"
+                return True
+            if hold_outcome == "decayed":
+                continue  # fresh rotation attempt, fresh evidence scoping
+            if hold_outcome == "over_rotation":
+                self._eject_phase_exit_reason = "over_rotation"
+                return False
+            # "stale" / "hold_timeout": the dive WAS confirmed and held; keep
+            # exit_reason "confirmed" so the post-release watcher arms decay
+            # re-entry (CR-014-1/-6: this label was previously unreachable).
+            return False
+
+    def _eject_establish_dive_once(self) -> bool:
+        """One rotation attempt: hold/correct until the dive confirms or the
+        attempt gives up (ADR 038/058 semantics).
+
+        Returns True when cancelled; otherwise leaves the outcome in
+        self._eject_phase_exit_reason ("confirmed", "no_telemetry",
+        "budget_exhausted", "nose_budget_exhausted", "over_rotation").
 
         When confident evidence says the dive did not establish, corrections are
         measure-correct-measure: issue a corrective input, re-check whether the
@@ -1324,7 +1377,7 @@ class Controller:
         over-rotation, but the SIGN of the rate can.
 
         Absence of telemetry is never treated as evidence: with no confident
-        reading by the legacy 5 s mark, the phase ends exactly like the old
+        reading by the legacy 5 s mark, the attempt ends exactly like the old
         open-loop timer.
         """
         phase_start = time.time()
@@ -1340,7 +1393,15 @@ class Controller:
         # reading satisfy confirm_consecutive=2 by being read twice — defeating
         # the exact low-speed-transient protection ADR 038 added it for.
         last_streak_sample_ts: "float | None" = None
-        deadline_grace_granted = False  # ADR 058 decision 11: once per phase
+        deadline_grace_granted = False  # ADR 058 decision 11: once per attempt
+        # ADR 068: evidence is scoped to THIS rotation attempt — initial press,
+        # re-entry, or in-phase re-establishment after a hold decay. Each
+        # attempt starts from an unknown attitude, so the over-rotation and
+        # reversal gates must not trust descents or target-angle sightings from
+        # a previous attempt: that is exactly how the 10:16 session's four
+        # post-decay nose-up misfires happened (CR-014-2).
+        self._eject_descended_since_press = False
+        self._eject_reached_target_dive = False
 
         while True:
             if self._eject_stop.wait(timeout=self._eject_cl_check_interval_s):
@@ -1467,15 +1528,17 @@ class Controller:
                 last_streak_sample_ts = sample_ts
                 steep_streak += 1
                 if steep_streak >= self._eject_cl_confirm_consecutive:
+                    # ADR 068 d6: confirmation hands off to the hold loop in
+                    # the caller — the key stays down through the descent.
+                    self._eject_phase_exit_reason = "confirmed"
                     logger.info(
                         "Controller: eject_and_dive — dive confirmed via %s "
                         "(nose %s, alt rate %s m/s after %.1fs, %d correction(s), "
-                        "%d consecutive)",
+                        "%d consecutive) — holding nose-down through descent",
                         "target angle" if at_target_dive else "descent rate",
                         f"{angle:+.0f}deg" if angle is not None else "?",
                         f"{rate:.0f}" if rate is not None else "?",
                         time.time() - phase_start, corrections, steep_streak)
-                    self._eject_phase_exit_reason = "confirmed"
                     return False
                 continue
             steep_streak = 0
@@ -1615,11 +1678,119 @@ class Controller:
             corrections += 1
             window_deadline = time.time() + self._eject_cl_verify_window_s
 
+    def _eject_hold_established_dive(self) -> str:
+        """Hold NOSE_DOWN through a confirmed descent (ADR 068 d6/d7, CR-014).
+
+        Returns "cancelled", "decayed", "over_rotation", "stale", or
+        "hold_timeout". Holding an established dive is productive descent, not
+        another rotation attempt, so the time spent here is credited back to
+        the rotation budget on exit (CR-014-9); runaway holds are bounded by
+        the stop event and the hold safety timeout instead.
+        """
+        hold_start = time.time()
+        last_sample_ts: "float | None" = None
+        last_fresh_wall = time.time()
+        climb_streak = 0
+        next_ab_check = time.time() + self._eject_cl_verify_window_s
+        try:
+            while True:
+                if self._eject_stop.wait(timeout=self._eject_cl_check_interval_s):
+                    return "cancelled"
+                if time.time() - hold_start >= self._eject_cl_hold_max_s:
+                    logger.warning(
+                        "Controller: eject_and_dive — held dive exceeded %.0fs "
+                        "safety timeout — releasing nose-down",
+                        self._eject_cl_hold_max_s)
+                    return "hold_timeout"
+
+                snap = self._eject_telemetry()
+                angle = None
+                rate = None
+                sample_ts = None
+                if snap is not None:
+                    angle = snap.pitch_angle_deg()
+                    if snap.altitude_fresh():
+                        rate = snap.altitude.rate
+                        sample_ts = snap.altitude.ts
+
+                # CR-014-4: afterburner engagement is verified during the hold —
+                # the post-release watcher's check is unreachable when respawn
+                # ends the phase. Budget shared with the watcher via the
+                # instance counter; missing speed data just re-checks later.
+                if (time.time() >= next_ab_check
+                        and self._eject_ab_represses_left > 0):
+                    if (snap is None or not snap.speed_fresh()
+                            or snap.speed.rate is None):
+                        next_ab_check = time.time() + self._eject_cl_check_interval_s
+                    elif snap.speed.trend == TREND_RISING:
+                        self._eject_ab_represses_left = 0  # engagement verified
+                    else:
+                        logger.info(
+                            "Controller: eject_and_dive — speed trend %s during "
+                            "held dive — re-pressing afterburner", snap.speed.trend)
+                        self._eject_key(False, AFTERBURNER_KEY)
+                        if self._eject_stop.wait(timeout=0.2):
+                            return "cancelled"
+                        self._eject_key(True, AFTERBURNER_KEY)
+                        self._eject_ab_represses_left -= 1
+                        next_ab_check = time.time() + self._eject_cl_verify_window_s
+
+                if sample_ts is None or sample_ts == last_sample_ts:
+                    # No new evidence. Tolerate one missed telemetry refresh
+                    # (CR-014-1: the establishment loop's legacy deadline gave
+                    # a mid-hold stale poll zero grace); past stale_after_s
+                    # without a fresh sample, release — a key is never left
+                    # down against missing data (ADR 038). The dive WAS
+                    # confirmed, so the caller keeps exit_reason "confirmed"
+                    # and the watcher arms decay re-entry.
+                    if time.time() - last_fresh_wall >= self._eject_tel_stale_after_s:
+                        logger.info(
+                            "Controller: eject_and_dive — telemetry lost during "
+                            "held dive — releasing nose-down")
+                        return "stale"
+                    continue
+                last_sample_ts = sample_ts
+                last_fresh_wall = time.time()
+
+                at_target = (
+                    (angle is not None
+                     and angle <= -self._eject_cl_target_dive_angle_deg)
+                    or (rate is not None
+                        and rate <= -self._eject_cl_confirm_descent_fps)
+                )
+                if at_target:
+                    climb_streak = 0
+                    continue
+                if rate is not None and rate > 0:
+                    # A climb following the confirmed descent is the
+                    # over-rotation signature (ADR 058 d12) — but demand the
+                    # same distinct-sample streak confirmation required, so a
+                    # single spurious OCR sample cannot abort a held dive
+                    # (CR-014-5).
+                    climb_streak += 1
+                    if climb_streak >= self._eject_cl_confirm_consecutive:
+                        logger.warning(
+                            "Controller: eject_and_dive — climbing (alt rate "
+                            "%.0f m/s, %d consecutive) during held dive — "
+                            "over-rotated, releasing", rate, climb_streak)
+                        return "over_rotation"
+                    continue
+                climb_streak = 0
+                logger.info(
+                    "Controller: eject_and_dive — dive decayed while held "
+                    "(nose %s) — re-establishing without leaving the phase",
+                    f"{angle:+.0f}deg" if angle is not None else "?")
+                return "decayed"
+        finally:
+            self._eject_nose_hold_credit_s += time.time() - hold_start
+
     def eject_and_dive(self, on_complete=None):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
-        NOSE_DOWN is held until telemetry confirms a steep dive (closed loop,
-        ADR 038) or the legacy timer expires, then released.
+        NOSE_DOWN is held until telemetry confirms a steep dive and then kept
+        held through the descent (ADR 068 — the game auto-levels on release);
+        the hold ends on respawn, the over-rotation guard, the nose budget, or
+        the legacy timer when telemetry never arrives.
         AFTERBURNER is held until respawn is detected (or a 120s safety timeout);
         a speed trend that fails to rise after engagement triggers a bounded re-press.
         on_complete: optional callable invoked in the finally block after all keys are released.
@@ -1638,11 +1809,12 @@ class Controller:
         self._eject_held_keys.clear()
         self._eject_phase_exit_reason = ""
         # Opens the nose-down budget for this sequence (None = not in an eject).
+        # The per-attempt evidence flags are NOT reset here — the establishment
+        # loop owns their scoping at each attempt entry (CR-014-13).
         self._eject_nose_held_total_s = 0.0
         self._eject_nose_down_since = None
-        # No rotation evidence yet this eject (ADR 068 over-rotation guard).
-        self._eject_descended_since_press = False
-        self._eject_reached_target_dive = False
+        self._eject_nose_hold_credit_s = 0.0
+        self._eject_ab_represses_left = 2 if self._eject_cl_enabled else 0
         # Reset the grace-period timestamp so buffered/held flight keys (e.g. 'k' on key-repeat
         # from normal gameplay) cannot cancel the eject within the first 2 seconds of starting it.
         self._game_battle_since = time.time()
@@ -1685,27 +1857,19 @@ class Controller:
                     # ADR 038: a speed trend that fails to rise after engagement means
                     # the afterburner press was missed — re-press, bounded to 2 attempts.
                     deadline = time.time() + 120.0
-                    ab_represses_left = 2 if self._eject_cl_enabled else 0
+                    # Afterburner re-press budget is the eject-wide instance
+                    # counter — the hold loop may already have verified or
+                    # spent it (CR-014-4).
                     next_ab_check = time.time() + self._eject_cl_verify_window_s
-                    # Confirmation is not forever: the dive can flatten after
-                    # nose release (flight-tested: a transient-inflated
-                    # confirmation settled into a 35-40 degree dive). Keep
-                    # watching the band and re-enter nose-down verification
-                    # when it decays, bounded by dive_reentries.
-                    #
-                    # Only meaningful after a REAL confirmation. Re-entering
-                    # after a give-up (budget exhausted / no telemetry) just
-                    # re-ran the same failing loop and logged "dive decayed
-                    # after confirmation" when nothing was ever confirmed
-                    # (2026-07-30) — and, with the nose-down budget, would spend
-                    # the remaining cap re-holding a key that already failed.
-                    # ADR 068 widens this from confirmed-only. ADR 058 withheld
-                    # re-entry after a give-up because it re-ran a loop failing
-                    # for its own reasons and logged "dive decayed after
-                    # confirmation" when nothing was confirmed. Both re-entry
-                    # paths below now require FRESH telemetry showing an attitude
+                    # ADR 068 d7: this watcher now only runs on give-up exits —
+                    # the dominant success path holds to respawn (cancelled) and
+                    # never reaches it. `confirmed` at entry is True only for
+                    # hold exits that preserved the label (telemetry lost or
+                    # hold safety timeout during a held dive); every other
+                    # reachable exit is a give-up (CR-014-8). Both re-entry
+                    # paths below require FRESH telemetry showing an attitude
                     # short of the dive target plus nose-budget headroom, so a
-                    # give-up on missing data still cannot spend one, and the
+                    # give-up on missing data cannot spend one, and the
                     # under-rotation case that actually needs another hold can.
                     dive_reentries_left = (
                         self._eject_cl_dive_reentries if self._eject_cl_enabled else 0
@@ -1744,14 +1908,10 @@ class Controller:
                                 if snap.altitude_fresh():
                                     rate = snap.altitude.rate
                                     sample_ts = snap.altitude.ts
-                                    if rate is not None and rate < 0:
-                                        self._eject_descended_since_press = True
                             at_target_dive = (
                                 angle is not None
                                 and angle <= -self._eject_cl_target_dive_angle_deg
                             )
-                            if at_target_dive:
-                                self._eject_reached_target_dive = True
                             descending_hard = (
                                 rate is not None
                                 and rate <= -self._eject_cl_confirm_descent_fps
@@ -1811,6 +1971,18 @@ class Controller:
                             self._eject_key(False, NOSE_DOWN_KEY)
                             if reentry_cancelled:
                                 break
+                            # CR-014-10: read the re-entry's outcome back. An
+                            # over-rotation refusal must not be answered with
+                            # another immediate nose-down; release reliably
+                            # produces the dive on its own (ADR 058 d12).
+                            confirmed = self._eject_phase_exit_reason == "confirmed"
+                            pr_streak = 0
+                            pr_last_ts = None
+                            if self._eject_phase_exit_reason == "over_rotation":
+                                logger.info(
+                                    "Controller: eject_and_dive — re-entry released as "
+                                    "over-rotation — suppressing further re-entries")
+                                dive_reentries_left = 0
                             next_dive_check = time.time() + self._eject_cl_verify_window_s
                             continue
                         if dive_reentries_left > 0 and time.time() >= next_dive_check:
@@ -1842,15 +2014,24 @@ class Controller:
                                 self._eject_key(False, NOSE_DOWN_KEY)
                                 if reentry_cancelled:
                                     break
+                                # CR-014-10: same outcome read-back as above.
+                                confirmed = self._eject_phase_exit_reason == "confirmed"
+                                pr_streak = 0
+                                pr_last_ts = None
+                                if self._eject_phase_exit_reason == "over_rotation":
+                                    logger.info(
+                                        "Controller: eject_and_dive — re-entry released as "
+                                        "over-rotation — suppressing further re-entries")
+                                    dive_reentries_left = 0
                                 next_dive_check = time.time() + self._eject_cl_verify_window_s
-                        if ab_represses_left > 0 and time.time() >= next_ab_check:
+                        if self._eject_ab_represses_left > 0 and time.time() >= next_ab_check:
                             snap = self._eject_telemetry()
                             if snap is None or not snap.speed_fresh() or snap.speed.rate is None:
                                 # No confident evidence — check again later, never
                                 # correct against missing data.
                                 next_ab_check = time.time() + self._eject_cl_check_interval_s
                             elif snap.speed.trend == TREND_RISING:
-                                ab_represses_left = 0  # engagement verified
+                                self._eject_ab_represses_left = 0  # engagement verified
                             else:
                                 logger.info(
                                     "Controller: eject_and_dive — speed trend %s after "
@@ -1859,7 +2040,7 @@ class Controller:
                                 if self._eject_stop.wait(timeout=0.2):
                                     break
                                 self._eject_key(True, AFTERBURNER_KEY)
-                                ab_represses_left -= 1
+                                self._eject_ab_represses_left -= 1
                                 next_ab_check = time.time() + self._eject_cl_verify_window_s
                     else:
                         logger.warning("Controller: eject_and_dive — respawn not detected within 120s, releasing afterburner")
@@ -2031,7 +2212,19 @@ class Controller:
                     "Controller: disengage restart skipped — mission still running "
                     "after %.0fs teardown wait", 5.0)
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._disengage_thread = threading.Thread(target=_run, daemon=True)
+        self._disengage_thread.start()
+
+    def is_disengage_running(self) -> bool:
+        """True while a disengage_roll_right maneuver thread is alive
+        (ADR 024 3.1b — the Disengage leaf's is_running_fn)."""
+        thread = self._disengage_thread
+        return thread is not None and thread.is_alive()
+
+    def is_ejecting(self) -> bool:
+        """True while an eject_and_dive sequence is in progress
+        (ADR 024 3.1b — the Eject leaf's is_running_fn)."""
+        return self._ejecting.is_set()
 
     def start_weapon_loop(self, interval: float | None = None):
         """Start continuously firing the active weapon in a loop.

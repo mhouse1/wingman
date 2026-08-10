@@ -257,11 +257,20 @@ def main():
             timeout_advances=False,
             out_of_order=True,
         )
-        cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
+        # ADR 045 lane: the presenter draws the timed screenshots AT the config
+        # region, so capture must be pinned there — auto-detecting the game
+        # window is actively wrong here (the game is a native Wayland window
+        # the presenter does not cover; when it sat away from the region, the
+        # lane captured live gameplay instead of the presented frames and
+        # every step failed — 2026-08-09 19:45 run).
+        lane_offset = (int(region[0]), int(region[1]))
+        cap = Capture(region, monitor_index, game_window_offset=lane_offset)
         logger.info(
-            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict",
+            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict, "
+            "capture pinned to config region at (%d, %d)",
             live_path.path_name,
             capture_screenshot_dir,
+            *lane_offset,
         )
     else:
         cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
@@ -465,14 +474,20 @@ def main():
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
+    bt_active = str(cfg.get("behavior_tree", {}).get("mode", "off")).lower() == "active"
     ammo_events = AmmoEventsHandler(
         analyzer, ctrl, mission_cfg,
         perf_tracker=tracker, stats_tracker=stats_tracker,
         emit_capture_event=_emit_capture_event,
+        # ADR 024 3.1b: in active mode the Eject leaf actuates; this handler
+        # keeps the debounce and every suppression gate and hands over only
+        # the confirmed verdict.
+        bt_owns_eject=bt_active,
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
     behavior_tree = BehaviorTreeHandler(
         analyzer, ctrl, cfg.get("behavior_tree", {}), j20_cfg, cfg.get("minimap", {}),
+        ammo_events=ammo_events,
     )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
@@ -480,6 +495,7 @@ def main():
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,
         enemy_presence=enemy_presence, ammo_events=ammo_events,
+        behavior_tree=behavior_tree,
         live_capture=live_capture, emit_capture_event=_emit_capture_event,
         disposition_fn=_alive_transition_disposition,
         respawn_state_enum=RespawnState,
@@ -700,9 +716,10 @@ def main():
             # Ammo events (GAME_BATTLE only).
             ammo_events.tick_events()
 
-            # Legacy ENEMY_CLOSE_BY disengage — suppressed while the behavior
-            # tree owns geometry (ADR 024 3.1a): its 10 s scripted roll fights
-            # the Engage leaf. The Disengage leaf inherits the job in 3.1b.
+            # Legacy ENEMY_CLOSE_BY disengage — retired in active mode
+            # (ADR 024 3.1b): the Disengage leaf owns the job there, firing on
+            # minimap ring absence with the legacy fire-once-and-reset
+            # semantics. Still ticks in off/shadow modes.
             if not behavior_tree.active:
                 enemy_presence.tick(frame, current_game_state)
 

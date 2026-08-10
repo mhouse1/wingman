@@ -1,8 +1,14 @@
 # ADR 067 — Metric HUD Units: Corrected Pitch Normalization and Band Recalibration
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-08 | 1.7.1           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-09 | 1.7.1           |
+
+*Accepted 2026-08-09 — every validation-plan item met: 50-session archive
+replay (decision 2), `make tp` fully green including the ADR 044/045 runtime
+gates, live sine-band eject confirmations (2026-08-08 19:30 session, 2 of 2
+via steep band), and `steep_dive_min_sin` settled at 0.8 from the replay
+corpus.*
 
 Extends [ADR 038](038-game-battle-altitude-speed-signals-for-phase3-and-eject-dive.md)
 (Draft) and [ADR 058](058-eject-dive-confirmation-via-raw-descent-rate.md)
@@ -190,7 +196,10 @@ behavioral component.
 1. ~~Replay archived telemetry through the corrected normalization.~~ **Done,
    exceeded scope**: all 50 archived sessions (15,099 samples, 498 eject
    windows) rather than the single 255-sample session; results in decision 2.
-2. `make tp` green, including the ADR 044/045 runtime gates.
+2. ~~`make tp` green, including the ADR 044/045 runtime gates.~~ **Done
+   2026-08-09** — after pinning the ADR 045 lane's capture to the config
+   region (the presenter's canvas), removing the lane's hidden dependency on
+   the game window's position.
 3. ~~At least one live flight session on the corrected eject pipeline showing
    sine-band eject confirmations.~~ **Done** — session 2026-08-08 19:30
    (11m09s, 2 missions, 2 ejects): **both ejects confirmed via the steep
