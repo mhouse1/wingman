@@ -24,14 +24,14 @@ NEGATIVE_LOG_PATTERNS = [
 
 POSITIVE_LOG_PATTERNS_REQUIRED = [
     "MISSILES EMPTY — cancelling mission and ejecting",
-    "Controller: eject_and_dive — NOSE_DOWN + AFTERBURNER engaged",
+    "Controller: eject_and_dive — descent control engaged",
     "Analyzer: 'Good Luck' detected in good_luck crop",
     "Controller: 'Good Luck' detected",
 ]
 
 TERMINAL_PATTERNS = [
     "Controller: eject_and_dive complete",
-    "Controller: eject_and_dive — cancelled during nose-down phase",
+    "Controller: eject_and_dive — cancelled during descent",
 ]
 
 MANUAL_TAKEOVER_PATTERN = "GAME_BATTLE → GAME_BATTLE_MANUAL"
@@ -112,9 +112,9 @@ def _validate_log(log_text: str, failures: list[str]) -> dict:
     # system-legitimate stops (match ended, app shutdown) now land in-phase
     # too (CR-014-11). Only cancellations with any other reason still require
     # the manual takeover marker to explain them.
-    cancellation_count = terminal_counts["Controller: eject_and_dive — cancelled during nose-down phase"]
+    cancellation_count = terminal_counts["Controller: eject_and_dive — cancelled during descent"]
     respawn_cancel_count = sum(
-        log_text.count(f"cancelled during nose-down phase (reason={reason})")
+        log_text.count(f"cancelled during descent (reason={reason})")
         for reason in ("respawn_detected", "match_ended", "shutdown")
     )
     if cancellation_count - respawn_cancel_count > 0 and manual_takeover_count <= 0:

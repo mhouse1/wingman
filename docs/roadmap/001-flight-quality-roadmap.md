@@ -31,9 +31,15 @@ steer controller); M4 assumes all three.
 
 ---
 
-## M1 — Eject containment: no more flying out of the map
+## M1 — Eject containment and descent quality
 
-**Status: open**
+**Status: open — design in [ADR 069](../adr/069-eject-impulse-rotation-and-ballistic-descent.md) (Draft)**
+
+ADR 069 widens this milestone: the 2026-08-10 06:21 trace showed the eject not
+only risking arena exit but descending at less than half the achievable rate,
+because continuous nose-down over-rotates into a high-drag mushing descent and
+the angle metric saturates during acceleration. The afterburner gating below is
+folded in as ADR 069 decision 8.
 
 **Problem (observed):** The ADR 068 rework fixed the dive diagnosis bugs, but
 when combat damage or decay churn exhausts the rotation budget, the jet levels
