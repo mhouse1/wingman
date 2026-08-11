@@ -16,8 +16,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.7.2"
-WINGMAN_VERSION_DETAILS = "begin phase3 behavior tree integration"
+WINGMAN_VERSION = "1.7.1"
+WINGMAN_VERSION_DETAILS = "implement requirements using strictdoc, minimap integration, bugfixes"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
