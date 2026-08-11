@@ -27,6 +27,7 @@ from .behavior_tree import (
     TACTIC_DISENGAGE,
     TACTIC_EJECT,
     TACTIC_ENGAGE,
+    TACTIC_MISSILE_EVADE,
     AnalyzerSnapshot,
     build_tree,
     make_snapshot_writer,
@@ -676,13 +677,16 @@ class BehaviorTreeHandler:
     """
 
     def __init__(self, analyzer, ctrl, bt_cfg, j20_cfg=None, minimap_cfg=None,
-                 ammo_events=None):
+                 ammo_events=None, stats_tracker=None):
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._mode = str(bt_cfg.get("mode", "off")).lower()
         self._enemy_last_seen_ts = 0.0
         self._last_selection = "none"
         self._ammo_events = ammo_events
+        # ADR 070: the evade entry event is emitted from the actuator wrapper —
+        # the Controller holds no stats tracker, so this is the only seam.
+        self._stats = stats_tracker
         j20_cfg = j20_cfg or {}
         self._dry_run = bool(j20_cfg.get("attack_mode_dry_run", False))
         self._nav = EngageNavigator(j20_cfg, minimap_cfg)
@@ -700,14 +704,21 @@ class BehaviorTreeHandler:
         if self.enabled:
             # ADR 024 3.1b: in active mode with an ammo handler wired, the
             # Eject and Disengage leaves actuate their Controller tactics.
-            actuators = None
+            actuators = {}
             if self.active and ammo_events is not None:
-                actuators = {
+                actuators.update({
                     TACTIC_EJECT: (ammo_events.fire_eject, ctrl.is_ejecting),
                     TACTIC_DISENGAGE: (self._start_disengage,
                                        ctrl.is_disengage_running),
-                }
-            self._tree = build_tree(bt_cfg, actuators=actuators)
+                })
+            # ADR 070: MissileEvade actuates when active and enabled; disabled
+            # leaves the leaf selection-only (the shadow pattern), so agreement
+            # can be checked against the flare-burst log before keys are pressed.
+            me_cfg = bt_cfg.get("missile_evade", {}) or {}
+            if self.active and bool(me_cfg.get("enabled", False)):
+                actuators[TACTIC_MISSILE_EVADE] = (self._start_missile_evade,
+                                                   ctrl.is_missile_evading)
+            self._tree = build_tree(bt_cfg, actuators=actuators or None)
             self._writer = make_snapshot_writer()
 
     def _start_disengage(self) -> None:
@@ -716,6 +727,15 @@ class BehaviorTreeHandler:
         next disengage requires a fresh full absence window."""
         self._ctrl.disengage_roll_right()
         self._enemy_last_seen_ts = time.time()
+
+    def _start_missile_evade(self) -> None:
+        """MissileEvade leaf start_fn (ADR 070): start the hold and count the
+        event. The stats call sits after the start so a duplicate-suppressed
+        trigger (d8) still counts the EVENT — the quantity V5 compares against
+        flare_burst_count."""
+        self._ctrl.missile_evade_mode()
+        if self._stats is not None:
+            self._stats.on_event("missile_evade", time.time())
 
     def arm_absence_clock(self) -> None:
         """Restart the enemy-absence clock — called by the respawn flow, the

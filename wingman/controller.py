@@ -121,6 +121,20 @@ _XKEY_ALIASES = {
     "down": "Down",
     "left": "Left",
     "right": "Right",
+    # Punctuation must use its X11 keysym NAME — string_to_keysym(';') returns
+    # 0 (observed 2026-08-11 07:27:22: "unknown keysym for ';'" from cleanup's
+    # YAW_LEFT release; ADR 070 V1). Letters and digits resolve as themselves.
+    ";": "semicolon",
+    "'": "apostrophe",
+    ",": "comma",
+    ".": "period",
+    "/": "slash",
+    "\\": "backslash",
+    "[": "bracketleft",
+    "]": "bracketright",
+    "-": "minus",
+    "=": "equal",
+    "`": "grave",
 }
 
 
@@ -405,7 +419,7 @@ NOSE_UP_KEY = 'i' # FLIGHT_CONTROL_KEY
 NOSE_DOWN_KEY = 'k' # FLIGHT_CONTROL_KEY
 ROLL_LEFT_KEY = 'j' # FLIGHT_CONTROL_KEY
 ROLL_RIGHT_KEY = 'l' # FLIGHT_CONTROL_KEY
-YAW_LEFT = ';'
+YAW_LEFT = ';' # yaw axis - left rudder (ADR 070)
 AFTERBURNER_KEY = 'e'
 AIRBRAKE_KEY = 'd'
 DEPLOY_FLARES_KEY = 'space'
@@ -452,7 +466,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True, missile_evade_cfg: "dict | None" = None):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -514,6 +528,16 @@ class Controller:
         # Handle to the current disengage_roll_right maneuver thread
         # (ADR 024 3.1b — liveness for the Disengage leaf).
         self._disengage_thread: "threading.Thread | None" = None
+        # ADR 070: set SYNCHRONOUSLY by missile_evade_mode() before the thread
+        # spawns (d8 — the duplicate-start guard is a design property, closed
+        # in the caller's thread before any concurrency exists), cleared by the
+        # thread's finally block.
+        self._missile_evading = threading.Event()
+        self._me_thread: "threading.Thread | None" = None
+        # Stop event for the evade hold loop — set in cleanup() so shutdown
+        # releases the three keys via the thread's own finally (repo rule:
+        # stoppable daemon threads).
+        self._me_stop = threading.Event()
         # Tracks which eject-sequence keys are currently physically held, so
         # _eject_key() calls are idempotent (a cleanup release of an
         # already-released key is a no-op) and _programmatic_key_counts stays
@@ -573,6 +597,16 @@ class Controller:
         self._eject_phase_exit_reason: str = ""
         self._eject_steep_min_sin = float(_tel_cfg.get("steep_dive_min_sin", 0.8))
         self._eject_level_max_sin = float(_tel_cfg.get("level_max_sin", 0.15))
+
+        # ADR 070 d10: MISSILE_EVADE_MODE tuning, constructor-injected from the
+        # behavior_tree.missile_evade config block (the Controller takes no
+        # config dict, and the ADR 024 actuator contract calls start_fn with no
+        # arguments — so the values can only arrive here). `enabled` is read by
+        # BehaviorTreeHandler, not by us.
+        _me_cfg = missile_evade_cfg or {}
+        self._me_clear_s = float(_me_cfg.get("clear_seconds", 3.0))
+        self._me_min_clear_samples = int(_me_cfg.get("min_clear_samples", 2))
+        self._me_max_hold_s = float(_me_cfg.get("max_hold_s", 15.0))
 
         # Tracks how many programmatic presses are in flight, per key.
         # keyboard.KeyboardEvent has no is_injected attribute, so the getattr guard
@@ -1785,6 +1819,145 @@ class Controller:
         (ADR 024 3.1b — the Eject leaf's is_running_fn)."""
         return self._ejecting.is_set()
 
+    def missile_evade_mode(self):
+        """Hold AFTERBURNER + ROLL_RIGHT + YAW_LEFT until incoming clears (ADR 070).
+
+        Non-blocking: performs the duplicate check, sets _missile_evading, spawns
+        the daemon thread, and returns. Idempotent while the thread is alive — a
+        second detection during an active evade extends it via the clear timer
+        rather than starting a second thread (d8).
+
+        Termination (d5): incoming absent for _me_clear_s wall-clock seconds AND
+        at least _me_min_clear_samples FRESH negative cache updates since the
+        last positive — a negative carrying a timestamp already counted is the
+        same stale cache entry read twice and is ignored, so a stalled analyzer
+        cannot end the evade early. Unconditional release at _me_max_hold_s (d6).
+        The mission is NOT cancelled (d7): engage-geometry suppression comes from
+        selection priority, and the padlock/weapon loops keep running.
+
+        @relation(FR-006, scope=function)
+        """
+        if self._missile_evading.is_set():
+            logger.debug("Controller: missile_evade_mode already in progress — extending")
+            return
+        # d8: flag set in the caller's thread, before any concurrency exists,
+        # so is_missile_evading() never under-reports after a start.
+        self._missile_evading.set()
+        self._me_stop.clear()
+        logger.info("\033[95m🌀 MISSILE EVADE — holding afterburner + roll right + yaw left\033[0m")
+
+        def _run():
+            try:
+                if not self._simulate_os_input and not keyboard_module:
+                    logger.error("Controller: keyboard library not available for missile_evade_mode")
+                    return
+                self._run_missile_evade_hold()
+            finally:
+                self._missile_evading.clear()
+
+        self._me_thread = threading.Thread(target=_run, daemon=True)
+        self._me_thread.start()
+
+    def _run_missile_evade_hold(self):
+        """Thread body for missile_evade_mode: press, poll, release (ADR 070).
+
+        @relation(SAF-006, scope=function)
+        """
+        entry_ts = time.time()
+        # d5: seed the last positive with the detection timestamp that
+        # triggered the tactic, so the timer is well-defined from the first
+        # poll. Analyzer absent (unit tests) → seed with entry time; no cache
+        # means no fresh samples, so only the cap or a stop ends the hold —
+        # "no perception" is never read as "clear".
+        seed_ts = entry_ts
+        if self._analyzer is not None:
+            try:
+                seed_ts = self._analyzer.get_incoming_cache_timestamp() or entry_ts
+            except Exception:
+                logger.exception("Controller: missile_evade seed read failed")
+        last_positive_ts = seed_ts
+        last_counted_ts = seed_ts
+        fresh_negatives = 0
+        exit_reason = "stopped"
+
+        # d4: ROLL_RIGHT is a watched maneuver key — held via XTest it
+        # auto-repeats ~40 ms with send_event=False, and each repeat would read
+        # as the player pressing 'l' and cancel the mission into manual
+        # takeover. Same bracket as disengage_roll_right. 'e' and ';' are
+        # unwatched and need none.
+        self._inc_programmatic_key(ROLL_RIGHT_KEY)
+        try:
+            for _key in (AFTERBURNER_KEY, ROLL_RIGHT_KEY, YAW_LEFT):
+                if self._simulate_os_input:
+                    self._record_action_intent("key_press", key=_key, action="missile_evade")
+                else:
+                    try:
+                        keyboard_module.press(_key)
+                    except Exception:
+                        logger.exception("Controller: missile_evade press failed for '%s'", _key)
+
+            # NOT _interruptible_sleep: the hold must be independent of mission
+            # cancellation (d7 — the tactic never touches mission state).
+            # _me_stop is the shutdown path; _exit_event covers program exit.
+            while not self._me_stop.wait(timeout=0.1):
+                if self._exit_event is not None and self._exit_event.is_set():
+                    break
+                now = time.time()
+                if now - entry_ts >= self._me_max_hold_s:
+                    logger.warning(
+                        "Controller: missile_evade max hold (%.0fs) reached — "
+                        "releasing (last incoming ts %.3f). Detector fault, "
+                        "not a normal exit.",
+                        self._me_max_hold_s, last_positive_ts)
+                    exit_reason = "max_hold"
+                    break
+                if self._analyzer is None:
+                    continue
+                try:
+                    detected, _, _ = self._analyzer.get_incoming_cache_result()
+                    cache_ts = self._analyzer.get_incoming_cache_timestamp()
+                except Exception:
+                    logger.exception("Controller: missile_evade cache poll failed")
+                    continue
+                if detected:
+                    # A fresh positive extends the evade (d8): the clear timer
+                    # is measured from the last positive and simply moves on.
+                    if cache_ts > last_positive_ts:
+                        last_positive_ts = cache_ts
+                        last_counted_ts = max(last_counted_ts, cache_ts)
+                    fresh_negatives = 0
+                elif cache_ts > last_counted_ts:
+                    # Fresh negative — the cache TIMESTAMP advanced, not merely
+                    # the result. An unchanged timestamp is a stale entry read
+                    # twice and must not count (d5).
+                    last_counted_ts = cache_ts
+                    fresh_negatives += 1
+                if (fresh_negatives >= self._me_min_clear_samples
+                        and (now - last_positive_ts) >= self._me_clear_s):
+                    exit_reason = "clear"
+                    break
+        finally:
+            for _key in (YAW_LEFT, ROLL_RIGHT_KEY, AFTERBURNER_KEY):
+                if self._simulate_os_input:
+                    self._record_action_intent("key_release", key=_key, action="missile_evade")
+                elif keyboard_module:
+                    try:
+                        keyboard_module.release(_key)
+                    except Exception:
+                        pass
+            # Physical release first, THEN the grace + counter drop, so repeats
+            # already queued in the XRecord pipeline cannot be misread as the
+            # player (the _eject_key release-ordering finding).
+            self._arm_release_grace(ROLL_RIGHT_KEY)
+            self._dec_programmatic_key(ROLL_RIGHT_KEY)
+        logger.info("Controller: missile_evade complete (%s, %.1fs)",
+                    exit_reason, time.time() - entry_ts)
+
+    def is_missile_evading(self) -> bool:
+        """True while a missile_evade_mode hold is in progress
+        (ADR 070 — the MissileEvade leaf's is_running_fn)."""
+        return self._missile_evading.is_set()
+
     def start_weapon_loop(self, interval: float | None = None):
         """Start continuously firing the active weapon in a loop.
         
@@ -2489,11 +2662,15 @@ class Controller:
         eject_thread = self._eject_thread
         if eject_thread is not None and eject_thread.is_alive():
             eject_thread.join(timeout=1.5)  # let its finally release keys cleanly
+        self._me_stop.set()  # ADR 070: end any evade hold via its own finally
+        me_thread = self._me_thread
+        if me_thread is not None and me_thread.is_alive():
+            me_thread.join(timeout=1.5)
 
         # 2. Belt-and-braces: release every injectable key.
         if keyboard_module and not self._simulate_os_input:
             for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
-                         AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
+                         YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
                          DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
                          PADLOCK_CAMERA, SPECIAL_ABILITY):
                 try:

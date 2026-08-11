@@ -65,6 +65,7 @@ class MissionStatsTracker:
         self._total_flare_bursts = 0
         self._total_flare_reloads = 0
         self._total_manual_takeovers = 0
+        self._total_missile_evades = 0
 
         # Pending outcome hint set by named events before the FSM transition fires.
         self._pending_outcome: str | None = None
@@ -103,6 +104,11 @@ class MissionStatsTracker:
             self._total_flare_bursts += 1
             if self._in_mission:
                 self._current["flare_burst_count"] += 1
+
+        elif event_name == "missile_evade":
+            self._total_missile_evades += 1
+            if self._in_mission:
+                self._current["missile_evade_count"] += 1
 
         elif event_name == "flare_reload":
             self._total_flare_reloads += 1
@@ -225,6 +231,7 @@ class MissionStatsTracker:
             "total_flare_bursts": self._total_flare_bursts,
             "total_flare_reloads": self._total_flare_reloads,
             "total_manual_takeovers": self._total_manual_takeovers,
+            "total_missile_evades": self._total_missile_evades,
             "avg_mission_duration_s": round(avg_duration, 1) if avg_duration is not None else None,
             "missions": self._missions,
         }
@@ -273,6 +280,7 @@ class MissionStatsTracker:
             f"Total respawns    : {s['total_respawns']}",
             f"Total flare bursts: {s['total_flare_bursts']}{bursts_per}",
             f"Flare reloads     : {s['total_flare_reloads']}",
+            f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
         ]
         if path_line:
@@ -296,6 +304,7 @@ class MissionStatsTracker:
             "respawn_count": 0,
             "flare_burst_count": 0,
             "flare_reload_count": 0,
+            "missile_evade_count": 0,
             "no_missiles_abort": False,
             "manual_takeover_count": 0,
             "outcome": "unknown",

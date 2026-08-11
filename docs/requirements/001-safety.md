@@ -106,3 +106,19 @@ release the hold rather than re-issue it.
 **Rationale**: ADR 058 d12. Across 27 logged ejects the productive descent happened in the
 first ~8-11 s of hold; holding longer over-rotated the aircraft into a climb
 — commanded input producing the opposite of the commanded intent.
+
+## Bounded missile-evade hold
+
+**UID**: SAF-006
+
+**Statement**: A missile-evade hold shall release all held flight keys unconditionally no
+later than behavior_tree.missile_evade.max_hold_s after entry, and shall
+release them on program exit and on controller cleanup. Absence of fresh
+perception samples shall not end the hold early, and shall not extend it past
+the cap.
+
+**Rationale**: ADR 070 d6. A detection stuck true (a HUD element that keeps matching the
+template, a frozen frame) would otherwise pin afterburner and a
+full-deflection roll for the rest of the mission and fly the aircraft out of
+the arena — the same failure class as the ADR 069 nose-hold budget. The cap
+firing is a detector fault and is logged at WARNING.

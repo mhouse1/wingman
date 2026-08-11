@@ -434,6 +434,14 @@ Each item must be answered before the tactic is enabled in a live mission.
   bound to yaw-left in the profile the automation runs under, so a keymap drift
   degrades the manoeuvre loudly rather than silently. This is a binding check,
   not an open design question.
+
+  *Injection-side finding, 2026-08-11 shadow session:* `;` was **not
+  injectable at all** — the XTest shim resolved punctuation via
+  `string_to_keysym(';')`, which returns 0 (`Linux key: unknown keysym for
+  ';'`, 07:27:22, fired by cleanup's YAW_LEFT release). Fixed by mapping
+  punctuation to X11 keysym names (`semicolon`) in `_XKEY_ALIASES`, with a
+  regression test covering every injectable key constant. The game-keymap half
+  of V1 remains open.
 - **V2 — the composed manoeuvre behaves as intended.** Roll right, left rudder
   and afterburner act on three separate axes and do not cancel (d3). What is
   unmeasured is the *result*: bench-fly the triple and confirm on the HUD that
@@ -450,6 +458,13 @@ Each item must be answered before the tactic is enabled in a live mission.
   real engagements should show the observed gap distribution between
   consecutive missile alerts; if alerts routinely arrive 4–5 s apart, 3 s
   causes release-then-immediate-repress churn and should be raised.
+
+  *First shadow evidence, 2026-08-11 session (34 min, 6 missions, 18 alerts):*
+  alerts arrive in bursts — consecutive detections within an engagement land
+  1.3–1.7 s apart (e.g. 06:59:12.2, 13.7, 15.2, 16.7), and bursts are
+  separated by minutes, not 4–5 s. Selection-only MissileEvade windows lasted
+  3–6 s (06:59:01→04, 06:59:13→19, 07:16:17→23). The 3.0 s clear window shows
+  no churn risk at this cadence; the default stands.
 - **V5 — effectiveness.** Compare per-mission health loss and death count from
   `MissionStatsTracker` across matched sessions with the tactic off and on.
   Flares-only is the baseline.

@@ -167,6 +167,11 @@ behavior_tree:                     # ADR 024 Phase 3 — tactic selection
   disengage_hold_s: 10             # minimum hold once DISENGAGE selected
   evade_hold_s: 10                 # minimum hold once EVADE selected
   # evade_health_threshold:        # unset — EVADE disabled until calibrated (ADR 024)
+  missile_evade:                   # ADR 070 — MISSILE_EVADE_MODE
+    enabled: false                 # false = leaf selection-only (shadow); true = hold AB+ROLL_RIGHT+YAW_LEFT
+    clear_seconds: 3.0             # incoming absent this long ends the evade (d5); THE tuning knob
+    min_clear_samples: 2           # fresh negative cache updates required — liveness floor, leave alone (d5)
+    max_hold_s: 15.0               # unconditional release; firing = detector fault (d6)
 minimap:                           # Design 003 — MINIMAP red-icon scan
   mask_radius_frac: 0.93           # circle mask radius as fraction of half the shorter side
   min_blob_px: 4                   # component area band for enemy icons

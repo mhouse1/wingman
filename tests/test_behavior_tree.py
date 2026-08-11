@@ -17,6 +17,7 @@ from wingman.behavior_tree import (
     TACTIC_ENGAGE,
     TACTIC_EVADE,
     TACTIC_IDLE,
+    TACTIC_MISSILE_EVADE,
     TACTIC_RESPAWN_WAIT,
     build_tree,
     make_snapshot_writer,
@@ -154,12 +155,15 @@ class _TacticRecorder:
         return self.running
 
 
-def make_actuated_harness(clock, eject=None, disengage=None):
+def make_actuated_harness(clock, eject=None, disengage=None, missile_evade=None):
     actuators = {}
     if eject is not None:
         actuators[TACTIC_EJECT] = (eject.start, eject.is_running)
     if disengage is not None:
         actuators[TACTIC_DISENGAGE] = (disengage.start, disengage.is_running)
+    if missile_evade is not None:
+        actuators[TACTIC_MISSILE_EVADE] = (missile_evade.start,
+                                           missile_evade.is_running)
     tree = build_tree(dict(BT_CFG), clock=clock, actuators=actuators)
     return tree, make_snapshot_writer()
 
@@ -222,6 +226,74 @@ def test_actuated_disengage_fires_once_per_selection(clock):
     clock.advance(11.0)
     assert tick(harness, make_snap(enemy_absent_seconds=2.0, ring_mid=1)) == TACTIC_ENGAGE
     assert disengage.starts == 1
+
+
+# ---------------------------------------------------------------------------
+# ADR 070 — MissileEvade leaf
+# ---------------------------------------------------------------------------
+
+def test_missile_evade_beats_engage(harness):
+    snap = make_snap(incoming_detected=True, ring_short=2, ring_mid=1)
+    assert tick(harness, snap) == TACTIC_MISSILE_EVADE
+
+
+def test_eject_beats_missile_evade(harness):
+    """d1: eject_and_dive owns AFTERBURNER through its closed-loop descent —
+    two owners on one key is the ADR 069 release-ordering fault."""
+    snap = make_snap(missiles=0, incoming_detected=True)
+    assert tick(harness, snap) == TACTIC_EJECT
+
+
+def test_respawn_beats_missile_evade(harness):
+    snap = make_snap(is_respawning=True, incoming_detected=True)
+    assert tick(harness, snap) == TACTIC_RESPAWN_WAIT
+
+
+def test_missile_evade_ignores_mission_running(harness):
+    """d9: a missile is a threat with or without a mission thread."""
+    snap = make_snap(incoming_detected=True, mission_running=False)
+    assert tick(harness, snap) == TACTIC_MISSILE_EVADE
+
+
+def test_missile_evade_not_selected_when_clear(harness):
+    assert tick(harness, make_snap(ring_mid=1)) == TACTIC_ENGAGE
+
+
+def test_actuated_missile_evade_sticky_while_running(clock):
+    """The condition holds selection while the evade thread owns the keys —
+    Engage must not re-select on the first clear tick and pulse the roll axis."""
+    evade = _TacticRecorder()
+    harness = make_actuated_harness(clock, missile_evade=evade)
+
+    assert tick(harness, make_snap(incoming_detected=True, ring_mid=1)) == TACTIC_MISSILE_EVADE
+    assert evade.starts == 1
+    evade.running = True
+
+    # Incoming clears but the hold is still live: selection stays, no re-fire.
+    assert tick(harness, make_snap(incoming_detected=False, ring_mid=1)) == TACTIC_MISSILE_EVADE
+    assert evade.starts == 1
+
+    # Hold ends: selection falls through to Engage.
+    evade.running = False
+    assert tick(harness, make_snap(incoming_detected=False, ring_mid=1)) == TACTIC_ENGAGE
+    assert evade.starts == 1
+
+
+def test_actuated_missile_evade_does_not_restart_while_running(clock):
+    evade = _TacticRecorder()
+    harness = make_actuated_harness(clock, missile_evade=evade)
+    tick(harness, make_snap(incoming_detected=True))
+    assert evade.starts == 1
+    evade.running = True
+    tick(harness, make_snap(incoming_detected=True))
+    assert evade.starts == 1  # is_running_fn gates the re-start
+
+
+def test_selection_only_missile_evade_not_sticky(harness):
+    """Without an actuator there is no running state to hold on — the leaf
+    falls back to the bare incoming_detected predicate (shadow build)."""
+    assert tick(harness, make_snap(incoming_detected=True)) == TACTIC_MISSILE_EVADE
+    assert tick(harness, make_snap(incoming_detected=False, ring_mid=1)) == TACTIC_ENGAGE
 
 
 class _FlagChild(py_trees.behaviour.Behaviour):

@@ -326,6 +326,7 @@ def main():
         good_luck_wait_s=float(mission_cfg.get("good_luck_wait_s", 13.0)),
         good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
         telemetry_cfg=cfg.get("telemetry", {}),
+        missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry
@@ -487,7 +488,7 @@ def main():
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
     behavior_tree = BehaviorTreeHandler(
         analyzer, ctrl, cfg.get("behavior_tree", {}), j20_cfg, cfg.get("minimap", {}),
-        ammo_events=ammo_events,
+        ammo_events=ammo_events, stats_tracker=stats_tracker,
     )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),

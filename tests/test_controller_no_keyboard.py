@@ -437,3 +437,28 @@ def test_toggle_weapon_loop_accepts_a_key_event(ctrl):
     assert ctrl._weapon_loop_active is True
     ctrl.toggle_weapon_loop(SimpleNamespace(name="x", is_injected=False))  # hotkey call
     assert ctrl._weapon_loop_active is False
+
+
+def test_every_injectable_key_resolves_to_a_keysym():
+    """Regression (ADR 070 V1): string_to_keysym(';') returns 0 — punctuation
+    needs its X11 keysym NAME via _XKEY_ALIASES, or the injection is silently
+    dropped ("unknown keysym for ';'", 2026-08-11 07:27:22 — YAW_LEFT was
+    never injectable). Every key the controller can press must resolve."""
+    XK = pytest.importorskip("Xlib.XK")
+    injectable = [
+        controller_module.NOSE_UP_KEY, controller_module.NOSE_DOWN_KEY,
+        controller_module.ROLL_LEFT_KEY, controller_module.ROLL_RIGHT_KEY,
+        controller_module.YAW_LEFT, controller_module.AFTERBURNER_KEY,
+        controller_module.AIRBRAKE_KEY, controller_module.WINGSWEEP_KEY,
+        controller_module.DEPLOY_FLARES_KEY, controller_module.FIRE_MACHINE_GUN,
+        controller_module.FIRE_ACTIVE_WEAPON, controller_module.PADLOCK_CAMERA,
+        controller_module.SPECIAL_ABILITY, controller_module.SWITCH_WEAPON,
+        controller_module.CANCEL_MISSION_KEY,
+        *controller_module.ALT_FLIGHT_KEYS,
+    ]
+    for key in injectable:
+        xk_name = controller_module._XKEY_ALIASES.get(key.lower(), key.lower())
+        assert XK.string_to_keysym(xk_name) != 0, (
+            f"key {key!r} (xk name {xk_name!r}) does not resolve to a keysym — "
+            "it would be silently dropped by _linux_key_event"
+        )
