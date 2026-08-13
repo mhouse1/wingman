@@ -1,30 +1,222 @@
 {
-  "timestamp": "2026-08-13T07:14:38.380812",
-  "version": "1.7.2",
+  "timestamp": "2026-08-13T07:29:05.888465",
+  "version": "1.7.1",
   "tests": {
-    "test_incoming_template_detection_positive": {
-      "duration": 0.029118500009644777,
+    "test_clear_after_fresh_negative_samples": {
+      "duration": 0.32279489999928046,
       "runs": 1,
-      "min": 0.029118500009644777,
-      "max": 0.029118500009644777
+      "min": 0.32279489999928046,
+      "max": 0.32279489999928046
     },
-    "test_incoming_template_detection_negative_blank": {
-      "duration": 0.029420399994705804,
+    "test_stalled_cache_does_not_end_evade": {
+      "duration": 0.7658335000014631,
       "runs": 1,
-      "min": 0.029420399994705804,
-      "max": 0.029420399994705804
+      "min": 0.7658335000014631,
+      "max": 0.7658335000014631
     },
-    "test_incoming_ocr_fallback_when_template_disabled": {
-      "duration": 0.029044100010651164,
+    "test_max_hold_cap_on_stuck_positive": {
+      "duration": 0.5270898000017041,
       "runs": 1,
-      "min": 0.029044100010651164,
-      "max": 0.029044100010651164
+      "min": 0.5270898000017041,
+      "max": 0.5270898000017041
     },
-    "test_incoming_ocr_fallback_degraded_reads": {
-      "duration": 0.02793382222686584,
-      "runs": 9,
-      "min": 0.02658309999969788,
-      "max": 0.029752400005236268
+    "test_release_on_exit_event": {
+      "duration": 0.11333860000013374,
+      "runs": 1,
+      "min": 0.11333860000013374,
+      "max": 0.11333860000013374
+    },
+    "test_duplicate_start_suppressed": {
+      "duration": 0.4323681000096258,
+      "runs": 1,
+      "min": 0.4323681000096258,
+      "max": 0.4323681000096258
+    },
+    "test_fresh_positive_extends_hold": {
+      "duration": 0.7501365000061924,
+      "runs": 1,
+      "min": 0.7501365000061924,
+      "max": 0.7501365000061924
+    },
+    "test_roll_right_bracketed_and_grace_armed": {
+      "duration": 0.5466393000097014,
+      "runs": 1,
+      "min": 0.5466393000097014,
+      "max": 0.5466393000097014
+    },
+    "test_simulate_mode_records_intents": {
+      "duration": 0.4346568000037223,
+      "runs": 1,
+      "min": 0.4346568000037223,
+      "max": 0.4346568000037223
+    },
+    "test_evade_yields_when_eject_starts_mid_hold": {
+      "duration": 0.21375019999686629,
+      "runs": 1,
+      "min": 0.21375019999686629,
+      "max": 0.21375019999686629
+    },
+    "test_evade_does_not_start_while_ejecting": {
+      "duration": 0.0002930999908130616,
+      "runs": 1,
+      "min": 0.0002930999908130616,
+      "max": 0.0002930999908130616
+    },
+    "test_evade_release_cannot_desync_eject_afterburner": {
+      "duration": 0.2131738000025507,
+      "runs": 1,
+      "min": 0.2131738000025507,
+      "max": 0.2131738000025507
+    },
+    "test_manoeuvre_limit_is_a_normal_exit": {
+      "duration": 0.7048961999971652,
+      "runs": 1,
+      "min": 0.7048961999971652,
+      "max": 0.7048961999971652
+    },
+    "test_pitch_down_variant_holds_and_brackets_nose_down": {
+      "duration": 0.4407446999975946,
+      "runs": 1,
+      "min": 0.4407446999975946,
+      "max": 0.4407446999975946
+    },
+    "test_pitch_down_off_by_default_leaves_nose_alone": {
+      "duration": 0.4176517000014428,
+      "runs": 1,
+      "min": 0.4176517000014428,
+      "max": 0.4176517000014428
+    },
+    "test_idle_outside_battle": {
+      "duration": 0.0005268999957479537,
+      "runs": 1,
+      "min": 0.0005268999957479537,
+      "max": 0.0005268999957479537
+    },
+    "test_respawn_wait_beats_everything_in_battle": {
+      "duration": 0.0002817999920807779,
+      "runs": 1,
+      "min": 0.0002817999920807779,
+      "max": 0.0002817999920807779
+    },
+    "test_eject_on_missiles_empty_beats_engage": {
+      "duration": 0.00021440000273287296,
+      "runs": 1,
+      "min": 0.00021440000273287296,
+      "max": 0.00021440000273287296
+    },
+    "test_engage_when_any_ring_occupied": {
+      "duration": 0.0003060000017285347,
+      "runs": 1,
+      "min": 0.0003060000017285347,
+      "max": 0.0003060000017285347
+    },
+    "test_attack_support_is_the_fallback": {
+      "duration": 0.00018199998885393143,
+      "runs": 1,
+      "min": 0.00018199998885393143,
+      "max": 0.00018199998885393143
+    },
+    "test_disengage_selects_after_absence_and_holds": {
+      "duration": 0.00019640001119114459,
+      "runs": 1,
+      "min": 0.00019640001119114459,
+      "max": 0.00019640001119114459
+    },
+    "test_evade_disabled_without_threshold": {
+      "duration": 0.00019700000120792538,
+      "runs": 1,
+      "min": 0.00019700000120792538,
+      "max": 0.00019700000120792538
+    },
+    "test_evade_selected_when_threshold_configured": {
+      "duration": 0.00045479999971576035,
+      "runs": 1,
+      "min": 0.00045479999971576035,
+      "max": 0.00045479999971576035
+    },
+    "test_missiles_unknown_is_not_empty": {
+      "duration": 0.0001396000006934628,
+      "runs": 1,
+      "min": 0.0001396000006934628,
+      "max": 0.0001396000006934628
+    },
+    "test_actuated_eject_fires_on_confirmed_verdict_only": {
+      "duration": 0.00022820000594947487,
+      "runs": 1,
+      "min": 0.00022820000594947487,
+      "max": 0.00022820000594947487
+    },
+    "test_actuated_eject_does_not_restart_while_running": {
+      "duration": 0.0002297000028192997,
+      "runs": 1,
+      "min": 0.0002297000028192997,
+      "max": 0.0002297000028192997
+    },
+    "test_actuated_eject_switchaway_does_not_cancel": {
+      "duration": 0.0002462999982526526,
+      "runs": 1,
+      "min": 0.0002462999982526526,
+      "max": 0.0002462999982526526
+    },
+    "test_actuated_disengage_fires_once_per_selection": {
+      "duration": 0.00036020000698044896,
+      "runs": 1,
+      "min": 0.00036020000698044896,
+      "max": 0.00036020000698044896
+    },
+    "test_missile_evade_beats_engage": {
+      "duration": 0.0001016999885905534,
+      "runs": 1,
+      "min": 0.0001016999885905534,
+      "max": 0.0001016999885905534
+    },
+    "test_eject_beats_missile_evade": {
+      "duration": 9.889999637380242e-05,
+      "runs": 1,
+      "min": 9.889999637380242e-05,
+      "max": 9.889999637380242e-05
+    },
+    "test_respawn_beats_missile_evade": {
+      "duration": 9.950000094249845e-05,
+      "runs": 1,
+      "min": 9.950000094249845e-05,
+      "max": 9.950000094249845e-05
+    },
+    "test_missile_evade_ignores_mission_running": {
+      "duration": 0.00010420000762678683,
+      "runs": 1,
+      "min": 0.00010420000762678683,
+      "max": 0.00010420000762678683
+    },
+    "test_missile_evade_not_selected_when_clear": {
+      "duration": 0.00011570000788196921,
+      "runs": 1,
+      "min": 0.00011570000788196921,
+      "max": 0.00011570000788196921
+    },
+    "test_actuated_missile_evade_sticky_while_running": {
+      "duration": 0.00023639999562874436,
+      "runs": 1,
+      "min": 0.00023639999562874436,
+      "max": 0.00023639999562874436
+    },
+    "test_actuated_missile_evade_does_not_restart_while_running": {
+      "duration": 0.00019180000526830554,
+      "runs": 1,
+      "min": 0.00019180000526830554,
+      "max": 0.00019180000526830554
+    },
+    "test_selection_only_missile_evade_not_sticky": {
+      "duration": 0.00013500000932253897,
+      "runs": 1,
+      "min": 0.00013500000932253897,
+      "max": 0.00013500000932253897
+    },
+    "test_minimum_hold_decorator_unit": {
+      "duration": 0.0001066999975591898,
+      "runs": 1,
+      "min": 0.0001066999975591898,
+      "max": 0.0001066999975591898
     }
   }
 }
