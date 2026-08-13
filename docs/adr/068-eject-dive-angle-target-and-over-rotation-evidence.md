@@ -1,8 +1,14 @@
 # ADR 068 — Eject Dive: Angle Target and Evidence-Gated Over-Rotation
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-09 | 1.7.1           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-09 | 1.7.1           |
+
+*Accepted 2026-08-09 — all seven decisions implemented and flight-validated
+across four live sessions (04:42 three-eject decision-5 validation, 13:12
+24-eject combat trial of the hold rework, 19:02 with the eject driven through
+the ADR 024 behavior tree), plus Code Review 014's thirteen findings resolved
+and `make tp` fully green including both runtime gates.*
 
 Extends [ADR 038](038-game-battle-altitude-speed-signals-for-phase3-and-eject-dive.md)
 (Draft), [ADR 058](058-eject-dive-confirmation-via-raw-descent-rate.md)
@@ -104,14 +110,24 @@ the target *and* nose-budget headroom, so the ADR 058 objection is answered at
 the point of use rather than by withholding the budget: a give-up on missing
 data still cannot spend a re-entry, while genuine under-rotation can.
 
-**4. `total_nose_budget_s` raised from 10.0 to 20.0.**
+**4. `total_nose_budget_s` raised from 10.0 to 40.0** (initially 20.0; raised
+again after the 2026-08-09 10:04 flight; decision 6 later raises it to 90.0
+when held time began to include the full descent).
 
-Reaching 75 degrees from a fast climb takes longer than 10 s of held
-nose-down — the manual takeover needed 13 s starting from an already-descending
--37 degrees. The budget remains a backstop against flying a full loop; with
-decision 2 the primary stop is now reaching the target angle, not exhausting
-time, so a larger backstop carries less risk than it did when time was the
-only limit.
+Reaching 75 degrees from a fast climb takes about 19 s of held nose-down on
+its own, and the budget must also absorb the failures that cost held time
+without producing rotation: the 10:04 eject lost ~6 s to an OCR outage that
+forced a timer release mid-rotation at +17 degrees, then ~6 s to a missed
+nose-down key injection that the correction re-press was 1.8 s too late to
+recover within a 20 s budget. All five ejects observed on the 20 s setting
+exhausted it; the 10:04 eject then glided level for 25 s with zero remaining
+key authority until manual takeover.
+
+The budget remains the backstop against flying a full loop, but it is no
+longer the primary protection: the over-rotation guard (decisions 1 and 5) now
+detects the actual past-vertical signature — a climb after an observed
+descent — so generous time no longer converts into loops. 40 s covers roughly
+two full rotation attempts with correction overhead.
 
 **5. The nose-up reversal requires the dive target to have been reached.**
 
@@ -129,7 +145,71 @@ target angle is observed, now gates the reversal. The climb-based guard
 (decision 1) remains the primary protection against a genuine over-rotation,
 since rotating past vertical eventually produces a climb.
 
-**6. `confirm_descent_fps` stays 250.**
+**6. Hold nose-down through the descent; scope rotation evidence per attempt.**
+*(Added after the 2026-08-09 10:16 session.)*
+
+That session (13 ejects, 13 respawns, zero manual takeovers) proved the
+mechanics but exposed a structural cost in release-on-confirm: the game
+auto-levels the moment pitch input stops, so every confirmation decayed within
+3-6 s (17 decay/re-entry cycles against 15 confirmations) and 4 of 13 ejects
+still exhausted the 40 s budget re-winning ground already won.
+
+Two changes:
+
+- **Confirmation no longer releases the key.** The nose phase keeps holding
+  through the descent; the hold ends on respawn (stop event), the
+  over-rotation guard, the nose budget, or a sensor frozen past 4x the check
+  interval (a key is never left down against missing data). A dive that
+  decays *while held* falls through to the correction machinery and is
+  re-established in place. Release-on-confirm existed to avoid blindly
+  holding past vertical when the ratio was untrustworthy; with ADR 067's
+  corrected angle and a guard that detects the actual past-vertical signature
+  (validated: 2 correct firings, 0 misfires), the fear it encoded is
+  obsolete.
+- **Evidence flags reset at each phase entry.** The session's four nose-up
+  reversal misfires all followed one pattern: a -90 confirmation early in the
+  eject left `reached_target_dive` set, so during a later re-entry the
+  auto-level's pitch-up read as "descent got shallower after nose-down" and
+  fired the reversal — helping the auto-level. Each phase call is a fresh
+  rotation attempt from an unknown attitude; the over-rotation and reversal
+  gates now trust only observations from the current attempt.
+
+`total_nose_budget_s` rises to 90 as the loop backstop, since held time now
+includes the productive descent itself (40-80 s from typical eject altitudes).
+
+**7. The hold is its own loop; evidence, corrections, and budgets are scoped
+per rotation attempt** *(added after Code Review 014).*
+
+The deep review of decision 6's implementation (docs/code-review/014-2026-08.md)
+confirmed six defects sharing one root cause: the confirmed hold was threaded
+through the establishment loop, so machinery calibrated for a ~5 s rotation
+attempt (legacy deadline, correction budget, reversal baseline, over-rotation
+guard) ran throughout 40-80 s holds. The rework:
+
+- `_eject_establish_dive_once` keeps the unmodified ADR 038/058 rotation
+  semantics and returns on confirmation; `_eject_hold_established_dive` is a
+  dedicated hold loop with exactly the checks a held descent needs — stop
+  event, hold safety timeout (`hold_max_s`, default 120 s), telemetry-loss
+  release after `stale_after_s` without a fresh sample (grace a stale poll
+  previously did not get, CR-014-1/-6, with exit_reason kept `confirmed` so
+  the watcher arms decay re-entry), afterburner engagement verification
+  (previously unreachable on the respawn-ended path, CR-014-4), over-rotation
+  release requiring the same distinct-sample streak as confirmation
+  (CR-014-5), and decay hand-back.
+- A decay while held starts a fresh establishment cycle: fresh correction
+  budget (CR-014-3), fresh reversal baseline and evidence flags (CR-014-2) —
+  each cycle is a rotation attempt in its own right.
+- Held time at target is credited back to the rotation budget
+  (`_eject_nose_hold_credit_s`), so `total_nose_budget_s` returns to 40 s and
+  again means what it originally meant: a bound on unproductive rotation
+  time, not on descent duration (CR-014-9). Runaway holds are bounded by the
+  hold safety timeout and respawn instead.
+- The post-release watcher reads each re-entry's outcome back and suppresses
+  further re-entries after an over-rotation refusal (CR-014-10); the ADR 044/
+  045 validators additionally exempt `match_ended` and `shutdown` in-phase
+  cancellations, which the long hold now makes routine (CR-014-11).
+
+**8. `confirm_descent_fps` stays 250.**
 
 The value is compared against raw display units, i.e. m/s, so the effective
 threshold is 250 m/s rather than the 250 ft/s its name implies. That is
@@ -218,14 +298,16 @@ degrees and 989 KPH, the loop kept commanding nose-down against a +160 m/s
 climb — the exact condition the old guard released on — then rotated -16, -36,
 -66, -90 over nine seconds.
 
-**Open issue — the 20 s budget now binds on every eject.** All three hit it.
+**The 20 s budget bound on every eject in this session.** All three hit it.
 Eject 3 reached -90 degrees 2.6 s before the budget expired, one telemetry
 sample short of the two needed to confirm; ejects 1 and 2 confirmed, decayed to
 -37 and -50 degrees, correctly took a re-entry, and then exhausted the budget
 2-5 s later. Rotation from a fast climb to vertical measures about 19 s, so 20 s
-leaves no headroom for the 6 s two-sample confirmation or any re-entry. Raising
-it to approximately 30 s is the indicated next step; deferred pending an
-operator decision, since the budget is the backstop against flying a full loop.
+left no headroom for the 6 s two-sample confirmation or any re-entry. The
+2026-08-09 10:04 flight then showed the failure outcome directly — budget
+exhausted mid-recovery, followed by a 25 s level glide with no remaining key
+authority until manual takeover — and settled the question: decision 4 now
+sets 40 s.
 
 ### Implementation defect found in production 2026-08-09 08:09
 
@@ -246,5 +328,51 @@ monitoring, re-entry and the afterburner hold were all lost for that eject.
 Fixed at both sites; two regression tests cover the nose phase and the
 post-release watcher, and both were verified to fail without the guard.
 
-- Pending for Accepted: a live session on the crash fix confirming an eject
-  runs its full post-release sequence through a telemetry gap.
+### Live validation session 2026-08-09 10:16 (decisions 1-5, 40 s budget)
+
+13 ejects, 13 respawns, **zero manual takeovers**, zero crashes. 15
+target-angle confirmations at -90 degrees, many within 3-4.5 s of engagement.
+The over-rotation guard fired correctly twice and misfired zero times. Two
+residual patterns from this session — the auto-level decay sawtooth and four
+post-decay nose-up reversal misfires — are addressed by decision 6.
+
+### Live validation session 2026-08-09 13:12 (decisions 6-7, post-CR-014)
+
+3h17m, 11 missions all click-to-finish, **24 ejects, 24 completed
+autonomously**, 26 respawns, zero crashes, zero errors, one unrelated manual
+takeover (13:20, before the first eject). Every CR-014 mechanism was
+exercised in flight:
+
+| Mechanism | Count | Notes |
+|-----------|-------|-------|
+| In-phase confirmations (held) | 30 | plus 17 post-release confirmations |
+| Decay while held, re-established in phase | 26 | fresh cycle each time |
+| Telemetry lost during hold, released as confirmed | 2 | previously-dead path now delivering |
+| Over-rotation releases (streak-deduped) | 7 | zero single-sample aborts |
+| Afterburner re-presses during hold | 16 | see caveat below |
+| Nose-up reversals | 1 | zero misfires against auto-level decays |
+
+Eject durations: mean 63 s, p50 69 s, p90 83 s, max 117 s.
+
+The anticipated "single confirmation held to respawn" signature did **not**
+dominate — zero in-phase respawn cancellations. The traces show why:
+contested airspace. Incoming missiles strike the diving aircraft (flare
+bursts run concurrently with the eject), knocking a confirmed -90 dive to -9
+degrees with speed collapsing 583 to 74 KPH — battle damage, not auto-level,
+drives most decays, and 15 of 24 ejects exhausted the 40 s rotation budget
+fighting through it before gliding under afterburner to a shot-down respawn.
+The outcome is unaffected (24/24 fresh-missile respawns), and the rework's
+actual claims — no misdiagnosed releases, graceful telemetry loss, bounded
+recovery, no permanent glides — are all demonstrated.
+
+Caveat worth a future look: 16 afterburner re-presses across 24 ejects
+suggests the speed-trend check reads terminal-dive drag plateaus
+("trend flat/falling") as a missed press. Bounded at 2 per eject and
+harmless, but the heuristic is weak evidence during a dive.
+
+- `make test` green (461 passed) and `make rr-path1-gate` PASS on the
+  reviewed implementation.
+- ~~Remaining for Accepted: one green `make tp` including the ADR 045 live
+  lane.~~ **Done 2026-08-09** — green after the lane's capture was pinned to
+  the config region, removing its hidden dependency on the game window's
+  position (the true cause of the lane's historical flakiness).

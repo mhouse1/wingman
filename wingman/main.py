@@ -4,7 +4,6 @@ import sys
 import yaml
 import time
 import logging
-import subprocess
 import threading
 from datetime import datetime
 from enum import Enum, auto
@@ -16,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.7.2"
-WINGMAN_VERSION_DETAILS = "begin phase3 behavior tree integration"
+WINGMAN_VERSION = "1.7.1"
+WINGMAN_VERSION_DETAILS = "implement requirements using strictdoc, minimap integration, bugfixes"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
@@ -257,11 +256,20 @@ def main():
             timeout_advances=False,
             out_of_order=True,
         )
-        cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
+        # ADR 045 lane: the presenter draws the timed screenshots AT the config
+        # region, so capture must be pinned there — auto-detecting the game
+        # window is actively wrong here (the game is a native Wayland window
+        # the presenter does not cover; when it sat away from the region, the
+        # lane captured live gameplay instead of the presented frames and
+        # every step failed — 2026-08-09 19:45 run).
+        lane_offset = (int(region[0]), int(region[1]))
+        cap = Capture(region, monitor_index, game_window_offset=lane_offset)
         logger.info(
-            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict",
+            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict, "
+            "capture pinned to config region at (%d, %d)",
             live_path.path_name,
             capture_screenshot_dir,
+            *lane_offset,
         )
     else:
         cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
@@ -281,6 +289,8 @@ def main():
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     starting_stalled_reclassify_after_s = float(mission_cfg.get("starting_stalled_reclassify_after_s", 20.0))
     starting_max_wait_s = float(mission_cfg.get("starting_max_wait_s", 90.0))
+    # Startup stall watchdog: exit wingman (never the host) if battle is never reached.
+    startup_stall_exit_after_s = float(mission_cfg.get("startup_stall_exit_after_s", 600.0))
     unknown_max_wait_s = float(startup_cfg.get("unknown_max_wait_s", 90.0))
     unknown_state_since = 0.0
     startup_classification_complete = False
@@ -317,6 +327,7 @@ def main():
         good_luck_wait_s=float(mission_cfg.get("good_luck_wait_s", 13.0)),
         good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
         telemetry_cfg=cfg.get("telemetry", {}),
+        missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry
@@ -465,14 +476,20 @@ def main():
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
+    bt_active = str(cfg.get("behavior_tree", {}).get("mode", "off")).lower() == "active"
     ammo_events = AmmoEventsHandler(
         analyzer, ctrl, mission_cfg,
         perf_tracker=tracker, stats_tracker=stats_tracker,
         emit_capture_event=_emit_capture_event,
+        # ADR 024 3.1b: in active mode the Eject leaf actuates; this handler
+        # keeps the debounce and every suppression gate and hands over only
+        # the confirmed verdict.
+        bt_owns_eject=bt_active,
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
     behavior_tree = BehaviorTreeHandler(
         analyzer, ctrl, cfg.get("behavior_tree", {}), j20_cfg, cfg.get("minimap", {}),
+        ammo_events=ammo_events, stats_tracker=stats_tracker,
     )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
@@ -480,6 +497,7 @@ def main():
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,
         enemy_presence=enemy_presence, ammo_events=ammo_events,
+        behavior_tree=behavior_tree,
         live_capture=live_capture, emit_capture_event=_emit_capture_event,
         disposition_fn=_alive_transition_disposition,
         respawn_state_enum=RespawnState,
@@ -641,20 +659,29 @@ def main():
                 if current_game_state == GameState.GAME_BATTLE:
                     battle_ever_reached = True
 
-            # Watchdog: if GAME_BATTLE not entered within 10 minutes, shut down wingman and PC.
-            # Skipped in replay/capture modes. Uses `shutdown /s /t 0` which does not require
-            # elevated privileges on Windows — standard users hold SeShutdownPrivilege by default.
+            # Watchdog: if GAME_BATTLE is not entered within the stall window, exit
+            # WINGMAN ONLY — never the machine. Skipped in replay/capture modes.
+            #
+            # This used to run `shutdown -h now` (`shutdown /s /t 0` on Windows),
+            # which took the whole host down on any long stall: a game stuck on a
+            # login screen, a matchmaking queue that never filled, or a capture
+            # backend that came up before the game did. That destroys the session
+            # under investigation along with everything else running on the box.
+            # The stall is a wingman-level condition and gets a wingman-level
+            # response — record why, then leave through the normal exit path so
+            # cleanup() releases every held key and the stats/perf artifacts are
+            # still written.
             if (not battle_ever_reached
                     and not replay_mode and not capture_mode
-                    and time.time() - startup_time > 600.0):
-                logger.warning(
-                    "GAME_BATTLE not reached within 10 minutes of startup — shutting down wingman and computer"
+                    and time.time() - startup_time > startup_stall_exit_after_s):
+                logger.error(
+                    "STALL: GAME_BATTLE not reached within %.0fs of startup "
+                    "(last state %s) — exiting wingman. The computer is left "
+                    "running; check the game window and relaunch.",
+                    startup_stall_exit_after_s,
+                    getattr(current_game_state, "name", current_game_state),
                 )
                 exit_requested.set()
-                if sys.platform == "win32":
-                    subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
-                else:
-                    subprocess.run(["shutdown", "-h", "now"], check=False)
                 break
 
             missiles_snapshot = analyzer.get_ammo_missiles()
@@ -700,9 +727,10 @@ def main():
             # Ammo events (GAME_BATTLE only).
             ammo_events.tick_events()
 
-            # Legacy ENEMY_CLOSE_BY disengage — suppressed while the behavior
-            # tree owns geometry (ADR 024 3.1a): its 10 s scripted roll fights
-            # the Engage leaf. The Disengage leaf inherits the job in 3.1b.
+            # Legacy ENEMY_CLOSE_BY disengage — retired in active mode
+            # (ADR 024 3.1b): the Disengage leaf owns the job there, firing on
+            # minimap ring absence with the legacy fire-once-and-reset
+            # semantics. Still ticks in off/shadow modes.
             if not behavior_tree.active:
                 enemy_presence.tick(frame, current_game_state)
 

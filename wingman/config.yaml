@@ -142,6 +142,7 @@ incoming_detection:
   incoming_template_sources: [test_screenshots/INCOMING.png]
 mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0,
+  startup_stall_exit_after_s: 600.0,  # battle never reached -> exit wingman only, never the host
   good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true, starting_health_probe_interval_s: 0.4}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
@@ -191,10 +192,30 @@ telemetry:
   steep_dive_min_sin: 0.8
   level_max_sin: 0.15
   ocr_every_n_ticks: 2
-  eject_closed_loop: {enabled: true, verify_window_s: 6.0, check_interval_s: 1.5,
-    max_corrections: 3, legacy_nose_hold_s: 5.0, confirm_consecutive: 2, streak_grace_s: 4.5,
-    dive_reentries: 2, confirm_descent_fps: 250, total_nose_budget_s: 20.0, over_rotation_after_s: 6.0,
-    target_dive_angle_deg: 75.0}
+  # ADR 069 — impulse rotation + ballistic descent. Rotation is PULSED and then
+  # observed; the descent itself is hands-off. Thresholds picked from 624
+  # archived eject windows: ballistic descents median -117 m/s, held -80 m/s.
+  eject_closed_loop: {enabled: true, check_interval_s: 1.5, confirm_consecutive: 2,
+    legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0,
+    target_dive_angle_deg: 65.0,    # THE criterion: dive must reach this angle.
+                                    # 75 proved unreachable — the game oscillates the
+                                    # flight path around a -58 median, so 2 consecutive
+                                    # samples at -75 never occurred in 8 ejects. -65
+                                    # establishes in 6 of 8 (2026-08-10 18:50).
+    dive_angle_floor_deg: 55.0,     # sagging past this resumes rotation. Steeper than
+                                    # the -47 sag that prompted this fix, so that case
+                                    # is corrected; the 10 deg deadband above absorbs
+                                    # normal oscillation.
+    descent_target_mps: 100.0,      # fallback criterion when the angle is unavailable
+    descent_floor_mps: 50.0,        # fallback floor when the angle is unavailable
+    rotation_pulse_s: 2.0,          # bounded NOSE_DOWN impulse
+    observe_after_pulse_s: 3.5,     # mandatory look-before-acting gap (one refresh)
+    max_rotation_pulses: 12,        # actuation budget, replaces total_nose_budget_s.
+                                    # Raised 4 -> 6 -> 12: pulses now also MAINTAIN the
+                                    # dive angle through the descent, not just establish
+                                    # it. Bounded per-pulse, gated by the over-rotation
+                                    # guard (0 misfires in 52 ejects) and by eject_max_s.
+    eject_max_s: 120.0}             # wall-clock backstop for the whole sequence
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}

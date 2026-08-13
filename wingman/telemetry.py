@@ -90,6 +90,21 @@ class TelemetrySnapshot:
     def altitude_fresh(self) -> bool:
         return self.altitude.is_fresh(self.taken_at_s, self.stale_after_s)
 
+    def _ratio_speed(self) -> "float | None":
+        """Speed for the flight-path ratio: the LAST ACCEPTED reading, not the
+        smoothed mean (ADR 069 d6).
+
+        ``stable_value`` averages the last smoothing_window accepted readings
+        (~9 s). In a dive the aircraft accelerates faster than that window
+        tracks, so the ratio alt_rate/speed inflates and saturates at 1.0 —
+        reported as 90 degrees. Measured 2026-08-10 06:21:24: rate -110 m/s at
+        469 KPH is -58 degrees, but the smoothed 313 KPH gave ratio -1.26 and
+        a bogus -90. The smoothed value stays the right choice for the
+        plausibility filter, whose job is noise immunity; it is the wrong
+        denominator for a ratio whose denominator is changing fast.
+        """
+        return None if self.speed.value is None else float(self.speed.value)
+
     def pitch_band(
         self,
         *,
@@ -100,7 +115,7 @@ class TelemetrySnapshot:
         if not (self.speed_fresh() and self.altitude_fresh()):
             return None
         return pitch_band(
-            self.speed.stable_value,
+            self._ratio_speed(),
             self.altitude.rate,
             steep_min_sin=steep_min_sin,
             level_max_sin=level_max_sin,
@@ -110,7 +125,7 @@ class TelemetrySnapshot:
         """Flight-path angle in degrees, or None when either signal is missing/stale."""
         if not (self.speed_fresh() and self.altitude_fresh()):
             return None
-        return pitch_angle_deg(self.speed.stable_value, self.altitude.rate)
+        return pitch_angle_deg(self._ratio_speed(), self.altitude.rate)
 
 
 def pitch_band(

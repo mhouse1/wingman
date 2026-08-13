@@ -17,6 +17,7 @@ from wingman.telemetry import (
     TREND_RISING,
     TREND_UNKNOWN,
     TelemetryProcessor,
+    TelemetrySignal,
     TelemetrySnapshot,
     pitch_angle_deg,
     pitch_band,
@@ -382,6 +383,46 @@ class TestPitchBandFromAngleDeg:
 # ---------------------------------------------------------------------------
 # Snapshot atomicity
 # ---------------------------------------------------------------------------
+
+class TestRatioUsesInstantaneousSpeed:
+    """ADR 069 d6: the flight-path ratio divides by the LAST ACCEPTED speed,
+    not the smoothed mean. In a dive the aircraft accelerates faster than the
+    smoothing window tracks, so the smoothed denominator inflates the ratio
+    past 1.0 and saturates the angle at 90 degrees — exactly when the reading
+    matters most."""
+
+    def _diving_snapshot(self):
+        # The real 2026-08-10 06:21:24 sample: -110 m/s at an instantaneous
+        # 469 KPH, whose 3-sample mean was 313 KPH.
+        return TelemetrySnapshot(
+            speed=TelemetrySignal(value=469, ts=0.0, stable_value=313.0),
+            altitude=TelemetrySignal(value=11415, ts=0.0, stable_value=11415.0,
+                                     rate=-110.0),
+            taken_at_s=0.0,
+            stale_after_s=6.0,
+        )
+
+    def test_angle_is_not_saturated_by_smoothing_lag(self):
+        snap = self._diving_snapshot()
+        # Smoothed 313 KPH would give ratio -1.26 -> clamped -90.
+        assert snap.pitch_angle_deg() == pytest.approx(-57.5, abs=1.0)
+
+    def test_band_uses_the_same_instantaneous_speed(self):
+        snap = self._diving_snapshot()
+        # ratio -0.845 at 469 KPH: steep, but genuinely so rather than clamped.
+        assert snap.pitch_band() == BAND_STEEP_DIVE
+
+    def test_missing_speed_value_yields_no_angle(self):
+        snap = TelemetrySnapshot(
+            speed=TelemetrySignal(value=None, ts=0.0, stable_value=400.0),
+            altitude=TelemetrySignal(value=10000, ts=0.0, stable_value=10000.0,
+                                     rate=-110.0),
+            taken_at_s=0.0,
+            stale_after_s=6.0,
+        )
+        assert snap.pitch_angle_deg() is None
+        assert snap.pitch_band() is None
+
 
 class TestSnapshot:
     def test_snapshot_is_immutable(self):

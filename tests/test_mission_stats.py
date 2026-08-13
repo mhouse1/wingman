@@ -404,3 +404,97 @@ class TestJsonSerialisation:
         r1 = t.finalize()
         assert r1["missions_started"] == 1
         assert r1["missions"][0]["outcome"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# ADR 070 V5 — per-engagement survival
+# ---------------------------------------------------------------------------
+
+class TestMissileEngagements:
+    """Per-ENGAGEMENT survival, the measure a per-mission death rate cannot
+    give: missions mix engagements the evade touched with ones it never saw
+    (2026-08-12: 8 evades across 12 missions), so per-mission deaths are
+    dominated by deaths the evade had no part in."""
+
+    def test_volley_alerts_group_into_one_engagement(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        # Alerts ~1.5s apart are ONE volley (measured cadence 1.3-1.7s).
+        for ts in (100.0, 101.5, 103.0, 104.5):
+            t.on_event("flare_burst_deployed", ts)
+        eng = t.finalize()["missile_engagements"]
+        assert eng["engagements"] == 1
+        assert eng["detail"][0]["alerts"] == 4
+
+    def test_separate_volleys_are_separate_engagements(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("flare_burst_deployed", 160.0)   # a minute later
+        assert t.finalize()["missile_engagements"]["engagements"] == 2
+
+    def test_evade_attributed_to_its_alert(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("missile_evade", 101.3)          # BT tick lag
+        eng = t.finalize()["missile_engagements"]
+        assert eng["evaded_total"] == 1
+        assert eng["not_evaded_total"] == 0
+
+    def test_death_in_window_counts_against_its_engagement(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("missile_evade", 101.3)
+        t.on_event("respawn_detected", 104.0)
+        eng = t.finalize()["missile_engagements"]
+        assert eng["evaded_died"] == 1
+        assert eng["evaded_survival"] == 0.0
+
+    def test_death_outside_window_is_not_attributed(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("respawn_detected", 140.0)       # 40s later, unrelated
+        eng = t.finalize()["missile_engagements"]
+        assert eng["not_evaded_died"] == 0
+        assert eng["not_evaded_survival"] == 1.0
+
+    def test_survival_split_by_evade(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        # Evaded, survived.
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("missile_evade", 101.3)
+        # Evaded, died.
+        t.on_event("flare_burst_deployed", 200.0)
+        t.on_event("missile_evade", 201.3)
+        t.on_event("respawn_detected", 205.0)
+        # Not evaded, died.
+        t.on_event("flare_burst_deployed", 300.0)
+        t.on_event("respawn_detected", 304.0)
+        eng = t.finalize()["missile_engagements"]
+        assert (eng["evaded_total"], eng["evaded_died"]) == (2, 1)
+        assert (eng["not_evaded_total"], eng["not_evaded_died"]) == (1, 1)
+        assert eng["evaded_survival"] == 0.5
+        assert eng["not_evaded_survival"] == 0.0
+
+    def test_no_engagements_reports_none_not_zero(self, tmp_path):
+        """No data must not read as 0% survival."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        eng = t.finalize()["missile_engagements"]
+        assert eng["engagements"] == 0
+        assert eng["evaded_survival"] is None
+        assert eng["not_evaded_survival"] is None
+
+    def test_print_summary_with_engagements(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("missile_evade", 101.3)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert "Missile engagements" in caplog.text
