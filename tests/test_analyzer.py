@@ -26,7 +26,7 @@ from constants import (
     TEST_SCREENSHOT_B,
     TEST_SCREENSHOT_C,
     TEST_SCREENSHOT_D,
-    TEST_SCREENSHOT_INCOMING_3,
+    TEST_SCREENSHOT_INCOMING,
 )
 
 
@@ -214,7 +214,7 @@ def test_game_end_b_blocks_background_ocr_scheduling(analyzer: GameStateAnalyzer
 @pytest.mark.parametrize(
     "image_path",
     [
-        TEST_SCREENSHOT_INCOMING_3,
+        TEST_SCREENSHOT_INCOMING,
     ],
 )
 def test_incoming_template_detection_positive(analyzer: GameStateAnalyzer, image_path: Path):
@@ -238,7 +238,7 @@ def test_incoming_template_detection_positive(analyzer: GameStateAnalyzer, image
 
 
 def test_incoming_template_detection_negative_blank(analyzer: GameStateAnalyzer):
-    frame = _load_image(TEST_SCREENSHOT_INCOMING_3)
+    frame = _load_image(TEST_SCREENSHOT_INCOMING)
     incoming_crop = get_crop(frame, *analyzer.crops["incoming"][:4])
     blank_crop = np.zeros_like(incoming_crop)
 
@@ -263,7 +263,7 @@ def test_incoming_ocr_fallback_when_template_disabled(analyzer: GameStateAnalyze
 
     monkeypatch.setattr(analyzer_module, "_get_thread_ocr_reader", lambda: _StubReader())
 
-    frame = _load_image(TEST_SCREENSHOT_INCOMING_3)
+    frame = _load_image(TEST_SCREENSHOT_INCOMING)
     incoming_crop = get_crop(frame, *analyzer.crops["incoming"][:4])
 
     result = _process_incoming_region(
@@ -279,6 +279,53 @@ def test_incoming_ocr_fallback_when_template_disabled(analyzer: GameStateAnalyze
     assert result["template_hit"] is False
     assert result["fallback_used"] is True
     assert result["fallback_hit"] is True
+
+
+@pytest.mark.parametrize(
+    "ocr_text,expected_hit",
+    [
+        # Clean reads from a correctly calibrated crop must trigger.
+        ("INCOMING", True),
+        ("WARNING", True),
+        ("INCOMINGMISSILE", True),
+        # Degraded reads with mangled edge characters (pre-recalibration
+        # 2026-08-13 session) must NOT trigger with the strict tokens — if
+        # these reappear in the log, the crop is clipping the text again:
+        # recalibrate the incoming crop rather than loosening the tokens.
+        ("NCOMIN", False),
+        ("VCOMIN", False),
+        ("MIOOMIN", False),
+        # Non-warning HUD text must not trigger.
+        ("LSELISI", False),
+        ("HRUST", False),
+        ("1.8KM", False),
+    ],
+)
+def test_incoming_ocr_fallback_degraded_reads(
+    analyzer: GameStateAnalyzer, monkeypatch, ocr_text: str, expected_hit: bool
+):
+    class _StubReader:
+        def readtext(self, _img, detail=0, paragraph=True, workers=0):
+            return [ocr_text]
+
+    monkeypatch.setattr(analyzer_module, "_get_thread_ocr_reader", lambda: _StubReader())
+
+    frame = _load_image(TEST_SCREENSHOT_INCOMING)
+    incoming_crop = get_crop(frame, *analyzer.crops["incoming"][:4])
+
+    result = _process_incoming_region(
+        incoming_crop,
+        analyzer._incoming_templates,
+        False,
+        analyzer._incoming_template_threshold,
+        analyzer._incoming_template_near_threshold_low,
+        analyzer._incoming_template_near_threshold_high,
+        True,
+        analyzer._incoming_fallback_tokens,
+    )
+
+    assert result["fallback_used"] is True
+    assert result["fallback_hit"] is expected_hit
 
 
 def test_waiting_cancel_baseline_capture_and_diff(analyzer: GameStateAnalyzer):

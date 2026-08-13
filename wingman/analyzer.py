@@ -57,9 +57,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _DEFAULT_INCOMING_TEMPLATE_SOURCES = (
-    "test_screenshots/INCOMING3.png",
+    "test_screenshots/INCOMING.png",
 )
 _DEFAULT_INCOMING_TEMPLATE_SCALES = (1.0,)
+
+# OCR fallback substrings for the INCOMING warning. Keep in sync with
+# incoming_fallback_tokens in config.yaml. If detections stop while the log
+# shows warning-like reads with mangled edge characters (e.g. NCOMIN), the
+# crop is clipping the text — recalibrate rather than loosening these.
+_DEFAULT_INCOMING_FALLBACK_TOKENS = ("MING", "ARNING")
 
 
 def _binarize_template_image(image_bgr: np.ndarray) -> np.ndarray:
@@ -246,6 +252,7 @@ def _process_incoming_region(
     template_near_threshold_low: float,
     template_near_threshold_high: float,
     fallback_to_ocr: bool,
+    fallback_tokens: "tuple[str, ...]" = _DEFAULT_INCOMING_FALLBACK_TOKENS,
 ):
     """
     Worker function to process incoming missile region in a thread pool thread.
@@ -308,7 +315,7 @@ def _process_incoming_region(
         normalized = " ".join(extracted_text.upper().split()).replace(" ", "")
         if normalized:
             raw_texts.append(f"{variant_name}={normalized!r}")
-        if "MING" in normalized or ("ARNING" in normalized and len(normalized) >= 6):
+        if any(token in normalized for token in fallback_tokens):
             result["fallback_hit"] = True
             result["fallback_variant"] = variant_name
             result["fallback_text"] = normalized
@@ -347,14 +354,16 @@ def _process_text_region(frame, text_tokens: "list[str]"):
     return (False, time.time() - t_start, None)
 
 
-def _process_health_region(health_frame) -> "tuple[int | None, float]":
+def _process_health_region(health_frame, label: str = "health") -> "tuple[int | None, float]":
     """Extract the numeric health value from the health crop via OCR.
 
     Upscales and thresholds the crop to maximise digit legibility, then strips
-    all non-digit characters from the OCR output.
+    all non-digit characters from the OCR output. Also used for the ammo
+    counters (label='ammo_flares'/'ammo_missiles').
 
     Args:
         health_frame: numpy array (BGR) — the extracted health crop region.
+        label: crop name used in the no-digits debug log.
 
     Returns:
         tuple: (health_value: int or None, ocr_time: float)
@@ -369,12 +378,18 @@ def _process_health_region(health_frame) -> "tuple[int | None, float]":
     upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
     _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+    raw_reads = []
     for img in (binary, upscaled):
         results = reader.readtext(img, detail=0, paragraph=False, workers=0)
+        raw_reads.extend(str(r) for r in results)
         digits = "".join(c for r in results for c in str(r) if c.isdigit())
         if digits:
             return (int(digits), time.time() - t_start)
 
+    # No digits in either variant — log what OCR actually saw so a dead or
+    # misaligned crop is diagnosable from the session log (2026-08-13: the
+    # AMMO_MISSILE crop produced 2 readings in an hour with no trace of why).
+    logger.debug("Analyzer: %s OCR found no digits — raw: %r", label, raw_reads)
     return (None, time.time() - t_start)
 
 
@@ -843,6 +858,11 @@ class GameStateAnalyzer:
         self._incoming_template_near_threshold_low = float(incoming_cfg.get("incoming_template_near_threshold_low", 0.76))
         self._incoming_template_near_threshold_high = float(incoming_cfg.get("incoming_template_near_threshold_high", 0.81))
         self._incoming_template_fallback_to_ocr = bool(incoming_cfg.get("incoming_template_fallback_to_ocr", True))
+        fallback_tokens_cfg = incoming_cfg.get("incoming_fallback_tokens")
+        self._incoming_fallback_tokens = (
+            tuple(str(t).upper() for t in fallback_tokens_cfg if str(t).strip())
+            if fallback_tokens_cfg else _DEFAULT_INCOMING_FALLBACK_TOKENS
+        )
         self._incoming_template_telemetry_info = bool(incoming_cfg.get("incoming_template_telemetry_info", True))
         self._incoming_debounce_ms = int(incoming_cfg.get("incoming_debounce_ms", 500))
         self._incoming_debounce_window_s = max(0.0, self._incoming_debounce_ms / 1000.0)
@@ -2248,10 +2268,11 @@ class GameStateAnalyzer:
                         self._incoming_template_near_threshold_low,
                         self._incoming_template_near_threshold_high,
                         self._incoming_template_fallback_to_ocr,
+                        self._incoming_fallback_tokens,
                     )
                     health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
-                    ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame) if ammo_flares_frame is not None else None
-                    ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame) if ammo_missile_frame is not None else None
+                    ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame, "ammo_flares") if ammo_flares_frame is not None else None
+                    ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame, "ammo_missiles") if ammo_missile_frame is not None else None
                     # Telemetry is fire-and-forget: harvest last submission's
                     # result if it finished, then maybe submit a fresh frame.
                     # The tick NEVER waits on telemetry (ADR 038 safety rule) —

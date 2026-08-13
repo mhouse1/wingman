@@ -27,3 +27,7 @@ calibration:
     crops: [event_refresh, event_refresh_dismiss]
   - screenshot: MINIMAP.png           # 1920×1200 — battle minimap, top-right circle
     crops: [MINIMAP]
+  - screenshot: AMMO_FLARES.png       # 1920×1200 — battle HUD, flare counter bottom-left
+    crops: [AMMO_FLARES]
+  - screenshot: AMMO_MISSILE.png      # 1920×1200 — battle HUD, missile counter bottom-left
+    crops: [AMMO_MISSILE]

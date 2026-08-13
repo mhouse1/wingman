@@ -22,8 +22,6 @@ from constants import (
     TEST_SCREENSHOT_CONTINUE,
     TEST_SCREENSHOT_CONTINUE_1,
     TEST_SCREENSHOT_INCOMING,
-    TEST_SCREENSHOT_INCOMING_1,
-    TEST_SCREENSHOT_INCOMING_2,
 )
 from wingman.analyzer import GameState, GameStateAnalyzer, _get_thread_ocr_reader
 from wingman.crop_region import get_crop
@@ -290,8 +288,6 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
     "image_path",
     [
         TEST_SCREENSHOT_INCOMING,
-        TEST_SCREENSHOT_INCOMING_1,
-        TEST_SCREENSHOT_INCOMING_2,
     ],
 )
 def test_level4_region9_contains_inco(require_easyocr, image_path: Path):

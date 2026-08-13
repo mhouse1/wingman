@@ -14,8 +14,8 @@ crops:
     text: [RESPAWN]
   incoming:
     coords:
-    - [0.4618, 0.2556]
-    - [0.5361, 0.2844]
+    - [0.4521, 0.2667]
+    - [0.5486, 0.2967]
     text: [MING, ARNING]
   click_to:
     coords:
@@ -93,12 +93,12 @@ crops:
     text: [UNREADY]
   AMMO_FLARES:
     coords:
-    - [0.0118, 0.9589]
-    - [0.0194, 0.9767]
+    - [0.009, 0.9544]
+    - [0.0194, 0.97]
   AMMO_MISSILE:
     coords:
-    - [0.0854, 0.9578]
-    - [0.0958, 0.9756]
+    - [0.0792, 0.9533]
+    - [0.0868, 0.9711]
   ENEMY_CLOSE_BY:
     coords:
     - [0.8764, 0.0822]
@@ -135,44 +135,24 @@ incoming_detection:
   incoming_template_near_threshold_low: 0.76
   incoming_template_near_threshold_high: 0.81
   incoming_template_fallback_to_ocr: true
+  incoming_fallback_tokens: [MING, ARNING]
   incoming_template_telemetry_info: false
   incoming_debounce_ms: 500
   incoming_template_scales: [1.0]
-  incoming_template_sources: [test_screenshots/INCOMING3.png]
+  incoming_template_sources: [test_screenshots/INCOMING.png]
 mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0,
   good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true, starting_health_probe_interval_s: 0.4}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
-j20_mission:
-  target_painting_mode: false
-  attack_mode_dry_run: false       # log-only mode: compute intents, inject nothing
-  min_safe_altitude: 500           # CFIT floor — all steering suppressed below
-  bearing_deadzone_deg: 12         # no roll inside this bearing error
-  short_ring_min_count: 1          # short-ring contacts required to orbit
-  ring_debounce_ticks: 2           # consecutive ticks to enter or leave orbit
-  ema_reseed_angle_deg: 60         # reseed steering EMA only on target jumps beyond this
-  rear_commit_deg: 150             # commit turn direction when target is deep astern
-  rear_release_deg: 90             # release only in the forward semicircle (18:21 tail-crossing finding)
-  orbit_direction: right           # fixed orbit roll direction (right or left)
-  orbit_roll_hold_s: 0.3           # roll hold per orbit correction
-  orbit_roll_interval_s: 2.0       # cadence of orbit corrections
-  coarse_kp: 0.5                   # gains passed to orient_nose_to_target
-  coarse_min_hold_s: 0.15
-  coarse_max_hold_s: 0.6
-  coarse_cooldown_s: 2.0
-behavior_tree:                     # ADR 024 Phase 3 — tactic selection
-  mode: active                     # off | shadow (log only) | active (Engage leaf owns geometry, 3.1a)
-  disengage_after_s: 30            # all-rings-empty duration before DISENGAGE selects
-  disengage_hold_s: 10             # minimum hold once DISENGAGE selected
-  evade_hold_s: 10                 # minimum hold once EVADE selected
-  # evade_health_threshold:        # unset — EVADE disabled until calibrated (ADR 024)
-minimap:                           # Design 003 — MINIMAP red-icon scan
-  mask_radius_frac: 0.93           # circle mask radius as fraction of half the shorter side
-  min_blob_px: 4                   # component area band for enemy icons
-  max_blob_px: 120
-  ema_alpha: 0.4                   # centroid-vector smoothing (dry-run 2026-08-08 jitter finding)
-  ema_reset_after_s: 5.0           # reseed EMA after a detection gap this long
+j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_altitude: 500,
+  bearing_deadzone_deg: 12, short_ring_min_count: 1, ring_debounce_ticks: 2, ema_reseed_angle_deg: 60,
+  rear_commit_deg: 150, rear_release_deg: 90, orbit_direction: right, orbit_roll_hold_s: 0.3,
+  orbit_roll_interval_s: 2.0, coarse_kp: 0.5, coarse_min_hold_s: 0.15, coarse_max_hold_s: 0.6,
+  coarse_cooldown_s: 2.0}
+behavior_tree: {mode: active, disengage_after_s: 30, disengage_hold_s: 10, evade_hold_s: 10}
+minimap: {mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
+  ema_reset_after_s: 5.0}
 tracking:
   enabled: false
   acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
