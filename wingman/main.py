@@ -4,7 +4,6 @@ import sys
 import yaml
 import time
 import logging
-import subprocess
 import threading
 from datetime import datetime
 from enum import Enum, auto
@@ -290,6 +289,8 @@ def main():
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     starting_stalled_reclassify_after_s = float(mission_cfg.get("starting_stalled_reclassify_after_s", 20.0))
     starting_max_wait_s = float(mission_cfg.get("starting_max_wait_s", 90.0))
+    # Startup stall watchdog: exit wingman (never the host) if battle is never reached.
+    startup_stall_exit_after_s = float(mission_cfg.get("startup_stall_exit_after_s", 600.0))
     unknown_max_wait_s = float(startup_cfg.get("unknown_max_wait_s", 90.0))
     unknown_state_since = 0.0
     startup_classification_complete = False
@@ -658,20 +659,29 @@ def main():
                 if current_game_state == GameState.GAME_BATTLE:
                     battle_ever_reached = True
 
-            # Watchdog: if GAME_BATTLE not entered within 10 minutes, shut down wingman and PC.
-            # Skipped in replay/capture modes. Uses `shutdown /s /t 0` which does not require
-            # elevated privileges on Windows — standard users hold SeShutdownPrivilege by default.
+            # Watchdog: if GAME_BATTLE is not entered within the stall window, exit
+            # WINGMAN ONLY — never the machine. Skipped in replay/capture modes.
+            #
+            # This used to run `shutdown -h now` (`shutdown /s /t 0` on Windows),
+            # which took the whole host down on any long stall: a game stuck on a
+            # login screen, a matchmaking queue that never filled, or a capture
+            # backend that came up before the game did. That destroys the session
+            # under investigation along with everything else running on the box.
+            # The stall is a wingman-level condition and gets a wingman-level
+            # response — record why, then leave through the normal exit path so
+            # cleanup() releases every held key and the stats/perf artifacts are
+            # still written.
             if (not battle_ever_reached
                     and not replay_mode and not capture_mode
-                    and time.time() - startup_time > 600.0):
-                logger.warning(
-                    "GAME_BATTLE not reached within 10 minutes of startup — shutting down wingman and computer"
+                    and time.time() - startup_time > startup_stall_exit_after_s):
+                logger.error(
+                    "STALL: GAME_BATTLE not reached within %.0fs of startup "
+                    "(last state %s) — exiting wingman. The computer is left "
+                    "running; check the game window and relaunch.",
+                    startup_stall_exit_after_s,
+                    getattr(current_game_state, "name", current_game_state),
                 )
                 exit_requested.set()
-                if sys.platform == "win32":
-                    subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
-                else:
-                    subprocess.run(["shutdown", "-h", "now"], check=False)
                 break
 
             missiles_snapshot = analyzer.get_ammo_missiles()

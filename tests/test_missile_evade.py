@@ -252,3 +252,143 @@ def test_simulate_mode_records_intents(monkeypatch):
     released = {i["key"] for i in intents if i["action_type"] == "key_release"}
     assert pressed == EVADE_KEYS
     assert released == EVADE_KEYS
+
+
+def test_evade_yields_when_eject_starts_mid_hold(monkeypatch):
+    """ADR 070 d11 — the defect observed 2026-08-12 05:34:50.
+
+    Selection priority (d1) is NOT symmetric in time: it stops an evade
+    STARTING under a selected Eject, but ConditionTactic.terminate is a no-op
+    and the hold thread self-terminates on its own clear timer, so an eject
+    beginning AFTER the evade had nothing to stop it. In the live session the
+    evade held roll-right + yaw-left + burner for 4.8 s into an eject, which
+    climbed to +55deg while its descent controller pulsed nose-down against it.
+    """
+    analyzer = _FakeIncomingAnalyzer(detected=True)  # stays positive: only eject ends this
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 3.0, "min_clear_samples": 2, "max_hold_s": 15.0})
+
+    ctrl.missile_evade_mode()
+    time.sleep(0.15)
+    assert ctrl.is_missile_evading()
+
+    t_eject = time.time()
+    ctrl._ejecting.set()  # eject_and_dive's thread body does exactly this
+
+    assert _wait_done(ctrl, timeout=2.0), "evade did not yield to the eject"
+    yielded_in = time.time() - t_eject
+    assert yielded_in < 1.0, f"evade took {yielded_in:.2f}s to yield to the eject"
+    for key in EVADE_KEYS:
+        assert _releases(kb, key), f"'{key}' not released to the eject sequence"
+
+
+def test_evade_does_not_start_while_ejecting(monkeypatch):
+    """d11: eject owns the airframe — no evade may begin under it."""
+    analyzer = _FakeIncomingAnalyzer(detected=True)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 0.1, "min_clear_samples": 1, "max_hold_s": 0.5})
+
+    ctrl._ejecting.set()
+    ctrl.missile_evade_mode()
+
+    assert not ctrl.is_missile_evading()
+    assert not kb.events, "keys were pressed despite an eject in progress"
+
+
+def test_evade_release_cannot_desync_eject_afterburner(monkeypatch):
+    """The reverse corruption d11 also closes: if the evade's finally released
+    AFTERBURNER while an eject held it, the eject's _eject_ab_engaged flag
+    would still read True and it would never re-press — burner silently off
+    for the rest of the dive. Yielding fast is what prevents the overlap in
+    which that can happen."""
+    analyzer = _FakeIncomingAnalyzer(detected=True)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 3.0, "min_clear_samples": 2, "max_hold_s": 15.0})
+
+    ctrl.missile_evade_mode()
+    time.sleep(0.15)
+    ctrl._ejecting.set()
+    assert _wait_done(ctrl, timeout=2.0)
+
+    # The eject's AB gate (engages only while descending) runs on a 1.5s
+    # interval; the evade must be fully out well inside one such cycle.
+    ab_releases = _releases(kb, AFTERBURNER_KEY)
+    assert ab_releases, "afterburner never released"
+    assert not ctrl._eject_ab_engaged, (
+        "evade exited with the eject's afterburner flag set — the eject would "
+        "believe the burner is on and never re-press it"
+    )
+
+
+def test_manoeuvre_limit_is_a_normal_exit(monkeypatch):
+    """ADR 070 d12: past ~5 s the manoeuvre only bleeds energy (2026-08-12: a
+    14 s hold traded 620 KPH for altitude and ended slow, high and level). The
+    tactical limit ends it NORMALLY — it must not masquerade as the max_hold
+    detector-fault backstop, or every long engagement logs a false fault."""
+    t0 = time.time()
+    analyzer = _FakeIncomingAnalyzer(detected=True, ts=t0)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 3.0, "min_clear_samples": 2,
+                       "max_manoeuvre_s": 0.4, "max_hold_s": 15.0})
+
+    ctrl.missile_evade_mode()
+    # Keep the detection fresh and positive — only the manoeuvre limit can end this.
+    for i in range(1, 8):
+        time.sleep(0.1)
+        analyzer.set(True, t0 + i * 0.1)
+
+    assert _wait_done(ctrl, timeout=3.0), "manoeuvre limit never fired"
+    releases = _releases(kb, ROLL_RIGHT_KEY)
+    assert releases
+    held = releases[0][2] - t0
+    assert held < 2.0, f"held {held:.1f}s — the 15s backstop fired instead of the limit"
+    for key in EVADE_KEYS:
+        assert _releases(kb, key), f"'{key}' not released at the manoeuvre limit"
+
+
+def test_pitch_down_variant_holds_and_brackets_nose_down(monkeypatch):
+    """d13: the descending-break variant adds NOSE_DOWN. It is a WATCHED
+    maneuver key, so it needs the same d4 programmatic bracket as ROLL_RIGHT —
+    without it the hold self-cancels the mission into manual takeover."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    analyzer = _FakeIncomingAnalyzer(detected=True)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 0.1, "min_clear_samples": 1,
+                       "max_manoeuvre_s": 0.4, "max_hold_s": 5.0,
+                       "pitch_down": True})
+
+    ctrl.missile_evade_mode()
+    time.sleep(0.15)
+    with ctrl._programmatic_key_lock:
+        assert ctrl._programmatic_key_counts.get(NOSE_DOWN_KEY, 0) == 1, (
+            "NOSE_DOWN held without the programmatic bracket — its XTest "
+            "auto-repeats would read as the player and cancel the mission"
+        )
+
+    assert _wait_done(ctrl)
+    assert _presses(kb, NOSE_DOWN_KEY), "pitch_down variant never pressed NOSE_DOWN"
+    assert _releases(kb, NOSE_DOWN_KEY), "NOSE_DOWN never released"
+    with ctrl._programmatic_key_lock:
+        assert ctrl._programmatic_key_counts.get(NOSE_DOWN_KEY, 0) == 0
+        assert ctrl._prog_release_grace_until.get(NOSE_DOWN_KEY, 0.0) > time.time() - 0.5
+
+
+def test_pitch_down_off_by_default_leaves_nose_alone(monkeypatch):
+    """The shipped triple is unchanged: d13 is opt-in."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    analyzer = _FakeIncomingAnalyzer(detected=True)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 0.1, "min_clear_samples": 1,
+                       "max_manoeuvre_s": 0.4, "max_hold_s": 5.0})
+
+    ctrl.missile_evade_mode()
+    assert _wait_done(ctrl)
+    assert not _presses(kb, NOSE_DOWN_KEY), "NOSE_DOWN pressed without pitch_down"

@@ -228,6 +228,100 @@ the lock, and d7 means the tactic never touches mission state anyway. The
 condition therefore tests only `incoming_detected`, with `Idle` (not in
 GAME_BATTLE) as the sole containing gate.
 
+### d11 — Eject preemption is bidirectional (added 2026-08-12)
+
+**d1's mutual exclusion was one-directional and did not hold.** Selection
+priority stops an evade *starting* while Eject is selected. It does nothing
+about an eject that starts while an evade is *already running*:
+`ConditionTactic.terminate` is a deliberate no-op
+([behavior_tree.py:119](../../wingman/behavior_tree.py#L119)) and the hold
+thread self-terminates only on its own clear timer (d5). So the "two owners on
+one key" fault d1 claims to prevent was prevented in exactly one of the two
+orderings.
+
+The 2026-08-12 05:34:50 session hit the other one:
+
+```
+05:34:50.956  MISSILE EVADE — holding afterburner + roll right + yaw left
+05:34:50.960  BT: Engage -> MissileEvade   (missiles=0, rings 0/0/0)
+05:34:52.460  MISSILES EMPTY — cancelling mission and ejecting
+05:34:54.012  eject rotation pulse 1/12 (rate 406 m/s, nose +55deg)   <- climbing
+05:34:57.264  missile_evade complete (clear, 6.3s)
+05:35:29.149  eject_and_dive — descending (-174 m/s) — afterburner engaged
+```
+
+For **4.8 s** the evade held roll-right, yaw-left and burner while
+`eject_and_dive` pulsed nose-down against it. Altitude over the eject's first
+six seconds: 7596 → 8663 → 9347 m — the aircraft *climbed* through a commanded
+dive. The eject's burner gate gets engaged only while descending (ADR 069 d8),
+so it stayed shut for **32 s**, and the whole eject took 57 s.
+
+There is also a reverse corruption the same overlap enables: `_eject_ab_engaged`
+is a plain bool, and AFTERBURNER goes through `_eject_key`'s *unguarded* path.
+Had the eject engaged the burner during the overlap, this thread's `finally`
+would have released the physical key while the eject's flag still read True —
+the eject would believe the burner was on and never re-press it, flying the
+rest of the dive without it. It did not happen here only because the burner
+gate never opened during the overlap.
+
+**Decision:** the evade yields the airframe to the eject, both ways.
+`missile_evade_mode()` refuses to start while `_ejecting` is set, and the hold
+loop tests `_ejecting` every poll and breaks with exit reason `eject_preempt`,
+releasing all three keys. At a 0.1 s poll against the eject's 1.5 s descent
+interval, the evade is out well before the burner gate can open. Eject wins,
+as d1 always intended — this makes that true in both time orders.
+
+### d12 — A tactical limit separate from the fault backstop (added 2026-08-12)
+
+`max_hold_s` (d6) is a *runaway-detector* backstop: it fires only when a
+detection is stuck true, and says so at WARNING. It is not a statement about
+how long the manoeuvre is useful.
+
+The 2026-08-12 evidence says those are different numbers. Every evade that
+ended normally ran **4.6–4.9 s**. The one that ran 14.0 s (exiting on `clear`,
+1.0 s short of the cap) shows what the tail costs:
+
+| Elapsed | Altitude | Speed | Nose |
+|---------|----------|-------|------|
+| entry | 3991 | 1849 | +41 deg |
+| +3 s | 5267 | 2009 | +50 deg |
+| +6 s | 6450 | 1763 | +54 deg |
+| +9 s | 7275 | 1515 | +41 deg |
+| +12 s | 7561 | 1229 | +16 deg |
+
+Climb rate decays monotonically (+1276, +1183, +825, +286 m per 3 s) and speed
+falls 34%. The nose drops from +54 to +16 deg with nothing commanding it — the
+aircraft simply ran out of energy. It finished slow, high and nearly level:
+worse than it started, and worse than doing nothing.
+
+So: `max_manoeuvre_s` (6.0) ends the evade as a **normal** exit at INFO, reason
+`manoeuvre_limit`, releasing while incoming may still be present. `max_hold_s`
+(15.0) stays as the outer fault backstop at WARNING and becomes unreachable in
+normal operation — which is what a backstop should be.
+
+They are kept as two values rather than one lowered value deliberately. Folding
+the tactical limit into `max_hold_s` would log "detector fault" on every
+genuinely long engagement, poisoning exactly the logs the effectiveness work
+(V5) has to read.
+
+### d13 — `pitch_down`: the descending-break variant (added 2026-08-12)
+
+V2 established that the shipped triple produces a climbing corkscrew, not the
+descending break d3 argued for, because no key in it commands pitch. `pitch_down`
+adds `NOSE_DOWN_KEY` to the hold, making the manoeuvre an actual break.
+
+**Off by default.** It is the unproven variant: it inherits none of the base
+triple's live evidence, and it re-opens the ADR 069 d2 finding that continuous
+nose-down mushed the airframe and halved the descent rate — a finding about a
+40 s eject descent, which may or may not transfer to a 5 s evade, and that is
+precisely what has to be measured before it ships on.
+
+`NOSE_DOWN_KEY` is a watched maneuver key, so it takes the same d4 programmatic
+bracket as `ROLL_RIGHT_KEY`. The bracket is now derived from
+`_WATCHED_MANEUVER_KEYS` rather than hardcoded, so the hotkey registration and
+the evade hold cannot drift apart — the failure that drift would produce is
+silent self-cancelling missions.
+
 ### d10 — Config and its plumbing
 
 ```yaml
@@ -236,7 +330,9 @@ behavior_tree:
     enabled: true          # false = leaf reverts to selection-only, no keys
     clear_seconds: 3.0     # incoming absent this long ends the evade (d5)
     min_clear_samples: 2   # liveness floor, not a tuning knob (d5)
-    max_hold_s: 15.0       # unconditional release (d6)
+    max_manoeuvre_s: 6.0   # tactical limit, normal exit (d12)
+    max_hold_s: 15.0       # outer fault backstop, WARNING (d6)
+    pitch_down: false      # descending-break variant (d13)
 ```
 
 `enabled: false` leaves the leaf in the tree with no actuator wired, matching
@@ -449,6 +545,40 @@ Each item must be answered before the tactic is enabled in a live mission.
   change over 3–6 s, rather than a mild flat skid the missile solution can
   absorb. If the departure is small, the lever to reach for is duration or an
   added pitch input — not a different axis pairing.
+
+  *Live-fire evidence, 2026-08-12 — 5 clean evades across two sessions
+  (one further evade overlapped an eject and is excluded; see d11).* Entry and
+  exit telemetry, one row per evade:
+
+  | Entry (alt / speed / nose) | Exit (alt / speed / nose) | Δalt | Δspeed | Δnose |
+  |---------------------------|---------------------------|------|--------|-------|
+  | 1611 / 1004 / +44 | 2911 / 999 / +49 | +1300 | -5 | +5 |
+  | 5339 / 2030 / +54 | 7776 / 1588 / +59 | +2437 | -442 | +5 |
+  | 8560 / 1318 / +46 | 9579 / 852 / +60 | +1019 | -466 | +14 |
+  | 4336 / 1928 / +45 | 6923 / 1688 / +61 | +2587 | -240 | +16 |
+  | 6377 / 1946 / +55 | 9347 / 1113 / +48 | +2970 | -833 | -7 |
+
+  **The manoeuvre is an energy-bleeding zoom climb, not a break.** Every evade
+  climbed (+1000 to +3000 m in 5–6 s). Four of five *steepened* the nose by 5
+  to 16 degrees, so the triple does not merely inherit the entering flight-path
+  angle as first supposed — the roll-plus-rudder pair actively slices the nose
+  **up**. Speed fell in every sample with room to fall, by up to 833 KPH (1946
+  → 1113, a ~40% loss) despite the burner being held throughout.
+
+  d3's mechanism is therefore wrong in its most important respect. The
+  cross-axis heading departure is real; the *descending* break is not, and
+  cannot be — there is no pitch input in the triple to command one. What the
+  aircraft actually does is trade its speed for altitude while corkscrewing,
+  which is the opposite of what a missile-defeating break wants: slower,
+  higher, and with less energy left to manoeuvre when the next missile arrives.
+
+  This does not by itself prove the tactic is harmful — V5 (per-mission deaths)
+  is still the arbiter, and a large heading change may defeat a seeker
+  regardless of the vertical. But the burden has shifted: the mechanism d3
+  argued from is not the mechanism in effect. Adding NOSE_DOWN to the hold is
+  the obvious lever and would make it a genuine split-S-style break, but that
+  is a change to d3 requiring its own evidence, and it re-opens the ADR 069
+  finding about continuous pitch input mushing the airframe.
 - **V3 — mission-thread overlap.** Confirm from a shadow session log whether a
   `j20_mission` scripted leg injects flight keys during an evade window. If it
   does, d7 needs revisiting — most likely a mission-maneuver suppression flag
@@ -469,6 +599,30 @@ Each item must be answered before the tactic is enabled in a live mission.
   `MissionStatsTracker` across matched sessions with the tactic off and on.
   Flares-only is the baseline.
 
+  *First numbers (deaths per mission, from the session stats JSONs):*
+
+  | Condition | Sessions | Missions | Deaths | Deaths/mission |
+  |-----------|----------|----------|--------|----------------|
+  | Evade OFF (2026-08-11, shadow) | 3 | 13 | 33 | **2.54** |
+  | Evade ON (2026-08-12) | 2 | 12 | 32 | **2.67** |
+
+  **No benefit detected.** The difference is noise at this sample size, and the
+  comparison is weak for a second reason: only 8 evades fired across those 12
+  missions, so the large majority of deaths occurred in engagements the tactic
+  never touched. A real verdict needs either many more missions or a
+  per-engagement measure (did the aircraft survive the 10 s after each incoming
+  alert, evade vs no evade) rather than a per-mission one. What can be said is
+  that nothing so far supports the tactic paying for itself, and V2's
+  energy-bleed finding supplies a mechanism by which it could cost something.
+
+  *Instrumentation added 2026-08-12:* `MissionStatsTracker` now records one
+  engagement per missile volley (alerts within 3 s are one volley, matching the
+  measured 1.3–1.7 s intra-volley cadence), tags it with whether an evade
+  fired, and marks it died if a respawn lands within 10 s. The session summary
+  and stats JSON carry `missile_engagements` with survival split evade vs
+  no-evade. This makes V5 answerable per engagement instead of per mission, so
+  a handful of sessions can settle it rather than dozens.
+
 ## Consequences
 
 - The first tactic in the tree whose trigger is an event rather than a standing
@@ -479,8 +633,11 @@ Each item must be answered before the tactic is enabled in a live mission.
   the manual-takeover guard. d4 covers `l`; if a future keybinding change makes
   `e` or `;` watched, this tactic breaks silently into self-cancelling missions.
 - `AFTERBURNER_KEY` now has two owners in the codebase (eject and evade),
-  mutually excluded only by selector priority. Any future tactic that touches
-  the burner must sit in the same priority chain, not outside it.
+  mutually excluded by selector priority **and** by the d11 runtime yield.
+  Selector priority alone proved insufficient: it orders *selections*, not the
+  lifetimes of the threads those selections start. Any future tactic that
+  touches the burner needs both — a slot in the priority chain and an explicit
+  runtime check against the tactics that outrank it.
 - Fuel/energy state is not modelled anywhere in wingman, so repeated
   afterburner evades have a cost the system cannot observe.
 - `;` acquires a runtime caller for the first time. A key that has sat inert in

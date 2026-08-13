@@ -430,6 +430,12 @@ SWITCH_WEAPON = 'g'
 SPECIAL_ABILITY = 'q'
 PADLOCK_CAMERA = 'p'
 ALT_FLIGHT_KEYS = ('up', 'down', 'left', 'right')  # Arrow keys also trigger GAME_BATTLE_MANUAL
+# Keys the maneuver-key hotkey listener watches as a manual-takeover signal.
+# Anything held programmatically from this set MUST be bracketed with
+# _inc_programmatic_key / release grace, or its XTest auto-repeats read as the
+# player and self-cancel the mission (ADR 070 d4).
+_WATCHED_MANEUVER_KEYS = (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+                          *ALT_FLIGHT_KEYS)
 TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
 MISSION_J20_KEY = 'u'  # Press U to start J20 mission
 MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
@@ -607,6 +613,15 @@ class Controller:
         self._me_clear_s = float(_me_cfg.get("clear_seconds", 3.0))
         self._me_min_clear_samples = int(_me_cfg.get("min_clear_samples", 2))
         self._me_max_hold_s = float(_me_cfg.get("max_hold_s", 15.0))
+        # ADR 070 d12: the TACTICAL limit — a normal exit, distinct from the
+        # max_hold_s fault backstop above. Beyond ~5 s the manoeuvre is only
+        # bleeding energy (2026-08-12 evidence: a 14 s hold traded 620 KPH for
+        # altitude and ended slow, high and nearly level).
+        self._me_max_manoeuvre_s = float(_me_cfg.get("max_manoeuvre_s", 6.0))
+        # ADR 070 d13: optional NOSE_DOWN in the hold, making the manoeuvre a
+        # descending break instead of the zoom climb the base triple produces.
+        # Off by default — it is the unproven variant, not the shipped one.
+        self._me_pitch_down = bool(_me_cfg.get("pitch_down", False))
 
         # Tracks how many programmatic presses are in flight, per key.
         # keyboard.KeyboardEvent has no is_injected attribute, so the getattr guard
@@ -690,7 +705,7 @@ class Controller:
                         key_name=getattr(e, 'name', str(e)),
                         is_injected=getattr(e, 'is_injected', False),
                     )
-                for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY, *ALT_FLIGHT_KEYS):
+                for _key in _WATCHED_MANEUVER_KEYS:
                     keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
                 logger.info(
                     "Controller: registered maneuver keys (%s/%s/%s/%s) and arrow keys to cancel mission on manual press",
@@ -1840,11 +1855,18 @@ class Controller:
         if self._missile_evading.is_set():
             logger.debug("Controller: missile_evade_mode already in progress — extending")
             return
+        # ADR 070 d11: eject owns the airframe. Selection priority (d1) only
+        # stops an evade STARTING when Eject is already selected; this covers
+        # the same instant from the Controller side.
+        if self._ejecting.is_set():
+            logger.info("Controller: missile_evade suppressed — eject in progress")
+            return
         # d8: flag set in the caller's thread, before any concurrency exists,
         # so is_missile_evading() never under-reports after a start.
         self._missile_evading.set()
         self._me_stop.clear()
-        logger.info("\033[95m🌀 MISSILE EVADE — holding afterburner + roll right + yaw left\033[0m")
+        logger.info("\033[95m🌀 MISSILE EVADE — holding %s\033[0m",
+                    " + ".join(self._missile_evade_key_labels()))
 
         def _run():
             try:
@@ -1857,6 +1879,23 @@ class Controller:
 
         self._me_thread = threading.Thread(target=_run, daemon=True)
         self._me_thread.start()
+
+    def _missile_evade_keys(self) -> tuple:
+        """Keys held for the duration of an evade, in press order (ADR 070 d3/d13).
+
+        NOSE_DOWN joins only under the d13 pitch_down variant. Both it and
+        ROLL_RIGHT are watched maneuver keys and get the d4 bracket.
+        """
+        keys = [AFTERBURNER_KEY, ROLL_RIGHT_KEY, YAW_LEFT]
+        if self._me_pitch_down:
+            keys.append(NOSE_DOWN_KEY)
+        return tuple(keys)
+
+    def _missile_evade_key_labels(self) -> list:
+        labels = ["afterburner", "roll right", "yaw left"]
+        if self._me_pitch_down:
+            labels.append("nose down")
+        return labels
 
     def _run_missile_evade_hold(self):
         """Thread body for missile_evade_mode: press, poll, release (ADR 070).
@@ -1880,14 +1919,17 @@ class Controller:
         fresh_negatives = 0
         exit_reason = "stopped"
 
-        # d4: ROLL_RIGHT is a watched maneuver key — held via XTest it
-        # auto-repeats ~40 ms with send_event=False, and each repeat would read
-        # as the player pressing 'l' and cancel the mission into manual
-        # takeover. Same bracket as disengage_roll_right. 'e' and ';' are
-        # unwatched and need none.
-        self._inc_programmatic_key(ROLL_RIGHT_KEY)
+        # d4: ROLL_RIGHT (and NOSE_DOWN under d13) are watched maneuver keys —
+        # held via XTest they auto-repeat ~40 ms with send_event=False, and each
+        # repeat would read as the player pressing the key and cancel the
+        # mission into manual takeover. Same bracket as disengage_roll_right.
+        # 'e' and ';' are unwatched and need none.
+        hold_keys = self._missile_evade_keys()
+        guarded_keys = tuple(k for k in hold_keys if k in _WATCHED_MANEUVER_KEYS)
+        for _key in guarded_keys:
+            self._inc_programmatic_key(_key)
         try:
-            for _key in (AFTERBURNER_KEY, ROLL_RIGHT_KEY, YAW_LEFT):
+            for _key in hold_keys:
                 if self._simulate_os_input:
                     self._record_action_intent("key_press", key=_key, action="missile_evade")
                 else:
@@ -1902,6 +1944,25 @@ class Controller:
             while not self._me_stop.wait(timeout=0.1):
                 if self._exit_event is not None and self._exit_event.is_set():
                     break
+                # ADR 070 d11: yield the airframe the instant an eject begins.
+                # Selection priority is NOT symmetric in time — it prevents an
+                # evade STARTING under a selected Eject, but ConditionTactic.
+                # terminate is a no-op and this thread self-terminates on its
+                # own clear timer, so an eject that starts AFTER the evade had
+                # nothing to stop it. Observed 2026-08-12 05:34:50: the evade
+                # held roll-right + yaw-left + burner for 4.8 s INTO an eject,
+                # which climbed to +55deg while its descent controller pulsed
+                # nose-down against it (alt 7596 -> 9347 m) and its burner gate,
+                # which only engages while descending, stayed shut for 32 s.
+                # Releasing here also prevents the reverse corruption: this
+                # thread's finally releasing AFTERBURNER out from under a
+                # running eject, whose _eject_ab_engaged flag would still read
+                # True and never re-press it.
+                if self._ejecting.is_set():
+                    logger.info("Controller: missile_evade — eject started, "
+                                "releasing keys to the eject sequence")
+                    exit_reason = "eject_preempt"
+                    break
                 now = time.time()
                 if now - entry_ts >= self._me_max_hold_s:
                     logger.warning(
@@ -1910,6 +1971,18 @@ class Controller:
                         "not a normal exit.",
                         self._me_max_hold_s, last_positive_ts)
                     exit_reason = "max_hold"
+                    break
+                # ADR 070 d12: the manoeuvre has run its useful course. A NORMAL
+                # exit at INFO — distinct from the max_hold backstop above,
+                # which means the detector is stuck. Conflating the two would
+                # log "detector fault" on every genuinely long engagement and
+                # poison the logs the effectiveness work reads.
+                if now - entry_ts >= self._me_max_manoeuvre_s:
+                    logger.info(
+                        "Controller: missile_evade — manoeuvre limit (%.1fs) "
+                        "reached, releasing while incoming is still present",
+                        self._me_max_manoeuvre_s)
+                    exit_reason = "manoeuvre_limit"
                     break
                 if self._analyzer is None:
                     continue
@@ -1937,7 +2010,7 @@ class Controller:
                     exit_reason = "clear"
                     break
         finally:
-            for _key in (YAW_LEFT, ROLL_RIGHT_KEY, AFTERBURNER_KEY):
+            for _key in reversed(hold_keys):
                 if self._simulate_os_input:
                     self._record_action_intent("key_release", key=_key, action="missile_evade")
                 elif keyboard_module:
@@ -1948,8 +2021,9 @@ class Controller:
             # Physical release first, THEN the grace + counter drop, so repeats
             # already queued in the XRecord pipeline cannot be misread as the
             # player (the _eject_key release-ordering finding).
-            self._arm_release_grace(ROLL_RIGHT_KEY)
-            self._dec_programmatic_key(ROLL_RIGHT_KEY)
+            for _key in guarded_keys:
+                self._arm_release_grace(_key)
+                self._dec_programmatic_key(_key)
         logger.info("Controller: missile_evade complete (%s, %.1fs)",
                     exit_reason, time.time() - entry_ts)
 
