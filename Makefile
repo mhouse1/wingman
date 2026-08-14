@@ -43,7 +43,11 @@ HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi
 PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pytest)
 PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
 CAPTURE_PATH ?= PATH1
-CAPTURE_TIMEOUT_S ?= 120.0
+# Real-game capture (make p1/p2/p3) must outlast a full mission cycle
+# (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
+# replay pacing the out-of-order deadline is derived from. The ADR 045
+# presenter lane hardcodes its own 30 s and is unaffected.
+CAPTURE_TIMEOUT_S ?= 600.0
 # Own artifact path, NOT wingman.log: this target rm -f's its log before
 # launching, and pointing it at the production filename silently deleted real
 # session logs every time the gate ran (the 2026-07-30 sessions were lost this
@@ -403,6 +407,7 @@ rr-live-path1:
 		--capture-path $(RR_LIVE_PATH1_NAME) \
 		--capture-screenshot-dir $(RR_LIVE_PATH1_CAPTURE_DIR) \
 		--capture-overwrite \
+		--capture-pin-region \
 		--capture-timeout-s 30.0 \
 		--capture-summary $(RR_LIVE_PATH1_CAPTURE_SUMMARY) \
 		--log-file $(RR_LIVE_PATH1_LOG); \

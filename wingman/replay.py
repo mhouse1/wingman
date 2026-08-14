@@ -305,6 +305,15 @@ class LivePathCaptureEngine:
         self._timeout_retries = 0
         self._seen_events: set[str] = set()
         self._event_last_seen_s: dict[str, float] = {}
+        # When each FSM state was last observed. Needed by the out-of-order
+        # both-fields readiness rule: a trigger that atomically EXITS its
+        # step's expected state (missiles_empty leaves GAME_BATTLE for
+        # GAME_BATTLE_EJECT since ADR 056; manual_mode leaves
+        # GAME_BATTLE_EJECT) can otherwise never be captured — by the next
+        # evaluate() tick the state has already moved on, so "trigger fresh
+        # AND state matches now" is unobservable by construction (P1_040
+        # timed out on every capture run, 2026-08-13 21:55).
+        self._state_last_seen_s: dict[str, float] = {}
         self._step_ready_source: dict[int, str | None] = {}
         self._step_ready_count: dict[int, int] = {}
 
@@ -420,6 +429,10 @@ class LivePathCaptureEngine:
                     self._pending_next_trigger = normalized_event
 
     def on_state(self, state_name: str, now_s: float) -> None:
+        normalized = _normalize_state(state_name)
+        if normalized is not None:
+            self._state_last_seen_s[normalized] = now_s
+
         step = self._current_step()
         if step is None:
             return
@@ -495,9 +508,20 @@ class LivePathCaptureEngine:
                 trigger_ready = True
 
             # In out-of-order mode, when both fields exist we require both to avoid
-            # capturing an unrelated frame long after the trigger fired.
+            # capturing an unrelated frame long after the trigger fired. The state
+            # half is satisfied by the CURRENT state or by the expected state
+            # having been observed within the freshness window — a trigger that
+            # atomically exits its expected state (missiles_empty, manual_mode)
+            # is otherwise uncapturable (see _state_last_seen_s comment).
             if expected_state is not None:
-                return "trigger" if (trigger_ready and normalized_state == expected_state) else None
+                state_ok = normalized_state == expected_state
+                if not state_ok:
+                    state_seen_s = self._state_last_seen_s.get(expected_state)
+                    state_ok = (
+                        state_seen_s is not None
+                        and (now_s - state_seen_s) <= self._trigger_freshness_s
+                    )
+                return "trigger" if (trigger_ready and state_ok) else None
             return "trigger" if trigger_ready else None
 
         if expected_state is not None:
@@ -594,6 +618,8 @@ class LivePathCaptureEngine:
                 self._mark_ended(now_s)
                 return
             normalized_state = _normalize_state(state_name)
+            if normalized_state is not None:
+                self._state_last_seen_s[normalized_state] = now_s
             for i, step in enumerate(self._steps):
                 result = self._results[i]
                 if result.status in {"captured", "failed", "skipped"}:
@@ -612,7 +638,16 @@ class LivePathCaptureEngine:
                     self._step_ready_source[i] = source
                     self._step_ready_count[i] = 1
 
-                if self._step_ready_count[i] < self._debounce_required:
+                # Trigger-sourced readiness captures on the FIRST ready
+                # evaluate: FSM triggers are already debounced upstream
+                # (ammo zero-streaks, OCR match filters), and one-shot
+                # triggers (missiles_empty — unlike cancel/good_luck, which
+                # OCR re-fires every tick) cannot survive N consecutive
+                # evaluates inside the 2.0 s freshness window at a 1.5 s
+                # loop tick. State-sourced readiness keeps the debounce as
+                # protection against classification flicker.
+                required = 1 if source == "trigger" else self._debounce_required
+                if self._step_ready_count[i] < required:
                     continue
 
                 self._capture_step(i, frame, now_s, source)

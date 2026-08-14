@@ -8,9 +8,9 @@ enemy_hsv:
   upper: [10, 255, 255]
 crops:
   respawn:
-    coords:
-    - [0.4188, 0.6978]
-    - [0.5292, 0.7233]
+    coords:                        # recalibrated 2026-08-13 from RESPAWN.png — overlay moved up ~2% in a game update
+    - [0.4229, 0.6778]
+    - [0.5486, 0.7022]
     text: [RESPAWN]
   incoming:
     coords:
@@ -142,8 +142,8 @@ incoming_detection:
   incoming_template_sources: [test_screenshots/INCOMING.png]
 mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0,
-  startup_stall_exit_after_s: 600.0,  # battle never reached -> exit wingman only, never the host
-  good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true, starting_health_probe_interval_s: 0.4}
+  startup_stall_exit_after_s: 600.0, good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true,
+  starting_health_probe_interval_s: 0.4}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
 j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_altitude: 500,
@@ -151,7 +151,18 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
   rear_commit_deg: 150, rear_release_deg: 90, orbit_direction: right, orbit_roll_hold_s: 0.3,
   orbit_roll_interval_s: 2.0, coarse_kp: 0.5, coarse_min_hold_s: 0.15, coarse_max_hold_s: 0.6,
   coarse_cooldown_s: 2.0}
-behavior_tree: {mode: active, disengage_after_s: 30, disengage_hold_s: 10, evade_hold_s: 10}
+behavior_tree:                     # ADR 024 Phase 3 — tactic selection
+  mode: active                     # off | shadow (log only) | active
+  disengage_after_s: 30
+  disengage_hold_s: 10
+  evade_hold_s: 10
+  missile_evade:                   # ADR 070 — MISSILE_EVADE_MODE
+    enabled: true                  # false = leaf selection-only (shadow); true = hold AB+ROLL_RIGHT+YAW_LEFT
+    clear_seconds: 3.0             # incoming absent this long ends the evade (d5); THE tuning knob
+    min_clear_samples: 2           # fresh negative cache updates required — liveness floor, leave alone (d5)
+    max_manoeuvre_s: 6.0           # tactical limit, NORMAL exit (d12) — past ~5s it only bleeds energy
+    max_hold_s: 15.0               # outer fault backstop; firing = stuck detector (d6)
+    pitch_down: false              # d13 variant: add NOSE_DOWN -> descending break instead of zoom climb
 minimap: {mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
   ema_reset_after_s: 5.0}
 tracking:
@@ -192,30 +203,10 @@ telemetry:
   steep_dive_min_sin: 0.8
   level_max_sin: 0.15
   ocr_every_n_ticks: 2
-  # ADR 069 — impulse rotation + ballistic descent. Rotation is PULSED and then
-  # observed; the descent itself is hands-off. Thresholds picked from 624
-  # archived eject windows: ballistic descents median -117 m/s, held -80 m/s.
   eject_closed_loop: {enabled: true, check_interval_s: 1.5, confirm_consecutive: 2,
-    legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0,
-    target_dive_angle_deg: 65.0,    # THE criterion: dive must reach this angle.
-                                    # 75 proved unreachable — the game oscillates the
-                                    # flight path around a -58 median, so 2 consecutive
-                                    # samples at -75 never occurred in 8 ejects. -65
-                                    # establishes in 6 of 8 (2026-08-10 18:50).
-    dive_angle_floor_deg: 55.0,     # sagging past this resumes rotation. Steeper than
-                                    # the -47 sag that prompted this fix, so that case
-                                    # is corrected; the 10 deg deadband above absorbs
-                                    # normal oscillation.
-    descent_target_mps: 100.0,      # fallback criterion when the angle is unavailable
-    descent_floor_mps: 50.0,        # fallback floor when the angle is unavailable
-    rotation_pulse_s: 2.0,          # bounded NOSE_DOWN impulse
-    observe_after_pulse_s: 3.5,     # mandatory look-before-acting gap (one refresh)
-    max_rotation_pulses: 12,        # actuation budget, replaces total_nose_budget_s.
-                                    # Raised 4 -> 6 -> 12: pulses now also MAINTAIN the
-                                    # dive angle through the descent, not just establish
-                                    # it. Bounded per-pulse, gated by the over-rotation
-                                    # guard (0 misfires in 52 ejects) and by eject_max_s.
-    eject_max_s: 120.0}             # wall-clock backstop for the whole sequence
+    legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
+    dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,
+    rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0}
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}

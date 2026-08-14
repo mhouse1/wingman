@@ -35,7 +35,9 @@ def load_config(path: Path | None = None) -> dict:
 
 def test_run_ocr_in_background(image_path: str = "RESPAWN.png"):
     if image_path == "RESPAWN.png":
-        image_path = str(PROJECT_ROOT / "test_screenshots" / "RESPAWN.png")
+        # Default respawn fixture is the gate-corpus frame (ADR 071).
+        image_path = str(PROJECT_ROOT / "test_screenshots" / "integration_test"
+                         / "P1_050_RESPAWN_VISIBLE_NO_HEALTH.png")
 
     analyzer = GameStateAnalyzer(load_config())
     analyzer.state = GameState.GAME_BATTLE.name  # CLI tests static screenshots; force GAME_BATTLE

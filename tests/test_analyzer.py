@@ -24,7 +24,6 @@ from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
     TEST_SCREENSHOT_B,
-    TEST_SCREENSHOT_C,
     TEST_SCREENSHOT_D,
     TEST_SCREENSHOT_INCOMING,
 )
@@ -88,8 +87,11 @@ def _load_image(image_path: Path):
 @pytest.mark.parametrize(
     "image_path, description",
     [
-        (TEST_SCREENSHOT, "normal quality"),
-        (TEST_SCREENSHOT_C, "discolored - tests OCR robustness"),
+        (TEST_SCREENSHOT, "normal quality"),  # P1_050 gate frame (ADR 071)
+        # RESPAWNC (discolored variant) deleted 2026-08-13: it showed the
+        # pre-update overlay layout, which the recalibrated respawn crop no
+        # longer covers — a correct non-match, not OCR fragility. Recapture a
+        # discolored NEW-layout frame to restore the robustness case.
     ],
 )
 def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_analyzer_easyocr, image_path: Path, description: str):

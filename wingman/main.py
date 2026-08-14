@@ -140,6 +140,11 @@ def main():
                         help="Allow synthetic inject_trigger use during live capture")
     parser.add_argument("--capture-start-at-step", default=None,
                         help="Optional screenshot_name to resume capture from")
+    parser.add_argument("--capture-pin-region", action="store_true",
+                        help="Pin capture to the config region instead of auto-detecting the "
+                             "game window. Required for the ADR 045 presenter lane (frames are "
+                             "drawn AT the region); wrong for real-game capture (make p1/p2/p3), "
+                             "where the game window sits at its own desktop offset.")
     args = parser.parse_args()
 
     console_level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -256,20 +261,31 @@ def main():
             timeout_advances=False,
             out_of_order=True,
         )
-        # ADR 045 lane: the presenter draws the timed screenshots AT the config
-        # region, so capture must be pinned there — auto-detecting the game
-        # window is actively wrong here (the game is a native Wayland window
-        # the presenter does not cover; when it sat away from the region, the
-        # lane captured live gameplay instead of the presented frames and
-        # every step failed — 2026-08-09 19:45 run).
-        lane_offset = (int(region[0]), int(region[1]))
-        cap = Capture(region, monitor_index, game_window_offset=lane_offset)
+        # Two capture lanes share this branch and need OPPOSITE offsets:
+        # - ADR 045 presenter lane (--capture-pin-region): the presenter draws
+        #   the timed screenshots AT the config region, so capture must be
+        #   pinned there — auto-detecting the game window is actively wrong
+        #   (when capture followed the game window it recorded live gameplay
+        #   instead of the presented frames and every step failed — 2026-08-09
+        #   19:45 run).
+        # - Real-game capture (make p1/p2/p3, no flag): the game window sits at
+        #   its own desktop offset (observed +66+69), so capture must
+        #   auto-detect exactly like a normal run. Pinning here shifts every
+        #   crop by that offset, OCR classifies nothing, and the lane dies at
+        #   the 90 s startup gate with zero screenshots (2026-08-13 21:48 and
+        #   21:50 runs — the pin was unconditional from 2026-08-09 until now).
+        if args.capture_pin_region:
+            lane_offset = (int(region[0]), int(region[1]))
+            cap = Capture(region, monitor_index, game_window_offset=lane_offset)
+            offset_note = f"capture pinned to config region at ({lane_offset[0]}, {lane_offset[1]})"
+        else:
+            cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
+            offset_note = "game-window auto-detect (real-game capture)"
         logger.info(
-            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict, "
-            "capture pinned to config region at (%d, %d)",
+            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict, %s",
             live_path.path_name,
             capture_screenshot_dir,
-            *lane_offset,
+            offset_note,
         )
     else:
         cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
