@@ -25,7 +25,11 @@ calibration:
     crops: [PLAY]
   - screenshot: UNREADY.png  # 1920×1200 — event refresh popup
     crops: [event_refresh, event_refresh_dismiss]
-  - screenshot: MINIMAP.png           # 1920×1200 — battle minimap, top-right circle
+  - screenshot: integration_test/P1_030_BATTLE_HUD_MISSILES_4.png  # battle minimap, top-right circle (ADR 072; MINIMAP.png stays as a CV test fixture)
     crops: [MINIMAP]
+  - screenshot: integration_test/P1_010_WAITING_CANCEL_VISIBLE.png  # matchmaking CANCEL button (ADR 072 — closes an unmapped-crop gap)
+    crops: [CANCEL]
+  - screenshot: integration_test/P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png  # health digits bottom-left (ADR 072 — closes an unmapped-crop gap)
+    crops: [HEALTH]
   - screenshot: integration_test/P1_030_BATTLE_HUD_MISSILES_4.png  # battle HUD (gate corpus) — both ammo counters visible
     crops: [AMMO_FLARES, AMMO_MISSILE]

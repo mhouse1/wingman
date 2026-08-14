@@ -9,7 +9,12 @@ Builds on [ADR 037](037-timed-screenshot-replay-integration-testing.md)
 (live auto-capture), [ADR 044](044-runtime-screenshot-driven-automation-lane.md) /
 [ADR 045](045-dual-lane-runtime-validation-replay-and-live-screen.md) (runtime
 gates). Does not supersede any of them: paths, capture, and gates keep their
-designs — this ADR decides what *images* they all consume. Code review
+designs — this ADR decides what *images* the replay/gate lanes consume and
+where CV ground truth lives. Companion:
+[ADR 072](072-calibration-screenshot-consolidation.md) owns the
+calibration-reference consolidation and the respawn-variant retirement; where
+this document's early drafts overlapped it (root-screenshot retirement,
+recapture-slot mechanics), ADR 072 is authoritative. Code review
 [CR-015](../code-review/015-2026-08.md) supplies the evidence trail.
 
 ## Context
@@ -58,7 +63,9 @@ not.**
    triggers over P1_030, the in-manual respawn step asserts OCR over P1_050,
    the end screens use P1_070/P1_080. The manual-takeover FSM test is
    unchanged — it never depended on P2 pixels.
-2. **Root-level duplicates are retired.** Unit/OCR tests and the calibration
+2. **Root-level duplicates are retired** *(detailed ownership of the
+   calibration-map consolidation now rests with ADR 072; summary kept here for
+   the corpus picture)*. Unit/OCR tests and the calibration
    map point at the gate frames: `TEST_SCREENSHOT` → P1_050,
    `TEST_SCREENSHOT_B` → P1_030, `TEST_SCREENSHOT_D` → P1_060,
    `TEST_SCREENSHOT_CONTINUE` → P1_070; calibration entries for respawn,
@@ -102,12 +109,14 @@ not.**
 - **A second click-to variant** (`continue1.png`): old layout; the single gate
   frame carries the case.
 
-Both recapture items are implemented as **self-activating skip-marked slots**
-(`pytest.mark.skipif(not FRAME.exists(), ...)`, the `test_minimap_bearing.py`
-idiom) in `test_analyzer.py` and `test_automated_levels.py`, with the target
-filenames pinned in `tests/constants.py` — dropping the captured file in place
-re-enables the coverage with no code change, and every test report lists the
-gap until then.
+**Superseded by ADR 072 decision 3 (2026-08-14):** the variant set is retired
+outright rather than held open for recapture — only the crop *location*
+changed in the game update, so per-layout variant maintenance is cost without
+coverage. The self-activating recapture slots this section originally
+prescribed were implemented and then removed when ADR 072 landed; the accepted
+losses (discolored-frame OCR robustness, the Levenshtein-distractor negative)
+and their revisit condition (a future update changing overlay *rendering*,
+not position) are recorded in ADR 072's consequences.
 
 ## Consequences
 

@@ -24,9 +24,7 @@ from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
     TEST_SCREENSHOT_B,
-    TEST_SCREENSHOT_C,
     TEST_SCREENSHOT_D,
-    TEST_SCREENSHOT_DISTRACTOR,
     TEST_SCREENSHOT_INCOMING,
 )
 
@@ -90,14 +88,8 @@ def _load_image(image_path: Path):
     "image_path, description",
     [
         (TEST_SCREENSHOT, "normal quality"),  # P1_050 gate frame (ADR 072)
-        # Self-activating recapture slot (ADR 072): skipped until a discolored
-        # NEW-layout frame is captured as RESPAWNC.png.
-        pytest.param(
-            TEST_SCREENSHOT_C, "discolored - tests OCR robustness",
-            marks=pytest.mark.skipif(
-                not TEST_SCREENSHOT_C.exists(),
-                reason="RESPAWNC.png recapture pending (ADR 072)"),
-        ),
+        # Respawn variants retired, no recapture — ADR 072 decision 3
+        # (discolored-frame coverage is an accepted loss, CR-015-04).
     ],
 )
 def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_analyzer_easyocr, image_path: Path, description: str):
@@ -115,14 +107,9 @@ def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_analyze
     [
         TEST_SCREENSHOT_B,  # P1_030 battle HUD — no respawn text
         TEST_SCREENSHOT_D,  # P1_060 battle HUD — no respawn text
-        # Self-activating recapture slot (ADR 072): near-miss text INSIDE the
-        # current respawn crop, restoring real Levenshtein-rejection coverage.
-        pytest.param(
-            TEST_SCREENSHOT_DISTRACTOR,
-            marks=pytest.mark.skipif(
-                not TEST_SCREENSHOT_DISTRACTOR.exists(),
-                reason="RESPAWND.png recapture pending (ADR 072)"),
-        ),
+        # Levenshtein-distractor negative retired with the variant set —
+        # ADR 072 decision 3 (accepted loss, CR-015-03). The token-level
+        # rejection cases live in test_respawn_text_matches below.
     ],
 )
 def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_analyzer_easyocr, image_path: Path):

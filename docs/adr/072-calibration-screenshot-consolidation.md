@@ -23,7 +23,7 @@ Make the integration-test path captures the single source of reference screensho
 
 1. **Repoint `tests/calibration_map.yaml` at `integration_test/` captures** wherever a `P*` screenshot shows the same UI element as a root screenshot. The `screenshot:` field carries a path relative to `test_screenshots/`, so entries become e.g. `integration_test/P1_030_BATTLE_HUD_MISSILES_4.png`.
 2. **Remove the redundant root screenshots; they are no longer maintained.** Already removed in this change: `AMMO_FLARES.png`, `AMMO_MISSILE.png`, `CANCEL.png`, `continue.png`, `continue1.png`, `RESPAWNC.png`. Each is replaced by the integration-test capture of the same screen — e.g. `CANCEL.png` is replaced by `P1_010_WAITING_CANCEL_VISIBLE.png`, which `make calibrate` now presents when calibrating the `CANCEL` crop. Remaining candidates (`GOODLUCK.png`, `PLAY1.png`, `HEALTH.png`, `MINIMAP.png`) go once no calibration-map entry or test references them.
-3. **Simplify respawn to a single screenshot.** Only the crop location changed in the game update, so the variant set is retired rather than recaptured: `RESPAWNC.png` is already deleted, and `RESPAWNB.png` / `RESPAWND.png` follow once their test references (`tests/constants.py`, `tests/test_automated_levels.py`, `tests/test_analyzer.py`) are pruned. This supersedes the recapture remedy CR-015 proposed for CR-015-03/04/07; per the code-review workflow, their disposition is recorded in the next review-cycle file, referencing this ADR. The recaptured `RESPAWN.png` remains the single respawn unit-test fixture, and `make calibrate` presents `P1_050_RESPAWN_VISIBLE_NO_HEALTH.png` for the `respawn` crop.
+3. **Simplify respawn to a single screenshot.** Only the crop location changed in the game update, so the variant set is retired rather than recaptured: all four variants (`RESPAWN.png`, `RESPAWNB/C/D.png`) are deleted, with test references repointed at gate frames (`TEST_SCREENSHOT` → P1_050 as the positive; P1_030/P1_060 as plain negatives). This supersedes the recapture remedy CR-015 proposed for CR-015-03/04/07; per the code-review workflow, their disposition is recorded in the next review-cycle file, referencing this ADR. `P1_050_RESPAWN_VISIBLE_NO_HEALTH.png` is thus both the single respawn unit-test fixture and what `make calibrate` presents for the `respawn` crop. *(Implementation note, 2026-08-14: as originally drafted this kept root `RESPAWN.png` as the unit fixture; the root file was deleted in the same cleanup, so the gate frame serves both roles — one fewer file, same coverage.)*
 4. **`make calibrate` then iterates the integration-test captures.** No behavioral change is needed in `tests/calibrate.py` beyond honoring subdirectory paths in the map — it already iterates whatever the map lists and lets the user click the two corners for each crop zone.
 5. **Root screenshots remain only for screens no capture path visits** — rare popups and one-offs such as `CREATION_FAILED.png`, `INVITED.png`, `UNREADY.png` (event-refresh popup), and `INCOMING.png` (the incoming-missile warning is timing-dependent and not deterministically captured by a path). Each such file is a candidate for future inclusion in a capture path; when a path gains that screen, the map entry moves and the root file is deleted.
 
@@ -31,14 +31,14 @@ Make the integration-test path captures the single source of reference screensho
 
 | Crop(s) | Old reference | New reference | Old file removed? |
 |---------|---------------|---------------|-------------------|
-| `respawn` | `RESPAWN.png` (+ variants B/C/D) | `integration_test/P1_050_RESPAWN_VISIBLE_NO_HEALTH.png` | `RESPAWNC.png` removed; `RESPAWN.png` kept as the single respawn test fixture; B/D pending test-reference cleanup |
+| `respawn` | `RESPAWN.png` (+ variants B/C/D) | `integration_test/P1_050_RESPAWN_VISIBLE_NO_HEALTH.png` | yes — all four, 2026-08-14; P1_050 is also the single respawn unit-test fixture (`TEST_SCREENSHOT`), and B/D test references now point at P1_030/P1_060 as plain negatives |
 | `click_to` | `continue.png`, `continue1.png` | `integration_test/P1_070_CLICK_TO_CONTINUE.png` | yes |
-| `good_luck` | `GOODLUCK.png` | `integration_test/P1_020_GOOD_LUCK_VISIBLE.png` | pending |
-| `PLAY` | `PLAY1.png` | `integration_test/P1_000_LOBBY_PLAY.png` | pending |
-| `CANCEL` | `CANCEL.png` *(unmapped)* | `integration_test/P1_010_WAITING_CANCEL_VISIBLE.png` | yes |
-| `MINIMAP` | `MINIMAP.png` | `integration_test/P1_030_BATTLE_HUD_MISSILES_4.png` | pending |
+| `good_luck` | `GOODLUCK.png` | `integration_test/P1_020_GOOD_LUCK_VISIBLE.png` | yes (2026-08-14) |
+| `PLAY` | `PLAY1.png` | `integration_test/P1_000_LOBBY_PLAY.png` | yes (2026-08-14) |
+| `CANCEL` | `CANCEL.png` *(unmapped)* | `integration_test/P1_010_WAITING_CANCEL_VISIBLE.png` | yes; map entry added 2026-08-14 |
+| `MINIMAP` | `MINIMAP.png` | `integration_test/P1_030_BATTLE_HUD_MISSILES_4.png` | no — calibration entry repointed 2026-08-14; `MINIMAP.png` retained as a dedicated CV test fixture (the hard lock-ring/route-line case, ADR 071) |
 | `AMMO_FLARES`, `AMMO_MISSILE` | `AMMO_FLARES.png`, `AMMO_MISSILE.png` | `integration_test/P1_030_BATTLE_HUD_MISSILES_4.png` | yes |
-| `HEALTH` | *(unmapped)* | `integration_test/P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png` | pending |
+| `HEALTH` | *(unmapped)* | `integration_test/P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png` | map entry added 2026-08-14 |
 | `incoming` | `INCOMING.png` | unchanged — no deterministic path capture yet | no |
 | `event_refresh`, `event_refresh_dismiss` | `UNREADY.png` | unchanged — popup not visited by any path | no |
 

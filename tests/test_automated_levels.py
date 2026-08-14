@@ -17,9 +17,7 @@ from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
     TEST_SCREENSHOT_B,
-    TEST_SCREENSHOT_C,
     TEST_SCREENSHOT_D,
-    TEST_SCREENSHOT_DISTRACTOR,
     TEST_SCREENSHOT_CONTINUE,
     TEST_SCREENSHOT_INCOMING,
 )
@@ -103,17 +101,12 @@ def test_respawn_detection_positive():
 
     RESPAWNC (discolored variant) was deleted 2026-08-13: it showed the
     pre-update overlay layout, which the recalibrated respawn crop no longer
-    covers — a correct non-match, not OCR fragility. Recapture a discolored
-    new-layout frame to restore the robustness case.
+    covers — a correct non-match, not OCR fragility. The variant set is
+    retired without recapture (ADR 072 decision 3, accepted loss CR-015-04).
     """
     screenshots = [
         ("P1_050 (respawn overlay)", TEST_SCREENSHOT, "normal quality"),
     ]
-    # Self-activating recapture slot (ADR 072): joins the run the moment a
-    # discolored NEW-layout frame is captured as RESPAWNC.png.
-    if TEST_SCREENSHOT_C.exists():
-        screenshots.append(
-            ("RESPAWNC.png", TEST_SCREENSHOT_C, "discolored - tests OCR robustness"))
     for name, path, description in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
         cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'
@@ -129,18 +122,14 @@ def test_respawn_detection_negative():
     
     Validates that the analyzer correctly rejects:
     - P1_030 / P1_060 battle HUD frames (no respawn text). The Levenshtein
-      near-miss distractor case is an open recapture item (ADR 072, CR-015-03).
+      distractor case is retired with the variant set (ADR 072 decision 3,
+      accepted loss CR-015-03); token-level rejection lives in
+      test_analyzer.py::test_respawn_text_matches.
     """
     screenshots = [
         ("P1_030 (battle HUD)", TEST_SCREENSHOT_B, "no respawn text"),
         ("P1_060 (battle HUD)", TEST_SCREENSHOT_D, "no respawn text"),
     ]
-    # Self-activating recapture slot (ADR 072): near-miss text INSIDE the
-    # current respawn crop restores real Levenshtein-rejection coverage.
-    if TEST_SCREENSHOT_DISTRACTOR.exists():
-        screenshots.append(
-            ("RESPAWND.png", TEST_SCREENSHOT_DISTRACTOR,
-             "near-miss text - Levenshtein distance too high"))
     for name, path, description in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
         cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'

@@ -10,15 +10,11 @@ CONFIG_PATH = PROJECT_ROOT / "wingman" / "config.yaml"
 TEST_SCREENSHOT = TEST_SCREENSHOTS_DIR / "integration_test" / "P1_050_RESPAWN_VISIBLE_NO_HEALTH.png"
 TEST_SCREENSHOT_B = TEST_SCREENSHOTS_DIR / "integration_test" / "P1_030_BATTLE_HUD_MISSILES_4.png"
 TEST_SCREENSHOT_D = TEST_SCREENSHOTS_DIR / "integration_test" / "P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png"
-# Open recapture items (ADR 072): tests referencing these are skip-marked and
-# SELF-ACTIVATE the moment the file appears — drop the capture in, done.
-# RESPAWNC.png: discolored NEW-layout respawn frame (OCR robustness for the
-#   ADR 021 preprocessing pipeline).
-# RESPAWND.png: near-miss text INSIDE the current respawn crop (Levenshtein
-#   rejection; the old distractor sat outside the recalibrated crop and the
-#   test passed vacuously — CR-015-03).
-TEST_SCREENSHOT_C = TEST_SCREENSHOTS_DIR / "RESPAWNC.png"
-TEST_SCREENSHOT_DISTRACTOR = TEST_SCREENSHOTS_DIR / "RESPAWND.png"
+# Respawn variant set (RESPAWNB/C/D) retired outright — ADR 072 decision 3:
+# only the crop location changed in the game update, so per-layout variant
+# maintenance is cost without coverage. Accepted losses (revisit if a future
+# update changes overlay RENDERING, not just position): discolored-frame OCR
+# robustness (CR-015-04) and the Levenshtein-distractor negative (CR-015-03).
 # continue.png/continue1.png retired 2026-08-13 (ADR 072): the gate corpus
 # frame is the single click-to fixture, refreshed unattended by make p1.
 TEST_SCREENSHOT_CONTINUE = TEST_SCREENSHOTS_DIR / "integration_test" / "P1_070_CLICK_TO_CONTINUE.png"

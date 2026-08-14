@@ -1,7 +1,7 @@
 """Manual CLI utility for GameStateAnalyzer diagnostics.
 
 Example:
-    uv run python tests/analyzer_cli.py test_screenshots/RESPAWN.png --grid
+    uv run python tests/analyzer_cli.py test_screenshots/integration_test/P1_050_RESPAWN_VISIBLE_NO_HEALTH.png --grid
 """
 
 import argparse
@@ -109,11 +109,13 @@ def test_respawn_detection(image_path: str = "RESPAWN.png"):
     analyzer.state = GameState.GAME_BATTLE.name  # CLI tests static screenshots; force GAME_BATTLE
 
     if image_path == "RESPAWN.png":
-        image_path = str(PROJECT_ROOT / "test_screenshots" / "RESPAWN.png")
+        # Default respawn fixture is the gate-corpus frame (ADR 072).
+        image_path = str(PROJECT_ROOT / "test_screenshots" / "integration_test"
+                         / "P1_050_RESPAWN_VISIBLE_NO_HEALTH.png")
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"ERROR: Could not load image: {image_path}")
-        print("Make sure RESPAWN.png is in the test_screenshots directory at the project root")
+        print("Make sure the gate-corpus screenshots exist (refresh with: make p1)")
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(1)
