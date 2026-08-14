@@ -564,6 +564,7 @@ class Capture:
     def __init__(self, region, monitor_index=1, game_window_offset=None):
         self.region = region
         self.monitor_index = monitor_index
+        self._last_frame_ts = None
         if _is_wayland():
             self._backend = _PipeWireBackend(region, game_window_offset=game_window_offset)
         else:
@@ -575,7 +576,21 @@ class Capture:
 
     def get_frame(self):
         """Return a BGR frame. Call from the thread that constructed this Capture."""
-        return self._backend.get_frame()
+        frame = self._backend.get_frame()
+        if frame is not None:
+            self._last_frame_ts = time.monotonic()
+        return frame
+
+    def seconds_since_last_frame(self):
+        """Age of the most recent successful get_frame(), or None before the first.
+
+        Thread-safe to read from daemon threads (single float assignment). Lets
+        injection paths detect a stalled pipeline / lost display and stop
+        pressing keys into whatever window is actually focused.
+        """
+        if self._last_frame_ts is None:
+            return None
+        return time.monotonic() - self._last_frame_ts
 
     def grab_from_thread(self):
         """Thread-safe frame grab for daemon threads."""

@@ -299,3 +299,86 @@ def test_good_luck_wait_config_defaults(monkeypatch):
     ctrl = _make_starting_ctrl(monkeypatch, analyzer)
     assert ctrl._good_luck_wait_s == 13.0
     assert ctrl._good_luck_bypass_on_alive is True
+
+
+# ---------------------------------------------------------------------------
+# Capture-stall injection guard (2026-08-14 display-loss incident)
+# ---------------------------------------------------------------------------
+
+class _AgedCapture:
+    """Capture stand-in reporting a fixed last-frame age."""
+
+    def __init__(self, age_s: float):
+        self.age_s = age_s
+
+    def seconds_since_last_frame(self):
+        return self.age_s
+
+    def grab_from_thread(self):
+        return None
+
+
+def _make_starting_ctrl_with_capture(monkeypatch, analyzer, capture) -> Controller:
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    return Controller(
+        region,
+        analyzer=analyzer,
+        exit_event=threading.Event(),
+        capture=capture,
+        simulate_os_input=True,
+        capture_stale_inject_s=10.0,
+    )
+
+
+def _game_starting_presses(ctrl) -> list[dict]:
+    return [i for i in ctrl.get_action_intents() if i.get("action") == "game_starting_loop"]
+
+
+def test_stale_capture_suppresses_game_starting_press(monkeypatch):
+    """No frames for longer than capture_stale_inject_s → the loop must not press
+    the mission key: the game may no longer be on screen, so the press would land
+    in whatever window is focused."""
+    analyzer = _StartingAnalyzerStub()
+    ctrl = _make_starting_ctrl_with_capture(monkeypatch, analyzer, _AgedCapture(30.0))
+
+    ctrl.start_game_starting_loop()
+    time.sleep(0.3)
+
+    assert _game_starting_presses(ctrl) == [], (
+        "mission key pressed while capture was stale (no frame for 30s, limit 10s)"
+    )
+
+    analyzer.game_state = GameState.GAME_LOBBY
+    time.sleep(0.2)
+
+
+def test_fresh_capture_allows_game_starting_press(monkeypatch):
+    analyzer = _StartingAnalyzerStub()
+    ctrl = _make_starting_ctrl_with_capture(monkeypatch, analyzer, _AgedCapture(1.0))
+
+    ctrl.start_game_starting_loop()
+    time.sleep(0.3)
+
+    assert _game_starting_presses(ctrl), "fresh capture must not suppress the mission key"
+
+    analyzer.game_state = GameState.GAME_LOBBY
+    time.sleep(0.2)
+
+
+def test_capture_without_freshness_tracking_allows_press(monkeypatch):
+    """Replay/test capture doubles don't track freshness — no staleness evidence
+    means the press proceeds (backward compatible with the replay gates)."""
+    analyzer = _StartingAnalyzerStub()
+    ctrl = _make_starting_ctrl_with_capture(monkeypatch, analyzer, _FrameStub())
+
+    ctrl.start_game_starting_loop()
+    time.sleep(0.3)
+
+    assert _game_starting_presses(ctrl), (
+        "capture without seconds_since_last_frame must not suppress the press"
+    )
+
+    analyzer.game_state = GameState.GAME_LOBBY
+    time.sleep(0.2)
