@@ -2,7 +2,7 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.7.0 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04).
+Current version: v1.8.0 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04).
 
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
@@ -31,10 +31,16 @@ Press `m` and Wingman can run the full loop:
 1. Lobby detection and PLAY/READY click flow.
 2. Matchmaking confirmation in GAME_WAITING (CANCEL + fallback logic).
 3. GAME_STARTING handling and transition to GAME_BATTLE.
-4. Mission execution (J20/Loiter), incoming response, health/ammo handling.
-5. Missiles-empty eject-and-dive, verified against live altitude/speed telemetry.
-6. Respawn detection and immediate restart the moment health returns.
-7. Match-end click-through and return to lobby.
+4. In-battle tactic selection via an active behavior tree (ADR 024): minimap
+   ring-engage navigation toward contacts, missile evasion, disengage, eject.
+5. Incoming-missile response: flare bursts plus the MISSILE_EVADE_MODE
+   manoeuvre (ADR 070) — live sessions measure 90% vs 68% ten-second survival
+   with the evade on (n=122 engagements).
+6. Missiles-empty eject-and-dive with impulse rotation and ballistic descent,
+   verified against live altitude/speed telemetry (ADR 069).
+7. Respawn detection (dual-sensor, ADR 064) and immediate restart the moment
+   health returns.
+8. Match-end click-through and return to lobby.
 
 Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), moving into GAME_BATTLE_MANUAL behavior. Dying while in manual mode returns control to auto and restarts the mission when health comes back, so the aircraft is never left flying uncommanded.
 
@@ -48,7 +54,11 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 | Health/ammo OCR-driven mission behavior | ✅ |
 | Dual-sensor respawn detection: overlay OCR with a health-signal fallback (ADR 064) | ✅ |
 | Health-gated immediate mission restart, including after a manual-mode death (ADR 059) | ✅ |
-| Missiles-empty eject as a first-class FSM state, with telemetry-verified dive (ADR 056/058) | ✅ |
+| Missiles-empty eject as a first-class FSM state, with impulse-rotation telemetry-verified dive (ADR 056/069) | ✅ |
+| Active behavior-tree tactic selection: Engage geometry, Eject, Disengage, MissileEvade (ADR 024 3.1a/3.1b) | ✅ |
+| MISSILE_EVADE_MODE with tactical hold limit and eject preemption (ADR 070) | ✅ |
+| Per-engagement survival metric: 10 s survival split evade vs no-evade (ADR 070 V5) | ✅ |
+| Metric HUD telemetry (altitude/speed/flight-path angle) feeding eject and evade decisions (ADR 038/067) | ✅ |
 | Health OCR value-confirmation filter for degraded-read regimes (ADR 063) | ✅ |
 | Per-mission and per-session statistics tracker (ADR 055) | ✅ |
 | Lobby popup handling and click-through end-state handling | ✅ |
@@ -62,6 +72,9 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 | Runtime replay gate (ADR 044, PATH1) | ✅ |
 | Live-screen capture gate (ADR 045, PATH1) | ✅ |
 | Real screenshot OCR integration tests (PATH1/PATH2) | ✅ |
+| Single gate-corpus screenshot set, refreshed unattended by `make p1` (ADR 071/072) | ✅ |
+| StrictDoc-managed requirements with source traceability gates (ADR 066) | ✅ |
+| No-stuck-keys guarantee: every injectable key released on any exit path (SAF-007) | ✅ |
 | Linux support: auto-launch, PipeWire capture, XTest input injection | ✅ |
 
 ---
@@ -172,6 +185,10 @@ make calibrate-crop CROP=respawn
 make add-crops
 ```
 
+Calibration references come from the same gate-corpus screenshots the test
+lanes use (ADR 072) — after a game UI update, one unattended `make p1` run
+refreshes both the test fixtures and the calibration references.
+
 ---
 
 ## Roadmap and Aspirations
@@ -179,7 +196,10 @@ make add-crops
 The near-term path is to complete robust replay-path fixture coverage and then move up the AI stack:
 
 - Phase 2 complete: stable automation + OCR perception + FSM + performance tooling
-- Phase 3 planned: behavior-tree tactical decisions
+- Phase 3 in progress: the behavior tree is **active** — Engage geometry (3.1a)
+  and Eject / Disengage / MissileEvade actuation (3.1b) are live, with the
+  first adaptive tactic (missile evasion) validated in 5+ hour unattended
+  soaks against per-engagement survival data
 - Future: reinforcement learning, deep vision policy learning, multi-agent coordination
 
 Roadmap doc:
@@ -211,4 +231,10 @@ Architecture decisions and workflow docs are tracked under:
 | `docs/adr/059-health-gated-immediate-mission-restart.md` | One restart path: mission restarts when health returns |
 | `docs/adr/060-tick-loop-handlers-and-typed-event-registry.md` | Tick-loop handler objects and the orchestration event registry |
 | `docs/adr/064-dual-sensor-respawn-detection.md` | Dual-sensor respawn detection (supersedes the rejected ADR 062) |
+| `docs/adr/066-strictdoc-requirements-adoption.md` | StrictDoc requirements with source traceability |
+| `docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md` | Eject descent: impulse rotation + ballistic phase |
+| `docs/adr/070-missile-evade-tactic.md` | MISSILE_EVADE_MODE behavior tactic (d1–d13, live V5 evidence) |
+| `docs/adr/071-single-gate-corpus-screenshot-set.md` | One screenshot corpus for all test lanes |
+| `docs/adr/072-calibration-screenshot-consolidation.md` | Calibration references consolidated onto the gate corpus |
+| `docs/architecture.md` | System architecture: modules, FSM, behavior tree, threading |
 | `CONTRIBUTING.md` | Contribution guide |
