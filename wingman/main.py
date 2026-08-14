@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.0"
-WINGMAN_VERSION_DETAILS = "implement initial behavior tree with adaptive tactics for missile avoidance, recalibrate to new UI"
+WINGMAN_VERSION = "1.8.1"
+WINGMAN_VERSION_DETAILS = "docs update"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
