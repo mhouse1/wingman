@@ -8,14 +8,14 @@ enemy_hsv:
   upper: [10, 255, 255]
 crops:
   respawn:
-    coords:
-    - [0.4188, 0.6978]
-    - [0.5292, 0.7233]
+    coords:                        # recalibrated 2026-08-13 from RESPAWN.png — overlay moved up ~2% in a game update
+    - [0.4229, 0.6778]
+    - [0.5486, 0.7022]
     text: [RESPAWN]
   incoming:
     coords:
-    - [0.4618, 0.2556]
-    - [0.5361, 0.2844]
+    - [0.4521, 0.2667]
+    - [0.5486, 0.2967]
     text: [MING, ARNING]
   click_to:
     coords:
@@ -93,12 +93,12 @@ crops:
     text: [UNREADY]
   AMMO_FLARES:
     coords:
-    - [0.0118, 0.9589]
-    - [0.0194, 0.9767]
+    - [0.009, 0.9544]
+    - [0.0194, 0.97]
   AMMO_MISSILE:
     coords:
-    - [0.0854, 0.9578]
-    - [0.0958, 0.9756]
+    - [0.0792, 0.9533]
+    - [0.0868, 0.9711]
   ENEMY_CLOSE_BY:
     coords:
     - [0.8764, 0.0822]
@@ -135,37 +135,36 @@ incoming_detection:
   incoming_template_near_threshold_low: 0.76
   incoming_template_near_threshold_high: 0.81
   incoming_template_fallback_to_ocr: true
+  incoming_fallback_tokens: [MING, ARNING]
   incoming_template_telemetry_info: false
   incoming_debounce_ms: 500
   incoming_template_scales: [1.0]
-  incoming_template_sources: [test_screenshots/INCOMING3.png]
+  incoming_template_sources: [test_screenshots/INCOMING.png]
 mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0,
-  good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true, starting_health_probe_interval_s: 0.4}
+  startup_stall_exit_after_s: 600.0, good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true,
+  starting_health_probe_interval_s: 0.4}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
-j20_mission:
-  target_painting_mode: false
-  attack_mode: true                # Design 003 — ring-engage navigation master switch
-  attack_mode_dry_run: false       # log-only mode: compute intents, inject nothing
-  min_safe_altitude: 500           # CFIT floor — all steering suppressed below
-  bearing_deadzone_deg: 12         # no roll inside this bearing error
-  short_ring_min_count: 1          # short-ring contacts required to orbit
-  ring_debounce_ticks: 2           # consecutive ticks to enter or leave orbit
-  ema_reseed_angle_deg: 60         # reseed steering EMA only on target jumps beyond this
-  orbit_direction: right           # fixed orbit roll direction (right or left)
-  orbit_roll_hold_s: 0.3           # roll hold per orbit correction
-  orbit_roll_interval_s: 2.0       # cadence of orbit corrections
-  coarse_kp: 0.5                   # gains passed to orient_nose_to_target
-  coarse_min_hold_s: 0.15
-  coarse_max_hold_s: 0.6
-  coarse_cooldown_s: 2.0
-minimap:                           # Design 003 — MINIMAP red-icon scan
-  mask_radius_frac: 0.93           # circle mask radius as fraction of half the shorter side
-  min_blob_px: 4                   # component area band for enemy icons
-  max_blob_px: 120
-  ema_alpha: 0.4                   # centroid-vector smoothing (dry-run 2026-08-08 jitter finding)
-  ema_reset_after_s: 5.0           # reseed EMA after a detection gap this long
+j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_altitude: 500,
+  bearing_deadzone_deg: 12, short_ring_min_count: 1, ring_debounce_ticks: 2, ema_reseed_angle_deg: 60,
+  rear_commit_deg: 150, rear_release_deg: 90, orbit_direction: right, orbit_roll_hold_s: 0.3,
+  orbit_roll_interval_s: 2.0, coarse_kp: 0.5, coarse_min_hold_s: 0.15, coarse_max_hold_s: 0.6,
+  coarse_cooldown_s: 2.0}
+behavior_tree:                     # ADR 024 Phase 3 — tactic selection
+  mode: active                     # off | shadow (log only) | active
+  disengage_after_s: 30
+  disengage_hold_s: 10
+  evade_hold_s: 10
+  missile_evade:                   # ADR 070 — MISSILE_EVADE_MODE
+    enabled: true                  # false = leaf selection-only (shadow); true = hold AB+ROLL_RIGHT+YAW_LEFT
+    clear_seconds: 3.0             # incoming absent this long ends the evade (d5); THE tuning knob
+    min_clear_samples: 2           # fresh negative cache updates required — liveness floor, leave alone (d5)
+    max_manoeuvre_s: 6.0           # tactical limit, NORMAL exit (d12) — past ~5s it only bleeds energy
+    max_hold_s: 15.0               # outer fault backstop; firing = stuck detector (d6)
+    pitch_down: false              # d13 variant: add NOSE_DOWN -> descending break instead of zoom climb
+minimap: {mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
+  ema_reset_after_s: 5.0}
 tracking:
   enabled: false
   acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
@@ -204,9 +203,12 @@ telemetry:
   steep_dive_min_sin: 0.8
   level_max_sin: 0.15
   ocr_every_n_ticks: 2
-  eject_closed_loop: {enabled: true, verify_window_s: 6.0, check_interval_s: 1.5,
-    max_corrections: 3, legacy_nose_hold_s: 5.0, confirm_consecutive: 2, streak_grace_s: 4.5,
-    dive_reentries: 2, confirm_descent_fps: 250, total_nose_budget_s: 10.0, over_rotation_after_s: 6.0}
+  # ADR 069 — impulse rotation + ballistic descent; thresholds from 624 archived
+  # eject windows (65 deg because 75 was empirically unreachable). Read it before retuning.
+  eject_closed_loop: {enabled: true, check_interval_s: 1.5, confirm_consecutive: 2,
+    legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
+    dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,
+    rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0}
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}

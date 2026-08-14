@@ -2,7 +2,29 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft    | 2026-04-19 | 1.6.6           |
+| Accepted | 2026-08-09 | 1.7.1           |
+
+*Accepted 2026-08-09 — all three rollout phases implemented and validated:
+shadow session 2026-08-08 17:32 (843 ticks, 8/8 eject agreement), 3.1a live
+cutover 2026-08-08, 3.1b validated by the ADR 044 replay gate plus the
+2026-08-09 19:02 live session (10/10 ejects BT-driven, zero false Eject
+selections in 31 minutes — the shadow-session stale-ammo hazard closed by
+the debounced-verdict gate). Evade actuation deferred to Phase 4 by design.*
+
+> **Revision note (2026-08-08):** in-place revision of this Draft (first
+> written 2026-04-19 at v1.6.6). The architecture stands; three deltas from
+> the work since April are folded in: (1) the ATTACK leaf decomposes — the
+> minimap ring-engage navigator (Design 003 / ADR 028) owns flight geometry
+> as an ENGAGE leaf, and `mission_j20` slims to launch, climb, and weapon
+> loops, because a live session measured ~82% of the navigator's roll
+> commands being absorbed by the mission script's scripted roll holds
+> (`roll_right(50)`, `roll_right(300)`); (2) DISENGAGE's condition moves
+> from the `ENEMY_CLOSE_BY` timer to minimap ring occupancy — the legacy
+> sensor twice cancelled the mission while the navigator was legitimately
+> tracking long-ring contacts; (3) `AnalyzerSnapshot` gains ring occupancy
+> and telemetry altitude, which did not exist in April. Rollout follows the
+> house shadow-first pattern (ADR 062/064): Phase 3.0 ticks the tree and
+> logs its selected tactic without actuating; Phase 3.1 cuts over.
 
 ## Context
 
@@ -16,6 +38,8 @@ Phase 2 is complete as of v1.6.3. The bot can now perceive:
 | Enemy close-by (red pixel) | `ENEMY_CLOSE_BY` region | `disengage_roll_right()` after 30s no detection |
 | Respawn text | EasyOCR | Cancel + restart |
 | Incoming missile text | EasyOCR | Deploy flares |
+| Minimap ring occupancy + bearings | `MINIMAP` component scan (Design 003) | Ring-engage steering/orbit (ADR 028) |
+| Altitude + speed | `ALTITUDE_SPEED` telemetry (ADR 038) | CFIT floor, eject-dive verification |
 
 The perception layer is solid. The problem is what happens with these signals. Decision-making is currently scattered across three files as a mix of reactive event handlers and ad-hoc timers:
 
@@ -81,15 +105,23 @@ Taken once at the start of each tick and written to the py-trees blackboard. All
 ```python
 @dataclass(frozen=True)
 class AnalyzerSnapshot:
-    health: int | None          # last OCR reading, None if unseen
+    health: int | None            # last OCR reading, None if unseen
     missiles: int | None
     flares: int | None
-    enemy_visible: bool         # red pixel in ENEMY_CLOSE_BY
-    enemy_absent_seconds: float # seconds since last red pixel
+    ring_short: int               # minimap red components per ring (Design 003)
+    ring_mid: int
+    ring_long: int
+    enemy_absent_seconds: float   # seconds since any ring was occupied
+    altitude: float | None        # fresh telemetry stable value (ADR 038)
     is_respawning: bool
     incoming_detected: bool
+    mission_running: bool
     game_state: GameState
 ```
+
+The 2026-08-08 revision replaces the `ENEMY_CLOSE_BY` boolean with ring
+occupancy: `enemy_absent_seconds` now derives from the whole minimap, so
+DISENGAGE cannot fire while the navigator is tracking a long-ring contact.
 
 ### Node types used
 
@@ -130,17 +162,30 @@ class TacticAction(py_trees.behaviour.Behaviour):
 
 ```
 Selector (root)
-├── Idle          — SUCCESS if game_state != GAME_BATTLE  (no action)
-├── RespawnWait   — SUCCESS if is_respawning              (hold, wait for alive event)
-├── Eject         — SUCCESS if missiles == 0              (eject_and_dive)
-├── Cooldown(10s)
-│   └── Evade     — SUCCESS if health < EVADE_THRESHOLD   (evasive maneuver; threshold TBD)
-├── Cooldown(30s)
-│   └── Disengage — SUCCESS if enemy_absent_seconds >= 30 (disengage_roll_right)
-└── Attack        — always SUCCESS                        (mission_j20 + S&D loop)
+├── Idle           — RUNNING if game_state != GAME_BATTLE  (no action)
+├── RespawnWait    — RUNNING if is_respawning              (hold, wait for alive event)
+├── Eject          — RUNNING if missiles == 0              (eject_and_dive)
+├── MinimumHold(10s)
+│   └── Evade      — RUNNING if health < EVADE_THRESHOLD   (threshold unset → FAILURE)
+├── MinimumHold(10s)
+│   └── Disengage  — RUNNING if enemy_absent_seconds >= 30 (all rings empty; disengage_roll_right)
+├── Engage         — RUNNING if any ring occupied          (ring-engage navigator, ADR 028)
+└── AttackSupport  — always RUNNING                        (slimmed mission: launch, climb, weapons)
 ```
 
-Priority order: top node wins. `Cooldown` wraps EVADE and DISENGAGE so that once selected, the tactic holds for its minimum duration before the selector re-evaluates. ATTACK is the unconditional fallback.
+Priority order: top node wins; a selected tactic returns RUNNING and the
+root's `tip()` names it. `MinimumHold` (a small custom decorator —
+`Cooldown` is not a stock py-trees decorator) keeps EVADE and DISENGAGE
+selected for their minimum duration before the selector re-evaluates.
+
+The 2026-08-08 revision splits the old unconditional ATTACK leaf: **Engage**
+owns flight geometry through the mission-agnostic `EngageNavigator`
+(steer/orbit intents — the node ADR 028 named `GAME_BATTLE_ENGAGE`), and
+**AttackSupport** is `mission_j20` with its scripted roll holds removed
+(the 4–300 s `roll_right`/`roll_left` calls) — launch, climb, afterburner,
+and the weapon/padlock loops. One owner per axis: the measured conflict
+(~82% of navigator roll commands absorbed by script holds, session
+2026-08-08) is resolved by construction, not arbitration.
 
 ### Tick integration
 
@@ -173,6 +218,9 @@ Immediate reactive handlers (`_deploy_flares_on_new_incoming`, `_handle_alive_tr
 | `mission_j20()` linear sequence, cancel-only branching | `AttackAction` leaf starts it; BT switches away cleanly via `terminate()` |
 | No EVADE behaviour | `Cooldown(EvadeAction)` node, threshold stubbed as ATTACK until calibrated |
 | `_handle_low_flares()` logs warning | Low flares stays a log; Phase 4 can add a `LowAmmoAction` leaf |
+| `EngageNavHandler` drives ring-engage directly | Absorbed into the `Engage` leaf at cutover; the pure `EngageNavigator`/`Intent` API is unchanged |
+| `mission_j20` scripted rolls (`roll_right(50)`, `roll_right(300)`, 4–30 s turns) | Deleted at cutover — geometry belongs to `Engage` |
+| `EnemyPresenceHandler` 30s `ENEMY_CLOSE_BY` timer | `enemy_absent_seconds` from ring occupancy; handler retires at cutover |
 
 ### What is deferred to Phase 4
 
@@ -207,11 +255,89 @@ RL requires a training loop, reward function, and policy network, plus thousands
 
 ## Implementation plan
 
+Rollout is shadow-first, matching the ADR 062/064 pattern:
+
+**Phase 3.0 (shadow):**
+
 1. **`pyproject.toml`** — add `py-trees` dependency
-2. **`wingman/behavior_tree.py`** — `AnalyzerSnapshot`, `TacticAction` base class, full tree construction
-3. **`wingman/controller.py`** — remove `set_tactic()`; `TacticAction.terminate()` calls `cancel_mission()` directly
-4. **`wingman/main.py`** — replace per-tactic handlers with `blackboard.set` + `behavior_tree.tick()`; keep reactive handlers
-5. **`tests/test_behavior_tree.py`** — unit tests: given snapshot X → assert node status Y (no Controller threads, no OCR)
+2. **`wingman/behavior_tree.py`** — `AnalyzerSnapshot`, `MinimumHold`
+   decorator, condition leaves, tree construction, `TacticAction` base class
+   (actuation functions unwired in shadow)
+3. **`tick_handlers.py`** — `BehaviorTreeHandler`: builds the snapshot,
+   ticks the tree once per loop tick, logs the selected tactic; actuates
+   nothing (`behavior_tree.mode: shadow` in config)
+4. **`tests/test_behavior_tree.py`** — unit tests: given snapshot X →
+   assert selected node Y (no Controller threads, no OCR)
+
+Shadow acceptance: a live session's log shows the tree's per-tick selection
+agreeing with what the legacy handlers actually did (eject on empty,
+disengage on absence, engage while contacts exist), with disagreements
+explainable (e.g. the legacy `ENEMY_CLOSE_BY` disengage firing where ring
+occupancy correctly says contacts remain).
+
+**Shadow session results (2026-08-08 17:32, 21 min, 843 tree ticks):**
+selection ladder correct throughout; Eject agreed with the legacy
+missiles-empty handler in 8 of 8 events and selected 1–2 s *earlier* (raw
+read vs the legacy two-confirm debounce); zero Disengage selections and
+zero legacy disengage firings (consistent sensors); RespawnWait and Idle
+tracked their states. One finding: stale post-respawn ammo (missiles still
+reading 0 for a tick or two after respawn) selected Eject twice — harmless
+in shadow, but the Eject leaf must inherit the ammo handler's confirmation
+debounce and post-respawn suppression before it actuates.
+
+**Phase 3.1a (geometry cutover — done 2026-08-08):**
+
+5. **`wingman/controller.py`** — `mission_j20` scripted roll holds removed
+   (`roll_right(50)`, `roll_right(300)` → interruptible loiter); launch,
+   climb, afterburner, and weapon/padlock loops remain
+6. **`tick_handlers.py`** — `behavior_tree.mode: active`: the Engage
+   selection actuates ring-engage geometry through `EngageNavigator`
+   (rear-sector turn commitment added — live finding 2026-08-08 15:01);
+   `EngageNavHandler` retired; the legacy `EnemyPresenceHandler` disengage
+   tick is suppressed in active mode (its 10 s scripted roll fights the
+   Engage leaf)
+
+**Phase 3.1b (tactic-lifecycle cutover — done 2026-08-09):**
+
+7. Eject and Disengage leaves actuate in active mode; the gate is satisfied
+   by construction:
+
+   - **Eject** — `AmmoEventsHandler` keeps the two-consecutive debounce and
+     every suppression gate (respawn screen, battle-start grace, post-respawn
+     grace) and, with `bt_owns_eject`, raises a sticky
+     `missiles_empty_confirmed` verdict instead of actuating. The Eject
+     leaf's condition consumes that verdict — never the raw snapshot read —
+     and its `start_fn` is the same `fire_eject()` (capture event, FSM
+     `eject_started`, `eject_and_dive`) the legacy path used, so one
+     implementation serves both modes. Pending verdicts are cleared on state
+     change and respawn suppression, closing the stale-post-respawn hazard
+     from the shadow session. `terminate` is deliberately a no-op: the
+     selector switching to Idle means the FSM entered GAME_BATTLE_EJECT —
+     the tactic succeeding, not being pre-empted.
+   - **Disengage** — fires `disengage_roll_right` with the legacy
+     fire-once-and-reset semantics (the start re-arms the absence clock);
+     the respawn flow re-arms the clock through
+     `BehaviorTreeHandler.arm_absence_clock()`, the analogue of the retired
+     handler's `arm()`. `EnemyPresenceHandler` now ticks only in off/shadow
+     modes.
+   - **Evade** — remains selection-only by design: the threshold is unset
+     pending calibration and no Controller evade tactic exists yet; wiring
+     it is Phase 4 work.
+
+   Validation: unit tests at node and handler level (actuation on confirmed
+   verdict only, no re-start while running, switch-away does not cancel,
+   suppression clears pending verdicts), and the ADR 044 runtime replay gate
+   green with the eject firing through the BT leaf in the real main loop.
+
+   **Live validation (2026-08-09 19:02, 31 min):** 10 of 10 ejects fired
+   through the Eject leaf (`MISSILES EMPTY` and the `tactic → Eject`
+   selection logged on the same millisecond — actuation inside the tree
+   tick); zero `selected=Eject` ticks with `respawn=True`, confirming the
+   debounced-verdict gate closed the shadow session's stale-ammo hazard;
+   all ejects completed autonomously, 5/5 missions click-to-finish, zero
+   errors. Zero Disengage selections — contested airspace kept the rings
+   occupied, consistent with the legacy handler's behavior in the same
+   conditions.
 
 `Tactic.EVADE` threshold is set to `None` (disabled) until calibrated on real gameplay data. The node exists in the tree; it simply returns `FAILURE` immediately when threshold is unset.
 

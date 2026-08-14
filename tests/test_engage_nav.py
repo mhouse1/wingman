@@ -4,6 +4,8 @@ Pure-logic tests: no frames, no analyzer, no controller. Times are explicit
 arguments, so no sleeping and no clock mocking.
 """
 
+import pytest
+
 from wingman.engage_nav import (
     EngageNavigator,
     MinimapEma,
@@ -222,6 +224,62 @@ def test_engaged_ring_empty_while_debouncing_holds_quietly():
     assert intent.mode == MODE_ENGAGE_MID                  # orbit still debouncing
     assert intent.kind == "none"
     assert intent.reason == "ring-empty"
+
+
+def test_rear_commit_no_reversal_on_astern_sign_flip():
+    """Live 2026-08-08 15:01 regression: a target dead astern flips bearing
+    sign between samples (+178 ↔ −179); each flip used to command a full
+    opposite roll. Committed: the direction must hold."""
+    nav = make_nav()
+    first = nav.update([comp(178, 0.9)], ALT, 0.0)
+    assert first.reason == "steering-rear-commit"
+    assert first.error_norm == 1.0
+    second = nav.update([comp(-179, 0.9)], ALT, 1.5)
+    assert second.error_norm == 1.0            # no reversal
+    third = nav.update([comp(177, 0.9)], ALT, 3.0)
+    assert third.error_norm == 1.0
+
+
+def test_rear_commit_releases_as_target_sweeps_forward():
+    nav = make_nav()
+    bearings = [170, 135, 95, 60, 30]
+    errors = []
+    reasons = []
+    for i, bearing in enumerate(bearings):
+        intent = nav.update([comp(bearing, 0.9)], ALT, i * 1.5)
+        errors.append(intent.error_norm)
+        reasons.append(intent.reason)
+    # Sustained same-direction turn: never a sign reversal while the target
+    # sweeps from astern to ahead-right.
+    assert all(error > 0 for error in errors), errors
+    assert reasons[0] == "steering-rear-commit"
+    assert reasons[-1] == "steering"           # released, proportional again
+    assert errors[-1] < 1.0
+
+
+def test_rear_commit_holds_through_tail_crossing():
+    """Live 2026-08-08 18:21 regression: the smoothed bearing crossed through
+    the tail (+150-ish → −100-ish, still rear-quarter) and a 120° release
+    band let the commitment go — commanding a full reversal. The commitment
+    must hold anywhere outside the forward semicircle."""
+    nav = make_nav()
+    committed = nav.update([comp(178, 0.5)], ALT, 0.0)
+    assert committed.error_norm == 1.0
+    crossed = nav.update([comp(-100, 0.5)], ALT, 1.5)     # smoothed ≈ −150
+    assert crossed.error_norm == 1.0                       # held, no reversal
+    deeper = nav.update([comp(-100, 0.5)], ALT, 3.0)      # smoothed ≈ −127
+    assert deeper.error_norm == 1.0
+
+
+def test_rear_commit_cleared_by_target_reseed():
+    nav = make_nav()
+    committed = nav.update([comp(178, 0.9)], ALT, 0.0)
+    assert committed.error_norm == 1.0
+    # A genuinely different target (ring switch + >60° jump) reseeds the EMA
+    # and frees the direction choice — reversal is correct here.
+    switched = nav.update([comp(-40, 0.5)], ALT, 1.5)
+    assert switched.mode == MODE_ENGAGE_MID
+    assert switched.error_norm == pytest.approx(-40.0 / 90.0)
 
 
 def test_reset_returns_to_idle():

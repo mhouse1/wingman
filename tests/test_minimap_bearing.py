@@ -33,8 +33,16 @@ UPPER = np.array([10, 255, 255], dtype=np.uint8)
 
 ROOT = Path(__file__).resolve().parents[1]
 MINIMAP_FRAME = ROOT / "test_screenshots" / "MINIMAP.png"
-P1_040_FRAME = ROOT / "test_screenshots" / "integration_test" / "P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png"
-P1_060_FRAME = ROOT / "test_screenshots" / "integration_test" / "P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png"
+# Dedicated fixture, formerly the pre-2026-08-13 P1_040 gate frame (preserved
+# from git history when the gate corpus was recaptured on the new UI layout).
+# Hand-verified CV ground truth must NOT live on gate frames: the gate corpus
+# is recaptured on every game-UI update, which silently invalidates pinned
+# blob positions — dedicated fixtures like MINIMAP.png are recapture-immune.
+DESERT_3RINGS_FRAME = ROOT / "test_screenshots" / "MINIMAP_DESERT_3RINGS.png"
+# Same treatment: formerly the pre-2026-08-13 P1_060 gate frame (its
+# rim-merged-components tuning-gap ground truth belongs to THAT frame,
+# not to whatever the capture lane most recently recorded).
+RIM_MERGED_FRAME = ROOT / "test_screenshots" / "MINIMAP_RIM_MERGED.png"
 
 
 def load_config() -> dict:
@@ -176,24 +184,24 @@ def test_reference_frame_rejects_lock_ring_and_route_line():
     assert banded_pixels < 400
 
 
-@pytest.mark.skipif(not P1_040_FRAME.exists(), reason="P1_040 not archived")
-def test_p1_040_cluster_bearing():
+@pytest.mark.skipif(not DESERT_3RINGS_FRAME.exists(), reason="MINIMAP_DESERT_3RINGS not archived")
+def test_desert_cluster_bearing():
     # Ground truth (hand-verified 2026-08-08): red icons sit upper-right of
     # own position on the desert map — and the desert terrain inside the
     # circle must not flood the mask.
-    bearing, radius, blobs, _ = scan_frame(load_config(), P1_040_FRAME)
+    bearing, radius, blobs, _ = scan_frame(load_config(), DESERT_3RINGS_FRAME)
     assert blobs >= 2
     assert 20.0 <= bearing <= 100.0
     assert 0.15 <= radius <= 0.7
 
 
-@pytest.mark.skipif(not P1_060_FRAME.exists(), reason="P1_060 not archived")
-def test_p1_060_output_well_formed():
+@pytest.mark.skipif(not RIM_MERGED_FRAME.exists(), reason="MINIMAP_RIM_MERGED not archived")
+def test_rim_merged_output_well_formed():
     # Known tuning gap (recorded 2026-08-08): this frame's enemy mass sits in
     # rim-merged components (~155 px and ~492 px) that the v1 area band
     # rejects, leaving a single small blob. Structural assertions only — the
     # dry-run tuning phase owns turning this into a semantic expectation.
-    bearing, radius, blobs, pixels = scan_frame(load_config(), P1_060_FRAME)
+    bearing, radius, blobs, pixels = scan_frame(load_config(), RIM_MERGED_FRAME)
     assert blobs >= 0
     if bearing is not None:
         assert -180.0 < bearing <= 180.0
@@ -299,19 +307,19 @@ def test_reference_frame_ring_occupancy():
     assert -140.0 <= rings[RING_LONG].bearing_deg <= -125.0
 
 
-@pytest.mark.skipif(not P1_040_FRAME.exists(), reason="P1_040 not archived")
-def test_p1_040_ring_occupancy():
+@pytest.mark.skipif(not DESERT_3RINGS_FRAME.exists(), reason="MINIMAP_DESERT_3RINGS not archived")
+def test_desert_ring_occupancy():
     # Ground truth (hand-verified 2026-08-08): one contact per ring.
-    rings = bin_rings(components_of_frame(load_config(), P1_040_FRAME))
+    rings = bin_rings(components_of_frame(load_config(), DESERT_3RINGS_FRAME))
     assert (rings[RING_SHORT].count, rings[RING_MID].count, rings[RING_LONG].count) == (1, 1, 1)
     assert 50.0 <= rings[RING_MID].bearing_deg <= 65.0
 
 
-@pytest.mark.skipif(not P1_060_FRAME.exists(), reason="P1_060 not archived")
-def test_p1_060_ring_occupancy():
+@pytest.mark.skipif(not RIM_MERGED_FRAME.exists(), reason="MINIMAP_RIM_MERGED not archived")
+def test_rim_merged_ring_occupancy():
     # Known tuning gap carried from revision 2: the rim-merged clusters are
     # band-rejected, leaving one small long-ring blob.
-    rings = bin_rings(components_of_frame(load_config(), P1_060_FRAME))
+    rings = bin_rings(components_of_frame(load_config(), RIM_MERGED_FRAME))
     assert (rings[RING_SHORT].count, rings[RING_MID].count, rings[RING_LONG].count) == (0, 0, 1)
     assert 140.0 <= rings[RING_LONG].bearing_deg <= 150.0
 

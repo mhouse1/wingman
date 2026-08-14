@@ -107,3 +107,24 @@ bounds the excursion. No arena-boundary sensor exists; the requirement is
 verified by outcome (excursion observations with ring-engage on vs off).
 Implemented by EngageNavigator.update (wingman/engage_nav.py).
 <<<
+
+[REQUIREMENT]
+UID: FR-006
+TITLE: Evasive manoeuvre on incoming missile detection
+STATEMENT: >>>
+When an incoming-missile detection is present during GAME_BATTLE and the
+missile-evade tactic is enabled, wingman shall hold afterburner, roll-right
+and yaw-left simultaneously, and shall release all three only after no fresh
+incoming detection has been observed for
+behavior_tree.missile_evade.clear_seconds. A repeated detection reading whose
+cache timestamp has not advanced shall not count toward clearance. The
+manoeuvre shall take selection priority over engage navigation and shall
+yield to eject and respawn handling.
+<<<
+RATIONALE: >>>
+ADR 070. Flares alone against a missile on a non-manoeuvring target is the
+weakest case for a countermeasure; the evade denies the missile a steady
+intercept solution while the existing flare burst (FR: flare deployment path,
+unchanged) decoys the seeker. Selection priority in the ADR 024 behavior tree
+provides the mutual exclusion with engage geometry and eject.
+<<<

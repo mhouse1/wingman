@@ -98,8 +98,46 @@ def pytest_runtest_makereport(item, call):
             _test_timings[test_name] = []
         _test_timings[test_name].append(call.duration)
 
+def _release_all_injectable_keys():
+    """Safety net: unstick any XTest key a test may have left held.
+
+    XTest key state lives in the X SERVER and survives this process — a test
+    that presses a real key and dies before releasing leaves the server
+    auto-repeating it into whatever window is focused ('iiiii…', observed
+    2026-08-14 after a make test run). The leak vector: tests neutralize
+    wingman.controller.keyboard_module via monkeypatch, but monkeypatch
+    reverts at TEST teardown while mission daemon threads keep running — a
+    thread that reaches a key press after the revert presses the REAL key,
+    and pytest exiting mid-hold (or mid-release: X round-trips take seconds
+    under load) latches it. Releasing an un-pressed key is a no-op, so this
+    releases everything injectable, unconditionally, at session end.
+    """
+    try:
+        from wingman.controller import _ensure_xauthority, _XKEY_ALIASES
+        _ensure_xauthority()
+        from Xlib import display as _xdisplay, XK as _XK
+        from Xlib.ext import xtest as _xtest
+        import Xlib.X as _X
+        d = _xdisplay.Display()
+        try:
+            for key in ("i", "j", "k", "l", "e", "d", "w", "space", "a", "f",
+                        "p", "q", ";", "u", "y", "x", "g",
+                        "up", "down", "left", "right"):
+                name = _XKEY_ALIASES.get(key, key)
+                ks = _XK.string_to_keysym(name)
+                kc = d.keysym_to_keycode(ks) if ks else 0
+                if kc:
+                    _xtest.fake_input(d, _X.KeyRelease, kc)
+            d.sync()
+        finally:
+            d.close()
+    except Exception:
+        pass  # headless CI / no X — nothing to unstick
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Generate performance.json at end of test session."""
+    _release_all_injectable_keys()
     output_dir = Path(__file__).parent / "test-output"
     output_dir.mkdir(parents=True, exist_ok=True)
     

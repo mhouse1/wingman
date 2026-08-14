@@ -17,13 +17,9 @@ from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
     TEST_SCREENSHOT_B,
-    TEST_SCREENSHOT_C,
     TEST_SCREENSHOT_D,
     TEST_SCREENSHOT_CONTINUE,
-    TEST_SCREENSHOT_CONTINUE_1,
     TEST_SCREENSHOT_INCOMING,
-    TEST_SCREENSHOT_INCOMING_1,
-    TEST_SCREENSHOT_INCOMING_2,
 )
 from wingman.analyzer import GameState, GameStateAnalyzer, _get_thread_ocr_reader
 from wingman.crop_region import get_crop
@@ -72,14 +68,14 @@ def test_level1_static_screenshot():
     Level 1: Respawn detection on saved screenshots with grid visualization.
     
     Validates that the analyzer can:
-    - Load and analyze saved RESPAWN.png (positive case)
+    - Load and analyze the respawn overlay gate frame (positive case)
     - Correctly identify respawn regions and generate grid overlays
-    - Handle non-respawn screenshots (RESPAWNB.png negative case)
+    - Handle non-respawn screenshots (battle HUD negative case)
     - Generate output_grid.png and output_grid_highlighted.png when respawn detected
     """
     screenshots = [
-        ("RESPAWN.png", TEST_SCREENSHOT, True),
-        ("RESPAWNB.png", TEST_SCREENSHOT_B, False)
+        ("P1_050 (respawn overlay)", TEST_SCREENSHOT, True),
+        ("P1_030 (battle HUD)", TEST_SCREENSHOT_B, False)
     ]
     for name, path, should_detect in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
@@ -101,12 +97,15 @@ def test_respawn_detection_positive():
     Respawn detection positive test: Verify correct detection of RESPAWN text.
     
     Validates that the analyzer correctly detects RESPAWN text in:
-    - RESPAWN.png (normal quality image)
-    - RESPAWNC.png (discolored image - tests OCR robustness)
+    - P1_050_RESPAWN_VISIBLE_NO_HEALTH.png (gate corpus, normal quality)
+
+    RESPAWNC (discolored variant) was deleted 2026-08-13: it showed the
+    pre-update overlay layout, which the recalibrated respawn crop no longer
+    covers — a correct non-match, not OCR fragility. The variant set is
+    retired without recapture (ADR 072 decision 3, accepted loss CR-015-04).
     """
     screenshots = [
-        ("RESPAWN.png", TEST_SCREENSHOT, "normal quality"),
-        ("RESPAWNC.png", TEST_SCREENSHOT_C, "discolored - tests OCR robustness"),
+        ("P1_050 (respawn overlay)", TEST_SCREENSHOT, "normal quality"),
     ]
     for name, path, description in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
@@ -122,12 +121,14 @@ def test_respawn_detection_negative():
     Respawn detection negative test: Verify correct rejection of non-RESPAWN text.
     
     Validates that the analyzer correctly rejects:
-    - RESPAWNB.png (no respawn text)
-    - RESPAWND.png (contains "natethegreat" text - should fail Levenshtein matching)
+    - P1_030 / P1_060 battle HUD frames (no respawn text). The Levenshtein
+      distractor case is retired with the variant set (ADR 072 decision 3,
+      accepted loss CR-015-03); token-level rejection lives in
+      test_analyzer.py::test_respawn_text_matches.
     """
     screenshots = [
-        ("RESPAWNB.png", TEST_SCREENSHOT_B, "no respawn text"),
-        ("RESPAWND.png", TEST_SCREENSHOT_D, "contains 'natethegreat' - Levenshtein distance too high"),
+        ("P1_030 (battle HUD)", TEST_SCREENSHOT_B, "no respawn text"),
+        ("P1_060 (battle HUD)", TEST_SCREENSHOT_D, "no respawn text"),
     ]
     for name, path, description in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
@@ -259,7 +260,9 @@ def test_level3_unit_ocr():
     "image_path",
     [
         TEST_SCREENSHOT_CONTINUE,
-        TEST_SCREENSHOT_CONTINUE_1,
+        # continue1.png (second click-to variant) retired 2026-08-13 with the
+        # old-layout purge (ADR 072); the gate-corpus frame P1_070 is the
+        # single click-to fixture, refreshed unattended by make p1.
     ],
 )
 def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
@@ -290,8 +293,6 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
     "image_path",
     [
         TEST_SCREENSHOT_INCOMING,
-        TEST_SCREENSHOT_INCOMING_1,
-        TEST_SCREENSHOT_INCOMING_2,
     ],
 )
 def test_level4_region9_contains_inco(require_easyocr, image_path: Path):

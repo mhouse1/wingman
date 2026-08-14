@@ -354,7 +354,8 @@ class TestOrientNoseToTarget:
 # ---------------------------------------------------------------------------
 
 class TestReferenceFrame:
-    _REF = Path("test_screenshots/integration_test/P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png")
+    # P1_060 reused (P2_050 deleted 2026-08-13 — byte-identical copy).
+    _REF = Path("test_screenshots/integration_test/P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png")
 
     @pytest.mark.skipif(
         not _REF.exists(),

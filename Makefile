@@ -43,7 +43,11 @@ HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi
 PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pytest)
 PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
 CAPTURE_PATH ?= PATH1
-CAPTURE_TIMEOUT_S ?= 120.0
+# Real-game capture (make p1/p2/p3) must outlast a full mission cycle
+# (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
+# replay pacing the out-of-order deadline is derived from. The ADR 045
+# presenter lane hardcodes its own 30 s and is unaffected.
+CAPTURE_TIMEOUT_S ?= 600.0
 # Own artifact path, NOT wingman.log: this target rm -f's its log before
 # launching, and pointing it at the production filename silently deleted real
 # session logs every time the gate ran (the 2026-07-30 sessions were lost this
@@ -82,7 +86,7 @@ reqs: reqs-gate
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -403,6 +407,7 @@ rr-live-path1:
 		--capture-path $(RR_LIVE_PATH1_NAME) \
 		--capture-screenshot-dir $(RR_LIVE_PATH1_CAPTURE_DIR) \
 		--capture-overwrite \
+		--capture-pin-region \
 		--capture-timeout-s 30.0 \
 		--capture-summary $(RR_LIVE_PATH1_CAPTURE_SUMMARY) \
 		--log-file $(RR_LIVE_PATH1_LOG); \

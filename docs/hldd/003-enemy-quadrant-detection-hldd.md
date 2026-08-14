@@ -139,6 +139,13 @@ Details:
 - **Steering math unchanged**: `error_norm = clamp(bearing/90, −1, 1)`,
   deadzone `bearing_deadzone_deg`, saturation beyond ±90° producing
   successive max-hold rolls for clusters behind the aircraft.
+- **Rear-sector turn commitment**: beyond `rear_commit_deg` the bearing's
+  sign is noise (a target dead astern flips +178 ↔ −179 between samples —
+  live finding 2026-08-08 15:01), so the turn direction latches and holds
+  until the target reaches the true forward semicircle
+  (`rear_release_deg`, default 90 — a 120° release band let a smoothed
+  bearing crossing *through* the tail escape the commitment, live finding
+  18:21). A target reseed (ring switch + angular jump) frees the direction.
 - **No altitude precondition** (revision 2's `attack_altitude` retired):
   live data showed the gate starved the tactic — 74% of ticks idle, and the
   eject-dive cycle, not the threshold, was the constraint. Altitude

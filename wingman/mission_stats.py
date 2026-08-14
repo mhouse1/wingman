@@ -16,6 +16,18 @@ logger = logging.getLogger(__name__)
 # EJECT -> MANUAL transitions arrived.
 _BATTLE_STATES = {"GAME_BATTLE", "GAME_BATTLE_MANUAL", "GAME_BATTLE_EJECT"}
 
+# ADR 070 V5 engagement accounting.
+# Alerts inside one volley arrive ~1.3-1.7 s apart (2026-08-11/12 sessions) and
+# are ONE engagement; separate volleys are minutes apart, so the grouping
+# threshold sits well clear of both.
+_VOLLEY_GROUP_S = 3.0
+# An evade is selected on the next behavior-tree tick, ~1.3-1.5 s after the
+# alert that triggered it; allow slack without reaching the next volley.
+_EVADE_ATTRIBUTION_S = 3.0
+# A missile that is going to kill you does it well inside this window. Longer
+# and unrelated deaths get attributed to the engagement.
+_ENGAGEMENT_WINDOW_S = 10.0
+
 
 def _fmt_duration(seconds: float) -> str:
     s = int(seconds)
@@ -65,6 +77,15 @@ class MissionStatsTracker:
         self._total_flare_bursts = 0
         self._total_flare_reloads = 0
         self._total_manual_takeovers = 0
+        self._total_missile_evades = 0
+
+        # ADR 070 V5: per-ENGAGEMENT survival, the measure a per-mission death
+        # rate cannot give. Missions mix engagements the tactic touched with
+        # ones it never saw (2026-08-12: 8 evades across 12 missions), so the
+        # per-mission rate is dominated by deaths the evade had no part in.
+        # One record per missile volley: did the aircraft die within
+        # _engagement_window_s of the alert, and had an evade fired?
+        self._engagements: list[dict] = []
 
         # Pending outcome hint set by named events before the FSM transition fires.
         self._pending_outcome: str | None = None
@@ -98,11 +119,19 @@ class MissionStatsTracker:
             self._total_respawns += 1
             if self._in_mission:
                 self._current["respawn_count"] += 1
+            self._attribute_death(ts)
 
         elif event_name == "flare_burst_deployed":
             self._total_flare_bursts += 1
             if self._in_mission:
                 self._current["flare_burst_count"] += 1
+            self._open_engagement(ts)
+
+        elif event_name == "missile_evade":
+            self._total_missile_evades += 1
+            if self._in_mission:
+                self._current["missile_evade_count"] += 1
+            self._mark_engagement_evaded(ts)
 
         elif event_name == "flare_reload":
             self._total_flare_reloads += 1
@@ -225,6 +254,8 @@ class MissionStatsTracker:
             "total_flare_bursts": self._total_flare_bursts,
             "total_flare_reloads": self._total_flare_reloads,
             "total_manual_takeovers": self._total_manual_takeovers,
+            "total_missile_evades": self._total_missile_evades,
+            "missile_engagements": self._engagement_summary(),
             "avg_mission_duration_s": round(avg_duration, 1) if avg_duration is not None else None,
             "missions": self._missions,
         }
@@ -273,8 +304,24 @@ class MissionStatsTracker:
             f"Total respawns    : {s['total_respawns']}",
             f"Total flare bursts: {s['total_flare_bursts']}{bursts_per}",
             f"Flare reloads     : {s['total_flare_reloads']}",
+            f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
         ]
+
+        eng = s.get("missile_engagements") or {}
+        if eng.get("engagements"):
+            def surv(rate, total, died):
+                if rate is None:
+                    return "n/a"
+                return f"{rate * 100:3.0f}%  ({total - died}/{total})"
+            lines += [
+                f"Missile engagements: {eng['engagements']}  "
+                f"(survived {eng['window_s']:.0f}s after alert)",
+                f"  with evade      : "
+                f"{surv(eng['evaded_survival'], eng['evaded_total'], eng['evaded_died'])}",
+                f"  without evade   : "
+                f"{surv(eng['not_evaded_survival'], eng['not_evaded_total'], eng['not_evaded_died'])}",
+            ]
         if path_line:
             lines.append(path_line.strip())
         lines.append("━" * 52)
@@ -284,6 +331,71 @@ class MissionStatsTracker:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    # -- ADR 070 V5: per-engagement survival -------------------------------
+
+    def _open_engagement(self, ts: float) -> None:
+        """Start an engagement on an incoming alert, or extend the current volley.
+
+        The flare burst fires on the detection edge, so this is the earliest
+        signal an engagement exists — before it is known whether an evade will
+        follow.
+        """
+        if self._engagements:
+            last = self._engagements[-1]
+            if ts - last["last_alert_ts"] <= _VOLLEY_GROUP_S:
+                last["last_alert_ts"] = ts
+                last["alerts"] += 1
+                return
+        self._engagements.append({
+            "ts": round(ts, 3),
+            "last_alert_ts": ts,
+            "alerts": 1,
+            "evaded": False,
+            "died_after_s": None,
+        })
+
+    def _mark_engagement_evaded(self, ts: float) -> None:
+        if not self._engagements:
+            return
+        last = self._engagements[-1]
+        if ts - last["last_alert_ts"] <= _EVADE_ATTRIBUTION_S:
+            last["evaded"] = True
+
+    def _attribute_death(self, ts: float) -> None:
+        """Attribute a death to the most recent engagement still in window."""
+        if not self._engagements:
+            return
+        last = self._engagements[-1]
+        if last["died_after_s"] is None and (ts - last["ts"]) <= _ENGAGEMENT_WINDOW_S:
+            last["died_after_s"] = round(ts - last["ts"], 1)
+
+    def _engagement_summary(self) -> dict:
+        """Survival rate split by whether an evade fired — the V5 measure."""
+        buckets = {"evaded": [0, 0], "not_evaded": [0, 0]}  # [total, died]
+        for e in self._engagements:
+            key = "evaded" if e["evaded"] else "not_evaded"
+            buckets[key][0] += 1
+            if e["died_after_s"] is not None:
+                buckets[key][1] += 1
+
+        def rate(total: int, died: int):
+            return round((total - died) / total, 3) if total else None
+
+        return {
+            "window_s": _ENGAGEMENT_WINDOW_S,
+            "engagements": len(self._engagements),
+            "evaded_total": buckets["evaded"][0],
+            "evaded_died": buckets["evaded"][1],
+            "evaded_survival": rate(*buckets["evaded"]),
+            "not_evaded_total": buckets["not_evaded"][0],
+            "not_evaded_died": buckets["not_evaded"][1],
+            "not_evaded_survival": rate(*buckets["not_evaded"]),
+            "detail": [
+                {k: v for k, v in e.items() if k != "last_alert_ts"}
+                for e in self._engagements
+            ],
+        }
 
     def _start_mission(self, ts: float) -> None:
         self._in_mission = True
@@ -296,6 +408,7 @@ class MissionStatsTracker:
             "respawn_count": 0,
             "flare_burst_count": 0,
             "flare_reload_count": 0,
+            "missile_evade_count": 0,
             "no_missiles_abort": False,
             "manual_takeover_count": 0,
             "outcome": "unknown",

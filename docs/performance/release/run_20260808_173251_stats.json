@@ -1,0 +1,73 @@
+{
+  "wingman_version": "1.7.1",
+  "run_id": "20260808_173251",
+  "session_start_ts": 1786224771.444,
+  "session_duration_s": 1258.7,
+  "missions_started": 3,
+  "missions_click_to": 3,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 9,
+  "total_flare_bursts": 19,
+  "total_flare_reloads": 1,
+  "total_manual_takeovers": 0,
+  "avg_mission_duration_s": 311.6,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1786224896.865,
+      "duration_s": 265.4,
+      "respawn_count": 2,
+      "flare_burst_count": 2,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 1,
+      "start_ts": 1786225242.516,
+      "duration_s": 317.1,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 2,
+      "start_ts": 1786225666.212,
+      "duration_s": 352.4,
+      "respawn_count": 4,
+      "flare_burst_count": 17,
+      "flare_reload_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 9,
+    "ocr_respawns": 8,
+    "matched": 8,
+    "matched_within_5s": 4,
+    "false_fires": 1,
+    "missed_ocr_respawns": 0,
+    "fire_deltas_s": [
+      5.45,
+      4.97,
+      3.35,
+      -11.6,
+      3.33,
+      6.02,
+      4.46,
+      5.41
+    ],
+    "max_confirmed_gap_s": 11.55,
+    "confirmed_gaps_over_threshold": 12
+  },
+  "stats_path": "docs/performance/current/run_20260808_173251_stats.json"
+}

@@ -4,7 +4,6 @@ import sys
 import yaml
 import time
 import logging
-import subprocess
 import threading
 from datetime import datetime
 from enum import Enum, auto
@@ -16,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.7.1"
-WINGMAN_VERSION_DETAILS = "implement requirements using strictdoc, minimap integration, bugfixes"
+WINGMAN_VERSION = "1.8.0"
+WINGMAN_VERSION_DETAILS = "implement initial behavior tree with adaptive tactics for missile avoidance, recalibrate to new UI"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
@@ -27,8 +26,8 @@ from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
 from .tick_handlers import (
     AmmoEventsHandler,
+    BehaviorTreeHandler,
     EnemyPresenceHandler,
-    EngageNavHandler,
     RespawnHandler,
     TrackingHudHandler,
     WaitingFallbackHandler,
@@ -141,6 +140,11 @@ def main():
                         help="Allow synthetic inject_trigger use during live capture")
     parser.add_argument("--capture-start-at-step", default=None,
                         help="Optional screenshot_name to resume capture from")
+    parser.add_argument("--capture-pin-region", action="store_true",
+                        help="Pin capture to the config region instead of auto-detecting the "
+                             "game window. Required for the ADR 045 presenter lane (frames are "
+                             "drawn AT the region); wrong for real-game capture (make p1/p2/p3), "
+                             "where the game window sits at its own desktop offset.")
     args = parser.parse_args()
 
     console_level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -257,11 +261,31 @@ def main():
             timeout_advances=False,
             out_of_order=True,
         )
-        cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
+        # Two capture lanes share this branch and need OPPOSITE offsets:
+        # - ADR 045 presenter lane (--capture-pin-region): the presenter draws
+        #   the timed screenshots AT the config region, so capture must be
+        #   pinned there — auto-detecting the game window is actively wrong
+        #   (when capture followed the game window it recorded live gameplay
+        #   instead of the presented frames and every step failed — 2026-08-09
+        #   19:45 run).
+        # - Real-game capture (make p1/p2/p3, no flag): the game window sits at
+        #   its own desktop offset (observed +66+69), so capture must
+        #   auto-detect exactly like a normal run. Pinning here shifts every
+        #   crop by that offset, OCR classifies nothing, and the lane dies at
+        #   the 90 s startup gate with zero screenshots (2026-08-13 21:48 and
+        #   21:50 runs — the pin was unconditional from 2026-08-09 until now).
+        if args.capture_pin_region:
+            lane_offset = (int(region[0]), int(region[1]))
+            cap = Capture(region, monitor_index, game_window_offset=lane_offset)
+            offset_note = f"capture pinned to config region at ({lane_offset[0]}, {lane_offset[1]})"
+        else:
+            cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
+            offset_note = "game-window auto-detect (real-game capture)"
         logger.info(
-            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict",
+            "Capture mode enabled: path=%s, screenshots=%s, mode=non-strict, %s",
             live_path.path_name,
             capture_screenshot_dir,
+            offset_note,
         )
     else:
         cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
@@ -281,6 +305,8 @@ def main():
     weapon_loop_interval = mission_cfg.get("weapon_loop_interval", 0.5)
     starting_stalled_reclassify_after_s = float(mission_cfg.get("starting_stalled_reclassify_after_s", 20.0))
     starting_max_wait_s = float(mission_cfg.get("starting_max_wait_s", 90.0))
+    # Startup stall watchdog: exit wingman (never the host) if battle is never reached.
+    startup_stall_exit_after_s = float(mission_cfg.get("startup_stall_exit_after_s", 600.0))
     unknown_max_wait_s = float(startup_cfg.get("unknown_max_wait_s", 90.0))
     unknown_state_since = 0.0
     startup_classification_complete = False
@@ -317,6 +343,7 @@ def main():
         good_luck_wait_s=float(mission_cfg.get("good_luck_wait_s", 13.0)),
         good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
         telemetry_cfg=cfg.get("telemetry", {}),
+        missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry
@@ -465,19 +492,28 @@ def main():
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
+    bt_active = str(cfg.get("behavior_tree", {}).get("mode", "off")).lower() == "active"
     ammo_events = AmmoEventsHandler(
         analyzer, ctrl, mission_cfg,
         perf_tracker=tracker, stats_tracker=stats_tracker,
         emit_capture_event=_emit_capture_event,
+        # ADR 024 3.1b: in active mode the Eject leaf actuates; this handler
+        # keeps the debounce and every suppression gate and hands over only
+        # the confirmed verdict.
+        bt_owns_eject=bt_active,
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
-    engage_nav = EngageNavHandler(analyzer, ctrl, j20_cfg, cfg.get("minimap", {}))
+    behavior_tree = BehaviorTreeHandler(
+        analyzer, ctrl, cfg.get("behavior_tree", {}), j20_cfg, cfg.get("minimap", {}),
+        ammo_events=ammo_events, stats_tracker=stats_tracker,
+    )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
     )
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,
         enemy_presence=enemy_presence, ammo_events=ammo_events,
+        behavior_tree=behavior_tree,
         live_capture=live_capture, emit_capture_event=_emit_capture_event,
         disposition_fn=_alive_transition_disposition,
         respawn_state_enum=RespawnState,
@@ -629,7 +665,7 @@ def main():
                     _stop_lobby_escape_loop()
                 waiting_fallback.on_state_change(current_game_state, prev_game_state)
                 enemy_presence.on_state_change(current_game_state, prev_game_state)
-                engage_nav.on_state_change(current_game_state, prev_game_state)
+                behavior_tree.on_state_change(current_game_state, prev_game_state)
                 ammo_events.on_state_change(current_game_state, prev_game_state)
                 tracking_hud.on_state_change(current_game_state, prev_game_state)
                 if current_game_state == GameState.GAME_STARTING_STALLED:
@@ -639,20 +675,29 @@ def main():
                 if current_game_state == GameState.GAME_BATTLE:
                     battle_ever_reached = True
 
-            # Watchdog: if GAME_BATTLE not entered within 10 minutes, shut down wingman and PC.
-            # Skipped in replay/capture modes. Uses `shutdown /s /t 0` which does not require
-            # elevated privileges on Windows — standard users hold SeShutdownPrivilege by default.
+            # Watchdog: if GAME_BATTLE is not entered within the stall window, exit
+            # WINGMAN ONLY — never the machine. Skipped in replay/capture modes.
+            #
+            # This used to run `shutdown -h now` (`shutdown /s /t 0` on Windows),
+            # which took the whole host down on any long stall: a game stuck on a
+            # login screen, a matchmaking queue that never filled, or a capture
+            # backend that came up before the game did. That destroys the session
+            # under investigation along with everything else running on the box.
+            # The stall is a wingman-level condition and gets a wingman-level
+            # response — record why, then leave through the normal exit path so
+            # cleanup() releases every held key and the stats/perf artifacts are
+            # still written.
             if (not battle_ever_reached
                     and not replay_mode and not capture_mode
-                    and time.time() - startup_time > 600.0):
-                logger.warning(
-                    "GAME_BATTLE not reached within 10 minutes of startup — shutting down wingman and computer"
+                    and time.time() - startup_time > startup_stall_exit_after_s):
+                logger.error(
+                    "STALL: GAME_BATTLE not reached within %.0fs of startup "
+                    "(last state %s) — exiting wingman. The computer is left "
+                    "running; check the game window and relaunch.",
+                    startup_stall_exit_after_s,
+                    getattr(current_game_state, "name", current_game_state),
                 )
                 exit_requested.set()
-                if sys.platform == "win32":
-                    subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
-                else:
-                    subprocess.run(["shutdown", "-h", "now"], check=False)
                 break
 
             missiles_snapshot = analyzer.get_ammo_missiles()
@@ -698,12 +743,18 @@ def main():
             # Ammo events (GAME_BATTLE only).
             ammo_events.tick_events()
 
-            # Enemy presence check: if ENEMY_CLOSE_BY has had no red for 30s, disengage.
-            enemy_presence.tick(frame, current_game_state)
+            # Legacy ENEMY_CLOSE_BY disengage — retired in active mode
+            # (ADR 024 3.1b): the Disengage leaf owns the job there, firing on
+            # minimap ring absence with the legacy fire-once-and-reset
+            # semantics. Still ticks in off/shadow modes.
+            if not behavior_tree.active:
+                enemy_presence.tick(frame, current_game_state)
 
-            # Ring-engage navigation (Design 003, FR-005) — before fine tracking
-            # so the shared orient_nose_to_target cooldown lets the terminal loop win.
-            engage_nav.tick(frame, current_game_state)
+            # ADR 024 behavior tree: tactic selection every tick; in active
+            # mode the Engage selection also drives ring-engage geometry
+            # (Design 003, FR-005) — before fine tracking so the shared
+            # orient_nose_to_target cooldown lets the terminal loop win.
+            behavior_tree.tick(frame, current_game_state, game_state)
 
             tracking_hud.tick(frame, current_game_state, game_state)
 

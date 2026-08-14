@@ -17,9 +17,11 @@ from wingman.telemetry import (
     TREND_RISING,
     TREND_UNKNOWN,
     TelemetryProcessor,
+    TelemetrySignal,
     TelemetrySnapshot,
     pitch_angle_deg,
     pitch_band,
+    pitch_band_from_angle_deg,
 )
 
 
@@ -276,31 +278,35 @@ class TestTrendAndStaleness:
 # ---------------------------------------------------------------------------
 
 class TestPitchBand:
+    # Metric normalization (ADR 067): 600 KPH is 166.67 m/s, so sin(angle)
+    # maps to alt rates of 25 m/s (level boundary, 0.15) and 133 m/s (steep
+    # boundary, 0.8) at that speed.
+
     def test_level_flight(self):
         assert pitch_band(600.0, 0.0) == BAND_LEVEL
 
-    def test_shallow_dive_20_degrees_at_600mph(self):
-        # sin(20°) ≈ 0.342 → ~300 ft/s descent at 600 MPH.
-        assert pitch_band(600.0, -300.0) == BAND_DIVE
+    def test_shallow_dive_20_degrees_at_600kph(self):
+        # sin(20°) ≈ 0.342 → ~57 m/s descent at 600 KPH.
+        assert pitch_band(600.0, -57.0) == BAND_DIVE
 
     def test_30_degree_dive_is_not_steep(self):
-        # sin(30°) = 0.5 → ~440 ft/s at 600 MPH. The flight-tested failure:
+        # sin(30°) = 0.5 → ~83 m/s at 600 KPH. The flight-tested failure:
         # with steep_min_sin 0.5 this counted as steep and the eject settled
         # at a 30-degree dive; the 0.8 default keeps it in the dive band.
-        assert pitch_band(600.0, -440.0) == BAND_DIVE
+        assert pitch_band(600.0, -83.3) == BAND_DIVE
 
-    def test_vertical_dive_at_600mph(self):
-        # sin(90°) = 1 → ~880 ft/s descent at 600 MPH.
-        assert pitch_band(600.0, -880.0) == BAND_STEEP_DIVE
+    def test_vertical_dive_at_600kph(self):
+        # sin(90°) = 1 → ~167 m/s descent at 600 KPH.
+        assert pitch_band(600.0, -167.0) == BAND_STEEP_DIVE
 
     def test_steep_climb(self):
-        assert pitch_band(600.0, 820.0) == BAND_STEEP_CLIMB
+        assert pitch_band(600.0, 140.0) == BAND_STEEP_CLIMB
 
     def test_shallow_climb(self):
-        assert pitch_band(600.0, 300.0) == BAND_CLIMB
+        assert pitch_band(600.0, 57.0) == BAND_CLIMB
 
     def test_missing_inputs_return_none(self):
-        assert pitch_band(None, -300.0) is None
+        assert pitch_band(None, -57.0) is None
         assert pitch_band(600.0, None) is None
 
     def test_too_slow_for_meaningful_ratio(self):
@@ -309,7 +315,7 @@ class TestPitchBand:
     def test_snapshot_pitch_band_requires_both_signals_fresh(self):
         p = _proc(stale_after_s=6.0)
         p.update(600, 20000, now_s=0.0)
-        p.update(600, 18800, now_s=1.5)  # -800 ft/s at 600 MPH → ratio 0.91, steep dive
+        p.update(600, 19775, now_s=1.5)  # -150 m/s at 600 KPH → ratio 0.9, steep dive
         assert p.snapshot(2.0).pitch_band() == BAND_STEEP_DIVE
         # Stale snapshot must return None — corrections need contrary
         # evidence, never absence of data (ADR 038).
@@ -317,22 +323,32 @@ class TestPitchBand:
 
 
 class TestPitchAngleDeg:
+    # The HUD is metric (KPH / meters) — see pitch_angle_deg(). 600 KPH is
+    # 166.67 m/s, so a 30-degree flight path is an 83.3 m/s altitude rate.
+
     def test_level_flight_is_zero(self):
         assert pitch_angle_deg(600.0, 0.0) == pytest.approx(0.0)
 
     def test_30_degree_dive(self):
-        # sin(30°) = 0.5 → -440 ft/s at 600 MPH (880 ft/s).
-        assert pitch_angle_deg(600.0, -440.0) == pytest.approx(-30.0, abs=0.1)
+        # sin(30°) = 0.5 → -83.3 m/s at 600 KPH (166.67 m/s).
+        assert pitch_angle_deg(600.0, -83.33) == pytest.approx(-30.0, abs=0.1)
 
     def test_30_degree_climb(self):
-        assert pitch_angle_deg(600.0, 440.0) == pytest.approx(30.0, abs=0.1)
+        assert pitch_angle_deg(600.0, 83.33) == pytest.approx(30.0, abs=0.1)
+
+    def test_uses_metric_conversion_not_mph(self):
+        # ADR 058 flight data: -389 m/s at 1782 KPH (495 m/s) was a hard dive.
+        # The legacy mph-as-displayed conversion read this as -8.6°; the metric
+        # conversion must place it in the low 50s.
+        assert pitch_angle_deg(1782.0, -389.0) == pytest.approx(-51.8, abs=0.5)
 
     def test_ratio_past_vertical_saturates_at_90(self):
-        # OCR noise can produce alt rate above total speed; asin must not raise.
-        assert pitch_angle_deg(600.0, -1200.0) == pytest.approx(-90.0)
+        # A stalled/falling aircraft can descend faster than its displayed
+        # forward speed; asin must saturate, not raise.
+        assert pitch_angle_deg(600.0, -400.0) == pytest.approx(-90.0)
 
     def test_missing_inputs_return_none(self):
-        assert pitch_angle_deg(None, -300.0) is None
+        assert pitch_angle_deg(None, -80.0) is None
         assert pitch_angle_deg(600.0, None) is None
 
     def test_too_slow_for_meaningful_ratio(self):
@@ -341,14 +357,72 @@ class TestPitchAngleDeg:
     def test_snapshot_pitch_angle_requires_both_signals_fresh(self):
         p = _proc(stale_after_s=6.0)
         p.update(600, 20000, now_s=0.0)
-        p.update(600, 19340, now_s=1.5)  # -440 ft/s at 600 MPH → -30°
+        p.update(600, 19875, now_s=1.5)  # -83.3 m/s at 600 KPH → -30°
         assert p.snapshot(2.0).pitch_angle_deg() == pytest.approx(-30.0, abs=0.1)
         assert p.snapshot(20.0).pitch_angle_deg() is None
+
+
+class TestPitchBandFromAngleDeg:
+    def test_level_band(self):
+        assert pitch_band_from_angle_deg(0.0) == BAND_LEVEL
+        assert pitch_band_from_angle_deg(8.0) == BAND_LEVEL
+
+    def test_dive_and_climb_bands(self):
+        assert pitch_band_from_angle_deg(-30.0) == BAND_DIVE
+        assert pitch_band_from_angle_deg(30.0) == BAND_CLIMB
+
+    def test_steep_bands(self):
+        # steep_min_sin 0.8 ≈ 53.1°
+        assert pitch_band_from_angle_deg(-60.0) == BAND_STEEP_DIVE
+        assert pitch_band_from_angle_deg(60.0) == BAND_STEEP_CLIMB
+
+    def test_none_angle_returns_none(self):
+        assert pitch_band_from_angle_deg(None) is None
 
 
 # ---------------------------------------------------------------------------
 # Snapshot atomicity
 # ---------------------------------------------------------------------------
+
+class TestRatioUsesInstantaneousSpeed:
+    """ADR 069 d6: the flight-path ratio divides by the LAST ACCEPTED speed,
+    not the smoothed mean. In a dive the aircraft accelerates faster than the
+    smoothing window tracks, so the smoothed denominator inflates the ratio
+    past 1.0 and saturates the angle at 90 degrees — exactly when the reading
+    matters most."""
+
+    def _diving_snapshot(self):
+        # The real 2026-08-10 06:21:24 sample: -110 m/s at an instantaneous
+        # 469 KPH, whose 3-sample mean was 313 KPH.
+        return TelemetrySnapshot(
+            speed=TelemetrySignal(value=469, ts=0.0, stable_value=313.0),
+            altitude=TelemetrySignal(value=11415, ts=0.0, stable_value=11415.0,
+                                     rate=-110.0),
+            taken_at_s=0.0,
+            stale_after_s=6.0,
+        )
+
+    def test_angle_is_not_saturated_by_smoothing_lag(self):
+        snap = self._diving_snapshot()
+        # Smoothed 313 KPH would give ratio -1.26 -> clamped -90.
+        assert snap.pitch_angle_deg() == pytest.approx(-57.5, abs=1.0)
+
+    def test_band_uses_the_same_instantaneous_speed(self):
+        snap = self._diving_snapshot()
+        # ratio -0.845 at 469 KPH: steep, but genuinely so rather than clamped.
+        assert snap.pitch_band() == BAND_STEEP_DIVE
+
+    def test_missing_speed_value_yields_no_angle(self):
+        snap = TelemetrySnapshot(
+            speed=TelemetrySignal(value=None, ts=0.0, stable_value=400.0),
+            altitude=TelemetrySignal(value=10000, ts=0.0, stable_value=10000.0,
+                                     rate=-110.0),
+            taken_at_s=0.0,
+            stale_after_s=6.0,
+        )
+        assert snap.pitch_angle_deg() is None
+        assert snap.pitch_band() is None
+
 
 class TestSnapshot:
     def test_snapshot_is_immutable(self):

@@ -42,7 +42,16 @@ def ctrl(monkeypatch):
     )
     yield c
     exit_event.set()
-    c.cancel_mission()
+    # Re-assert cancel until the mission lock is actually free: mission entry
+    # does _mission_cancel.clear(), so a single cancel landing in the
+    # spawn-to-entry window is swallowed and the thread survives into
+    # monkeypatch teardown — where keyboard_module reverts to the REAL XTest
+    # shim and the thread presses real keys (2026-08-14 stuck-'i' incident).
+    deadline = time.time() + 5.0
+    while c.is_mission_running() and time.time() < deadline:
+        c._mission_cancel.set()
+        time.sleep(0.05)
+    assert not c.is_mission_running(), "mission thread survived teardown"
 
 
 # ---------------------------------------------------------------------------

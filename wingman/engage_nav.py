@@ -178,6 +178,11 @@ class EngageNavigator:
         self.short_ring_min_count = int(j20_cfg.get("short_ring_min_count", 1))
         self.ring_debounce_ticks = int(j20_cfg.get("ring_debounce_ticks", 2))
         self.ema_reseed_angle_deg = float(j20_cfg.get("ema_reseed_angle_deg", 60.0))
+        self.rear_commit_deg = float(j20_cfg.get("rear_commit_deg", 150.0))
+        # Release only in the true forward semicircle: live 2026-08-08 18:21,
+        # a smoothed bearing crossing THROUGH the tail (+150 → −100) satisfied
+        # a 120° release while still rear-quarter, re-admitting a reversal.
+        self.rear_release_deg = float(j20_cfg.get("rear_release_deg", 90.0))
         self.orbit_direction = str(j20_cfg.get("orbit_direction", "right"))
         self._ema = MinimapEma(minimap_cfg or {})
         self.mode = MODE_IDLE
@@ -185,6 +190,7 @@ class EngageNavigator:
         self._candidate = self.mode
         self._candidate_streak = 0
         self._engaged_ring: "str | None" = None
+        self._committed_sign: "float | None" = None
 
     @property
     def deadband_norm(self) -> float:
@@ -197,6 +203,7 @@ class EngageNavigator:
         self._candidate = self.mode
         self._candidate_streak = 0
         self._engaged_ring = None
+        self._committed_sign = None
         self._ema.reset()
 
     def _classify(self, rings: dict) -> str:
@@ -254,6 +261,7 @@ class EngageNavigator:
 
         if self.mode == MODE_ORBIT:
             self._engaged_ring = None
+            self._committed_sign = None
             return Intent(self.mode, "orbit", None, self.orbit_direction, "orbit-short-ring")
 
         if self.mode == MODE_ENGAGE_MID:
@@ -262,6 +270,7 @@ class EngageNavigator:
             ring_name = RING_LONG
         else:
             self._engaged_ring = None
+            self._committed_sign = None
             return Intent(self.mode, "none", None, None, "idle")
 
         ring = rings[ring_name]
@@ -274,9 +283,26 @@ class EngageNavigator:
             if (state_bearing is None
                     or angle_diff_deg(ring.bearing_deg, state_bearing) > self.ema_reseed_angle_deg):
                 self._ema.reset()
+                self._committed_sign = None   # genuinely new target — free direction choice
             self._engaged_ring = ring_name
         bearing, _radius = self._ema.update(ring.bearing_deg, ring.radius_frac, now)
-        if abs(bearing) <= self.bearing_deadzone_deg:
+
+        # Rear-sector turn commitment (live finding 2026-08-08 15:01): a target
+        # near ±180° has an unstable bearing SIGN — flipping the roll direction
+        # each sample restarts the turn and never brings the target forward.
+        # Commit to one direction while the target is deep astern; release once
+        # it swings forward of rear_release_deg.
+        abs_bearing = abs(bearing)
+        if self._committed_sign is not None:
+            if abs_bearing < self.rear_release_deg:
+                self._committed_sign = None
+            else:
+                return Intent(self.mode, "steer", self._committed_sign, None, "steering-rear-commit")
+        if abs_bearing >= self.rear_commit_deg:
+            self._committed_sign = 1.0 if bearing >= 0 else -1.0
+            return Intent(self.mode, "steer", self._committed_sign, None, "steering-rear-commit")
+
+        if abs_bearing <= self.bearing_deadzone_deg:
             return Intent(self.mode, "none", None, None, "on-course")
         error = max(-1.0, min(1.0, bearing / 90.0))
         return Intent(self.mode, "steer", error, None, "steering")

@@ -175,57 +175,60 @@ def _build_path2_ocr_yaml(tmp_path: Path) -> Path:
     content = """\
 # PATH2_OCR: real-OCR timing clone of PATH2.
 # inject_trigger: manual_force_battle on step 0 seeds the FSM into GAME_BATTLE.
-# inject_trigger: manual_takeover on P2_020 fires the manual-mode transition.
+# inject_trigger: manual_takeover on the second P1_030 step fires the manual-mode transition.
 PATH2_OCR:
   # Seed GAME_BATTLE immediately via inject_trigger; no assertion on this step.
-  - screenshot_name: P2_000_BATTLE_HUD_MISSILES_4.png
+  # P1_030 reused (P2_000 deleted 2026-08-13 — byte-identical copy).
+  - screenshot_name: P1_030_BATTLE_HUD_MISSILES_4.png
     injection_time_s: 0.0
     inject_trigger: manual_force_battle
   # BATTLE (missiles=0) at t=8 s.  Ammo OCR detects 0 within 10 s.
-  - screenshot_name: P2_010_BATTLE_HUD_MISSILES_0.png
+  # P1_040 reused (P2_010 deleted 2026-08-13 — same battle HUD, missiles=0).
+  - screenshot_name: P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png
     injection_time_s: 8.0
     expected_state: GAME_BATTLE
     expected_trigger: missiles_empty
     max_settle_time_s: 10.0
   # Manual takeover: inject_trigger fires manual_takeover immediately.
-  # missiles_empty at P2_010 fires eject_started (ADR 056), so the FSM sits in
-  # GAME_BATTLE_EJECT here — the old GAME_BATTLE expectation could never be met
-  # and masked the real flow behind an out-of-order harness failure.
-  - screenshot_name: P2_020_MANUAL_TAKEOVER_MOMENT.png
+  # missiles_empty at the previous step fires eject_started (ADR 056), so the
+  # FSM sits in GAME_BATTLE_EJECT here — the old GAME_BATTLE expectation could
+  # never be met and masked the real flow behind an out-of-order harness failure.
+  - screenshot_name: P1_030_BATTLE_HUD_MISSILES_4.png
     injection_time_s: 20.0
     expected_state: GAME_BATTLE_EJECT
     expected_trigger: manual_mode
     max_settle_time_s: 5.0
     inject_trigger: manual_takeover
   # GAME_BATTLE_MANUAL confirmed immediately after inject.
-  - screenshot_name: P2_030_GAME_BATTLE_MANUAL_HUD.png
+  - screenshot_name: P1_030_BATTLE_HUD_MISSILES_4.png
     injection_time_s: 23.0
     expected_state: GAME_BATTLE_MANUAL
     expected_trigger: manual_mode_entered
     max_settle_time_s: 5.0
   # RESPAWN at t=35 s.  Respawn OCR runs in background; allow 12 s.
-  - screenshot_name: P2_040_RESPAWN_VISIBLE_NO_HEALTH.png
+  - screenshot_name: P1_050_RESPAWN_VISIBLE_NO_HEALTH.png
     injection_time_s: 35.0
     expected_state: GAME_BATTLE_MANUAL
     expected_trigger: respawn_detected
     max_settle_time_s: 12.0
-  # ALIVE at t=52 s.  Death ended manual takeover at P2_040 (respawn_reset),
+  # ALIVE at t=52 s.  Death ended manual takeover at the respawn step (respawn_reset),
   # so health returning restarts the mission immediately via the alive event.
-  - screenshot_name: P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png
+  # P1_060 reused (P2_050 deleted 2026-08-13 — byte-identical copy).
+  - screenshot_name: P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png
     injection_time_s: 52.0
     expected_state: GAME_BATTLE
     expected_trigger: restart_last_mission
     max_settle_time_s: 12.0
   # End-of-mission screen at t=65 s.  inject_trigger forces FSM into GAME_END_B.
-  # (P2_050 deadline is t=64 s; 1 s buffer before this step activates.)
-  - screenshot_name: P2_060_CLICK_TO_CONTINUE.png
+  # (previous step's deadline is t=64 s; 1 s buffer before this step activates.)
+  - screenshot_name: P1_070_CLICK_TO_CONTINUE.png
     injection_time_s: 65.0
     expected_state: GAME_END_B
     expected_trigger: click_to_detected
     max_settle_time_s: 5.0
     inject_trigger: click_to_detected
   # Back to LOBBY at t=66 s.  inject_trigger fires continue_clicked.
-  - screenshot_name: P2_070_LOBBY_AFTER_MISSION.png
+  - screenshot_name: P1_080_LOBBY_AFTER_MISSION.png
     injection_time_s: 66.0
     expected_state: GAME_LOBBY
     expected_trigger: continue_clicked
@@ -305,6 +308,39 @@ class FakeController:
         self._mission_running = True
         self._intents.append({"action_type": "restart_last_mission"})
         return True
+
+    # --- Behavior-tree tactic predicates (ADR 024 3.1b / ADR 070) ---
+    # The active-mode tree wires actuators at construction and calls the
+    # is_running predicates every tick (the MissileEvade leaf's sticky
+    # condition calls is_missile_evading even with no incoming detection).
+    # The stub never actuates, so these report "not running" and record any
+    # start calls as intents.
+    def is_ejecting(self) -> bool:
+        return False
+
+    def is_disengage_running(self) -> bool:
+        return False
+
+    def is_missile_evading(self) -> bool:
+        return False
+
+    def disengage_roll_right(self, duration: float = 10.0) -> None:
+        self._intents.append({"action_type": "disengage_roll_right"})
+
+    def missile_evade_mode(self) -> None:
+        self._intents.append({"action_type": "missile_evade_mode"})
+
+    # Engage-geometry actuation (3.1a) — called when the Engage leaf selects
+    # with contacts on the injected battle frames' minimaps.
+    def orient_nose_to_target(self, error_norm, **_cfg) -> str | None:
+        self._intents.append({"action_type": "orient_nose_to_target"})
+        return None
+
+    def roll_left(self, hold_seconds: float = 0.3, block: bool = True) -> None:
+        self._intents.append({"action_type": "roll_left"})
+
+    def roll_right(self, hold_seconds: float = 0.3, block: bool = True) -> None:
+        self._intents.append({"action_type": "roll_right"})
 
     def stop_eject_sequence(self, reason: str = "respawn_detected") -> None:
         self._intents.append({"action_type": "stop_eject_sequence"})
@@ -531,14 +567,14 @@ def test_path1_ocr_regression(tmp_path, monkeypatch):
 def test_path2_ocr_regression(tmp_path, monkeypatch):
     """PATH2 full OCR regression: BATTLE (seeded) → missiles_empty → manual_takeover → RESPAWN → ALIVE."""
     path2_screenshots = [
-        "P2_000_BATTLE_HUD_MISSILES_4.png",
-        "P2_010_BATTLE_HUD_MISSILES_0.png",
-        "P2_020_MANUAL_TAKEOVER_MOMENT.png",
-        "P2_030_GAME_BATTLE_MANUAL_HUD.png",
-        "P2_040_RESPAWN_VISIBLE_NO_HEALTH.png",
-        "P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png",
-        "P2_060_CLICK_TO_CONTINUE.png",
-        "P2_070_LOBBY_AFTER_MISSION.png",
+        "P1_030_BATTLE_HUD_MISSILES_4.png",               # reused; P2_000 deleted
+        "P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png",  # reused; P2_010 deleted
+        "P1_030_BATTLE_HUD_MISSILES_4.png",
+        "P1_030_BATTLE_HUD_MISSILES_4.png",
+        "P1_050_RESPAWN_VISIBLE_NO_HEALTH.png",
+        "P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png",  # reused; P2_050 deleted
+        "P1_070_CLICK_TO_CONTINUE.png",
+        "P1_080_LOBBY_AFTER_MISSION.png",
     ]
     _check_screenshots_ready(path2_screenshots)
 
@@ -559,7 +595,7 @@ def test_path2_ocr_regression(tmp_path, monkeypatch):
     # Guard: all five GAME_BATTLE OCR crops must have been scanned at least once.
     _assert_ocr_ran(tracker, _BATTLE_OCR_CROPS, "PATH2_OCR")
 
-    # Final FSM state: PATH2 ends with P2_070 which injects continue_clicked → GAME_LOBBY.
+    # Final FSM state: PATH2 ends with P1_080 which injects continue_clicked → GAME_LOBBY.
     # OCR may then detect PLAY in the lobby screenshot and transition to GAME_WAITING
     # within the exit_after window — both are valid "back in lobby" states.
     assert analyzer is not None

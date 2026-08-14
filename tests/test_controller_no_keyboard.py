@@ -22,6 +22,26 @@ def _load_config():
         return yaml.safe_load(fh)
 
 
+def _drain_mission_threads(c, timeout=5.0):
+    """Cancel and WAIT OUT any mission daemon thread before monkeypatch reverts.
+
+    mission_j20's entry does `_mission_cancel.clear()`, so a cancel that lands
+    in the spawn-to-entry window is silently swallowed — the mission then runs
+    its full multi-minute script. Combined with monkeypatch restoring the REAL
+    keyboard_module at teardown, a surviving thread presses REAL keys; pytest
+    exiting mid-hold latches the key in the X server (the 2026-08-14 stuck-'i'
+    incident). Re-assert the cancel until the mission lock is actually free.
+    """
+    deadline = time.time() + timeout
+    while c.is_mission_running() and time.time() < deadline:
+        c._mission_cancel.set()
+        time.sleep(0.05)
+    assert not c.is_mission_running(), (
+        "mission thread survived teardown — it would press REAL keys once "
+        "monkeypatch restores keyboard_module"
+    )
+
+
 @pytest.fixture
 def ctrl(monkeypatch):
     """Controller with keyboard_module patched to None."""
@@ -39,7 +59,7 @@ def ctrl(monkeypatch):
     )
     yield c
     exit_event.set()
-    c.cancel_mission()
+    _drain_mission_threads(c)
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +94,8 @@ def test_restart_last_mission_no_history(ctrl):
     # _last_mission must now be set so future restarts also work
     with ctrl._last_mission_lock:
         assert ctrl._last_mission == "j20"
-    ctrl.cancel_mission()  # stop the spawned thread
+    _drain_mission_threads(ctrl)  # a bare cancel can be swallowed by the
+    # mission entry's _mission_cancel.clear() — see the helper's docstring
 
 
 def test_restart_last_mission_returns_false_when_running(ctrl):
@@ -437,3 +458,88 @@ def test_toggle_weapon_loop_accepts_a_key_event(ctrl):
     assert ctrl._weapon_loop_active is True
     ctrl.toggle_weapon_loop(SimpleNamespace(name="x", is_injected=False))  # hotkey call
     assert ctrl._weapon_loop_active is False
+
+
+def test_every_injectable_key_resolves_to_a_keysym():
+    """Regression (ADR 070 V1): string_to_keysym(';') returns 0 — punctuation
+    needs its X11 keysym NAME via _XKEY_ALIASES, or the injection is silently
+    dropped ("unknown keysym for ';'", 2026-08-11 07:27:22 — YAW_LEFT was
+    never injectable). Every key the controller can press must resolve."""
+    XK = pytest.importorskip("Xlib.XK")
+    injectable = [
+        controller_module.NOSE_UP_KEY, controller_module.NOSE_DOWN_KEY,
+        controller_module.ROLL_LEFT_KEY, controller_module.ROLL_RIGHT_KEY,
+        controller_module.YAW_LEFT, controller_module.AFTERBURNER_KEY,
+        controller_module.AIRBRAKE_KEY, controller_module.WINGSWEEP_KEY,
+        controller_module.DEPLOY_FLARES_KEY, controller_module.FIRE_MACHINE_GUN,
+        controller_module.FIRE_ACTIVE_WEAPON, controller_module.PADLOCK_CAMERA,
+        controller_module.SPECIAL_ABILITY, controller_module.SWITCH_WEAPON,
+        controller_module.CANCEL_MISSION_KEY,
+        *controller_module.ALT_FLIGHT_KEYS,
+    ]
+    for key in injectable:
+        xk_name = controller_module._XKEY_ALIASES.get(key.lower(), key.lower())
+        assert XK.string_to_keysym(xk_name) != 0, (
+            f"key {key!r} (xk name {xk_name!r}) does not resolve to a keysym — "
+            "it would be silently dropped by _linux_key_event"
+        )
+
+
+def test_delayed_echo_within_release_grace_is_ignored(monkeypatch):
+    """Regression (2026-08-14 02:35 soak): XRecord delivery lag scales with
+    X-server load — a queued 'j' auto-repeat arrived 391 ms after wingman's own
+    roll_left release, outlived the old 0.15 s grace window, and cancelled the
+    mission into GAME_BATTLE_MANUAL mid-flight. Echoes of a key wingman just
+    released must be ignored for the full grace second."""
+    import time as _time
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_BATTLE)
+    ctrl = Controller(region, analyzer=analyzer)
+
+    ctrl._mission_lock.acquire(blocking=False)
+    try:
+        # Wingman releases 'j' — grace armed at that moment.
+        ctrl._arm_release_grace("j")
+
+        # The observed delayed echo: 0.4 s after release.
+        _time.sleep(0.4)
+        handled = ctrl._handle_maneuver_key_press("j", is_injected=False)
+        assert handled is False, "delayed echo cancelled the mission"
+        assert ctrl._mission_cancel.is_set() is False
+        assert analyzer.trigger_calls == []
+
+        # A genuine press after the grace expires still takes over.
+        ctrl._prog_release_grace_until["j"] = _time.time() - 0.01
+        handled = ctrl._handle_maneuver_key_press("j", is_injected=False)
+        assert handled is True
+        assert analyzer.trigger_calls == ["manual_takeover"]
+    finally:
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+def test_release_grace_scales_with_release_latency(monkeypatch):
+    """2026-08-14 03:35 sizing case: a 0.15 s roll_left took 2.7 s to release
+    and queued repeats were still delivered 3.2 s after the release — past any
+    fixed window. The grace must scale with the measured release latency
+    (3x span), while fast releases keep the 1.0 s floor."""
+    import time as _time
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_BATTLE)
+    ctrl = Controller(region, analyzer=analyzer)
+
+    # Loaded server: release took 2.56 s -> window must cover the 3.2 s echo.
+    now = _time.time()
+    ctrl._arm_release_grace("j", span_s=2.56)
+    window = ctrl._prog_release_grace_until["j"] - now
+    assert window >= 3.2 + 0.5, f"window {window:.1f}s does not cover the observed 3.2s echo"
+
+    # Healthy server: ~5 ms release keeps the fixed floor, not less.
+    now = _time.time()
+    ctrl._arm_release_grace("k", span_s=0.005)
+    window = ctrl._prog_release_grace_until["k"] - now
+    assert abs(window - ctrl._prog_release_grace_s) < 0.05

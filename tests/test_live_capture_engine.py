@@ -479,3 +479,77 @@ def test_live_capture_engine_out_of_order_overall_timeout_fails_pending_steps(ca
     assert payload["steps"][1]["status"] == "failed"
     assert payload["steps"][1]["timeout"] is True
     assert payload["steps"][1]["notes"] == "timeout_after_5.0s"
+
+
+def test_oo_trigger_captures_when_state_exits_same_tick(capture_dir: Path):
+    """Regression (2026-08-13 21:55 make p1 run): since ADR 056, missiles_empty
+    atomically exits GAME_BATTLE for GAME_BATTLE_EJECT, so by the next
+    evaluate() the state no longer matches and 'trigger fresh AND state
+    matches now' was unobservable by construction — P1_040 timed out on every
+    real-game capture run. The state half must accept the expected state
+    having been OBSERVED within the freshness window."""
+    steps = [ReplayStep(
+        screenshot_name="p1_040.png", injection_time_s=0.0,
+        expected_state="GAME_BATTLE", expected_trigger="missiles_empty",
+    )]
+    engine = LivePathCaptureEngine(
+        path_name="PATH1", steps=steps, screenshot_dir=capture_dir,
+        region=(0, 0, 10, 10), overwrite=True, timeout_s=5.0,
+        allow_inject=False, out_of_order=True,
+    )
+    # Battle ticks observed, then the one-shot trigger fires and the FSM
+    # leaves GAME_BATTLE on the same tick.
+    engine.evaluate(_frame(), "game_battle", 0.0)
+    engine.on_event("missiles_empty", 1.4)
+    engine.on_state("game_battle_eject", 1.5)
+    # Next evaluate is already in the eject state.
+    engine.evaluate(_frame(), "game_battle_eject", 1.6)
+
+    assert (capture_dir / "p1_040.png").exists(), (
+        "same-tick state exit made the trigger step uncapturable"
+    )
+
+
+def test_oo_one_shot_trigger_captures_on_first_ready_evaluate(capture_dir: Path):
+    """One-shot FSM triggers cannot survive debounce_required consecutive
+    evaluates inside the 2.0 s freshness window at the 1.5 s loop tick —
+    trigger-sourced readiness must capture on the first ready evaluate."""
+    steps = [ReplayStep(
+        screenshot_name="one_shot.png", injection_time_s=0.0,
+        expected_state="GAME_BATTLE", expected_trigger="respawn_detected",
+    )]
+    engine = LivePathCaptureEngine(
+        path_name="PATH1", steps=steps, screenshot_dir=capture_dir,
+        region=(0, 0, 10, 10), overwrite=True, timeout_s=5.0,
+        allow_inject=False, out_of_order=True, debounce_required=2,
+    )
+    engine.evaluate(_frame(), "game_battle", 0.0)
+    engine.on_event("respawn_detected", 1.0)
+    # Only ONE evaluate lands inside the freshness window.
+    engine.evaluate(_frame(), "game_battle", 1.9)
+
+    assert (capture_dir / "one_shot.png").exists(), (
+        "one-shot trigger needed debounce ticks it can never get"
+    )
+
+
+def test_oo_stale_state_does_not_satisfy_trigger_step(capture_dir: Path):
+    """The anti-stale guard survives the fix: expected state seen long BEFORE
+    the trigger (outside the freshness window) must not capture."""
+    steps = [ReplayStep(
+        screenshot_name="stale.png", injection_time_s=0.0,
+        expected_state="GAME_BATTLE", expected_trigger="missiles_empty",
+    )]
+    engine = LivePathCaptureEngine(
+        path_name="PATH1", steps=steps, screenshot_dir=capture_dir,
+        region=(0, 0, 10, 10), overwrite=True, timeout_s=60.0,
+        allow_inject=False, out_of_order=True,
+    )
+    engine.evaluate(_frame(), "game_battle", 0.0)     # battle seen at t=0
+    engine.on_state("game_lobby", 5.0)                # long gone from battle
+    engine.on_event("missiles_empty", 30.0)           # trigger fires much later
+    engine.evaluate(_frame(), "game_lobby", 30.5)     # state stale by 30 s
+
+    assert not (capture_dir / "stale.png").exists(), (
+        "a 30s-stale state sighting satisfied the both-fields rule"
+    )
