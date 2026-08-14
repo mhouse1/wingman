@@ -638,10 +638,21 @@ class Controller:
         self._programmatic_key_lock = threading.Lock()
         # Per-key deadline until which a maneuver-key press is still treated as
         # ours. Covers auto-repeat KeyPress events emitted while we held the key
-        # but delivered by the XRecord listener a few ms after we released it
+        # but delivered by the XRecord listener AFTER we released it
         # (see _eject_key / _arm_release_grace).
+        #
+        # 1.0 s, not "a few ms": XRecord delivery lag scales with X-server load,
+        # not with our release timing. In the 2026-08-14 02:35 soak session a
+        # wingman roll_left release took 1.1 s to execute and a queued 'j'
+        # repeat was delivered 391 ms AFTER the release — past the old 0.15 s
+        # window — cancelling the mission into GAME_BATTLE_MANUAL mid-flight
+        # with auto-restart suppressed. The cost is bounded and per-key: only
+        # THE key wingman itself just released is deaf for 1 s; a genuine
+        # takeover still lands via any other maneuver key, repeated presses
+        # (the observed human pattern is 3+ taps over ~1.3 s), or the same key
+        # after 1 s. SAF-001's 2.0 s cessation bound is still met.
         self._prog_release_grace_until: dict = {}
-        self._prog_release_grace_s = 0.15
+        self._prog_release_grace_s = 1.0
 
         # Optional callback fired immediately when Good Luck OCR succeeds, with the
         # captured frame.  Used by live capture mode to record the fixture at the
@@ -1076,6 +1087,7 @@ class Controller:
                     return
                 logger.debug("Controller: using keyboard library for '%s' press", key)
                 self._inc_programmatic_key(key)
+                release_span = 0.0  # measured below; finally must not NameError
                 try:
                     keyboard_module.press(key)
                     start = time.time()
@@ -1086,16 +1098,19 @@ class Controller:
                                 break
                         else:
                             time.sleep(0.05)
+                    release_started = time.time()
                     try:
                         keyboard_module.release(key)
                     except Exception:
                         logger.exception("Controller: failed to release '%s' key", key)
+                    release_span = time.time() - release_started
                     logger.debug("%sController: %s complete%s", complete_color_start, label, complete_color_end)
                 finally:
                     # Same stale-auto-repeat window as _eject_key: the X server
-                    # repeats XTest-held keys, and the last repeats can land just
-                    # after the release. Arm before dropping the count.
-                    self._arm_release_grace(key)
+                    # repeats XTest-held keys, and queued repeats can land
+                    # SECONDS after the release under load. Arm before dropping
+                    # the count, scaled by the measured release latency.
+                    self._arm_release_grace(key, span_s=release_span)
                     self._dec_programmatic_key(key)
             except Exception:
                 logger.exception("Controller: %s failed", label)
@@ -1265,14 +1280,16 @@ class Controller:
             return
 
         self._eject_held_keys.discard(key)
+        _release_started = time.time()
         try:
             keyboard_module.release(key)
         except Exception:
             pass
         finally:
             # Arm the suppression window BEFORE dropping the count so there is no
-            # instant where neither guard is active.
-            self._arm_release_grace(key)
+            # instant where neither guard is active. Scaled by release latency —
+            # queued repeats drain for seconds under X load (2026-08-14 03:35).
+            self._arm_release_grace(key, span_s=time.time() - _release_started)
             self._dec_programmatic_key(key)
 
     def _account_nose_hold(self, press: bool) -> None:
@@ -1307,18 +1324,26 @@ class Controller:
             held += time.time() - self._eject_nose_down_since
         return held
 
-    def _arm_release_grace(self, key: str) -> None:
-        """Suppress maneuver-key takeover for this key briefly after our own release.
+    def _arm_release_grace(self, key: str, span_s: float = 0.0) -> None:
+        """Suppress maneuver-key takeover for this key after our own release.
 
-        The X server stops auto-repeating the moment the release lands, so this
-        only has to outlast delivery of repeats already queued in the XRecord
-        pipeline (measured 2-35 ms under OCR load). Deliberately short: a human
-        press arriving within this window of wingman's own release would be
-        swallowed, and the whole point of the per-key counter is to keep manual
-        takeover responsive.
+        The X server stops auto-repeating the moment the release lands, but
+        DELIVERY of repeats already queued in the XRecord pipeline scales with
+        X-server load, not with our timing. The 2026-08-14 03:35 soak session
+        is the sizing case: a 0.15 s roll_left hold took 2.7 s to release, and
+        its queued 'j' repeats were still being delivered 3.2 s AFTER the
+        release — three of them fired manual takeover in a row.
+
+        `span_s` is the measured duration of the physical release call — the
+        cheapest live proxy for X-server load. The window is the fixed floor
+        (fast healthy releases) or 3x the release latency (loaded server, e.g.
+        3 x 2.56 s = 7.7 s covers the observed 3.2 s straggler with margin).
+        Per-key cost only: a human takeover still lands via any other maneuver
+        key or repeated presses.
         """
+        window = max(self._prog_release_grace_s, 3.0 * span_s)
         with self._programmatic_key_lock:
-            self._prog_release_grace_until[key] = time.time() + self._prog_release_grace_s
+            self._prog_release_grace_until[key] = time.time() + window
 
     @contextlib.contextmanager
     def _eject_guard_hold(self):
@@ -1794,11 +1819,13 @@ class Controller:
                         break
                     time.sleep(0.1)
             finally:
+                _release_started = time.time()
                 try:
                     keyboard_module.release(ROLL_RIGHT_KEY)
                 except Exception:
                     pass
-                self._arm_release_grace(ROLL_RIGHT_KEY)
+                self._arm_release_grace(ROLL_RIGHT_KEY,
+                                        span_s=time.time() - _release_started)
                 self._dec_programmatic_key(ROLL_RIGHT_KEY)
                 if not self.is_mission_running():
                     self.stop_search_and_destroy_loop()
@@ -2010,6 +2037,7 @@ class Controller:
                     exit_reason = "clear"
                     break
         finally:
+            _release_started = time.time()
             for _key in reversed(hold_keys):
                 if self._simulate_os_input:
                     self._record_action_intent("key_release", key=_key, action="missile_evade")
@@ -2018,11 +2046,13 @@ class Controller:
                         keyboard_module.release(_key)
                     except Exception:
                         pass
+            _release_span = time.time() - _release_started
             # Physical release first, THEN the grace + counter drop, so repeats
             # already queued in the XRecord pipeline cannot be misread as the
-            # player (the _eject_key release-ordering finding).
+            # player (the _eject_key release-ordering finding). Grace scaled by
+            # release latency (2026-08-14 03:35 delayed-echo finding).
             for _key in guarded_keys:
-                self._arm_release_grace(_key)
+                self._arm_release_grace(_key, span_s=_release_span)
                 self._dec_programmatic_key(_key)
         logger.info("Controller: missile_evade complete (%s, %.1fs)",
                     exit_reason, time.time() - entry_ts)

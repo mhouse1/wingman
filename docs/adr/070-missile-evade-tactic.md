@@ -623,6 +623,23 @@ Each item must be answered before the tactic is enabled in a live mission.
   no-evade. This makes V5 answerable per engagement instead of per mission, so
   a handful of sessions can settle it rather than dozens.
 
+  *Soak verdict, 2026-08-14 (5h17m unattended, 54 missions, 122 engagements):*
+
+  | Condition | Engagements | Survived 10 s | Rate |
+  |-----------|-------------|---------------|------|
+  | With evade | 60 | 54 | **90%** |
+  | Without evade | 62 | 42 | **68%** |
+
+  A 22-point gap on near-balanced arms (two-proportion z ≈ 3.0, p ≈ 0.003).
+  The selection caveat still applies — no-evade engagements cluster in states
+  that suppress evades (eject, respawn), which are themselves risky — so this
+  is strong observational evidence, not a controlled trial. Combined with the
+  2026-08-13 session (82% vs 50%, n=25), the tactic now consistently
+  associates with materially higher engagement survival despite V2's
+  energy-bleed mechanism. Exit mix that session: 51 manoeuvre_limit /
+  34 clear / 6 eject_preempt — the d12 limit is the modal exit under
+  sustained barrages.
+
 ## Consequences
 
 - The first tactic in the tree whose trigger is an event rather than a standing

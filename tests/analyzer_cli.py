@@ -35,7 +35,7 @@ def load_config(path: Path | None = None) -> dict:
 
 def test_run_ocr_in_background(image_path: str = "RESPAWN.png"):
     if image_path == "RESPAWN.png":
-        # Default respawn fixture is the gate-corpus frame (ADR 071).
+        # Default respawn fixture is the gate-corpus frame (ADR 072).
         image_path = str(PROJECT_ROOT / "test_screenshots" / "integration_test"
                          / "P1_050_RESPAWN_VISIBLE_NO_HEALTH.png")
 

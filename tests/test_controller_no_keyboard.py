@@ -462,3 +462,63 @@ def test_every_injectable_key_resolves_to_a_keysym():
             f"key {key!r} (xk name {xk_name!r}) does not resolve to a keysym — "
             "it would be silently dropped by _linux_key_event"
         )
+
+
+def test_delayed_echo_within_release_grace_is_ignored(monkeypatch):
+    """Regression (2026-08-14 02:35 soak): XRecord delivery lag scales with
+    X-server load — a queued 'j' auto-repeat arrived 391 ms after wingman's own
+    roll_left release, outlived the old 0.15 s grace window, and cancelled the
+    mission into GAME_BATTLE_MANUAL mid-flight. Echoes of a key wingman just
+    released must be ignored for the full grace second."""
+    import time as _time
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_BATTLE)
+    ctrl = Controller(region, analyzer=analyzer)
+
+    ctrl._mission_lock.acquire(blocking=False)
+    try:
+        # Wingman releases 'j' — grace armed at that moment.
+        ctrl._arm_release_grace("j")
+
+        # The observed delayed echo: 0.4 s after release.
+        _time.sleep(0.4)
+        handled = ctrl._handle_maneuver_key_press("j", is_injected=False)
+        assert handled is False, "delayed echo cancelled the mission"
+        assert ctrl._mission_cancel.is_set() is False
+        assert analyzer.trigger_calls == []
+
+        # A genuine press after the grace expires still takes over.
+        ctrl._prog_release_grace_until["j"] = _time.time() - 0.01
+        handled = ctrl._handle_maneuver_key_press("j", is_injected=False)
+        assert handled is True
+        assert analyzer.trigger_calls == ["manual_takeover"]
+    finally:
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+def test_release_grace_scales_with_release_latency(monkeypatch):
+    """2026-08-14 03:35 sizing case: a 0.15 s roll_left took 2.7 s to release
+    and queued repeats were still delivered 3.2 s after the release — past any
+    fixed window. The grace must scale with the measured release latency
+    (3x span), while fast releases keep the 1.0 s floor."""
+    import time as _time
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    analyzer = _AnalyzerStub(GameState.GAME_BATTLE)
+    ctrl = Controller(region, analyzer=analyzer)
+
+    # Loaded server: release took 2.56 s -> window must cover the 3.2 s echo.
+    now = _time.time()
+    ctrl._arm_release_grace("j", span_s=2.56)
+    window = ctrl._prog_release_grace_until["j"] - now
+    assert window >= 3.2 + 0.5, f"window {window:.1f}s does not cover the observed 3.2s echo"
+
+    # Healthy server: ~5 ms release keeps the fixed floor, not less.
+    now = _time.time()
+    ctrl._arm_release_grace("k", span_s=0.005)
+    window = ctrl._prog_release_grace_until["k"] - now
+    assert abs(window - ctrl._prog_release_grace_s) < 0.05

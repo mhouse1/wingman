@@ -1,4 +1,4 @@
-# ADR 071 — Consolidate Calibration Screenshots onto Integration-Test Captures
+# ADR 072 — Consolidate Calibration Screenshots onto Integration-Test Captures
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|

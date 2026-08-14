@@ -89,14 +89,14 @@ def _load_image(image_path: Path):
 @pytest.mark.parametrize(
     "image_path, description",
     [
-        (TEST_SCREENSHOT, "normal quality"),  # P1_050 gate frame (ADR 071)
-        # Self-activating recapture slot (ADR 071): skipped until a discolored
+        (TEST_SCREENSHOT, "normal quality"),  # P1_050 gate frame (ADR 072)
+        # Self-activating recapture slot (ADR 072): skipped until a discolored
         # NEW-layout frame is captured as RESPAWNC.png.
         pytest.param(
             TEST_SCREENSHOT_C, "discolored - tests OCR robustness",
             marks=pytest.mark.skipif(
                 not TEST_SCREENSHOT_C.exists(),
-                reason="RESPAWNC.png recapture pending (ADR 071)"),
+                reason="RESPAWNC.png recapture pending (ADR 072)"),
         ),
     ],
 )
@@ -115,13 +115,13 @@ def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_analyze
     [
         TEST_SCREENSHOT_B,  # P1_030 battle HUD — no respawn text
         TEST_SCREENSHOT_D,  # P1_060 battle HUD — no respawn text
-        # Self-activating recapture slot (ADR 071): near-miss text INSIDE the
+        # Self-activating recapture slot (ADR 072): near-miss text INSIDE the
         # current respawn crop, restoring real Levenshtein-rejection coverage.
         pytest.param(
             TEST_SCREENSHOT_DISTRACTOR,
             marks=pytest.mark.skipif(
                 not TEST_SCREENSHOT_DISTRACTOR.exists(),
-                reason="RESPAWND.png recapture pending (ADR 071)"),
+                reason="RESPAWND.png recapture pending (ADR 072)"),
         ),
     ],
 )

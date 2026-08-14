@@ -109,7 +109,7 @@ def test_respawn_detection_positive():
     screenshots = [
         ("P1_050 (respawn overlay)", TEST_SCREENSHOT, "normal quality"),
     ]
-    # Self-activating recapture slot (ADR 071): joins the run the moment a
+    # Self-activating recapture slot (ADR 072): joins the run the moment a
     # discolored NEW-layout frame is captured as RESPAWNC.png.
     if TEST_SCREENSHOT_C.exists():
         screenshots.append(
@@ -129,13 +129,13 @@ def test_respawn_detection_negative():
     
     Validates that the analyzer correctly rejects:
     - P1_030 / P1_060 battle HUD frames (no respawn text). The Levenshtein
-      near-miss distractor case is an open recapture item (ADR 071, CR-015-03).
+      near-miss distractor case is an open recapture item (ADR 072, CR-015-03).
     """
     screenshots = [
         ("P1_030 (battle HUD)", TEST_SCREENSHOT_B, "no respawn text"),
         ("P1_060 (battle HUD)", TEST_SCREENSHOT_D, "no respawn text"),
     ]
-    # Self-activating recapture slot (ADR 071): near-miss text INSIDE the
+    # Self-activating recapture slot (ADR 072): near-miss text INSIDE the
     # current respawn crop restores real Levenshtein-rejection coverage.
     if TEST_SCREENSHOT_DISTRACTOR.exists():
         screenshots.append(
@@ -272,7 +272,7 @@ def test_level3_unit_ocr():
     [
         TEST_SCREENSHOT_CONTINUE,
         # continue1.png (second click-to variant) retired 2026-08-13 with the
-        # old-layout purge (ADR 071); the gate-corpus frame P1_070 is the
+        # old-layout purge (ADR 072); the gate-corpus frame P1_070 is the
         # single click-to fixture, refreshed unattended by make p1.
     ],
 )
