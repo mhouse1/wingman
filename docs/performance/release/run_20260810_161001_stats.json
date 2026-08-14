@@ -1,0 +1,45 @@
+{
+  "wingman_version": "1.7.2",
+  "run_id": "20260810_161001",
+  "session_start_ts": 1786392601.518,
+  "session_duration_s": 2656.2,
+  "missions_started": 1,
+  "missions_click_to": 1,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 3,
+  "total_flare_bursts": 0,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 0,
+  "avg_mission_duration_s": 287.5,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1786392645.025,
+      "duration_s": 287.5,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 2,
+    "ocr_respawns": 3,
+    "matched": 2,
+    "matched_within_5s": 0,
+    "false_fires": 0,
+    "missed_ocr_respawns": 1,
+    "fire_deltas_s": [
+      6.84,
+      5.3
+    ],
+    "max_confirmed_gap_s": 11.55,
+    "confirmed_gaps_over_threshold": 2
+  },
+  "stats_path": "docs/performance/current/run_20260810_161001_stats.json"
+}

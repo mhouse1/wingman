@@ -1,0 +1,101 @@
+{
+  "wingman_version": "1.7.2",
+  "run_id": "20260809_190213",
+  "session_start_ts": 1786316533.567,
+  "session_duration_s": 1862.0,
+  "missions_started": 5,
+  "missions_click_to": 5,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 15,
+  "total_flare_bursts": 63,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 2,
+  "avg_mission_duration_s": 283.9,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1786316646.07,
+      "duration_s": 301.0,
+      "respawn_count": 2,
+      "flare_burst_count": 4,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 1,
+      "start_ts": 1786317031.617,
+      "duration_s": 316.7,
+      "respawn_count": 2,
+      "flare_burst_count": 5,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 2,
+      "start_ts": 1786317392.34,
+      "duration_s": 260.4,
+      "respawn_count": 3,
+      "flare_burst_count": 10,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 1,
+      "outcome": "click_to"
+    },
+    {
+      "index": 3,
+      "start_ts": 1786317744.028,
+      "duration_s": 258.4,
+      "respawn_count": 6,
+      "flare_burst_count": 30,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 4,
+      "start_ts": 1786318100.029,
+      "duration_s": 283.2,
+      "respawn_count": 2,
+      "flare_burst_count": 14,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 1,
+      "outcome": "click_to"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 15,
+    "ocr_respawns": 15,
+    "matched": 14,
+    "matched_within_5s": 1,
+    "false_fires": 1,
+    "missed_ocr_respawns": 1,
+    "fire_deltas_s": [
+      5.41,
+      6.47,
+      5.62,
+      5.54,
+      2.32,
+      6.37,
+      6.54,
+      5.51,
+      6.51,
+      5.35,
+      6.87,
+      8.05,
+      5.49,
+      6.5
+    ],
+    "max_confirmed_gap_s": 14.04,
+    "confirmed_gaps_over_threshold": 15
+  },
+  "stats_path": "docs/performance/current/run_20260809_190213_stats.json"
+}

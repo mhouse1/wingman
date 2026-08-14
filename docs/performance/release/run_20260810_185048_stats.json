@@ -1,0 +1,84 @@
+{
+  "wingman_version": "1.7.2",
+  "run_id": "20260810_185048",
+  "session_start_ts": 1786402248.952,
+  "session_duration_s": 1587.4,
+  "missions_started": 4,
+  "missions_click_to": 3,
+  "missions_missiles_empty": 1,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 8,
+  "total_flare_bursts": 28,
+  "total_flare_reloads": 1,
+  "total_manual_takeovers": 2,
+  "avg_mission_duration_s": 231.2,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1786402326.843,
+      "duration_s": 178.8,
+      "respawn_count": 1,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 1,
+      "start_ts": 1786402543.039,
+      "duration_s": 292.4,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 2,
+      "start_ts": 1786402968.538,
+      "duration_s": 236.6,
+      "respawn_count": 2,
+      "flare_burst_count": 10,
+      "flare_reload_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 3,
+      "start_ts": 1786403619.343,
+      "duration_s": 217.0,
+      "respawn_count": 3,
+      "flare_burst_count": 18,
+      "flare_reload_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 2,
+      "outcome": "missiles_empty"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 8,
+    "ocr_respawns": 8,
+    "matched": 8,
+    "matched_within_5s": 1,
+    "false_fires": 0,
+    "missed_ocr_respawns": 0,
+    "fire_deltas_s": [
+      7.59,
+      10.51,
+      11.9,
+      6.45,
+      6.57,
+      6.46,
+      5.28,
+      2.4
+    ],
+    "max_confirmed_gap_s": 16.62,
+    "confirmed_gaps_over_threshold": 11
+  },
+  "stats_path": "docs/performance/current/run_20260810_185048_stats.json"
+}
