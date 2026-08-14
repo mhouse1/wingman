@@ -203,6 +203,8 @@ telemetry:
   steep_dive_min_sin: 0.8
   level_max_sin: 0.15
   ocr_every_n_ticks: 2
+  # ADR 069 — impulse rotation + ballistic descent; thresholds from 624 archived
+  # eject windows (65 deg because 75 was empirically unreachable). Read it before retuning.
   eject_closed_loop: {enabled: true, check_interval_s: 1.5, confirm_consecutive: 2,
     legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,
