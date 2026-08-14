@@ -309,6 +309,39 @@ class FakeController:
         self._intents.append({"action_type": "restart_last_mission"})
         return True
 
+    # --- Behavior-tree tactic predicates (ADR 024 3.1b / ADR 070) ---
+    # The active-mode tree wires actuators at construction and calls the
+    # is_running predicates every tick (the MissileEvade leaf's sticky
+    # condition calls is_missile_evading even with no incoming detection).
+    # The stub never actuates, so these report "not running" and record any
+    # start calls as intents.
+    def is_ejecting(self) -> bool:
+        return False
+
+    def is_disengage_running(self) -> bool:
+        return False
+
+    def is_missile_evading(self) -> bool:
+        return False
+
+    def disengage_roll_right(self, duration: float = 10.0) -> None:
+        self._intents.append({"action_type": "disengage_roll_right"})
+
+    def missile_evade_mode(self) -> None:
+        self._intents.append({"action_type": "missile_evade_mode"})
+
+    # Engage-geometry actuation (3.1a) — called when the Engage leaf selects
+    # with contacts on the injected battle frames' minimaps.
+    def orient_nose_to_target(self, error_norm, **_cfg) -> str | None:
+        self._intents.append({"action_type": "orient_nose_to_target"})
+        return None
+
+    def roll_left(self, hold_seconds: float = 0.3, block: bool = True) -> None:
+        self._intents.append({"action_type": "roll_left"})
+
+    def roll_right(self, hold_seconds: float = 0.3, block: bool = True) -> None:
+        self._intents.append({"action_type": "roll_right"})
+
     def stop_eject_sequence(self, reason: str = "respawn_detected") -> None:
         self._intents.append({"action_type": "stop_eject_sequence"})
         self._fire_eject_complete()

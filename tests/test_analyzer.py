@@ -24,7 +24,9 @@ from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
     TEST_SCREENSHOT_B,
+    TEST_SCREENSHOT_C,
     TEST_SCREENSHOT_D,
+    TEST_SCREENSHOT_DISTRACTOR,
     TEST_SCREENSHOT_INCOMING,
 )
 
@@ -88,10 +90,14 @@ def _load_image(image_path: Path):
     "image_path, description",
     [
         (TEST_SCREENSHOT, "normal quality"),  # P1_050 gate frame (ADR 071)
-        # RESPAWNC (discolored variant) deleted 2026-08-13: it showed the
-        # pre-update overlay layout, which the recalibrated respawn crop no
-        # longer covers — a correct non-match, not OCR fragility. Recapture a
-        # discolored NEW-layout frame to restore the robustness case.
+        # Self-activating recapture slot (ADR 071): skipped until a discolored
+        # NEW-layout frame is captured as RESPAWNC.png.
+        pytest.param(
+            TEST_SCREENSHOT_C, "discolored - tests OCR robustness",
+            marks=pytest.mark.skipif(
+                not TEST_SCREENSHOT_C.exists(),
+                reason="RESPAWNC.png recapture pending (ADR 071)"),
+        ),
     ],
 )
 def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_analyzer_easyocr, image_path: Path, description: str):
@@ -107,8 +113,16 @@ def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_analyze
 @pytest.mark.parametrize(
     "image_path",
     [
-        TEST_SCREENSHOT_B,  # No respawn text
-        TEST_SCREENSHOT_D,  # Contains "natethegreat" text, should fail Levenshtein matching
+        TEST_SCREENSHOT_B,  # P1_030 battle HUD — no respawn text
+        TEST_SCREENSHOT_D,  # P1_060 battle HUD — no respawn text
+        # Self-activating recapture slot (ADR 071): near-miss text INSIDE the
+        # current respawn crop, restoring real Levenshtein-rejection coverage.
+        pytest.param(
+            TEST_SCREENSHOT_DISTRACTOR,
+            marks=pytest.mark.skipif(
+                not TEST_SCREENSHOT_DISTRACTOR.exists(),
+                reason="RESPAWND.png recapture pending (ADR 071)"),
+        ),
     ],
 )
 def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_analyzer_easyocr, image_path: Path):

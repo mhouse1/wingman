@@ -17,7 +17,9 @@ from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
     TEST_SCREENSHOT_B,
+    TEST_SCREENSHOT_C,
     TEST_SCREENSHOT_D,
+    TEST_SCREENSHOT_DISTRACTOR,
     TEST_SCREENSHOT_CONTINUE,
     TEST_SCREENSHOT_INCOMING,
 )
@@ -107,6 +109,11 @@ def test_respawn_detection_positive():
     screenshots = [
         ("P1_050 (respawn overlay)", TEST_SCREENSHOT, "normal quality"),
     ]
+    # Self-activating recapture slot (ADR 071): joins the run the moment a
+    # discolored NEW-layout frame is captured as RESPAWNC.png.
+    if TEST_SCREENSHOT_C.exists():
+        screenshots.append(
+            ("RESPAWNC.png", TEST_SCREENSHOT_C, "discolored - tests OCR robustness"))
     for name, path, description in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
         cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'
@@ -128,6 +135,12 @@ def test_respawn_detection_negative():
         ("P1_030 (battle HUD)", TEST_SCREENSHOT_B, "no respawn text"),
         ("P1_060 (battle HUD)", TEST_SCREENSHOT_D, "no respawn text"),
     ]
+    # Self-activating recapture slot (ADR 071): near-miss text INSIDE the
+    # current respawn crop restores real Levenshtein-rejection coverage.
+    if TEST_SCREENSHOT_DISTRACTOR.exists():
+        screenshots.append(
+            ("RESPAWND.png", TEST_SCREENSHOT_DISTRACTOR,
+             "near-miss text - Levenshtein distance too high"))
     for name, path, description in screenshots:
         assert path.exists(), f"Test screenshot not found: {path}"
         cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'

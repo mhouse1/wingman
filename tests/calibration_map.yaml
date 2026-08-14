@@ -19,7 +19,7 @@ calibration:
     crops: [incoming]
   - screenshot: integration_test/P1_070_CLICK_TO_CONTINUE.png  # click to continue (gate corpus, make p1 refreshes)
     crops: [click_to]
-  - screenshot: GOODLUCK.png        # 1920×1200 — good luck / game starting
+  - screenshot: integration_test/P1_020_GOOD_LUCK_VISIBLE.png  # good luck / game starting (gate corpus, make p1 refreshes)
     crops: [good_luck]
   - screenshot: integration_test/P1_000_LOBBY_PLAY.png  # lobby play button (gate corpus, make p1 refreshes)
     crops: [PLAY]

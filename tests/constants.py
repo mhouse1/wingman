@@ -9,12 +9,16 @@ CONFIG_PATH = PROJECT_ROOT / "wingman" / "config.yaml"
 # retired 2026-08-13 with the old-layout purge.
 TEST_SCREENSHOT = TEST_SCREENSHOTS_DIR / "integration_test" / "P1_050_RESPAWN_VISIBLE_NO_HEALTH.png"
 TEST_SCREENSHOT_B = TEST_SCREENSHOTS_DIR / "integration_test" / "P1_030_BATTLE_HUD_MISSILES_4.png"
-# RESPAWNC (discolored positive) and RESPAWND ('natethegreat' Levenshtein
-# distractor) are open recapture items (ADR 071): a discolored new-layout
-# frame, and a frame with near-miss text INSIDE the current respawn crop —
-# the old RESPAWND was already vacuous after the crop recalibration
-# (code review CR-015-03). P1_060 stands in as a second negative meanwhile.
 TEST_SCREENSHOT_D = TEST_SCREENSHOTS_DIR / "integration_test" / "P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png"
+# Open recapture items (ADR 071): tests referencing these are skip-marked and
+# SELF-ACTIVATE the moment the file appears — drop the capture in, done.
+# RESPAWNC.png: discolored NEW-layout respawn frame (OCR robustness for the
+#   ADR 021 preprocessing pipeline).
+# RESPAWND.png: near-miss text INSIDE the current respawn crop (Levenshtein
+#   rejection; the old distractor sat outside the recalibrated crop and the
+#   test passed vacuously — CR-015-03).
+TEST_SCREENSHOT_C = TEST_SCREENSHOTS_DIR / "RESPAWNC.png"
+TEST_SCREENSHOT_DISTRACTOR = TEST_SCREENSHOTS_DIR / "RESPAWND.png"
 # continue.png/continue1.png retired 2026-08-13 (ADR 071): the gate corpus
 # frame is the single click-to fixture, refreshed unattended by make p1.
 TEST_SCREENSHOT_CONTINUE = TEST_SCREENSHOTS_DIR / "integration_test" / "P1_070_CLICK_TO_CONTINUE.png"
