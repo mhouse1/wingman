@@ -22,6 +22,26 @@ def _load_config():
         return yaml.safe_load(fh)
 
 
+def _drain_mission_threads(c, timeout=5.0):
+    """Cancel and WAIT OUT any mission daemon thread before monkeypatch reverts.
+
+    mission_j20's entry does `_mission_cancel.clear()`, so a cancel that lands
+    in the spawn-to-entry window is silently swallowed — the mission then runs
+    its full multi-minute script. Combined with monkeypatch restoring the REAL
+    keyboard_module at teardown, a surviving thread presses REAL keys; pytest
+    exiting mid-hold latches the key in the X server (the 2026-08-14 stuck-'i'
+    incident). Re-assert the cancel until the mission lock is actually free.
+    """
+    deadline = time.time() + timeout
+    while c.is_mission_running() and time.time() < deadline:
+        c._mission_cancel.set()
+        time.sleep(0.05)
+    assert not c.is_mission_running(), (
+        "mission thread survived teardown — it would press REAL keys once "
+        "monkeypatch restores keyboard_module"
+    )
+
+
 @pytest.fixture
 def ctrl(monkeypatch):
     """Controller with keyboard_module patched to None."""
@@ -39,7 +59,7 @@ def ctrl(monkeypatch):
     )
     yield c
     exit_event.set()
-    c.cancel_mission()
+    _drain_mission_threads(c)
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +94,8 @@ def test_restart_last_mission_no_history(ctrl):
     # _last_mission must now be set so future restarts also work
     with ctrl._last_mission_lock:
         assert ctrl._last_mission == "j20"
-    ctrl.cancel_mission()  # stop the spawned thread
+    _drain_mission_threads(ctrl)  # a bare cancel can be swallowed by the
+    # mission entry's _mission_cancel.clear() — see the helper's docstring
 
 
 def test_restart_last_mission_returns_false_when_running(ctrl):

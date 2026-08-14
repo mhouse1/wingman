@@ -122,3 +122,26 @@ template, a frozen frame) would otherwise pin afterburner and a
 full-deflection roll for the rest of the mission and fly the aircraft out of
 the arena — the same failure class as the ADR 069 nose-hold budget. The cap
 firing is a detector fault and is logged at WARNING.
+
+## No injected key survives process termination
+
+**UID**: SAF-007
+
+**Statement**: On termination — normal exit, SIGTERM, or controller cleanup — wingman shall
+release every key it is capable of injecting, such that no wingman-injected
+key press remains asserted in the X server after the wingman process has
+exited. This holds regardless of which thread held the key (mission, eject,
+evade, disengage, recovery) and regardless of the termination point, including
+termination inside a press-and-release call. Every key any code path injects
+shall be present in the cleanup release list.
+
+**Rationale**: XTest key state lives in the X SERVER and survives the injecting process; a
+key left held is auto-repeated into whatever window has focus, indefinitely.
+Incident class: NOSE_DOWN/AFTERBURNER left pressed for the whole X session
+after a mid-eject exit (pre-ADR 069 cleanup hardening), and the 2026-08-14
+stuck-'i' incident (a test-suite mission thread outliving its keyboard stub —
+CR-016-01). Enforced by Controller.cleanup()'s unconditional release of the
+full injectable-key list (audit 2026-08-14 added the previously missing
+'escape' and MISSION_J20_KEY), SIGTERM routing through the graceful path, and
+stoppable daemon threads. The test suite carries its own session-end
+release-all net in tests/conftest.py as defense in depth.

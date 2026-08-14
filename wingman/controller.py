@@ -2754,6 +2754,8 @@ class Controller:
         whole X session. Stop the writers first, then release every key this
         controller can inject, unconditionally (releasing an un-pressed key is
         a no-op).
+
+        @relation(SAF-007, scope=function)
         """
         # 1. Stop the writers so nothing re-presses after our releases.
         self._eject_stop_reason = "shutdown"
@@ -2773,10 +2775,16 @@ class Controller:
 
         # 2. Belt-and-braces: release every injectable key.
         if keyboard_module and not self._simulate_os_input:
+            # SAF-007: every key wingman injects anywhere must be in this
+            # list. 'escape' (press_escape recovery) and MISSION_J20_KEY (the
+            # game_starting loop's press_and_release) were missing until the
+            # 2026-08-14 audit — a key is stuck if the process dies inside
+            # even a press_and_release call.
             for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
                          YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
                          DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
-                         PADLOCK_CAMERA, SPECIAL_ABILITY):
+                         PADLOCK_CAMERA, SPECIAL_ABILITY, MISSION_J20_KEY,
+                         'escape'):
                 try:
                     keyboard_module.release(_key)
                 except Exception:
