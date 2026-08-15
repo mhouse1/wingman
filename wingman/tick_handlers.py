@@ -30,6 +30,7 @@ from .behavior_tree import (
     TACTIC_MISSILE_EVADE,
     AnalyzerSnapshot,
     build_tree,
+    make_climb_condition,
     make_snapshot_writer,
     selected_tactic,
 )
@@ -701,6 +702,19 @@ class BehaviorTreeHandler:
         self._orbit_interval_s = float(j20_cfg.get("orbit_roll_interval_s", 2.0))
         self._last_orbit_roll_ts = 0.0
         self._last_nav_mode = self._nav.mode
+        # ADR 073 Phase 3.2a: while the Climb leaf is disabled it stays OUT of
+        # the selector (a selection-only leaf would pre-empt Engage actuation —
+        # not shadow). Instead an independent instance of the same condition is
+        # evaluated against the same frozen snapshot and transitions are
+        # logged as would-select evidence.
+        climb_cfg = bt_cfg.get("climb", {}) or {}
+        self._climb_shadow = None
+        self._climb_shadow_active = False
+        self._climb_shadow_since = 0.0
+        self._climb_band = (climb_cfg.get("enter_below_alt"),
+                            climb_cfg.get("exit_above_alt"))
+        if not bool(climb_cfg.get("enabled", False)):
+            self._climb_shadow = make_climb_condition(*self._climb_band)
         if self.enabled:
             # ADR 024 3.1b: in active mode with an ammo handler wired, the
             # Eject and Disengage leaves actuate their Controller tactics.
@@ -806,6 +820,30 @@ class BehaviorTreeHandler:
             snap.ring_long, absent_s, snap.is_respawning, altitude,
             snap.mission_running,
         )
+        if self._climb_shadow is not None:
+            # Outside GAME_BATTLE the Idle leaf would own selection, and the
+            # freeze-on-None policy would otherwise carry a stale would-select
+            # through the lobby — force-release there instead of evaluating.
+            if snap.game_state == GameState.GAME_BATTLE:
+                would = self._climb_shadow(snap)
+            else:
+                would = False
+                if self._climb_shadow_active:
+                    # Drop the closure's frozen hysteresis state too, or the
+                    # next battle would open on last battle's verdict.
+                    self._climb_shadow = make_climb_condition(*self._climb_band)
+            if would != self._climb_shadow_active:
+                if would:
+                    self._climb_shadow_since = now
+                    logger.info(
+                        "BT[shadow-climb]: would_select=True alt=%s "
+                        "selected=%s respawn=%s", altitude, selection,
+                        snap.is_respawning)
+                else:
+                    logger.info(
+                        "BT[shadow-climb]: would_select=False alt=%s held=%.0fs",
+                        altitude, now - self._climb_shadow_since)
+                self._climb_shadow_active = would
         if (self.active and selection == TACTIC_ENGAGE
                 and snap.mission_running):
             self._actuate_engage(components, altitude, now)

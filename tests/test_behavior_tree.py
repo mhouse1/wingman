@@ -12,6 +12,7 @@ from wingman.behavior_tree import (
     AnalyzerSnapshot,
     MinimumHold,
     TACTIC_ATTACK_SUPPORT,
+    TACTIC_CLIMB,
     TACTIC_DISENGAGE,
     TACTIC_EJECT,
     TACTIC_ENGAGE,
@@ -20,6 +21,7 @@ from wingman.behavior_tree import (
     TACTIC_MISSILE_EVADE,
     TACTIC_RESPAWN_WAIT,
     build_tree,
+    make_climb_condition,
     make_snapshot_writer,
     selected_tactic,
 )
@@ -320,3 +322,81 @@ def test_minimum_hold_decorator_unit():
     clock.advance(6)
     hold.tick_once()
     assert hold.status == py_trees.common.Status.FAILURE   # hold expired
+
+
+# ---------------------------------------------------------------------------
+# ADR 073 — Climb tactic
+
+
+CLIMB_CFG = dict(BT_CFG, climb={
+    "enabled": True, "enter_below_alt": 500, "exit_above_alt": 1000})
+
+
+@pytest.fixture
+def climb_harness(clock):
+    tree = build_tree(dict(CLIMB_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    return tree, writer
+
+
+def test_climb_absent_from_default_tree(harness):
+    """With climb.enabled false (or missing) the leaf is not in the selector —
+    a selection-only leaf would pre-empt Engage actuation, so shadow means
+    absent (ADR 073)."""
+    assert tick(harness, make_snap(altitude=100.0, ring_mid=1)) == TACTIC_ENGAGE
+    assert tick(harness, make_snap(altitude=100.0)) == TACTIC_ATTACK_SUPPORT
+
+
+def test_climb_selected_below_enter_threshold(climb_harness):
+    assert tick(climb_harness, make_snap(altitude=499.0)) == TACTIC_CLIMB
+    # Beats Engage even with contacts on every ring.
+    snap = make_snap(altitude=499.0, ring_short=1, ring_mid=1, ring_long=1)
+    assert tick(climb_harness, snap) == TACTIC_CLIMB
+
+
+def test_climb_hysteresis_band(climb_harness):
+    """Enter below 500; inside the band selection depends on prior state;
+    release only at/above 1000."""
+    assert tick(climb_harness, make_snap(altitude=700.0)) == TACTIC_ATTACK_SUPPORT
+    assert tick(climb_harness, make_snap(altitude=499.0)) == TACTIC_CLIMB
+    assert tick(climb_harness, make_snap(altitude=700.0)) == TACTIC_CLIMB    # still climbing
+    assert tick(climb_harness, make_snap(altitude=999.0)) == TACTIC_CLIMB    # still inside band
+    assert tick(climb_harness, make_snap(altitude=1000.0)) == TACTIC_ATTACK_SUPPORT
+    assert tick(climb_harness, make_snap(altitude=700.0)) == TACTIC_ATTACK_SUPPORT
+
+
+def test_climb_freezes_on_missing_altitude(climb_harness):
+    """altitude=None neither enters nor releases (ADR 073): OCR dropouts must
+    not flap selection in either direction."""
+    assert tick(climb_harness, make_snap(altitude=None)) == TACTIC_ATTACK_SUPPORT
+    assert tick(climb_harness, make_snap(altitude=400.0)) == TACTIC_CLIMB
+    assert tick(climb_harness, make_snap(altitude=None)) == TACTIC_CLIMB     # frozen active
+    assert tick(climb_harness, make_snap(altitude=1200.0)) == TACTIC_ATTACK_SUPPORT
+    assert tick(climb_harness, make_snap(altitude=None)) == TACTIC_ATTACK_SUPPORT
+
+
+def test_climb_yields_to_defensive_tactics(climb_harness):
+    low = dict(altitude=100.0)
+    assert tick(climb_harness, make_snap(is_respawning=True, **low)) == TACTIC_RESPAWN_WAIT
+    assert tick(climb_harness, make_snap(missiles=0, **low)) == TACTIC_EJECT
+    assert tick(climb_harness, make_snap(incoming_detected=True, **low)) == TACTIC_MISSILE_EVADE
+    assert tick(climb_harness, make_snap(game_state=GameState.GAME_LOBBY, **low)) == TACTIC_IDLE
+
+
+def test_climb_disabled_without_thresholds(clock):
+    """enabled with unset thresholds = leaf present but inert (Evade
+    precedent: disabled until calibrated)."""
+    cfg = dict(BT_CFG, climb={"enabled": True})
+    tree = build_tree(cfg, clock=clock)
+    harness = (tree, make_snapshot_writer())
+    assert tick(harness, make_snap(altitude=100.0)) == TACTIC_ATTACK_SUPPORT
+
+
+def test_climb_condition_sticky_while_actuated():
+    """is_running_fn keeps the condition true while the climb thread owns the
+    pitch axis, exactly like the ADR 070 evade stickiness."""
+    running = {"flag": True}
+    cond = make_climb_condition(500, 1000, is_running_fn=lambda: running["flag"])
+    assert cond(make_snap(altitude=2000.0)) is True          # sticky on running
+    running["flag"] = False
+    assert cond(make_snap(altitude=2000.0)) is False

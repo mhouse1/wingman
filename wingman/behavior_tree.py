@@ -8,7 +8,11 @@ retires the corresponding handlers.
 
 Layout (priority selector, top wins):
 
-    Idle → RespawnWait → Eject → MissileEvade → Evade(hold) → Disengage(hold) → Engage → AttackSupport
+    Idle → RespawnWait → Eject → MissileEvade → Evade(hold) → Disengage(hold) → [Climb] → Engage → AttackSupport
+
+Climb (ADR 073) joins the selector only when ``behavior_tree.climb.enabled``
+is true; while disabled it is shadow-logged by BehaviorTreeHandler instead of
+inserted, so live selection is untouched.
 
 All leaves read one frozen ``AnalyzerSnapshot`` from the py-trees blackboard;
 no leaf holds a reference to the live analyzer. ``MinimumHold`` is the small
@@ -32,6 +36,7 @@ TACTIC_EJECT = "Eject"
 TACTIC_MISSILE_EVADE = "MissileEvade"
 TACTIC_EVADE = "Evade"
 TACTIC_DISENGAGE = "Disengage"
+TACTIC_CLIMB = "Climb"
 TACTIC_ENGAGE = "Engage"
 TACTIC_ATTACK_SUPPORT = "AttackSupport"
 
@@ -181,6 +186,37 @@ def make_disengage_condition(absent_after_s: float):
     return disengage
 
 
+def make_climb_condition(enter_below_alt: "float | None",
+                         exit_above_alt: "float | None",
+                         is_running_fn=None):
+    """ADR 073: hysteresis band on the telemetry stable altitude.
+
+    Enters below ``enter_below_alt``, releases only at or above
+    ``exit_above_alt`` — a single threshold would flap at the boundary every
+    telemetry tick. ``altitude is None`` FREEZES the decision (neither enters
+    nor releases): entering blind would command climbs on OCR dropouts, and
+    releasing blind would flap selection through telemetry gaps. A long blind
+    climb is bounded by the actuating thread's own duration backstop
+    (Phase 3.2b), never by this condition. Unset thresholds disable the leaf
+    (the Evade precedent). ``is_running_fn`` keeps selection sticky while an
+    actuated climb thread owns the pitch axis (the ADR 070 pattern);
+    selection-only builds pass none and get the bare band.
+    """
+    state = {"active": False}
+
+    def climb(snapshot: AnalyzerSnapshot) -> bool:
+        if enter_below_alt is None or exit_above_alt is None:
+            return False   # ADR 073: disabled until calibrated
+        alt = snapshot.altitude
+        if alt is not None:
+            if state["active"]:
+                state["active"] = alt < exit_above_alt
+            else:
+                state["active"] = alt < enter_below_alt
+        return state["active"] or (is_running_fn is not None and is_running_fn())
+    return climb
+
+
 def has_contacts(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.contacts > 0
 
@@ -205,10 +241,12 @@ def build_tree(bt_cfg: dict, clock=time.time,
     disengage_hold_s = float(bt_cfg.get("disengage_hold_s", 10.0))
     evade_hold_s = float(bt_cfg.get("evade_hold_s", 10.0))
     evade_threshold = bt_cfg.get("evade_health_threshold")
+    climb_cfg = bt_cfg.get("climb", {}) or {}
     actuators = actuators or {}
     eject_fns = actuators.get(TACTIC_EJECT)
     disengage_fns = actuators.get(TACTIC_DISENGAGE)
     missile_evade_fns = actuators.get(TACTIC_MISSILE_EVADE)
+    climb_fns = actuators.get(TACTIC_CLIMB)
 
     if eject_fns is not None:
         eject_leaf = ConditionTactic(TACTIC_EJECT, is_eject_confirmed,
@@ -235,30 +273,51 @@ def build_tree(bt_cfg: dict, clock=time.time,
         disengage_kwargs = {"start_fn": disengage_fns[0],
                             "is_running_fn": disengage_fns[1]}
 
+    children = [
+        ConditionTactic(TACTIC_IDLE, is_idle),
+        ConditionTactic(TACTIC_RESPAWN_WAIT, is_respawning),
+        eject_leaf,
+        missile_evade_leaf,
+        MinimumHold(
+            TACTIC_EVADE,
+            ConditionTactic(f"{TACTIC_EVADE}Condition",
+                            make_evade_condition(evade_threshold)),
+            hold_s=evade_hold_s, clock=clock,
+        ),
+        MinimumHold(
+            TACTIC_DISENGAGE,
+            ConditionTactic(f"{TACTIC_DISENGAGE}Condition",
+                            make_disengage_condition(disengage_after_s),
+                            **disengage_kwargs),
+            hold_s=disengage_hold_s, clock=clock,
+        ),
+        ConditionTactic(TACTIC_ENGAGE, has_contacts),
+        ConditionTactic(TACTIC_ATTACK_SUPPORT, always),
+    ]
+
+    # ADR 073: the Climb leaf enters the selector ONLY when enabled. A
+    # selection-only leaf here would not be shadow — every selection would
+    # pre-empt Engage actuation and silently pause geometry at low altitude.
+    # While disabled, BehaviorTreeHandler logs would-select from an
+    # independent condition instance instead.
+    if bool(climb_cfg.get("enabled", False)):
+        climb_kwargs = {}
+        if climb_fns is not None:
+            climb_kwargs = {"start_fn": climb_fns[0],
+                            "is_running_fn": climb_fns[1]}
+        climb_leaf = ConditionTactic(
+            TACTIC_CLIMB,
+            make_climb_condition(
+                climb_cfg.get("enter_below_alt"),
+                climb_cfg.get("exit_above_alt"),
+                is_running_fn=climb_fns[1] if climb_fns is not None else None),
+            **climb_kwargs)
+        children.insert(len(children) - 2, climb_leaf)   # above Engage
+
     root = py_trees.composites.Selector(
         name="TacticSelector",
         memory=False,
-        children=[
-            ConditionTactic(TACTIC_IDLE, is_idle),
-            ConditionTactic(TACTIC_RESPAWN_WAIT, is_respawning),
-            eject_leaf,
-            missile_evade_leaf,
-            MinimumHold(
-                TACTIC_EVADE,
-                ConditionTactic(f"{TACTIC_EVADE}Condition",
-                                make_evade_condition(evade_threshold)),
-                hold_s=evade_hold_s, clock=clock,
-            ),
-            MinimumHold(
-                TACTIC_DISENGAGE,
-                ConditionTactic(f"{TACTIC_DISENGAGE}Condition",
-                                make_disengage_condition(disengage_after_s),
-                                **disengage_kwargs),
-                hold_s=disengage_hold_s, clock=clock,
-            ),
-            ConditionTactic(TACTIC_ENGAGE, has_contacts),
-            ConditionTactic(TACTIC_ATTACK_SUPPORT, always),
-        ],
+        children=children,
     )
     return py_trees.trees.BehaviourTree(root)
 

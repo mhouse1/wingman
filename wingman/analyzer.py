@@ -994,6 +994,12 @@ class GameStateAnalyzer:
         self._shadow_fires: "list[tuple[float, str, float]]" = []   # (ts, tier, dead_for_s)
         self._shadow_ocr_respawn_edges: "list[float]" = []          # rising-edge timestamps
         self._shadow_prev_ocr_respawn = False
+        # Respawn-latency instrumentation (measurement gate for any ADR 064
+        # extension): at each OCR rising edge, how stale the health evidence
+        # already was. since_confirmed_s overestimates true death duration by
+        # up to the normal inter-confirm gap — read it against
+        # max_confirmed_gap_s, not as an absolute.
+        self._ocr_edge_latencies: "list[dict]" = []
         # ADR 064 dual mode: set when composite evidence fires while OCR has not
         # detected the episode; the main loop treats it as respawn-detected.
         self.health_respawn_event = threading.Event()
@@ -1934,10 +1940,26 @@ class GameStateAnalyzer:
             self._death_pending = False
 
     def _shadow_record_ocr_respawn(self, respawn_detected: bool):
-        """Record rising edges of OCR respawn detection for agreement matching."""
+        """Record rising edges of OCR respawn detection for agreement matching.
+
+        Each edge also snapshots how long health evidence had already been
+        absent — the headroom a corroborated-absence detector could reclaim
+        by firing before the RESPAWN text renders.
+        """
         if self._respawn_detection_mode in ("shadow", "dual"):
             if respawn_detected and not self._shadow_prev_ocr_respawn:
-                self._shadow_ocr_respawn_edges.append(time.time())
+                now_t = time.time()
+                self._shadow_ocr_respawn_edges.append(now_t)
+                since_confirmed = (round(now_t - self._last_confirmed_read_ts, 2)
+                                   if self._last_confirmed_read_ts else None)
+                no_digits_for = (round(now_t - self._health_no_digits_since, 2)
+                                 if self._health_no_digits_since else None)
+                self._ocr_edge_latencies.append(
+                    {"since_confirmed_s": since_confirmed,
+                     "no_digits_for_s": no_digits_for})
+                logger.info(
+                    "RespawnLatency: OCR edge — since_confirmed=%ss no_digits_for=%ss",
+                    since_confirmed, no_digits_for)
         self._shadow_prev_ocr_respawn = respawn_detected
 
     def shadow_respawn_summary(self) -> "dict | None":
@@ -1966,6 +1988,8 @@ class GameStateAnalyzer:
             else:
                 deltas.append(round(fire_ts - best, 2))
                 remaining_edges.remove(best)
+        edge_lat = [e["since_confirmed_s"] for e in self._ocr_edge_latencies
+                    if e["since_confirmed_s"] is not None]
         return {
             "mode": self._respawn_detection_mode,
             "shadow_fires": len(fires),
@@ -1977,6 +2001,11 @@ class GameStateAnalyzer:
             "fire_deltas_s": deltas,
             "max_confirmed_gap_s": round(self._max_confirmed_gap_s, 2),
             "confirmed_gaps_over_threshold": self._confirmed_gap_over_threshold,
+            "ocr_edge_latencies": list(self._ocr_edge_latencies),
+            "edge_since_confirmed_mean_s": (
+                round(sum(edge_lat) / len(edge_lat), 2) if edge_lat else None),
+            "edge_since_confirmed_max_s": (
+                round(max(edge_lat), 2) if edge_lat else None),
         }
 
     def crops_for_state(self, state: "GameState | None" = None) -> "dict[str, CropCoords]":
