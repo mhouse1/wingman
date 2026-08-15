@@ -120,6 +120,11 @@ crops:
     coords:
     - [0.8319, 0.0044]
     - [0.9986, 0.2689]
+unknown_anomaly:                   # ADR 074 — archive unclassifiable GAME_UNKNOWN screens
+  screenshot_after_s: 30.0         # stuck this long -> capture (normal startup classifies in ~4s)
+  recapture_interval_s: 120.0      # follow-up captures while still stuck
+  max_per_episode: 5               # disk-flood guard per stranding episode
+  dir: test_screenshots/unknown_anomalies
 respawn_detection:
   use_ocr: true
   use_gpu: false

@@ -20,7 +20,7 @@ WINGMAN_VERSION_DETAILS = "TBD"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
-from .analyzer import GameStateAnalyzer, GameState, GameEvent
+from .analyzer import GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -30,6 +30,7 @@ from .tick_handlers import (
     EnemyPresenceHandler,
     RespawnHandler,
     TrackingHudHandler,
+    UnknownAnomalyRecorder,
     WaitingFallbackHandler,
 )
 from .tracker import TargetTracker
@@ -399,7 +400,7 @@ def main():
 
     def _handle_lobby_popup(popup):
         current = analyzer.game_state
-        if current not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+        if current not in POPUP_DISMISS_STATES:
             logger.debug("Lobby popup '%s' suppressed — state is %s", popup, current.name)
             return
         if not ctrl.popup_click_allowed(popup):
@@ -522,6 +523,7 @@ def main():
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
     )
+    unknown_anomaly = UnknownAnomalyRecorder(cfg.get("unknown_anomaly", {}))
     startup_time = time.time()
     battle_ever_reached = False
 
@@ -666,6 +668,7 @@ def main():
                     _stop_lobby_escape_loop()
                 waiting_fallback.on_state_change(current_game_state, prev_game_state)
                 enemy_presence.on_state_change(current_game_state, prev_game_state)
+                unknown_anomaly.on_state_change(current_game_state, prev_game_state)
                 behavior_tree.on_state_change(current_game_state, prev_game_state)
                 ammo_events.on_state_change(current_game_state, prev_game_state)
                 tracking_hud.on_state_change(current_game_state, prev_game_state)
@@ -756,6 +759,10 @@ def main():
             # (Design 003, FR-005) — before fine tracking so the shared
             # orient_nose_to_target cooldown lets the terminal loop win.
             behavior_tree.tick(frame, current_game_state, game_state)
+
+            # ADR 074: archive the screen when GAME_UNKNOWN persists — the
+            # evidence future stall handling is built from.
+            unknown_anomaly.tick(frame, current_game_state)
 
             tracking_hud.tick(frame, current_game_state, game_state)
 

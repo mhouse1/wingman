@@ -1044,3 +1044,83 @@ class WaitingFallbackHandler:
                 elapsed_waiting, effective_interval - (time.time() - self._last_reclick_ts),
                 "click missed" if not self._play_ever_absent else "returned from matchmaking")
         return False
+
+
+class UnknownAnomalyRecorder:
+    """ADR 074: archive screenshots of unclassifiable GAME_UNKNOWN episodes.
+
+    A GAME_UNKNOWN state that persists past ``screenshot_after_s`` means the
+    screen is showing something neither the classifier nor any calibrated
+    popup crop recognises — the 2026-08-15 "Event refresh" stranding was
+    diagnosed only because a screenshot happened to be taken afterwards.
+    This recorder captures that evidence automatically: timestamped frames
+    saved under ``dir`` for later triage and popup-crop calibration
+    (``make add-crops``), so each new stranding variant can be added to
+    stall handling instead of being lost when the session ends.
+
+    Normal startup classification (~4 s in GAME_UNKNOWN) never triggers a
+    capture. Follows the ADR 060 handler contract; owns only its own state.
+    """
+
+    def __init__(self, cfg: "dict | None", clock=time.time):
+        import cv2  # heavy import kept local: recorder is constructed once
+        self._cv2 = cv2
+        cfg = cfg or {}
+        self._after_s = float(cfg.get("screenshot_after_s", 30.0))
+        self._recapture_s = float(cfg.get("recapture_interval_s", 120.0))
+        self._max_per_episode = int(cfg.get("max_per_episode", 5))
+        self._dir = str(cfg.get("dir", "test_screenshots/unknown_anomalies"))
+        self._clock = clock
+        self._unknown_since = 0.0
+        self._captured = 0
+        self._last_capture_ts = 0.0
+
+    def on_state_change(self, current_game_state, prev_game_state) -> None:
+        if current_game_state == GameState.GAME_UNKNOWN:
+            self._unknown_since = self._clock()
+            self._captured = 0
+            self._last_capture_ts = 0.0
+        else:
+            self._unknown_since = 0.0
+
+    def tick(self, frame, current_game_state) -> "str | None":
+        """Capture when GAME_UNKNOWN has persisted past the threshold.
+
+        Returns the saved path (for tests/logging), else None. Never raises —
+        a capture failure must not take down the tick loop.
+        """
+        if current_game_state != GameState.GAME_UNKNOWN or frame is None:
+            return None
+        now = self._clock()
+        if self._unknown_since == 0.0:
+            # Startup enters GAME_UNKNOWN without a state-change callback —
+            # arm the clock on first sight instead.
+            self._unknown_since = now
+            return None
+        stuck_for = now - self._unknown_since
+        if stuck_for < self._after_s:
+            return None
+        if self._captured >= self._max_per_episode:
+            return None
+        if self._last_capture_ts and now - self._last_capture_ts < self._recapture_s:
+            return None
+        try:
+            from datetime import datetime
+            from pathlib import Path
+            out_dir = Path(self._dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = out_dir / f"unknown_{stamp}_stuck{int(stuck_for)}s.png"
+            if not self._cv2.imwrite(str(path), frame):
+                logger.warning("ADR074 anomaly: screenshot write failed: %s", path)
+                return None
+        except Exception as e:
+            logger.warning("ADR074 anomaly: screenshot capture failed: %s: %s",
+                           type(e).__name__, e)
+            return None
+        self._captured += 1
+        self._last_capture_ts = now
+        logger.warning(
+            "ADR074 anomaly: GAME_UNKNOWN stuck for %.0fs — screenshot %d/%d "
+            "saved to %s", stuck_for, self._captured, self._max_per_episode, path)
+        return str(path)

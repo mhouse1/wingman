@@ -755,3 +755,78 @@ class TestTrackingHud:
         handler, t, _, _ = _tracking()
         handler.on_state_change(GameState.GAME_BATTLE, GameState.GAME_LOBBY)
         assert t.resets == 0
+
+
+class TestUnknownAnomalyRecorder:
+    """ADR 074: screenshots of GAME_UNKNOWN episodes that outlive the threshold."""
+
+    def _recorder(self, tmp_path, clock, **cfg_overrides):
+        from wingman.tick_handlers import UnknownAnomalyRecorder
+        cfg = {"screenshot_after_s": 30.0, "recapture_interval_s": 120.0,
+               "max_per_episode": 2, "dir": str(tmp_path)}
+        cfg.update(cfg_overrides)
+        return UnknownAnomalyRecorder(cfg, clock=clock)
+
+    @staticmethod
+    def _frame():
+        import numpy as np
+        return np.zeros((4, 4, 3), dtype=np.uint8)
+
+    @staticmethod
+    def _clock(start=1000.0):
+        state = {"now": start}
+        def clock():
+            return state["now"]
+        clock.state = state
+        return clock
+
+    def test_normal_startup_never_captures(self, tmp_path):
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock)
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None  # arms
+        clock.state["now"] += 5.0   # startup classification window
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None
+        r.on_state_change(GameState.GAME_LOBBY, GameState.GAME_UNKNOWN)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_captures_after_threshold_with_stuck_duration_in_name(self, tmp_path):
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        path = r.tick(self._frame(), GameState.GAME_UNKNOWN)
+        assert path is not None and "stuck31s" in path
+        assert (tmp_path / path.split("/")[-1]).exists()
+
+    def test_recapture_interval_and_episode_cap(self, tmp_path):
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None   # 1st
+        clock.state["now"] += 5.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None       # interval gate
+        clock.state["now"] += 120.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None   # 2nd
+        clock.state["now"] += 120.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None       # cap (max 2)
+
+    def test_episode_reset_on_reentry(self, tmp_path):
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+        r.on_state_change(GameState.GAME_LOBBY, GameState.GAME_UNKNOWN)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_LOBBY)
+        clock.state["now"] += 5.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None   # fresh clock
+        clock.state["now"] += 26.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_other_states_ignored(self, tmp_path):
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock)
+        clock.state["now"] += 100.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []

@@ -164,3 +164,28 @@ class TestFsmIntegration:
         analyzer.state = GameState.GAME_END_B.name
         analyzer.trigger_event("continue_clicked")
         assert calls == [1]
+
+
+class TestPopupDismissStates:
+    """ADR 074: the popup scan-and-dismiss pipeline's state contract.
+
+    Four gate sites (quick-scan loop entry, do_popup_scan, the post-futures
+    re-check, and main.py's _handle_lobby_popup) all read this constant —
+    the tests lock the membership so a refactor cannot silently strand
+    GAME_UNKNOWN again.
+    """
+
+    def test_game_unknown_is_dismissable(self):
+        from wingman.analyzer import POPUP_DISMISS_STATES
+        assert GameState.GAME_UNKNOWN in POPUP_DISMISS_STATES
+        assert GameState.GAME_LOBBY in POPUP_DISMISS_STATES
+        assert GameState.GAME_WAITING in POPUP_DISMISS_STATES
+
+    def test_battle_states_never_dismiss(self):
+        """A dismissal click during flight would be an uncommanded input —
+        battle-family and starting states must stay excluded."""
+        from wingman.analyzer import POPUP_DISMISS_STATES
+        for state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL,
+                      GameState.GAME_BATTLE_EJECT, GameState.GAME_STARTING,
+                      GameState.GAME_STARTING_STALLED, GameState.GAME_END_B):
+            assert state not in POPUP_DISMISS_STATES

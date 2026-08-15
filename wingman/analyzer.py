@@ -32,6 +32,13 @@ class GameState(Enum):
     GAME_BATTLE_EJECT    = auto()  # Eject sequence active (missiles empty); respawn detection only
 
 
+# ADR 074: states where the popup quick-scan runs and dismissal clicks are
+# allowed. GAME_UNKNOWN is included because a modal popup there hides every
+# classification marker — dismissal is the only recovery path.
+POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
+                        GameState.GAME_UNKNOWN)
+
+
 class GameEvent(Enum):
     """Orchestration events the analyzer publishes (ADR 060 Phase 1).
 
@@ -2576,15 +2583,18 @@ class GameStateAnalyzer:
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
 
     def _run_game_lobby_quick_scan(self):
-        """Scan lobby crops every 1s while in GAME_LOBBY or GAME_WAITING.
+        """Scan lobby crops every 1s while in a POPUP_DISMISS_STATES state.
 
         Lobby crops and popup crops are submitted in separate batches so popup OCR
         can use a fresher frame than the one used for CANCEL / PLAY detection.
 
-        Popup scan fires every 5s in both states unless a PLAY/READY click happened
-        within the last 5s; CANCEL/PLAY scan fires every cycle in GAME_LOBBY;
-        CANCEL alone is also scanned every cycle in GAME_WAITING so a brief CANCEL
-        window is not missed between main-loop 3-second polling intervals.
+        Popup scan fires every 5s in all participating states unless a PLAY/READY
+        click happened within the last 5s; CANCEL/PLAY scan fires every cycle in
+        GAME_LOBBY; CANCEL alone is also scanned every cycle in GAME_WAITING so a
+        brief CANCEL window is not missed between main-loop 3-second polling
+        intervals. GAME_UNKNOWN runs the popup batch ONLY (ADR 074): a modal
+        popup there hides every classification marker, so dismissal is the sole
+        recovery path.
         """
         lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
         popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
@@ -2606,7 +2616,11 @@ class GameStateAnalyzer:
                 # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
                 # counting fresh instead of comparing against a stale timestamp.
                 lobby_stall_since = 0.0
-            if state not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+            # ADR 074: GAME_UNKNOWN participates for the POPUP batch only —
+            # lobby crops stay excluded there: classification owns marker
+            # detection in GAME_UNKNOWN, and clicking PLAY/CANCEL from an
+            # unclassified state would be wrong.
+            if state not in POPUP_DISMISS_STATES:
                 continue
 
             executor = self.ocr_executor
@@ -2624,10 +2638,12 @@ class GameStateAnalyzer:
                 handled = False
                 play_clicked_this_cycle = False
 
-                crops_to_scan = (
-                    lobby_crops if state == GameState.GAME_LOBBY
-                    else [c for c in ("CANCEL",) if c in self.crops]
-                )
+                if state == GameState.GAME_LOBBY:
+                    crops_to_scan = lobby_crops
+                elif state == GameState.GAME_WAITING:
+                    crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
+                else:
+                    crops_to_scan = []   # GAME_UNKNOWN: popup batch only (ADR 074)
                 if crops_to_scan:
                     with self._click_to_frame_lock:
                         frame = self._click_to_latest_frame
@@ -2757,7 +2773,7 @@ class GameStateAnalyzer:
                     and not play_clicked_this_cycle
                     and popup_cooldown_remaining <= 0.0
                     and time.time() - last_popup_scan_ts >= 5.0
-                    and current_state_for_popup_gate in (GameState.GAME_LOBBY, GameState.GAME_WAITING)
+                    and current_state_for_popup_gate in POPUP_DISMISS_STATES
                 )
                 if bool(popup_crops) and popup_cooldown_remaining > 0.0:
                     logger.debug(
@@ -2797,7 +2813,7 @@ class GameStateAnalyzer:
                     # and we're now in GAME_STARTING), cancel queued futures and skip this batch
                     # entirely to avoid holding up the executor for 50+ seconds.
                     current_state_for_popup = self.game_state
-                    if current_state_for_popup not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+                    if current_state_for_popup not in POPUP_DISMISS_STATES:
                         for f in popup_futures.values():
                             f.cancel()
                         logger.debug(
