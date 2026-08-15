@@ -268,6 +268,7 @@ class _LinuxXTestKeyboard:
         The outer loop retries on transient display errors (e.g. XWayland dropping
         the connection). It exits only when _stop is set (via unhook_all).
         """
+        reconnect_attempts = 0
         while not self._stop.is_set():
             _ensure_xauthority()
             d_rec = None
@@ -381,6 +382,10 @@ class _LinuxXTestKeyboard:
                         except Exception as exc:
                             logger.error("XKey callback error for %r: %s", key_name, exc)
 
+                if reconnect_attempts:
+                    logger.info("XKey: display reconnected after %d attempt(s) — hotkeys active again", reconnect_attempts)
+                    reconnect_attempts = 0
+
                 # Blocks until record_disable_context is called (from unhook_all)
                 d_rec.record_enable_context(ctx, _record_handler)
                 d_rec.record_free_context(ctx)
@@ -405,7 +410,8 @@ class _LinuxXTestKeyboard:
                 self._ctrl_display = None
                 self._record_ctx = None
                 if not self._stop.is_set():
-                    logger.info("XKey: reconnecting display in 3s")
+                    reconnect_attempts += 1
+                    logger.info("XKey: reconnecting display in 3s (attempt %d)", reconnect_attempts)
                     self._stop.wait(timeout=3.0)
 
 
@@ -472,7 +478,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True, missile_evade_cfg: "dict | None" = None):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True, missile_evade_cfg: "dict | None" = None, capture_stale_inject_s: float = 10.0):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -505,6 +511,10 @@ class Controller:
         self._weapon_loop_stop = threading.Event()
         self._weapon_loop_interval = float(weapon_loop_interval or 0.5)  # Firing interval from config or default
         self._starting_max_wait_s = float(starting_max_wait_s)
+        # Suppress key injection when the last good frame is older than this:
+        # with capture stalled (display loss, KVM switch) the game may no longer
+        # be on screen, so presses land in whatever window is focused.
+        self._capture_stale_inject_s = float(capture_stale_inject_s)
         # Post-"Good Luck" settle before launching the mission. Interruptible:
         # a battle-alive signal ends it early (2026-08-05).
         self._good_luck_wait_s = float(good_luck_wait_s)
@@ -2540,6 +2550,16 @@ class Controller:
         """
         return self._mission_lock.locked() and self._mission_cancel.is_set()
 
+    def capture_frame_age_s(self):
+        """Seconds since the capture last produced a frame, or None if unknown.
+
+        None means either no capture is wired, no frame has arrived yet, or the
+        capture object does not track freshness (replay/test doubles) — callers
+        must treat None as "no staleness evidence", not as stale.
+        """
+        age_fn = getattr(self._capture, "seconds_since_last_frame", None)
+        return age_fn() if age_fn is not None else None
+
     def start_game_starting_loop(self):
         """Public orchestration entrypoint for the GAME_STARTING loop."""
         self._start_game_starting_loop()
@@ -2615,8 +2635,19 @@ class Controller:
             health_scan_armed = False
             try:
                 while _in_starting():
-                    # Press MISSION_J20_KEY every interval
-                    if self._simulate_os_input:
+                    # Press MISSION_J20_KEY every interval — unless capture has
+                    # gone stale (display loss / pipeline stall): the game may no
+                    # longer be on screen, so the press would land in whatever
+                    # window is focused. The loop itself keeps running so the
+                    # Good-Luck timeout can still move the FSM to stalled.
+                    frame_age = self.capture_frame_age_s()
+                    if (frame_age is not None
+                            and frame_age > self._capture_stale_inject_s):
+                        logger.warning(
+                            "Controller: game_starting - no frame for %.1fs "
+                            "(limit %.0fs) - suppressing '%s' press",
+                            frame_age, self._capture_stale_inject_s, MISSION_J20_KEY)
+                    elif self._simulate_os_input:
                         self._record_action_intent("key_tap", key=MISSION_J20_KEY, action="game_starting_loop")
                         logger.info("Controller: game_starting - simulated '%s' key tap", MISSION_J20_KEY)
                     elif keyboard_module:

@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.1"
-WINGMAN_VERSION_DETAILS = "docs update"
+WINGMAN_VERSION = "1.8.2"
+WINGMAN_VERSION_DETAILS = "TBD"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
@@ -344,6 +344,7 @@ def main():
         good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
         telemetry_cfg=cfg.get("telemetry", {}),
         missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
+        capture_stale_inject_s=float(mission_cfg.get("capture_stale_inject_s", 10.0)),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry

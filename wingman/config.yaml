@@ -143,7 +143,7 @@ incoming_detection:
 mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 20.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 90.0,
   startup_stall_exit_after_s: 600.0, good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true,
-  starting_health_probe_interval_s: 0.4}
+  starting_health_probe_interval_s: 0.4, capture_stale_inject_s: 10.0}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
 j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_altitude: 500,
