@@ -1,0 +1,84 @@
+{
+  "wingman_version": "1.8.1",
+  "run_id": "20260814_073032",
+  "session_start_ts": 1786707032.839,
+  "session_duration_s": 1379.2,
+  "missions_started": 2,
+  "missions_click_to": 2,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 3,
+  "total_flare_bursts": 5,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 1,
+  "total_missile_evades": 0,
+  "missile_engagements": {
+    "window_s": 10.0,
+    "engagements": 2,
+    "evaded_total": 0,
+    "evaded_died": 0,
+    "evaded_survival": null,
+    "not_evaded_total": 2,
+    "not_evaded_died": 1,
+    "not_evaded_survival": 0.5,
+    "detail": [
+      {
+        "ts": 1786707518.078,
+        "alerts": 4,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1786707612.674,
+        "alerts": 1,
+        "evaded": false,
+        "died_after_s": 5.8
+      }
+    ]
+  },
+  "avg_mission_duration_s": 276.6,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1786707075.45,
+      "duration_s": 348.3,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 1,
+      "outcome": "click_to"
+    },
+    {
+      "index": 1,
+      "start_ts": 1786707483.079,
+      "duration_s": 204.9,
+      "respawn_count": 1,
+      "flare_burst_count": 5,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 3,
+    "ocr_respawns": 3,
+    "matched": 3,
+    "matched_within_5s": 1,
+    "false_fires": 0,
+    "missed_ocr_respawns": 0,
+    "fire_deltas_s": [
+      5.53,
+      4.34,
+      5.53
+    ],
+    "max_confirmed_gap_s": 10.68,
+    "confirmed_gaps_over_threshold": 5
+  },
+  "stats_path": "docs/performance/current/run_20260814_073032_stats.json"
+}
