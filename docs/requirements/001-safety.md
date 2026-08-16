@@ -145,3 +145,21 @@ full injectable-key list (audit 2026-08-14 added the previously missing
 'escape' and MISSION_J20_KEY), SIGTERM routing through the graceful path, and
 stoppable daemon threads. The test suite carries its own session-end
 release-all net in tests/conftest.py as defense in depth.
+
+## Bounded climb hold
+
+**UID**: SAF-008
+
+**Statement**: A climb hold shall release all held flight keys unconditionally no later
+than its duration cap — behavior_tree.climb.max_climb_s for a band-recovery
+climb, behavior_tree.climb.mission_start_max_s for a mission-start climb —
+after entry, and shall release them on mission cancellation, on program
+exit, and on controller cleanup. Absence of fresh telemetry shall not end
+the hold early, and shall not extend it past the cap.
+
+**Rationale**: ADR 073 (3.2b/3.2c), mirroring SAF-006: an unreadable altitude (OCR dropout,
+frozen frame) would otherwise pin nose-up and afterburner indefinitely — the
+ADR 069 nose-hold-budget failure class. The cap firing without altitude
+confirmation is logged at WARNING as a fault indicator. Enforced by the
+climb thread's finally-block release, the stop event set in cleanup(), and
+the mission prologue's cancellation path.

@@ -1,8 +1,14 @@
 # ADR 073 — Climb Tactic: Altitude Recovery as a Behavior-Tree Leaf (Shadow-First)
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-15 | 1.8.2           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-16 | 1.8.2           |
+
+*Accepted 2026-08-16: phases 3.2a–3.2c implemented, enabled in production
+config, and live-validated across the 2026-08-15/16 sessions — 34+ confirmed
+operating-altitude climbs (means 24–28 s, zero duration-cap timeouts), two
+emergency-band recoveries, and ~20 clean pre-emption yields. Requirements
+FR-007 / SAF-008 capture the behavior and safety properties.*
 
 ## Context
 
@@ -150,6 +156,12 @@ Phase 3.2a shadow data says otherwise.
   in-battle low-altitude window happened at a telemetry-read moment. A
   genuine stuck-low episode remains the outstanding live-fire case.
 
+  *Live fire, same evening (20:33 session):* the emergency band fired twice —
+  both times after a missile evade left the aircraft below the entry band —
+  and recovered cleanly (`altitude_recovered` in 12.8 s and 12.0 s). A third
+  emergency recovery followed in the 20:37 window. The outstanding case is
+  closed: both layers of the tactic have live-fired successfully.
+
 - **Phase 3.2c (2026-08-15, live finding from the 19:33 session):** deleting
   the prologue outright was wrong — with the emergency band at 500 and spawn
   altitude around 2000, nothing commanded a climb at mission start or
@@ -202,6 +214,14 @@ Phase 3.2a shadow data says otherwise.
   battle exit to keep the evidence clean; whether the actuated leaf should
   reset on battle exit (via `on_state_change`) or deliberately open climbing
   is a Phase 3.2b decision to be made from the shadow data.
+
+  *Disposition (2026-08-16, at acceptance):* the persistence is kept, benign
+  by construction. Two mechanisms neutralise a stale `active` at battle
+  entry: the `confirm_reads` exit debounce releases it within two fresh
+  above-band reads, and the 3.2c mission-start prologue commands a climb at
+  every battle start anyway, masking the leaf's opening state entirely (the
+  `climb_mode` idempotence guard makes the two converge on one hold). No
+  reset hook is added; revisit only if the prologue is ever removed.
 - Shadow logging adds one INFO line per would-select transition — negligible
   log volume, greppable for offline analysis.
 - Until Phase 3.2b, behavior is unchanged; the known failure mode persists

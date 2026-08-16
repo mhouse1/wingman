@@ -1,8 +1,13 @@
 # ADR 070 — MISSILE_EVADE_MODE Behavior Tactic
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-11 | 1.7.1           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-16 | 1.8.2           |
+
+*Accepted 2026-08-16: implementation complete and enabled in production
+config since 2026-08-12; V1–V5 resolved below. The d13 `pitch_down` variant
+remains the one open follow-on and requires its own evidence before any
+change to the shipped triple.*
 
 Extends [ADR 024](024-phase3-behavior-tree-architecture.md) (the Phase 3 tactic
 selector) with a new actuating leaf, and builds on
@@ -538,6 +543,13 @@ Each item must be answered before the tactic is enabled in a live mission.
   punctuation to X11 keysym names (`semicolon`) in `_XKEY_ALIASES`, with a
   regression test covering every injectable key constant. The game-keymap half
   of V1 remains open.
+
+  *Resolution, 2026-08-16:* closed by the V2 live telemetry — the composed
+  triple demonstrably moves the aircraft (cross-axis heading departure plus
+  the zoom-climb signature across all five measured evades), which is only
+  possible if every key in the triple, `;` included, injects and acts in the
+  running keymap. A silent binding drift would have produced a flat
+  burner-only profile instead.
 - **V2 — the composed manoeuvre behaves as intended.** Roll right, left rudder
   and afterburner act on three separate axes and do not cancel (d3). What is
   unmeasured is the *result*: bench-fly the triple and confirm on the HUD that
@@ -583,6 +595,15 @@ Each item must be answered before the tactic is enabled in a live mission.
   `j20_mission` scripted leg injects flight keys during an evade window. If it
   does, d7 needs revisiting — most likely a mission-maneuver suppression flag
   rather than a full `cancel_mission()`.
+
+  *Resolution, 2026-08-16:* overtaken and answered by ADR 073. The scripted
+  roll legs were retired into the Engage leaf (ADR 024 3.1a) before this
+  tactic went live, and the mission's remaining flight-key leg — the 3.2c
+  prologue climb — explicitly yields to a starting evade: the climb hold
+  polls `_missile_evading` and releases its keys within one 0.25 s tick,
+  live-validated across ~20 `evade_preempt` exits in the 2026-08-15
+  sessions. The residual scripted legs press only AFTERBURNER, which the
+  evade itself holds. d7 stands unrevised.
 - **V4 — clear-window sizing.** The 3 s figure is the requested value, not a
   measured one. A shadow session recording incoming-cache timestamps across
   real engagements should show the observed gap distribution between

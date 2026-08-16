@@ -2115,6 +2115,8 @@ class Controller:
         advanced; a stalled analyzer can never end the climb early — the d5
         lesson), an eject or evade starting mid-climb, or the unconditional
         duration backstop. The mission is never touched.
+
+        @relation(FR-007, scope=function)
         """
         if self._climbing.is_set():
             logger.debug("Controller: climb_mode already in progress")
@@ -2171,6 +2173,8 @@ class Controller:
         of climbing it (2026-08-15 20:24 evidence: 60 s held, altitude
         oscillated 1650-2400 with zero net gain). The eject dive controller's
         pulse/observe pattern, inverted.
+
+        @relation(SAF-008, scope=function)
         """
         entry_ts = time.time()
         exit_reason = "stopped"

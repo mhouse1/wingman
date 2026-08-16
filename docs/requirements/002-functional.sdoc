@@ -114,17 +114,57 @@ TITLE: Evasive manoeuvre on incoming missile detection
 STATEMENT: >>>
 When an incoming-missile detection is present during GAME_BATTLE and the
 missile-evade tactic is enabled, wingman shall hold afterburner, roll-right
-and yaw-left simultaneously, and shall release all three only after no fresh
-incoming detection has been observed for
-behavior_tree.missile_evade.clear_seconds. A repeated detection reading whose
-cache timestamp has not advanced shall not count toward clearance. The
-manoeuvre shall take selection priority over engage navigation and shall
-yield to eject and respawn handling.
+and yaw-left simultaneously. The hold shall release when no fresh incoming
+detection has been observed for behavior_tree.missile_evade.clear_seconds,
+or when the hold has lasted behavior_tree.missile_evade.max_manoeuvre_s,
+whichever occurs first; the manoeuvre-limit release applies even while a
+detection is still present. A repeated detection reading whose cache
+timestamp has not advanced shall not count toward clearance. The manoeuvre
+shall take selection priority over engage navigation and shall yield to
+eject and respawn handling.
 <<<
 RATIONALE: >>>
 ADR 070. Flares alone against a missile on a non-manoeuvring target is the
 weakest case for a countermeasure; the evade denies the missile a steady
 intercept solution while the existing flare burst (FR: flare deployment path,
 unchanged) decoys the seeker. Selection priority in the ADR 024 behavior tree
-provides the mutual exclusion with engage geometry and eject.
+provides the mutual exclusion with engage geometry and eject. The
+manoeuvre-limit release is ADR 070 d12: the tactic is a tactical window, not
+a hold-until-clear — past it the manoeuvre only bleeds energy (the V2
+zoom-climb evidence), and under sustained barrages the limit, not clearance,
+is the modal exit. SAF-006's unconditional cap remains the fault backstop
+above both release paths.
+<<<
+
+[REQUIREMENT]
+UID: FR-007
+TITLE: Operating-altitude climb and low-altitude recovery
+STATEMENT: >>>
+At mission start, and at each mission restart after a respawn, wingman shall
+command a climb and shall not begin search-and-destroy until a fresh
+telemetry altitude at or above behavior_tree.climb.mission_start_alt has
+been confirmed, the altitude is unreadable, or a duration budget of
+behavior_tree.climb.mission_start_max_s has elapsed. Independently, during
+GAME_BATTLE, when behavior_tree.climb.confirm_reads consecutive fresh
+altitude readings fall below behavior_tree.climb.enter_below_alt, wingman
+shall command a climb until the same number of consecutive fresh readings
+reach behavior_tree.climb.exit_above_alt. A climb shall apply pitch input in
+bounded pulses, re-applied only while the observed climb rate is below
+behavior_tree.climb.min_climb_rate; it shall take selection priority over
+engage navigation and shall yield to eject, missile evade, respawn handling,
+and manual takeover, both at climb start and while a climb is in progress.
+<<<
+RATIONALE: >>>
+ADR 073. A mid-mission respawn used to leave the aircraft flying level at
+spawn altitude — below the navigator's safe floor nothing steered, and the
+observed outcome was terrain impact. The operating-altitude prologue and the
+emergency band close that gap as an invariant ("be high") rather than a
+scripted step. Pulsed pitch is the 3.2c live finding: a continuously held
+nose-up input loops the airframe (altitude oscillated with zero net gain for
+a full minute), so pitch is re-applied only while the climb rate is
+deficient. Confirmed readings guard both band edges because single garbage
+OCR stable-values were observed entering the band mid-flight. Yield ordering
+is the ADR 070 d11 pattern: selection priority orders selections, not thread
+lifetimes, so the climb hold also polls the higher-priority tactics' running
+state. Implemented by Controller.climb_mode (wingman/controller.py).
 <<<
