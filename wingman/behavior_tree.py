@@ -188,7 +188,8 @@ def make_disengage_condition(absent_after_s: float):
 
 def make_climb_condition(enter_below_alt: "float | None",
                          exit_above_alt: "float | None",
-                         is_running_fn=None):
+                         is_running_fn=None,
+                         confirm_reads: int = 1):
     """ADR 073: hysteresis band on the telemetry stable altitude.
 
     Enters below ``enter_below_alt``, releases only at or above
@@ -201,8 +202,15 @@ def make_climb_condition(enter_below_alt: "float | None",
     (the Evade precedent). ``is_running_fn`` keeps selection sticky while an
     actuated climb thread owns the pitch axis (the ADR 070 pattern);
     selection-only builds pass none and get the bare band.
+
+    ``confirm_reads`` (Phase 3.2b): band crossings only count after this many
+    CONSECUTIVE agreeing reads, in both directions. The 3.2a shadow sessions
+    showed single garbage stable-values (alt=1, 8, 73 mid-flight, next read
+    1400+) entering the band — one bad read must never command a climb, and
+    one bad high must never release a genuine one. None reads neither count
+    toward nor reset a streak (the freeze policy applied to the debounce).
     """
-    state = {"active": False}
+    state = {"active": False, "streak": 0}
 
     def climb(snapshot: AnalyzerSnapshot) -> bool:
         if enter_below_alt is None or exit_above_alt is None:
@@ -210,9 +218,16 @@ def make_climb_condition(enter_below_alt: "float | None",
         alt = snapshot.altitude
         if alt is not None:
             if state["active"]:
-                state["active"] = alt < exit_above_alt
+                crossing = alt >= exit_above_alt
             else:
-                state["active"] = alt < enter_below_alt
+                crossing = alt < enter_below_alt
+            if crossing:
+                state["streak"] += 1
+                if state["streak"] >= max(1, int(confirm_reads)):
+                    state["active"] = not state["active"]
+                    state["streak"] = 0
+            else:
+                state["streak"] = 0
         return state["active"] or (is_running_fn is not None and is_running_fn())
     return climb
 
@@ -310,7 +325,8 @@ def build_tree(bt_cfg: dict, clock=time.time,
             make_climb_condition(
                 climb_cfg.get("enter_below_alt"),
                 climb_cfg.get("exit_above_alt"),
-                is_running_fn=climb_fns[1] if climb_fns is not None else None),
+                is_running_fn=climb_fns[1] if climb_fns is not None else None,
+                confirm_reads=int(climb_cfg.get("confirm_reads", 1))),
             **climb_kwargs)
         children.insert(len(children) - 2, climb_leaf)   # above Engage
 

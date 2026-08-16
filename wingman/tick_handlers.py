@@ -24,6 +24,7 @@ import time
 
 from .analyzer import GameState
 from .behavior_tree import (
+    TACTIC_CLIMB,
     TACTIC_DISENGAGE,
     TACTIC_EJECT,
     TACTIC_ENGAGE,
@@ -713,8 +714,10 @@ class BehaviorTreeHandler:
         self._climb_shadow_since = 0.0
         self._climb_band = (climb_cfg.get("enter_below_alt"),
                             climb_cfg.get("exit_above_alt"))
+        self._climb_confirm = int(climb_cfg.get("confirm_reads", 1))
         if not bool(climb_cfg.get("enabled", False)):
-            self._climb_shadow = make_climb_condition(*self._climb_band)
+            self._climb_shadow = make_climb_condition(
+                *self._climb_band, confirm_reads=self._climb_confirm)
         if self.enabled:
             # ADR 024 3.1b: in active mode with an ammo handler wired, the
             # Eject and Disengage leaves actuate their Controller tactics.
@@ -732,6 +735,11 @@ class BehaviorTreeHandler:
             if self.active and bool(me_cfg.get("enabled", False)):
                 actuators[TACTIC_MISSILE_EVADE] = (self._start_missile_evade,
                                                    ctrl.is_missile_evading)
+            # ADR 073 3.2b: Climb actuates when active and enabled — the leaf
+            # is only inserted in that case (see build_tree), so there is no
+            # in-tree selection-only variant to wire.
+            if self.active and bool(climb_cfg.get("enabled", False)):
+                actuators[TACTIC_CLIMB] = (ctrl.climb_mode, ctrl.is_climbing)
             self._tree = build_tree(bt_cfg, actuators=actuators or None)
             self._writer = make_snapshot_writer()
 
@@ -831,7 +839,8 @@ class BehaviorTreeHandler:
                 if self._climb_shadow_active:
                     # Drop the closure's frozen hysteresis state too, or the
                     # next battle would open on last battle's verdict.
-                    self._climb_shadow = make_climb_condition(*self._climb_band)
+                    self._climb_shadow = make_climb_condition(
+                        *self._climb_band, confirm_reads=self._climb_confirm)
             if would != self._climb_shadow_active:
                 if would:
                     self._climb_shadow_since = now

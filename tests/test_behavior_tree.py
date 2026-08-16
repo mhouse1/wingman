@@ -400,3 +400,41 @@ def test_climb_condition_sticky_while_actuated():
     assert cond(make_snap(altitude=2000.0)) is True          # sticky on running
     running["flag"] = False
     assert cond(make_snap(altitude=2000.0)) is False
+
+
+class TestClimbDebounce:
+    """ADR 073 3.2b: confirm_reads — band crossings need consecutive
+    agreement in both directions (shadow sessions showed single garbage
+    stable-values like alt=8 mid-flight)."""
+
+    def _cond(self, confirm_reads=2):
+        return make_climb_condition(500, 1000, confirm_reads=confirm_reads)
+
+    def test_single_garbage_low_does_not_enter(self):
+        cond = self._cond()
+        assert cond(make_snap(altitude=8.0)) is False       # streak 1
+        assert cond(make_snap(altitude=1500.0)) is False    # streak reset
+
+    def test_two_consecutive_lows_enter(self):
+        cond = self._cond()
+        assert cond(make_snap(altitude=400.0)) is False
+        assert cond(make_snap(altitude=420.0)) is True
+
+    def test_none_neither_counts_nor_resets(self):
+        cond = self._cond()
+        assert cond(make_snap(altitude=400.0)) is False
+        assert cond(make_snap(altitude=None)) is False      # freeze
+        assert cond(make_snap(altitude=420.0)) is True      # streak survived
+
+    def test_single_garbage_high_does_not_release(self):
+        cond = self._cond()
+        cond(make_snap(altitude=400.0))
+        assert cond(make_snap(altitude=400.0)) is True      # active
+        assert cond(make_snap(altitude=5000.0)) is True     # streak 1, still active
+        assert cond(make_snap(altitude=400.0)) is True      # reset, still active
+        assert cond(make_snap(altitude=1200.0)) is True     # streak 1
+        assert cond(make_snap(altitude=1200.0)) is False    # released
+
+    def test_default_confirm_reads_is_immediate(self):
+        cond = make_climb_condition(500, 1000)
+        assert cond(make_snap(altitude=400.0)) is True

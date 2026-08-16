@@ -114,14 +114,78 @@ Phase 3.2a shadow data says otherwise.
   (a) how often Climb would fire, (b) what fraction of would-fire windows
   follow a respawn, (c) whether terrain deaths coincide with would-fire
   windows that had no climb commanded.
-- **Phase 3.2b (follow-up, gated on 3.2a evidence):** wire a Controller
-  `climb_mode` actuator — nose-up plus afterburner held while the leaf is
-  selected, sticky via `is_running_fn` (the ADR 070 pattern), with a
-  `max_climb_s` fault backstop. Flip `enabled: true`. `mission_j20` then
-  shrinks by its prologue: the one-shot `nose_up(2.0)` is deleted and the
-  search-and-destroy loop starts immediately, with attitude owned by the
-  tree from the first tick. The afterburner cadence moves into or defers to
-  the Climb leaf.
+- **Phase 3.2b (implemented 2026-08-15, gated on the 3.2a evidence below):**
+  `Controller.climb_mode` holds NOSE_UP + AFTERBURNER, sticky via
+  `is_climbing` (the ADR 070 pattern), with the NOSE_UP programmatic-key
+  bracket (d4) so XTest auto-repeats never read as a manual takeover.
+  Termination: `confirm_reads` consecutive FRESH telemetry reads at or above
+  `exit_above_alt` (fresh = the signal timestamp advanced — a stalled
+  analyzer can never end a climb early, the d5 lesson), pre-emption by an
+  eject or missile evade starting mid-climb (the d11 time-asymmetry), or the
+  unconditional `max_climb_s` backstop (15 s). The mission is never touched.
+  `enabled: true` shipped; `mission_j20`'s one-shot `nose_up(2.0)` prologue
+  is retired when the leaf is enabled (kept for legacy disabled configs) and
+  the search-and-destroy loop starts immediately. The scripted afterburner
+  cadence stays for now — the climb hold provides burner during recovery.
+
+  **3.2a evidence (three shadow sessions, 2026-08-15):** 8 would-fire
+  windows; 6 respawn-adjacent at plausible spawn altitudes (369–499), all
+  self-recovering in 6–9 s; 2–3 triggered by single garbage stable-values
+  (alt = 1, 8, 73 mid-flight, next read 1400+). Hence `confirm_reads: 2` —
+  band crossings, in BOTH directions, only count after two consecutive
+  agreeing reads. One bad low must never command a climb; one bad high must
+  never release a genuine one. None reads neither count nor reset a streak
+  (the freeze policy applied to the debounce).
+
+  Known parity limitation (shared with the evade hold): the climb thread
+  does not watch game state, so a battle ending mid-climb holds the keys
+  until a termination condition — bounded by `max_climb_s` at 15 s into the
+  end screen, where key input is inert.
+
+  **First active session (2026-08-15 19:33, 25 min):** integration verified
+  non-disruptive — 5/5 missions completed, 28 respawns, 0 errors, 0 manual
+  takeovers, prologue retirement confirmed in every mission start. The leaf
+  never fired, and correctly so: all 14 sub-500 altitude readings occurred
+  with Idle selected (eject dives and non-battle states own those); no
+  in-battle low-altitude window happened at a telemetry-read moment. A
+  genuine stuck-low episode remains the outstanding live-fire case.
+
+- **Phase 3.2c (2026-08-15, live finding from the 19:33 session):** deleting
+  the prologue outright was wrong — with the emergency band at 500 and spawn
+  altitude around 2000, nothing commanded a climb at mission start or
+  respawn restart, so the aircraft flew level at spawn altitude and mostly
+  ended in terrain. The prologue returns as a **closed-loop climb to
+  operating altitude**: `climb_mode(target_alt, max_s)` is parameterized,
+  and `mission_j20` climbs to `climb.mission_start_alt` (7000 HUD units,
+  cap `mission_start_max_s` 60 s) BEFORE starting search-and-destroy —
+  on every mission start and every respawn restart. Timeout falls through
+  to S&D (a blind climb must never wedge the mission); mission cancel
+  aborts the climb within 0.25 s. The emergency band (500/1000) remains as
+  the in-fight recovery layer. The open-loop `nose_up(2.0)` stays only for
+  legacy configs with the tactic disabled.
+
+  **Live iteration (same evening, 20:20 session):** two corrections from the
+  first prologue session.
+  1. *Held nose-up loops the aircraft.* The 60 s prologue climb pinned
+     NOSE_UP and gained nothing — altitude oscillated 1650–2400 for the
+     full minute (the aircraft pitched through vertical repeatedly). The
+     hold is now a **pulse-and-observe pitch controller**: AFTERBURNER held
+     throughout, NOSE_UP applied in `pitch_pulse_s` (1.5 s) pulses,
+     re-applied after `pulse_observe_s` (2.5 s) only while the telemetry
+     climb rate is below `min_climb_rate` (30 units/s) or unknown — the
+     eject dive controller's pattern, inverted. The emergency-band success
+     that same session (`altitude_recovered`, 12.8 s) predates the change
+     only because +500 fits inside one zoom-climb phase.
+  2. *Prologue inheritance.* A respawn restart at 20:23:51 issued the
+     prologue while the emergency climb (target 1000) was still holding;
+     the idempotence guard made the prologue inherit that lower-target
+     climb and start S&D near 1000. The prologue now **re-issues**
+     `climb_mode` until the operating altitude is confirmed, the altitude
+     is unreadable, or the `mission_start_max_s` budget (raised to 90 s
+     for realistic climb rates) is spent — pre-emptions and inherited
+     exits loop back after a 1 s beat. Evade pre-emption during the first
+     prologue climb (11.0 s, `evade_preempt`) validated the priority
+     yielding in live flight.
 
 ## Consequences
 

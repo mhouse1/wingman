@@ -39,14 +39,23 @@ watchdog subsystem: the quick-scan thread, popup crop definitions, OCR
 batch, cooldown guard (`popup_click_allowed`), and click path are reused
 unchanged.
 
-- The quick-scan loop also runs in GAME_UNKNOWN, scanning **popup crops
-  only** — no lobby-crop batch there. Lobby-marker detection in
-  GAME_UNKNOWN stays where it is (the main-loop classifier), and quick-scan
-  clicking of PLAY/CANCEL from an unclassified state would be wrong.
+- The quick-scan loop also runs in GAME_UNKNOWN and GAME_STARTING_STALLED,
+  scanning **popup crops only** — no lobby-crop batch there. Lobby-marker
+  detection in GAME_UNKNOWN stays where it is (the main-loop classifier),
+  and quick-scan clicking of PLAY/CANCEL from an unclassified state would
+  be wrong. GAME_STARTING_STALLED is included because a popup can be what
+  blocked "Good Luck" detection in the first place — checking during the
+  stall window beats waiting out the 20 s reclassify to GAME_UNKNOWN.
+  GAME_STARTING itself stays excluded: the match may genuinely be loading.
 - The `do_popup_scan` gate, the post-futures state re-check, and the
-  `_handle_lobby_popup` click handler each accept GAME_UNKNOWN.
-- Cadence is unchanged: popup OCR every 5 s, dismissal clicks rate-limited
+  `_handle_lobby_popup` handler each read the shared `POPUP_DISMISS_STATES`
+  constant.
+- Cadence is unchanged: popup OCR every 5 s, dismissal actions rate-limited
   by the existing per-popup cooldown.
+- Dismissal action is per-popup: most popups click their calibrated crop
+  (`event_refresh` clicks `event_refresh_dismiss`); `NEW_FLIGHT_PASS` (the
+  flight-pass promo, detected via its title text) has no calibrated click
+  target and is dismissed with an ESC press instead.
 
 Expected recovery flow: popup appears → GAME_UNKNOWN classification fails →
 popup batch detects `event_refresh` within ~5 s → dismissal click on the OK

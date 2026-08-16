@@ -32,11 +32,14 @@ class GameState(Enum):
     GAME_BATTLE_EJECT    = auto()  # Eject sequence active (missiles empty); respawn detection only
 
 
-# ADR 074: states where the popup quick-scan runs and dismissal clicks are
+# ADR 074: states where the popup quick-scan runs and dismissal actions are
 # allowed. GAME_UNKNOWN is included because a modal popup there hides every
 # classification marker — dismissal is the only recovery path.
+# GAME_STARTING_STALLED is included because a popup (e.g. the flight-pass
+# promo) can be what blocked the "Good Luck" detection in the first place —
+# checking during the stall window beats waiting out the 20 s reclassify.
 POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
-                        GameState.GAME_UNKNOWN)
+                        GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
 
 class GameEvent(Enum):
@@ -2598,7 +2601,8 @@ class GameStateAnalyzer:
         """
         lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
         popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
-                            "UNLOCK_CLOSE", "INSPECT", "event_refresh"]
+                            "UNLOCK_CLOSE", "INSPECT", "event_refresh",
+                            "NEW_FLIGHT_PASS"]
         popup_crops = [c for c in popup_crop_names if c in self.crops]
 
         if not lobby_crops and not popup_crops:
@@ -2643,7 +2647,9 @@ class GameStateAnalyzer:
                 elif state == GameState.GAME_WAITING:
                     crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
                 else:
-                    crops_to_scan = []   # GAME_UNKNOWN: popup batch only (ADR 074)
+                    # GAME_UNKNOWN / GAME_STARTING_STALLED: popup batch only
+                    # (ADR 074) — no lobby-crop clicking from those states.
+                    crops_to_scan = []
                 if crops_to_scan:
                     with self._click_to_frame_lock:
                         frame = self._click_to_latest_frame

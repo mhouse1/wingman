@@ -345,6 +345,7 @@ def main():
         good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
         telemetry_cfg=cfg.get("telemetry", {}),
         missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
+        climb_cfg=cfg.get("behavior_tree", {}).get("climb", {}),
         capture_stale_inject_s=float(mission_cfg.get("capture_stale_inject_s", 10.0)),
     )
 
@@ -408,6 +409,11 @@ def main():
             return
         logger.info("\033[93m📋 Lobby quick-scan: dismissing popup '%s'\033[0m", popup)
         ctrl.record_popup_click(popup)
+        if popup == "NEW_FLIGHT_PASS":
+            # Flight-pass promo (ADR 074): no safe click target calibrated —
+            # ESC dismisses it. Cooldown above still rate-limits the presses.
+            ctrl.press_escape(hold_seconds=0.05, block=False)
+            return
         click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
         ctrl.click_crop(analyzer.crops[click_target], block=False, count=1, region_name=click_target)
         if popup == "REVEAL_ALL":
