@@ -330,6 +330,12 @@ class FakeController:
     def missile_evade_mode(self) -> None:
         self._intents.append({"action_type": "missile_evade_mode"})
 
+    def is_climbing(self) -> bool:
+        return False
+
+    def climb_mode(self, target_alt=None, max_s=None) -> None:
+        self._intents.append({"action_type": "climb_mode"})
+
     # Engage-geometry actuation (3.1a) — called when the Engage leaf selects
     # with contacts on the injected battle frames' minimaps.
     def orient_nose_to_target(self, error_norm, **_cfg) -> str | None:

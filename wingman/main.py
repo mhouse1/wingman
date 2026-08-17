@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.2"
-WINGMAN_VERSION_DETAILS = "TBD"
+WINGMAN_VERSION = "1.8.3"
+WINGMAN_VERSION_DETAILS = "Make J20 mission sequence behavior driven instead of hard coded"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
