@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.3"
-WINGMAN_VERSION_DETAILS = "Make J20 mission sequence behavior driven instead of hard coded"
+WINGMAN_VERSION = "1.8.4"
+WINGMAN_VERSION_DETAILS = "Part2: Make J20 mission sequence behavior driven instead of hard coded"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
@@ -346,6 +346,7 @@ def main():
         telemetry_cfg=cfg.get("telemetry", {}),
         missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
         climb_cfg=cfg.get("behavior_tree", {}).get("climb", {}),
+        fuel_cfg=cfg.get("fuel", {}),
         capture_stale_inject_s=float(mission_cfg.get("capture_stale_inject_s", 10.0)),
     )
 

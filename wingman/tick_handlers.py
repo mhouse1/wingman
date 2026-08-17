@@ -715,6 +715,15 @@ class BehaviorTreeHandler:
         self._climb_band = (climb_cfg.get("enter_below_alt"),
                             climb_cfg.get("exit_above_alt"))
         self._climb_confirm = int(climb_cfg.get("confirm_reads", 1))
+        # ADR 075: armed altitude-sustain band and the evade fuel reserve. The
+        # start_fn wrapper picks the sustain target when the aircraft is above
+        # the emergency band — the leaf is shared, the targets are not.
+        _sustain_cfg = climb_cfg.get("sustain", {}) or {}
+        self._sustain_enabled = bool(_sustain_cfg.get("enabled", False))
+        self._sustain_exit_alt = _sustain_cfg.get("exit_above_alt")
+        self._sustain_max_s = float(_sustain_cfg.get("max_climb_s", 90.0))
+        self._climb_fuel_reserve = float(climb_cfg.get("fuel_reserve_pct", 0.0))
+        self._last_altitude: "float | None" = None
         if not bool(climb_cfg.get("enabled", False)):
             self._climb_shadow = make_climb_condition(
                 *self._climb_band, confirm_reads=self._climb_confirm)
@@ -739,9 +748,31 @@ class BehaviorTreeHandler:
             # is only inserted in that case (see build_tree), so there is no
             # in-tree selection-only variant to wire.
             if self.active and bool(climb_cfg.get("enabled", False)):
-                actuators[TACTIC_CLIMB] = (ctrl.climb_mode, ctrl.is_climbing)
+                actuators[TACTIC_CLIMB] = (self._start_climb, ctrl.is_climbing)
             self._tree = build_tree(bt_cfg, actuators=actuators or None)
             self._writer = make_snapshot_writer()
+
+    def _start_climb(self) -> None:
+        """Climb leaf start_fn (ADR 075): pick the band the selection came from.
+
+        Below the emergency enter threshold (or with altitude unknown) this is
+        a terrain-avoidance climb: Controller defaults, no fuel held back —
+        terrain outranks the evade reserve. Otherwise the sustain band selected
+        it: climb to the operating altitude with the evade fuel reserve
+        honoured, so the burner is released once fuel drops to the reserve.
+        """
+        alt = self._last_altitude
+        emergency_enter = self._climb_band[0]
+        is_sustain = (self._sustain_enabled
+                      and self._sustain_exit_alt is not None
+                      and alt is not None
+                      and (emergency_enter is None or alt >= float(emergency_enter)))
+        if is_sustain:
+            self._ctrl.climb_mode(target_alt=float(self._sustain_exit_alt),
+                                  max_s=self._sustain_max_s,
+                                  fuel_floor_pct=self._climb_fuel_reserve)
+        else:
+            self._ctrl.climb_mode()
 
     def _start_disengage(self) -> None:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence
@@ -794,6 +825,9 @@ class BehaviorTreeHandler:
         altitude = None
         if snapshot_obj is not None and snapshot_obj.altitude_fresh():
             altitude = snapshot_obj.altitude.stable_value
+        # Stored for _start_climb, which runs inside tree.tick() below and
+        # needs the altitude the selection was made against (ADR 075).
+        self._last_altitude = altitude
         is_respawning, _, _ = self._analyzer.get_respawn_cache_result()
         incoming, _, _ = self._analyzer.get_incoming_cache_result()
         missiles_empty_confirmed = False
@@ -814,6 +848,7 @@ class BehaviorTreeHandler:
             mission_running=self._ctrl.is_mission_running(),
             game_state=current_game_state,
             missiles_empty_confirmed=missiles_empty_confirmed,
+            fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
         )
         self._writer.set("snapshot", snap)
         self._tree.tick()
@@ -823,10 +858,10 @@ class BehaviorTreeHandler:
             self._last_selection = selection
         logger.debug(
             "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
-            "respawn=%s alt=%s mission=%s",
+            "respawn=%s alt=%s fuel=%s mission=%s",
             self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
             snap.ring_long, absent_s, snap.is_respawning, altitude,
-            snap.mission_running,
+            snap.fuel_pct, snap.mission_running,
         )
         if self._climb_shadow is not None:
             # Outside GAME_BATTLE the Idle leaf would own selection, and the

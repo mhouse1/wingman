@@ -488,3 +488,34 @@ def test_telemetry_split_row_confidence_is_minimum_of_digit_boxes():
     assert (speed, alt) == (530, 27123)
     assert speed_conf == pytest.approx(0.3)
     assert alt_conf == pytest.approx(0.9)
+
+
+# ---------------------------------------------------------------------------
+# ADR 075: afterburner fuel reading (FUEL_100 crop)
+# ---------------------------------------------------------------------------
+
+def test_fuel_reading_range_gate_and_staleness(analyzer: GameStateAnalyzer):
+    """Readings outside 0-100 are OCR garbage and must not enter the cache;
+    a stale reading must read back as None (fuel changes continuously while
+    the burner is held, so old values say nothing)."""
+    # Garbage (digit bleed) rejected — cache stays empty.
+    analyzer._process_fuel_reading(8100)
+    assert analyzer.get_afterburner_fuel_pct() is None
+
+    # Valid value stored.
+    analyzer._process_fuel_reading(87)
+    assert analyzer.get_afterburner_fuel_pct() == 87
+
+    # None (no digits) leaves the last value in place.
+    analyzer._process_fuel_reading(None)
+    assert analyzer.get_afterburner_fuel_pct() == 87
+
+    # Boundary values are valid.
+    analyzer._process_fuel_reading(0)
+    assert analyzer.get_afterburner_fuel_pct() == 0
+    analyzer._process_fuel_reading(100)
+    assert analyzer.get_afterburner_fuel_pct() == 100
+
+    # Stale: age the timestamp past the freshness window.
+    analyzer._fuel_ts -= analyzer._fuel_stale_after_s + 1.0
+    assert analyzer.get_afterburner_fuel_pct() is None

@@ -1046,6 +1046,16 @@ class GameStateAnalyzer:
         self.low_flares_event = threading.Event()
         self.no_missiles_event = threading.Event()
 
+        # Afterburner fuel sub-state (GAME_BATTLE only, ADR 075). The FUEL_100
+        # crop shows the fuel percentage as bare digits (no '%' symbol);
+        # readings outside 0-100 are OCR garbage and rejected.
+        _fuel_cfg = config.get("fuel", {})
+        self._fuel_pct: "int | None" = None
+        self._fuel_ts = 0.0
+        self._fuel_lock = threading.Lock()
+        self._last_logged_fuel = None
+        self._fuel_stale_after_s = float(_fuel_cfg.get("stale_after_s", 6.0))
+
         # Flight telemetry (GAME_BATTLE only) — speed (MPH) and altitude (feet),
         # read together from the combined ALTITUDE_SPEED crop (ADR 038).
         # ADR 038: plausibility filter + smoothing + rate live in the pure
@@ -1296,6 +1306,46 @@ class GameStateAnalyzer:
         finally:
             if self._ammo_lock.locked():
                 self._ammo_lock.release()
+
+    def _process_fuel_reading(self, value: "int | None"):
+        """Range-gate and store one afterburner-fuel OCR reading (ADR 075).
+
+        The FUEL_100 crop shows 0-100 bare digits; anything outside that range
+        is an OCR misread (digit bleed from neighbouring HUD text) and must
+        not enter the cache — a garbage 8100 read as "plenty of fuel" would
+        keep the burner held through a genuinely empty tank.
+        """
+        if value is None:
+            return
+        if not (0 <= value <= 100):
+            logger.debug("Analyzer: fuel reading %d outside 0-100 — rejected", value)
+            return
+        with self._fuel_lock:
+            self._fuel_pct = value
+            self._fuel_ts = time.time()
+        if value != self._last_logged_fuel:
+            logger.debug("Afterburner fuel: %d%%", value)
+            self._last_logged_fuel = value
+
+    def get_afterburner_fuel_pct(self) -> "int | None":
+        """Latest afterburner fuel percentage, or None when unknown/stale.
+
+        Staleness matters here more than for ammo: fuel changes continuously
+        while the burner is held, so a reading older than ``stale_after_s``
+        says nothing about the current tank and must not gate the burner.
+        """
+        if not self._fuel_lock.acquire(timeout=1.0):
+            logger.warning("get_afterburner_fuel_pct: _fuel_lock timeout — returning None")
+            return None
+        try:
+            if self._fuel_pct is None:
+                return None
+            if time.time() - self._fuel_ts > self._fuel_stale_after_s:
+                return None
+            return self._fuel_pct
+        finally:
+            if self._fuel_lock.locked():
+                self._fuel_lock.release()
 
     def _harvest_telemetry_future(self) -> float:
         """Collect a finished telemetry OCR pass without blocking (ADR 038).
@@ -2292,6 +2342,7 @@ class GameStateAnalyzer:
                     health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4]) if "HEALTH" in self.crops else None
                     ammo_flares_frame = get_crop(full_frame, *self.crops["AMMO_FLARES"][:4]) if "AMMO_FLARES" in self.crops else None
                     ammo_missile_frame = get_crop(full_frame, *self.crops["AMMO_MISSILE"][:4]) if "AMMO_MISSILE" in self.crops else None
+                    fuel_frame = get_crop(full_frame, *self.crops["FUEL_100"][:4]) if "FUEL_100" in self.crops else None
                     telemetry_frame = get_crop(full_frame, *self.crops["ALTITUDE_SPEED"][:4]) if "ALTITUDE_SPEED" in self.crops else None
                     t1 = time.time()
 
@@ -2312,6 +2363,7 @@ class GameStateAnalyzer:
                     health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
                     ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame, "ammo_flares") if ammo_flares_frame is not None else None
                     ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame, "ammo_missiles") if ammo_missile_frame is not None else None
+                    fuel_future = executor.submit(_process_health_region, fuel_frame, "fuel") if fuel_frame is not None else None
                     # Telemetry is fire-and-forget: harvest last submission's
                     # result if it finished, then maybe submit a fresh frame.
                     # The tick NEVER waits on telemetry (ADR 038 safety rule) —
@@ -2464,6 +2516,12 @@ class GameStateAnalyzer:
                             self._tracker.record_ocr_crop("ammo_missiles", ammo_missile_ocr_time)
                     else:
                         missile_value = None
+                    fuel_ocr_time = 0.0
+                    if fuel_future is not None:
+                        fuel_value, fuel_ocr_time = fuel_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("fuel", fuel_ocr_time)
+                        self._process_fuel_reading(fuel_value)
 
                     if respawn_detected:
                         with self._ammo_lock:
@@ -2498,9 +2556,9 @@ class GameStateAnalyzer:
                     logger.debug(
                         "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
                         "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | "
-                        "Flares OCR: %.2fs | Missiles OCR: %.2fs | Telemetry OCR: %.2fs | Total: %.2fs",
+                        "Flares OCR: %.2fs | Missiles OCR: %.2fs | Fuel OCR: %.2fs | Telemetry OCR: %.2fs | Total: %.2fs",
                         t1-t0, t2-t1, respawn_ocr_time, incoming_processing_time, health_ocr_time,
-                        ammo_flares_ocr_time, ammo_missile_ocr_time, telemetry_ocr_time, t4-t0
+                        ammo_flares_ocr_time, ammo_missile_ocr_time, fuel_ocr_time, telemetry_ocr_time, t4-t0
                     )
                 # NOTE: the GAME_STARTING health-probe branch that used to live here
                 # was removed 2026-08-05. It was unreachable — _detect_respawn_ocr

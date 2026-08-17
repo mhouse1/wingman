@@ -478,7 +478,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True, missile_evade_cfg: "dict | None" = None, climb_cfg: "dict | None" = None, capture_stale_inject_s: float = 10.0):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True, missile_evade_cfg: "dict | None" = None, climb_cfg: "dict | None" = None, fuel_cfg: "dict | None" = None, capture_stale_inject_s: float = 10.0):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -493,6 +493,10 @@ class Controller:
         self._analyzer = analyzer
         self._capture = capture
         self._on_auto_mission_key = on_auto_mission_key
+        self._last_auto_mission_key_ts = 0.0
+        # Battle-state guard arm timestamp for the double-press force (see
+        # _on_auto_mission_hotkey).
+        self._auto_mission_force_armed_ts = 0.0
         self._crops: "dict[str, CropCoords]" = crops or {}
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
@@ -634,18 +638,20 @@ class Controller:
         self._me_pitch_down = bool(_me_cfg.get("pitch_down", False))
 
         # ADR 073 Phase 3.2b — CLIMB tactic hold (NOSE_UP + AFTERBURNER).
-        # `enabled` also gates the mission_j20 prologue nose_up: when the
-        # Climb leaf owns attitude, the scripted one-shot climb is retired.
+        # The mission-start prologue climb (3.2c) is retired: the ADR 075
+        # sustain band selects Climb from the tree whenever the armed aircraft
+        # is below operating altitude, so mission_j20 no longer climbs itself.
         _cl_cfg = climb_cfg or {}
         self.climb_tactic_enabled = bool(_cl_cfg.get("enabled", False))
         self._climb_exit_alt = _cl_cfg.get("exit_above_alt")
         self._climb_confirm_reads = max(1, int(_cl_cfg.get("confirm_reads", 2)))
         self._climb_max_s = float(_cl_cfg.get("max_climb_s", 15.0))
-        # Mission-start closed-loop climb (ADR 073 3.2c): mission_j20 climbs
-        # to THIS altitude before search-and-destroy begins — the operating-
-        # altitude doctrine, distinct from the emergency band above.
-        self._mission_climb_alt = float(_cl_cfg.get("mission_start_alt", 7000.0))
-        self._mission_climb_max_s = float(_cl_cfg.get("mission_start_max_s", 90.0))
+        # ADR 075: afterburner fuel discipline. The game recharges fuel only
+        # while the key is UP; at 0% the burner is off and a held key blocks
+        # the recharge, so every burner hold releases at its floor and re-arms
+        # only after the margin refills.
+        _fuel_cfg = fuel_cfg or {}
+        self._fuel_rearm_margin = float(_fuel_cfg.get("rearm_margin_pct", 5.0))
         # Pulse-and-observe pitch control (3.2c live finding 2026-08-15
         # 20:24: 60 s of HELD nose-up looped the aircraft, alt oscillating
         # 1650-2400 with zero net gain). NOSE_UP is applied in bounded pulses
@@ -903,41 +909,63 @@ class Controller:
 
             # Auto-mission hotkey: force GAME_LOBBY state, then click PLAY/READY
             try:
-                self._last_auto_mission_key_ts = 0.0
-                def auto_mission_key_pressed(_e):
-                    now = time.time()
-                    if now - self._last_auto_mission_key_ts < 0.5:  # debounce: ignore key-repeat
-                        return
-                    self._last_auto_mission_key_ts = now
-                    if self._analyzer is None:
-                        return
-                    if self._analyzer.game_state != GameState.GAME_LOBBY:
-                        current_state = self._analyzer.game_state
-                        logger.info(
-                            "Controller: '%s' key pressed — forcing GAME_LOBBY (was %s)",
-                            AUTO_MISSION_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
-                        )
-                        self._analyzer.trigger_event("manual_reset")
-                    if self._on_auto_mission_key is not None:
-                        self._on_auto_mission_key()
-                    crop = next(
-                        (c for c in ("PLAY", "READY") if c in self._crops),
-                        None,
-                    )
-                    if crop is None:
-                        logger.warning("Controller: '%s' pressed but no PLAY/READY crop configured", AUTO_MISSION_KEY)
-                        return
-                    logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s (waiting for CANCEL)", AUTO_MISSION_KEY, crop)
-                    self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
-                    # Stamp the same cooldown the lobby quick-scan thread checks before it
-                    # clicks PLAY/READY on its own (analyzer.py _last_lobby_play_click_ts).
-                    # Without this, GAME_LOBBY entry resets that timestamp to 0, and the
-                    # quick-scan thread re-clicks the same button ~1s later, undoing this click.
-                    self._analyzer._last_lobby_play_click_ts = time.time()
-                keyboard_module.on_press_key(AUTO_MISSION_KEY, auto_mission_key_pressed, suppress=False)
+                keyboard_module.on_press_key(AUTO_MISSION_KEY, self._on_auto_mission_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
+
+    def _on_auto_mission_hotkey(self, _e=None):
+        """AUTO_MISSION_KEY handler: force GAME_LOBBY, then click PLAY/READY.
+
+        From a battle state (GAME_BATTLE, GAME_BATTLE_MANUAL,
+        GAME_BATTLE_EJECT) a single press is REFUSED: 'm' can be hit as a game
+        binding mid-flight, and forcing the FSM to GAME_LOBBY from a live
+        battle clicks PLAY into the battlefield and sets the lobby quick-scan
+        pressing ESC against the running game (2026-08-17 04:15 incident). A
+        second press within 2 s still forces it — the deliberate stuck-state
+        recovery stays available.
+        """
+        now = time.time()
+        if now - self._last_auto_mission_key_ts < 0.5:  # debounce: ignore key-repeat
+            return
+        self._last_auto_mission_key_ts = now
+        if self._analyzer is None:
+            return
+        current_state = self._analyzer.game_state
+        if current_state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL,
+                             GameState.GAME_BATTLE_EJECT):
+            if now - self._auto_mission_force_armed_ts > 2.0:
+                self._auto_mission_force_armed_ts = now
+                logger.info(
+                    "Controller: '%s' pressed during %s — ignored (press again "
+                    "within 2s to force GAME_LOBBY)",
+                    AUTO_MISSION_KEY, current_state.name)
+                return
+            logger.info(
+                "Controller: '%s' pressed twice during %s — forcing GAME_LOBBY",
+                AUTO_MISSION_KEY, current_state.name)
+        if current_state != GameState.GAME_LOBBY:
+            logger.info(
+                "Controller: '%s' key pressed — forcing GAME_LOBBY (was %s)",
+                AUTO_MISSION_KEY, current_state.name if hasattr(current_state, 'name') else current_state,
+            )
+            self._analyzer.trigger_event("manual_reset")
+        if self._on_auto_mission_key is not None:
+            self._on_auto_mission_key()
+        crop = next(
+            (c for c in ("PLAY", "READY") if c in self._crops),
+            None,
+        )
+        if crop is None:
+            logger.warning("Controller: '%s' pressed but no PLAY/READY crop configured", AUTO_MISSION_KEY)
+            return
+        logger.info("Controller: '%s' pressed in GAME_LOBBY - clicking %s (waiting for CANCEL)", AUTO_MISSION_KEY, crop)
+        self.click_crop(self._crops[crop], block=False, count=1, region_name=crop)
+        # Stamp the same cooldown the lobby quick-scan thread checks before it
+        # clicks PLAY/READY on its own (analyzer.py _last_lobby_play_click_ts).
+        # Without this, GAME_LOBBY entry resets that timestamp to 0, and the
+        # quick-scan thread re-clicks the same button ~1s later, undoing this click.
+        self._analyzer._last_lobby_play_click_ts = time.time()
 
     def _record_action_intent(self, action_type: str, **payload):
         intent = {
@@ -1000,13 +1028,23 @@ class Controller:
                 key_name,
             )
             return False
-        if not (self.is_mission_running() or self._ejecting.is_set()):
+        # A climb or evade hold is commanded flight even with no mission thread
+        # (the tree selects them with mission=False after a respawn cancels the
+        # mission) — SAF-001's takeover must fire for them too.
+        if not (self.is_mission_running() or self._ejecting.is_set()
+                or self._climbing.is_set() or self._missile_evading.is_set()):
             return False
 
         logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", key_name)
         self._auto_respawn_restart = False
         self._eject_stop_reason = "manual_takeover"
         self._eject_stop.set()
+        # SAF-001: cease ALL commanded flight — the FSM transition alone does
+        # not stop the tactic hold threads (2026-08-17 session: the climb hold
+        # kept pulsing nose-up 45 s into GAME_BATTLE_MANUAL). Both events are
+        # re-cleared by the next climb_mode/missile_evade_mode start.
+        self._climb_stop.set()
+        self._me_stop.set()
         self.cancel_mission()
         if self._analyzer is not None:
             try:
@@ -1962,6 +2000,7 @@ class Controller:
     def _run_missile_evade_hold(self):
         """Thread body for missile_evade_mode: press, poll, release (ADR 070).
 
+        @relation(SAF-001, scope=function)
         @relation(SAF-006, scope=function)
         """
         entry_ts = time.time()
@@ -1988,6 +2027,24 @@ class Controller:
         # 'e' and ';' are unwatched and need none.
         hold_keys = self._missile_evade_keys()
         guarded_keys = tuple(k for k in hold_keys if k in _WATCHED_MANEUVER_KEYS)
+        ab_held = AFTERBURNER_KEY in hold_keys
+
+        def _set_burner(pressed: bool):
+            # ADR 075: burner-only press/release inside the hold. 'e' is not a
+            # watched maneuver key, so no programmatic bracket is needed.
+            if self._simulate_os_input:
+                self._record_action_intent(
+                    "key_press" if pressed else "key_release",
+                    key=AFTERBURNER_KEY, action="missile_evade")
+            elif keyboard_module:
+                try:
+                    (keyboard_module.press if pressed
+                     else keyboard_module.release)(AFTERBURNER_KEY)
+                except Exception:
+                    logger.exception(
+                        "Controller: missile_evade burner %s failed",
+                        "press" if pressed else "release")
+
         for _key in guarded_keys:
             self._inc_programmatic_key(_key)
         try:
@@ -2025,6 +2082,36 @@ class Controller:
                                 "releasing keys to the eject sequence")
                     exit_reason = "eject_preempt"
                     break
+                # SAF-001 backstop (the climb-hold analogue): release when the
+                # operator owns the airframe (GAME_BATTLE_MANUAL) or the FSM
+                # has left battle altogether. GAME_BATTLE_EJECT stays with the
+                # d11 _ejecting handoff above, which owns that transition.
+                if self._analyzer is not None:
+                    _st = getattr(self._analyzer, "game_state", None)
+                    if isinstance(_st, GameState) and _st not in (
+                            GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
+                        logger.info("Controller: missile_evade — game state %s, "
+                                    "releasing keys", _st.name)
+                        exit_reason = "state_exit"
+                        break
+                # ADR 075: at 0% the burner is off AND a held key blocks the
+                # game's recharge — release it (manoeuvre keys stay held) and
+                # re-press once the rearm margin refills. The evade may burn
+                # the climb tactic's reserve; only empty forces a release.
+                fuel = self._read_fuel_pct()
+                if fuel is not None:
+                    if ab_held and fuel <= 0:
+                        _set_burner(False)
+                        ab_held = False
+                        logger.info(
+                            "Controller: missile_evade — fuel empty, releasing "
+                            "afterburner to allow recharge (manoeuvre keys held)")
+                    elif not ab_held and fuel >= self._fuel_rearm_margin:
+                        _set_burner(True)
+                        ab_held = True
+                        logger.info(
+                            "Controller: missile_evade — fuel %d%% — "
+                            "afterburner re-engaged", fuel)
                 now = time.time()
                 if now - entry_ts >= self._me_max_hold_s:
                     logger.warning(
@@ -2098,7 +2185,8 @@ class Controller:
         return self._missile_evading.is_set()
 
     def climb_mode(self, target_alt: "float | None" = None,
-                   max_s: "float | None" = None):
+                   max_s: "float | None" = None,
+                   fuel_floor_pct: float = 0.0):
         """Hold NOSE_UP + AFTERBURNER until altitude recovers (ADR 073 3.2b).
 
         Non-blocking and idempotent while the thread is alive (the ADR 070
@@ -2142,7 +2230,8 @@ class Controller:
                 if not self._simulate_os_input and not keyboard_module:
                     logger.error("Controller: keyboard library not available for climb_mode")
                     return
-                self._run_climb_hold(float(exit_alt), cap_s)
+                self._run_climb_hold(float(exit_alt), cap_s,
+                                     fuel_floor_pct=float(fuel_floor_pct))
             finally:
                 self._climbing.clear()
 
@@ -2163,17 +2252,24 @@ class Controller:
             if press:
                 logger.exception("Controller: climb press failed for '%s'", key)
 
-    def _run_climb_hold(self, exit_alt: float, cap_s: float):
+    def _run_climb_hold(self, exit_alt: float, cap_s: float,
+                        fuel_floor_pct: float = 0.0):
         """Thread body for climb_mode: pulse-and-observe pitch, poll altitude.
 
-        AFTERBURNER is held for the whole climb. NOSE_UP is applied in
-        ``pitch_pulse_s`` pulses and re-applied only after ``pulse_observe_s``
-        AND only while the telemetry climb rate is below ``min_climb_rate``
-        or unknown — a continuously held nose-up LOOPS the aircraft instead
-        of climbing it (2026-08-15 20:24 evidence: 60 s held, altitude
-        oscillated 1650-2400 with zero net gain). The eject dive controller's
-        pulse/observe pattern, inverted.
+        AFTERBURNER is held while fuel stays above ``fuel_floor_pct``
+        (ADR 075): the sustain climb passes the evade reserve (so a missile
+        alert always finds burner fuel waiting), the emergency climb passes 0
+        (terrain outranks the reserve). At the floor the key is released —
+        holding at 0% blocks the game's recharge — and re-pressed only after
+        the rearm margin refills. Unknown fuel changes nothing (freeze
+        policy). NOSE_UP is applied in ``pitch_pulse_s`` pulses and re-applied
+        only after ``pulse_observe_s`` AND only while the telemetry climb rate
+        is below ``min_climb_rate`` or unknown — a continuously held nose-up
+        LOOPS the aircraft instead of climbing it (2026-08-15 20:24 evidence:
+        60 s held, altitude oscillated 1650-2400 with zero net gain). The
+        eject dive controller's pulse/observe pattern, inverted.
 
+        @relation(SAF-001, scope=function)
         @relation(SAF-008, scope=function)
         """
         entry_ts = time.time()
@@ -2184,6 +2280,7 @@ class Controller:
         pulse_until = 0.0
         observe_until = 0.0
         last_rate = None
+        ab_held = False
 
         # NOSE_UP is a watched maneuver key — same programmatic bracket as the
         # evade hold (d4), held across all pulses so XTest auto-repeats are
@@ -2193,11 +2290,37 @@ class Controller:
         for _key in guarded_keys:
             self._inc_programmatic_key(_key)
         try:
-            self._climb_key(AFTERBURNER_KEY, press=True)
+            fuel = self._read_fuel_pct()
+            if fuel is None or fuel > fuel_floor_pct:
+                self._climb_key(AFTERBURNER_KEY, press=True)
+                ab_held = True
+            else:
+                logger.info(
+                    "Controller: climb — fuel %d%% at/below floor %.0f%% — "
+                    "starting without afterburner", fuel, fuel_floor_pct)
 
             while not self._climb_stop.wait(timeout=0.25):
                 if self._exit_event is not None and self._exit_event.is_set():
                     break
+                # ADR 075 burner gate: release at the floor (a held key at 0%
+                # blocks recharge; the sustain floor keeps the evade reserve),
+                # re-press only after the rearm margin refills.
+                fuel = self._read_fuel_pct()
+                if fuel is not None:
+                    if ab_held and fuel <= fuel_floor_pct:
+                        self._climb_key(AFTERBURNER_KEY, press=False)
+                        ab_held = False
+                        logger.info(
+                            "Controller: climb — fuel %d%% reached floor %.0f%% "
+                            "— afterburner released (recharge/reserve)",
+                            fuel, fuel_floor_pct)
+                    elif (not ab_held
+                            and fuel >= fuel_floor_pct + self._fuel_rearm_margin):
+                        self._climb_key(AFTERBURNER_KEY, press=True)
+                        ab_held = True
+                        logger.info(
+                            "Controller: climb — fuel recovered to %d%% — "
+                            "afterburner re-engaged", fuel)
                 # Yield the airframe to higher-priority tactics that started
                 # after this hold (the ADR 070 d11 time-asymmetry).
                 if self._ejecting.is_set():
@@ -2208,6 +2331,17 @@ class Controller:
                     logger.info("Controller: climb — missile evade started, releasing keys")
                     exit_reason = "evade_preempt"
                     break
+                # SAF-001 backstop: the takeover handler stops this hold, but
+                # the FSM can leave GAME_BATTLE without it (a forced state
+                # reset, a match end) — a climb must never keep flying an
+                # airframe the state machine says wingman no longer owns.
+                if self._analyzer is not None:
+                    _st = getattr(self._analyzer, "game_state", None)
+                    if isinstance(_st, GameState) and _st != GameState.GAME_BATTLE:
+                        logger.info("Controller: climb — game state %s, releasing keys",
+                                    _st.name)
+                        exit_reason = "state_exit"
+                        break
                 now = time.time()
                 if now - entry_ts >= cap_s:
                     logger.warning(
@@ -2278,6 +2412,15 @@ class Controller:
         if snap is None or not snap.altitude_fresh():
             return None
         return snap.altitude.stable_value
+
+    def _read_fuel_pct(self) -> "int | None":
+        """Fresh afterburner fuel percentage, or None when unreadable (ADR 075)."""
+        if self._analyzer is None:
+            return None
+        try:
+            return self._analyzer.get_afterburner_fuel_pct()
+        except Exception:
+            return None
 
     def start_weapon_loop(self, interval: float | None = None):
         """Start continuously firing the active weapon in a loop.
@@ -2450,7 +2593,14 @@ class Controller:
                 break
 
     def mission_j20(self):
-        """This mission sequence performs a predefined set of maneuvers for the J20 with continuous padlock and weapon fire
+        """Fully adaptive J20 mission (ADR 075): the behavior tree owns every
+        in-battle decision — sustained climb to operating altitude while armed,
+        engage geometry, missile evade, eject. The mission thread contributes
+        only the search-and-destroy loops (padlock + weapon fire, which keep
+        running through climbs and evades) and holds the mission-running state
+        until cancelled. No scripted maneuver, afterburner schedule, or fixed
+        mission window remains; the mission ends via cancel — respawn restart,
+        eject, manual takeover, or match end.
         Compatible Jets: J20
         """
         # Check if mission is already running
@@ -2465,80 +2615,16 @@ class Controller:
 
         def _mission_runner():
             try:
-                # ADR 073 3.2c: closed-loop prologue — climb to the operating
-                # altitude BEFORE search-and-destroy begins. The retired
-                # open-loop nose_up(2.0) left the aircraft flying level at
-                # spawn altitude on every respawn restart, which mostly ends
-                # in terrain (live finding 2026-08-15 evening). Timeout falls
-                # through to S&D — a blind climb must never wedge the mission.
-                if self.climb_tactic_enabled:
-                    logger.info(
-                        "Controller: mission_j20 prologue — climbing to %.0f "
-                        "(budget %.0fs) before search-and-destroy",
-                        self._mission_climb_alt, self._mission_climb_max_s)
-                    # Re-issue until the target is confirmed or the budget is
-                    # spent: a single call can end early via evade/eject
-                    # pre-emption, or inherit an already-running EMERGENCY
-                    # climb whose lower target (exit_above_alt) ends it far
-                    # below the operating altitude (live finding 2026-08-15
-                    # 20:23:51). Unreadable altitude also ends the loop — a
-                    # blind prologue must never wedge the mission.
-                    deadline = time.time() + self._mission_climb_max_s
-                    while time.time() < deadline:
-                        self.climb_mode(
-                            target_alt=self._mission_climb_alt,
-                            max_s=max(1.0, deadline - time.time()))
-                        while self.is_climbing():
-                            if not self._interruptible_sleep(0.25, check_interval=0.25):
-                                self._climb_stop.set()
-                                logger.info("Controller: prologue climb aborted "
-                                            "— mission cancelled")
-                                return
-                        alt = self._read_stable_altitude()
-                        if alt is None or alt >= self._mission_climb_alt:
-                            break
-                        # Ended below target (pre-empted or inherited) — let
-                        # the pre-empting tactic finish, then climb again.
-                        if not self._interruptible_sleep(1.0, check_interval=0.5):
-                            return
-                else:
-                    # Legacy open-loop prologue for configs with the tactic off.
-                    self.nose_up(2.0)
-                    if self._mission_cancel.is_set():
-                        logger.info("Controller: mission cancelled after nose_up")
-                        return
-
-                # Start search-and-destroy loop
                 self.start_search_and_destroy_loop()
-                logger.info("Controller: mission_j20 background loops started")
-
-                self.afterburner(20.0)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after afterburner")
-                    return
-                # Geometry belongs to the Engage leaf (ADR 024 3.1a) — the
-                # scripted roll holds are gone; afterburner and weapon loops remain.
-                self.afterburner(10)
-                if not self._interruptible_sleep(10, check_interval=1.0):
-                    logger.info("Controller: mission cancelled during afterburner recharge")
-                    return
-                logger.info("\033[94mController:  initiated second afterburner\033[0m")
-                self.afterburner(10)
-                if not self._interruptible_sleep(10, check_interval=1.0):
-                    logger.info("Controller: mission cancelled during afterburner recharge")
-                    return
-                self.afterburner(10)
-                # Loiter for the same 300 s window the final scripted roll used
-                # to hold — geometry is owned by the Engage leaf (ADR 024 3.1a).
-                logger.info("Controller: mission_j20 - loiter phase (geometry owned by Engage leaf)")
-                if not self._interruptible_sleep(300, check_interval=1.0):
-                    logger.info("Controller: mission cancelled during loiter")
-                    return
-
+                logger.info(
+                    "Controller: mission_j20 - adaptive mission running "
+                    "(S&D loops up, behavior tree owns tactics)")
+                while not self._mission_cancel.wait(timeout=0.5):
+                    if self._exit_event is not None and self._exit_event.is_set():
+                        logger.info("Controller: mission_j20 - exit requested")
+                        break
+                logger.info("Controller: mission_j20 - cancelled, stopping loops")
                 self.stop_search_and_destroy_loop()
-                #self.nose_down(4.0)
-                #time.sleep(10.0)  # additional wait time to stabilize
-                logger.info("\033[91mController: mission_j20 - sequence complete\033[0m")
             except Exception:
                 logger.exception("Controller: mission_j20 failed")
                 self.stop_search_and_destroy_loop()

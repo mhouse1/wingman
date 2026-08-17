@@ -46,15 +46,24 @@ class _Snapshot:
 
 
 class _FakeTelemetryAnalyzer:
-    """Settable stand-in for analyzer.get_telemetry()."""
+    """Settable stand-in for analyzer.get_telemetry() and the fuel read."""
 
-    def __init__(self, stable_value=None, ts=None, fresh=True):
+    def __init__(self, stable_value=None, ts=None, fresh=True, fuel=None):
         self._lock = threading.Lock()
+        self._fuel = fuel
         self.set(stable_value, ts, fresh)
 
     def set(self, stable_value, ts, fresh=True):
         with self._lock:
             self._snap = _Snapshot(stable_value, ts, fresh)
+
+    def set_fuel(self, fuel):
+        with self._lock:
+            self._fuel = fuel
+
+    def get_afterburner_fuel_pct(self):
+        with self._lock:
+            return self._fuel
 
     def get_telemetry(self):
         with self._lock:
@@ -245,11 +254,13 @@ def test_target_alt_reached_ends_climb(monkeypatch):
     assert time.time() - t0 < 6.0, "ended by cap, not target confirmation"
 
 
-def test_mission_climb_config_defaults(monkeypatch):
+def test_fuel_config_defaults(monkeypatch):
+    """ADR 075: the prologue fields are gone (sustain climb owns mission
+    altitude); the fuel rearm margin defaults without a fuel config block."""
     kb = _FakeKeyboard()
     ctrl = _make_ctrl(monkeypatch, kb, _FakeTelemetryAnalyzer(), CFG)
-    assert ctrl._mission_climb_alt == 7000.0
-    assert ctrl._mission_climb_max_s == 90.0
+    assert not hasattr(ctrl, "_mission_climb_alt")
+    assert ctrl._fuel_rearm_margin == 5.0
 
 
 def test_pitch_is_pulsed_not_held(monkeypatch):
@@ -293,3 +304,109 @@ def test_healthy_climb_rate_suppresses_pulse(monkeypatch):
     assert len(_presses(kb, NOSE_UP_KEY)) == presses_after_rate, \
         "pulse fired despite healthy climb rate"
     assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 075: fuel-gated afterburner in the climb hold
+# ---------------------------------------------------------------------------
+
+def test_climb_burner_respects_fuel_floor(monkeypatch):
+    """Sustain climbs pass the evade reserve as the floor: the burner releases
+    at the floor (leaving the reserve for a missile alert and letting the game
+    recharge), and re-engages only after the rearm margin refills."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False,
+                                      fuel=50)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=6.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=7000.0, max_s=6.0, fuel_floor_pct=10.0)
+    time.sleep(0.4)
+    assert _presses(kb, AFTERBURNER_KEY), "burner not engaged with fuel above floor"
+
+    analyzer.set_fuel(10)          # at the reserve floor
+    time.sleep(0.6)
+    assert ctrl.is_climbing(), "climb must continue without burner"
+    assert _releases(kb, AFTERBURNER_KEY), "burner not released at the reserve floor"
+
+    analyzer.set_fuel(30)          # >= floor + rearm margin (default 5)
+    time.sleep(0.6)
+    assert len(_presses(kb, AFTERBURNER_KEY)) >= 2, "burner not re-engaged after recovery"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_climb_starts_without_burner_when_fuel_empty(monkeypatch):
+    """Emergency floor is 0: at 0% the burner is off in-game and holding the
+    key blocks recharge, so the climb starts on pitch alone."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False,
+                                      fuel=0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()
+    time.sleep(0.4)
+    assert not _presses(kb, AFTERBURNER_KEY), "burner pressed with an empty tank"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_climb_unknown_fuel_keeps_legacy_burner_hold(monkeypatch):
+    """No fuel reading (OCR dropout, test doubles) must not change behavior:
+    the burner is held as before ADR 075 (freeze policy)."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False,
+                                      fuel=None)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()
+    time.sleep(0.3)
+    assert _presses(kb, AFTERBURNER_KEY), "burner must be held when fuel is unknown"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_manual_takeover_state_ends_climb(monkeypatch):
+    """SAF-001: the FSM entering GAME_BATTLE_MANUAL must end a running climb
+    — the 2026-08-17 session showed the hold pulsing nose-up 45 s into
+    manual flight because nothing stopped the thread."""
+    from wingman.analyzer import GameState
+
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    analyzer.game_state = GameState.GAME_BATTLE
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=10.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    t0 = time.time()
+    ctrl.climb_mode()
+    assert ctrl.is_climbing()
+    time.sleep(0.2)
+    analyzer.game_state = GameState.GAME_BATTLE_MANUAL
+    assert _wait_done(ctrl), "climb did not end on GAME_BATTLE_MANUAL"
+    assert time.time() - t0 < 5.0, "climb ended by cap, not the state exit"
+    for key in CLIMB_KEYS:
+        assert _releases(kb, key), f"'{key}' never released"
+
+
+def test_takeover_handler_stops_running_climb(monkeypatch):
+    """SAF-001: a physical maneuver key must trigger takeover and stop the
+    climb hold even with NO mission thread running (the tree selects Climb
+    with mission=False after a respawn cancels the mission)."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=10.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()
+    assert ctrl.is_climbing()
+    time.sleep(0.2)
+    assert not ctrl.is_mission_running()
+    took_over = ctrl._handle_maneuver_key_press("l")
+    assert took_over, "maneuver key did not trigger takeover during a bare climb hold"
+    assert _wait_done(ctrl), "takeover did not stop the climb hold"
+    for key in CLIMB_KEYS:
+        assert _releases(kb, key), f"'{key}' never released"

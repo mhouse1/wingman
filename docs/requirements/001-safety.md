@@ -15,15 +15,21 @@ rationale and evidence. Tuning values live in wingman/config.yaml, never here.
 
 **Statement**: When the operator physically presses a flight-control key (NOSE_UP i,
 NOSE_DOWN k, ROLL_LEFT j, ROLL_RIGHT l, or an arrow key) while wingman is
-commanding flight — a mission thread holds the mission lock, or an eject
-sequence is active — wingman shall cease all commanded flight input within
-2.0 s and transition to GAME_BATTLE_MANUAL, and shall not re-command flight
-until health evidence indicates a death and respawn.
+commanding flight — a mission thread holds the mission lock, an eject
+sequence is active, or a tactic hold (climb, missile evade) is active —
+wingman shall cease all commanded flight input, including the tactic hold
+threads, within 2.0 s and transition to GAME_BATTLE_MANUAL, and shall not
+re-command flight until health evidence indicates a death and respawn.
 
 **Rationale**: The manual-takeover guarantee. The 2.0 s cessation bound is enforced by
 tests/test_mission_cancel.py::test_cancel_releases_lock_within_two_seconds.
 Requested 2026-08-07; behaviour shipped in wingman/controller.py
 (_handle_maneuver_key_press). ADR 059 governs the post-death return to auto.
+Tactic holds added 2026-08-17: a live session showed the FSM transitioning
+to GAME_BATTLE_MANUAL while the climb hold kept pulsing nose-up and cycling
+the afterburner for the rest of its 90 s cap — the transition alone does not
+stop the hold threads, so takeover must stop them explicitly and the holds
+must release when the FSM leaves their owning states.
 
 ## Injected key presses never trigger takeover
 

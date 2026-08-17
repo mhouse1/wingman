@@ -95,17 +95,24 @@ def test_cancel_prevents_new_missions(ctrl):
     assert ctrl._mission_cancel.is_set() is True
 
 
-def test_mission_lock_not_held_after_natural_completion(ctrl, monkeypatch):
-    """Mission lock must be released after mission_j20 completes normally (no cancel)."""
-    # Skip long recharge waits so this unit test validates lock release quickly.
-    monkeypatch.setattr(ctrl, "_interruptible_sleep", lambda *_args, **_kwargs: True)
+def test_mission_lock_not_held_after_cancel_completion(ctrl):
+    """Mission lock must be released once the adaptive mission is cancelled.
 
-    # mission_j20 with a patched keyboard does nothing meaningful — it will
-    # iterate through maneuvers that call key presses (no-ops), then exit.
+    ADR 075: mission_j20 has no natural completion any more — it runs until
+    cancelled (respawn, eject, manual, match end). Lock release now happens
+    on the cancel path, so that is what this guards.
+    """
     t = threading.Thread(target=ctrl.mission_j20, daemon=True)
     t.start()
+
+    deadline = time.time() + 2.0
+    while not ctrl.is_mission_running() and time.time() < deadline:
+        time.sleep(0.01)
+    assert ctrl.is_mission_running(), "mission_j20 never acquired the lock"
+
+    ctrl.cancel_mission()
     t.join(timeout=10.0)
-    assert not t.is_alive(), "mission_j20 thread did not complete within test timeout"
+    assert not t.is_alive(), "mission_j20 thread did not exit after cancel"
 
     assert not ctrl.is_mission_running(), (
         "Mission lock still held after mission_j20 thread exited"
