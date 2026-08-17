@@ -164,3 +164,36 @@ class TestFsmIntegration:
         analyzer.state = GameState.GAME_END_B.name
         analyzer.trigger_event("continue_clicked")
         assert calls == [1]
+
+
+class TestPopupDismissStates:
+    """ADR 074: the popup scan-and-dismiss pipeline's state contract.
+
+    Four gate sites (quick-scan loop entry, do_popup_scan, the post-futures
+    re-check, and main.py's _handle_lobby_popup) all read this constant —
+    the tests lock the membership so a refactor cannot silently strand
+    GAME_UNKNOWN again.
+    """
+
+    def test_game_unknown_is_dismissable(self):
+        from wingman.analyzer import POPUP_DISMISS_STATES
+        assert GameState.GAME_UNKNOWN in POPUP_DISMISS_STATES
+        assert GameState.GAME_LOBBY in POPUP_DISMISS_STATES
+        assert GameState.GAME_WAITING in POPUP_DISMISS_STATES
+
+    def test_stalled_is_dismissable(self):
+        """A popup (e.g. the flight-pass promo) can be what blocked Good Luck
+        detection — the stall window checks for popups rather than waiting
+        out the 20s GAME_UNKNOWN reclassify."""
+        from wingman.analyzer import POPUP_DISMISS_STATES
+        assert GameState.GAME_STARTING_STALLED in POPUP_DISMISS_STATES
+
+    def test_battle_states_never_dismiss(self):
+        """A dismissal action during flight or match load would be an
+        uncommanded input — battle-family states and GAME_STARTING (match
+        genuinely loading) must stay excluded."""
+        from wingman.analyzer import POPUP_DISMISS_STATES
+        for state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL,
+                      GameState.GAME_BATTLE_EJECT, GameState.GAME_STARTING,
+                      GameState.GAME_END_B):
+            assert state not in POPUP_DISMISS_STATES

@@ -1,12 +1,14 @@
 # Wingman: Project Status & AI Evolution Roadmap
 
-**Current Date:** May 10, 2026
-**Current Version:** v1.6.6
-**Current Phase:** Phase 2 complete — Phase 3 (Behavior Trees) planned; ADR 024 written
+**Current Date:** August 17, 2026
+**Current Version:** v1.8.3
+**Current Phase:** Phase 3 in progress — behavior tree **active** in live sessions; multi-agent squad coordination begins during Phase 3, not after Phase 5
 
 ---
 
 ## Part 1: What Is Wingman Today?
+
+> **Snapshot note:** Part 1 was written at v1.6.6 (May 2026) and describes the Phase 1–2 baseline. For current capabilities see the README; the Phase 3 section below is kept current.
 
 ### Current Architecture
 
@@ -105,33 +107,36 @@ a dedicated lobby quick-scan thread, and a health ceiling spike filter.
 
 ---
 
-### Phase 3: Behavior Trees 🎯
+### Phase 3: Behavior Trees 🎯 — in progress (active)
 **"AI that makes strategic decisions"**
 
 **Goal:** Replace the hardcoded mission sequence with a behavior tree that chooses tactics
-based on current game state (health, ammo, enemy proximity).
+based on current game state (health, ammo, enemy proximity, altitude, incoming threats).
 
-**What this looks like:**
-```
-Root: Execute Mission
-├─ If Respawning
-│  └─ Cancel and Wait
-├─ If Health Critical
-│  ├─ Deploy Flares
-│  └─ Nose Down (reduce exposure)
-├─ If Missiles Empty
-│  └─ Eject and Dive
-└─ If Healthy & Armed
-    ├─ If Enemy Close → Aggressive Attack
-    └─ If Enemy Far  → Close Distance
-```
+**Current state (v1.8.3):** The tree (ADR 024, `py_trees`) runs **active** in every live
+session. Each tick freezes an `AnalyzerSnapshot` and a priority selector picks the tactic:
 
-**Current state:** ADR 024 written (Draft). Planned using the `py_trees` library. Health,
-ammo, and enemy proximity are already detected — the perception inputs exist. ADR 028 (minimap
-enemy bearing and overhead attack positioning, Draft) is the next perception building block that
-feeds Phase 3 tactics. The remaining work is replacing the fixed mission sequence with a tree.
+- **Eject** — missiles-empty eject-and-dive on the debounced ammo verdict (ADR 056/069)
+- **MissileEvade** — evasive manoeuvre on incoming detection (ADR 070); live A/B evidence:
+  90% vs 68% ten-second survival with the evade on (n=122 engagements)
+- **Climb** — terrain avoidance and closed-loop climb-to-operating-altitude, including the
+  mission-start prologue (ADR 073)
+- **Engage** — minimap ring-engage geometry: steer toward contacts, orbit when merged
+  (ADR 024 3.1a, ADR 028)
+- **Disengage / AttackSupport / Idle / RespawnWait** — supporting tactics and
+  selection-only states
 
-**Estimated effort:** 30–60 hours
+The J20 mission has been rewritten from a hardcoded maneuver script to this tactic-driven
+model; the remaining open-loop pieces (afterburner cadence, the fixed mission window) are
+conversion candidates. New tactics enter through the **shadow-first pipeline** proven by
+ADR 073: selection-only logging against live data first, actuation only after the shadow
+evidence holds up, then live A/B validation via per-engagement survival stats (ADR 055/070).
+
+**Squad coordination starts here, not after Phase 5:** each Wingman instance can hold a
+role (aggressive, loiter, target-painting, support) as a tactic configuration of the same
+tree — the first multi-agent work is multiple instances flying complementary roles during
+Phase 3 (see Multi-Agent Track below).
+
 **AI level:** Task planning (what to do), not yet learning
 
 ---
@@ -178,13 +183,21 @@ class VisionRL:
 
 ---
 
-### Phase 6: Multi-Agent & Swarm Tactics 👥
+### Multi-Agent Track: Squad & Swarm Tactics 👥 — during and after Phase 3
 **"Cooperative AI for multiplayer scenarios"**
 
-Fleet of bots with coordinated tactics — shared target priority, attack vector coordination,
-formation flying. Centralized training, decentralized execution.
+Not a terminal phase — a parallel track that **begins during Phase 3** and deepens through
+Phases 4–5:
 
-**Estimated effort:** 100–150 hours additional
+- **During Phase 3:** multiple Wingman instances flying complementary behavior-tree roles
+  (aggressive, loiter, target-painting, support). The behavior tree is what makes this
+  practical: a role is a tactic configuration of the same tree, so coordination starts as
+  role assignment, not new AI machinery.
+- **After Phase 3 (with Phases 4–5):** shared target priority, attack vector coordination,
+  formation flying, learned coordinated policies — centralized training, decentralized
+  execution.
+
+**Estimated effort:** 100–150 hours across the track
 **AI level:** Multi-agent systems
 
 ---
@@ -194,14 +207,17 @@ formation flying. Centralized training, decentralized execution.
 | Phase | Effort | Gameplay Benefit | Status |
 |-------|--------|-----------------|--------|
 | 1–2 (Automation + OCR Perception) | ✅ Done | Full unattended loop, all major detections | ✅ Complete |
-| 3 (Behavior Trees) | 30–60h | Adapts tactics to situation | Planned (ADR 024 written) |
+| 3 (Behavior Trees) | 30–60h | Adapts tactics to situation | 🎯 In progress — tree active, evade + climb validated live |
+| Multi-Agent Track (during/after Phase 3) | 100–150h | Squad roles, then fleet tactics | Starts during Phase 3 |
 | 4 (RL) | 60–120h | Learns from play | Future |
 | 5 (DRL + Vision) | 120–200h | Expert autonomy from raw screenshots | Research |
-| 6 (Multi-Agent) | 100–150h | Fleet tactics | Research |
 
-**Practical recommendation:** Phase 3 (behavior trees) is the highest-leverage next step —
-the perception inputs already exist, ADR 028 (minimap enemy bearing) will add the final
-spatial input it needs. Phases 4–6 are worthwhile for ML research but overkill for a game bot.
+**Practical recommendation:** Phase 3 delivered on its promise — the perception inputs were
+already in place and the active tree now carries live-validated tactics (evade, climb, eject,
+engage geometry). The next leverage points are finishing the tactic conversion (energy /
+afterburner discipline via a shadow-first spike) and starting the multi-agent track with
+role-configured instances of the same tree. Phases 4–5 remain worthwhile for ML research but
+are not required for effective squad play.
 
 ---
 
@@ -231,17 +247,18 @@ Wall-clock time = max of concurrent crop scans (5 crops: respawn, incoming, heal
 
 ### Next Steps
 
-1. **Phase 3 — Behavior trees** (30–60h): ADR 024 written; ADR 028 (minimap enemy bearing) the remaining perception input
-2. **ADR 031 — Round-end histogram** (Draft): implement in-process OCR timing summary on GAME_LOBBY entry
-3. **ADR 028 — Minimap enemy bearing** (Draft): spatial awareness for Phase 3 tactics
-4. **Enable GPU** (zero code changes): significant OCR latency reduction if CUDA is available
-5. **Phase 4+ RL**: save for research/ML portfolio work
+1. **Phase 3 — finish the tactic conversion**: energy/afterburner discipline via a
+   shadow-first spike; retire the remaining fixed mission window (ADR 024/073 pipeline)
+2. **Multi-agent track — squad pilot**: two instances flying complementary behavior-tree
+   roles (first concrete step of the multi-agent track, during Phase 3)
+3. **Enable GPU** (zero code changes): significant OCR latency reduction if CUDA is available
+4. **Phase 4+ RL**: save for research/ML portfolio work
 
 ---
 
 ## Summary: Wingman's AI Journey
 
-### Today (Phase 1–2 complete, v1.6.6)
+### Phase 1–2 baseline (v1.6.6)
 ```
 User: "Press M once"
 Bot: Clicks play → waits for matchmaking → waits for Good Luck (or alive fallback)
@@ -251,10 +268,19 @@ Bot: Clicks play → waits for matchmaking → waits for Good Luck (or alive fal
      → clicks through match end → loops indefinitely
 ```
 
-### Phase 3 (Behavior Trees)
+### Phase 3 (Behavior Trees) — where we are now (v1.8.3)
 ```
-Bot logic: "Missiles empty → eject. Health critical → evade. Enemy close → attack."
-Result: Situational tactics instead of a fixed sequence
+Bot logic: "Incoming missile → evade. Below safe altitude → climb. Missiles empty → eject.
+            Contacts on minimap → engage geometry. Otherwise → support."
+Result: Situational tactics instead of a fixed sequence — live-validated per-engagement
+        (evade: 90% vs 68% ten-second survival, n=122)
+```
+
+### Multi-Agent Track (starting during Phase 3)
+```
+Two or more instances: one aggressive, one loiter/support — each a role configuration
+of the same behavior tree
+Result: Squad behavior emerges from role assignment before any learning is involved
 ```
 
 ### Phase 4 (Reinforcement Learning)

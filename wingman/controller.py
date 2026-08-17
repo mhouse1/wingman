@@ -478,7 +478,7 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True, missile_evade_cfg: "dict | None" = None, capture_stale_inject_s: float = 10.0):
+    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True, missile_evade_cfg: "dict | None" = None, climb_cfg: "dict | None" = None, capture_stale_inject_s: float = 10.0):
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -632,6 +632,31 @@ class Controller:
         # descending break instead of the zoom climb the base triple produces.
         # Off by default — it is the unproven variant, not the shipped one.
         self._me_pitch_down = bool(_me_cfg.get("pitch_down", False))
+
+        # ADR 073 Phase 3.2b — CLIMB tactic hold (NOSE_UP + AFTERBURNER).
+        # `enabled` also gates the mission_j20 prologue nose_up: when the
+        # Climb leaf owns attitude, the scripted one-shot climb is retired.
+        _cl_cfg = climb_cfg or {}
+        self.climb_tactic_enabled = bool(_cl_cfg.get("enabled", False))
+        self._climb_exit_alt = _cl_cfg.get("exit_above_alt")
+        self._climb_confirm_reads = max(1, int(_cl_cfg.get("confirm_reads", 2)))
+        self._climb_max_s = float(_cl_cfg.get("max_climb_s", 15.0))
+        # Mission-start closed-loop climb (ADR 073 3.2c): mission_j20 climbs
+        # to THIS altitude before search-and-destroy begins — the operating-
+        # altitude doctrine, distinct from the emergency band above.
+        self._mission_climb_alt = float(_cl_cfg.get("mission_start_alt", 7000.0))
+        self._mission_climb_max_s = float(_cl_cfg.get("mission_start_max_s", 90.0))
+        # Pulse-and-observe pitch control (3.2c live finding 2026-08-15
+        # 20:24: 60 s of HELD nose-up looped the aircraft, alt oscillating
+        # 1650-2400 with zero net gain). NOSE_UP is applied in bounded pulses
+        # and re-applied only when the telemetry climb RATE decays — the
+        # eject dive controller's pattern, inverted. AFTERBURNER stays held.
+        self._climb_pulse_s = float(_cl_cfg.get("pitch_pulse_s", 1.5))
+        self._climb_observe_s = float(_cl_cfg.get("pulse_observe_s", 2.5))
+        self._climb_min_rate = float(_cl_cfg.get("min_climb_rate", 30.0))
+        self._climbing = threading.Event()
+        self._climb_thread: "threading.Thread | None" = None
+        self._climb_stop = threading.Event()
 
         # Tracks how many programmatic presses are in flight, per key.
         # keyboard.KeyboardEvent has no is_injected attribute, so the getattr guard
@@ -2072,6 +2097,188 @@ class Controller:
         (ADR 070 — the MissileEvade leaf's is_running_fn)."""
         return self._missile_evading.is_set()
 
+    def climb_mode(self, target_alt: "float | None" = None,
+                   max_s: "float | None" = None):
+        """Hold NOSE_UP + AFTERBURNER until altitude recovers (ADR 073 3.2b).
+
+        Non-blocking and idempotent while the thread is alive (the ADR 070
+        d8 pattern). Suppressed while an eject or missile evade owns the
+        airframe — selection priority prevents most overlaps, but this covers
+        the same instant from the Controller side (d11 analogue).
+
+        ``target_alt``/``max_s`` default to the emergency band's
+        ``exit_above_alt``/``max_climb_s``; the mission-start prologue passes
+        its own operating-altitude target (3.2c).
+
+        Termination: ``confirm_reads`` consecutive FRESH telemetry reads at or
+        above the target (a fresh read = the stable value's timestamp
+        advanced; a stalled analyzer can never end the climb early — the d5
+        lesson), an eject or evade starting mid-climb, or the unconditional
+        duration backstop. The mission is never touched.
+
+        @relation(FR-007, scope=function)
+        """
+        if self._climbing.is_set():
+            logger.debug("Controller: climb_mode already in progress")
+            return
+        if self._ejecting.is_set():
+            logger.info("Controller: climb suppressed — eject in progress")
+            return
+        if self._missile_evading.is_set():
+            logger.info("Controller: climb suppressed — missile evade in progress")
+            return
+        exit_alt = target_alt if target_alt is not None else self._climb_exit_alt
+        if exit_alt is None:
+            logger.warning("Controller: climb_mode disabled — exit_above_alt unset")
+            return
+        cap_s = float(max_s) if max_s is not None else self._climb_max_s
+        self._climbing.set()
+        self._climb_stop.clear()
+        logger.info("\033[95m⬆️  CLIMB — holding nose up + afterburner "
+                    "(target alt %.0f, cap %.0fs)\033[0m", float(exit_alt), cap_s)
+
+        def _run():
+            try:
+                if not self._simulate_os_input and not keyboard_module:
+                    logger.error("Controller: keyboard library not available for climb_mode")
+                    return
+                self._run_climb_hold(float(exit_alt), cap_s)
+            finally:
+                self._climbing.clear()
+
+        self._climb_thread = threading.Thread(target=_run, daemon=True)
+        self._climb_thread.start()
+
+    def _climb_key(self, key: str, press: bool):
+        """Press/release one climb key, honoring simulate mode."""
+        if self._simulate_os_input:
+            self._record_action_intent(
+                "key_press" if press else "key_release", key=key, action="climb")
+            return
+        if not keyboard_module:
+            return
+        try:
+            (keyboard_module.press if press else keyboard_module.release)(key)
+        except Exception:
+            if press:
+                logger.exception("Controller: climb press failed for '%s'", key)
+
+    def _run_climb_hold(self, exit_alt: float, cap_s: float):
+        """Thread body for climb_mode: pulse-and-observe pitch, poll altitude.
+
+        AFTERBURNER is held for the whole climb. NOSE_UP is applied in
+        ``pitch_pulse_s`` pulses and re-applied only after ``pulse_observe_s``
+        AND only while the telemetry climb rate is below ``min_climb_rate``
+        or unknown — a continuously held nose-up LOOPS the aircraft instead
+        of climbing it (2026-08-15 20:24 evidence: 60 s held, altitude
+        oscillated 1650-2400 with zero net gain). The eject dive controller's
+        pulse/observe pattern, inverted.
+
+        @relation(SAF-008, scope=function)
+        """
+        entry_ts = time.time()
+        exit_reason = "stopped"
+        last_counted_ts = 0.0
+        confirm_streak = 0
+        nose_held = False
+        pulse_until = 0.0
+        observe_until = 0.0
+        last_rate = None
+
+        # NOSE_UP is a watched maneuver key — same programmatic bracket as the
+        # evade hold (d4), held across all pulses so XTest auto-repeats are
+        # never read as a manual takeover.
+        guarded_keys = tuple(k for k in (NOSE_UP_KEY, AFTERBURNER_KEY)
+                             if k in _WATCHED_MANEUVER_KEYS)
+        for _key in guarded_keys:
+            self._inc_programmatic_key(_key)
+        try:
+            self._climb_key(AFTERBURNER_KEY, press=True)
+
+            while not self._climb_stop.wait(timeout=0.25):
+                if self._exit_event is not None and self._exit_event.is_set():
+                    break
+                # Yield the airframe to higher-priority tactics that started
+                # after this hold (the ADR 070 d11 time-asymmetry).
+                if self._ejecting.is_set():
+                    logger.info("Controller: climb — eject started, releasing keys")
+                    exit_reason = "eject_preempt"
+                    break
+                if self._missile_evading.is_set():
+                    logger.info("Controller: climb — missile evade started, releasing keys")
+                    exit_reason = "evade_preempt"
+                    break
+                now = time.time()
+                if now - entry_ts >= cap_s:
+                    logger.warning(
+                        "Controller: climb max duration (%.0fs) reached — "
+                        "releasing without altitude confirmation", cap_s)
+                    exit_reason = "max_climb"
+                    break
+
+                # Pitch pulse state machine (never blocks the poll cadence).
+                if nose_held and now >= pulse_until:
+                    self._climb_key(NOSE_UP_KEY, press=False)
+                    nose_held = False
+                    observe_until = now + self._climb_observe_s
+                elif (not nose_held and now >= observe_until
+                        and (last_rate is None or last_rate < self._climb_min_rate)):
+                    self._climb_key(NOSE_UP_KEY, press=True)
+                    nose_held = True
+                    pulse_until = now + self._climb_pulse_s
+                    logger.debug("Controller: climb pitch pulse (rate=%s)", last_rate)
+
+                if self._analyzer is None:
+                    continue
+                try:
+                    snap = self._analyzer.get_telemetry()
+                except Exception:
+                    logger.exception("Controller: climb telemetry poll failed")
+                    continue
+                if snap is None or not snap.altitude_fresh():
+                    continue   # blind: neither counts nor resets (freeze)
+                alt_signal = snap.altitude
+                alt = alt_signal.stable_value
+                sig_ts = alt_signal.ts
+                if alt is None or sig_ts is None or sig_ts <= last_counted_ts:
+                    continue   # stale sample already counted (d5)
+                last_counted_ts = sig_ts
+                last_rate = getattr(alt_signal, "rate", None)
+                if alt >= exit_alt:
+                    confirm_streak += 1
+                    if confirm_streak >= self._climb_confirm_reads:
+                        exit_reason = "altitude_recovered"
+                        break
+                else:
+                    confirm_streak = 0
+        finally:
+            _release_started = time.time()
+            self._climb_key(NOSE_UP_KEY, press=False)
+            self._climb_key(AFTERBURNER_KEY, press=False)
+            _release_span = time.time() - _release_started
+            for _key in guarded_keys:
+                self._arm_release_grace(_key, span_s=_release_span)
+                self._dec_programmatic_key(_key)
+        logger.info("Controller: climb complete (%s, %.1fs)",
+                    exit_reason, time.time() - entry_ts)
+
+    def is_climbing(self) -> bool:
+        """True while a climb_mode hold is in progress
+        (ADR 073 3.2b — the Climb leaf's is_running_fn)."""
+        return self._climbing.is_set()
+
+    def _read_stable_altitude(self) -> "float | None":
+        """Fresh telemetry stable altitude, or None when unreadable."""
+        if self._analyzer is None:
+            return None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return None
+        if snap is None or not snap.altitude_fresh():
+            return None
+        return snap.altitude.stable_value
+
     def start_weapon_loop(self, interval: float | None = None):
         """Start continuously firing the active weapon in a loop.
         
@@ -2258,13 +2465,50 @@ class Controller:
 
         def _mission_runner():
             try:
-                # Execute mission maneuvers (maneuvers log their own activity)
-                self.nose_up(2.0)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after nose_up")
-                    return
+                # ADR 073 3.2c: closed-loop prologue — climb to the operating
+                # altitude BEFORE search-and-destroy begins. The retired
+                # open-loop nose_up(2.0) left the aircraft flying level at
+                # spawn altitude on every respawn restart, which mostly ends
+                # in terrain (live finding 2026-08-15 evening). Timeout falls
+                # through to S&D — a blind climb must never wedge the mission.
+                if self.climb_tactic_enabled:
+                    logger.info(
+                        "Controller: mission_j20 prologue — climbing to %.0f "
+                        "(budget %.0fs) before search-and-destroy",
+                        self._mission_climb_alt, self._mission_climb_max_s)
+                    # Re-issue until the target is confirmed or the budget is
+                    # spent: a single call can end early via evade/eject
+                    # pre-emption, or inherit an already-running EMERGENCY
+                    # climb whose lower target (exit_above_alt) ends it far
+                    # below the operating altitude (live finding 2026-08-15
+                    # 20:23:51). Unreadable altitude also ends the loop — a
+                    # blind prologue must never wedge the mission.
+                    deadline = time.time() + self._mission_climb_max_s
+                    while time.time() < deadline:
+                        self.climb_mode(
+                            target_alt=self._mission_climb_alt,
+                            max_s=max(1.0, deadline - time.time()))
+                        while self.is_climbing():
+                            if not self._interruptible_sleep(0.25, check_interval=0.25):
+                                self._climb_stop.set()
+                                logger.info("Controller: prologue climb aborted "
+                                            "— mission cancelled")
+                                return
+                        alt = self._read_stable_altitude()
+                        if alt is None or alt >= self._mission_climb_alt:
+                            break
+                        # Ended below target (pre-empted or inherited) — let
+                        # the pre-empting tactic finish, then climb again.
+                        if not self._interruptible_sleep(1.0, check_interval=0.5):
+                            return
+                else:
+                    # Legacy open-loop prologue for configs with the tactic off.
+                    self.nose_up(2.0)
+                    if self._mission_cancel.is_set():
+                        logger.info("Controller: mission cancelled after nose_up")
+                        return
 
-                # Start search-and-destroy loop after first maneuver
+                # Start search-and-destroy loop
                 self.start_search_and_destroy_loop()
                 logger.info("Controller: mission_j20 background loops started")
 
@@ -2800,6 +3044,7 @@ class Controller:
         if eject_thread is not None and eject_thread.is_alive():
             eject_thread.join(timeout=1.5)  # let its finally release keys cleanly
         self._me_stop.set()  # ADR 070: end any evade hold via its own finally
+        self._climb_stop.set()  # ADR 073 3.2b: end any climb hold via its own finally
         me_thread = self._me_thread
         if me_thread is not None and me_thread.is_alive():
             me_thread.join(timeout=1.5)

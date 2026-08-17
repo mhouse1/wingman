@@ -516,6 +516,26 @@ class TestDualMode:
 
 
 class TestShadowSummary:
+    def test_ocr_edge_latency_recorded(self, analyzer):
+        """Each OCR rising edge snapshots how stale health evidence already
+        was — the headroom measurement gating any ADR 064 extension."""
+        _feed(analyzer, 240, 240)          # confirmed read stamps the clock
+        time.sleep(0.06)
+        analyzer._shadow_record_ocr_respawn(True)
+        analyzer._shadow_record_ocr_respawn(False)
+        s = analyzer.shadow_respawn_summary()
+        assert len(s["ocr_edge_latencies"]) == 1
+        assert s["ocr_edge_latencies"][0]["since_confirmed_s"] >= 0.05
+        assert s["edge_since_confirmed_max_s"] >= 0.05
+        assert s["edge_since_confirmed_mean_s"] >= 0.05
+
+    def test_ocr_edge_latency_none_before_any_confirmed_read(self, analyzer):
+        analyzer._shadow_record_ocr_respawn(True)
+        s = analyzer.shadow_respawn_summary()
+        assert s["ocr_edge_latencies"][0]["since_confirmed_s"] is None
+        assert s["edge_since_confirmed_mean_s"] is None
+        assert s["edge_since_confirmed_max_s"] is None
+
     def test_matched_fire_within_5s(self, analyzer):
         analyzer._shadow_record_ocr_respawn(True)   # rising edge now
         _feed(analyzer, 240, 240, 0, 0, 0, 250, 250)

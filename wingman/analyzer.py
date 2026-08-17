@@ -32,6 +32,16 @@ class GameState(Enum):
     GAME_BATTLE_EJECT    = auto()  # Eject sequence active (missiles empty); respawn detection only
 
 
+# ADR 074: states where the popup quick-scan runs and dismissal actions are
+# allowed. GAME_UNKNOWN is included because a modal popup there hides every
+# classification marker — dismissal is the only recovery path.
+# GAME_STARTING_STALLED is included because a popup (e.g. the flight-pass
+# promo) can be what blocked the "Good Luck" detection in the first place —
+# checking during the stall window beats waiting out the 20 s reclassify.
+POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
+                        GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+
+
 class GameEvent(Enum):
     """Orchestration events the analyzer publishes (ADR 060 Phase 1).
 
@@ -994,6 +1004,12 @@ class GameStateAnalyzer:
         self._shadow_fires: "list[tuple[float, str, float]]" = []   # (ts, tier, dead_for_s)
         self._shadow_ocr_respawn_edges: "list[float]" = []          # rising-edge timestamps
         self._shadow_prev_ocr_respawn = False
+        # Respawn-latency instrumentation (measurement gate for any ADR 064
+        # extension): at each OCR rising edge, how stale the health evidence
+        # already was. since_confirmed_s overestimates true death duration by
+        # up to the normal inter-confirm gap — read it against
+        # max_confirmed_gap_s, not as an absolute.
+        self._ocr_edge_latencies: "list[dict]" = []
         # ADR 064 dual mode: set when composite evidence fires while OCR has not
         # detected the episode; the main loop treats it as respawn-detected.
         self.health_respawn_event = threading.Event()
@@ -1934,10 +1950,26 @@ class GameStateAnalyzer:
             self._death_pending = False
 
     def _shadow_record_ocr_respawn(self, respawn_detected: bool):
-        """Record rising edges of OCR respawn detection for agreement matching."""
+        """Record rising edges of OCR respawn detection for agreement matching.
+
+        Each edge also snapshots how long health evidence had already been
+        absent — the headroom a corroborated-absence detector could reclaim
+        by firing before the RESPAWN text renders.
+        """
         if self._respawn_detection_mode in ("shadow", "dual"):
             if respawn_detected and not self._shadow_prev_ocr_respawn:
-                self._shadow_ocr_respawn_edges.append(time.time())
+                now_t = time.time()
+                self._shadow_ocr_respawn_edges.append(now_t)
+                since_confirmed = (round(now_t - self._last_confirmed_read_ts, 2)
+                                   if self._last_confirmed_read_ts else None)
+                no_digits_for = (round(now_t - self._health_no_digits_since, 2)
+                                 if self._health_no_digits_since else None)
+                self._ocr_edge_latencies.append(
+                    {"since_confirmed_s": since_confirmed,
+                     "no_digits_for_s": no_digits_for})
+                logger.info(
+                    "RespawnLatency: OCR edge — since_confirmed=%ss no_digits_for=%ss",
+                    since_confirmed, no_digits_for)
         self._shadow_prev_ocr_respawn = respawn_detected
 
     def shadow_respawn_summary(self) -> "dict | None":
@@ -1966,6 +1998,8 @@ class GameStateAnalyzer:
             else:
                 deltas.append(round(fire_ts - best, 2))
                 remaining_edges.remove(best)
+        edge_lat = [e["since_confirmed_s"] for e in self._ocr_edge_latencies
+                    if e["since_confirmed_s"] is not None]
         return {
             "mode": self._respawn_detection_mode,
             "shadow_fires": len(fires),
@@ -1977,6 +2011,11 @@ class GameStateAnalyzer:
             "fire_deltas_s": deltas,
             "max_confirmed_gap_s": round(self._max_confirmed_gap_s, 2),
             "confirmed_gaps_over_threshold": self._confirmed_gap_over_threshold,
+            "ocr_edge_latencies": list(self._ocr_edge_latencies),
+            "edge_since_confirmed_mean_s": (
+                round(sum(edge_lat) / len(edge_lat), 2) if edge_lat else None),
+            "edge_since_confirmed_max_s": (
+                round(max(edge_lat), 2) if edge_lat else None),
         }
 
     def crops_for_state(self, state: "GameState | None" = None) -> "dict[str, CropCoords]":
@@ -2547,19 +2586,23 @@ class GameStateAnalyzer:
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
 
     def _run_game_lobby_quick_scan(self):
-        """Scan lobby crops every 1s while in GAME_LOBBY or GAME_WAITING.
+        """Scan lobby crops every 1s while in a POPUP_DISMISS_STATES state.
 
         Lobby crops and popup crops are submitted in separate batches so popup OCR
         can use a fresher frame than the one used for CANCEL / PLAY detection.
 
-        Popup scan fires every 5s in both states unless a PLAY/READY click happened
-        within the last 5s; CANCEL/PLAY scan fires every cycle in GAME_LOBBY;
-        CANCEL alone is also scanned every cycle in GAME_WAITING so a brief CANCEL
-        window is not missed between main-loop 3-second polling intervals.
+        Popup scan fires every 5s in all participating states unless a PLAY/READY
+        click happened within the last 5s; CANCEL/PLAY scan fires every cycle in
+        GAME_LOBBY; CANCEL alone is also scanned every cycle in GAME_WAITING so a
+        brief CANCEL window is not missed between main-loop 3-second polling
+        intervals. GAME_UNKNOWN runs the popup batch ONLY (ADR 074): a modal
+        popup there hides every classification marker, so dismissal is the sole
+        recovery path.
         """
         lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
         popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
-                            "UNLOCK_CLOSE", "INSPECT", "event_refresh"]
+                            "UNLOCK_CLOSE", "INSPECT", "event_refresh",
+                            "NEW_FLIGHT_PASS"]
         popup_crops = [c for c in popup_crop_names if c in self.crops]
 
         if not lobby_crops and not popup_crops:
@@ -2577,7 +2620,11 @@ class GameStateAnalyzer:
                 # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
                 # counting fresh instead of comparing against a stale timestamp.
                 lobby_stall_since = 0.0
-            if state not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+            # ADR 074: GAME_UNKNOWN participates for the POPUP batch only —
+            # lobby crops stay excluded there: classification owns marker
+            # detection in GAME_UNKNOWN, and clicking PLAY/CANCEL from an
+            # unclassified state would be wrong.
+            if state not in POPUP_DISMISS_STATES:
                 continue
 
             executor = self.ocr_executor
@@ -2595,10 +2642,14 @@ class GameStateAnalyzer:
                 handled = False
                 play_clicked_this_cycle = False
 
-                crops_to_scan = (
-                    lobby_crops if state == GameState.GAME_LOBBY
-                    else [c for c in ("CANCEL",) if c in self.crops]
-                )
+                if state == GameState.GAME_LOBBY:
+                    crops_to_scan = lobby_crops
+                elif state == GameState.GAME_WAITING:
+                    crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
+                else:
+                    # GAME_UNKNOWN / GAME_STARTING_STALLED: popup batch only
+                    # (ADR 074) — no lobby-crop clicking from those states.
+                    crops_to_scan = []
                 if crops_to_scan:
                     with self._click_to_frame_lock:
                         frame = self._click_to_latest_frame
@@ -2728,7 +2779,7 @@ class GameStateAnalyzer:
                     and not play_clicked_this_cycle
                     and popup_cooldown_remaining <= 0.0
                     and time.time() - last_popup_scan_ts >= 5.0
-                    and current_state_for_popup_gate in (GameState.GAME_LOBBY, GameState.GAME_WAITING)
+                    and current_state_for_popup_gate in POPUP_DISMISS_STATES
                 )
                 if bool(popup_crops) and popup_cooldown_remaining > 0.0:
                     logger.debug(
@@ -2768,7 +2819,7 @@ class GameStateAnalyzer:
                     # and we're now in GAME_STARTING), cancel queued futures and skip this batch
                     # entirely to avoid holding up the executor for 50+ seconds.
                     current_state_for_popup = self.game_state
-                    if current_state_for_popup not in (GameState.GAME_LOBBY, GameState.GAME_WAITING):
+                    if current_state_for_popup not in POPUP_DISMISS_STATES:
                         for f in popup_futures.values():
                             f.cancel()
                         logger.debug(

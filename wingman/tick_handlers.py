@@ -24,12 +24,14 @@ import time
 
 from .analyzer import GameState
 from .behavior_tree import (
+    TACTIC_CLIMB,
     TACTIC_DISENGAGE,
     TACTIC_EJECT,
     TACTIC_ENGAGE,
     TACTIC_MISSILE_EVADE,
     AnalyzerSnapshot,
     build_tree,
+    make_climb_condition,
     make_snapshot_writer,
     selected_tactic,
 )
@@ -701,6 +703,21 @@ class BehaviorTreeHandler:
         self._orbit_interval_s = float(j20_cfg.get("orbit_roll_interval_s", 2.0))
         self._last_orbit_roll_ts = 0.0
         self._last_nav_mode = self._nav.mode
+        # ADR 073 Phase 3.2a: while the Climb leaf is disabled it stays OUT of
+        # the selector (a selection-only leaf would pre-empt Engage actuation —
+        # not shadow). Instead an independent instance of the same condition is
+        # evaluated against the same frozen snapshot and transitions are
+        # logged as would-select evidence.
+        climb_cfg = bt_cfg.get("climb", {}) or {}
+        self._climb_shadow = None
+        self._climb_shadow_active = False
+        self._climb_shadow_since = 0.0
+        self._climb_band = (climb_cfg.get("enter_below_alt"),
+                            climb_cfg.get("exit_above_alt"))
+        self._climb_confirm = int(climb_cfg.get("confirm_reads", 1))
+        if not bool(climb_cfg.get("enabled", False)):
+            self._climb_shadow = make_climb_condition(
+                *self._climb_band, confirm_reads=self._climb_confirm)
         if self.enabled:
             # ADR 024 3.1b: in active mode with an ammo handler wired, the
             # Eject and Disengage leaves actuate their Controller tactics.
@@ -718,6 +735,11 @@ class BehaviorTreeHandler:
             if self.active and bool(me_cfg.get("enabled", False)):
                 actuators[TACTIC_MISSILE_EVADE] = (self._start_missile_evade,
                                                    ctrl.is_missile_evading)
+            # ADR 073 3.2b: Climb actuates when active and enabled — the leaf
+            # is only inserted in that case (see build_tree), so there is no
+            # in-tree selection-only variant to wire.
+            if self.active and bool(climb_cfg.get("enabled", False)):
+                actuators[TACTIC_CLIMB] = (ctrl.climb_mode, ctrl.is_climbing)
             self._tree = build_tree(bt_cfg, actuators=actuators or None)
             self._writer = make_snapshot_writer()
 
@@ -806,6 +828,31 @@ class BehaviorTreeHandler:
             snap.ring_long, absent_s, snap.is_respawning, altitude,
             snap.mission_running,
         )
+        if self._climb_shadow is not None:
+            # Outside GAME_BATTLE the Idle leaf would own selection, and the
+            # freeze-on-None policy would otherwise carry a stale would-select
+            # through the lobby — force-release there instead of evaluating.
+            if snap.game_state == GameState.GAME_BATTLE:
+                would = self._climb_shadow(snap)
+            else:
+                would = False
+                if self._climb_shadow_active:
+                    # Drop the closure's frozen hysteresis state too, or the
+                    # next battle would open on last battle's verdict.
+                    self._climb_shadow = make_climb_condition(
+                        *self._climb_band, confirm_reads=self._climb_confirm)
+            if would != self._climb_shadow_active:
+                if would:
+                    self._climb_shadow_since = now
+                    logger.info(
+                        "BT[shadow-climb]: would_select=True alt=%s "
+                        "selected=%s respawn=%s", altitude, selection,
+                        snap.is_respawning)
+                else:
+                    logger.info(
+                        "BT[shadow-climb]: would_select=False alt=%s held=%.0fs",
+                        altitude, now - self._climb_shadow_since)
+                self._climb_shadow_active = would
         if (self.active and selection == TACTIC_ENGAGE
                 and snap.mission_running):
             self._actuate_engage(components, altitude, now)
@@ -1006,3 +1053,83 @@ class WaitingFallbackHandler:
                 elapsed_waiting, effective_interval - (time.time() - self._last_reclick_ts),
                 "click missed" if not self._play_ever_absent else "returned from matchmaking")
         return False
+
+
+class UnknownAnomalyRecorder:
+    """ADR 074: archive screenshots of unclassifiable GAME_UNKNOWN episodes.
+
+    A GAME_UNKNOWN state that persists past ``screenshot_after_s`` means the
+    screen is showing something neither the classifier nor any calibrated
+    popup crop recognises — the 2026-08-15 "Event refresh" stranding was
+    diagnosed only because a screenshot happened to be taken afterwards.
+    This recorder captures that evidence automatically: timestamped frames
+    saved under ``dir`` for later triage and popup-crop calibration
+    (``make add-crops``), so each new stranding variant can be added to
+    stall handling instead of being lost when the session ends.
+
+    Normal startup classification (~4 s in GAME_UNKNOWN) never triggers a
+    capture. Follows the ADR 060 handler contract; owns only its own state.
+    """
+
+    def __init__(self, cfg: "dict | None", clock=time.time):
+        import cv2  # heavy import kept local: recorder is constructed once
+        self._cv2 = cv2
+        cfg = cfg or {}
+        self._after_s = float(cfg.get("screenshot_after_s", 30.0))
+        self._recapture_s = float(cfg.get("recapture_interval_s", 120.0))
+        self._max_per_episode = int(cfg.get("max_per_episode", 5))
+        self._dir = str(cfg.get("dir", "test_screenshots/unknown_anomalies"))
+        self._clock = clock
+        self._unknown_since = 0.0
+        self._captured = 0
+        self._last_capture_ts = 0.0
+
+    def on_state_change(self, current_game_state, prev_game_state) -> None:
+        if current_game_state == GameState.GAME_UNKNOWN:
+            self._unknown_since = self._clock()
+            self._captured = 0
+            self._last_capture_ts = 0.0
+        else:
+            self._unknown_since = 0.0
+
+    def tick(self, frame, current_game_state) -> "str | None":
+        """Capture when GAME_UNKNOWN has persisted past the threshold.
+
+        Returns the saved path (for tests/logging), else None. Never raises —
+        a capture failure must not take down the tick loop.
+        """
+        if current_game_state != GameState.GAME_UNKNOWN or frame is None:
+            return None
+        now = self._clock()
+        if self._unknown_since == 0.0:
+            # Startup enters GAME_UNKNOWN without a state-change callback —
+            # arm the clock on first sight instead.
+            self._unknown_since = now
+            return None
+        stuck_for = now - self._unknown_since
+        if stuck_for < self._after_s:
+            return None
+        if self._captured >= self._max_per_episode:
+            return None
+        if self._last_capture_ts and now - self._last_capture_ts < self._recapture_s:
+            return None
+        try:
+            from datetime import datetime
+            from pathlib import Path
+            out_dir = Path(self._dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = out_dir / f"unknown_{stamp}_stuck{int(stuck_for)}s.png"
+            if not self._cv2.imwrite(str(path), frame):
+                logger.warning("ADR074 anomaly: screenshot write failed: %s", path)
+                return None
+        except Exception as e:
+            logger.warning("ADR074 anomaly: screenshot capture failed: %s: %s",
+                           type(e).__name__, e)
+            return None
+        self._captured += 1
+        self._last_capture_ts = now
+        logger.warning(
+            "ADR074 anomaly: GAME_UNKNOWN stuck for %.0fs — screenshot %d/%d "
+            "saved to %s", stuck_for, self._captured, self._max_per_episode, path)
+        return str(path)

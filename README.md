@@ -2,7 +2,7 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.8.0 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04).
+Current version: v1.8.3 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04).
 
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
@@ -24,23 +24,50 @@ Beyond the game itself, Wingman is an R&D reference architecture for AI-driven a
 
 ---
 
+## Project Phases
+
+Wingman evolves through deliberate phases, each raising the AI level of the system. The full plan lives in `docs/PROJECT_AI_ROADMAP.md`.
+
+| Phase | Focus | AI Level | Status |
+|-------|-------|----------|--------|
+| 1–2 | Unattended automation: OCR perception, formal FSM, mission loops, replay-based validation, performance tracking | Scripted automation | ✅ Complete |
+| **3** | **Behavior tree for adaptive tactics: the aircraft chooses what to do from live battlefield state instead of following a fixed script — and the start of multi-instance squad coordination** | **Task planning** | **🎯 In progress (active)** |
+| 4 | Reinforcement learning — strategy improves from gameplay outcomes | Learning | Future |
+| 5 | Deep RL + vision — policies from raw frames | Research | Future |
+
+**Multi-agent squad coordination is not a distant end-phase — it begins during Phase 3 and continues beyond it.** The behavior tree is what makes coordination practical: each Wingman instance can hold a role (aggressive, loiter, target-painting, support) as a tactic configuration of the same tree, so the first squad work is multiple instances flying complementary roles. Later phases deepen coordination (shared target priority, learned policies) rather than introduce it.
+
+### Where Phase 3 stands
+
+The behavior tree (ADR 024, built on `py_trees`) runs **active** in every session. Each tick it freezes an analyzer snapshot (health, ammo, minimap rings, altitude, respawn state) and a priority selector picks the tactic:
+
+- **Engage** — minimap ring-engage geometry: steer toward contacts, orbit when merged (ADR 024 3.1a, ADR 028)
+- **MissileEvade** — evasive manoeuvre on incoming-missile detection (ADR 070); live sessions measure 90% vs 68% ten-second survival with the evade on (n=122 engagements)
+- **Climb** — terrain avoidance and closed-loop climb-to-operating-altitude, including the mission-start climb prologue (ADR 073)
+- **Eject** — missiles-empty eject-and-dive on the debounced ammo verdict, with impulse rotation and telemetry-verified ballistic descent (ADR 056/069)
+- **Disengage / Idle / RespawnWait** — supporting tactics and selection-only states
+
+The J20 mission is being rewritten from a hardcoded maneuver script to this tactic-driven model (v1.8.3): geometry, evasion, climb, and eject decisions all belong to the tree, with the scripted roll sequence retired. A few open-loop pieces (afterburner cadence, the fixed mission window) remain and are candidates for later conversion. New tactics enter through a **shadow-first pipeline** (ADR 073): a candidate tactic first runs selection-only, logging what it *would* do against live data; only after shadow evidence holds up does it get actuation. Per-engagement survival stats (ADR 055/070) close the loop with A/B evidence from unattended soaks.
+
+---
+
 ## What It Does Today
 
-Press `m` and Wingman can run the full loop:
+Wingman flies MetalStorm unattended for hours at a time. A session is: launch, then walk away — the FSM drives lobby → matchmaking → battle → match end → lobby continuously, with the behavior tree making the in-battle decisions and per-session statistics written on exit.
 
-1. Lobby detection and PLAY/READY click flow.
+One full match cycle:
+
+1. Lobby detection, popup dismissal, and PLAY/READY click flow.
 2. Matchmaking confirmation in GAME_WAITING (CANCEL + fallback logic).
 3. GAME_STARTING handling and transition to GAME_BATTLE.
-4. In-battle tactic selection via an active behavior tree (ADR 024): minimap
-   ring-engage navigation toward contacts, missile evasion, disengage, eject.
+4. Closed-loop climb to operating altitude, then in-battle tactic selection via
+   the active behavior tree: ring-engage navigation, missile evasion, climb,
+   disengage, eject (see Phase 3 above).
 5. Incoming-missile response: flare bursts plus the MISSILE_EVADE_MODE
-   manoeuvre (ADR 070) — live sessions measure 90% vs 68% ten-second survival
-   with the evade on (n=122 engagements).
-6. Missiles-empty eject-and-dive with impulse rotation and ballistic descent,
-   verified against live altitude/speed telemetry (ADR 069).
-7. Respawn detection (dual-sensor, ADR 064) and immediate restart the moment
+   manoeuvre (ADR 070).
+6. Respawn detection (dual-sensor, ADR 064) and immediate restart the moment
    health returns.
-8. Match-end click-through and return to lobby.
+7. Match-end click-through and return to lobby — then the loop repeats.
 
 Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), moving into GAME_BATTLE_MANUAL behavior. Dying while in manual mode returns control to auto and restarts the mission when health comes back, so the aircraft is never left flying uncommanded.
 
@@ -49,29 +76,26 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 | Capability | Status |
 |------------|--------|
 | Formal FSM with lobby/waiting/starting/battle/manual/end transitions | ✅ |
-| Unattended loop trigger (`m`) and mission hotkeys (`u`, `y`) | ✅ |
-| Incoming missile detection and flare response | ✅ |
+| Fully unattended match loop — hours-long sessions with zero input | ✅ |
+| Active behavior-tree tactic selection: Engage geometry, Eject, Disengage, MissileEvade, Climb (ADR 024/070/073) | ✅ |
+| Tactic-driven J20 mission — scripted geometry retired, tree owns in-battle decisions (v1.8.3) | ✅ |
+| Shadow-first tactic pipeline: selection-only validation before actuation (ADR 073) | ✅ |
+| Per-engagement survival metric: 10 s survival split evade vs no-evade (ADR 070 V5) | ✅ |
+| Incoming missile detection (template matching + OCR fallback) and flare response | ✅ |
 | Health/ammo OCR-driven mission behavior | ✅ |
 | Dual-sensor respawn detection: overlay OCR with a health-signal fallback (ADR 064) | ✅ |
 | Health-gated immediate mission restart, including after a manual-mode death (ADR 059) | ✅ |
 | Missiles-empty eject as a first-class FSM state, with impulse-rotation telemetry-verified dive (ADR 056/069) | ✅ |
-| Active behavior-tree tactic selection: Engage geometry, Eject, Disengage, MissileEvade (ADR 024 3.1a/3.1b) | ✅ |
-| MISSILE_EVADE_MODE with tactical hold limit and eject preemption (ADR 070) | ✅ |
-| Per-engagement survival metric: 10 s survival split evade vs no-evade (ADR 070 V5) | ✅ |
-| Metric HUD telemetry (altitude/speed/flight-path angle) feeding eject and evade decisions (ADR 038/067) | ✅ |
+| Metric HUD telemetry (altitude/speed/flight-path angle) feeding eject, evade, and climb decisions (ADR 038/067) | ✅ |
 | Health OCR value-confirmation filter for degraded-read regimes (ADR 063) | ✅ |
 | Per-mission and per-session statistics tracker (ADR 055) | ✅ |
 | Lobby popup handling and click-through end-state handling | ✅ |
-| Game lobby stall guard (v1.6.19) | ✅ |
 | Per-concern tick-loop handlers and typed orchestration event registry (ADR 060) | ✅ |
 | Live HUD overlay snapshot (health/ammo/state, written off the tick loop) | ✅ |
 | HSV target tracking with proportional roll correction | ⚙️ off by default |
 | Offline crop calibration tooling | ✅ |
 | Performance tracking and preview/release chart workflows | ✅ |
-| Replay integration harness with assertion engine (ADR 037) | ✅ |
-| Runtime replay gate (ADR 044, PATH1) | ✅ |
-| Live-screen capture gate (ADR 045, PATH1) | ✅ |
-| Real screenshot OCR integration tests (PATH1/PATH2) | ✅ |
+| Layered validation: replay harness, runtime gates, real-OCR lanes (ADR 037/044/045) | ✅ |
 | Single gate-corpus screenshot set, refreshed unattended by `make p1` (ADR 071/072) | ✅ |
 | StrictDoc-managed requirements with source traceability gates (ADR 066) | ✅ |
 | No-stuck-keys guarantee: every injectable key released on any exit path (SAF-007) | ✅ |
@@ -91,19 +115,6 @@ Live artifacts (regenerated by `make tp` / `make tp-full`):
 The chart below is a historical snapshot covering v1.6.7 through v1.6.19, captured before the Linux migration; it is kept for the long-run trend, not as current data.
 
 ![Runtime performance trend v1.6.7–v1.6.19](docs/performance/run_time_performance_tracking.png)
-
----
-
-## Validation Lanes
-
-Wingman includes layered validation from fast checks to runtime-realistic gates:
-
-- `make test`: core pytest suite and HTML report.
-- `make rr-path1-gate`: ADR044 runtime replay gate (full `wingman.main` loop + replay assertions validator).
-- `make rr-live-path1-gate`: ADR045 live-screen gate (desktop presenter + real monitor capture + live validator).
-- `make ocr` (or `make ti`): ADR037 PATH1/PATH2 real-OCR integration tests.
-- `make tp`: fast preview bundle (`test` + ADR044 + ADR045 + performance previews).
-- `make tp-full`: full preview bundle (`tp` + ADR037 PATH1/PATH2 OCR lane).
 
 ---
 
@@ -136,31 +147,32 @@ On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not 
 
 On Windows, launch MetalStorm manually before running `make r`.
 
-### Core Validation Commands
+---
+
+## Validation
+
+Layered lanes from fast unit checks to runtime-realistic gates:
 
 ```bash
-make test
-make tp
-make tp-full
-make rr-path1-gate
-make rr-live-path1-gate
-make ocr
+make test               # core pytest suite and HTML report
+make tp                 # fast preview bundle: test + ADR044/ADR045 gates + performance previews
+make tp-full            # full preview bundle: tp + ADR037 PATH1/PATH2 real-OCR lane
+make rr-path1-gate      # ADR044 deterministic runtime replay gate (full wingman.main loop + assertions)
+make rr-live-path1-gate # ADR045 live-screen gate (desktop presenter + real monitor capture)
+make ocr                # ADR037 real-OCR integration tests (PATH1/PATH2)
 ```
 
-- `make test`: main automated test report workflow
-- `make tp`: fast preview (test + ADR044/ADR045 gates + performance preview artifacts)
-- `make tp-full`: full preview (adds ADR037 PATH1/PATH2 OCR lane)
-- `make rr-path1-gate`: deterministic runtime replay gate for PATH1
-- `make rr-live-path1-gate`: live-screen runtime gate for PATH1
-- `make ocr`: real-OCR integration tests for PATH1 and PATH2
+Run `make tp` before proposing a release; `make tp-full` for the complete pre-release sweep.
 
 ---
 
 ## Runtime Hotkeys
 
+Wingman is normally fully unattended — hotkeys exist for supervision, testing, and manual takeover.
+
 | Key | Action |
 |-----|--------|
-| `m` | Start unattended mode |
+| `m` | Activate unattended mode (also auto-enabled from config) |
 | `u` | Start J20 mission |
 | `y` | Start loiter mission |
 | `end` | Cancel active mission |
@@ -191,29 +203,51 @@ refreshes both the test fixtures and the calibration references.
 
 ---
 
-## Roadmap and Aspirations
-
-The near-term path is to complete robust replay-path fixture coverage and then move up the AI stack:
-
-- Phase 2 complete: stable automation + OCR perception + FSM + performance tooling
-- Phase 3 in progress: the behavior tree is **active** — Engage geometry (3.1a)
-  and Eject / Disengage / MissileEvade actuation (3.1b) are live, with the
-  first adaptive tactic (missile evasion) validated in 5+ hour unattended
-  soaks against per-engagement survival data
-- Future: reinforcement learning, deep vision policy learning, multi-agent coordination
-
-Roadmap doc:
-
-- `docs/PROJECT_AI_ROADMAP.md`
-
-Architecture decisions and workflow docs are tracked under:
-
-- `docs/adr/`
-- `docs/workflow/`
-
----
-
 ## Documentation Index
+
+Roadmap: `docs/PROJECT_AI_ROADMAP.md` · Architecture: `docs/architecture.md` · Contribution guide: `CONTRIBUTING.md`
+
+### Core ADRs — the architecture of Wingman's logic
+
+| Document | Description |
+|---|---|
+| `docs/adr/024-phase3-behavior-tree-architecture.md` | **The Phase 3 behavior tree**: tactic selector, snapshot model, actuation cutover |
+| `docs/adr/025-formalise-game-state-machine.md` | The formal FSM that drives the match loop |
+| `docs/adr/060-tick-loop-handlers-and-typed-event-registry.md` | Tick-loop handler objects and the orchestration event registry |
+| `docs/adr/021-ocr-pipeline-design-rationale.md` | Why the OCR perception pipeline is built the way it is |
+| `docs/adr/023-percentage-coordinate-crop-regions.md` | Percentage-coordinate crop regions — the perception addressing scheme |
+| `docs/adr/028-enemy-quadrant-detection-and-nose-orientation.md` | Minimap enemy bearing — the spatial input behind Engage geometry |
+
+### Tactics and flight logic
+
+| Document | Description |
+|---|---|
+| `docs/adr/070-missile-evade-tactic.md` | MISSILE_EVADE_MODE tactic (d1–d13, live V5 survival evidence) |
+| `docs/adr/073-climb-tactic-shadow-first.md` | Climb tactic and the shadow-first validation pipeline for new tactics |
+| `docs/adr/056-game-battle-eject-fsm-state.md` | Eject as a first-class FSM state |
+| `docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md` | Eject descent: impulse rotation + ballistic phase |
+| `docs/adr/059-health-gated-immediate-mission-restart.md` | One restart path: mission restarts when health returns |
+
+### Perception and detection
+
+| Document | Description |
+|---|---|
+| `docs/adr/046-incoming-template-matching-replacement.md` | Incoming-missile detection via template matching with OCR fallback |
+| `docs/adr/064-dual-sensor-respawn-detection.md` | Dual-sensor respawn detection (supersedes the rejected ADR 062) |
+| `docs/adr/063-health-ocr-value-confirmation-filter.md` | Health OCR value-confirmation filter for degraded-read regimes |
+| `docs/adr/067-metric-hud-units-pitch-normalization-recalibration.md` | Metric HUD telemetry units and pitch normalization |
+
+### Validation and requirements
+
+| Document | Description |
+|---|---|
+| `docs/adr/037-timed-screenshot-replay-integration-testing.md` | Replay integration harness with assertion engine |
+| `docs/adr/044-runtime-screenshot-driven-automation-lane.md` | Deterministic runtime replay gate (PATH1) |
+| `docs/adr/045-dual-lane-runtime-validation-replay-and-live-screen.md` | Dual-lane runtime validation: replay + live screen |
+| `docs/adr/071-single-gate-corpus-screenshot-set.md` | One screenshot corpus for all test lanes |
+| `docs/adr/066-strictdoc-requirements-adoption.md` | StrictDoc requirements with source traceability |
+
+### Platform and setup
 
 | Document | Description |
 |---|---|
@@ -224,17 +258,4 @@ Architecture decisions and workflow docs are tracked under:
 | `docs/job-aids/011-wingman-keybindings.md` | In-game keybinding configuration (Linux) |
 | `docs/adr/049-linux-migration-game-and-automation-layer.md` | Linux migration decisions and implementation summary |
 | `docs/adr/050-wayland-screen-capture.md` | PipeWire screen capture on GNOME Wayland |
-| `docs/adr/051-linux-pitch-control-joystick-binding.md` | Pitch control: why joystick mode is required under Wine |
 | `docs/adr/053-linux-one-command-launch.md` | Full Linux input stack: window detection, XTest, XRecord |
-| `docs/adr/056-game-battle-eject-fsm-state.md` | Eject as a first-class FSM state |
-| `docs/adr/058-eject-dive-confirmation-via-raw-descent-rate.md` | Telemetry-verified eject dive, and the limits found in flight |
-| `docs/adr/059-health-gated-immediate-mission-restart.md` | One restart path: mission restarts when health returns |
-| `docs/adr/060-tick-loop-handlers-and-typed-event-registry.md` | Tick-loop handler objects and the orchestration event registry |
-| `docs/adr/064-dual-sensor-respawn-detection.md` | Dual-sensor respawn detection (supersedes the rejected ADR 062) |
-| `docs/adr/066-strictdoc-requirements-adoption.md` | StrictDoc requirements with source traceability |
-| `docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md` | Eject descent: impulse rotation + ballistic phase |
-| `docs/adr/070-missile-evade-tactic.md` | MISSILE_EVADE_MODE behavior tactic (d1–d13, live V5 evidence) |
-| `docs/adr/071-single-gate-corpus-screenshot-set.md` | One screenshot corpus for all test lanes |
-| `docs/adr/072-calibration-screenshot-consolidation.md` | Calibration references consolidated onto the gate corpus |
-| `docs/architecture.md` | System architecture: modules, FSM, behavior tree, threading |
-| `CONTRIBUTING.md` | Contribution guide |

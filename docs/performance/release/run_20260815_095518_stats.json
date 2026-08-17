@@ -1,0 +1,114 @@
+{
+  "wingman_version": "1.8.2",
+  "run_id": "20260815_095518",
+  "session_start_ts": 1786802118.865,
+  "session_duration_s": 1379.9,
+  "missions_started": 1,
+  "missions_click_to": 1,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 3,
+  "total_flare_bursts": 20,
+  "total_flare_reloads": 2,
+  "total_manual_takeovers": 0,
+  "total_missile_evades": 4,
+  "missile_engagements": {
+    "window_s": 10.0,
+    "engagements": 5,
+    "evaded_total": 3,
+    "evaded_died": 0,
+    "evaded_survival": 1.0,
+    "not_evaded_total": 2,
+    "not_evaded_died": 2,
+    "not_evaded_survival": 0.0,
+    "detail": [
+      {
+        "ts": 1786802207.762,
+        "alerts": 5,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1786802264.756,
+        "alerts": 3,
+        "evaded": false,
+        "died_after_s": 8.9
+      },
+      {
+        "ts": 1786802293.302,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1786802356.291,
+        "alerts": 2,
+        "evaded": false,
+        "died_after_s": 7.4
+      },
+      {
+        "ts": 1786802380.425,
+        "alerts": 7,
+        "evaded": true,
+        "died_after_s": null
+      }
+    ]
+  },
+  "avg_mission_duration_s": 241.7,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1786802195.107,
+      "duration_s": 241.7,
+      "respawn_count": 3,
+      "flare_burst_count": 20,
+      "flare_reload_count": 2,
+      "missile_evade_count": 4,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 3,
+    "ocr_respawns": 5,
+    "matched": 3,
+    "matched_within_5s": 2,
+    "false_fires": 0,
+    "missed_ocr_respawns": 2,
+    "fire_deltas_s": [
+      3.31,
+      2.31,
+      5.86
+    ],
+    "max_confirmed_gap_s": 10.7,
+    "confirmed_gaps_over_threshold": 3,
+    "ocr_edge_latencies": [
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.13
+      },
+      {
+        "since_confirmed_s": 7.31,
+        "no_digits_for_s": 1.24
+      },
+      {
+        "since_confirmed_s": 4.53,
+        "no_digits_for_s": 3.06
+      },
+      {
+        "since_confirmed_s": 8.25,
+        "no_digits_for_s": 2.01
+      },
+      {
+        "since_confirmed_s": 4.84,
+        "no_digits_for_s": 3.19
+      }
+    ],
+    "edge_since_confirmed_mean_s": 5.94,
+    "edge_since_confirmed_max_s": 8.25
+  },
+  "stats_path": "docs/performance/current/run_20260815_095518_stats.json"
+}
