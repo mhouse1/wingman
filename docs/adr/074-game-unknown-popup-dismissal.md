@@ -106,6 +106,19 @@ other stall handling) in a follow-up change.
   unattended `make rd` session (popup recurrence) or against a
   deliberately provoked stranding.
 
+  *Partial live evidence, 2026-08-16:* (a) the popup batch was observed
+  executing in GAME_UNKNOWN during the 08:27 stall recovery (morning
+  session) — the new scan states run. (b) In the 19:06 soak (3 h 49 m), the
+  **event_refresh popup itself appeared and was dismissed live** at
+  20:30:24 — OCR read `ROGRESS,TRYAGAINOK`, matched on the `AGAIN` token,
+  OK-crop click fired, matchmaking proceeded; the popup that caused the
+  original 15-minute stranding cost 7 seconds. REVEAL_ALL was dismissed
+  twice the same session. Scoping: that dismissal fired in GAME_WAITING, a
+  state the scan covered before this ADR, so the crops, tokens, and click
+  path are proven live — the GAME_UNKNOWN-state dismissal (the stranding
+  scenario proper) remains the one unfired slice, which is why this ADR
+  stays Draft.
+
 ## References
 
 - ADR 065 — starting-health-probe reachability (the STALLED → UNKNOWN

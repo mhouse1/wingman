@@ -8,7 +8,11 @@
 config, and live-validated across the 2026-08-15/16 sessions — 34+ confirmed
 operating-altitude climbs (means 24–28 s, zero duration-cap timeouts), two
 emergency-band recoveries, and ~20 clean pre-emption yields. Requirements
-FR-007 / SAF-008 capture the behavior and safety properties.*
+FR-007 / SAF-008 capture the behavior and safety properties. Scale
+confirmation same day (19:06 soak, 3 h 49 m unattended, 39/39 missions,
+0 errors): 176 climbs — 115 `altitude_recovered`, 36 evade pre-emptions,
+24 clean stops, and one duration-cap release (0.6%) on a telemetry-blind
+climb, which is the SAF-008 backstop behaving as specified.*
 
 ## Context
 
