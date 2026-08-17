@@ -410,3 +410,81 @@ def test_takeover_handler_stops_running_climb(monkeypatch):
     assert _wait_done(ctrl), "takeover did not stop the climb hold"
     for key in CLIMB_KEYS:
         assert _releases(kb, key), f"'{key}' never released"
+
+
+# ---------------------------------------------------------------------------
+# ADR 076 d3: nose-down over-rotation ceiling
+# ---------------------------------------------------------------------------
+
+def test_nose_down_pulse_above_rate_ceiling(monkeypatch):
+    """Above max_climb_rate the pulse controller rotates BACK DOWN — the
+    spawn guard can pre-load pitch before the climb thread starts, and
+    declining to add nose-up is not enough to prevent the loop."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=2.5, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0, max_climb_rate=100.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=7000, max_s=2.5)
+    # Feed fresh advancing samples reporting a rate far above the ceiling.
+    for i in range(6):
+        time.sleep(0.25)
+        analyzer.set(3000.0 + i, t0 + 0.1 * (i + 1))
+        analyzer._snap.altitude.rate = 500.0
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+    assert _presses(kb, NOSE_DOWN_KEY), \
+        "no nose-down pulse despite rate far above max_climb_rate"
+    assert _releases(kb, NOSE_DOWN_KEY), "nose-down never released"
+
+
+def test_no_pulse_between_rate_bands(monkeypatch):
+    """Between min_climb_rate and max_climb_rate: no input in either
+    direction — the aircraft is flying the climb correctly."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    analyzer._snap.altitude.rate = 60.0
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.4, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0, max_climb_rate=100.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=7000, max_s=1.4)
+    time.sleep(0.3)
+    analyzer.set(3100.0, t0 + 0.1)
+    analyzer._snap.altitude.rate = 60.0
+    time.sleep(0.4)
+    up_after_rate = len(_presses(kb, NOSE_UP_KEY))
+    time.sleep(0.4)
+    assert len(_presses(kb, NOSE_UP_KEY)) == up_after_rate, \
+        "nose-up pulse fired despite in-band climb rate"
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "nose-down pulse fired despite rate below the ceiling"
+    assert _wait_done(ctrl)
+
+
+def test_unset_ceiling_disables_nose_down(monkeypatch):
+    """No max_climb_rate in config: pre-ADR 076 behavior — never nose-down."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.0, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0)   # no max_climb_rate key
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=7000, max_s=1.0)
+    time.sleep(0.3)
+    analyzer.set(3050.0, t0 + 0.1)
+    analyzer._snap.altitude.rate = 5000.0
+    time.sleep(0.5)
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "nose-down fired with the ceiling unset"
+    assert _wait_done(ctrl)

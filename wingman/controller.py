@@ -660,9 +660,27 @@ class Controller:
         self._climb_pulse_s = float(_cl_cfg.get("pitch_pulse_s", 1.5))
         self._climb_observe_s = float(_cl_cfg.get("pulse_observe_s", 2.5))
         self._climb_min_rate = float(_cl_cfg.get("min_climb_rate", 30.0))
+        # ADR 076 d3: over-rotation ceiling. The spawn guard can hand the
+        # climb an aircraft that is ALREADY pitching up, so the pulse
+        # controller must be able to rotate back down, not just decline to
+        # add more nose-up. None disables (unset in config).
+        self._climb_max_rate = _cl_cfg.get("max_climb_rate")
         self._climbing = threading.Event()
         self._climb_thread: "threading.Thread | None" = None
         self._climb_stop = threading.Event()
+        # ADR 076 d1/d2 — spawn-attitude guard: hold NOSE_UP from death
+        # detection through the respawn screen so the aircraft's first frames
+        # of life are already pitching up (spawn-into-terrain anomaly).
+        _sg_cfg = _cl_cfg.get("spawn_guard", {}) or {}
+        self._spawn_guard_enabled = bool(_sg_cfg.get("enabled", False))
+        self._sg_max_hold_s = float(_sg_cfg.get("max_hold_s", 90.0))
+        self._sg_release_overlap_s = float(_sg_cfg.get("release_overlap_s", 2.5))
+        self._spawn_guarding = threading.Event()
+        self._sg_stop = threading.Event()
+        self._sg_thread: "threading.Thread | None" = None
+        # Stamped by notify_spawn_alive(); read by the guard thread (float
+        # store is atomic under the GIL, same pattern as the cooldown stamps).
+        self._sg_alive_deadline: "float | None" = None
 
         # Tracks how many programmatic presses are in flight, per key.
         # keyboard.KeyboardEvent has no is_injected attribute, so the getattr guard
@@ -1028,11 +1046,13 @@ class Controller:
                 key_name,
             )
             return False
-        # A climb or evade hold is commanded flight even with no mission thread
-        # (the tree selects them with mission=False after a respawn cancels the
-        # mission) — SAF-001's takeover must fire for them too.
+        # A climb, evade, or spawn-guard hold is commanded flight even with no
+        # mission thread (the tree selects them with mission=False after a
+        # respawn cancels the mission) — SAF-001's takeover must fire for
+        # them too.
         if not (self.is_mission_running() or self._ejecting.is_set()
-                or self._climbing.is_set() or self._missile_evading.is_set()):
+                or self._climbing.is_set() or self._missile_evading.is_set()
+                or self._spawn_guarding.is_set()):
             return False
 
         logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", key_name)
@@ -1041,10 +1061,12 @@ class Controller:
         self._eject_stop.set()
         # SAF-001: cease ALL commanded flight — the FSM transition alone does
         # not stop the tactic hold threads (2026-08-17 session: the climb hold
-        # kept pulsing nose-up 45 s into GAME_BATTLE_MANUAL). Both events are
-        # re-cleared by the next climb_mode/missile_evade_mode start.
+        # kept pulsing nose-up 45 s into GAME_BATTLE_MANUAL). The events are
+        # re-cleared by the next climb_mode/missile_evade_mode/spawn-guard
+        # start.
         self._climb_stop.set()
         self._me_stop.set()
+        self._sg_stop.set()
         self.cancel_mission()
         if self._analyzer is not None:
             try:
@@ -2238,11 +2260,11 @@ class Controller:
         self._climb_thread = threading.Thread(target=_run, daemon=True)
         self._climb_thread.start()
 
-    def _climb_key(self, key: str, press: bool):
-        """Press/release one climb key, honoring simulate mode."""
+    def _climb_key(self, key: str, press: bool, action: str = "climb"):
+        """Press/release one climb-family key, honoring simulate mode."""
         if self._simulate_os_input:
             self._record_action_intent(
-                "key_press" if press else "key_release", key=key, action="climb")
+                "key_press" if press else "key_release", key=key, action=action)
             return
         if not keyboard_module:
             return
@@ -2250,7 +2272,116 @@ class Controller:
             (keyboard_module.press if press else keyboard_module.release)(key)
         except Exception:
             if press:
-                logger.exception("Controller: climb press failed for '%s'", key)
+                logger.exception("Controller: %s press failed for '%s'", action, key)
+
+    def start_spawn_guard(self):
+        """ADR 076 d1: hold NOSE_UP from death detection until the spawn
+        hands off — the aircraft's first frames of life are already pitching
+        up, closing the reaction gap no perception-gated tactic can close.
+
+        Called by the respawn flow when it latches a death. Non-blocking and
+        idempotent while the thread is alive (the ADR 070 d8 pattern). Inert
+        by construction while the respawn screen is up: flight keys do
+        nothing while the aircraft does not exist.
+        """
+        if not self._spawn_guard_enabled:
+            return
+        if self._spawn_guarding.is_set():
+            logger.debug("Controller: spawn guard already in progress")
+            return
+        self._spawn_guarding.set()
+        self._sg_stop.clear()
+        self._sg_alive_deadline = None
+        logger.info("\033[95m🛫 SPAWN GUARD — holding nose up until the "
+                    "respawn hands off (cap %.0fs)\033[0m", self._sg_max_hold_s)
+
+        def _run():
+            try:
+                if not self._simulate_os_input and not keyboard_module:
+                    logger.error("Controller: keyboard library not available for spawn guard")
+                    return
+                self._run_spawn_guard()
+            finally:
+                self._spawn_guarding.clear()
+
+        self._sg_thread = threading.Thread(target=_run, daemon=True)
+        self._sg_thread.start()
+
+    def is_spawn_guarding(self) -> bool:
+        return self._spawn_guarding.is_set()
+
+    def notify_spawn_alive(self):
+        """ADR 076 d2: health returned in battle — start the guard's
+        release-overlap window (covers the tree's re-selection latency so
+        pitch input never gaps between guard and Climb tactic)."""
+        if self._spawn_guarding.is_set() and self._sg_alive_deadline is None:
+            self._sg_alive_deadline = time.time() + self._sg_release_overlap_s
+            logger.info("Controller: spawn guard — alive, releasing in %.1fs",
+                        self._sg_release_overlap_s)
+
+    def _run_spawn_guard(self):
+        """Thread body for the spawn-attitude guard (ADR 076 d1/d2).
+
+        Holds NOSE_UP under the programmatic bracket ('i' is a watched
+        manual-takeover key). Releases on the first of: the alive handoff
+        (notify_spawn_alive + overlap), an eject or evade starting, the FSM
+        leaving GAME_BATTLE, manual takeover (the SAF-001 handler sets
+        _sg_stop), program exit, or the unconditional max-hold backstop.
+
+        The physical key-up is ownership-aware: if a climb hold is active at
+        release time the OS-level release is skipped — the climb thread owns
+        the key state and its own finally block releases it; releasing here
+        would yank a pulse in progress (the d2 rule).
+
+        @relation(SAF-001, scope=function)
+        @relation(SAF-009, scope=function)
+        """
+        entry_ts = time.time()
+        exit_reason = "stopped"
+        bracketed = NOSE_UP_KEY in _WATCHED_MANEUVER_KEYS
+        if bracketed:
+            self._inc_programmatic_key(NOSE_UP_KEY)
+        try:
+            self._climb_key(NOSE_UP_KEY, press=True, action="spawn_guard")
+            while not self._sg_stop.wait(timeout=0.25):
+                if self._exit_event is not None and self._exit_event.is_set():
+                    exit_reason = "exit"
+                    break
+                # ADR 076 d4: eject and evade own the airframe outright.
+                if self._ejecting.is_set() or self._missile_evading.is_set():
+                    exit_reason = "tactic_preempt"
+                    break
+                if self._analyzer is not None:
+                    _st = getattr(self._analyzer, "game_state", None)
+                    if isinstance(_st, GameState) and _st != GameState.GAME_BATTLE:
+                        exit_reason = "state_exit"
+                        break
+                now = time.time()
+                deadline = self._sg_alive_deadline
+                if deadline is not None and now >= deadline:
+                    exit_reason = "alive_handoff"
+                    break
+                if now - entry_ts >= self._sg_max_hold_s:
+                    # SAF-009: the cap firing means no alive/state signal ever
+                    # arrived — a perception fault, not a normal exit.
+                    logger.warning(
+                        "Controller: spawn guard max hold (%.0fs) reached — "
+                        "releasing without handoff", self._sg_max_hold_s)
+                    exit_reason = "max_hold"
+                    break
+        finally:
+            _release_started = time.time()
+            if not self._climbing.is_set():
+                self._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
+            else:
+                logger.info("Controller: spawn guard — climb hold owns the "
+                            "pitch key, skipping OS-level release")
+            _release_span = time.time() - _release_started
+            if bracketed:
+                self._arm_release_grace(NOSE_UP_KEY, span_s=_release_span)
+                self._dec_programmatic_key(NOSE_UP_KEY)
+        logger.info("Controller: spawn guard complete (%s, %.1fs)",
+                    exit_reason, time.time() - entry_ts)
 
     def _run_climb_hold(self, exit_alt: float, cap_s: float,
                         fuel_floor_pct: float = 0.0):
@@ -2276,16 +2407,17 @@ class Controller:
         exit_reason = "stopped"
         last_counted_ts = 0.0
         confirm_streak = 0
-        nose_held = False
+        pitch_held: "str | None" = None
         pulse_until = 0.0
         observe_until = 0.0
         last_rate = None
         ab_held = False
 
-        # NOSE_UP is a watched maneuver key — same programmatic bracket as the
-        # evade hold (d4), held across all pulses so XTest auto-repeats are
-        # never read as a manual takeover.
-        guarded_keys = tuple(k for k in (NOSE_UP_KEY, AFTERBURNER_KEY)
+        # NOSE_UP and NOSE_DOWN (ADR 076 d3 ceiling) are watched maneuver
+        # keys — same programmatic bracket as the evade hold (d4), held
+        # across all pulses so XTest auto-repeats are never read as a manual
+        # takeover.
+        guarded_keys = tuple(k for k in (NOSE_UP_KEY, NOSE_DOWN_KEY, AFTERBURNER_KEY)
                              if k in _WATCHED_MANEUVER_KEYS)
         for _key in guarded_keys:
             self._inc_programmatic_key(_key)
@@ -2351,16 +2483,29 @@ class Controller:
                     break
 
                 # Pitch pulse state machine (never blocks the poll cadence).
-                if nose_held and now >= pulse_until:
-                    self._climb_key(NOSE_UP_KEY, press=False)
-                    nose_held = False
+                # ADR 076 d3: two-sided authority. Below min_climb_rate the
+                # aircraft is under-rotated → nose-up pulse (the 3.2b rule);
+                # above max_climb_rate it is over-rotated (e.g. the spawn
+                # guard pre-loaded pitch before this thread started) →
+                # nose-down pulse to trade surplus pitch back for forward
+                # heading instead of the 2026-08-15 loop. Between the bands:
+                # no input. Unknown rate keeps the legacy nose-up behavior.
+                if pitch_held is not None and now >= pulse_until:
+                    self._climb_key(pitch_held, press=False)
+                    pitch_held = None
                     observe_until = now + self._climb_observe_s
-                elif (not nose_held and now >= observe_until
-                        and (last_rate is None or last_rate < self._climb_min_rate)):
-                    self._climb_key(NOSE_UP_KEY, press=True)
-                    nose_held = True
-                    pulse_until = now + self._climb_pulse_s
-                    logger.debug("Controller: climb pitch pulse (rate=%s)", last_rate)
+                elif pitch_held is None and now >= observe_until:
+                    if last_rate is None or last_rate < self._climb_min_rate:
+                        pitch_held = NOSE_UP_KEY
+                    elif (self._climb_max_rate is not None
+                            and last_rate > float(self._climb_max_rate)):
+                        pitch_held = NOSE_DOWN_KEY
+                    if pitch_held is not None:
+                        self._climb_key(pitch_held, press=True)
+                        pulse_until = now + self._climb_pulse_s
+                        logger.debug("Controller: climb pitch pulse (%s, rate=%s)",
+                                     "up" if pitch_held == NOSE_UP_KEY else "down",
+                                     last_rate)
 
                 if self._analyzer is None:
                     continue
@@ -2388,6 +2533,7 @@ class Controller:
         finally:
             _release_started = time.time()
             self._climb_key(NOSE_UP_KEY, press=False)
+            self._climb_key(NOSE_DOWN_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
             _release_span = time.time() - _release_started
             for _key in guarded_keys:
@@ -3131,6 +3277,7 @@ class Controller:
             eject_thread.join(timeout=1.5)  # let its finally release keys cleanly
         self._me_stop.set()  # ADR 070: end any evade hold via its own finally
         self._climb_stop.set()  # ADR 073 3.2b: end any climb hold via its own finally
+        self._sg_stop.set()  # ADR 076: end any spawn guard via its own finally
         me_thread = self._me_thread
         if me_thread is not None and me_thread.is_alive():
             me_thread.join(timeout=1.5)

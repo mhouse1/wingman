@@ -64,6 +64,13 @@ class FakeController:
     def stop_eject_sequence(self):
         pass
 
+    # ADR 076 spawn-attitude guard hooks (called by the respawn flow).
+    def start_spawn_guard(self):
+        pass
+
+    def notify_spawn_alive(self):
+        pass
+
     def deploy_flares(self, hold_seconds=0.05, block=True, ignore_cancel=True):
         self._intents.append(
             {

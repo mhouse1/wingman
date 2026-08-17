@@ -1,8 +1,8 @@
 # ADR 075 — Afterburner Fuel Perception and the Fully Adaptive J20 Mission
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-17 | 1.8.4           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-17 | 1.8.4           |
 
 ## Context
 
@@ -162,10 +162,27 @@ flowchart TD
 - `make test` green (full suite); ADR 044 runtime replay gate unaffected
   (replay capture doubles carry no fuel reading — freeze policy keeps
   legacy behavior).
-- Live validation pending: first unattended session should confirm (a) fuel
-  OCR plausibility-reject rate, (b) burner release/re-arm cycling in the
-  session log, (c) sustain climb selections after respawns, (d) survival
-  split unchanged or better.
+- Live validation (2026-08-17 sessions, cumulative ~1 h 15 min of battle;
+  the 04:49–05:33 session was 43 min clean unattended running, 6 missions
+  all click-to-finish):
+  - (a) Fuel OCR plausibility gate: 766 accepted / 29 range-rejected
+    (3.6%) in the 04:49 session alone; rejects were genuine digit bleed
+    (readings of 906, 197) and never entered the cache.
+  - (b) Burner discipline: 21 floor releases and 15 rearm-margin re-presses
+    in one session; start-without-burner observed at 4% with re-engage at
+    57%. The evade empty-tank release (d4) has zero live occurrences — the
+    d3 reserve makes reaching 0% mid-evade rare by design; the path remains
+    unit-tested (`test_missile_evade.py`).
+  - (c) Sustain climb selections after respawns: ~98 sustain-band climbs
+    across 60+ respawns on 2026-08-17, re-selecting after every respawn
+    with no mission-side code.
+  - (d) Survival split (ADR 055 instrument, N=23 engagements): 92% with
+    evade (11/12) vs 82% without (9/11) — both arms at or above the
+    ADR 070 historical figures (82% / 50%).
+  - Performance: period comparison at 7 sessions / 2036 cycles (baseline
+    bar was 5 / 1000); every crop 39–48% faster than the all-release
+    baseline, within ~10% of the v1.8.3 version baseline, no regression
+    flags.
 
 ## References
 

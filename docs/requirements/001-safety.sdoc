@@ -192,3 +192,26 @@ confirmation is logged at WARNING as a fault indicator. Enforced by the
 climb thread's finally-block release, the stop event set in cleanup(), and
 the mission prologue's cancellation path.
 <<<
+
+[REQUIREMENT]
+UID: SAF-009
+TITLE: Bounded respawn spawn-attitude hold
+STATEMENT: >>>
+A spawn-attitude guard hold shall release its held flight key
+unconditionally no later than behavior_tree.climb.spawn_guard.max_hold_s
+after entry, and shall release it on manual takeover, on eject or
+missile-evade start, when the FSM leaves GAME_BATTLE, on program exit, and
+on controller cleanup. When a climb hold is active at release time, the
+guard shall skip the OS-level key release — the climb hold owns the key
+state and its own release path applies.
+<<<
+RATIONALE: >>>
+ADR 076. The guard holds NOSE_UP from death detection through the respawn
+screen so the new life's first frames are already pitching up; while the
+respawn screen is up the hold is inert, so the entire risk window is the
+first seconds after spawn. The cap mirrors SAF-006/SAF-008: absence of the
+alive handoff signal is a perception fault and is logged at WARNING. The
+ownership rule prevents the guard's release from yanking a climb pitch
+pulse in progress (two threads must never independently release the same
+key).
+<<<

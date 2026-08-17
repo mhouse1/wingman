@@ -464,6 +464,8 @@ class _RespawnCtrlStub:
         self.restarts = 0
         self.eject_stops = 0
         self.cancels = 0
+        self.spawn_guard_starts = 0
+        self.spawn_alive_notifies = 0
 
     def is_mission_running(self):
         return self._running
@@ -485,6 +487,12 @@ class _RespawnCtrlStub:
 
     def set_auto_respawn_restart(self, v):
         self._auto = v
+
+    def start_spawn_guard(self):
+        self.spawn_guard_starts += 1
+
+    def notify_spawn_alive(self):
+        self.spawn_alive_notifies += 1
 
 
 def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None):

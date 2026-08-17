@@ -498,3 +498,46 @@ class TestMissileEngagements:
         with caplog.at_level("INFO"):
             t.print_summary()
         assert "Missile engagements" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ADR 076 — spawn-crash instrument
+# ---------------------------------------------------------------------------
+
+class TestSpawnCrashes:
+    """Deaths within the window after a post-respawn restart — the
+    before/after measure for the ADR 076 spawn-attitude guard. Stamped off
+    the existing restart_last_mission event so no new event names enter the
+    replay/capture streams."""
+
+    def test_death_soon_after_restart_counts(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 106.0)
+        sc = t.finalize()["spawn_crashes"]
+        assert sc["count"] == 1
+        assert sc["died_after_s"] == [6.0]
+
+    def test_death_outside_window_does_not_count(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 140.0)
+        assert t.finalize()["spawn_crashes"]["count"] == 0
+
+    def test_one_candidate_per_life(self, tmp_path):
+        """The restart stamp is consumed by the first death — a later death
+        without a new restart must not count against the old stamp."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 140.0)   # consumed, out of window
+        t.on_event("respawn_detected", 141.0)   # no stamp — never counts
+        assert t.finalize()["spawn_crashes"]["count"] == 0
+
+    def test_death_with_no_restart_is_not_a_spawn_crash(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("respawn_detected", 100.0)
+        assert t.finalize()["spawn_crashes"]["count"] == 0

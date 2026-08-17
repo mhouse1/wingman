@@ -28,6 +28,12 @@ _EVADE_ATTRIBUTION_S = 3.0
 # and unrelated deaths get attributed to the engagement.
 _ENGAGEMENT_WINDOW_S = 10.0
 
+# ADR 076: a death this soon after a post-respawn mission restart is a
+# spawn-crash candidate — the anomaly the spawn-attitude guard exists to fix.
+# Stamped off the existing restart_last_mission event (the post-respawn
+# restart path), so no new event names enter the replay/capture streams.
+_SPAWN_CRASH_WINDOW_S = 10.0
+
 
 def _fmt_duration(seconds: float) -> str:
     s = int(seconds)
@@ -87,6 +93,12 @@ class MissionStatsTracker:
         # _engagement_window_s of the alert, and had an evade fired?
         self._engagements: list[dict] = []
 
+        # ADR 076 spawn-crash instrument: deaths within _SPAWN_CRASH_WINDOW_S
+        # of a post-respawn restart. The before/after measure for the
+        # spawn-attitude guard.
+        self._last_restart_ts: float | None = None
+        self._spawn_crashes: list[float] = []   # seconds from restart to death
+
         # Pending outcome hint set by named events before the FSM transition fires.
         self._pending_outcome: str | None = None
 
@@ -120,6 +132,16 @@ class MissionStatsTracker:
             if self._in_mission:
                 self._current["respawn_count"] += 1
             self._attribute_death(ts)
+            # ADR 076: death shortly after a restart = spawn crash. One
+            # candidate per life — the stamp is consumed either way.
+            if self._last_restart_ts is not None:
+                since_restart = ts - self._last_restart_ts
+                if since_restart <= _SPAWN_CRASH_WINDOW_S:
+                    self._spawn_crashes.append(round(since_restart, 1))
+                self._last_restart_ts = None
+
+        elif event_name == "restart_last_mission":
+            self._last_restart_ts = ts
 
         elif event_name == "flare_burst_deployed":
             self._total_flare_bursts += 1
@@ -255,6 +277,11 @@ class MissionStatsTracker:
             "total_flare_reloads": self._total_flare_reloads,
             "total_manual_takeovers": self._total_manual_takeovers,
             "total_missile_evades": self._total_missile_evades,
+            "spawn_crashes": {
+                "window_s": _SPAWN_CRASH_WINDOW_S,
+                "count": len(self._spawn_crashes),
+                "died_after_s": self._spawn_crashes,
+            },
             "missile_engagements": self._engagement_summary(),
             "avg_mission_duration_s": round(avg_duration, 1) if avg_duration is not None else None,
             "missions": self._missions,
@@ -307,6 +334,13 @@ class MissionStatsTracker:
             f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
         ]
+
+        sc = s.get("spawn_crashes") or {}
+        if sc:
+            lines.append(
+                f"Spawn crashes     : {sc['count']}  "
+                f"(death within {sc['window_s']:.0f}s of restart)"
+            )
 
         eng = s.get("missile_engagements") or {}
         if eng.get("engagements"):

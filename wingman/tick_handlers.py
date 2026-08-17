@@ -286,6 +286,12 @@ class RespawnHandler:
             )
             return
 
+        # ADR 076 d2: the aircraft is alive in battle — start the spawn
+        # guard's release-overlap window regardless of which restart branch
+        # follows (restart, missiles-empty skip, restart-disabled: the guard
+        # must hand off in all of them).
+        ctrl.notify_spawn_alive()
+
         if not ctrl.is_auto_respawn_restart_enabled():
             logger.debug("HEALTH ALIVE consumed — auto-respawn restart disabled")
             return
@@ -369,6 +375,11 @@ class RespawnHandler:
                         self._live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
                     analyzer.trigger_event("respawn_reset")
                 ctrl.set_auto_respawn_restart(True)  # always restart after respawn
+                # ADR 076 d1: death is latched — hold nose-up through the
+                # respawn screen so the new life's first frames are already
+                # pitching up (spawn-into-terrain anomaly). Inert while the
+                # screen is up; the alive handoff below releases it.
+                ctrl.start_spawn_guard()
                 # Wait for the cancelled mission thread to release its lock so the
                 # health-alive restart can't be skipped by a teardown race
                 # (is_mission_running would read True).

@@ -309,6 +309,13 @@ class FakeController:
         self._intents.append({"action_type": "restart_last_mission"})
         return True
 
+    # --- ADR 076 spawn-attitude guard ---
+    def start_spawn_guard(self) -> None:
+        self._intents.append({"action_type": "start_spawn_guard"})
+
+    def notify_spawn_alive(self) -> None:
+        self._intents.append({"action_type": "notify_spawn_alive"})
+
     # --- Behavior-tree tactic predicates (ADR 024 3.1b / ADR 070) ---
     # The active-mode tree wires actuators at construction and calls the
     # is_running predicates every tick (the MissileEvade leaf's sticky
@@ -333,7 +340,7 @@ class FakeController:
     def is_climbing(self) -> bool:
         return False
 
-    def climb_mode(self, target_alt=None, max_s=None) -> None:
+    def climb_mode(self, target_alt=None, max_s=None, fuel_floor_pct=0.0) -> None:
         self._intents.append({"action_type": "climb_mode"})
 
     # Engage-geometry actuation (3.1a) — called when the Engage leaf selects

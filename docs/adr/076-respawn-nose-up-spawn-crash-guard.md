@@ -1,8 +1,8 @@
 # ADR 076 — Respawn Nose-Up Guard Against Spawn-Into-Terrain Crashes
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-17 | 1.8.4           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-17 | 1.8.4           |
 
 ## Context
 
@@ -171,11 +171,25 @@ flowchart TD
   (`test_climb_mode.py`, `test_behavior_tree.py`).
 - `make test` green; ADR 044 replay gate unaffected (the guard actuates
   keys, which replay capture doubles already ignore).
-- Live validation: (a) respawn screen confirmed inert to the held key,
-  (b) spawn-crash count (death within ~10 s of alive) drops to zero across
-  a multi-mission session, (c) no looping — climb rate stays inside the
-  floor/ceiling band after spawns, (d) no false manual-takeover detections
-  from the guard's hold.
+- Live validation (2026-08-17 05:52–07:06 session, 1 h 14 min unattended,
+  12 missions all click-to finish, 49 respawns):
+  - Guard lifecycle: 49 starts / 49 completes — 47 `alive_handoff`
+    releases, 2 `state_exit` (match end during the respawn hold), zero
+    max-hold backstop firings.
+  - (a) Respawn screen confirmed inert to the held key: 49 respawns with
+    NOSE_UP held throughout, every one proceeded respawn → alive → restart
+    with no menu or state anomalies.
+  - (b) **Spawn crashes: 0 / 49** (death within 10 s of restart — the new
+    MissionStatsTracker instrument).
+  - (c) The d3 ceiling actively engaged: 24 nose-down pulses traded surplus
+    pitch back for forward heading; no looping observed.
+  - (d) No false manual-takeover detections from the hold; the 2 genuine
+    takeovers in the session behaved per SAF-001.
+  - The d2 ownership rule carried nearly every handoff: 48 of 49 releases
+    found a climb hold owning the pitch key and correctly skipped the
+    OS-level key-up — the overlap window works exactly as designed.
+  - Survival split (ADR 055): 90% with evade (9/10) vs 60% without (3/5),
+    consistent with the ADR 070/075 record.
 
 ## References
 
