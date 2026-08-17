@@ -1900,7 +1900,32 @@ class GameStateAnalyzer:
         if self._decline_before(anchor):
             required /= 2.0
         if time.time() - anchor >= required:
+            # ADR 079: a live HUD disproves the dead premise. Health OCR
+            # drops out for 7-25s mid-flight (four false fires 2026-08-17)
+            # while telemetry keeps reading — a dead aircraft renders no
+            # HUD, so fresh telemetry at mark time means OCR dropout, not
+            # death. Real deaths mark mid-respawn-screen where telemetry
+            # has been stale for seconds (mark time separates the cases;
+            # at fire time the new life's HUD is fresh for real respawns
+            # too — the ADR 078 measurement).
+            if self._telemetry_hud_live():
+                logger.debug(
+                    "Health respawn detector: weak mark suppressed — "
+                    "telemetry live during the confirmed-read gap (ADR 079)")
+                return
             self._shadow_mark_death("weak")
+
+    def _telemetry_hud_live(self) -> bool:
+        """True when a fresh telemetry sample exists — the HUD is rendering,
+        so the aircraft exists (ADR 079).
+
+        @relation(SAF-003, scope=function)
+        """
+        try:
+            snap = self.get_telemetry()
+        except Exception:
+            return False
+        return snap is not None and snap.altitude_fresh()
 
     def _shadow_mark_death(self, tier: str):
         """Record a death mark for the health detector. Strong upgrades weak; weak never downgrades."""

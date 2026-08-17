@@ -675,6 +675,10 @@ class Controller:
         self._spawn_guard_enabled = bool(_sg_cfg.get("enabled", False))
         self._sg_max_hold_s = float(_sg_cfg.get("max_hold_s", 90.0))
         self._sg_release_overlap_s = float(_sg_cfg.get("release_overlap_s", 2.5))
+        # ADR 078: pulsed application — a continuous hold looped the live
+        # aircraft at spawn (2026-08-17 14:22, 180-and-out-of-map).
+        self._sg_pulse_s = float(_sg_cfg.get("pulse_s", 1.5))
+        self._sg_observe_s = float(_sg_cfg.get("observe_s", 1.0))
         self._spawn_guarding = threading.Event()
         self._sg_stop = threading.Event()
         self._sg_thread: "threading.Thread | None" = None
@@ -2320,18 +2324,29 @@ class Controller:
                         self._sg_release_overlap_s)
 
     def _run_spawn_guard(self):
-        """Thread body for the spawn-attitude guard (ADR 076 d1/d2).
+        """Thread body for the spawn-attitude guard (ADR 076 d1/d2, revised
+        ADR 078: pulsed application + telemetry handoff).
 
-        Holds NOSE_UP under the programmatic bracket ('i' is a watched
-        manual-takeover key). Releases on the first of: the alive handoff
-        (notify_spawn_alive + overlap), an eject or evade starting, the FSM
-        leaving GAME_BATTLE, manual takeover (the SAF-001 handler sets
-        _sg_stop), program exit, or the unconditional max-hold backstop.
+        Applies NOSE_UP in ``pulse_s``/``observe_s`` pulses under the
+        programmatic bracket ('i' is a watched manual-takeover key) — a
+        continuous hold looped the live aircraft at spawn (2026-08-17 14:22:
+        alive detection lags the spawn instant by seconds, and held nose-up
+        at spawn speed rolled a 180 and flew out of the map). Pulses bound
+        the rotation; on the inert respawn screen the duty cycle costs
+        nothing.
+
+        Releases on the first of: a FRESH telemetry sample (advancing
+        stable-value timestamp = the HUD is rendering = the aircraft exists
+        — beats health-confirm by ~1.5-2 s, ADR 078 d2), the alive handoff
+        (notify_spawn_alive + overlap, the fallback when telemetry never
+        freshens), an eject or evade starting, the FSM leaving GAME_BATTLE,
+        manual takeover (the SAF-001 handler sets _sg_stop), program exit,
+        or the unconditional max-hold backstop.
 
         The physical key-up is ownership-aware: if a climb hold is active at
         release time the OS-level release is skipped — the climb thread owns
         the key state and its own finally block releases it; releasing here
-        would yank a pulse in progress (the d2 rule).
+        would yank a pulse in progress (the ADR 076 d2 rule).
 
         @relation(SAF-001, scope=function)
         @relation(SAF-009, scope=function)
@@ -2339,11 +2354,29 @@ class Controller:
         entry_ts = time.time()
         exit_reason = "stopped"
         bracketed = NOSE_UP_KEY in _WATCHED_MANEUVER_KEYS
+        nose_held = False
+        pulse_until = 0.0
+        observe_until = 0.0
+        # ADR 078 d2 baseline: any telemetry timestamp NEWER than this means
+        # the HUD came back — the aircraft spawned.
+        baseline_ts = self._telemetry_stable_ts()
         if bracketed:
             self._inc_programmatic_key(NOSE_UP_KEY)
         try:
-            self._climb_key(NOSE_UP_KEY, press=True, action="spawn_guard")
-            while not self._sg_stop.wait(timeout=0.25):
+            while True:
+                now = time.time()
+                # Pulse state machine first, so the very first iteration
+                # presses immediately (observe_until starts at 0).
+                if nose_held and now >= pulse_until:
+                    self._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
+                    nose_held = False
+                    observe_until = now + self._sg_observe_s
+                elif not nose_held and now >= observe_until:
+                    self._climb_key(NOSE_UP_KEY, press=True, action="spawn_guard")
+                    nose_held = True
+                    pulse_until = now + self._sg_pulse_s
+                if self._sg_stop.wait(timeout=0.25):
+                    break
                 if self._exit_event is not None and self._exit_event.is_set():
                     exit_reason = "exit"
                     break
@@ -2356,6 +2389,13 @@ class Controller:
                     if isinstance(_st, GameState) and _st != GameState.GAME_BATTLE:
                         exit_reason = "state_exit"
                         break
+                # ADR 078 d2: fresh telemetry = the aircraft exists. Release
+                # now; the Climb tactic takes pitch with its rate ceiling.
+                fresh_ts = self._telemetry_stable_ts()
+                if (fresh_ts is not None
+                        and (baseline_ts is None or fresh_ts > baseline_ts)):
+                    exit_reason = "telemetry_handoff"
+                    break
                 now = time.time()
                 deadline = self._sg_alive_deadline
                 if deadline is not None and now >= deadline:
@@ -2382,6 +2422,25 @@ class Controller:
                 self._dec_programmatic_key(NOSE_UP_KEY)
         logger.info("Controller: spawn guard complete (%s, %.1fs)",
                     exit_reason, time.time() - entry_ts)
+
+    def _telemetry_stable_ts(self) -> "float | None":
+        """Timestamp of the analyzer's current telemetry stable value, or
+        None when unavailable (no analyzer, no snapshot, stale double)."""
+        if self._analyzer is None:
+            return None
+        get_telemetry = getattr(self._analyzer, "get_telemetry", None)
+        if get_telemetry is None:
+            return None
+        try:
+            snap = get_telemetry()
+        except Exception:
+            return None
+        if snap is None or not snap.altitude_fresh():
+            return None
+        alt_signal = snap.altitude
+        if alt_signal is None or alt_signal.stable_value is None:
+            return None
+        return alt_signal.ts
 
     def _run_climb_hold(self, exit_alt: float, cap_s: float,
                         fuel_floor_pct: float = 0.0):
@@ -3166,8 +3225,14 @@ class Controller:
                             return
 
                     if not _in_starting():
-                        # If cancel fired while FSM is still GAME_STARTING, push it to stalled.
+                        # If cancel fired while FSM is still GAME_STARTING, push it to
+                        # stalled — but not on program exit: shutdown cancels the
+                        # mission too, and firing starting_timeout then only stamps a
+                        # spurious STALLED warning into the log tail (observed
+                        # 2026-08-17 12:52, Backspace during matchmaking).
                         if (self._mission_cancel.is_set()
+                                and not (self._exit_event is not None
+                                         and self._exit_event.is_set())
                                 and self._analyzer is not None
                                 and self._analyzer.game_state == GameState.GAME_STARTING):
                             self._analyzer.trigger_event("starting_timeout")

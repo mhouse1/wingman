@@ -1,8 +1,8 @@
 # ADR 077 — Match-Entry Tail: Longer Starting Wait, Immediate Stall Reclassification
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-17 | 1.8.4           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-17 | 1.8.4           |
 
 ## Context
 
@@ -113,10 +113,14 @@ flowchart TD
 ## Verification
 
 - `make test` green (config parse only; no behavior code changed).
-- Next unattended session: (a) zero `GAME_STARTING_STALLED` warnings for
-  entries under 150 s, (b) entry-duration distribution measured from the
-  log confirms the tail is covered, (c) the stuck-lobby case (if it
-  occurs) still recovers via the ADR 025 pipeline.
+- Live validation (three sessions, 2026-08-17 13:05 / 15:02 / 15:33,
+  ~3 h combined, 30 match entries): **zero stalls**. Entries measured up
+  to 96 s, 107 s, and 119 s — five entries that would have stalled under
+  the old 90 s timeout took the fast path. The stuck-lobby case did not
+  occur; its recovery pipeline is unchanged.
+- Adjacent fix in the same change: program exit during GAME_STARTING no
+  longer fires `starting_timeout` (the 12:52 shutdown artifact), with a
+  regression test beside the cancel-fires-timeout test.
 
 ## References
 

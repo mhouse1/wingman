@@ -216,6 +216,28 @@ def test_cancel_during_game_starting_fires_starting_timeout(monkeypatch):
     )
 
 
+def test_exit_during_game_starting_does_not_fire_timeout(monkeypatch):
+    """Program exit while FSM is GAME_STARTING must NOT fire starting_timeout.
+
+    Shutdown cancels the mission too, and the cancel→stalled push then only
+    stamps a spurious STALLED warning into the log tail (ADR 077 review,
+    2026-08-17 12:52: Backspace during matchmaking)."""
+    analyzer = _StartingAnalyzerStub()
+    ctrl = _make_starting_ctrl(monkeypatch, analyzer)
+
+    ctrl.start_game_starting_loop()
+    time.sleep(0.15)
+
+    ctrl._exit_event.set()
+    ctrl.cancel_mission()
+
+    time.sleep(0.3)  # loop detects the cancel within one 0.1s tick
+
+    assert "starting_timeout" not in analyzer.trigger_calls, (
+        "starting_timeout must not fire when the cancel comes from program exit"
+    )
+
+
 def test_fsm_transition_away_from_starting_does_not_fire_timeout(monkeypatch):
     """Natural FSM exit from GAME_STARTING (no cancel) must NOT fire starting_timeout.
 

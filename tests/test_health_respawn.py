@@ -288,6 +288,55 @@ class TestShadowDetector:
         _feed(analyzer, 240, 240, 238)
         assert analyzer._shadow_fires == []
 
+    # -- ADR 079: telemetry liveness gate on the weak tier ------------------
+
+    def test_weak_mark_suppressed_while_telemetry_live(self, fast_window_analyzer, monkeypatch):
+        """Fresh telemetry at mark time = the HUD is rendering = the aircraft
+        exists — the confirmed-read gap is OCR dropout, not death (four false
+        fires 2026-08-17)."""
+        a = fast_window_analyzer
+
+        class _LiveSnap:
+            def altitude_fresh(self):
+                return True
+
+        monkeypatch.setattr(a, "get_telemetry", lambda: _LiveSnap())
+        _feed(a, 240, 240, None)
+        time.sleep(0.06)
+        _feed(a, None)
+        assert a._shadow_mark_tier is None, \
+            "weak mark formed despite live telemetry"
+        _feed(a, 250)
+        assert a._shadow_fires == [], "suppressed mark still fired"
+
+    def test_weak_mark_forms_when_telemetry_stale(self, fast_window_analyzer, monkeypatch):
+        """A real death silences telemetry — the weak tier fires as before."""
+        a = fast_window_analyzer
+
+        class _StaleSnap:
+            def altitude_fresh(self):
+                return False
+
+        monkeypatch.setattr(a, "get_telemetry", lambda: _StaleSnap())
+        _feed(a, 240, 240, None)
+        time.sleep(0.06)
+        _feed(a, None)
+        assert a._shadow_mark_tier == "weak"
+        _feed(a, 250)
+        assert len(a._shadow_fires) == 1
+
+    def test_strong_tier_unaffected_by_live_telemetry(self, analyzer, monkeypatch):
+        """Strong evidence (confirmed sub-1 then digit loss) is intrinsic —
+        the ADR 079 gate applies to the weak tier only."""
+
+        class _LiveSnap:
+            def altitude_fresh(self):
+                return True
+
+        monkeypatch.setattr(analyzer, "get_telemetry", lambda: _LiveSnap())
+        _feed(analyzer, 240, 240, 0, 0, 0)
+        assert analyzer._shadow_mark_tier == "strong"
+
     def test_synthetic_death_never_marks_or_fires(self, analyzer):
         _feed(analyzer, 240, 240)
         analyzer.mark_health_dead_synthetic()

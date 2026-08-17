@@ -195,3 +195,90 @@ def test_duplicate_start_suppressed(monkeypatch):
     assert len(_presses(kb)) == 1, "second start pressed the key again"
     ctrl._sg_stop.set()
     assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 078: pulsed application + telemetry handoff
+# ---------------------------------------------------------------------------
+
+class _AltSignal:
+    def __init__(self, stable_value, ts):
+        self.stable_value = stable_value
+        self.ts = ts
+
+
+class _TelemetrySnap:
+    def __init__(self, stable_value, ts, fresh=True):
+        self.altitude = _AltSignal(stable_value, ts)
+        self._fresh = fresh
+
+    def altitude_fresh(self):
+        return self._fresh
+
+
+class _FakeTelemetryStateAnalyzer(_FakeStateAnalyzer):
+    """State fake plus a settable telemetry snapshot (the ADR 078 d2 feed)."""
+
+    def __init__(self, state=GameState.GAME_BATTLE):
+        super().__init__(state)
+        self._snap = _TelemetrySnap(None, None, fresh=False)
+
+    def set_telemetry(self, stable_value, ts, fresh=True):
+        self._snap = _TelemetrySnap(stable_value, ts, fresh)
+
+    def get_telemetry(self):
+        return self._snap
+
+
+def test_guard_pulses_instead_of_holding(monkeypatch):
+    """ADR 078 d1: NOSE_UP cycles on the pulse cadence — a continuous hold
+    looped the live aircraft at spawn (2026-08-17 14:22)."""
+    kb = _FakeKeyboard()
+    cfg = {"enabled": True, "exit_above_alt": 1000,
+           "spawn_guard": {"enabled": True, "max_hold_s": 5.0,
+                           "release_overlap_s": 0.3,
+                           "pulse_s": 0.2, "observe_s": 0.2}}
+    ctrl = _make_ctrl(monkeypatch, kb, _FakeStateAnalyzer(), cfg)
+
+    ctrl.start_spawn_guard()
+    time.sleep(1.2)
+    ctrl._sg_stop.set()
+    assert _wait_done(ctrl)
+    assert len(_presses(kb)) >= 2, \
+        f"guard held instead of pulsing ({len(_presses(kb))} presses)"
+    assert len(_releases(kb)) >= 2, "pulse releases never fired"
+
+
+def test_fresh_telemetry_releases_guard(monkeypatch):
+    """ADR 078 d2: an advancing telemetry timestamp means the aircraft
+    exists — the guard releases without waiting for health confirm."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryStateAnalyzer()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer)
+
+    t0 = time.time()
+    ctrl.start_spawn_guard()
+    time.sleep(0.3)
+    assert ctrl.is_spawn_guarding()
+    analyzer.set_telemetry(1500.0, t0 + 1.0, fresh=True)   # HUD came back
+    assert _wait_done(ctrl, timeout=2.0), \
+        "guard did not release on fresh telemetry"
+    assert time.time() - t0 < 3.0
+    assert _releases(kb)
+
+
+def test_stale_telemetry_does_not_release(monkeypatch):
+    """A frozen timestamp (same value re-read) is not evidence of a spawn —
+    only an ADVANCING timestamp releases."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryStateAnalyzer()
+    t0 = time.time()
+    analyzer.set_telemetry(1500.0, t0, fresh=True)   # fresh at guard START
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer)
+
+    ctrl.start_spawn_guard()
+    time.sleep(0.8)   # several poll ticks, timestamp never advances
+    assert ctrl.is_spawn_guarding(), \
+        "guard released on a frozen pre-death telemetry timestamp"
+    ctrl._sg_stop.set()
+    assert _wait_done(ctrl)
