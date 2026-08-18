@@ -37,12 +37,16 @@ class _AltSignal:
 
 
 class _Snapshot:
-    def __init__(self, stable_value, ts, fresh=True):
+    def __init__(self, stable_value, ts, fresh=True, angle=None):
         self.altitude = _AltSignal(stable_value, ts)
         self._fresh = fresh
+        self._angle = angle
 
     def altitude_fresh(self):
         return self._fresh
+
+    def pitch_angle_deg(self):
+        return self._angle
 
 
 class _FakeTelemetryAnalyzer:
@@ -53,9 +57,9 @@ class _FakeTelemetryAnalyzer:
         self._fuel = fuel
         self.set(stable_value, ts, fresh)
 
-    def set(self, stable_value, ts, fresh=True):
+    def set(self, stable_value, ts, fresh=True, angle=None):
         with self._lock:
-            self._snap = _Snapshot(stable_value, ts, fresh)
+            self._snap = _Snapshot(stable_value, ts, fresh, angle)
 
     def set_fuel(self, fuel):
         with self._lock:
@@ -485,6 +489,74 @@ def test_unset_ceiling_disables_nose_down(monkeypatch):
     analyzer.set(3050.0, t0 + 0.1)
     analyzer._snap.altitude.rate = 5000.0
     time.sleep(0.5)
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "nose-down fired with the ceiling unset"
+    assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 081 d1: pitch ceiling outranks the rate floor
+# ---------------------------------------------------------------------------
+
+def test_over_angle_pulses_nose_down_despite_low_rate(monkeypatch):
+    """The inversion case: near vertical the rate decays below the floor,
+    and rate logic alone would pulse MORE nose-up — the ceiling must win."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=2.0, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0, max_pitch_deg=80.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=9000, max_s=2.0)
+    for i in range(5):
+        time.sleep(0.25)
+        analyzer.set(3000.0 + i, t0 + 0.1 * (i + 1), angle=85.0)
+        analyzer._snap.altitude.rate = 5.0   # decayed rate — below the floor
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+    assert _presses(kb, NOSE_DOWN_KEY), \
+        "no nose-down pulse at 85° — rate floor won over the pitch ceiling"
+
+
+def test_below_ceiling_keeps_rate_logic(monkeypatch):
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.4, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0, max_pitch_deg=80.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=9000, max_s=1.4)
+    time.sleep(0.3)
+    analyzer.set(3050.0, t0 + 0.1, angle=60.0)
+    analyzer._snap.altitude.rate = 5.0       # below floor, angle in range
+    time.sleep(0.6)
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "nose-down fired below the pitch ceiling"
+    assert len(_presses(kb, NOSE_UP_KEY)) >= 1
+    assert _wait_done(ctrl)
+
+
+def test_unset_ceiling_reproduces_legacy_behavior(monkeypatch):
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.0, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0)   # no max_pitch_deg key
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=9000, max_s=1.0)
+    time.sleep(0.3)
+    analyzer.set(3050.0, t0 + 0.1, angle=89.0)
+    analyzer._snap.altitude.rate = 5.0
+    time.sleep(0.4)
     assert not _presses(kb, NOSE_DOWN_KEY), \
         "nose-down fired with the ceiling unset"
     assert _wait_done(ctrl)

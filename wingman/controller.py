@@ -665,6 +665,13 @@ class Controller:
         # controller must be able to rotate back down, not just decline to
         # add more nose-up. None disables (unset in config).
         self._climb_max_rate = _cl_cfg.get("max_climb_rate")
+        # ADR 081 d1: pitch ceiling. Near vertical the climb RATE decays
+        # (speed bleeds), so the rate floor pulses more nose-up exactly when
+        # over-rotated — the angle is the direct variable and outranks the
+        # rate logic. ~10° of forward margin below vertical keeps a forward
+        # velocity component (no trading through vertical into reversed
+        # flight). None disables.
+        self._climb_max_pitch_deg = _cl_cfg.get("max_pitch_deg")
         self._climbing = threading.Event()
         self._climb_thread: "threading.Thread | None" = None
         self._climb_stop = threading.Event()
@@ -2470,6 +2477,7 @@ class Controller:
         pulse_until = 0.0
         observe_until = 0.0
         last_rate = None
+        last_angle = None   # ADR 081: flight-path angle from the same sample
         ab_held = False
 
         # NOSE_UP and NOSE_DOWN (ADR 076 d3 ceiling) are watched maneuver
@@ -2542,19 +2550,24 @@ class Controller:
                     break
 
                 # Pitch pulse state machine (never blocks the poll cadence).
-                # ADR 076 d3: two-sided authority. Below min_climb_rate the
-                # aircraft is under-rotated → nose-up pulse (the 3.2b rule);
-                # above max_climb_rate it is over-rotated (e.g. the spawn
-                # guard pre-loaded pitch before this thread started) →
-                # nose-down pulse to trade surplus pitch back for forward
-                # heading instead of the 2026-08-15 loop. Between the bands:
-                # no input. Unknown rate keeps the legacy nose-up behavior.
+                # ADR 081 d1 first: at or above max_pitch_deg the aircraft is
+                # over-angled and the RATE floor gives the wrong answer (near
+                # vertical, speed bleeds, the rate decays, and the floor
+                # would pulse MORE nose-up — the fly-backwards-out-of-map
+                # mechanism, stall observed at speed 26 / 9250 m). Then
+                # ADR 076 d3 two-sided rate authority: below min_climb_rate
+                # → nose-up; above max_climb_rate → nose-down; between the
+                # bands no input. Unknown angle/rate keeps legacy behavior.
                 if pitch_held is not None and now >= pulse_until:
                     self._climb_key(pitch_held, press=False)
                     pitch_held = None
                     observe_until = now + self._climb_observe_s
                 elif pitch_held is None and now >= observe_until:
-                    if last_rate is None or last_rate < self._climb_min_rate:
+                    if (self._climb_max_pitch_deg is not None
+                            and last_angle is not None
+                            and last_angle >= float(self._climb_max_pitch_deg)):
+                        pitch_held = NOSE_DOWN_KEY
+                    elif last_rate is None or last_rate < self._climb_min_rate:
                         pitch_held = NOSE_UP_KEY
                     elif (self._climb_max_rate is not None
                             and last_rate > float(self._climb_max_rate)):
@@ -2562,9 +2575,10 @@ class Controller:
                     if pitch_held is not None:
                         self._climb_key(pitch_held, press=True)
                         pulse_until = now + self._climb_pulse_s
-                        logger.debug("Controller: climb pitch pulse (%s, rate=%s)",
-                                     "up" if pitch_held == NOSE_UP_KEY else "down",
-                                     last_rate)
+                        logger.debug(
+                            "Controller: climb pitch pulse (%s, rate=%s, angle=%s)",
+                            "up" if pitch_held == NOSE_UP_KEY else "down",
+                            last_rate, last_angle)
 
                 if self._analyzer is None:
                     continue
@@ -2582,6 +2596,8 @@ class Controller:
                     continue   # stale sample already counted (d5)
                 last_counted_ts = sig_ts
                 last_rate = getattr(alt_signal, "rate", None)
+                _angle_fn = getattr(snap, "pitch_angle_deg", None)
+                last_angle = _angle_fn() if callable(_angle_fn) else None
                 if alt >= exit_alt:
                     confirm_streak += 1
                     if confirm_streak >= self._climb_confirm_reads:
