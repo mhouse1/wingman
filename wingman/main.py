@@ -30,6 +30,7 @@ from .tick_handlers import (
     EnemyPresenceHandler,
     RespawnHandler,
     TrackingHudHandler,
+    HealthDropoutRecorder,
     UnknownAnomalyRecorder,
     WaitingFallbackHandler,
 )
@@ -531,6 +532,8 @@ def main():
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
     )
     unknown_anomaly = UnknownAnomalyRecorder(cfg.get("unknown_anomaly", {}))
+    health_dropout = HealthDropoutRecorder(
+        (cfg.get("health", {}) or {}).get("dropout_capture", {}), analyzer)
     startup_time = time.time()
     battle_ever_reached = False
 
@@ -771,6 +774,10 @@ def main():
             # evidence future stall handling is built from.
             unknown_anomaly.tick(frame, current_game_state)
 
+            # ADR 080: archive the screen when health OCR drops out during
+            # live flight — the evidence the perception fix is built from.
+            health_dropout.tick(frame, current_game_state)
+
             tracking_hud.tick(frame, current_game_state, game_state)
 
             # Detect respawn — from overlay OCR, or (ADR 064 dual mode) from the
@@ -897,14 +904,21 @@ def main():
         shadow_summary = analyzer.shadow_respawn_summary()
         if shadow_summary is not None:
             logger.info("Shadow respawn detector (ADR 062 Phase A): %s", json.dumps(shadow_summary))
+        # ADR 080: live-flight health-dropout histogram — same
+        # emit-before-cleanup rule as the shadow summary above.
+        dropout_summary = analyzer.health_dropout_summary()
+        logger.info("Health dropout histogram (ADR 080): %s", json.dumps(dropout_summary))
         if hasattr(cap, "cleanup"):
             cap.cleanup()
         ctrl.cleanup()
         analyzer.cleanup()
         if stats_tracker is not None:
             try:
-                extra = {"respawn_shadow": shadow_summary} if shadow_summary is not None else None
-                stats_tracker.finalize(run_id=tracker.run_id, extra=extra)
+                extra = {}
+                if shadow_summary is not None:
+                    extra["respawn_shadow"] = shadow_summary
+                extra["health_dropouts"] = dropout_summary
+                stats_tracker.finalize(run_id=tracker.run_id, extra=extra or None)
                 stats_tracker.print_summary()
             except Exception as e:
                 logger.warning("MissionStatsTracker: finalize failed: %s", e)

@@ -697,3 +697,66 @@ class TestStartingHealthProbe:
             assert a._starting_probe_last_ts == 0.0   # disarmed → no scheduling
         finally:
             a.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# ADR 080 — live-flight dropout histogram
+# ---------------------------------------------------------------------------
+
+class TestDropoutHistogram:
+    """Confirmed-read gaps enter the histogram only when the whole gap ran
+    with live telemetry in GAME_BATTLE — death/menu gaps stay out."""
+
+    class _LiveSnap:
+        def altitude_fresh(self):
+            return True
+
+    class _StaleSnap:
+        def altitude_fresh(self):
+            return False
+
+    def test_live_gap_lands_in_the_right_bucket(self, analyzer, monkeypatch):
+        monkeypatch.setattr(analyzer, "get_telemetry", lambda: self._LiveSnap())
+        _feed(analyzer, 240, 240)                       # anchor + clean gap window
+        analyzer._last_confirmed_read_ts = time.time() - 7.0
+        _feed(analyzer, 240)                            # confirms → closes a ~7s gap
+        s = analyzer.health_dropout_summary()
+        assert s["buckets"]["5to10s"] == 1
+        assert s["over_5s"] == 1
+        assert s["max_s"] >= 6.9
+
+    def test_stale_seen_gap_is_excluded(self, analyzer, monkeypatch):
+        monkeypatch.setattr(analyzer, "get_telemetry", lambda: self._StaleSnap())
+        _feed(analyzer, 240, 240, None)                 # stale sampled mid-gap
+        analyzer._last_confirmed_read_ts = time.time() - 7.0
+        _feed(analyzer, 240)
+        s = analyzer.health_dropout_summary()
+        assert s["buckets"]["5to10s"] == 0
+        assert s["count"] <= 1                          # only the pre-taint gap, if any
+
+    def test_respawn_reset_taints_the_open_gap(self, analyzer, monkeypatch):
+        monkeypatch.setattr(analyzer, "get_telemetry", lambda: self._LiveSnap())
+        _feed(analyzer, 240, 240)
+        analyzer.reset_health_for_respawn()
+        analyzer._last_confirmed_read_ts = time.time() - 12.0
+        _feed(analyzer, 240, 240)                       # post-respawn confirm
+        s = analyzer.health_dropout_summary()
+        assert s["buckets"]["10to20s"] == 0
+
+    def test_non_battle_gap_is_excluded(self, analyzer, monkeypatch):
+        monkeypatch.setattr(analyzer, "get_telemetry", lambda: self._LiveSnap())
+        _feed(analyzer, 240, 240)
+        analyzer.state = GameState.GAME_LOBBY.name
+        analyzer._last_confirmed_read_ts = time.time() - 7.0
+        _feed(analyzer, 240)
+        assert analyzer.health_dropout_summary()["buckets"]["5to10s"] == 0
+
+    def test_summary_shape_when_empty(self, analyzer):
+        s = analyzer.health_dropout_summary()
+        assert s["count"] == 0 and s["p95_s"] is None and s["max_s"] is None
+
+    def test_gap_accessor(self, analyzer):
+        assert analyzer.health_confirmed_gap_s() is None   # no anchor yet
+        _feed(analyzer, 240, 240)
+        gap = analyzer.health_confirmed_gap_s()
+        assert gap is not None and gap < 2.0

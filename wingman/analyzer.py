@@ -364,6 +364,24 @@ def _process_text_region(frame, text_tokens: "list[str]"):
     return (False, time.time() - t_start, None)
 
 
+# ADR 080: crops whose digits render in the HUD's pale green (the ammo
+# counters are white and stay on the legacy variant order).
+_GREEN_DIGIT_LABELS = ("health", "fuel")
+
+
+def _hsv_green_digit_mask(frame_bgr):
+    """Isolate pale-green HUD digits by hue, inverted for OCR (ADR 080 d3).
+
+    Luminance thresholding fails over sky: the green digits and blue sky
+    share brightness, so Otsu splits mid-glyph and emits fragments. Hue
+    separates them on every measured background.
+    """
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (35, 30, 120), (95, 255, 255))
+    upscaled = cv2.resize(mask, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    return cv2.bitwise_not(upscaled)
+
+
 def _process_health_region(health_frame, label: str = "health") -> "tuple[int | None, float]":
     """Extract the numeric health value from the health crop via OCR.
 
@@ -388,8 +406,22 @@ def _process_health_region(health_frame, label: str = "health") -> "tuple[int | 
     upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
     _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+    # ADR 080 d3: the HEALTH and FUEL digits are the HUD's pale green, which
+    # collapses under luminance thresholding whenever the background is sky
+    # (nose-up flight) — the measured source of the confirmed-read dropouts.
+    # For those labels a hue mask goes FIRST (9/9 dropout frames read exactly
+    # right vs 1/9 via Otsu, 2026-08-18), gray second, and the fragment-prone
+    # Otsu binary last (its partial reads — '50' from 250 — otherwise win the
+    # early return and feed the confirm window garbage). The ammo counters
+    # are white digits (the mask sees nothing there) and keep the original
+    # variant order untouched.
+    if label in _GREEN_DIGIT_LABELS:
+        variants = (_hsv_green_digit_mask(health_frame), upscaled, binary)
+    else:
+        variants = (binary, upscaled)
+
     raw_reads = []
-    for img in (binary, upscaled):
+    for img in variants:
         results = reader.readtext(img, detail=0, paragraph=False, workers=0)
         raw_reads.extend(str(r) for r in results)
         digits = "".join(c for r in results for c in str(r) if c.isdigit())
@@ -943,6 +975,15 @@ class GameStateAnalyzer:
         self._unknown_debounce_required = max(1, int(startup_cfg.get("debounce_consecutive_required", 2)))
         self._unknown_candidate_state: "GameState | None" = None
         self._unknown_candidate_count = 0
+
+        # ADR 080 d1: live-flight health-dropout histogram. The stale flag
+        # taints the OPEN confirmed-read gap the moment telemetry goes stale
+        # (death/menu), keeping those gaps out of the dropout distribution.
+        # Starts True so the pre-first-read window can never count.
+        self._dropout_buckets = {"lt2s": 0, "2to5s": 0, "5to10s": 0,
+                                 "10to20s": 0, "gte20s": 0}
+        self._dropout_gaps: "list[float]" = []
+        self._gap_saw_stale_telemetry = True
 
         Machine(
             model=self,
@@ -1550,6 +1591,8 @@ class GameStateAnalyzer:
             # animation — silently degrading "restart when health returns" to
             # "restart when the respawn screen clears".
             self._health = None
+        # ADR 080: a respawn gap is never a live-flight dropout.
+        self._gap_saw_stale_telemetry = True
         # Respawn teleports the aircraft — a legitimate discontinuity the
         # telemetry plausibility filter would otherwise reject for several
         # ticks, so recalibrate it alongside the health filter.
@@ -1866,8 +1909,54 @@ class GameStateAnalyzer:
                 self._max_confirmed_gap_s = gap
             if gap >= self._death_no_confirmed_s:
                 self._confirmed_gap_over_threshold += 1
+            # ADR 080 d1: live-flight dropout histogram. A gap that ever saw
+            # stale telemetry is a death/menu gap (respawn screens render no
+            # HUD) and stays out; what remains is health OCR failing while
+            # the aircraft demonstrably flies.
+            if (not self._gap_saw_stale_telemetry
+                    and self.game_state == GameState.GAME_BATTLE):
+                b = self._dropout_buckets
+                if gap < 2.0:
+                    b["lt2s"] += 1
+                elif gap < 5.0:
+                    b["2to5s"] += 1
+                elif gap < 10.0:
+                    b["5to10s"] += 1
+                elif gap < 20.0:
+                    b["10to20s"] += 1
+                else:
+                    b["gte20s"] += 1
+                if len(self._dropout_gaps) < 20000:
+                    self._dropout_gaps.append(round(gap, 2))
+        # A confirmed read opens a new gap window, telemetry-clean until the
+        # per-cycle sampling in _evaluate_confirmed_absence says otherwise.
+        self._gap_saw_stale_telemetry = False
         self._last_confirmed_read_ts = now_t
         self._confirmed_history.append((now_t, value))
+
+    def health_confirmed_gap_s(self) -> "float | None":
+        """Seconds since the last confirmed health read (None before the
+        first). ADR 080 d2: polled by the dropout frame recorder."""
+        anchor = self._last_confirmed_read_ts
+        if anchor <= 0.0:
+            return None
+        return time.time() - anchor
+
+    def telemetry_hud_live(self) -> bool:
+        """Public liveness accessor (ADR 079/080)."""
+        return self._telemetry_hud_live()
+
+    def health_dropout_summary(self) -> dict:
+        """ADR 080 d1: session histogram of live-flight confirmed-read gaps."""
+        gaps = sorted(self._dropout_gaps)
+        p95 = gaps[max(0, int(len(gaps) * 0.95) - 1)] if gaps else None
+        return {
+            "buckets": dict(self._dropout_buckets),
+            "count": len(gaps),
+            "over_5s": sum(1 for g in gaps if g >= 5.0),
+            "p95_s": p95,
+            "max_s": gaps[-1] if gaps else None,
+        }
 
     def _decline_before(self, evidence_start: float) -> bool:
         """True when confirmed health fell by >= decline_evidence_drop in the window before evidence began.
@@ -1891,6 +1980,11 @@ class GameStateAnalyzer:
         (which never confirm). The window halves when confirmed health was in
         rapid decline just before the last confirmed read — a death prior.
         """
+        # ADR 080: per-cycle telemetry sampling for the open confirmed-read
+        # gap — runs on every health cycle (digits or not), before any mode
+        # gating. The `not` guard keeps it to one lock acquire per gap.
+        if not self._gap_saw_stale_telemetry and not self._telemetry_hud_live():
+            self._gap_saw_stale_telemetry = True
         if self._respawn_detection_mode not in ("shadow", "dual"):
             return
         anchor = self._last_confirmed_read_ts

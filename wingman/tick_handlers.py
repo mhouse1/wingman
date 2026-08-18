@@ -1179,3 +1179,72 @@ class UnknownAnomalyRecorder:
             "ADR074 anomaly: GAME_UNKNOWN stuck for %.0fs — screenshot %d/%d "
             "saved to %s", stuck_for, self._captured, self._max_per_episode, path)
         return str(path)
+
+class HealthDropoutRecorder:
+    """ADR 080 d2: capture full frames during live-flight health OCR dropouts.
+
+    An episode is one continuous confirmed-read gap past ``capture_after_s``
+    while telemetry is live (stale telemetry means a death/menu gap — never
+    captured). One frame per episode plus one recapture per
+    ``recapture_interval_s`` for long episodes, capped per session. Mirrors
+    the ADR 074 anomaly recorder contract: never raises, capture failure
+    must not take down the tick loop.
+    """
+
+    def __init__(self, cfg: "dict | None", analyzer, clock=time.time):
+        import cv2  # heavy import kept local: recorder is constructed once
+        self._cv2 = cv2
+        cfg = cfg or {}
+        self._enabled = bool(cfg.get("enabled", True))
+        self._after_s = float(cfg.get("capture_after_s", 5.0))
+        self._recapture_s = float(cfg.get("recapture_interval_s", 60.0))
+        self._max_per_session = int(cfg.get("max_per_session", 12))
+        self._dir = str(cfg.get("dir", "test_screenshots/health_dropouts"))
+        self._analyzer = analyzer
+        self._clock = clock
+        self._captured_total = 0
+        self._episode_captured = False
+        self._last_capture_ts = 0.0
+
+    def tick(self, frame, current_game_state) -> "str | None":
+        """Capture when a live-telemetry health gap has persisted past the
+        threshold. Returns the saved path (for tests/logging), else None."""
+        if not self._enabled or frame is None:
+            return None
+        if current_game_state != GameState.GAME_BATTLE:
+            self._episode_captured = False
+            return None
+        gap = self._analyzer.health_confirmed_gap_s()
+        if gap is None or gap < self._after_s:
+            # A confirmed read (or no anchor yet) closed the episode.
+            self._episode_captured = False
+            return None
+        if not self._analyzer.telemetry_hud_live():
+            return None   # death/menu gap — not a dropout
+        if self._captured_total >= self._max_per_session:
+            return None
+        now = self._clock()
+        if self._episode_captured and now - self._last_capture_ts < self._recapture_s:
+            return None
+        try:
+            from datetime import datetime
+            from pathlib import Path
+            out_dir = Path(self._dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = out_dir / f"dropout_{stamp}_gap{int(gap)}s.png"
+            if not self._cv2.imwrite(str(path), frame):
+                logger.warning("ADR080 dropout: screenshot write failed: %s", path)
+                return None
+        except Exception as e:
+            logger.warning("ADR080 dropout: screenshot capture failed: %s: %s",
+                           type(e).__name__, e)
+            return None
+        self._captured_total += 1
+        self._episode_captured = True
+        self._last_capture_ts = now
+        logger.info(
+            "ADR080 dropout: health unconfirmed %.0fs with live telemetry — "
+            "frame %d/%d saved to %s",
+            gap, self._captured_total, self._max_per_session, path)
+        return str(path)

@@ -838,3 +838,104 @@ class TestUnknownAnomalyRecorder:
         clock.state["now"] += 100.0
         assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
         assert list(tmp_path.iterdir()) == []
+
+
+class TestHealthDropoutRecorder:
+    """ADR 080 d2: frames captured during live-flight health OCR dropouts."""
+
+    class _FakeDropoutAnalyzer:
+        def __init__(self):
+            self.gap = None
+            self.live = True
+
+        def health_confirmed_gap_s(self):
+            return self.gap
+
+        def telemetry_hud_live(self):
+            return self.live
+
+    def _recorder(self, tmp_path, analyzer, clock, **cfg_overrides):
+        from wingman.tick_handlers import HealthDropoutRecorder
+        cfg = {"capture_after_s": 5.0, "recapture_interval_s": 60.0,
+               "max_per_session": 2, "dir": str(tmp_path)}
+        cfg.update(cfg_overrides)
+        return HealthDropoutRecorder(cfg, analyzer, clock=clock)
+
+    @staticmethod
+    def _frame():
+        import numpy as np
+        return np.zeros((4, 4, 3), dtype=np.uint8)
+
+    @staticmethod
+    def _clock(start=1000.0):
+        state = {"now": start}
+        def clock():
+            return state["now"]
+        clock.state = state
+        return clock
+
+    def test_short_gap_never_captures(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 3.0
+        r = self._recorder(tmp_path, a, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_captures_past_threshold_with_gap_in_name(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 7.2
+        r = self._recorder(tmp_path, a, self._clock())
+        path = r.tick(self._frame(), GameState.GAME_BATTLE)
+        assert path is not None and "gap7s" in path
+        assert (tmp_path / path.split("/")[-1]).exists()
+
+    def test_stale_telemetry_gap_never_captures(self, tmp_path):
+        """A gap with stale telemetry is a death/menu gap, not a dropout."""
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 20.0
+        a.live = False
+        r = self._recorder(tmp_path, a, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_one_per_episode_plus_recapture_and_session_cap(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 6.0
+        clock = self._clock()
+        r = self._recorder(tmp_path, a, clock)
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # 1st
+        clock.state["now"] += 5.0
+        a.gap = 11.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None     # interval gate
+        clock.state["now"] += 60.0
+        a.gap = 71.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # recapture
+        clock.state["now"] += 60.0
+        a.gap = 131.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None     # session cap (2)
+
+    def test_confirmed_read_resets_episode(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 6.0
+        clock = self._clock()
+        r = self._recorder(tmp_path, a, clock)
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # episode 1
+        a.gap = 0.5                                                      # confirm landed
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        clock.state["now"] += 1.0
+        a.gap = 6.0                                                      # new episode
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # captures again
+
+    def test_non_battle_state_never_captures(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 30.0
+        r = self._recorder(tmp_path, a, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_LOBBY) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_disabled_config_is_noop(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 30.0
+        r = self._recorder(tmp_path, a, self._clock(), enabled=False)
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []

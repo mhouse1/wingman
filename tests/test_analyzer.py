@@ -519,3 +519,69 @@ def test_fuel_reading_range_gate_and_staleness(analyzer: GameStateAnalyzer):
     # Stale: age the timestamp past the freshness window.
     analyzer._fuel_ts -= analyzer._fuel_stale_after_s + 1.0
     assert analyzer.get_afterburner_fuel_pct() is None
+
+
+# ---------------------------------------------------------------------------
+# ADR 080 d3 — green-digit hue mask and variant ordering
+# ---------------------------------------------------------------------------
+
+def _green_digit_frame():
+    """Synthetic HUD crop: pale-green digit strokes over sky blue — the
+    measured dropout background where Otsu collapses."""
+    import numpy as np
+    frame = np.full((30, 64, 3), (220, 180, 150), dtype=np.uint8)  # BGR sky
+    frame[10:24, 20:26] = (170, 230, 180)   # pale-green strokes (BGR)
+    frame[10:24, 30:36] = (170, 230, 180)
+    return frame
+
+
+def test_hsv_mask_isolates_green_on_sky():
+    from wingman.analyzer import _hsv_green_digit_mask
+    mask = _hsv_green_digit_mask(_green_digit_frame())
+    # Inverted mask: digit strokes dark (0), background white (255).
+    assert mask.min() == 0 and mask.max() == 255
+    # Strokes cover a small fraction — the mask must not smear the background.
+    dark_frac = (mask < 128).mean()
+    assert 0.02 < dark_frac < 0.30
+
+
+class _OrderRecordingReader:
+    """Stub reader that records how many variants were tried and returns
+    digits only on the requested attempt."""
+
+    def __init__(self, digits_on_attempt=None):
+        self.calls = 0
+        self._digits_on = digits_on_attempt
+
+    def readtext(self, _img, detail=0, paragraph=False, workers=0):
+        self.calls += 1
+        if self._digits_on is not None and self.calls == self._digits_on:
+            return ["250"]
+        return []
+
+
+def test_green_label_tries_three_variants(monkeypatch):
+    from wingman.analyzer import _process_health_region
+    reader = _OrderRecordingReader(digits_on_attempt=None)
+    monkeypatch.setattr(analyzer_module, "_get_thread_ocr_reader", lambda: reader)
+    value, _ = _process_health_region(_green_digit_frame(), label="health")
+    assert value is None
+    assert reader.calls == 3, "health should try hsv, gray, binary"
+
+
+def test_ammo_label_keeps_legacy_two_variants(monkeypatch):
+    from wingman.analyzer import _process_health_region
+    reader = _OrderRecordingReader(digits_on_attempt=None)
+    monkeypatch.setattr(analyzer_module, "_get_thread_ocr_reader", lambda: reader)
+    value, _ = _process_health_region(_green_digit_frame(), label="ammo_missiles")
+    assert value is None
+    assert reader.calls == 2, "ammo must keep the original binary+gray order"
+
+
+def test_green_label_first_variant_wins_early(monkeypatch):
+    from wingman.analyzer import _process_health_region
+    reader = _OrderRecordingReader(digits_on_attempt=1)
+    monkeypatch.setattr(analyzer_module, "_get_thread_ocr_reader", lambda: reader)
+    value, _ = _process_health_region(_green_digit_frame(), label="fuel")
+    assert value == 250
+    assert reader.calls == 1, "hsv variant read must early-return"

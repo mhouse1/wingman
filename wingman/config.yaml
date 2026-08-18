@@ -139,7 +139,9 @@ respawn_detection:
   text_hsv_upper: [180, 50, 255]
   mode: dual
 health: {death_no_digits_s: 6.0, max_plausible: 500, value_confirm_window: 3, value_confirm_tolerance: 15,
-  death_no_confirmed_s: 8.0, decline_evidence_drop: 80, decline_evidence_window_s: 6.0}
+  death_no_confirmed_s: 8.0, decline_evidence_drop: 80, decline_evidence_window_s: 6.0,
+  dropout_capture: {enabled: true, capture_after_s: 5.0, recapture_interval_s: 60.0,
+    max_per_session: 12}}
 fuel: {stale_after_s: 6.0, rearm_margin_pct: 5}
 incoming_detection:
   incoming_template_matching_enabled: true
