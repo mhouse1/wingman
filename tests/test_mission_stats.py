@@ -498,3 +498,105 @@ class TestMissileEngagements:
         with caplog.at_level("INFO"):
             t.print_summary()
         assert "Missile engagements" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ADR 076 — spawn-crash instrument
+# ---------------------------------------------------------------------------
+
+class TestSpawnCrashes:
+    """Deaths in [min, window] after a post-respawn restart — the
+    before/after measure for the ADR 076 spawn-attitude guard. Stamped off
+    the existing restart_last_mission event so no new event names enter the
+    replay/capture streams. ADR 082 adds the physical floor: the aircraft
+    respawns airborne, so a sub-floor death is respawn re-detection churn,
+    counted separately rather than dropped."""
+
+    def test_death_soon_after_restart_counts(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 106.0)
+        sc = t.finalize()["spawn_crashes"]
+        assert sc["count"] == 1
+        assert sc["died_after_s"] == [6.0]
+
+    def test_death_outside_window_does_not_count(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 140.0)
+        assert t.finalize()["spawn_crashes"]["count"] == 0
+
+    def test_one_candidate_per_life(self, tmp_path):
+        """The restart stamp is consumed by the first death — a later death
+        without a new restart must not count against the old stamp."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 140.0)   # consumed, out of window
+        t.on_event("respawn_detected", 141.0)   # no stamp — never counts
+        assert t.finalize()["spawn_crashes"]["count"] == 0
+
+    # -- ADR 082: the physical floor ---------------------------------------
+
+    def test_sub_floor_death_is_redetect_not_crash(self, tmp_path):
+        """0.2 s after restart: the aircraft cannot have reached terrain —
+        this is the 2026-08-19 artifact class (22 events, median 0.2 s)."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 100.2)
+        sc = t.finalize()["spawn_crashes"]
+        assert sc["count"] == 0, "sub-floor death counted as a spawn crash"
+        assert sc["immediate_redetects"] == 1
+        assert sc["redetect_after_s"] == [0.2]
+
+    def test_just_under_floor_is_redetect(self, tmp_path):
+        """2.5 s — the slowest observed artifact — stays below the floor."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 102.5)
+        sc = t.finalize()["spawn_crashes"]
+        assert sc["count"] == 0
+        assert sc["immediate_redetects"] == 1
+
+    def test_at_floor_counts_as_crash(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 103.0)
+        sc = t.finalize()["spawn_crashes"]
+        assert sc["count"] == 1
+        assert sc["immediate_redetects"] == 0
+
+    def test_redetect_consumes_the_stamp(self, tmp_path):
+        """A sub-floor redetect consumes the restart stamp like any other
+        candidate — a later death must not also book against it."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 100.1)   # redetect, consumes stamp
+        t.on_event("respawn_detected", 105.0)   # no stamp — counts as neither
+        sc = t.finalize()["spawn_crashes"]
+        assert sc["count"] == 0
+        assert sc["immediate_redetects"] == 1
+
+    def test_summary_reports_both_counts(self, tmp_path, caplog):
+        import logging
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("restart_last_mission", 100.0)
+        t.on_event("respawn_detected", 100.2)
+        t.finalize()
+        with caplog.at_level(logging.INFO):
+            t.print_summary()
+        assert "Spawn crashes" in caplog.text
+        assert "redetect churn" in caplog.text
+
+    def test_death_with_no_restart_is_not_a_spawn_crash(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("respawn_detected", 100.0)
+        assert t.finalize()["spawn_crashes"]["count"] == 0

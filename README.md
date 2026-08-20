@@ -20,7 +20,7 @@ Wingman is designed to scale from single-instance automation to multi-instance c
 
 ## Why This Project Exists
 
-Beyond the game itself, Wingman is an R&D reference architecture for AI-driven automation. MetalStorm is the testbed where patterns get built and proven — OCR-driven state machines, replay-based testing, calibration tooling, performance regression tracking — and those patterns are meant to be reproduced into other projects, not imported as a shared library. Other repos (e.g. `mos-docker/tests/automated`, `dojo`) already reuse the test-harness architecture developed here.
+Beyond the game itself, Wingman is an R&D reference architecture for AI-driven automation. MetalStorm is the testbed where patterns get built and proven — OCR-driven state machines, replay-based testing, calibration tooling, performance regression tracking — and those patterns are meant to be reproduced into other projects, not imported as a shared library. Other repos (e.g. `mos-docker/tests/automated`, [dojo](https://github.com/mhouse1/dojo)) already reuse the test-harness architecture developed here.
 
 ---
 

@@ -392,3 +392,88 @@ def test_pitch_down_off_by_default_leaves_nose_alone(monkeypatch):
     ctrl.missile_evade_mode()
     assert _wait_done(ctrl)
     assert not _presses(kb, NOSE_DOWN_KEY), "NOSE_DOWN pressed without pitch_down"
+
+
+# ---------------------------------------------------------------------------
+# ADR 075: burner release at 0% fuel inside the evade hold
+# ---------------------------------------------------------------------------
+
+class _FakeFuelIncomingAnalyzer(_FakeIncomingAnalyzer):
+    """Incoming cache stand-in that also serves the fuel read."""
+
+    def __init__(self, detected=True, ts=None, fuel=None):
+        super().__init__(detected=detected, ts=ts)
+        self._fuel = fuel
+
+    def set_fuel(self, fuel):
+        with self._lock:
+            self._fuel = fuel
+
+    def get_afterburner_fuel_pct(self):
+        with self._lock:
+            return self._fuel
+
+
+def test_burner_released_at_zero_fuel_manoeuvre_keys_stay_held(monkeypatch):
+    """At 0% the burner is off in-game and a held key blocks recharge — the
+    hold must release AFTERBURNER while keeping the manoeuvre keys, then
+    re-engage once the rearm margin refills."""
+    analyzer = _FakeFuelIncomingAnalyzer(detected=True, fuel=0)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 30.0, "min_clear_samples": 2,
+                       "max_hold_s": 30.0, "max_manoeuvre_s": 30.0})
+
+    ctrl.missile_evade_mode()
+    time.sleep(0.4)
+    assert ctrl.is_missile_evading(), "evade ended prematurely"
+    assert _releases(kb, AFTERBURNER_KEY), "burner not released at 0% fuel"
+    assert not _releases(kb, ROLL_RIGHT_KEY), "manoeuvre key released with the burner"
+    assert not _releases(kb, YAW_LEFT), "manoeuvre key released with the burner"
+
+    analyzer.set_fuel(20)   # >= rearm margin (default 5)
+    time.sleep(0.4)
+    assert len(_presses(kb, AFTERBURNER_KEY)) >= 2, "burner not re-engaged after recharge"
+
+    ctrl._me_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_unknown_fuel_keeps_burner_held_in_evade(monkeypatch):
+    analyzer = _FakeFuelIncomingAnalyzer(detected=True, fuel=None)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 30.0, "min_clear_samples": 2,
+                       "max_hold_s": 30.0, "max_manoeuvre_s": 30.0})
+
+    ctrl.missile_evade_mode()
+    time.sleep(0.3)
+    assert ctrl.is_missile_evading()
+    assert _presses(kb, AFTERBURNER_KEY), "burner never pressed"
+    assert not _releases(kb, AFTERBURNER_KEY), "burner released without fuel evidence"
+
+    ctrl._me_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_manual_takeover_state_ends_evade(monkeypatch):
+    """SAF-001 backstop: the FSM entering GAME_BATTLE_MANUAL releases the
+    hold — the operator owns the airframe, a stuck-positive detection must
+    not keep flying it (the climb-hold analogue of the 2026-08-17 fix)."""
+    from wingman.analyzer import GameState
+
+    t0 = time.time()
+    analyzer = _FakeIncomingAnalyzer(detected=True, ts=t0)   # stuck positive
+    analyzer.game_state = GameState.GAME_BATTLE
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      {"clear_seconds": 5.0, "min_clear_samples": 2, "max_hold_s": 10.0})
+
+    ctrl.missile_evade_mode()
+    assert ctrl.is_missile_evading()
+    time.sleep(0.2)
+    analyzer.game_state = GameState.GAME_BATTLE_MANUAL
+    assert _wait_done(ctrl), "evade did not end on GAME_BATTLE_MANUAL"
+    assert time.time() - t0 < 5.0, "evade ended by cap, not the state exit"
+    for key in EVADE_KEYS:
+        assert _releases(kb, key), f"'{key}' never released"

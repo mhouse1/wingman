@@ -438,3 +438,69 @@ class TestClimbDebounce:
     def test_default_confirm_reads_is_immediate(self):
         cond = make_climb_condition(500, 1000)
         assert cond(make_snap(altitude=400.0)) is True
+
+
+# ---------------------------------------------------------------------------
+# ADR 075: armed altitude-sustain climb band
+# ---------------------------------------------------------------------------
+
+SUSTAIN_CLIMB_CFG = dict(
+    BT_CFG,
+    climb={"enabled": True, "enter_below_alt": 500, "exit_above_alt": 1000,
+           "confirm_reads": 1,
+           "sustain": {"enabled": True, "enter_below_alt": 6000,
+                       "exit_above_alt": 7000}},
+)
+
+
+@pytest.fixture
+def sustain_harness(clock):
+    tree = build_tree(dict(SUSTAIN_CLIMB_CFG), clock=clock)
+    return tree, make_snapshot_writer()
+
+
+def test_sustain_climb_selected_below_operating_alt_while_armed(sustain_harness):
+    assert tick(sustain_harness, make_snap(altitude=5000.0)) == TACTIC_CLIMB
+
+
+def test_sustain_climb_beats_engage(sustain_harness):
+    """Armed and low → climb outranks engage geometry; S&D keeps firing from
+    the mission loops, so altitude work costs no trigger time."""
+    snap = make_snap(altitude=5000.0, ring_short=2)
+    assert tick(sustain_harness, snap) == TACTIC_CLIMB
+
+
+def test_sustain_requires_missiles(sustain_harness):
+    assert tick(sustain_harness,
+                make_snap(altitude=5000.0, missiles=None)) == TACTIC_ATTACK_SUPPORT
+    assert tick(sustain_harness,
+                make_snap(altitude=5000.0, missiles=0)) == TACTIC_EJECT
+
+
+def test_sustain_requires_mission_running(sustain_harness):
+    snap = make_snap(altitude=5000.0, mission_running=False)
+    assert tick(sustain_harness, snap) == TACTIC_ATTACK_SUPPORT
+
+
+def test_sustain_hysteresis_band(sustain_harness):
+    # Between enter (6000) and exit (7000) without having entered: no climb.
+    assert tick(sustain_harness, make_snap(altitude=6500.0)) == TACTIC_ATTACK_SUPPORT
+    # Below enter: climb.
+    assert tick(sustain_harness, make_snap(altitude=5900.0)) == TACTIC_CLIMB
+    # Back inside the band: still climbing (hysteresis holds to exit alt).
+    assert tick(sustain_harness, make_snap(altitude=6500.0)) == TACTIC_CLIMB
+    # At/above exit: released.
+    assert tick(sustain_harness, make_snap(altitude=7100.0)) == TACTIC_ATTACK_SUPPORT
+
+
+def test_emergency_band_ignores_mission_and_missiles(sustain_harness):
+    """Terrain avoidance fires regardless of the armed/mission gates that
+    scope the sustain band (missiles empty is outranked by Eject, so test the
+    unknown-missiles + no-mission case)."""
+    snap = make_snap(altitude=300.0, mission_running=False, missiles=None)
+    assert tick(sustain_harness, snap) == TACTIC_CLIMB
+
+
+def test_incoming_beats_sustain_climb(sustain_harness):
+    snap = make_snap(altitude=5000.0, incoming_detected=True)
+    assert tick(sustain_harness, snap) == TACTIC_MISSILE_EVADE

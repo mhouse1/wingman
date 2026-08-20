@@ -28,6 +28,22 @@ _EVADE_ATTRIBUTION_S = 3.0
 # and unrelated deaths get attributed to the engagement.
 _ENGAGEMENT_WINDOW_S = 10.0
 
+# ADR 076: a death this soon after a post-respawn mission restart is a
+# spawn-crash candidate — the anomaly the spawn-attitude guard exists to fix.
+# Stamped off the existing restart_last_mission event (the post-respawn
+# restart path), so no new event names enter the replay/capture streams.
+_SPAWN_CRASH_WINDOW_S = 10.0
+
+# ADR 082: and no sooner than this. The aircraft respawns AIRBORNE with
+# forward speed, so it cannot reach terrain in under a second — a death
+# stamped that fast is a second respawn_detected arriving on the heels of
+# the restart, not a crash. The 2026-08-19 12-hour session produced 22 such
+# events (median 0.2 s, max 2.5 s) and zero genuine ones. Sub-floor events
+# are counted separately rather than dropped: they are respawn-flow churn
+# (each one cancels a freshly restarted mission) and the only surviving
+# evidence that it happens.
+_SPAWN_CRASH_MIN_S = 3.0
+
 
 def _fmt_duration(seconds: float) -> str:
     s = int(seconds)
@@ -87,6 +103,14 @@ class MissionStatsTracker:
         # _engagement_window_s of the alert, and had an evade fired?
         self._engagements: list[dict] = []
 
+        # ADR 076/082 spawn-crash instrument: deaths in
+        # [_SPAWN_CRASH_MIN_S, _SPAWN_CRASH_WINDOW_S] after a post-respawn
+        # restart. The before/after measure for the spawn-attitude guard.
+        # Faster deaths are respawn re-detection churn, tracked separately.
+        self._last_restart_ts: float | None = None
+        self._spawn_crashes: list[float] = []       # seconds from restart to death
+        self._immediate_redetects: list[float] = []  # sub-floor, same stamp
+
         # Pending outcome hint set by named events before the FSM transition fires.
         self._pending_outcome: str | None = None
 
@@ -120,6 +144,21 @@ class MissionStatsTracker:
             if self._in_mission:
                 self._current["respawn_count"] += 1
             self._attribute_death(ts)
+            # ADR 076/082: death shortly after a restart = spawn crash, but
+            # only above the physical floor; faster ones are re-detection
+            # churn. One candidate per life — the stamp is consumed in every
+            # branch.
+            if self._last_restart_ts is not None:
+                since_restart = ts - self._last_restart_ts
+                if since_restart <= _SPAWN_CRASH_WINDOW_S:
+                    if since_restart >= _SPAWN_CRASH_MIN_S:
+                        self._spawn_crashes.append(round(since_restart, 1))
+                    else:
+                        self._immediate_redetects.append(round(since_restart, 1))
+                self._last_restart_ts = None
+
+        elif event_name == "restart_last_mission":
+            self._last_restart_ts = ts
 
         elif event_name == "flare_burst_deployed":
             self._total_flare_bursts += 1
@@ -255,6 +294,16 @@ class MissionStatsTracker:
             "total_flare_reloads": self._total_flare_reloads,
             "total_manual_takeovers": self._total_manual_takeovers,
             "total_missile_evades": self._total_missile_evades,
+            "spawn_crashes": {
+                "window_s": _SPAWN_CRASH_WINDOW_S,
+                "min_s": _SPAWN_CRASH_MIN_S,
+                "count": len(self._spawn_crashes),
+                "died_after_s": self._spawn_crashes,
+                # ADR 082: sub-floor events — respawn re-detection churn,
+                # not crashes. Reported so the class stays visible.
+                "immediate_redetects": len(self._immediate_redetects),
+                "redetect_after_s": self._immediate_redetects,
+            },
             "missile_engagements": self._engagement_summary(),
             "avg_mission_duration_s": round(avg_duration, 1) if avg_duration is not None else None,
             "missions": self._missions,
@@ -307,6 +356,18 @@ class MissionStatsTracker:
             f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
         ]
+
+        sc = s.get("spawn_crashes") or {}
+        if sc:
+            lines.append(
+                f"Spawn crashes     : {sc['count']}  "
+                f"(death {sc.get('min_s', 0):.0f}-{sc['window_s']:.0f}s after restart)"
+            )
+            if sc.get("immediate_redetects"):
+                lines.append(
+                    f"  redetect churn  : {sc['immediate_redetects']}  "
+                    f"(respawn re-fired under {sc.get('min_s', 0):.0f}s — not crashes)"
+                )
 
         eng = s.get("missile_engagements") or {}
         if eng.get("engagements"):

@@ -37,24 +37,37 @@ class _AltSignal:
 
 
 class _Snapshot:
-    def __init__(self, stable_value, ts, fresh=True):
+    def __init__(self, stable_value, ts, fresh=True, angle=None):
         self.altitude = _AltSignal(stable_value, ts)
         self._fresh = fresh
+        self._angle = angle
 
     def altitude_fresh(self):
         return self._fresh
 
+    def pitch_angle_deg(self):
+        return self._angle
+
 
 class _FakeTelemetryAnalyzer:
-    """Settable stand-in for analyzer.get_telemetry()."""
+    """Settable stand-in for analyzer.get_telemetry() and the fuel read."""
 
-    def __init__(self, stable_value=None, ts=None, fresh=True):
+    def __init__(self, stable_value=None, ts=None, fresh=True, fuel=None):
         self._lock = threading.Lock()
+        self._fuel = fuel
         self.set(stable_value, ts, fresh)
 
-    def set(self, stable_value, ts, fresh=True):
+    def set(self, stable_value, ts, fresh=True, angle=None):
         with self._lock:
-            self._snap = _Snapshot(stable_value, ts, fresh)
+            self._snap = _Snapshot(stable_value, ts, fresh, angle)
+
+    def set_fuel(self, fuel):
+        with self._lock:
+            self._fuel = fuel
+
+    def get_afterburner_fuel_pct(self):
+        with self._lock:
+            return self._fuel
 
     def get_telemetry(self):
         with self._lock:
@@ -245,11 +258,13 @@ def test_target_alt_reached_ends_climb(monkeypatch):
     assert time.time() - t0 < 6.0, "ended by cap, not target confirmation"
 
 
-def test_mission_climb_config_defaults(monkeypatch):
+def test_fuel_config_defaults(monkeypatch):
+    """ADR 075: the prologue fields are gone (sustain climb owns mission
+    altitude); the fuel rearm margin defaults without a fuel config block."""
     kb = _FakeKeyboard()
     ctrl = _make_ctrl(monkeypatch, kb, _FakeTelemetryAnalyzer(), CFG)
-    assert ctrl._mission_climb_alt == 7000.0
-    assert ctrl._mission_climb_max_s == 90.0
+    assert not hasattr(ctrl, "_mission_climb_alt")
+    assert ctrl._fuel_rearm_margin == 5.0
 
 
 def test_pitch_is_pulsed_not_held(monkeypatch):
@@ -292,4 +307,353 @@ def test_healthy_climb_rate_suppresses_pulse(monkeypatch):
     time.sleep(0.4)
     assert len(_presses(kb, NOSE_UP_KEY)) == presses_after_rate, \
         "pulse fired despite healthy climb rate"
+    assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 075: fuel-gated afterburner in the climb hold
+# ---------------------------------------------------------------------------
+
+def test_climb_burner_respects_fuel_floor(monkeypatch):
+    """Sustain climbs pass the evade reserve as the floor: the burner releases
+    at the floor (leaving the reserve for a missile alert and letting the game
+    recharge), and re-engages only after the rearm margin refills."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False,
+                                      fuel=50)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=6.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=7000.0, max_s=6.0, fuel_floor_pct=10.0)
+    time.sleep(0.4)
+    assert _presses(kb, AFTERBURNER_KEY), "burner not engaged with fuel above floor"
+
+    analyzer.set_fuel(10)          # at the reserve floor
+    time.sleep(0.6)
+    assert ctrl.is_climbing(), "climb must continue without burner"
+    assert _releases(kb, AFTERBURNER_KEY), "burner not released at the reserve floor"
+
+    analyzer.set_fuel(30)          # >= floor + rearm margin (default 5)
+    time.sleep(0.6)
+    assert len(_presses(kb, AFTERBURNER_KEY)) >= 2, "burner not re-engaged after recovery"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_climb_starts_without_burner_when_fuel_empty(monkeypatch):
+    """Emergency floor is 0: at 0% the burner is off in-game and holding the
+    key blocks recharge, so the climb starts on pitch alone."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False,
+                                      fuel=0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()
+    time.sleep(0.4)
+    assert not _presses(kb, AFTERBURNER_KEY), "burner pressed with an empty tank"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_climb_unknown_fuel_keeps_legacy_burner_hold(monkeypatch):
+    """No fuel reading (OCR dropout, test doubles) must not change behavior:
+    the burner is held as before ADR 075 (freeze policy)."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False,
+                                      fuel=None)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()
+    time.sleep(0.3)
+    assert _presses(kb, AFTERBURNER_KEY), "burner must be held when fuel is unknown"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_manual_takeover_state_ends_climb(monkeypatch):
+    """SAF-001: the FSM entering GAME_BATTLE_MANUAL must end a running climb
+    — the 2026-08-17 session showed the hold pulsing nose-up 45 s into
+    manual flight because nothing stopped the thread."""
+    from wingman.analyzer import GameState
+
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    analyzer.game_state = GameState.GAME_BATTLE
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=10.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    t0 = time.time()
+    ctrl.climb_mode()
+    assert ctrl.is_climbing()
+    time.sleep(0.2)
+    analyzer.game_state = GameState.GAME_BATTLE_MANUAL
+    assert _wait_done(ctrl), "climb did not end on GAME_BATTLE_MANUAL"
+    assert time.time() - t0 < 5.0, "climb ended by cap, not the state exit"
+    for key in CLIMB_KEYS:
+        assert _releases(kb, key), f"'{key}' never released"
+
+
+def test_takeover_handler_stops_running_climb(monkeypatch):
+    """SAF-001: a physical maneuver key must trigger takeover and stop the
+    climb hold even with NO mission thread running (the tree selects Climb
+    with mission=False after a respawn cancels the mission)."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=10.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()
+    assert ctrl.is_climbing()
+    time.sleep(0.2)
+    assert not ctrl.is_mission_running()
+    took_over = ctrl._handle_maneuver_key_press("l")
+    assert took_over, "maneuver key did not trigger takeover during a bare climb hold"
+    assert _wait_done(ctrl), "takeover did not stop the climb hold"
+    for key in CLIMB_KEYS:
+        assert _releases(kb, key), f"'{key}' never released"
+
+
+# ---------------------------------------------------------------------------
+# ADR 076 d3: nose-down over-rotation ceiling
+# ---------------------------------------------------------------------------
+
+def test_nose_down_pulse_above_rate_ceiling(monkeypatch):
+    """Above max_climb_rate the pulse controller rotates BACK DOWN — the
+    spawn guard can pre-load pitch before the climb thread starts, and
+    declining to add nose-up is not enough to prevent the loop."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=2.5, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0, max_climb_rate=100.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=7000, max_s=2.5)
+    # Feed fresh advancing samples reporting a rate far above the ceiling.
+    for i in range(6):
+        time.sleep(0.25)
+        analyzer.set(3000.0 + i, t0 + 0.1 * (i + 1))
+        analyzer._snap.altitude.rate = 500.0
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+    assert _presses(kb, NOSE_DOWN_KEY), \
+        "no nose-down pulse despite rate far above max_climb_rate"
+    assert _releases(kb, NOSE_DOWN_KEY), "nose-down never released"
+
+
+def test_no_pulse_between_rate_bands(monkeypatch):
+    """Between min_climb_rate and max_climb_rate: no input in either
+    direction — the aircraft is flying the climb correctly."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    analyzer._snap.altitude.rate = 60.0
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.4, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0, max_climb_rate=100.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=7000, max_s=1.4)
+    time.sleep(0.3)
+    analyzer.set(3100.0, t0 + 0.1)
+    analyzer._snap.altitude.rate = 60.0
+    time.sleep(0.4)
+    up_after_rate = len(_presses(kb, NOSE_UP_KEY))
+    time.sleep(0.4)
+    assert len(_presses(kb, NOSE_UP_KEY)) == up_after_rate, \
+        "nose-up pulse fired despite in-band climb rate"
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "nose-down pulse fired despite rate below the ceiling"
+    assert _wait_done(ctrl)
+
+
+def test_unset_ceiling_disables_nose_down(monkeypatch):
+    """No max_climb_rate in config: pre-ADR 076 behavior — never nose-down."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.0, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0)   # no max_climb_rate key
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=7000, max_s=1.0)
+    time.sleep(0.3)
+    analyzer.set(3050.0, t0 + 0.1)
+    analyzer._snap.altitude.rate = 5000.0
+    time.sleep(0.5)
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "nose-down fired with the ceiling unset"
+    assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 081 d1: pitch ceiling outranks the rate floor
+# ---------------------------------------------------------------------------
+
+def test_over_angle_pulses_nose_down_despite_low_rate(monkeypatch):
+    """The inversion case: near vertical the rate decays below the floor,
+    and rate logic alone would pulse MORE nose-up — the ceiling must win."""
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=2.0, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0, max_pitch_deg=80.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=9000, max_s=2.0)
+    for i in range(5):
+        time.sleep(0.25)
+        analyzer.set(3000.0 + i, t0 + 0.1 * (i + 1), angle=85.0)
+        analyzer._snap.altitude.rate = 5.0   # decayed rate — below the floor
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+    assert _presses(kb, NOSE_DOWN_KEY), \
+        "no nose-down pulse at 85° — rate floor won over the pitch ceiling"
+
+
+def test_below_ceiling_keeps_rate_logic(monkeypatch):
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.4, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0, max_pitch_deg=80.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=9000, max_s=1.4)
+    time.sleep(0.3)
+    analyzer.set(3050.0, t0 + 0.1, angle=60.0)
+    analyzer._snap.altitude.rate = 5.0       # below floor, angle in range
+    time.sleep(0.6)
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "nose-down fired below the pitch ceiling"
+    assert len(_presses(kb, NOSE_UP_KEY)) >= 1
+    assert _wait_done(ctrl)
+
+
+def test_unset_ceiling_reproduces_legacy_behavior(monkeypatch):
+    from wingman.controller import NOSE_DOWN_KEY
+
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.0, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               min_climb_rate=30.0)   # no max_pitch_deg key
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=9000, max_s=1.0)
+    time.sleep(0.3)
+    analyzer.set(3050.0, t0 + 0.1, angle=89.0)
+    analyzer._snap.altitude.rate = 5.0
+    time.sleep(0.4)
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "nose-down fired with the ceiling unset"
+    assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 083: lead-the-target exit and burner cut above target
+# ---------------------------------------------------------------------------
+
+def test_lead_exits_a_sample_early(monkeypatch):
+    """A fast climb exits on the PREDICTED altitude: 4000 m climbing at
+    450 m/s is 5350 m one 3 s sample later, so the 5000 m target is met."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=3.0, confirm_reads=1)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=5000, max_s=3.0, exit_lead_s=3.0)
+    time.sleep(0.3)
+    analyzer.set(4000.0, t0 + 0.1)          # below target...
+    analyzer._snap.altitude.rate = 450.0    # ...but 5350 predicted
+    assert _wait_done(ctrl, timeout=3.0), "lead-the-target exit did not fire"
+
+
+def test_unknown_rate_falls_back_to_raw_altitude(monkeypatch):
+    """Freeze policy: no rate means no prediction — the raw value decides,
+    so a below-target read must NOT end the climb."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.2, confirm_reads=1)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    t_start = time.time()
+    ctrl.climb_mode(target_alt=5000, max_s=1.2, exit_lead_s=3.0)
+    time.sleep(0.3)
+    analyzer.set(4000.0, t0 + 0.1)          # rate stays None
+    assert _wait_done(ctrl)
+    assert time.time() - t_start >= 1.0, "climb ended early on an unknown rate"
+
+
+def test_zero_lead_reproduces_legacy_exit(monkeypatch):
+    """Emergency climbs pass lead 0 — behaviour must be byte-identical to
+    the pre-ADR-083 exit (terrain outranks efficiency)."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.2, confirm_reads=1)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    t_start = time.time()
+    ctrl.climb_mode(target_alt=5000, max_s=1.2, exit_lead_s=0.0)
+    time.sleep(0.3)
+    analyzer.set(4000.0, t0 + 0.1)
+    analyzer._snap.altitude.rate = 450.0     # would predict 5350 — must be ignored
+    assert _wait_done(ctrl)
+    assert time.time() - t_start >= 1.0, "zero lead still exited on prediction"
+
+
+def test_confirm_reads_still_debounces_the_prediction(monkeypatch):
+    """One predicted-over-target read must not end a confirm_reads=2 climb."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.4, confirm_reads=2)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=5000, max_s=1.4, exit_lead_s=3.0)
+    time.sleep(0.3)
+    analyzer.set(4000.0, t0 + 0.1)
+    analyzer._snap.altitude.rate = 450.0     # streak 1 only
+    time.sleep(0.3)
+    assert ctrl.is_climbing(), "single predicted read ended the climb"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_burner_cut_at_target_and_never_relit(monkeypatch):
+    """ADR 083 d3: thrust stops on the first at-target read, and the ADR 075
+    fuel rearm must not relight it above target."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0, fuel=100)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=2.0, confirm_reads=5)   # keep the hold alive
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=5000, max_s=2.0, fuel_floor_pct=10.0)
+    time.sleep(0.3)
+    assert _presses(kb, AFTERBURNER_KEY), "burner never lit"
+    analyzer.set(5100.0, t0 + 0.1)          # at target
+    time.sleep(0.4)
+    assert _releases(kb, AFTERBURNER_KEY), "burner not cut at target"
+    lit_before = len(_presses(kb, AFTERBURNER_KEY))
+    analyzer.set(5200.0, t0 + 0.2)          # still above, fuel still 100%
+    time.sleep(0.4)
+    assert len(_presses(kb, AFTERBURNER_KEY)) == lit_before, \
+        "burner relit above target"
+    ctrl._climb_stop.set()
     assert _wait_done(ctrl)

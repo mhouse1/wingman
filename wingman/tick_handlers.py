@@ -286,6 +286,12 @@ class RespawnHandler:
             )
             return
 
+        # ADR 076 d2: the aircraft is alive in battle — start the spawn
+        # guard's release-overlap window regardless of which restart branch
+        # follows (restart, missiles-empty skip, restart-disabled: the guard
+        # must hand off in all of them).
+        ctrl.notify_spawn_alive()
+
         if not ctrl.is_auto_respawn_restart_enabled():
             logger.debug("HEALTH ALIVE consumed — auto-respawn restart disabled")
             return
@@ -369,6 +375,11 @@ class RespawnHandler:
                         self._live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
                     analyzer.trigger_event("respawn_reset")
                 ctrl.set_auto_respawn_restart(True)  # always restart after respawn
+                # ADR 076 d1: death is latched — hold nose-up through the
+                # respawn screen so the new life's first frames are already
+                # pitching up (spawn-into-terrain anomaly). Inert while the
+                # screen is up; the alive handoff below releases it.
+                ctrl.start_spawn_guard()
                 # Wait for the cancelled mission thread to release its lock so the
                 # health-alive restart can't be skipped by a teardown race
                 # (is_mission_running would read True).
@@ -715,6 +726,17 @@ class BehaviorTreeHandler:
         self._climb_band = (climb_cfg.get("enter_below_alt"),
                             climb_cfg.get("exit_above_alt"))
         self._climb_confirm = int(climb_cfg.get("confirm_reads", 1))
+        # ADR 075: armed altitude-sustain band and the evade fuel reserve. The
+        # start_fn wrapper picks the sustain target when the aircraft is above
+        # the emergency band — the leaf is shared, the targets are not.
+        _sustain_cfg = climb_cfg.get("sustain", {}) or {}
+        self._sustain_enabled = bool(_sustain_cfg.get("enabled", False))
+        self._sustain_exit_alt = _sustain_cfg.get("exit_above_alt")
+        self._sustain_max_s = float(_sustain_cfg.get("max_climb_s", 90.0))
+        self._climb_fuel_reserve = float(climb_cfg.get("fuel_reserve_pct", 0.0))
+        # ADR 083 d1/d2: predictive exit lead, sustain climbs only.
+        self._climb_exit_lead_s = float(climb_cfg.get("exit_lead_s", 0.0))
+        self._last_altitude: "float | None" = None
         if not bool(climb_cfg.get("enabled", False)):
             self._climb_shadow = make_climb_condition(
                 *self._climb_band, confirm_reads=self._climb_confirm)
@@ -739,9 +761,32 @@ class BehaviorTreeHandler:
             # is only inserted in that case (see build_tree), so there is no
             # in-tree selection-only variant to wire.
             if self.active and bool(climb_cfg.get("enabled", False)):
-                actuators[TACTIC_CLIMB] = (ctrl.climb_mode, ctrl.is_climbing)
+                actuators[TACTIC_CLIMB] = (self._start_climb, ctrl.is_climbing)
             self._tree = build_tree(bt_cfg, actuators=actuators or None)
             self._writer = make_snapshot_writer()
+
+    def _start_climb(self) -> None:
+        """Climb leaf start_fn (ADR 075): pick the band the selection came from.
+
+        Below the emergency enter threshold (or with altitude unknown) this is
+        a terrain-avoidance climb: Controller defaults, no fuel held back —
+        terrain outranks the evade reserve. Otherwise the sustain band selected
+        it: climb to the operating altitude with the evade fuel reserve
+        honoured, so the burner is released once fuel drops to the reserve.
+        """
+        alt = self._last_altitude
+        emergency_enter = self._climb_band[0]
+        is_sustain = (self._sustain_enabled
+                      and self._sustain_exit_alt is not None
+                      and alt is not None
+                      and (emergency_enter is None or alt >= float(emergency_enter)))
+        if is_sustain:
+            self._ctrl.climb_mode(target_alt=float(self._sustain_exit_alt),
+                                  max_s=self._sustain_max_s,
+                                  fuel_floor_pct=self._climb_fuel_reserve,
+                                  exit_lead_s=self._climb_exit_lead_s)
+        else:
+            self._ctrl.climb_mode()
 
     def _start_disengage(self) -> None:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence
@@ -794,6 +839,9 @@ class BehaviorTreeHandler:
         altitude = None
         if snapshot_obj is not None and snapshot_obj.altitude_fresh():
             altitude = snapshot_obj.altitude.stable_value
+        # Stored for _start_climb, which runs inside tree.tick() below and
+        # needs the altitude the selection was made against (ADR 075).
+        self._last_altitude = altitude
         is_respawning, _, _ = self._analyzer.get_respawn_cache_result()
         incoming, _, _ = self._analyzer.get_incoming_cache_result()
         missiles_empty_confirmed = False
@@ -814,6 +862,7 @@ class BehaviorTreeHandler:
             mission_running=self._ctrl.is_mission_running(),
             game_state=current_game_state,
             missiles_empty_confirmed=missiles_empty_confirmed,
+            fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
         )
         self._writer.set("snapshot", snap)
         self._tree.tick()
@@ -823,10 +872,10 @@ class BehaviorTreeHandler:
             self._last_selection = selection
         logger.debug(
             "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
-            "respawn=%s alt=%s mission=%s",
+            "respawn=%s alt=%s fuel=%s mission=%s",
             self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
             snap.ring_long, absent_s, snap.is_respawning, altitude,
-            snap.mission_running,
+            snap.fuel_pct, snap.mission_running,
         )
         if self._climb_shadow is not None:
             # Outside GAME_BATTLE the Idle leaf would own selection, and the
@@ -1079,10 +1128,19 @@ class UnknownAnomalyRecorder:
         self._recapture_s = float(cfg.get("recapture_interval_s", 120.0))
         self._max_per_episode = int(cfg.get("max_per_episode", 5))
         self._dir = str(cfg.get("dir", "test_screenshots/unknown_anomalies"))
+        # Grace period after the FIRST dismissal attempt of an episode. Measured
+        # from the first attempt, not the latest, so a popup that is detected and
+        # re-clicked every cycle without clearing still gets captured as evidence
+        # that handling failed.
+        self._dismiss_grace_s = float(cfg.get("dismiss_grace_s", 20.0))
         self._clock = clock
         self._unknown_since = 0.0
         self._captured = 0
         self._last_capture_ts = 0.0
+        self._first_dismiss_ts = 0.0
+        self._dismiss_attempts = 0
+        self._dismiss_popups: "list[str]" = []
+        self._cleared_popups: "list[str]" = []
 
     def on_state_change(self, current_game_state, prev_game_state) -> None:
         if current_game_state == GameState.GAME_UNKNOWN:
@@ -1091,6 +1149,40 @@ class UnknownAnomalyRecorder:
             self._last_capture_ts = 0.0
         else:
             self._unknown_since = 0.0
+        # Dismissal history belongs to the episode: leaving GAME_UNKNOWN means
+        # handling worked (or was never needed), so it must not carry forward.
+        self._first_dismiss_ts = 0.0
+        self._dismiss_attempts = 0
+        self._dismiss_popups = []
+        self._cleared_popups = []
+
+    def note_dismiss_attempt(self, popup: str) -> None:
+        """Record that popup dismissal was attempted during this episode.
+
+        Called from the LOBBY_POPUP_CLICK handler. Suppresses the capture for
+        ``dismiss_grace_s`` so a popup that IS handled never produces an
+        anomaly screenshot; if the stall outlives the grace window the capture
+        proceeds and names the popups that failed to clear it.
+        """
+        now = self._clock()
+        if self._first_dismiss_ts == 0.0:
+            self._first_dismiss_ts = now
+        self._dismiss_attempts += 1
+        if popup not in self._dismiss_popups:
+            self._dismiss_popups.append(popup)
+
+    def note_popup_absent(self) -> None:
+        """Record that a popup scan completed with nothing on screen.
+
+        Distinguishes "the dismissal failed" from "the dismissal worked but the
+        screen is still unclassifiable". Without this the recorder infers
+        failure from the state alone and mislabels a slow classification as a
+        failed dismissal (observed live 2026-08-20 00:33:37).
+        """
+        if self._first_dismiss_ts:
+            self._cleared_popups = list(self._dismiss_popups)
+            self._first_dismiss_ts = 0.0
+            self._dismiss_popups = []
 
     def tick(self, frame, current_game_state) -> "str | None":
         """Capture when GAME_UNKNOWN has persisted past the threshold.
@@ -1111,6 +1203,18 @@ class UnknownAnomalyRecorder:
             return None
         if self._captured >= self._max_per_episode:
             return None
+        # Handling was attempted and may still be taking effect — a popup that
+        # clears is not an anomaly, so hold the capture until the grace window
+        # from the FIRST attempt expires.
+        if self._first_dismiss_ts:
+            grace_left = self._dismiss_grace_s - (now - self._first_dismiss_ts)
+            if grace_left > 0:
+                logger.debug(
+                    "ADR074 anomaly: capture deferred %.0fs — dismissal of %s "
+                    "attempted %dx, waiting to see if it clears",
+                    grace_left, ", ".join(self._dismiss_popups) or "popup",
+                    self._dismiss_attempts)
+                return None
         if self._last_capture_ts and now - self._last_capture_ts < self._recapture_s:
             return None
         try:
@@ -1129,7 +1233,86 @@ class UnknownAnomalyRecorder:
             return None
         self._captured += 1
         self._last_capture_ts = now
+        if self._first_dismiss_ts:
+            handling = ("dismissal of %s attempted %dx and did NOT clear it"
+                        % (", ".join(self._dismiss_popups), self._dismiss_attempts))
+        elif self._cleared_popups:
+            handling = ("dismissal of %s cleared the popup (%dx) but GAME_UNKNOWN "
+                        "persisted — cause is NOT popup handling"
+                        % (", ".join(self._cleared_popups), self._dismiss_attempts))
+        else:
+            handling = "no calibrated popup crop matched — nothing to dismiss"
         logger.warning(
-            "ADR074 anomaly: GAME_UNKNOWN stuck for %.0fs — screenshot %d/%d "
-            "saved to %s", stuck_for, self._captured, self._max_per_episode, path)
+            "ADR074 anomaly: GAME_UNKNOWN stuck for %.0fs (%s) — screenshot %d/%d "
+            "saved to %s", stuck_for, handling, self._captured,
+            self._max_per_episode, path)
+        return str(path)
+
+class HealthDropoutRecorder:
+    """ADR 080 d2: capture full frames during live-flight health OCR dropouts.
+
+    An episode is one continuous confirmed-read gap past ``capture_after_s``
+    while telemetry is live (stale telemetry means a death/menu gap — never
+    captured). One frame per episode plus one recapture per
+    ``recapture_interval_s`` for long episodes, capped per session. Mirrors
+    the ADR 074 anomaly recorder contract: never raises, capture failure
+    must not take down the tick loop.
+    """
+
+    def __init__(self, cfg: "dict | None", analyzer, clock=time.time):
+        import cv2  # heavy import kept local: recorder is constructed once
+        self._cv2 = cv2
+        cfg = cfg or {}
+        self._enabled = bool(cfg.get("enabled", True))
+        self._after_s = float(cfg.get("capture_after_s", 5.0))
+        self._recapture_s = float(cfg.get("recapture_interval_s", 60.0))
+        self._max_per_session = int(cfg.get("max_per_session", 12))
+        self._dir = str(cfg.get("dir", "test_screenshots/health_dropouts"))
+        self._analyzer = analyzer
+        self._clock = clock
+        self._captured_total = 0
+        self._episode_captured = False
+        self._last_capture_ts = 0.0
+
+    def tick(self, frame, current_game_state) -> "str | None":
+        """Capture when a live-telemetry health gap has persisted past the
+        threshold. Returns the saved path (for tests/logging), else None."""
+        if not self._enabled or frame is None:
+            return None
+        if current_game_state != GameState.GAME_BATTLE:
+            self._episode_captured = False
+            return None
+        gap = self._analyzer.health_confirmed_gap_s()
+        if gap is None or gap < self._after_s:
+            # A confirmed read (or no anchor yet) closed the episode.
+            self._episode_captured = False
+            return None
+        if not self._analyzer.telemetry_hud_live():
+            return None   # death/menu gap — not a dropout
+        if self._captured_total >= self._max_per_session:
+            return None
+        now = self._clock()
+        if self._episode_captured and now - self._last_capture_ts < self._recapture_s:
+            return None
+        try:
+            from datetime import datetime
+            from pathlib import Path
+            out_dir = Path(self._dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = out_dir / f"dropout_{stamp}_gap{int(gap)}s.png"
+            if not self._cv2.imwrite(str(path), frame):
+                logger.warning("ADR080 dropout: screenshot write failed: %s", path)
+                return None
+        except Exception as e:
+            logger.warning("ADR080 dropout: screenshot capture failed: %s: %s",
+                           type(e).__name__, e)
+            return None
+        self._captured_total += 1
+        self._episode_captured = True
+        self._last_capture_ts = now
+        logger.info(
+            "ADR080 dropout: health unconfirmed %.0fs with live telemetry — "
+            "frame %d/%d saved to %s",
+            gap, self._captured_total, self._max_per_session, path)
         return str(path)

@@ -62,6 +62,10 @@ class AnalyzerSnapshot:
     # applied. The actuating Eject leaf consumes THIS, never the raw
     # ``missiles`` read (the 2026-08-08 shadow-session gate).
     missiles_empty_confirmed: bool = False
+    # ADR 075: afterburner fuel percentage (0-100) from the FUEL_100 crop,
+    # None when unread or stale. Consumed by the Controller's burner gating,
+    # carried here so tactics and logging see the same frozen value.
+    fuel_pct: "int | None" = None
 
     @property
     def contacts(self) -> int:
@@ -232,6 +236,38 @@ def make_climb_condition(enter_below_alt: "float | None",
     return climb
 
 
+def make_sustain_climb_condition(enter_below_alt: "float | None",
+                                 exit_above_alt: "float | None",
+                                 confirm_reads: int = 1):
+    """ADR 075: climb-while-armed altitude sustain band.
+
+    The adaptive J20 doctrine: as long as the aircraft has missiles and a
+    mission is running, it works its way up to the operating altitude while
+    search-and-destroy runs. Same hysteresis + confirm-reads debounce as the
+    ADR 073 emergency band (delegated to ``make_climb_condition``), gated on:
+
+    - ``missiles`` > 0 — an empty aircraft belongs to the Eject leaf, and an
+      unreadable count must not command a climb;
+    - ``mission_running`` — sustain is mission doctrine, unlike the emergency
+      band which fires regardless (terrain outranks everything).
+
+    No is_running stickiness here: the leaf combines this condition with the
+    emergency band's, and that one already carries the stickiness for any
+    active climb thread.
+    """
+    band = make_climb_condition(enter_below_alt, exit_above_alt,
+                                is_running_fn=None,
+                                confirm_reads=confirm_reads)
+
+    def sustain(snapshot: AnalyzerSnapshot) -> bool:
+        if snapshot.missiles is None or snapshot.missiles <= 0:
+            return False
+        if not snapshot.mission_running:
+            return False
+        return band(snapshot)
+    return sustain
+
+
 def has_contacts(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.contacts > 0
 
@@ -320,14 +356,30 @@ def build_tree(bt_cfg: dict, clock=time.time,
         if climb_fns is not None:
             climb_kwargs = {"start_fn": climb_fns[0],
                             "is_running_fn": climb_fns[1]}
-        climb_leaf = ConditionTactic(
-            TACTIC_CLIMB,
-            make_climb_condition(
-                climb_cfg.get("enter_below_alt"),
-                climb_cfg.get("exit_above_alt"),
-                is_running_fn=climb_fns[1] if climb_fns is not None else None,
-                confirm_reads=int(climb_cfg.get("confirm_reads", 1))),
-            **climb_kwargs)
+        emergency = make_climb_condition(
+            climb_cfg.get("enter_below_alt"),
+            climb_cfg.get("exit_above_alt"),
+            is_running_fn=climb_fns[1] if climb_fns is not None else None,
+            confirm_reads=int(climb_cfg.get("confirm_reads", 1)))
+        # ADR 075: the armed altitude-sustain band shares the leaf with the
+        # emergency band. Both closures are evaluated EVERY tick (no
+        # short-circuit) so neither hysteresis state machine goes stale while
+        # the other holds the selection.
+        sustain_cfg = climb_cfg.get("sustain", {}) or {}
+        if bool(sustain_cfg.get("enabled", False)):
+            sustain = make_sustain_climb_condition(
+                sustain_cfg.get("enter_below_alt"),
+                sustain_cfg.get("exit_above_alt"),
+                confirm_reads=int(climb_cfg.get("confirm_reads", 1)))
+
+            def climb_condition(snapshot, _e=emergency, _s=sustain):
+                e = _e(snapshot)
+                s = _s(snapshot)
+                return e or s
+        else:
+            climb_condition = emergency
+        climb_leaf = ConditionTactic(TACTIC_CLIMB, climb_condition,
+                                     **climb_kwargs)
         children.insert(len(children) - 2, climb_leaf)   # above Engage
 
     root = py_trees.composites.Selector(

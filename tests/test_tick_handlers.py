@@ -464,6 +464,8 @@ class _RespawnCtrlStub:
         self.restarts = 0
         self.eject_stops = 0
         self.cancels = 0
+        self.spawn_guard_starts = 0
+        self.spawn_alive_notifies = 0
 
     def is_mission_running(self):
         return self._running
@@ -485,6 +487,12 @@ class _RespawnCtrlStub:
 
     def set_auto_respawn_restart(self, v):
         self._auto = v
+
+    def start_spawn_guard(self):
+        self.spawn_guard_starts += 1
+
+    def notify_spawn_alive(self):
+        self.spawn_alive_notifies += 1
 
 
 def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None):
@@ -828,5 +836,204 @@ class TestUnknownAnomalyRecorder:
         clock = self._clock()
         r = self._recorder(tmp_path, clock)
         clock.state["now"] += 100.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_dismissal_attempt_defers_capture(self, tmp_path):
+        """A popup being handled is not an anomaly — hold the capture."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None
+        clock.state["now"] += 19.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None   # still in grace
+        assert list(tmp_path.iterdir()) == []
+
+    def test_capture_proceeds_when_dismissal_does_not_clear(self, tmp_path):
+        """Grace runs from the FIRST attempt, so repeated failing clicks still capture."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None
+        for _ in range(4):            # popup re-detected and re-clicked every 5s
+            clock.state["now"] += 6.0
+            r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+        assert r._dismiss_attempts == 5
+
+    def test_successful_dismissal_never_captures(self, tmp_path):
+        """Popup cleared, state left GAME_UNKNOWN — no evidence needed."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None
+        r.on_state_change(GameState.GAME_LOBBY, GameState.GAME_UNKNOWN)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_dismiss_history_resets_between_episodes(self, tmp_path):
+        """A later stall must not inherit the previous episode's grace window."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        r.on_state_change(GameState.GAME_LOBBY, GameState.GAME_UNKNOWN)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_LOBBY)
+        assert r._dismiss_attempts == 0 and r._dismiss_popups == []
+        clock.state["now"] += 31.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_no_dismissal_still_captures_immediately(self, tmp_path):
+        """Nothing matched the screen — the original ADR 074 path is unchanged."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_popup_absent_ends_grace_and_records_cleared(self, tmp_path):
+        """Popup gone but still unclassified: capture at once, blame nothing.
+
+        Regression for the live 2026-08-20 00:33:37 mislabel — the ESC HAD
+        worked (5 consecutive 'not found' scans) yet the capture claimed the
+        dismissal "did NOT clear it", because failure was inferred from the
+        state instead of from the popup still being on screen.
+        """
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None   # in grace
+        r.note_popup_absent()                                          # ESC worked
+        assert r._first_dismiss_ts == 0.0
+        assert r._cleared_popups == ["NEW_FLIGHT_PASS"]
+        # Grace no longer applies: the stall is real but not a popup failure.
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_popup_absent_before_any_dismissal_is_a_noop(self, tmp_path):
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        r.note_popup_absent()
+        assert r._cleared_popups == [] and r._dismiss_attempts == 0
+        clock.state["now"] += 31.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_popup_reappearing_after_clear_re_arms_grace(self, tmp_path):
+        """A popup that comes back is a fresh handling attempt, not a cleared one."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        r.note_popup_absent()
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")      # back again
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None   # grace re-armed
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestHealthDropoutRecorder:
+    """ADR 080 d2: frames captured during live-flight health OCR dropouts."""
+
+    class _FakeDropoutAnalyzer:
+        def __init__(self):
+            self.gap = None
+            self.live = True
+
+        def health_confirmed_gap_s(self):
+            return self.gap
+
+        def telemetry_hud_live(self):
+            return self.live
+
+    def _recorder(self, tmp_path, analyzer, clock, **cfg_overrides):
+        from wingman.tick_handlers import HealthDropoutRecorder
+        cfg = {"capture_after_s": 5.0, "recapture_interval_s": 60.0,
+               "max_per_session": 2, "dir": str(tmp_path)}
+        cfg.update(cfg_overrides)
+        return HealthDropoutRecorder(cfg, analyzer, clock=clock)
+
+    @staticmethod
+    def _frame():
+        import numpy as np
+        return np.zeros((4, 4, 3), dtype=np.uint8)
+
+    @staticmethod
+    def _clock(start=1000.0):
+        state = {"now": start}
+        def clock():
+            return state["now"]
+        clock.state = state
+        return clock
+
+    def test_short_gap_never_captures(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 3.0
+        r = self._recorder(tmp_path, a, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_captures_past_threshold_with_gap_in_name(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 7.2
+        r = self._recorder(tmp_path, a, self._clock())
+        path = r.tick(self._frame(), GameState.GAME_BATTLE)
+        assert path is not None and "gap7s" in path
+        assert (tmp_path / path.split("/")[-1]).exists()
+
+    def test_stale_telemetry_gap_never_captures(self, tmp_path):
+        """A gap with stale telemetry is a death/menu gap, not a dropout."""
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 20.0
+        a.live = False
+        r = self._recorder(tmp_path, a, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_one_per_episode_plus_recapture_and_session_cap(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 6.0
+        clock = self._clock()
+        r = self._recorder(tmp_path, a, clock)
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # 1st
+        clock.state["now"] += 5.0
+        a.gap = 11.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None     # interval gate
+        clock.state["now"] += 60.0
+        a.gap = 71.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # recapture
+        clock.state["now"] += 60.0
+        a.gap = 131.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None     # session cap (2)
+
+    def test_confirmed_read_resets_episode(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 6.0
+        clock = self._clock()
+        r = self._recorder(tmp_path, a, clock)
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # episode 1
+        a.gap = 0.5                                                      # confirm landed
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        clock.state["now"] += 1.0
+        a.gap = 6.0                                                      # new episode
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # captures again
+
+    def test_non_battle_state_never_captures(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 30.0
+        r = self._recorder(tmp_path, a, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_LOBBY) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_disabled_config_is_noop(self, tmp_path):
+        a = self._FakeDropoutAnalyzer()
+        a.gap = 30.0
+        r = self._recorder(tmp_path, a, self._clock(), enabled=False)
         assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
         assert list(tmp_path.iterdir()) == []

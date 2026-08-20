@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.3"
-WINGMAN_VERSION_DETAILS = "Make J20 mission sequence behavior driven instead of hard coded"
+WINGMAN_VERSION = "1.8.4"
+WINGMAN_VERSION_DETAILS = "Part2: Make J20 mission sequence behavior driven instead of hard coded"
 
 from .capture import Capture
 from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
@@ -30,6 +30,7 @@ from .tick_handlers import (
     EnemyPresenceHandler,
     RespawnHandler,
     TrackingHudHandler,
+    HealthDropoutRecorder,
     UnknownAnomalyRecorder,
     WaitingFallbackHandler,
 )
@@ -346,6 +347,7 @@ def main():
         telemetry_cfg=cfg.get("telemetry", {}),
         missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
         climb_cfg=cfg.get("behavior_tree", {}).get("climb", {}),
+        fuel_cfg=cfg.get("fuel", {}),
         capture_stale_inject_s=float(mission_cfg.get("capture_stale_inject_s", 10.0)),
     )
 
@@ -399,6 +401,11 @@ def main():
             live_capture.evaluate(mt_frame, "GAME_BATTLE", _now + 1e-6)
         ctrl.set_on_manual_takeover_frame(_on_manual_takeover_frame)
 
+    # Constructed ahead of _handle_lobby_popup: the handler reports dismissal
+    # attempts to it, and the quick-scan thread now starts while still in
+    # GAME_UNKNOWN, so the first popup event can arrive early.
+    unknown_anomaly = UnknownAnomalyRecorder(cfg.get("unknown_anomaly", {}))
+
     def _handle_lobby_popup(popup):
         current = analyzer.game_state
         if current not in POPUP_DISMISS_STATES:
@@ -407,8 +414,13 @@ def main():
         if not ctrl.popup_click_allowed(popup):
             logger.debug("Lobby quick-scan: popup '%s' click suppressed by cooldown", popup)
             return
-        logger.info("\033[93m📋 Lobby quick-scan: dismissing popup '%s'\033[0m", popup)
+        logger.info("\033[93m📋 Lobby quick-scan: dismissing popup '%s' (state=%s)\033[0m",
+                    popup, current.name)
         ctrl.record_popup_click(popup)
+        if current == GameState.GAME_UNKNOWN:
+            # ADR 074: tell the anomaly recorder handling is underway so it only
+            # captures a screenshot if the stall SURVIVES the dismissal attempt.
+            unknown_anomaly.note_dismiss_attempt(popup)
         if popup == "NEW_FLIGHT_PASS":
             # Flight-pass promo (ADR 074): no safe click target calibrated —
             # ESC dismisses it. Cooldown above still rate-limits the presses.
@@ -442,6 +454,73 @@ def main():
             threading.Thread(target=_click_ready_after_invite, daemon=True).start()
 
     analyzer.subscribe(GameEvent.LOBBY_POPUP_CLICK, _handle_lobby_popup, name="controller")
+    analyzer.subscribe(GameEvent.LOBBY_POPUP_ABSENT, unknown_anomaly.note_popup_absent,
+                       name="unknown_anomaly")
+
+    stall_cfg = cfg.get("stall_recovery", {}) or {}
+    stall_play_delay_s = float(stall_cfg.get("play_click_delay_s", 2.0))
+    stall_cooldown_s = float(stall_cfg.get("cooldown_s", 20.0))
+
+    def _handle_stall_recovery(crop):
+        """ADR 084: act on a screen that has stranded the FSM.
+
+        The analyzer only emits this once its stall gate is open, so no state
+        check is repeated here — but the cooldown is, because a screen that does
+        not clear would otherwise be re-actioned every scan interval.
+        """
+        current = analyzer.game_state
+        if not ctrl.popup_click_allowed(crop, cooldown=stall_cooldown_s):
+            logger.debug("Stall recovery: '%s' action suppressed by cooldown", crop)
+            return
+        ctrl.record_popup_click(crop)
+        # Recorded as a dismissal attempt so an ADR 074 capture can say whether
+        # recovery was tried and failed, rather than blaming an untried screen.
+        if current == GameState.GAME_UNKNOWN:
+            unknown_anomaly.note_dismiss_attempt(crop)
+
+        if crop in ("STALL_AIRCRAFT", "STALL_EXIT_TO_DESKTOP"):
+            # Escape, never a click: on the Exit-to-Desktop modal the Cancel
+            # button sits beside an Exit button that would close the game.
+            logger.warning("\033[93m🔧 Stall recovery: '%s' — pressing ESC (state=%s)\033[0m",
+                           crop, current.name)
+            ctrl.press_escape(hold_seconds=0.05, block=False)
+            return
+
+        if crop == "STALL_RETRY":
+            logger.warning("\033[93m🔧 Stall recovery: '%s' — clicking RETRY (state=%s)\033[0m",
+                           crop, current.name)
+            ctrl.click_crop(analyzer.crops["STALL_RETRY"], block=False, count=1,
+                            region_name="STALL_RETRY")
+            return
+
+        if crop == "STALL_MULTI_PLAYER":
+            logger.warning(
+                "\033[93m🔧 Stall recovery: '%s' — leaving squad via red X (state=%s)\033[0m",
+                crop, current.name)
+            ctrl.click_crop(analyzer.crops["STALL_MULTI_PLAYER"], block=False, count=1,
+                            region_name="STALL_MULTI_PLAYER")
+            if replay_mode:
+                logger.info("STALL_MULTI_PLAYER PLAY click-through skipped in replay mode")
+                return
+
+            def _click_play_after_leaving_squad():
+                time.sleep(stall_play_delay_s)
+                new_frame = cap.grab_from_thread()
+                if new_frame is None:
+                    logger.warning("STALL_MULTI_PLAYER: frame capture returned None")
+                    return
+                # Re-scans UNREADY too, so a squad we failed to leave suppresses
+                # the click instead of firing PLAY into a still-blocked lobby.
+                ready = analyzer.scan_region_for_play_button(new_frame)
+                if ready is None:
+                    logger.warning("STALL_MULTI_PLAYER: no PLAY/READY after leaving squad")
+                    return
+                logger.info("\033[92m🔧 Stall recovery: clicking '%s' after squad exit\033[0m", ready)
+                ctrl.click_crop(analyzer.crops[ready], block=False, count=1, region_name=ready)
+            threading.Thread(target=_click_play_after_leaving_squad, daemon=True).start()
+
+    analyzer.subscribe(GameEvent.STALL_RECOVERY_ACTION, _handle_stall_recovery,
+                       name="controller")
     analyzer.subscribe(GameEvent.LOBBY_STALL,
                        lambda: ctrl.press_escape(hold_seconds=0.05, block=False),
                        name="controller")
@@ -529,7 +608,8 @@ def main():
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
     )
-    unknown_anomaly = UnknownAnomalyRecorder(cfg.get("unknown_anomaly", {}))
+    health_dropout = HealthDropoutRecorder(
+        (cfg.get("health", {}) or {}).get("dropout_capture", {}), analyzer)
     startup_time = time.time()
     battle_ever_reached = False
 
@@ -770,6 +850,10 @@ def main():
             # evidence future stall handling is built from.
             unknown_anomaly.tick(frame, current_game_state)
 
+            # ADR 080: archive the screen when health OCR drops out during
+            # live flight — the evidence the perception fix is built from.
+            health_dropout.tick(frame, current_game_state)
+
             tracking_hud.tick(frame, current_game_state, game_state)
 
             # Detect respawn — from overlay OCR, or (ADR 064 dual mode) from the
@@ -896,14 +980,21 @@ def main():
         shadow_summary = analyzer.shadow_respawn_summary()
         if shadow_summary is not None:
             logger.info("Shadow respawn detector (ADR 062 Phase A): %s", json.dumps(shadow_summary))
+        # ADR 080: live-flight health-dropout histogram — same
+        # emit-before-cleanup rule as the shadow summary above.
+        dropout_summary = analyzer.health_dropout_summary()
+        logger.info("Health dropout histogram (ADR 080): %s", json.dumps(dropout_summary))
         if hasattr(cap, "cleanup"):
             cap.cleanup()
         ctrl.cleanup()
         analyzer.cleanup()
         if stats_tracker is not None:
             try:
-                extra = {"respawn_shadow": shadow_summary} if shadow_summary is not None else None
-                stats_tracker.finalize(run_id=tracker.run_id, extra=extra)
+                extra = {}
+                if shadow_summary is not None:
+                    extra["respawn_shadow"] = shadow_summary
+                extra["health_dropouts"] = dropout_summary
+                stats_tracker.finalize(run_id=tracker.run_id, extra=extra or None)
                 stats_tracker.print_summary()
             except Exception as e:
                 logger.warning("MissionStatsTracker: finalize failed: %s", e)

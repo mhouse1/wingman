@@ -41,6 +41,21 @@ class GameState(Enum):
 POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
                         GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
+# ADR 084: states where the FSM has lost the screen and a recovery action is
+# warranted. Deliberately EXCLUDES GAME_LOBBY / GAME_WAITING — unlike the popup
+# crops, these actions leave squads and close modals next to an "Exit" button,
+# so they must not fire while the FSM still knows where it is.
+STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+
+# Scan order: most specific screen first. The batch stops at the first hit, so a
+# generic match must never pre-empt a precise one.
+STALL_RECOVERY_CROPS = ("STALL_RETRY", "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
+
+# Gated on UNREADY dwell rather than state dwell: UNREADY makes
+# scan_region_for_play_button return None, which makes _classify_unknown_state
+# fail forever, so this screen strands the FSM without ever looking like a popup.
+STALL_UNREADY_CROP = "STALL_MULTI_PLAYER"
+
 
 class GameEvent(Enum):
     """Orchestration events the analyzer publishes (ADR 060 Phase 1).
@@ -54,6 +69,8 @@ class GameEvent(Enum):
     START_GAME_STARTING_LOOP = auto()  # ()          — entered GAME_STARTING
     LOBBY_PLAY_CLICK = auto()          # (crop, frame)
     LOBBY_POPUP_CLICK = auto()         # (crop,)
+    LOBBY_POPUP_ABSENT = auto()        # ()          — popup batch completed, none detected
+    STALL_RECOVERY_ACTION = auto()     # (crop,)     — stall-recovery screen detected (ADR 084)
     LOBBY_STALL = auto()               # ()          — no lobby crops detected for the stall window
     FSM_TRANSITION = auto()            # (trigger, prev_state_name, next_state_name, ts)
     RESPAWN_DETECTED = auto()          # (frame,)    — fired from the background OCR thread
@@ -364,6 +381,24 @@ def _process_text_region(frame, text_tokens: "list[str]"):
     return (False, time.time() - t_start, None)
 
 
+# ADR 080: crops whose digits render in the HUD's pale green (the ammo
+# counters are white and stay on the legacy variant order).
+_GREEN_DIGIT_LABELS = ("health", "fuel")
+
+
+def _hsv_green_digit_mask(frame_bgr):
+    """Isolate pale-green HUD digits by hue, inverted for OCR (ADR 080 d3).
+
+    Luminance thresholding fails over sky: the green digits and blue sky
+    share brightness, so Otsu splits mid-glyph and emits fragments. Hue
+    separates them on every measured background.
+    """
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (35, 30, 120), (95, 255, 255))
+    upscaled = cv2.resize(mask, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    return cv2.bitwise_not(upscaled)
+
+
 def _process_health_region(health_frame, label: str = "health") -> "tuple[int | None, float]":
     """Extract the numeric health value from the health crop via OCR.
 
@@ -388,8 +423,22 @@ def _process_health_region(health_frame, label: str = "health") -> "tuple[int | 
     upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
     _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+    # ADR 080 d3: the HEALTH and FUEL digits are the HUD's pale green, which
+    # collapses under luminance thresholding whenever the background is sky
+    # (nose-up flight) — the measured source of the confirmed-read dropouts.
+    # For those labels a hue mask goes FIRST (9/9 dropout frames read exactly
+    # right vs 1/9 via Otsu, 2026-08-18), gray second, and the fragment-prone
+    # Otsu binary last (its partial reads — '50' from 250 — otherwise win the
+    # early return and feed the confirm window garbage). The ammo counters
+    # are white digits (the mask sees nothing there) and keep the original
+    # variant order untouched.
+    if label in _GREEN_DIGIT_LABELS:
+        variants = (_hsv_green_digit_mask(health_frame), upscaled, binary)
+    else:
+        variants = (binary, upscaled)
+
     raw_reads = []
-    for img in (binary, upscaled):
+    for img in variants:
         results = reader.readtext(img, detail=0, paragraph=False, workers=0)
         raw_reads.extend(str(r) for r in results)
         digits = "".join(c for r in results for c in str(r) if c.isdigit())
@@ -922,6 +971,12 @@ class GameStateAnalyzer:
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
         self._click_to_stop = threading.Event()
+        _stall_cfg = config.get("stall_recovery", {}) or {}
+        self._stall_action_after_s = float(_stall_cfg.get("action_after_s", 15.0))
+        self._stall_unready_dwell_s = float(_stall_cfg.get("unready_dwell_s", 30.0))
+        self._stall_scan_interval_s = float(_stall_cfg.get("scan_interval_s", 5.0))
+        self._unready_since = 0.0
+        self._stall_state_since = 0.0
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
@@ -943,6 +998,15 @@ class GameStateAnalyzer:
         self._unknown_debounce_required = max(1, int(startup_cfg.get("debounce_consecutive_required", 2)))
         self._unknown_candidate_state: "GameState | None" = None
         self._unknown_candidate_count = 0
+
+        # ADR 080 d1: live-flight health-dropout histogram. The stale flag
+        # taints the OPEN confirmed-read gap the moment telemetry goes stale
+        # (death/menu), keeping those gaps out of the dropout distribution.
+        # Starts True so the pre-first-read window can never count.
+        self._dropout_buckets = {"lt2s": 0, "2to5s": 0, "5to10s": 0,
+                                 "10to20s": 0, "gte20s": 0}
+        self._dropout_gaps: "list[float]" = []
+        self._gap_saw_stale_telemetry = True
 
         Machine(
             model=self,
@@ -1045,6 +1109,16 @@ class GameStateAnalyzer:
         # Signalled when flares == 2 (reload needed) or missiles == 0 (end mission).
         self.low_flares_event = threading.Event()
         self.no_missiles_event = threading.Event()
+
+        # Afterburner fuel sub-state (GAME_BATTLE only, ADR 075). The FUEL_100
+        # crop shows the fuel percentage as bare digits (no '%' symbol);
+        # readings outside 0-100 are OCR garbage and rejected.
+        _fuel_cfg = config.get("fuel", {})
+        self._fuel_pct: "int | None" = None
+        self._fuel_ts = 0.0
+        self._fuel_lock = threading.Lock()
+        self._last_logged_fuel = None
+        self._fuel_stale_after_s = float(_fuel_cfg.get("stale_after_s", 6.0))
 
         # Flight telemetry (GAME_BATTLE only) — speed (MPH) and altitude (feet),
         # read together from the combined ALTITUDE_SPEED crop (ADR 038).
@@ -1297,6 +1371,46 @@ class GameStateAnalyzer:
             if self._ammo_lock.locked():
                 self._ammo_lock.release()
 
+    def _process_fuel_reading(self, value: "int | None"):
+        """Range-gate and store one afterburner-fuel OCR reading (ADR 075).
+
+        The FUEL_100 crop shows 0-100 bare digits; anything outside that range
+        is an OCR misread (digit bleed from neighbouring HUD text) and must
+        not enter the cache — a garbage 8100 read as "plenty of fuel" would
+        keep the burner held through a genuinely empty tank.
+        """
+        if value is None:
+            return
+        if not (0 <= value <= 100):
+            logger.debug("Analyzer: fuel reading %d outside 0-100 — rejected", value)
+            return
+        with self._fuel_lock:
+            self._fuel_pct = value
+            self._fuel_ts = time.time()
+        if value != self._last_logged_fuel:
+            logger.debug("Afterburner fuel: %d%%", value)
+            self._last_logged_fuel = value
+
+    def get_afterburner_fuel_pct(self) -> "int | None":
+        """Latest afterburner fuel percentage, or None when unknown/stale.
+
+        Staleness matters here more than for ammo: fuel changes continuously
+        while the burner is held, so a reading older than ``stale_after_s``
+        says nothing about the current tank and must not gate the burner.
+        """
+        if not self._fuel_lock.acquire(timeout=1.0):
+            logger.warning("get_afterburner_fuel_pct: _fuel_lock timeout — returning None")
+            return None
+        try:
+            if self._fuel_pct is None:
+                return None
+            if time.time() - self._fuel_ts > self._fuel_stale_after_s:
+                return None
+            return self._fuel_pct
+        finally:
+            if self._fuel_lock.locked():
+                self._fuel_lock.release()
+
     def _harvest_telemetry_future(self) -> float:
         """Collect a finished telemetry OCR pass without blocking (ADR 038).
 
@@ -1500,6 +1614,8 @@ class GameStateAnalyzer:
             # animation — silently degrading "restart when health returns" to
             # "restart when the respawn screen clears".
             self._health = None
+        # ADR 080: a respawn gap is never a live-flight dropout.
+        self._gap_saw_stale_telemetry = True
         # Respawn teleports the aircraft — a legitimate discontinuity the
         # telemetry plausibility filter would otherwise reject for several
         # ticks, so recalibrate it alongside the health filter.
@@ -1816,8 +1932,54 @@ class GameStateAnalyzer:
                 self._max_confirmed_gap_s = gap
             if gap >= self._death_no_confirmed_s:
                 self._confirmed_gap_over_threshold += 1
+            # ADR 080 d1: live-flight dropout histogram. A gap that ever saw
+            # stale telemetry is a death/menu gap (respawn screens render no
+            # HUD) and stays out; what remains is health OCR failing while
+            # the aircraft demonstrably flies.
+            if (not self._gap_saw_stale_telemetry
+                    and self.game_state == GameState.GAME_BATTLE):
+                b = self._dropout_buckets
+                if gap < 2.0:
+                    b["lt2s"] += 1
+                elif gap < 5.0:
+                    b["2to5s"] += 1
+                elif gap < 10.0:
+                    b["5to10s"] += 1
+                elif gap < 20.0:
+                    b["10to20s"] += 1
+                else:
+                    b["gte20s"] += 1
+                if len(self._dropout_gaps) < 20000:
+                    self._dropout_gaps.append(round(gap, 2))
+        # A confirmed read opens a new gap window, telemetry-clean until the
+        # per-cycle sampling in _evaluate_confirmed_absence says otherwise.
+        self._gap_saw_stale_telemetry = False
         self._last_confirmed_read_ts = now_t
         self._confirmed_history.append((now_t, value))
+
+    def health_confirmed_gap_s(self) -> "float | None":
+        """Seconds since the last confirmed health read (None before the
+        first). ADR 080 d2: polled by the dropout frame recorder."""
+        anchor = self._last_confirmed_read_ts
+        if anchor <= 0.0:
+            return None
+        return time.time() - anchor
+
+    def telemetry_hud_live(self) -> bool:
+        """Public liveness accessor (ADR 079/080)."""
+        return self._telemetry_hud_live()
+
+    def health_dropout_summary(self) -> dict:
+        """ADR 080 d1: session histogram of live-flight confirmed-read gaps."""
+        gaps = sorted(self._dropout_gaps)
+        p95 = gaps[max(0, int(len(gaps) * 0.95) - 1)] if gaps else None
+        return {
+            "buckets": dict(self._dropout_buckets),
+            "count": len(gaps),
+            "over_5s": sum(1 for g in gaps if g >= 5.0),
+            "p95_s": p95,
+            "max_s": gaps[-1] if gaps else None,
+        }
 
     def _decline_before(self, evidence_start: float) -> bool:
         """True when confirmed health fell by >= decline_evidence_drop in the window before evidence began.
@@ -1841,6 +2003,11 @@ class GameStateAnalyzer:
         (which never confirm). The window halves when confirmed health was in
         rapid decline just before the last confirmed read — a death prior.
         """
+        # ADR 080: per-cycle telemetry sampling for the open confirmed-read
+        # gap — runs on every health cycle (digits or not), before any mode
+        # gating. The `not` guard keeps it to one lock acquire per gap.
+        if not self._gap_saw_stale_telemetry and not self._telemetry_hud_live():
+            self._gap_saw_stale_telemetry = True
         if self._respawn_detection_mode not in ("shadow", "dual"):
             return
         anchor = self._last_confirmed_read_ts
@@ -1850,7 +2017,32 @@ class GameStateAnalyzer:
         if self._decline_before(anchor):
             required /= 2.0
         if time.time() - anchor >= required:
+            # ADR 079: a live HUD disproves the dead premise. Health OCR
+            # drops out for 7-25s mid-flight (four false fires 2026-08-17)
+            # while telemetry keeps reading — a dead aircraft renders no
+            # HUD, so fresh telemetry at mark time means OCR dropout, not
+            # death. Real deaths mark mid-respawn-screen where telemetry
+            # has been stale for seconds (mark time separates the cases;
+            # at fire time the new life's HUD is fresh for real respawns
+            # too — the ADR 078 measurement).
+            if self._telemetry_hud_live():
+                logger.debug(
+                    "Health respawn detector: weak mark suppressed — "
+                    "telemetry live during the confirmed-read gap (ADR 079)")
+                return
             self._shadow_mark_death("weak")
+
+    def _telemetry_hud_live(self) -> bool:
+        """True when a fresh telemetry sample exists — the HUD is rendering,
+        so the aircraft exists (ADR 079).
+
+        @relation(SAF-003, scope=function)
+        """
+        try:
+            snap = self.get_telemetry()
+        except Exception:
+            return False
+        return snap is not None and snap.altitude_fresh()
 
     def _shadow_mark_death(self, tier: str):
         """Record a death mark for the health detector. Strong upgrades weak; weak never downgrades."""
@@ -2077,6 +2269,11 @@ class GameStateAnalyzer:
             self._click_to_latest_frame = frame
             self._click_to_frame_ts = time.time()
 
+        # Must run BEFORE the GAME_UNKNOWN branch below, which returns early:
+        # ADR 074 makes GAME_UNKNOWN a popup-dismiss state, so the scanner has
+        # to be alive *while* unclassified, not only after classification.
+        self._ensure_lobby_quick_scan_thread()
+
         state = {
             'is_respawning': False,
             'respawn_confidence': 0.0,
@@ -2123,22 +2320,11 @@ class GameStateAnalyzer:
             state['game_state'] = self.game_state
             return state
 
-        # Start background threads once on first frame after unknown-state classification.
+        # Click-to detection is only meaningful once the state is classified.
         if not self._click_to_thread_started:
             self._click_to_thread_started = True
             threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
             logger.debug("Click-to background thread started")
-        thread_dead = (self._lobby_quick_scan_thread is not None
-                       and not self._lobby_quick_scan_thread.is_alive())
-        if not self._lobby_quick_scan_thread_started or thread_dead:
-            if thread_dead:
-                logger.warning("Lobby quick-scan thread died unexpectedly — restarting")
-                self._lobby_quick_scan_stop.clear()
-            self._lobby_quick_scan_thread_started = True
-            self._lobby_quick_scan_thread = threading.Thread(
-                target=self._run_game_lobby_quick_scan, daemon=True)
-            self._lobby_quick_scan_thread.start()
-            logger.info("Lobby quick-scan background thread started")
 
         respawn_detected, confidence, method = self._detect_respawn(frame)
         
@@ -2292,6 +2478,7 @@ class GameStateAnalyzer:
                     health_frame = get_crop(full_frame, *self.crops["HEALTH"][:4]) if "HEALTH" in self.crops else None
                     ammo_flares_frame = get_crop(full_frame, *self.crops["AMMO_FLARES"][:4]) if "AMMO_FLARES" in self.crops else None
                     ammo_missile_frame = get_crop(full_frame, *self.crops["AMMO_MISSILE"][:4]) if "AMMO_MISSILE" in self.crops else None
+                    fuel_frame = get_crop(full_frame, *self.crops["FUEL_100"][:4]) if "FUEL_100" in self.crops else None
                     telemetry_frame = get_crop(full_frame, *self.crops["ALTITUDE_SPEED"][:4]) if "ALTITUDE_SPEED" in self.crops else None
                     t1 = time.time()
 
@@ -2312,6 +2499,7 @@ class GameStateAnalyzer:
                     health_future = executor.submit(_process_health_region, health_frame) if health_frame is not None else None
                     ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame, "ammo_flares") if ammo_flares_frame is not None else None
                     ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame, "ammo_missiles") if ammo_missile_frame is not None else None
+                    fuel_future = executor.submit(_process_health_region, fuel_frame, "fuel") if fuel_frame is not None else None
                     # Telemetry is fire-and-forget: harvest last submission's
                     # result if it finished, then maybe submit a fresh frame.
                     # The tick NEVER waits on telemetry (ADR 038 safety rule) —
@@ -2464,6 +2652,12 @@ class GameStateAnalyzer:
                             self._tracker.record_ocr_crop("ammo_missiles", ammo_missile_ocr_time)
                     else:
                         missile_value = None
+                    fuel_ocr_time = 0.0
+                    if fuel_future is not None:
+                        fuel_value, fuel_ocr_time = fuel_future.result(timeout=120)
+                        if self._tracker:
+                            self._tracker.record_ocr_crop("fuel", fuel_ocr_time)
+                        self._process_fuel_reading(fuel_value)
 
                     if respawn_detected:
                         with self._ammo_lock:
@@ -2498,9 +2692,9 @@ class GameStateAnalyzer:
                     logger.debug(
                         "Analyzer: Parallel OCR Timings - Extract: %.2fs, Submit: %.2fs | "
                         "Respawn OCR: %.2fs | Incoming OCR: %.2fs | Health OCR: %.2fs | "
-                        "Flares OCR: %.2fs | Missiles OCR: %.2fs | Telemetry OCR: %.2fs | Total: %.2fs",
+                        "Flares OCR: %.2fs | Missiles OCR: %.2fs | Fuel OCR: %.2fs | Telemetry OCR: %.2fs | Total: %.2fs",
                         t1-t0, t2-t1, respawn_ocr_time, incoming_processing_time, health_ocr_time,
-                        ammo_flares_ocr_time, ammo_missile_ocr_time, telemetry_ocr_time, t4-t0
+                        ammo_flares_ocr_time, ammo_missile_ocr_time, fuel_ocr_time, telemetry_ocr_time, t4-t0
                     )
                 # NOTE: the GAME_STARTING health-probe branch that used to live here
                 # was removed 2026-08-05. It was unreachable — _detect_respawn_ocr
@@ -2585,6 +2779,52 @@ class GameStateAnalyzer:
                     return
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
 
+    def _ensure_lobby_quick_scan_thread(self):
+        """Start (or restart) the popup quick-scan thread.
+
+        Called on every frame, including while still in GAME_UNKNOWN. ADR 074
+        made GAME_UNKNOWN a popup-dismiss state precisely because a modal popup
+        there hides every classification marker — so gating the scanner on
+        successful classification defeats the recovery path it was added for.
+        A session that boots straight into a popup (2026-08-19 04:29,
+        NEW_FLIGHT_PASS) previously stranded until a manual 'm' press.
+        """
+        if self._shutting_down or self._lobby_quick_scan_stop.is_set():
+            return
+        thread_dead = (self._lobby_quick_scan_thread is not None
+                       and not self._lobby_quick_scan_thread.is_alive())
+        if not self._lobby_quick_scan_thread_started or thread_dead:
+            if thread_dead:
+                logger.warning("Lobby quick-scan thread died unexpectedly — restarting")
+                self._lobby_quick_scan_stop.clear()
+            self._lobby_quick_scan_thread_started = True
+            self._lobby_quick_scan_thread = threading.Thread(
+                target=self._run_game_lobby_quick_scan, daemon=True)
+            self._lobby_quick_scan_thread.start()
+            logger.info("Lobby quick-scan background thread started")
+
+    def _stall_recovery_targets(self, state):
+        """Return the stall-recovery crops eligible to act right now (ADR 084).
+
+        Empty during healthy operation — these actions leave squads and dismiss
+        modals sitting next to an "Exit to Desktop" button, so the gate is
+        deliberately tighter than the popup crops': an unclassifiable state that
+        has PERSISTED, not merely occurred.
+        """
+        targets = []
+        now = time.time()
+        if (state in STALL_ACTION_STATES
+                and self._stall_state_since
+                and now - self._stall_state_since >= self._stall_action_after_s):
+            targets.extend(c for c in STALL_RECOVERY_CROPS if c in self.crops)
+        # Independent gate: a stuck UNREADY blocks classification outright, so it
+        # is timed from the UNREADY read itself rather than from the state.
+        if (self._unready_since
+                and now - self._unready_since >= self._stall_unready_dwell_s
+                and STALL_UNREADY_CROP in self.crops):
+            targets.append(STALL_UNREADY_CROP)
+        return targets
+
     def _run_game_lobby_quick_scan(self):
         """Scan lobby crops every 1s while in a POPUP_DISMISS_STATES state.
 
@@ -2610,6 +2850,7 @@ class GameStateAnalyzer:
             return
 
         last_popup_scan_ts = 0.0
+        last_stall_scan_ts = 0.0
         lobby_stall_since = 0.0  # timestamp when stall (no crops detected) first started
 
         while not self._lobby_quick_scan_stop.wait(timeout=1.0):
@@ -2620,6 +2861,13 @@ class GameStateAnalyzer:
                 # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
                 # counting fresh instead of comparing against a stale timestamp.
                 lobby_stall_since = 0.0
+            # ADR 084: dwell in an unclassifiable state, reset on any classified state
+            # so a brief GAME_UNKNOWN blip mid-transition never opens the gate.
+            if state in STALL_ACTION_STATES:
+                if self._stall_state_since == 0.0:
+                    self._stall_state_since = time.time()
+            else:
+                self._stall_state_since = 0.0
             # ADR 074: GAME_UNKNOWN participates for the POPUP batch only —
             # lobby crops stay excluded there: classification owns marker
             # detection in GAME_UNKNOWN, and clicking PLAY/CANCEL from an
@@ -2850,12 +3098,46 @@ class GameStateAnalyzer:
                                 crop, type(e).__name__, e,
                             )
 
+                    if not popup_detected:
+                        # The screen is popup-free: tells the ADR 074 recorder a
+                        # prior dismissal actually worked, so a continuing stall
+                        # is not blamed on popup handling.
+                        self.emit(GameEvent.LOBBY_POPUP_ABSENT)
+
                     if popup_scan_start is not None:
                         logger.debug(
                             "Lobby quick-scan: popup batch completed in %.2fs%s",
                             time.time() - popup_scan_start,
                             " (detected)" if popup_detected else "",
                         )
+
+                # --- Stall-recovery crops (ADR 084, gated on a real stall) ---
+                stall_targets = self._stall_recovery_targets(state)
+                if stall_targets and time.time() - last_stall_scan_ts >= self._stall_scan_interval_s:
+                    with self._click_to_frame_lock:
+                        stall_frame = self._click_to_latest_frame
+                        stall_frame_ts = self._click_to_frame_ts
+                    if stall_frame is not None and time.time() - stall_frame_ts <= 3.0:
+                        last_stall_scan_ts = time.time()
+                        for crop in stall_targets:
+                            try:
+                                detected, _, text = executor.submit(
+                                    _process_crop_region, stall_frame,
+                                    self.crops[crop][:4],
+                                    self.crops[crop].text or [],
+                                ).result(timeout=20)
+                            except Exception as e:
+                                logger.warning(
+                                    "Stall recovery: '%s' scan failed: %s: %s",
+                                    crop, type(e).__name__, e)
+                                continue
+                            if detected:
+                                logger.warning(
+                                    "\033[93m🔧 Stall recovery: '%s' detected (text='%s', state=%s)\033[0m",
+                                    crop, text, state.name)
+                                self.emit(GameEvent.STALL_RECOVERY_ACTION, crop)
+                                break
+                            logger.debug("Stall recovery: '%s' not found", crop)
 
                 cycle_elapsed = time.time() - cycle_start
                 if cycle_elapsed > 15.0:
@@ -3130,8 +3412,17 @@ class GameStateAnalyzer:
             if "UNREADY" in futures:
                 detected, _, text = futures["UNREADY"].result(timeout=30)
                 if detected:
-                    logger.info("Analyzer: UNREADY detected (text='%s') — suppressing PLAY click", text)
+                    # ADR 084: track dwell here rather than per-state. Returning
+                    # None also makes _classify_unknown_state fail, so a stuck
+                    # UNREADY strands the FSM in GAME_UNKNOWN indefinitely — the
+                    # dwell has to accumulate across whatever state we are in.
+                    if self._unready_since == 0.0:
+                        self._unready_since = time.time()
+                    logger.info(
+                        "Analyzer: UNREADY detected (text='%s') — suppressing PLAY click (%.0fs)",
+                        text, time.time() - self._unready_since)
                     return None
+                self._unready_since = 0.0
                 logger.debug("Analyzer: UNREADY not found")
             for crop in ("PLAY", "READY"):
                 if crop not in futures:
