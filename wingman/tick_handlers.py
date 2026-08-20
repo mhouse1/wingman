@@ -734,6 +734,8 @@ class BehaviorTreeHandler:
         self._sustain_exit_alt = _sustain_cfg.get("exit_above_alt")
         self._sustain_max_s = float(_sustain_cfg.get("max_climb_s", 90.0))
         self._climb_fuel_reserve = float(climb_cfg.get("fuel_reserve_pct", 0.0))
+        # ADR 083 d1/d2: predictive exit lead, sustain climbs only.
+        self._climb_exit_lead_s = float(climb_cfg.get("exit_lead_s", 0.0))
         self._last_altitude: "float | None" = None
         if not bool(climb_cfg.get("enabled", False)):
             self._climb_shadow = make_climb_condition(
@@ -781,7 +783,8 @@ class BehaviorTreeHandler:
         if is_sustain:
             self._ctrl.climb_mode(target_alt=float(self._sustain_exit_alt),
                                   max_s=self._sustain_max_s,
-                                  fuel_floor_pct=self._climb_fuel_reserve)
+                                  fuel_floor_pct=self._climb_fuel_reserve,
+                                  exit_lead_s=self._climb_exit_lead_s)
         else:
             self._ctrl.climb_mode()
 

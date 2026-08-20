@@ -340,7 +340,8 @@ class FakeController:
     def is_climbing(self) -> bool:
         return False
 
-    def climb_mode(self, target_alt=None, max_s=None, fuel_floor_pct=0.0) -> None:
+    def climb_mode(self, target_alt=None, max_s=None, fuel_floor_pct=0.0,
+                   exit_lead_s=0.0) -> None:
         self._intents.append({"action_type": "climb_mode"})
 
     # Engage-geometry actuation (3.1a) — called when the Engage leaf selects

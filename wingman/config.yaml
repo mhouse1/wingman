@@ -174,7 +174,7 @@ behavior_tree:
     max_hold_s: 15.0, pitch_down: false}
   climb: {enabled: true, enter_below_alt: 500, exit_above_alt: 1000, confirm_reads: 2,
     max_climb_s: 15.0, pitch_pulse_s: 1.5, pulse_observe_s: 2.5, min_climb_rate: 30.0,
-    max_climb_rate: 450.0, max_pitch_deg: 80.0,
+    max_climb_rate: 450.0, max_pitch_deg: 80.0, exit_lead_s: 3.0,
     fuel_reserve_pct: 10,
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5,
       pulse_s: 1.5, observe_s: 1.0},

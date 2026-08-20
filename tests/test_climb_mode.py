@@ -560,3 +560,100 @@ def test_unset_ceiling_reproduces_legacy_behavior(monkeypatch):
     assert not _presses(kb, NOSE_DOWN_KEY), \
         "nose-down fired with the ceiling unset"
     assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 083: lead-the-target exit and burner cut above target
+# ---------------------------------------------------------------------------
+
+def test_lead_exits_a_sample_early(monkeypatch):
+    """A fast climb exits on the PREDICTED altitude: 4000 m climbing at
+    450 m/s is 5350 m one 3 s sample later, so the 5000 m target is met."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=3.0, confirm_reads=1)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=5000, max_s=3.0, exit_lead_s=3.0)
+    time.sleep(0.3)
+    analyzer.set(4000.0, t0 + 0.1)          # below target...
+    analyzer._snap.altitude.rate = 450.0    # ...but 5350 predicted
+    assert _wait_done(ctrl, timeout=3.0), "lead-the-target exit did not fire"
+
+
+def test_unknown_rate_falls_back_to_raw_altitude(monkeypatch):
+    """Freeze policy: no rate means no prediction — the raw value decides,
+    so a below-target read must NOT end the climb."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.2, confirm_reads=1)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    t_start = time.time()
+    ctrl.climb_mode(target_alt=5000, max_s=1.2, exit_lead_s=3.0)
+    time.sleep(0.3)
+    analyzer.set(4000.0, t0 + 0.1)          # rate stays None
+    assert _wait_done(ctrl)
+    assert time.time() - t_start >= 1.0, "climb ended early on an unknown rate"
+
+
+def test_zero_lead_reproduces_legacy_exit(monkeypatch):
+    """Emergency climbs pass lead 0 — behaviour must be byte-identical to
+    the pre-ADR-083 exit (terrain outranks efficiency)."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.2, confirm_reads=1)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    t_start = time.time()
+    ctrl.climb_mode(target_alt=5000, max_s=1.2, exit_lead_s=0.0)
+    time.sleep(0.3)
+    analyzer.set(4000.0, t0 + 0.1)
+    analyzer._snap.altitude.rate = 450.0     # would predict 5350 — must be ignored
+    assert _wait_done(ctrl)
+    assert time.time() - t_start >= 1.0, "zero lead still exited on prediction"
+
+
+def test_confirm_reads_still_debounces_the_prediction(monkeypatch):
+    """One predicted-over-target read must not end a confirm_reads=2 climb."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.4, confirm_reads=2)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=5000, max_s=1.4, exit_lead_s=3.0)
+    time.sleep(0.3)
+    analyzer.set(4000.0, t0 + 0.1)
+    analyzer._snap.altitude.rate = 450.0     # streak 1 only
+    time.sleep(0.3)
+    assert ctrl.is_climbing(), "single predicted read ended the climb"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_burner_cut_at_target_and_never_relit(monkeypatch):
+    """ADR 083 d3: thrust stops on the first at-target read, and the ADR 075
+    fuel rearm must not relight it above target."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0, fuel=100)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=2.0, confirm_reads=5)   # keep the hold alive
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=5000, max_s=2.0, fuel_floor_pct=10.0)
+    time.sleep(0.3)
+    assert _presses(kb, AFTERBURNER_KEY), "burner never lit"
+    analyzer.set(5100.0, t0 + 0.1)          # at target
+    time.sleep(0.4)
+    assert _releases(kb, AFTERBURNER_KEY), "burner not cut at target"
+    lit_before = len(_presses(kb, AFTERBURNER_KEY))
+    analyzer.set(5200.0, t0 + 0.2)          # still above, fuel still 100%
+    time.sleep(0.4)
+    assert len(_presses(kb, AFTERBURNER_KEY)) == lit_before, \
+        "burner relit above target"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)

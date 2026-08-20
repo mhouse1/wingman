@@ -2219,7 +2219,8 @@ class Controller:
 
     def climb_mode(self, target_alt: "float | None" = None,
                    max_s: "float | None" = None,
-                   fuel_floor_pct: float = 0.0):
+                   fuel_floor_pct: float = 0.0,
+                   exit_lead_s: float = 0.0):
         """Hold NOSE_UP + AFTERBURNER until altitude recovers (ADR 073 3.2b).
 
         Non-blocking and idempotent while the thread is alive (the ADR 070
@@ -2264,7 +2265,8 @@ class Controller:
                     logger.error("Controller: keyboard library not available for climb_mode")
                     return
                 self._run_climb_hold(float(exit_alt), cap_s,
-                                     fuel_floor_pct=float(fuel_floor_pct))
+                                     fuel_floor_pct=float(fuel_floor_pct),
+                                     exit_lead_s=float(exit_lead_s))
             finally:
                 self._climbing.clear()
 
@@ -2450,7 +2452,8 @@ class Controller:
         return alt_signal.ts
 
     def _run_climb_hold(self, exit_alt: float, cap_s: float,
-                        fuel_floor_pct: float = 0.0):
+                        fuel_floor_pct: float = 0.0,
+                        exit_lead_s: float = 0.0):
         """Thread body for climb_mode: pulse-and-observe pitch, poll altitude.
 
         AFTERBURNER is held while fuel stays above ``fuel_floor_pct``
@@ -2479,6 +2482,7 @@ class Controller:
         last_rate = None
         last_angle = None   # ADR 081: flight-path angle from the same sample
         ab_held = False
+        above_target = False   # ADR 083 d3: latches on the first at-target read
 
         # NOSE_UP and NOSE_DOWN (ADR 076 d3 ceiling) are watched maneuver
         # keys — same programmatic bracket as the evade hold (d4), held
@@ -2514,6 +2518,7 @@ class Controller:
                             "— afterburner released (recharge/reserve)",
                             fuel, fuel_floor_pct)
                     elif (not ab_held
+                            and not above_target   # ADR 083 d3: never relight above target
                             and fuel >= fuel_floor_pct + self._fuel_rearm_margin):
                         self._climb_key(AFTERBURNER_KEY, press=True)
                         ab_held = True
@@ -2598,7 +2603,32 @@ class Controller:
                 last_rate = getattr(alt_signal, "rate", None)
                 _angle_fn = getattr(snap, "pitch_angle_deg", None)
                 last_angle = _angle_fn() if callable(_angle_fn) else None
-                if alt >= exit_alt:
+                # ADR 083 d3: at or above target, thrust stops — one fresh
+                # read, no debounce. Removing the energy source is the
+                # physical fix for a zoom climb; the pitch ceiling fighting
+                # a lit burner is what left 59% of high-angle stretches
+                # stalled (2026-08-19). Independent of the ADR 075 fuel
+                # gate, which keeps its floor/rearm behaviour below target.
+                if alt >= exit_alt and not above_target:
+                    above_target = True
+                    if ab_held:
+                        self._climb_key(AFTERBURNER_KEY, press=False)
+                        ab_held = False
+                        logger.info(
+                            "Controller: climb — reached target alt %.0f "
+                            "— afterburner cut", exit_alt)
+                # ADR 083 d1: compare the PREDICTED altitude at the next
+                # sample. Telemetry lands every ~3 s and a burner climb
+                # covers ~1350 m in that time, so testing the current value
+                # against the target builds ~2700 m of overshoot into the
+                # exit (measured median 2401 m). Releasing a sample early
+                # lets momentum carry the aircraft to the target instead of
+                # past it. Unknown rate contributes nothing (freeze policy)
+                # and the confirm_reads debounce still applies.
+                predicted = alt
+                if exit_lead_s > 0.0 and last_rate is not None:
+                    predicted = alt + (last_rate * exit_lead_s)
+                if predicted >= exit_alt:
                     confirm_streak += 1
                     if confirm_streak >= self._climb_confirm_reads:
                         exit_reason = "altitude_recovered"
