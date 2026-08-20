@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from wingman.controller import Controller, DEPLOY_FLARES_KEY
+from wingman.controller_config import ControllerConfig
 from wingman.crop_region import CropCoords
 from wingman.replay import (
     ReplayAssertionEngine,
@@ -288,8 +289,10 @@ PATH1:
 def test_controller_simulated_input_records_action_intents():
     ctrl = Controller(
         region=(0, 0, 100, 100),
-        simulate_os_input=True,
-        disable_hotkeys=True,
+        config=ControllerConfig(
+            simulate_os_input=True,
+            disable_hotkeys=True,
+        )
     )
 
     ctrl.deploy_flares(hold_seconds=0.01, block=True)

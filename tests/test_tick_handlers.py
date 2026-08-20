@@ -9,7 +9,6 @@ Usage: uv run pytest tests/test_tick_handlers.py -q
 import time
 from types import SimpleNamespace
 
-import pytest
 
 from wingman.analyzer import GameState
 from wingman.tick_handlers import WaitingFallbackHandler

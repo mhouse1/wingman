@@ -68,6 +68,25 @@ RR_LIVE_PATH1_VALIDATION_SUMMARY ?= tests/test-output/runtime_live_validation.pa
 RR_LIVE_PATH1_PRESENTER_LOG ?= tests/test-output/live_presenter.path1.log
 RR_LIVE_PATH1_PRESENTER_GRACE_S ?= 8.0
 
+# Coding standard gate (Research 006). Rules and rationale live in
+# pyproject.toml [tool.ruff.lint]; this target is what make tp gates on.
+#
+# `ruff format` is deliberately NOT part of this gate yet. Research 006 step 3
+# calls for applying it once as a dedicated, behaviour-free commit; until that
+# lands, `make lint` would fail on formatting alone and hide real findings.
+# Sequence: run `make format` on its own, review and commit that diff, then move
+# `format-check` into `lint` below.
+lint:
+	uv run ruff check .
+	@echo "PASS: ruff lint clean"
+
+# One-time (then routine) formatter pass — review the diff before committing.
+format:
+	uv run ruff format .
+
+format-check:
+	uv run ruff format --check .
+
 # Validate host environment before first run (ADR 047)
 preflight:
 	$(PYTHON_RUN) tests/preflight.py
@@ -86,7 +105,7 @@ reqs: reqs-gate
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -134,11 +153,11 @@ test-perf: test test-perf-csv test-perf-chart
 
 # Preview performance trends including current uncommitted data
 # Includes ADR044 PATH1 runtime replay gate and ADR045 live-screen gate.
-tp: test reqs-gate rr-path1-gate rr-live-path1-gate
+tp: lint test reqs-gate rr-path1-gate rr-live-path1-gate
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
-	@echo "✅ Performance preview complete (test + ADR044/ADR045 runtime gates + runtime metrics)!"
+	@echo "✅ Performance preview complete (lint + test + ADR044/ADR045 runtime gates + runtime metrics)!"
 	@echo "📊 View trends: tests/test-output/performance-trends.html"
 	@echo "📈 CSV data: tests/test-output/performance-history.csv"
 	@echo "📊 Runtime preview: docs/performance/runtime-performance-trends.preview.html"
@@ -149,7 +168,7 @@ tp: test reqs-gate rr-path1-gate rr-live-path1-gate
 	@echo ""
 
 # Full preview including ADR037 PATH1/PATH2 real-OCR integration tests.
-tp-full: test rr-path1-gate rr-live-path1-gate ocr
+tp-full: lint test rr-path1-gate rr-live-path1-gate ocr
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""

@@ -272,7 +272,7 @@ def has_contacts(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.contacts > 0
 
 
-def always(snapshot: AnalyzerSnapshot) -> bool:
+def always(_snapshot: AnalyzerSnapshot) -> bool:
     return True
 
 

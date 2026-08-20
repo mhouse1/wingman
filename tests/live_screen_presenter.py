@@ -13,6 +13,7 @@ import tkinter as tk
 
 import yaml
 from mss import mss
+import contextlib
 
 
 def _load_steps(path_config: Path, path_name: str) -> list[dict]:
@@ -81,10 +82,8 @@ def main() -> int:
     root.resizable(False, False)
     root.attributes("-topmost", True)
     root.lift()
-    try:
+    with contextlib.suppress(Exception):
         root.tk.call("tk", "scaling", 1.0)
-    except Exception:
-        pass
 
     print(
         f"Presenter window geometry: left={left} top={top} width={width} height={height}",

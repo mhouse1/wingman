@@ -449,7 +449,7 @@ class AmmoEventsHandler:
 
     # -- state --------------------------------------------------------------
 
-    def on_state_change(self, new_state, prev_state=None):
+    def on_state_change(self, new_state, _prev_state=None):
         if new_state == GameState.GAME_BATTLE:
             self._battle_started_ts = time.time()
             self._fired_since_padlock = 0
@@ -640,7 +640,7 @@ class EnemyPresenceHandler:
         """Start (or restart) the idle clock — battle entry and post-respawn."""
         self._last_seen_ts = time.time()
 
-    def on_state_change(self, new_state, prev_state=None):
+    def on_state_change(self, new_state, _prev_state=None):
         if new_state == GameState.GAME_BATTLE:
             self.arm()   # assume enemy present on battle entry
 
@@ -991,7 +991,7 @@ class WaitingFallbackHandler:
         self._score = 0
         self._consecutive = 0
 
-    def on_state_change(self, new_state, prev_state=None):
+    def on_state_change(self, new_state, _prev_state=None):
         if new_state == GameState.GAME_WAITING:
             now = time.time()
             self._waiting_since = now
@@ -1142,7 +1142,7 @@ class UnknownAnomalyRecorder:
         self._dismiss_popups: "list[str]" = []
         self._cleared_popups: "list[str]" = []
 
-    def on_state_change(self, current_game_state, prev_game_state) -> None:
+    def on_state_change(self, current_game_state, _prev_game_state) -> None:
         if current_game_state == GameState.GAME_UNKNOWN:
             self._unknown_since = self._clock()
             self._captured = 0

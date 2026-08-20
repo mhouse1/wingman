@@ -18,13 +18,13 @@ from typing import Dict, List, Tuple, Optional
 
 class PerformanceTracker:
     """Track and analyze test performance over time."""
-    
+
     def __init__(self, repo_root: Path = None):
         if repo_root is None:
             repo_root = Path(__file__).resolve().parent.parent
         self.repo_root = repo_root
         self.perf_file_path = "tests/test-output/performance.json"
-    
+
     def get_git_commits_with_file(self) -> List[Tuple[str, str, str]]:
         """
         Get all commits that modified performance.json.
@@ -32,14 +32,14 @@ class PerformanceTracker:
         """
         try:
             result = subprocess.run(
-                ["git", "log", "--follow", "--pretty=format:%H|%ae|%aI", 
+                ["git", "log", "--follow", "--pretty=format:%H|%ae|%aI",
                  "--", self.perf_file_path],
                 cwd=self.repo_root,
                 capture_output=True,
                 text=True,
                 check=False
             )
-            
+
             commits = []
             for line in result.stdout.strip().split('\n'):
                 if not line:
@@ -47,12 +47,12 @@ class PerformanceTracker:
                 parts = line.split('|')
                 if len(parts) >= 3:
                     commits.append((parts[0], parts[1], parts[2]))
-            
+
             return commits
         except Exception as e:
             print(f"Error getting git commits: {e}", file=sys.stderr)
             return []
-    
+
     def get_performance_data_at_commit(self, commit_hash: str) -> Optional[Dict]:
         """Get performance.json content at specific commit."""
         try:
@@ -63,42 +63,42 @@ class PerformanceTracker:
                 text=True,
                 check=False
             )
-            
+
             if result.returncode == 0:
                 return json.loads(result.stdout)
             return None
         except Exception as e:
             print(f"Error reading performance data: {e}", file=sys.stderr)
             return None
-    
+
     def generate_csv_trends(self, output_file: Path = None, include_current: bool = False) -> Path:
         """
         Generate CSV with performance trends over commits.
         Format: timestamp, version, test_name, duration, min, max, runs
-        
+
         Args:
             output_file: Path to output CSV file
             include_current: If True, append current uncommitted performance.json data
         """
         if output_file is None:
             output_file = Path(__file__).parent / "test-output" / "performance-history.csv"
-        
+
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
         commits = self.get_git_commits_with_file()
         if not commits:
             print("No commits with performance.json found", file=sys.stderr)
             return output_file
-        
+
         rows = []
-        for commit_hash, author, timestamp in commits:
+        for commit_hash, _author, timestamp in commits:
             perf_data = self.get_performance_data_at_commit(commit_hash)
             if not perf_data:
                 continue
-            
+
             version = perf_data.get('version', 'unknown')
             perf_timestamp = perf_data.get('timestamp', timestamp)
-            
+
             for test_name, metrics in perf_data.get('tests', {}).items():
                 rows.append({
                     'timestamp': perf_timestamp,
@@ -110,7 +110,7 @@ class PerformanceTracker:
                     'max': metrics.get('max', 0),
                     'runs': metrics.get('runs', 1)
                 })
-        
+
         # Optionally include current uncommitted data
         if include_current:
             current_perf_file = self.repo_root / self.perf_file_path
@@ -118,10 +118,10 @@ class PerformanceTracker:
                 try:
                     with open(current_perf_file, 'r') as f:
                         current_data = json.load(f)
-                    
+
                     version = current_data.get('version', 'uncommitted')
                     perf_timestamp = current_data.get('timestamp', datetime.now().isoformat())
-                    
+
                     for test_name, metrics in current_data.get('tests', {}).items():
                         rows.append({
                             'timestamp': perf_timestamp,
@@ -136,7 +136,7 @@ class PerformanceTracker:
                     print(f"[OK] Included current uncommitted data (v{version})")
                 except Exception as e:
                     print(f"Warning: Could not read current performance.json: {e}", file=sys.stderr)
-        
+
         # Write CSV
         if rows:
             with open(output_file, 'w', newline='') as f:
@@ -144,9 +144,9 @@ class PerformanceTracker:
                 writer.writeheader()
                 writer.writerows(rows)
             print(f"[OK] Generated {output_file.name} with {len(rows)} data points")
-        
+
         return output_file
-    
+
     def generate_visualization(self, output_html: Path = None, include_current: bool = False) -> Path:
         """
         Generate HTML visualization of performance trends.
@@ -159,7 +159,7 @@ class PerformanceTracker:
 
         try:
             import plotly.graph_objects as go
-            import plotly.express as px
+            import plotly.express  # noqa: F401  — availability probe
             from plotly.subplots import make_subplots
         except ImportError:
             print("❌ plotly not installed. Install with: pip install plotly")
@@ -168,7 +168,7 @@ class PerformanceTracker:
 
         # Generate CSV first
         csv_file = self.generate_csv_trends(include_current=include_current)
-        
+
         # Read CSV data
         try:
             import pandas as pd
@@ -176,11 +176,11 @@ class PerformanceTracker:
         except ImportError:
             print("❌ pandas not installed. Install with: pip install pandas")
             return output_html
-        
+
         if df.empty:
             print("No performance data found")
             return output_html
-        
+
         # Group by test name and create subplots
         test_names = sorted(df['test'].unique())
         n_tests = len(test_names)
@@ -191,7 +191,7 @@ class PerformanceTracker:
             subplot_titles=test_names,
             specs=[[{'secondary_y': False}] * 2 for _ in range((n_tests + 1) // 2)]
         )
-        
+
         for idx, test_name in enumerate(test_names):
             test_data = df[df['test'] == test_name].sort_values('timestamp')
 
@@ -241,7 +241,7 @@ class PerformanceTracker:
                 ),
                 row=row, col=col
             )
-        
+
         # Update layout
         fig.update_layout(
             title_text="Test Performance Trends Over Time",
@@ -249,21 +249,21 @@ class PerformanceTracker:
             showlegend=False,
             hovermode='x unified'
         )
-        
+
         # Update y-axes
         fig.update_yaxes(title_text="Duration (seconds)", row=1, col=1)
-        
+
         # Save HTML
         fig.write_html(str(output_html))
         print(f"[OK] Generated {output_html.name}")
-        
+
         return output_html
 
 
 def main():
     """CLI for performance tracking."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Analyze test performance trends")
     parser.add_argument(
         '--csv',
@@ -285,11 +285,11 @@ def main():
         action='store_true',
         help='Include current uncommitted performance.json data in output'
     )
-    
+
     args = parser.parse_args()
-    
+
     tracker = PerformanceTracker()
-    
+
     if args.all or (not args.csv and not args.chart):
         # Default: generate both
         tracker.generate_csv_trends(include_current=args.include_current)

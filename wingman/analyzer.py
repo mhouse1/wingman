@@ -16,7 +16,7 @@ HEALTH_SPIKE_FACTOR = 1.5  # reject readings more than 50 % above the establishe
 
 from transitions import Machine, MachineError
 
-from .crop_region import get_crop, load_crops, draw_crops
+from .crop_region import CropCoords, get_crop, load_crops, draw_crops
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
 
 
@@ -243,7 +243,7 @@ def _process_respawn_region(respawn_frame):
         return (False, 0.0, None)
 
     t_start = time.time()
-    
+
     # Preprocess respawn region
     gray_respawn = cv2.cvtColor(respawn_frame, cv2.COLOR_BGR2GRAY)
     _, binary_respawn = cv2.threshold(gray_respawn, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -263,7 +263,7 @@ def _process_respawn_region(respawn_frame):
     # Log all OCR results for debugging
     logger.debug(f"Respawn OCR results: {results}")
 
-    for label, text_clean, conf in results:
+    for label, text_clean, _conf in results:
         if _respawn_text_matches(text_clean):
             logger.debug(f"Respawn detected (variant: {label}, text: {text_clean})")
             return (True, ocr_time, text_clean)
@@ -636,7 +636,7 @@ def _levenshtein_distance_simple(a: str, b: str) -> int:
         return len(b)
     if not b:
         return len(a)
-    
+
     prev_row = list(range(len(b) + 1))
     for i, char_a in enumerate(a, start=1):
         curr_row = [i]
@@ -848,7 +848,7 @@ def _scan_minimap_red(
 
 class GameStateAnalyzer:
     """Analyzes game screenshots to determine current game state."""
-    
+
     def __init__(self, config, tracker=None):
         """
         Initialize analyzer with configuration.
@@ -859,7 +859,6 @@ class GameStateAnalyzer:
         """
         self._tracker = tracker
         startup_cfg = config.get("startup_state_detection", {})
-        mission_cfg = config.get("mission", {})
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
 
@@ -896,7 +895,7 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
-        
+
         # OCR result caching for performance (avoid running OCR every frame)
         self._ocr_cache = {
             'result': (False, 0.0, None),  # (is_respawning, confidence, method)
@@ -904,7 +903,7 @@ class GameStateAnalyzer:
             'cooldown': respawn_cfg.get("ocr_cooldown", 0.1)  # Seconds between OCR runs
         }
         self._ocr_cache_lock = threading.Lock()  # Thread-safe cache updates
-        
+
         # Incoming missile cache (separate from respawn)
         self._incoming_cache = {
             'result': (False, 0.0, None),  # (is_incoming, confidence, method)
@@ -1157,24 +1156,24 @@ class GameStateAnalyzer:
 
         # Fallback HSV detection (if OCR unavailable)
         self.respawn_text_hsv_lower = np.array(
-            respawn_cfg.get("text_hsv_lower", [0, 0, 180]), 
+            respawn_cfg.get("text_hsv_lower", [0, 0, 180]),
             dtype=np.uint8
         )
         self.respawn_text_hsv_upper = np.array(
-            respawn_cfg.get("text_hsv_upper", [180, 50, 255]), 
+            respawn_cfg.get("text_hsv_upper", [180, 50, 255]),
             dtype=np.uint8
         )
-        
+
         debug_cfg = config.get("debug", {})
         self.debug = debug_cfg.get("show_window", False)
         self.show_grid_highlighted = debug_cfg.get("show_grid_highlighted", False)
-        
+
         # Debug output directory for OCR preprocessing images
         debug_output_dir = debug_cfg.get("debug_output_dir", "tests/test-output")
         self.debug_output_dir = Path(debug_output_dir)
         if not self.debug_output_dir.exists():
             self.debug_output_dir.mkdir(parents=True, exist_ok=True)
-        
+
 
     @property
     def ocr_executor(self):
@@ -1204,7 +1203,7 @@ class GameStateAnalyzer:
                 if self._background_ocr_lock.locked():
                     self._background_ocr_lock.release()
         return self._ocr_executor
-    
+
     def _trigger(self, trigger_name: str) -> bool:
         """Thread-safe FSM trigger dispatch. Returns False on invalid transitions.
 
@@ -2247,7 +2246,7 @@ class GameStateAnalyzer:
     def __exit__(self, *_):
         self.cleanup()
         return False
-    
+
     def analyze_frame(self, frame):
         """Analyze a single frame and return game state.
 
@@ -2263,7 +2262,7 @@ class GameStateAnalyzer:
         if frame is None or frame.size == 0:
             logger.warning("Analyzer: received invalid frame")
             return self._empty_state()
-        
+
         # Keep latest full frame available for the click_to background thread
         with self._click_to_frame_lock:
             self._click_to_latest_frame = frame
@@ -2327,11 +2326,11 @@ class GameStateAnalyzer:
             logger.debug("Click-to background thread started")
 
         respawn_detected, confidence, method = self._detect_respawn(frame)
-        
+
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
-        
+
         # Detect incoming missiles - use cached result from background OCR
         with self._incoming_cache_lock:
             incoming_detected, incoming_conf, incoming_method = self._incoming_cache['result']
@@ -2365,29 +2364,28 @@ class GameStateAnalyzer:
                 logger.warning("Failed to save highlighted grid: %s", e)
 
 
-        
+
         return state
-    
+
     def _detect_respawn(self, frame):
         """
         Detect if respawn screen is visible using OCR.
         Looks for "RESPAWN" text in the frame.
-        
+
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
         if self.use_ocr and easyocr:
             return self._detect_respawn_ocr(frame)
-        else:
-            if not easyocr:
-                logger.warning("EasyOCR not available, respawn detection disabled")
-            return False, 0.0, None
-    
+        if not easyocr:
+            logger.warning("EasyOCR not available, respawn detection disabled")
+        return False, 0.0, None
+
     def _detect_respawn_ocr(self, frame):
         """
         Use EasyOCR to detect "RESPAWN" text in the frame.
         Non-blocking: uses caching + background thread to avoid blocking main loop.
-        
+
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
@@ -2421,7 +2419,7 @@ class GameStateAnalyzer:
                 if self.debug:
                     logger.debug("Using cached OCR result (%.2fs old)", time_since_last_ocr)
                 return cached_result
-        
+
         # Cache expired - schedule background OCR (non-blocking).
         # If OCR is already running, update pending frame; otherwise, start thread.
         if not self._background_ocr_lock.acquire(timeout=5.0):
@@ -2447,7 +2445,7 @@ class GameStateAnalyzer:
 
         # Return cached result (may be stale) while background OCR runs
         return cached_result
-    
+
     def _run_ocr_in_background(self):
         """Run OCR in background using thread pool for parallel region processing."""
         while not self._background_ocr_stop.is_set():
@@ -2539,15 +2537,12 @@ class GameStateAnalyzer:
                     incoming_processing_time = float(incoming_eval.get("processing_time", 0.0))
                     if self._tracker:
                         self._tracker.record_ocr_crop("incoming", incoming_processing_time)
-                    t3 = time.time()
 
                     template_score = float(incoming_eval.get("template_score", -1.0))
                     template_hit = bool(incoming_eval.get("template_hit", False))
                     near_threshold = bool(incoming_eval.get("near_threshold", False))
                     template_label = incoming_eval.get("template_label")
-                    fallback_used = bool(incoming_eval.get("fallback_used", False))
                     fallback_hit = bool(incoming_eval.get("fallback_hit", False))
-                    fallback_variant = incoming_eval.get("fallback_variant")
                     fallback_text = incoming_eval.get("fallback_text")
                     fallback_raw = incoming_eval.get("fallback_raw") or []
 
@@ -2572,11 +2567,7 @@ class GameStateAnalyzer:
                     detection_source = "none"
                     detected_label = None
 
-                    if template_hit:
-                        incoming_detected = True
-                        detection_source = "template"
-                        detected_label = template_label
-                    elif near_threshold_confirmation:
+                    if template_hit or near_threshold_confirmation:
                         incoming_detected = True
                         detection_source = "template"
                         detected_label = template_label
@@ -2726,7 +2717,7 @@ class GameStateAnalyzer:
                 self._background_ocr_frame = None
                 self._background_ocr_running = False
                 return
-    
+
     def _run_click_to_in_background(self):
         """Poll for 'Click to Continue' on a low-frequency independent schedule.
 
@@ -3223,7 +3214,7 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.debug("Analyzer: health OCR failed in unknown classification: %s", e)
             return None
-    
+
     def reset_cache(self):
         """Reset OCR caches - useful when switching between different images/scenes."""
         with self._ocr_cache_lock:

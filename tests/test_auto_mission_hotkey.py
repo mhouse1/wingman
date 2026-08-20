@@ -11,6 +11,7 @@ import threading
 import time
 
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 from wingman.analyzer import GameState
 from wingman.controller import Controller
 
@@ -41,7 +42,9 @@ def _make_ctrl(monkeypatch, analyzer):
         analyzer=analyzer,
         exit_event=threading.Event(),
         capture=None,
-        disable_hotkeys=True,
+        config=ControllerConfig(
+            disable_hotkeys=True,
+        )
     )
 
 

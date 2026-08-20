@@ -19,6 +19,7 @@ import time
 import pytest
 
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 from wingman.controller import AFTERBURNER_KEY, Controller, NOSE_DOWN_KEY
 from wingman.telemetry import TelemetrySignal, TelemetrySnapshot, TREND_UNKNOWN
 
@@ -106,11 +107,13 @@ def _make_ctrl(monkeypatch, stub, **ecl_overrides):
         analyzer=stub,
         exit_event=threading.Event(),
         capture=None,
-        simulate_os_input=True,
-        disable_hotkeys=True,
-        # Scales the descent loop's telemetry-loss tolerance to test speed
-        # (production 6.0 s against a 1.5 s check interval).
-        telemetry_cfg={"eject_closed_loop": ecl, "stale_after_s": 0.3},
+        config=ControllerConfig(
+            simulate_os_input=True,
+            disable_hotkeys=True,
+            # Scales the descent loop's telemetry-loss tolerance to test speed
+            # (production 6.0 s against a 1.5 s check interval).
+            telemetry={"eject_closed_loop": ecl, "stale_after_s": 0.3},
+        ),
     )
 
 

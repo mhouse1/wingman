@@ -31,7 +31,7 @@ def check_python():
 
 def check_tool(name):
     if not shutil.which(name):
-        return _line(FAIL, name, f"not found on PATH")
+        return _line(FAIL, name, "not found on PATH")
     try:
         raw = subprocess.check_output(
             [name, "--version"], stderr=subprocess.STDOUT, text=True

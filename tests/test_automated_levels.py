@@ -4,10 +4,10 @@ Usage, run in bash:  uv run pytest tests/test_automated_levels.py --html=tests/t
 uv run pytest tests/test_automated_levels.py -k test_level3_unit_ocr --html=tests/test-output/report.html --self-contained-html
 
 '''
+import importlib
 import subprocess
 import sys
 import time
-import os
 from pathlib import Path
 import cv2
 import pytest
@@ -53,12 +53,15 @@ def run_command(cmd, timeout=120):
 def test_wingman_smoke_launch():
     """
     Smoke test: Verify wingman main module imports without errors.
-    
+
     Catches import errors, missing dependencies, threading initialization issues,
     and other startup problems. This is a quick sanity check, not a full integration test.
     """
     try:
-        from wingman import main
+        # importlib, not a bare `import`: the import IS the assertion here, and a
+        # plain import statement reads as an unused binding to the linter, which
+        # once autofixed this body away to `pass` (ruff F401, ADR 085 d4).
+        importlib.import_module("wingman.main")
     except Exception as e:
         pytest.fail(f"wingman.main failed to import: {e}")
 
@@ -66,7 +69,7 @@ def test_wingman_smoke_launch():
 def test_level1_static_screenshot():
     """
     Level 1: Respawn detection on saved screenshots with grid visualization.
-    
+
     Validates that the analyzer can:
     - Load and analyze the respawn overlay gate frame (positive case)
     - Correctly identify respawn regions and generate grid overlays
@@ -95,7 +98,7 @@ def test_level1_static_screenshot():
 def test_respawn_detection_positive():
     """
     Respawn detection positive test: Verify correct detection of RESPAWN text.
-    
+
     Validates that the analyzer correctly detects RESPAWN text in:
     - P1_050_RESPAWN_VISIBLE_NO_HEALTH.png (gate corpus, normal quality)
 
@@ -119,7 +122,7 @@ def test_respawn_detection_positive():
 def test_respawn_detection_negative():
     """
     Respawn detection negative test: Verify correct rejection of non-RESPAWN text.
-    
+
     Validates that the analyzer correctly rejects:
     - P1_030 / P1_060 battle HUD frames (no respawn text). The Levenshtein
       distractor case is retired with the variant set (ADR 072 decision 3,
@@ -142,7 +145,7 @@ def test_respawn_detection_negative():
 def test_level2_live_capture():
     """
     Level 2: Live screen capture and real-time game state analysis.
-    
+
     Validates that the analyzer can:
     - Capture a live screenshot from the configured monitor/region
     - Perform grid-based region analysis on captured frame
@@ -227,7 +230,7 @@ def test_get_frame_and_analyze_frame():
 def test_level3_unit_ocr():
     """
     Level 3: OCR background worker performance and accuracy test.
-    
+
     Validates that the background OCR thread:
     - Correctly runs EasyOCR on RESPAWN.png without blocking main loop
     - Detects 'RESPAWN' text with 100% confidence
@@ -320,7 +323,7 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
 
     debug_dir = Path(__file__).parent / "test-output"
     debug_dir.mkdir(parents=True, exist_ok=True)
-    stem = image_path.stem
+    _stem = image_path.stem  # referenced by the commented-out debug dumps below
     # cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_grayscale.png"), gray)
     # cv2.imwrite(str(debug_dir / f"debug_ocr_region{incoming_region}_{stem}_binary.png"), binary_otsu)
 
@@ -351,49 +354,49 @@ def test_level4_region9_contains_inco(require_easyocr, image_path: Path):
 def test_level5_performance_validation(test_timings, strict_timing):
     """
     Level 5: Performance validation against baseline.
-    
+
     Validates that test execution times are within expected ranges.
     - Warning mode (default): Reports deviations but doesn't fail
     - Strict mode (--strict-timing): Fails on timing violations
-    
+
     This test runs last to validate all previous test timings.
     """
     baseline_path = Path(__file__).resolve().parent / "test_timing_baseline.yaml"
-    
+
     if not baseline_path.exists():
         print("\n[Level 5] No timing baseline found - skipping performance validation")
         print(f"  Create {baseline_path} to enable performance validation")
         return
-    
+
     # Load baseline
     with baseline_path.open('r') as f:
         baseline_data = yaml.safe_load(f)
-    
+
     baseline_durations = baseline_data.get('test_durations', {})
     tolerance = baseline_data.get('tolerance', 5)
     strict_mode = strict_timing
-    
+
     print("\n" + "=" * 60)
     print("[Level 5] Performance Validation")
     print("=" * 60)
     print(f"Mode: {'STRICT (fails on violations)' if strict_mode else 'WARNING (reports only)'}")
     print(f"Tolerance: ±{tolerance}s")
     print("-" * 60)
-    
+
     violations = []
     all_ok = []
-    
+
     for test_name, durations in sorted(test_timings.items()):
         if test_name == 'test_level5_performance_validation':
             continue  # Skip self
-        
+
         # For parametrized tests, use average duration
         avg_duration = sum(durations) / len(durations)
-        
+
         if test_name in baseline_durations:
             expected = baseline_durations[test_name]
             deviation = abs(avg_duration - expected)
-            
+
             if deviation > tolerance:
                 status = "⚠️  VIOLATION"
                 violations.append({
@@ -406,13 +409,13 @@ def test_level5_performance_validation(test_timings, strict_timing):
             else:
                 status = "✓ OK"
                 all_ok.append(test_name)
-            
+
             print(f"{status:12s} {test_name:45s} Expected: {expected:5.1f}s  Actual: {avg_duration:5.1f}s  Δ {deviation:+5.1f}s")
         else:
             print(f"{'ℹ️  NEW':12s} {test_name:45s} Duration: {avg_duration:5.1f}s (no baseline)")
-    
+
     print("-" * 60)
-    
+
     if violations:
         print(f"\n⚠️  {len(violations)} timing violation(s) detected:")
         for v in violations:
@@ -420,7 +423,7 @@ def test_level5_performance_validation(test_timings, strict_timing):
             print(f"    Expected: {v['expected']:.1f}s ± {v['tolerance']}s")
             print(f"    Actual:   {v['actual']:.1f}s")
             print(f"    Deviation: {v['deviation']:.1f}s over tolerance")
-        
+
         if strict_mode:
             print("\n❌ --strict-timing: Failing due to timing violations")
             pytest.fail(f"{len(violations)} test(s) exceeded timing tolerance of ±{tolerance}s")
@@ -428,7 +431,7 @@ def test_level5_performance_validation(test_timings, strict_timing):
             print("\n💡 Tip: Use pytest --strict-timing to fail on timing violations (useful for CI)")
     else:
         print(f"\n✓ All {len(all_ok)} tests within expected timing ranges")
-    
+
     print("=" * 60)
 
 

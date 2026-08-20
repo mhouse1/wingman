@@ -1,7 +1,6 @@
 """Unit tests for MissionStatsTracker."""
 
 import json
-import time
 
 import pytest
 
@@ -365,7 +364,7 @@ class TestJsonSerialisation:
         t._startup_done = True
         _enter_battle(t, ts=0.0)
         _leave_battle(t, ts=10.0)
-        result = t.finalize(run_id="test_run_001")
+        t.finalize(run_id="test_run_001")
         out_dir = tmp_path / "current"
         assert out_dir.exists()
         stats_files = list(out_dir.glob("run_*_stats.json"))

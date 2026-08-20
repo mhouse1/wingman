@@ -12,13 +12,11 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import numpy as np
 import cv2
 import yaml
 import time
 
 from wingman.capture import Capture
-from wingman.crop_region import CropCoords
 
 
 def load_config():

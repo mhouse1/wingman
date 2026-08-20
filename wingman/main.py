@@ -15,11 +15,13 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.4"
-WINGMAN_VERSION_DETAILS = "Part2: Make J20 mission sequence behavior driven instead of hard coded"
+WINGMAN_VERSION = "1.8.5"
+WINGMAN_VERSION_DETAILS = "resolve tech debt"
 
 from .capture import Capture
-from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
+from .config_schema import assert_valid_config
+from .controller_config import ControllerConfig
+from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
@@ -52,9 +54,20 @@ class RespawnState(Enum):
     RESPAWNING = auto()      # Respawn screen active; restart fires on health return
 
 
-def load_config(path):
+def load_config(path, *, validate: bool = True):
+    """Load config.yaml and validate it against the declared schema.
+
+    Validation is fail-fast by design (Future 002 A-03): an unknown or
+    mistyped key means the program would otherwise run on a silent code
+    default, which has already shipped a wrong value to production once.
+    Pass validate=False only for tooling that intentionally works on a
+    partial config.
+    """
     with open(path, "r") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    if validate:
+        assert_valid_config(cfg, source=str(path))
+    return cfg
 
 
 def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8, sleep_fn=time.sleep):
@@ -96,7 +109,7 @@ def _alive_transition_disposition(state, alive_after_observed_death: bool) -> st
       consume_spurious — GAME_BATTLE_EJECT without an observed death: the
                          synthetic eject-start transition; consume it.
       consume_other    — any other state (manual, lobby, ...): consume it.
-    
+
     @relation(SAF-002, scope=function)
     """
     if state == GameState.GAME_BATTLE:
@@ -187,7 +200,7 @@ def main():
 
     cfg = load_config(args.config)
     logger.info("Configuration loaded from %s", args.config)
-    
+
 
     region = (
         cfg["region"]["left"],
@@ -212,8 +225,9 @@ def main():
     try:
         import signal
         signal.signal(signal.SIGTERM, lambda _sig, _frm: exit_requested.set())
-    except (ValueError, OSError):  # non-main thread or unsupported platform
-        pass
+    except (ValueError, OSError) as e:  # non-main thread or unsupported platform
+        print(f"WARNING: SIGTERM handler not installed ({e}); "
+              "a SIGTERM may leave injected keys held", file=sys.stderr)
     replay_mode = bool(args.replay_config)
     capture_mode = bool(args.capture_path_config)
     replay_capture = None
@@ -329,26 +343,24 @@ def main():
     debug_cfg = cfg.get("debug", {})
     target_painting_mode = j20_cfg.get("target_painting_mode", False)
     capture_with_overlay = bool(debug_cfg.get("capture_with_overlay", True))
+    # Every tuned value comes from the validated config; only the run-mode flags
+    # (which the YAML cannot know) are overridden here. See ControllerConfig.
     ctrl = Controller(
         region,
+        config=ControllerConfig.from_config(
+            cfg,
+            weapon_loop_interval=weapon_loop_interval,
+            starting_max_wait_s=starting_max_wait_s,
+            target_painting_mode=target_painting_mode,
+            capture_with_overlay=capture_with_overlay,
+            simulate_os_input=replay_mode,
+            disable_hotkeys=(replay_mode or capture_mode),
+        ),
         analyzer=analyzer,
-        weapon_loop_interval=weapon_loop_interval,
-        exit_event=exit_requested,
         capture=cap,
+        exit_event=exit_requested,
         on_auto_mission_key=_on_auto_mission_key,
         crops=analyzer.crops,
-        target_painting_mode=target_painting_mode,
-        simulate_os_input=replay_mode,
-        disable_hotkeys=(replay_mode or capture_mode),
-        capture_with_overlay=capture_with_overlay,
-        starting_max_wait_s=starting_max_wait_s,
-        good_luck_wait_s=float(mission_cfg.get("good_luck_wait_s", 13.0)),
-        good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
-        telemetry_cfg=cfg.get("telemetry", {}),
-        missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
-        climb_cfg=cfg.get("behavior_tree", {}).get("climb", {}),
-        fuel_cfg=cfg.get("fuel", {}),
-        capture_stale_inject_s=float(mission_cfg.get("capture_stale_inject_s", 10.0)),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry

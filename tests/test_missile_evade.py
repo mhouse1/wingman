@@ -10,6 +10,7 @@ import threading
 import time
 
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 from wingman.controller import (
     AFTERBURNER_KEY,
     Controller,
@@ -60,8 +61,10 @@ def _make_ctrl(monkeypatch, kb, analyzer, me_cfg):
         analyzer=analyzer,
         exit_event=threading.Event(),
         capture=None,
-        disable_hotkeys=True,
-        missile_evade_cfg=me_cfg,
+        config=ControllerConfig(
+            disable_hotkeys=True,
+            missile_evade=me_cfg,
+        )
     )
 
 
@@ -241,9 +244,11 @@ def test_simulate_mode_records_intents(monkeypatch):
         analyzer=analyzer,
         exit_event=threading.Event(),
         capture=None,
-        disable_hotkeys=True,
-        simulate_os_input=True,
-        missile_evade_cfg={"clear_seconds": 0.1, "min_clear_samples": 1, "max_hold_s": 0.4},
+        config=ControllerConfig(
+            disable_hotkeys=True,
+            simulate_os_input=True,
+            missile_evade={"clear_seconds": 0.1, "min_clear_samples": 1, "max_hold_s": 0.4},
+        )
     )
     ctrl.missile_evade_mode()
     assert _wait_done(ctrl)

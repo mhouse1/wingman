@@ -11,6 +11,7 @@ import threading
 import time
 
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 from wingman.controller import Controller, ROLL_RIGHT_KEY
 
 
@@ -31,7 +32,9 @@ def _make_ctrl(monkeypatch, kb):
         (0, 0, 1920, 1200),
         exit_event=threading.Event(),
         capture=None,
-        disable_hotkeys=True,
+        config=ControllerConfig(
+            disable_hotkeys=True,
+        )
     )
     monkeypatch.setattr(ctrl, "start_search_and_destroy_loop", lambda: None)
     monkeypatch.setattr(ctrl, "stop_search_and_destroy_loop", lambda: None)

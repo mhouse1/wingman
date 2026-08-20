@@ -21,8 +21,9 @@ def _load_restore_token():
         try:
             with open(TOKEN_FILE) as f:
                 return json.load(f).get("restore_token")
-        except Exception:
-            pass
+        except Exception as e:
+            # Absent or corrupt token just means a fresh portal handshake.
+            logger.debug("Portal: could not read restore token from %s: %s", TOKEN_FILE, e)
     return None
 
 
@@ -81,7 +82,7 @@ def acquire_screencast_node():
     t1 = nt()
     req1 = f"/org/freedesktop/portal/desktop/request/{sender}/{t1}"
 
-    def on_create(conn, sndr, obj, iface, sig, params):
+    def on_create(_conn, _sndr, _obj, _iface, _sig, params):
         resp, res = params
         if resp != 0:
             state["error"] = f"CreateSession failed (response={resp})"
@@ -103,7 +104,7 @@ def acquire_screencast_node():
         if restore_token:
             sel_opts["restore_token"] = GLib.Variant("s", restore_token)
 
-        def on_select(conn, sndr, obj, iface, sig, params):
+        def on_select(_conn, _sndr, _obj, _iface, _sig, params):
             resp, _ = params
             if resp != 0:
                 state["error"] = f"SelectSources failed (response={resp})"
@@ -114,7 +115,7 @@ def acquire_screencast_node():
             t3 = nt()
             req3 = f"/org/freedesktop/portal/desktop/request/{sender}/{t3}"
 
-            def on_start(conn, sndr, obj, iface, sig, params):
+            def on_start(_conn, _sndr, _obj, _iface, _sig, params):
                 resp, res = params
                 if resp != 0:
                     state["error"] = f"Start failed (response={resp})"

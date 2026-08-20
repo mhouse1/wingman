@@ -10,6 +10,7 @@ import threading
 import time
 
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 from wingman.controller import (
     AFTERBURNER_KEY,
     Controller,
@@ -81,8 +82,10 @@ def _make_ctrl(monkeypatch, kb, analyzer, climb_cfg):
         analyzer=analyzer,
         exit_event=threading.Event(),
         capture=None,
-        disable_hotkeys=True,
-        climb_cfg=climb_cfg,
+        config=ControllerConfig(
+            disable_hotkeys=True,
+            climb=climb_cfg,
+        ),
     )
 
 
@@ -150,7 +153,6 @@ def test_max_climb_backstop(monkeypatch):
     cfg = dict(CFG, max_climb_s=0.5)
     ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
 
-    t0 = time.time()
     ctrl.climb_mode()
     assert _wait_done(ctrl), "climb did not end at the backstop"
     for key in CLIMB_KEYS:
