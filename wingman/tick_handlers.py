@@ -1128,10 +1128,19 @@ class UnknownAnomalyRecorder:
         self._recapture_s = float(cfg.get("recapture_interval_s", 120.0))
         self._max_per_episode = int(cfg.get("max_per_episode", 5))
         self._dir = str(cfg.get("dir", "test_screenshots/unknown_anomalies"))
+        # Grace period after the FIRST dismissal attempt of an episode. Measured
+        # from the first attempt, not the latest, so a popup that is detected and
+        # re-clicked every cycle without clearing still gets captured as evidence
+        # that handling failed.
+        self._dismiss_grace_s = float(cfg.get("dismiss_grace_s", 20.0))
         self._clock = clock
         self._unknown_since = 0.0
         self._captured = 0
         self._last_capture_ts = 0.0
+        self._first_dismiss_ts = 0.0
+        self._dismiss_attempts = 0
+        self._dismiss_popups: "list[str]" = []
+        self._cleared_popups: "list[str]" = []
 
     def on_state_change(self, current_game_state, prev_game_state) -> None:
         if current_game_state == GameState.GAME_UNKNOWN:
@@ -1140,6 +1149,40 @@ class UnknownAnomalyRecorder:
             self._last_capture_ts = 0.0
         else:
             self._unknown_since = 0.0
+        # Dismissal history belongs to the episode: leaving GAME_UNKNOWN means
+        # handling worked (or was never needed), so it must not carry forward.
+        self._first_dismiss_ts = 0.0
+        self._dismiss_attempts = 0
+        self._dismiss_popups = []
+        self._cleared_popups = []
+
+    def note_dismiss_attempt(self, popup: str) -> None:
+        """Record that popup dismissal was attempted during this episode.
+
+        Called from the LOBBY_POPUP_CLICK handler. Suppresses the capture for
+        ``dismiss_grace_s`` so a popup that IS handled never produces an
+        anomaly screenshot; if the stall outlives the grace window the capture
+        proceeds and names the popups that failed to clear it.
+        """
+        now = self._clock()
+        if self._first_dismiss_ts == 0.0:
+            self._first_dismiss_ts = now
+        self._dismiss_attempts += 1
+        if popup not in self._dismiss_popups:
+            self._dismiss_popups.append(popup)
+
+    def note_popup_absent(self) -> None:
+        """Record that a popup scan completed with nothing on screen.
+
+        Distinguishes "the dismissal failed" from "the dismissal worked but the
+        screen is still unclassifiable". Without this the recorder infers
+        failure from the state alone and mislabels a slow classification as a
+        failed dismissal (observed live 2026-08-20 00:33:37).
+        """
+        if self._first_dismiss_ts:
+            self._cleared_popups = list(self._dismiss_popups)
+            self._first_dismiss_ts = 0.0
+            self._dismiss_popups = []
 
     def tick(self, frame, current_game_state) -> "str | None":
         """Capture when GAME_UNKNOWN has persisted past the threshold.
@@ -1160,6 +1203,18 @@ class UnknownAnomalyRecorder:
             return None
         if self._captured >= self._max_per_episode:
             return None
+        # Handling was attempted and may still be taking effect — a popup that
+        # clears is not an anomaly, so hold the capture until the grace window
+        # from the FIRST attempt expires.
+        if self._first_dismiss_ts:
+            grace_left = self._dismiss_grace_s - (now - self._first_dismiss_ts)
+            if grace_left > 0:
+                logger.debug(
+                    "ADR074 anomaly: capture deferred %.0fs — dismissal of %s "
+                    "attempted %dx, waiting to see if it clears",
+                    grace_left, ", ".join(self._dismiss_popups) or "popup",
+                    self._dismiss_attempts)
+                return None
         if self._last_capture_ts and now - self._last_capture_ts < self._recapture_s:
             return None
         try:
@@ -1178,9 +1233,19 @@ class UnknownAnomalyRecorder:
             return None
         self._captured += 1
         self._last_capture_ts = now
+        if self._first_dismiss_ts:
+            handling = ("dismissal of %s attempted %dx and did NOT clear it"
+                        % (", ".join(self._dismiss_popups), self._dismiss_attempts))
+        elif self._cleared_popups:
+            handling = ("dismissal of %s cleared the popup (%dx) but GAME_UNKNOWN "
+                        "persisted — cause is NOT popup handling"
+                        % (", ".join(self._cleared_popups), self._dismiss_attempts))
+        else:
+            handling = "no calibrated popup crop matched — nothing to dismiss"
         logger.warning(
-            "ADR074 anomaly: GAME_UNKNOWN stuck for %.0fs — screenshot %d/%d "
-            "saved to %s", stuck_for, self._captured, self._max_per_episode, path)
+            "ADR074 anomaly: GAME_UNKNOWN stuck for %.0fs (%s) — screenshot %d/%d "
+            "saved to %s", stuck_for, handling, self._captured,
+            self._max_per_episode, path)
         return str(path)
 
 class HealthDropoutRecorder:

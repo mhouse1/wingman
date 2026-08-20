@@ -839,6 +839,104 @@ class TestUnknownAnomalyRecorder:
         assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
         assert list(tmp_path.iterdir()) == []
 
+    def test_dismissal_attempt_defers_capture(self, tmp_path):
+        """A popup being handled is not an anomaly — hold the capture."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None
+        clock.state["now"] += 19.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None   # still in grace
+        assert list(tmp_path.iterdir()) == []
+
+    def test_capture_proceeds_when_dismissal_does_not_clear(self, tmp_path):
+        """Grace runs from the FIRST attempt, so repeated failing clicks still capture."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None
+        for _ in range(4):            # popup re-detected and re-clicked every 5s
+            clock.state["now"] += 6.0
+            r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+        assert r._dismiss_attempts == 5
+
+    def test_successful_dismissal_never_captures(self, tmp_path):
+        """Popup cleared, state left GAME_UNKNOWN — no evidence needed."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None
+        r.on_state_change(GameState.GAME_LOBBY, GameState.GAME_UNKNOWN)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_dismiss_history_resets_between_episodes(self, tmp_path):
+        """A later stall must not inherit the previous episode's grace window."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        r.on_state_change(GameState.GAME_LOBBY, GameState.GAME_UNKNOWN)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_LOBBY)
+        assert r._dismiss_attempts == 0 and r._dismiss_popups == []
+        clock.state["now"] += 31.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_no_dismissal_still_captures_immediately(self, tmp_path):
+        """Nothing matched the screen — the original ADR 074 path is unchanged."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_popup_absent_ends_grace_and_records_cleared(self, tmp_path):
+        """Popup gone but still unclassified: capture at once, blame nothing.
+
+        Regression for the live 2026-08-20 00:33:37 mislabel — the ESC HAD
+        worked (5 consecutive 'not found' scans) yet the capture claimed the
+        dismissal "did NOT clear it", because failure was inferred from the
+        state instead of from the popup still being on screen.
+        """
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None   # in grace
+        r.note_popup_absent()                                          # ESC worked
+        assert r._first_dismiss_ts == 0.0
+        assert r._cleared_popups == ["NEW_FLIGHT_PASS"]
+        # Grace no longer applies: the stall is real but not a popup failure.
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_popup_absent_before_any_dismissal_is_a_noop(self, tmp_path):
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        r.note_popup_absent()
+        assert r._cleared_popups == [] and r._dismiss_attempts == 0
+        clock.state["now"] += 31.0
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is not None
+
+    def test_popup_reappearing_after_clear_re_arms_grace(self, tmp_path):
+        """A popup that comes back is a fresh handling attempt, not a cleared one."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock, dismiss_grace_s=20.0)
+        r.on_state_change(GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+        clock.state["now"] += 31.0
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")
+        r.note_popup_absent()
+        r.note_dismiss_attempt("NEW_FLIGHT_PASS")      # back again
+        assert r.tick(self._frame(), GameState.GAME_UNKNOWN) is None   # grace re-armed
+        assert list(tmp_path.iterdir()) == []
+
 
 class TestHealthDropoutRecorder:
     """ADR 080 d2: frames captured during live-flight health OCR dropouts."""

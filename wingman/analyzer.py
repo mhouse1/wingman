@@ -41,6 +41,21 @@ class GameState(Enum):
 POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
                         GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
+# ADR 084: states where the FSM has lost the screen and a recovery action is
+# warranted. Deliberately EXCLUDES GAME_LOBBY / GAME_WAITING — unlike the popup
+# crops, these actions leave squads and close modals next to an "Exit" button,
+# so they must not fire while the FSM still knows where it is.
+STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
+
+# Scan order: most specific screen first. The batch stops at the first hit, so a
+# generic match must never pre-empt a precise one.
+STALL_RECOVERY_CROPS = ("STALL_RETRY", "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
+
+# Gated on UNREADY dwell rather than state dwell: UNREADY makes
+# scan_region_for_play_button return None, which makes _classify_unknown_state
+# fail forever, so this screen strands the FSM without ever looking like a popup.
+STALL_UNREADY_CROP = "STALL_MULTI_PLAYER"
+
 
 class GameEvent(Enum):
     """Orchestration events the analyzer publishes (ADR 060 Phase 1).
@@ -54,6 +69,8 @@ class GameEvent(Enum):
     START_GAME_STARTING_LOOP = auto()  # ()          — entered GAME_STARTING
     LOBBY_PLAY_CLICK = auto()          # (crop, frame)
     LOBBY_POPUP_CLICK = auto()         # (crop,)
+    LOBBY_POPUP_ABSENT = auto()        # ()          — popup batch completed, none detected
+    STALL_RECOVERY_ACTION = auto()     # (crop,)     — stall-recovery screen detected (ADR 084)
     LOBBY_STALL = auto()               # ()          — no lobby crops detected for the stall window
     FSM_TRANSITION = auto()            # (trigger, prev_state_name, next_state_name, ts)
     RESPAWN_DETECTED = auto()          # (frame,)    — fired from the background OCR thread
@@ -954,6 +971,12 @@ class GameStateAnalyzer:
         self._click_to_frame_lock = threading.Lock()
         self._click_to_thread_started = False
         self._click_to_stop = threading.Event()
+        _stall_cfg = config.get("stall_recovery", {}) or {}
+        self._stall_action_after_s = float(_stall_cfg.get("action_after_s", 15.0))
+        self._stall_unready_dwell_s = float(_stall_cfg.get("unready_dwell_s", 30.0))
+        self._stall_scan_interval_s = float(_stall_cfg.get("scan_interval_s", 5.0))
+        self._unready_since = 0.0
+        self._stall_state_since = 0.0
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
@@ -2246,6 +2269,11 @@ class GameStateAnalyzer:
             self._click_to_latest_frame = frame
             self._click_to_frame_ts = time.time()
 
+        # Must run BEFORE the GAME_UNKNOWN branch below, which returns early:
+        # ADR 074 makes GAME_UNKNOWN a popup-dismiss state, so the scanner has
+        # to be alive *while* unclassified, not only after classification.
+        self._ensure_lobby_quick_scan_thread()
+
         state = {
             'is_respawning': False,
             'respawn_confidence': 0.0,
@@ -2292,22 +2320,11 @@ class GameStateAnalyzer:
             state['game_state'] = self.game_state
             return state
 
-        # Start background threads once on first frame after unknown-state classification.
+        # Click-to detection is only meaningful once the state is classified.
         if not self._click_to_thread_started:
             self._click_to_thread_started = True
             threading.Thread(target=self._run_click_to_in_background, daemon=True).start()
             logger.debug("Click-to background thread started")
-        thread_dead = (self._lobby_quick_scan_thread is not None
-                       and not self._lobby_quick_scan_thread.is_alive())
-        if not self._lobby_quick_scan_thread_started or thread_dead:
-            if thread_dead:
-                logger.warning("Lobby quick-scan thread died unexpectedly — restarting")
-                self._lobby_quick_scan_stop.clear()
-            self._lobby_quick_scan_thread_started = True
-            self._lobby_quick_scan_thread = threading.Thread(
-                target=self._run_game_lobby_quick_scan, daemon=True)
-            self._lobby_quick_scan_thread.start()
-            logger.info("Lobby quick-scan background thread started")
 
         respawn_detected, confidence, method = self._detect_respawn(frame)
         
@@ -2762,6 +2779,52 @@ class GameStateAnalyzer:
                     return
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
 
+    def _ensure_lobby_quick_scan_thread(self):
+        """Start (or restart) the popup quick-scan thread.
+
+        Called on every frame, including while still in GAME_UNKNOWN. ADR 074
+        made GAME_UNKNOWN a popup-dismiss state precisely because a modal popup
+        there hides every classification marker — so gating the scanner on
+        successful classification defeats the recovery path it was added for.
+        A session that boots straight into a popup (2026-08-19 04:29,
+        NEW_FLIGHT_PASS) previously stranded until a manual 'm' press.
+        """
+        if self._shutting_down or self._lobby_quick_scan_stop.is_set():
+            return
+        thread_dead = (self._lobby_quick_scan_thread is not None
+                       and not self._lobby_quick_scan_thread.is_alive())
+        if not self._lobby_quick_scan_thread_started or thread_dead:
+            if thread_dead:
+                logger.warning("Lobby quick-scan thread died unexpectedly — restarting")
+                self._lobby_quick_scan_stop.clear()
+            self._lobby_quick_scan_thread_started = True
+            self._lobby_quick_scan_thread = threading.Thread(
+                target=self._run_game_lobby_quick_scan, daemon=True)
+            self._lobby_quick_scan_thread.start()
+            logger.info("Lobby quick-scan background thread started")
+
+    def _stall_recovery_targets(self, state):
+        """Return the stall-recovery crops eligible to act right now (ADR 084).
+
+        Empty during healthy operation — these actions leave squads and dismiss
+        modals sitting next to an "Exit to Desktop" button, so the gate is
+        deliberately tighter than the popup crops': an unclassifiable state that
+        has PERSISTED, not merely occurred.
+        """
+        targets = []
+        now = time.time()
+        if (state in STALL_ACTION_STATES
+                and self._stall_state_since
+                and now - self._stall_state_since >= self._stall_action_after_s):
+            targets.extend(c for c in STALL_RECOVERY_CROPS if c in self.crops)
+        # Independent gate: a stuck UNREADY blocks classification outright, so it
+        # is timed from the UNREADY read itself rather than from the state.
+        if (self._unready_since
+                and now - self._unready_since >= self._stall_unready_dwell_s
+                and STALL_UNREADY_CROP in self.crops):
+            targets.append(STALL_UNREADY_CROP)
+        return targets
+
     def _run_game_lobby_quick_scan(self):
         """Scan lobby crops every 1s while in a POPUP_DISMISS_STATES state.
 
@@ -2787,6 +2850,7 @@ class GameStateAnalyzer:
             return
 
         last_popup_scan_ts = 0.0
+        last_stall_scan_ts = 0.0
         lobby_stall_since = 0.0  # timestamp when stall (no crops detected) first started
 
         while not self._lobby_quick_scan_stop.wait(timeout=1.0):
@@ -2797,6 +2861,13 @@ class GameStateAnalyzer:
                 # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
                 # counting fresh instead of comparing against a stale timestamp.
                 lobby_stall_since = 0.0
+            # ADR 084: dwell in an unclassifiable state, reset on any classified state
+            # so a brief GAME_UNKNOWN blip mid-transition never opens the gate.
+            if state in STALL_ACTION_STATES:
+                if self._stall_state_since == 0.0:
+                    self._stall_state_since = time.time()
+            else:
+                self._stall_state_since = 0.0
             # ADR 074: GAME_UNKNOWN participates for the POPUP batch only —
             # lobby crops stay excluded there: classification owns marker
             # detection in GAME_UNKNOWN, and clicking PLAY/CANCEL from an
@@ -3027,12 +3098,46 @@ class GameStateAnalyzer:
                                 crop, type(e).__name__, e,
                             )
 
+                    if not popup_detected:
+                        # The screen is popup-free: tells the ADR 074 recorder a
+                        # prior dismissal actually worked, so a continuing stall
+                        # is not blamed on popup handling.
+                        self.emit(GameEvent.LOBBY_POPUP_ABSENT)
+
                     if popup_scan_start is not None:
                         logger.debug(
                             "Lobby quick-scan: popup batch completed in %.2fs%s",
                             time.time() - popup_scan_start,
                             " (detected)" if popup_detected else "",
                         )
+
+                # --- Stall-recovery crops (ADR 084, gated on a real stall) ---
+                stall_targets = self._stall_recovery_targets(state)
+                if stall_targets and time.time() - last_stall_scan_ts >= self._stall_scan_interval_s:
+                    with self._click_to_frame_lock:
+                        stall_frame = self._click_to_latest_frame
+                        stall_frame_ts = self._click_to_frame_ts
+                    if stall_frame is not None and time.time() - stall_frame_ts <= 3.0:
+                        last_stall_scan_ts = time.time()
+                        for crop in stall_targets:
+                            try:
+                                detected, _, text = executor.submit(
+                                    _process_crop_region, stall_frame,
+                                    self.crops[crop][:4],
+                                    self.crops[crop].text or [],
+                                ).result(timeout=20)
+                            except Exception as e:
+                                logger.warning(
+                                    "Stall recovery: '%s' scan failed: %s: %s",
+                                    crop, type(e).__name__, e)
+                                continue
+                            if detected:
+                                logger.warning(
+                                    "\033[93m🔧 Stall recovery: '%s' detected (text='%s', state=%s)\033[0m",
+                                    crop, text, state.name)
+                                self.emit(GameEvent.STALL_RECOVERY_ACTION, crop)
+                                break
+                            logger.debug("Stall recovery: '%s' not found", crop)
 
                 cycle_elapsed = time.time() - cycle_start
                 if cycle_elapsed > 15.0:
@@ -3307,8 +3412,17 @@ class GameStateAnalyzer:
             if "UNREADY" in futures:
                 detected, _, text = futures["UNREADY"].result(timeout=30)
                 if detected:
-                    logger.info("Analyzer: UNREADY detected (text='%s') — suppressing PLAY click", text)
+                    # ADR 084: track dwell here rather than per-state. Returning
+                    # None also makes _classify_unknown_state fail, so a stuck
+                    # UNREADY strands the FSM in GAME_UNKNOWN indefinitely — the
+                    # dwell has to accumulate across whatever state we are in.
+                    if self._unready_since == 0.0:
+                        self._unready_since = time.time()
+                    logger.info(
+                        "Analyzer: UNREADY detected (text='%s') — suppressing PLAY click (%.0fs)",
+                        text, time.time() - self._unready_since)
                     return None
+                self._unready_since = 0.0
                 logger.debug("Analyzer: UNREADY not found")
             for crop in ("PLAY", "READY"):
                 if crop not in futures:
