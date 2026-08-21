@@ -109,6 +109,7 @@ SCHEMA = Section(
     required=frozenset({"region", "monitor"}),
     children={
         "unattended_mode": BOOL,
+        "accept_invite": BOOL,
         # Upper bound is a sanity guard (a tick slower than a minute is a typo);
         # no lower bound beyond non-negative — the replay lanes tick at 0.01.
         "loop_interval_sec": _num(0.0, 60.0),

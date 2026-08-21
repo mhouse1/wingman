@@ -98,6 +98,23 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
 
 
+def _invite_click_target(accept_invite: bool, crops) -> "str | None":
+    """Which crop dismisses a party-invite popup, given the accept/decline policy.
+
+    ACCEPT and REJECT are two buttons in the *same* dialog, and the INVITED crop
+    is positioned on ACCEPT — so declining an invite means clicking a different
+    crop, not skipping the click. An undismissed invite dialog sits over the
+    lobby and strands the FSM.
+
+    Returns None when the crop the policy calls for is not calibrated. The
+    caller must then click nothing: falling back to the other button would
+    silently invert the operator's decision, which is a worse failure than a
+    dialog left up (ADR 084 stall recovery already handles a stranded lobby).
+    """
+    target = "INVITED" if accept_invite else "REJECT"
+    return target if target in crops else None
+
+
 def _alive_transition_disposition(state, alive_after_observed_death: bool) -> str:
     """Classify an alive (dead→alive health) transition by FSM state (ADR 061).
 
@@ -309,6 +326,12 @@ def main():
     tracker = PerformanceTracker(cfg, version=WINGMAN_VERSION)
     analyzer = GameStateAnalyzer(cfg, tracker=tracker)  # also usable as a context manager via __enter__/__exit__
 
+    # Party invites are DECLINED by default: accepting drops the aircraft into
+    # someone else's squad mid-session, which silently changes what an unattended
+    # soak is actually measuring.
+    accept_invite = bool(cfg.get("accept_invite", False))
+    logger.info("Party invites: %s", "ACCEPT" if accept_invite else "DECLINE (accept_invite=false)")
+
     unattended_mode = cfg.get("unattended_mode", False)
     unattended_active = threading.Event()
     if unattended_mode:
@@ -439,6 +462,14 @@ def main():
             ctrl.press_escape(hold_seconds=0.05, block=False)
             return
         click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
+        if popup == "INVITED":
+            click_target = _invite_click_target(accept_invite, analyzer.crops)
+            if click_target is None:
+                logger.error(
+                    "INVITED: no '%s' crop calibrated — invite left undismissed rather than "
+                    "clicking the opposite button (run 'make calibrate-crop CROP=REJECT')",
+                    "INVITED" if accept_invite else "REJECT")
+                return
         ctrl.click_crop(analyzer.crops[click_target], block=False, count=1, region_name=click_target)
         if popup == "REVEAL_ALL":
             def _reveal_all_second_click():
@@ -450,6 +481,10 @@ def main():
                 ctrl.click_crop(analyzer.crops["REVEAL_ALL"], block=False, count=1, region_name="REVEAL_ALL")
             threading.Thread(target=_reveal_all_second_click, daemon=True).start()
         elif popup == "INVITED":
+            if not accept_invite:
+                # REJECT closes the dialog outright — there is no squad to ready up in.
+                logger.info("\033[93m📋 INVITED declined — REJECT clicked\033[0m")
+                return
             if replay_mode:
                 logger.info("INVITED popup click-through skipped in replay mode")
                 return

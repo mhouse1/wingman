@@ -1,4 +1,8 @@
 unattended_mode: true
+# Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
+# Default false — accepting drops the aircraft into someone else's squad
+# mid-session and silently changes what an unattended soak is measuring.
+accept_invite: false
 loop_interval_sec: 1.5
 region: {left: 0, top: 0, width: 1920, height: 1200}
 monitor: 1
@@ -149,6 +153,10 @@ crops:
     - [0.4681, 0.5344]
     - [0.5285, 0.5644]
     text: [RETRY]
+  REJECT:
+    coords:
+    - [0.3451, 0.58]
+    - [0.4146, 0.61]
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
