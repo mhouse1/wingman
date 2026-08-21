@@ -276,6 +276,11 @@ telemetry:
     legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,
     rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0}
+resource_monitor:                  # Performance 008 — long-session leak diagnosis
+  enabled: true                    # emits one greppable RESOURCE line per interval
+  interval_s: 300.0                # 5 min -> ~100 lines per 8h session
+  warmup_s: 600.0                  # rates measured AFTER this; EasyOCR model load is ~3.9GB in 5min
+  game_process_name: Metalstorm.exe  # summed RSS/swap read as a GROWTH TREND, not an absolute
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}

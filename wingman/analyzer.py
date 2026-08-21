@@ -1487,6 +1487,23 @@ class GameStateAnalyzer:
         with self._incoming_cache_lock:
             return self._incoming_cache['timestamp']
 
+    def ocr_queue_depth(self) -> "int | None":
+        """Work queued but not yet started in the OCR pool (Performance 008).
+
+        Pool saturation is the mechanism FUTURE 001 item 5 predicted and the
+        2026-08-14 soak measured indirectly (0.1 s polls stretched to 2-3.5 s).
+        Sampling the depth makes it a first-class observation. Returns None
+        when the pool has not been created or the attribute is unavailable —
+        this is a diagnostic, never a correctness dependency.
+        """
+        executor = self._ocr_executor
+        if executor is None:
+            return None
+        try:
+            return executor._work_queue.qsize()
+        except Exception:
+            return None
+
     def get_click_to_cache_result(self):
         """Return the cached click-to tuple (detected, confidence, method)."""
         with self._click_to_cache_lock:
@@ -2118,9 +2135,18 @@ class GameStateAnalyzer:
                     tier, dead_for,
                 )
             else:
+                # Performance 008: carry the evidence that distinguishes a real
+                # respawn from an OCR-starvation artifact. A death->respawn
+                # cycle cannot complete in under ~8s (the overlay alone runs
+                # that long), so a short dead_for beside a long preceding OCR
+                # pass is a confirmation gap, not a death — 17 of 31 weak fires
+                # in the 2026-08-20 session looked like this. Logged rather
+                # than acted on until the ADR 064 amendment lands.
                 logger.info(
-                    "\033[93m💛 HEALTH RESPAWN FALLBACK firing (tier=%s, dead_for=%.1fs) — OCR missed this respawn (ADR 064 dual)\033[0m",
-                    tier, dead_for,
+                    "\033[93m💛 HEALTH RESPAWN FALLBACK firing (tier=%s, dead_for=%.1fs) — OCR missed this respawn (ADR 064 dual)"
+                    " [context: health_window=%s last_respawn_ocr=%.2fs]\033[0m",
+                    tier, dead_for, list(self._health_window),
+                    getattr(self, "_last_respawn_ocr_s", float("nan")),
                 )
                 self.health_respawn_event.set()
         else:
@@ -2517,6 +2543,9 @@ class GameStateAnalyzer:
                     # Wait for respawn result first — update its cache immediately so the
                     # main loop can react without waiting for the (often slower) incoming OCR.
                     respawn_detected, respawn_ocr_time, respawn_text = respawn_future.result(timeout=120)
+                    # Performance 008: the fallback-fire log reads this to show
+                    # whether a "death" coincided with a starved OCR pass.
+                    self._last_respawn_ocr_s = respawn_ocr_time
                     if self._tracker:
                         self._tracker.record_ocr_crop("respawn", respawn_ocr_time)
 

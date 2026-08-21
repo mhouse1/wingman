@@ -190,3 +190,73 @@ alive handoff signal is a perception fault and is logged at WARNING. The
 ownership rule prevents the guard's release from yanking a climb pitch
 pulse in progress (two threads must never independently release the same
 key).
+
+## Tactic handoff leaves a flyable attitude
+
+**UID**: SAF-010
+
+**Statement**: A tactic that commands pitch shall not release its pitch input to neutral
+while the observed flight-path angle is outside the flyable band bounded by
+behavior_tree.climb.exit_pitch_deg. Before releasing it shall command the
+aircraft back inside that band, subject to a bounded pulse budget, or hand
+explicitly to a recovery tactic. Exhausting the budget shall release and be
+logged as a fault indicator, not treated as success.
+
+**Rationale**: ADR 086 d1. SAF-005 already bounds commanded nose-DOWN during an eject with
+both a budget and an attitude-referenced release rule; SAF-008 bounds the
+climb by DURATION only, and that missing half is a live defect. On
+2026-08-21 the climb released all three flight keys at +73 degrees, leaving
+the aircraft ballistic; it coasted 1500 m further, stalled at 24 KPH, fell
+into an unrecovered dive and hit the ground with two missiles still racked.
+84 climb completions in that session produced 21 near-vertical stalls.
+Critically, SAF-008 and FR-007 were BOTH satisfied throughout — every
+existing requirement describes the climb while it runs or when it starts,
+none describes what it hands back. Currently unsatisfied by design; the
+@relation marker lands with the ADR 086 implementation.
+
+## Ground-collision avoidance by predicted time to ground
+
+**UID**: SAF-011
+
+**Statement**: While wingman is commanding flight in GAME_BATTLE and the aircraft is
+descending, wingman shall command a recovery when the predicted time to
+ground — altitude divided by descent rate — falls below
+behavior_tree.climb.recover_below_time_s. When that predicted time is below
+behavior_tree.climb.confirm_bypass_time_s the recovery shall fire on a
+single qualifying reading rather than waiting for
+behavior_tree.climb.confirm_reads confirmations. A rejected or absent
+telemetry reading during an established descent shall not clear the descent
+state for behavior_tree.climb.descent_memory_s.
+
+**Rationale**: ADR 086 d2-d4. The existing recovery band is expressed in ALTITUDE, but the
+emergency is governed by descent RATE: at the 552 m/s descent measured on
+2026-08-21 the 4000 m sustain band allowed 7.2 s and the 500 m emergency
+band allowed 0.9 s, while telemetry ticks about every 3 s and confirm_reads
+of 2 needs roughly 6 s — the confirmation was slower than the margin it
+protected, so the band could not fire at any altitude tuning. The band was
+also frozen: make_climb_condition holds its decision when altitude is None,
+and rapid altitude change is exactly what trips the ADR 038/067
+plausibility filter, so the net went deaf precisely when needed. Absence of
+perception must not read as absence of danger. Currently unsatisfied by
+design; the @relation marker lands with the ADR 086 implementation.
+
+## No terrain impact while the airframe is serviceable
+
+**UID**: SAF-012
+
+**Statement**: Wingman shall not fly the aircraft into terrain while it is commanding
+flight and the airframe remains serviceable. A ground impact that is not
+the intended conclusion of an eject sequence is a violation. Verification
+is by outcome over a session: near-vertical stalls, counted as telemetry
+samples at or above +80 degrees flight-path angle with speed below 120 KPH,
+and ground impacts occurring while missiles remain available.
+
+**Rationale**: ADR 086. Modelled on FR-005, which is likewise verified by outcome rather
+than by mechanism because no in-game sensor reports the property directly.
+This requirement is the standing statement of the hazard that SAF-010 and
+SAF-011 address by different means, and it is what stays true if either
+mechanism is later replaced. Baseline for comparison, session
+2026-08-21 04:16: 21 near-vertical stalls across 84 climb completions and
+51 respawns over 16 missions (3.2 per mission), against 53 missiles-empty
+ejects. The eject share is by design and is expected to be unchanged; the
+stall share is the target. Currently unsatisfied by design.

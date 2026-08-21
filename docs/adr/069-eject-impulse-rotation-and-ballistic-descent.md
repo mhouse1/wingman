@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-08-10 | 1.7.2           |
+| Accepted | 2026-08-10 | 1.7.2           |
 
 Supersedes [ADR 068](068-eject-dive-angle-target-and-over-rotation-evidence.md)
 (Accepted) on decisions 6 and 7 — hold-nose-down-through-descent and the

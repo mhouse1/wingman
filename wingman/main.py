@@ -26,6 +26,7 @@ from .analyzer import GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STA
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
+from .resource_monitor import ResourceSampler
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -657,6 +658,10 @@ def main():
     )
     health_dropout = HealthDropoutRecorder(
         (cfg.get("health", {}) or {}).get("dropout_capture", {}), analyzer)
+    # Performance 008: periodic RESOURCE line for long-session leak diagnosis.
+    resource_sampler = ResourceSampler(
+        cfg.get("resource_monitor", {}), perf_tracker=tracker)
+    resource_sampler.set_pool_depth_source(analyzer.ocr_queue_depth)
     startup_time = time.time()
     battle_ever_reached = False
 
@@ -673,6 +678,11 @@ def main():
             if exit_requested.is_set():
                 logger.info("Exit requested, shutting down")
                 break
+            # Self-throttled; a no-op float comparison on ticks that aren't due.
+            # Placed before the capture so a stalled capture path still leaves a
+            # resource trail — capture stalls are a symptom of the very
+            # starvation this samples (Performance 008).
+            resource_sampler.maybe_sample()
             # Capture and analyze frame
             frame = cap.get_frame()
             if frame is None:
@@ -1045,6 +1055,13 @@ def main():
                 stats_tracker.print_summary()
             except Exception as e:
                 logger.warning("MissionStatsTracker: finalize failed: %s", e)
+        # Performance 008: growth rates and the leak-attribution verdict. Emitted
+        # after the stats summary so a long session ends with the one line the
+        # investigation actually reads.
+        try:
+            resource_sampler.summarize()
+        except Exception as e:
+            logger.warning("ResourceSampler: summarize failed: %s", e)
 
 
 if __name__ == "__main__":

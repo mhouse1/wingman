@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-08-07 | 1.7.1           |
+| Accepted | 2026-08-07 | 1.7.1           |
 
 Records the adoption decided by [research 002](../research/002-strictdoc-requirements-management-spike.md),
 the verified spike that answered all ten open questions from kobayashi_maru

@@ -42,6 +42,16 @@ PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
 PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pytest)
 PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
+# Performance 008: cap glibc malloc arenas for every wingman run.
+# The OCR pool runs 13 worker threads; glibc gives each its own arena, and
+# freed blocks are returned to the arena rather than the OS. Measured
+# 2026-08-21 over identical workloads (same n_ocr, same ocr_med):
+#   default arenas   681 ->  4598 ->  7112 -> 10144 MB at 0/300/600/900 s
+#   MALLOC_ARENA_MAX=2  684 ->  2453 ->  2637 ->  2545 MB  (plateau, memory returned)
+# 2.5 GB is wingman's real footprint (13 thread-local EasyOCR readers);
+# everything above it was arena fragmentation, not live data. Must be set
+# before the process starts — glibc reads it at first malloc.
+WINGMAN_ENV := MALLOC_ARENA_MAX=2
 CAPTURE_PATH ?= PATH1
 # Real-game capture (make p1/p2/p3) must outlast a full mission cycle
 # (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
@@ -105,7 +115,7 @@ reqs: reqs-gate
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -280,10 +290,10 @@ endif
 g: $(GAME_LAUNCH_DEPS)
 
 r: $(GAME_LAUNCH_DEPS)
-	$(PYTHON_RUN) -m wingman.main
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main
 
 rd: $(GAME_LAUNCH_DEPS)
-	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main --log-file wingman.log
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.
@@ -380,7 +390,7 @@ ti:
 rr-path1:
 	mkdir -p tests/test-output
 	rm -f $(RR_PATH1_LOG) $(RR_PATH1_ASSERTIONS) $(RR_PATH1_INTENTS) $(RR_PATH1_REPORT) $(RR_PATH1_SUMMARY)
-	$(PYTHON_RUN) -m wingman.main \
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--replay-config $(RR_PATH1_CONFIG) \
 		--replay-path $(RR_PATH1_NAME) \
@@ -420,7 +430,7 @@ rr-live-path1:
 		wait $$PRES_PID || true; \
 		exit 1; \
 	fi; \
-	$(PYTHON_RUN) -m wingman.main \
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--capture-path-config $(RR_LIVE_PATH1_CAPTURE_CONFIG) \
 		--capture-path $(RR_LIVE_PATH1_NAME) \
@@ -454,7 +464,7 @@ rr-live-path1-gate:
 #   make newpaths CAPTURE_PATH=PATH2
 #   make newpaths CAPTURE_PATH=PATH3
 newpaths: $(GAME_LAUNCH_DEPS)
-	$(PYTHON_RUN) -m wingman.main \
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--capture-path-config tests/replay_paths/adr037_paths.yaml \
 		--capture-path $(CAPTURE_PATH) \

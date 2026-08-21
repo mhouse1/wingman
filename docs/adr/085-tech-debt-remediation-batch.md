@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-08-20 | 1.8.5           |
+| Accepted | 2026-08-20 | 1.8.5           |
 
 ## Context
 

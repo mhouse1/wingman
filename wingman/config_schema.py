@@ -370,6 +370,13 @@ SCHEMA = Section(
             }),
         }),
 
+        # Performance 008 — periodic RESOURCE line for long-session leak diagnosis.
+        "resource_monitor": Section(children={
+            "enabled": BOOL,
+            "interval_s": SECONDS,
+            "warmup_s": SECONDS,
+            "game_process_name": STR,
+        }),
         "performance": Section(children={
             "round_histogram": Section(children={
                 "enabled": BOOL,

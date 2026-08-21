@@ -179,6 +179,26 @@ class PerformanceTracker:
             self._round_crops[crop_name].append(seconds)
             self._session_crops[crop_name].append(seconds)
 
+    def snapshot_since(self, offsets: "dict | None") -> tuple:
+        """Per-crop OCR samples recorded since `offsets`, plus new offsets.
+
+        Read-only window accessor for the ResourceSampler (Performance 008):
+        it slices the session buffers rather than draining them, so the
+        round/session aggregates and the regression gate are unaffected.
+        Passing None returns an empty window and just marks the current
+        position — the first call establishes a baseline rather than dumping
+        the whole session so far.
+        """
+        with self._lock:
+            marks = {c: len(self._session_crops[c]) for c in _CROPS}
+            if offsets is None:
+                return {}, marks
+            window = {
+                c: self._session_crops[c][offsets.get(c, 0):marks[c]]
+                for c in _CROPS
+            }
+        return window, marks
+
     def record_reaction(self, seconds: float) -> None:
         """Record one incoming→flare reaction latency. Called from main thread."""
         if not self._enabled:
