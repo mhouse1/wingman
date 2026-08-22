@@ -214,8 +214,20 @@ _TELEMETRY_ROW_CONF_MIN = 0.6
 _use_gpu: bool = False
 
 
+# Readers are thread-local and each holds ~300 MB of model weights, so the
+# legitimate lifetime total is roughly one per LONG-LIVED thread: 13 pool
+# workers plus a handful of analyzer daemons. Initialising on a transient
+# thread allocates and discards a model per call — 1,138 GAME_STARTING health
+# probes produced 1,213 initialisations on 2026-08-22 before that probe was
+# moved onto the pool. This counter makes a recurrence self-reporting instead
+# of hiding in the console at INFO.
+_OCR_READER_INIT_BUDGET = 25
+_ocr_reader_inits = 0
+
+
 def _get_thread_ocr_reader():
     """Return the EasyOCR reader for the current thread, initializing it on first call."""
+    global _ocr_reader_inits
     if not getattr(_thread_local, 'reader', None):
         with _ocr_init_lock:
             _thread_local.reader = None
@@ -223,7 +235,15 @@ def _get_thread_ocr_reader():
                 try:
                     _thread_local.reader = easyocr.Reader(['en'], gpu=_use_gpu, verbose=False)
                     mode = "GPU" if _use_gpu else "CPU"
-                    logger.info("OCR thread %d: initialized EasyOCR reader (%s)", threading.get_ident(), mode)
+                    _ocr_reader_inits += 1
+                    if _ocr_reader_inits > _OCR_READER_INIT_BUDGET:
+                        logger.warning(
+                            "OCR reader init #%d on thread '%s' — exceeds the %d expected "
+                            "for long-lived threads. Something is running OCR on transient "
+                            "threads; each init allocates ~300 MB (Performance 008).",
+                            _ocr_reader_inits, threading.current_thread().name,
+                            _OCR_READER_INIT_BUDGET)
+                    logger.debug("OCR thread %d: initialized EasyOCR reader (%s)", threading.get_ident(), mode)
                 except Exception as e:
                     logger.warning("OCR thread %d: EasyOCR init failed: %s", threading.get_ident(), e)
     return _thread_local.reader
@@ -1745,7 +1765,19 @@ class GameStateAnalyzer:
             finally:
                 self._starting_probe_running = False
 
-        threading.Thread(target=_probe, daemon=True, name="starting-health-probe").start()
+        # Run on the OCR pool, NOT a fresh thread. EasyOCR readers are
+        # thread-local (~300 MB of model weights each), so a per-probe thread
+        # built and discarded one on every probe: 1,138 probes produced 1,213
+        # reader initialisations in the 2026-08-22 02:18 session against a
+        # single 13-worker pool. That is ~350 GB of allocate/free churn per
+        # session and a prime suspect for the Performance 008 heap growth.
+        # The executor was already fetched above as a guard and then unused.
+        try:
+            executor.submit(_probe)
+        except RuntimeError as e:
+            # Pool shutting down: drop the probe rather than resurrect a thread.
+            self._starting_probe_running = False
+            logger.debug("Analyzer: health probe not submitted (%s)", e)
 
     def arm_starting_health_scan(self):
         """Enable the GAME_STARTING health-only probe and reset its instrumentation.

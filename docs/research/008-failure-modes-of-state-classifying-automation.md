@@ -172,6 +172,70 @@ simply a file written only in a state the system was no longer in.
 needed to observe it. Build the self-capture *before* it is needed, and know
 which artefacts are state-conditional so a stale one is not misread as a signal.
 
+## Lesson 8 — Grep answers questions; ranking finds questions
+
+A memory leak was investigated across several sessions. Frames, threads, file
+descriptors and Python object counts were ruled out; a heap-versus-mapped-buffer
+metric was designed and added to settle attribution; `MALLOC_ARENA_MAX=2` was
+found and cut the rate 69%. All of that was competent, targeted work, and none
+of it found the cause.
+
+The cause was one line in every log, printed 1,213 times per session:
+
+```
+1213  OCR thread N: initialized EasyOCR reader (CPU)
+ 1138  GAME_STARTING health probe #N: no digits
+  639  Altitude: N | Speed: N | Nose: +Ndeg
+```
+
+A health probe was running its OCR on a fresh thread per probe. EasyOCR readers
+are thread-local and hold ~300 MB of model weights, so every probe loaded a
+model, used it once, and discarded it — roughly 350 GB of allocate/free churn
+per session, in exactly the block size that fragments a glibc heap.
+
+It had been present in every substantial log for as long as those logs existed
+(933 initialisations in one, 180 in another). Several of those logs had been
+read, that same day, by the same investigator, repeatedly.
+
+**Why it survived.** Every query run against those logs was hypothesis-driven —
+*show me the climbs*, *show me the dive*, *show me RESOURCE lines*, *show me
+time-to-ground*. `grep` returns what you already suspect. Not one query asked
+the hypothesis-free question: **what is in this file, by volume?**
+
+It was finally found not while hunting the leak, but while answering an
+unrelated request to reduce console noise — a request whose natural first step
+is to rank log lines by frequency. That ranking is the cheapest anomaly
+detector available, and it had never been run, because tidying output and
+diagnosing a leak had not been recognised as the same operation.
+
+**The pattern.** Targeted instrumentation can only confirm or refute the
+hypothesis it was built for. A well-aimed metric is evidence *of what you
+aimed at*, and its precision is exactly what makes it blind elsewhere. Search
+strategy is subject to the same failure as Lesson 3, one level up: there, a
+diagnostic was gated on the assumption that failed; here, the entire search was
+gated on the investigator's hypotheses.
+
+Noise compounds it. A message appearing 1,213 times in a stream running at 1.3
+lines/second reads as normal chatter. The same message with a count beside it is
+obviously wrong. Volume does not merely bury signal — it disguises an anomaly as
+background.
+
+**Applicable check.** Before forming a hypothesis about a log, rank it:
+
+```
+grep "\[INFO\]" run.log | sed -E 's/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -20
+```
+
+Do this *first*, not as cleanup. Ask of the top entries: should this be here at
+all, and should it be here this many times? Anything in the top ten that is not
+a deliberate periodic report is worth explaining before anything else is
+investigated.
+
+The same move generalises past logs — rank allocations by size, syscalls by
+count, queries by frequency. Any place a targeted search is about to be run
+against a large body of data, rank it first and let the distribution suggest
+the hypothesis, rather than bringing one.
+
 ## Meta-lesson — iteration count as a diagnostic signal
 
 The symptom took four rounds to fix: recovery gate → recovery action →
@@ -200,11 +264,17 @@ system was doing *before* the symptom, not only during it.
    failed (Lesson 5).
 5. Treat the ESC-in-lobby question as open. It is the clearest live instance of
    Lesson 4 remaining in the codebase.
+6. Rank before grepping, on any new investigation (Lesson 8). Frequency ranking
+   costs one command and is the only step here that has ever found something
+   nobody was looking for.
 
 ## References
 
 - ADR 087 — the blackout chain, root cause, and all four fixes
 - ADR 086 — climb exit attitude; d6/d7 are instances of Lesson 5 (a ceiling
   tested against a stale reading reacts a sample too late)
-- Performance 008 — the leak, the retraction, and the four-hour rule
+- Performance 008 — the leak, the retraction, the four-hour rule, and the
+  per-probe reader reload found by ranking rather than by searching
+- Design 007 — the telemetry split; partly justified by Lesson 8, since the
+  clue was buried in a console emitting 1.3 lines/second
 - ADR 074 / ADR 084 — the gates whose premises failed

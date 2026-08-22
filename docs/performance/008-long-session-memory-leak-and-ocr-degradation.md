@@ -25,6 +25,58 @@ foundry `docs/performance/001-brave-oom-full-session-crash.md` — different
 memory class, disjoint time windows, anti-correlated. See "Relationship to the
 compositor OOM investigation".
 
+## 2026-08-22 — PRIME SUSPECT FOUND: a ~300 MB model reloaded per health probe
+
+`_schedule_starting_health_probe` ran its OCR on a **fresh thread per probe**:
+
+```python
+executor = self.ocr_executor          # fetched as a guard...
+if executor is None:
+    return
+...
+threading.Thread(target=_probe, daemon=True, name="starting-health-probe").start()
+```
+
+The executor was fetched, checked, and then not used. EasyOCR readers are
+thread-local and hold roughly 300 MB of model weights, so every probe built one
+on its new thread, ran a single OCR, and discarded it when the thread died.
+
+Measured on the 3h 18m session of 2026-08-22:
+
+| | |
+|---|---|
+| GAME_STARTING health probes | 1,138 |
+| EasyOCR reader initialisations | 1,213 |
+| ThreadPoolExecutor instances | 1 (13 workers) |
+| Distinct thread ids seen | 44 (up to 78 inits on one reused id) |
+| Legitimate expected total | ~16 (13 pool workers + 3 daemons) |
+
+That is on the order of **350 GB of allocate/free churn per session** in
+~300 MB blocks — a textbook driver of glibc arena fragmentation, and it fits
+every constraint this document had accumulated:
+
+- growth is **anonymous heap**, not mapped buffers — matches large transient mallocs
+- **Python object counts stay flat** — the readers really are freed
+- `MALLOC_ARENA_MAX=2` helped 69% but did not fix it — fewer arenas to fragment,
+  same churn
+- frames, threads and fds were all correctly ruled out — none of them was it
+- **OCR degrades progressively** — both the reloads themselves and allocation
+  slowing as the heap fragments
+
+**Fix:** the probe now submits to the existing pool. A tripwire warns if reader
+initialisations exceed 25 in a session, so a recurrence announces itself, and
+the per-init log moved from INFO to DEBUG — it had been firing 1,213 times a
+session and reading as noise.
+
+**Not yet confirmed as the whole cause.** The mechanism is verified and the fit
+is strong, but the residual rate after the fix has not been measured. That needs
+a session of at least four hours per the method rule below. If the rate drops to
+the ~50 MB/h noise floor this document closes; if it merely improves, the
+remainder is still unattributed.
+
+**How it hid:** the clue printed 1,213 times per session at INFO, in a console
+emitting 1.3 lines/sec. Design 007 exists partly because of this.
+
 ## Current status (2026-08-21)
 
 | | |
@@ -33,7 +85,7 @@ compositor OOM investigation".
 | **Whose leak** | Wingman's own process. Game grows +157 MB/h against wingman's +1,530 MB/h, and the memory returns to the host on wingman's exit. |
 | **Cause — partly known** | glibc arena fragmentation across the OCR thread pool. `MALLOC_ARENA_MAX=2` cuts the rate 69% (5,187 to 1,620 MB/h) and delays onset from hour ~2 to hour ~3. |
 | **Cause — still unknown** | The residual +1,620 MB/h. Not yet attributed to a specific allocation path. |
-| **Fixed?** | **No.** Mitigated only. A 5h43m session on 2026-08-21 reached 10.9 GB RSS with OCR median at 1.97s. |
+| **Fixed?** | **Prime suspect found and fixed 2026-08-22** (see above); residual unmeasured. Previously: mitigated only. A 5h43m session on 2026-08-21 reached 10.9 GB RSS with OCR median at 1.97s. |
 | **Mitigation in force** | `MALLOC_ARENA_MAX=2` (Makefile `WINGMAN_ENV`), plus restarting wingman every ~3 hours. |
 | **Next measurement** | `anon_mb` vs `rss_mb` on the RESOURCE line (added 2026-08-21) separates wingman's own heap from mapped capture buffers. Needs one 4h+ session. |
 
