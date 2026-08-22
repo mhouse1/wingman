@@ -2,11 +2,28 @@
 
 import json
 import logging
+import os
+import re
 import threading
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_ACCOUNT_ENV = "WINGMAN_ACCOUNT"
+_ACCOUNT_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def account_tag() -> str:
+    """Account label for this run, or "" when unset (Research 005).
+
+    Set by the per-account `make r1`/`r2` targets. Sanitised because it becomes
+    part of a filename: anything outside [A-Za-z0-9_-] would let an account
+    name containing a path separator write outside the output directory.
+    """
+    raw = (os.environ.get(_ACCOUNT_ENV) or "").strip()
+    return _ACCOUNT_SAFE.sub("_", raw)[:32] if raw else ""
+
 
 _CROPS = ("incoming", "respawn", "health", "ammo_flares", "ammo_missiles", "telemetry")
 
@@ -157,6 +174,13 @@ class PerformanceTracker:
         self._lock = threading.Lock()
         self._session_start    = time.time()
         self.run_id            = time.strftime("%Y%m%d_%H%M%S", time.localtime(self._session_start))
+        # Research 005: multi-account runs write into one directory. Different
+        # accounts fly different jets with different missiles, so an untagged
+        # mix silently corrupts the regression baseline and is near-impossible
+        # to unpick afterwards. Tag at the source; set by the r1/r2 targets.
+        self.account = account_tag()
+        if self.account:
+            self.run_id = f"{self.run_id}_{self.account}"
         self._rounds           = 0
 
         # Per-round buffers — cleared after each on_enter_game_lobby() emission
@@ -311,6 +335,7 @@ class PerformanceTracker:
         data = {
             "version":   self._version,
             "run_id":    run_id,
+            "account":   self.account or None,
             "start_ts":  round(self._session_start, 3),
             "end_ts":    round(end_ts, 3),
             "rounds":    rounds,

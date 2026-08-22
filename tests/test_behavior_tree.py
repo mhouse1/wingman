@@ -597,3 +597,48 @@ class TestTimeToGroundRecovery:
         """Unset thresholds leave the pure ADR 073 altitude band."""
         cond = make_climb_condition(500, 1000, confirm_reads=1)
         assert cond(make_snap(altitude=3000.0, altitude_rate=-900.0)) is False
+
+
+class TestDiveRecoveryRespawnGuard:
+    """ADR 086 d2: a respawn is an altitude discontinuity, not a descent.
+
+    Live false positive 2026-08-21 21:28:49 — DIVE RECOVERY fired "2s to
+    ground" at a smoothed 324 m while the newly respawned aircraft was at 10 m
+    and climbing away at +513 m/s. The smoothed value had carried the dead
+    aircraft's fall across the respawn boundary.
+    """
+
+    @staticmethod
+    def _cond(clock):
+        return make_climb_condition(500, 1000, recover_below_time_s=20.0,
+                                    confirm_bypass_time_s=10.0,
+                                    descent_memory_s=5.0, confirm_reads=1,
+                                    clock=clock)
+
+    def test_does_not_fire_on_the_first_samples_after_respawn(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        cond(make_snap(is_respawning=True, altitude=None, altitude_rate=None))
+        # Above enter_below_alt, so ONLY the time-to-ground trigger could fire.
+        # Stale carry-over: looks like a dive, is actually a dead aircraft.
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is False, \
+            "fired on the respawn discontinuity"
+
+    def test_still_fires_once_settled_after_a_respawn(self):
+        """The guard must delay the trigger, never disable it."""
+        clock = FakeClock()
+        cond = self._cond(clock)
+        cond(make_snap(is_respawning=True, altitude=None, altitude_rate=None))
+        cond(make_snap(altitude=5000.0, altitude_rate=+100.0))   # settling 1
+        cond(make_snap(altitude=5200.0, altitude_rate=+100.0))   # settling 2
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True, \
+            "guard suppressed a genuine dive after the aircraft had settled"
+
+    def test_a_later_respawn_re_arms_the_guard(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        for _ in range(3):
+            cond(make_snap(altitude=5000.0, altitude_rate=+50.0))
+        cond(make_snap(is_respawning=True, altitude=None, altitude_rate=None))
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is False, \
+            "guard did not re-arm on the second respawn"

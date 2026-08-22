@@ -115,7 +115,7 @@ reqs: reqs-gate
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -294,6 +294,73 @@ r: $(GAME_LAUNCH_DEPS)
 
 rd: $(GAME_LAUNCH_DEPS)
 	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main --log-file wingman.log
+
+# ---------------------------------------------------------------------------
+# Per-account run targets (Research 005)
+#
+# One Wine prefix per account, one shared GAME_EXE. The game's session lives in
+# the prefix registry (Software\\Starform\\Metalstorm holds auth_token,
+# selectedAccountId and generatedDeviceIdentifier), so a prefix IS an account.
+# launch-game kills any running instance first, so switching accounts is just
+# running the other target.
+#
+# WINGMAN_ACCOUNT tags run_*.json / run_*_stats.json so accounts at different
+# progression never silently share a performance baseline.
+#
+# ONE-TIME BOOTSTRAP per account, before its first `make rN`:
+#   1. cp -a $(HOME)/Games/Heroic/Prefixes/Metalstorm \
+#            $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct1
+#   2. make g1          # launches from that prefix — comes up LOGGED OUT
+#   3. Log in as the intended account, quit cleanly.
+#   4. make g1 again — the login persists.
+#
+# VERIFIED 2026-08-21 (Research 005 Q1). The copy carries the Proton first-run
+# setup but NOT the session, so each prefix is an independent account rather
+# than a clone of one login — no risk of two targets sharing a session. The
+# duplicated generatedDeviceIdentifier did not prevent a fresh login.
+ACCT1_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct1
+ACCT2_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct2
+
+# Proton's prefix update (wineboot) on first launch of a COPIED prefix resets
+# Wine-owned registry keys while leaving app keys intact, so a cp -a prefix
+# loses its virtual desktop and launches true-fullscreen — which breaks the
+# capture region, game_window_offset, and every calibrated crop. Idempotent, so
+# it is a dependency of every per-account launch rather than a manual step.
+VIRTUAL_DESKTOP_SIZE ?= 1920x1200
+
+# Copy settings + keybindings from the main prefix into a per-account prefix,
+# WITHOUT copying identity (ADR 052 Open Question 3). Deliberately manual, not a
+# launch dependency: it overwrites the target's settings, so running it on every
+# launch would discard any per-account tweak.
+#   make sync-settings-1     # main prefix -> acct1
+#   make sync-settings-1 DRY=--dry-run
+SETTINGS_SRC_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
+
+sync-settings-1:
+	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
+	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT1_PREFIX)" $(DRY)
+
+sync-settings-2:
+	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
+	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT2_PREFIX)" $(DRY)
+
+ensure-virtual-desktop:
+	@$(PYTHON_RUN) scripts/ensure-virtual-desktop.py \
+	  "$(WINE_PREFIX)" "$(VIRTUAL_DESKTOP_SIZE)"
+
+g1: WINE_PREFIX := $(ACCT1_PREFIX)
+g1: ensure-virtual-desktop g
+g2: WINE_PREFIX := $(ACCT2_PREFIX)
+g2: ensure-virtual-desktop g
+
+r1: WINE_PREFIX := $(ACCT1_PREFIX)
+r1: WINGMAN_ENV += WINGMAN_ACCOUNT=acct1
+r1: ensure-virtual-desktop rd
+r2: WINE_PREFIX := $(ACCT2_PREFIX)
+r2: WINGMAN_ENV += WINGMAN_ACCOUNT=acct2
+r2: ensure-virtual-desktop rd
+
+.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.

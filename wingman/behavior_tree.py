@@ -198,6 +198,12 @@ def make_disengage_condition(absent_after_s: float):
     return disengage
 
 
+# Fresh altitude samples required after a respawn before the time-to-ground
+# trigger is trusted again (ADR 086 d2). Sessions start already settled — only
+# an observed respawn imposes the wait.
+_SETTLED = 2
+
+
 def make_climb_condition(enter_below_alt: "float | None",
                          exit_above_alt: "float | None",
                          is_running_fn=None,
@@ -227,7 +233,7 @@ def make_climb_condition(enter_below_alt: "float | None",
     toward nor reset a streak (the freeze policy applied to the debounce).
     """
     state = {"active": False, "streak": 0, "ttg_streak": 0,
-             "last_ttg": None, "last_ttg_ts": 0.0}
+             "last_ttg": None, "last_ttg_ts": 0.0, "post_respawn": _SETTLED}
 
     def _time_to_ground(snapshot, now):
         """Seconds to impact at the current descent rate, or None.
@@ -258,9 +264,25 @@ def make_climb_condition(enter_below_alt: "float | None",
         # the altitude band never opened because the smoothed altitude lags
         # ~1500 m in a 560 m/s dive and the aircraft hit the ground first.
         now = clock()
+
+        # ADR 086 d2: a respawn is an altitude DISCONTINUITY, not a descent.
+        # The smoothed value carries the dead aircraft's numbers across it, so
+        # the first post-respawn samples describe a fall that already ended.
+        # Observed 2026-08-21 21:28:49 — fired "2s to ground" at a smoothed
+        # 324m while the new aircraft was at 10m and climbing away at +513m/s.
+        if snapshot.is_respawning:
+            state["post_respawn"] = 0
+            state["last_ttg"] = None
+            state["ttg_streak"] = 0
+        elif snapshot.altitude is not None:
+            state["post_respawn"] += 1
+
         ttg = _time_to_ground(snapshot, now)
         emergency = False
-        if recover_below_time_s is not None and ttg is not None \
+        # Two clean samples since the respawn before the emergency is trusted:
+        # enough to establish a rate that describes the LIVING aircraft.
+        settled = state["post_respawn"] >= _SETTLED
+        if settled and recover_below_time_s is not None and ttg is not None \
                 and ttg < float(recover_below_time_s):
             if (confirm_bypass_time_s is not None
                     and ttg < float(confirm_bypass_time_s)):
