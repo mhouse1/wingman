@@ -516,3 +516,95 @@ def test_rate_fallback_when_angle_unavailable(monkeypatch):
     thread, result = _descent_in_thread(ctrl)
     assert _wait_for(lambda: ctrl._eject_phase_exit_reason == "established")
     _stop(ctrl, thread, result)
+
+
+# ---------------------------------------------------------------------------
+# ADR 088: the dive's premise is re-checked while it is being acted on
+# ---------------------------------------------------------------------------
+
+def test_descent_aborts_when_missiles_rearm(monkeypatch, caplog):
+    """The eject fires on an EMPTY rack, but the game rearms on a timer and the
+    dive outlives that timer.
+
+    Observed 2026-08-22 01:51:33 — missiles went 0 -> 1 thirteen seconds into a
+    dive started because the count was 0, and the aircraft flew a usable
+    missile into the ground.
+    """
+    stub = _TelemetryStub(alt_rate=-120.0)
+    stub.missiles = 0
+    stub.get_ammo_missiles = lambda: stub.missiles
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    thread, result = _descent_in_thread(ctrl)
+    time.sleep(0.2)
+    assert result.get("cancelled") is None, "aborted before any rearm"
+
+    stub.missiles = 1                       # the game rearms mid-dive
+    assert _wait_for(lambda: result.get("cancelled") is True, timeout=3.0), \
+        "descent did not abort when a missile became available"
+    assert ctrl._eject_phase_exit_reason == "rearmed"
+    thread.join(timeout=5.0)
+
+
+def test_descent_continues_while_rack_stays_empty(monkeypatch):
+    """The abort must not fire on an empty rack or an unreadable count."""
+    stub = _TelemetryStub(alt_rate=-120.0)
+    stub.missiles = 0
+    stub.get_ammo_missiles = lambda: stub.missiles
+    ctrl = _make_ctrl(monkeypatch, stub)
+
+    thread, result = _descent_in_thread(ctrl)
+    time.sleep(0.3)
+    assert result.get("cancelled") is None, "aborted with an empty rack"
+    stub.missiles = None                    # OCR dropout, not a rearm
+    time.sleep(0.3)
+    assert result.get("cancelled") is None, "aborted on an unreadable count"
+    _stop(ctrl, thread, result)
+
+
+def _eject_into_hold(ctrl, stub):
+    """eject_and_dive() spawns its own thread and returns at once, so progress
+    is observed through the _ejecting flag. Establish descent on live
+    telemetry, then drop it so the loop exits into 'holding until respawn'."""
+    ctrl.eject_and_dive()
+    assert _wait_for(lambda: ctrl._ejecting.is_set(), timeout=2.0), "eject never started"
+    time.sleep(0.3)          # descent control running
+    stub.available = False   # telemetry lost -> descent ends -> hold begins
+
+
+def test_hold_phase_also_aborts_on_rearm(monkeypatch, caplog):
+    """ADR 088 d1: the post-descent hold outlives the rearm timer too.
+
+    With the check only in the descent loop, 4 of 85 dives still completed
+    carrying missiles (2026-08-22 02:18 session) — the rack refilled after
+    descent control had already ended, and the hold was a single blocking wait
+    with nothing to notice.
+    """
+    stub = _TelemetryStub(alt_rate=-120.0)
+    stub.missiles = 0
+    stub.get_ammo_missiles = lambda: stub.missiles
+    ctrl = _make_ctrl(monkeypatch, stub, eject_max_s=6.0)
+
+    caplog.set_level("WARNING")
+    _eject_into_hold(ctrl, stub)
+    time.sleep(0.8)
+    assert ctrl._ejecting.is_set(), "eject ended before the rearm"
+
+    stub.missiles = 2                        # the game rearms during the hold
+    assert _wait_for(lambda: not ctrl._ejecting.is_set(), timeout=4.0), \
+        "hold phase did not abort when missiles rearmed"
+    assert "ABORT during hold" in caplog.text
+
+
+def test_hold_phase_is_not_cut_short_without_a_rearm(monkeypatch):
+    """The poll must not shorten the hold when the rack stays empty."""
+    stub = _TelemetryStub(alt_rate=-120.0)
+    stub.missiles = 0
+    stub.get_ammo_missiles = lambda: stub.missiles
+    ctrl = _make_ctrl(monkeypatch, stub, eject_max_s=2.0)
+
+    t0 = time.time()
+    _eject_into_hold(ctrl, stub)
+    assert _wait_for(lambda: not ctrl._ejecting.is_set(), timeout=8.0)
+    held = time.time() - t0
+    assert held >= 1.5, f"eject ended after {held:.2f}s — the poll cut the hold short"

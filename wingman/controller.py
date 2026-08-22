@@ -343,6 +343,8 @@ class Controller:
         # at 24 KPH and hit the ground with missiles still racked. None
         # disables the push (pre-ADR-086 behaviour).
         self._climb_pitch_lead_s = float(_cl_cfg.get("pitch_lead_s", 3.0))
+        # ADR 088: abort a dive whose premise (empty rack) has expired.
+        self._eject_abort_on_rearm = bool(_ecl.get("abort_on_rearm", True))
         self._climb_exit_pitch_deg = _cl_cfg.get("exit_pitch_deg")
         self._climb_exit_pulse_s = float(_cl_cfg.get("exit_push_pulse_s", 1.0))
         self._climb_exit_max_pulses = int(_cl_cfg.get("exit_push_max_pulses", 3))
@@ -1171,7 +1173,7 @@ class Controller:
     def _eject_descent_control(self) -> bool:
         """Impulse rotation and ballistic descent (ADR 069).
 
-        Returns True when cancelled (respawn). The outcome is left in
+        Returns True when cancelled (respawn or ADR 088 d1 rearm). The outcome is left in
         self._eject_phase_exit_reason.
 
         Two alternating regimes, one criterion:
@@ -1189,6 +1191,8 @@ class Controller:
         The criterion is the raw altitude rate, never the flight-path angle:
         the angle ratio saturates at 90 degrees exactly when the aircraft is
         accelerating hardest, which is precisely during a good dive (Fault A).
+
+        @relation(SAF-012, scope=function)
         """
         start = time.time()
         pulses = 0
@@ -1211,6 +1215,24 @@ class Controller:
                     "— releasing", self._eject_cl_max_s)
                 self._eject_phase_exit_reason = "timeout"
                 return False
+
+            # ADR 088: the eject fires on an EMPTY rack, but the game rearms on
+            # a timer and the dive outlives that timer. Observed 2026-08-22
+            # 01:51:33 — missiles went 0 -> 1 thirteen seconds into a dive
+            # started because the count was 0, and the aircraft flew a usable
+            # missile into the ground. Re-check the premise while acting on it.
+            if self._eject_abort_on_rearm and self._analyzer is not None:
+                try:
+                    _mis = self._analyzer.get_ammo_missiles()
+                except Exception:
+                    _mis = None
+                if isinstance(_mis, int) and _mis > 0:
+                    logger.warning(
+                        "Controller: eject_and_dive — ABORT, %d missile(s) "
+                        "rearmed mid-descent (ADR 088)", _mis)
+                    self._eject_phase_exit_reason = "rearmed"
+                    self._eject_stop_reason = "rearmed"
+                    return True
 
             snap = self._eject_telemetry()
             rate = None
@@ -1471,7 +1493,29 @@ class Controller:
                     logger.info(
                         "Controller: eject_and_dive — descent control ended (%s) "
                         "— holding until respawn", self._eject_phase_exit_reason or "unknown")
-                    self._eject_stop.wait(timeout=self._eject_cl_max_s)
+                    # ADR 088 d1: the hold outlives the rearm timer just as the
+                    # descent does, so it needs the same re-check. Polled rather
+                    # than a single wait — with one wait, 4 of 85 dives still
+                    # completed carrying missiles (2026-08-22 02:18 session),
+                    # because the rack refilled AFTER descent control ended.
+                    _hold_deadline = time.time() + self._eject_cl_max_s
+                    while not self._eject_stop.wait(
+                            timeout=self._eject_cl_check_interval_s):
+                        if time.time() >= _hold_deadline:
+                            break
+                        if not (self._eject_abort_on_rearm
+                                and self._analyzer is not None):
+                            continue
+                        try:
+                            _mis = self._analyzer.get_ammo_missiles()
+                        except Exception:
+                            _mis = None
+                        if isinstance(_mis, int) and _mis > 0:
+                            logger.warning(
+                                "Controller: eject_and_dive — ABORT during hold, "
+                                "%d missile(s) rearmed (ADR 088 d1)", _mis)
+                            self._eject_stop_reason = "rearmed"
+                            break
             finally:
                 self._ejecting.clear()
                 self._eject_nose_held_total_s = None
@@ -2218,12 +2262,25 @@ class Controller:
                 # re-press only after the rearm margin refills.
                 fuel = self._read_fuel_pct()
                 if fuel is not None:
-                    if ab_held and fuel <= fuel_floor_pct:
+                    _incoming = self._incoming_now()
+                    if ab_held and fuel <= fuel_floor_pct and not _incoming:
                         self._climb_key(AFTERBURNER_KEY, press=False)
                         ab_held = False
                         logger.info(
                             "Controller: climb — fuel %d%% reached floor %.0f%% "
                             "— afterburner released (recharge/reserve)",
+                            fuel, fuel_floor_pct)
+                    elif not ab_held and _incoming and fuel > 0:
+                        # ADR 088: outrunning a missile outranks every reserve
+                        # policy. Overrides the ADR 075 floor and the ADR 083 d3
+                        # above-target cut, down to (not including) empty —
+                        # at 0% the burner produces no thrust and a held key
+                        # blocks recharge, so that ADR 075 limit still stands.
+                        self._climb_key(AFTERBURNER_KEY, press=True)
+                        ab_held = True
+                        logger.info(
+                            "Controller: climb — INCOMING, afterburner forced on "
+                            "(fuel %d%%, reserve floor %.0f%% overridden)",
                             fuel, fuel_floor_pct)
                     elif (not ab_held
                             and not above_target   # ADR 083 d3: never relight above target
@@ -2333,7 +2390,14 @@ class Controller:
                 # gate, which keeps its floor/rearm behaviour below target.
                 if alt >= exit_alt and not above_target:
                     above_target = True
-                    if ab_held:
+                    if ab_held and self._incoming_now():
+                        # ADR 088: this is the cut observed stranding an evade
+                        # (2026-08-22 01:47:39, burner cut 1.7s after the
+                        # manoeuvre limit released with incoming still present).
+                        logger.info(
+                            "Controller: climb — reached target alt %.0f but "
+                            "INCOMING — holding afterburner", exit_alt)
+                    elif ab_held:
                         self._climb_key(AFTERBURNER_KEY, press=False)
                         ab_held = False
                         logger.info(
@@ -2377,6 +2441,22 @@ class Controller:
         """True while a climb_mode hold is in progress
         (ADR 073 3.2b — the Climb leaf's is_running_fn)."""
         return self._climbing.is_set()
+
+    def _incoming_now(self) -> bool:
+        """True while an incoming-missile alert is on screen (ADR 088).
+
+        Cheap cache read — the analyzer already maintains this for the evade
+        tactic; this is a second consumer, not a second detector.
+
+        @relation(SAF-013, scope=function)
+        """
+        if self._analyzer is None:
+            return False
+        try:
+            detected, _, _ = self._analyzer.get_incoming_cache_result()
+            return bool(detected)
+        except Exception:
+            return False   # a diagnostic read must never break the climb loop
 
     def _climb_exit_push(self) -> str:
         """Nose down into the flyable band before the climb releases (ADR 086 d1).

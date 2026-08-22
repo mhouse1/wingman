@@ -854,3 +854,66 @@ def test_exit_push_yields_to_stop_event(monkeypatch):
     assert reason == "interrupted"
     assert len(_presses(kb, NOSE_DOWN_KEY)) <= 1
     assert len(_releases(kb, NOSE_DOWN_KEY)) == len(_presses(kb, NOSE_DOWN_KEY))
+
+
+# ---------------------------------------------------------------------------
+# ADR 088: an inbound missile outranks every afterburner reserve policy
+# ---------------------------------------------------------------------------
+
+class _IncomingAnalyzer(_FakeTelemetryAnalyzer):
+    """Telemetry stand-in that can also report an incoming-missile alert."""
+
+    def __init__(self, *a, incoming=False, **kw):
+        super().__init__(*a, **kw)
+        self._incoming = incoming
+
+    def set_incoming(self, value):
+        with self._lock:
+            self._incoming = value
+
+    def get_incoming_cache_result(self):
+        with self._lock:
+            return (self._incoming, 1.0, "test")
+
+
+def test_incoming_overrides_the_fuel_reserve_floor(monkeypatch):
+    """ADR 088: outrunning a missile beats preserving the evade reserve.
+
+    Observed 2026-08-22 01:47:39 — the evade released at its manoeuvre limit
+    with incoming still present, Climb took over, and the burner was cut 1.7s
+    later. The aircraft coasted while a missile was inbound.
+    """
+    analyzer = _IncomingAnalyzer(stable_value=None, ts=None, fresh=False, fuel=50)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=8.0))
+
+    ctrl.climb_mode(target_alt=9000.0, max_s=8.0, fuel_floor_pct=10.0)
+    time.sleep(0.4)
+    analyzer.set_fuel(8)                    # below the floor -> normally released
+    time.sleep(0.6)
+    assert _releases(kb, AFTERBURNER_KEY), "burner not released at the floor"
+    lit = len(_presses(kb, AFTERBURNER_KEY))
+
+    analyzer.set_incoming(True)             # missile inbound, fuel still 8%
+    time.sleep(0.8)
+    assert len(_presses(kb, AFTERBURNER_KEY)) > lit, \
+        "burner not forced on for an inbound missile below the reserve floor"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_incoming_does_not_force_burner_on_an_empty_tank(monkeypatch):
+    """ADR 075 still stands at 0%: no thrust, and a held key blocks recharge."""
+    analyzer = _IncomingAnalyzer(stable_value=None, ts=None, fresh=False,
+                                 fuel=0, incoming=True)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=6.0))
+
+    ctrl.climb_mode(target_alt=9000.0, max_s=6.0, fuel_floor_pct=10.0)
+    time.sleep(0.8)
+    assert not _presses(kb, AFTERBURNER_KEY), \
+        "burner pressed with an empty tank despite ADR 075"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)

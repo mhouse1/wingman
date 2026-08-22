@@ -374,6 +374,7 @@ SCHEMA = Section(
                 "observe_after_pulse_s": SECONDS,
                 "max_rotation_pulses": _int(1),
                 "eject_max_s": SECONDS,
+                    "abort_on_rearm": BOOL,
             }),
         }),
 

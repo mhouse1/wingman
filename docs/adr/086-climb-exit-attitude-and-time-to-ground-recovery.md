@@ -340,6 +340,33 @@ freshest accepted reading rather than the smoothed one — but that changes what
 every other consumer of `snapshot.altitude` sees, so it is deliberately not
 bundled here.
 
+## d2 live evidence 2026-08-21 — 18 firings, 16 genuine
+
+First long session with the trigger active (2h 19m, 23 missions, 78 respawns).
+
+| ttg at fire | altitude | count |
+|-------------|----------|-------|
+| 11-17s | 4998-6398 m | 10 |
+| 2-4s | 296-4947 m | 6 |
+| after respawn | 324 m, 3874 m | 2 |
+
+The ten firings at 11-17s are the trigger doing exactly what d2 was written
+for: catching an established dive at altitude with double-digit seconds of
+margin, where the pure altitude band would not have fired until far too late.
+
+The six at 2-4s are late, and the cause is the known smoothing lag documented
+under "Deviation" above — the tree's altitude trails the aircraft's in a fast
+descent, so ttg is computed from a value that is already stale. They still fire,
+just without useful margin.
+
+Two fired within 15s of a respawn (5.5s and 14.6s), the discontinuity artifact.
+The respawn guard added after this session suppresses exactly these two and
+none of the sixteen genuine firings.
+
+Not yet established: whether any of the sixteen actually *prevented* a crash.
+Respawn count (3.4 per mission) is unchanged from pre-d2 sessions (3.2-3.4), so
+there is no aggregate effect visible yet.
+
 ## Consequences
 
 - The climb tactic gains an attitude obligation it did not have. ADR 073 framed

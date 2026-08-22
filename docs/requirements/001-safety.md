@@ -260,3 +260,25 @@ mechanism is later replaced. Baseline for comparison, session
 51 respawns over 16 missions (3.2 per mission), against 53 missiles-empty
 ejects. The eject share is by design and is expected to be unchanged; the
 stall share is the target. Currently unsatisfied by design.
+
+## Thrust is not withdrawn during an active missile threat
+
+**UID**: SAF-013
+
+**Statement**: While an incoming-missile alert is detected and wingman is commanding flight,
+no fuel-conservation or altitude-management policy shall release the
+afterburner. This overrides the reserve floor and the at-target thrust cut.
+The sole exception is an afterburner fuel reading of zero, where the control
+produces no thrust and holding it prevents the recharge that a subsequent
+evade depends on.
+
+**Rationale**: ADR 088 d2. ADR 075 releases the burner at a reserve floor to keep fuel for a
+FUTURE evade; ADR 083 d3 cuts it at target altitude to stop a zoom climb
+stalling itself. Both are correct in the situations they were written for, and
+neither considered an evade already in progress — an evade in hand is worth
+more than a hypothetical one. Observed 2026-08-22 01:47:39: the ADR 070 d12
+manoeuvre limit released the evade with the alert still present, the climb
+tactic took selection, and the burner was cut 1.7 seconds later while a
+missile was tracking. The zero-fuel exception is physical rather than
+policy-based and is why this is stated as an override of specific policies
+rather than as an unconditional hold.

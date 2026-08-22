@@ -431,7 +431,40 @@ both processes directly: wingman +1,530 MB/h against the game's +157 MB/h, and
 the host recovered the full 10.9 GB when wingman exited. **The leak is in the
 wingman process.**
 
-### Next experiment: heap or mapped buffers? (instrumented, not yet run)
+### Heap or mapped buffers? — ANSWERED 2026-08-21: heap
+
+The 2h 19m acct1 session is the first with the `anon_mb` split. The result is
+unambiguous:
+
+| Elapsed | rss_mb | anon_mb | rss − anon |
+|---------|--------|---------|------------|
+| 0.0h | 685 | 379 | 306 |
+| 0.5h | 2521 | 2202 | 319 |
+| 1.0h | 3062 | 2742 | 320 |
+| 1.5h | 3537 | 3218 | 319 |
+| 2.0h | 4282 | 3962 | 320 |
+
+**The non-anonymous portion is flat at ~320 MB for the entire session.** RSS grew
++3597 MB and anonymous memory grew +3583 MB — essentially all of it.
+
+So the growth is **wingman's own heap**, not mapped capture buffers. The
+PipeWire capture path is exonerated by direct measurement rather than by
+inference, closing the ambiguity noted in the retraction above: `VmRSS` could
+not distinguish the two, and now it does not have to.
+
+This narrows the remaining +1,000–1,600 MB/h to allocator behaviour or genuine
+Python-side retention within the process. The 2026-08-20 narrowing already ruled
+out frame retention, thread growth, fd growth and Python object counts, and
+`MALLOC_ARENA_MAX=2` removed the arena component it could reach — so the
+residual is most likely fragmentation the cap does not address, but that is
+inference, not measurement.
+
+**Note on the four-hour rule.** This session is 2.3h, below the threshold for a
+*rate* claim, and its +1,001 MB/h is reported as such. The attribution finding
+above is not a rate claim: a constant rss−anon gap across 28 samples is
+decisive regardless of session length.
+
+### Superseded plan (kept for context)
 
 `VmRSS` counts shared pages as well as heap, and wingman receives capture
 buffers through the PipeWire pipeline the game feeds. So "growth in wingman's
