@@ -25,7 +25,54 @@ foundry `docs/performance/001-brave-oom-full-session-crash.md` — different
 memory class, disjoint time windows, anti-correlated. See "Relationship to the
 compositor OOM investigation".
 
-## 2026-08-22 — PRIME SUSPECT FOUND: a ~300 MB model reloaded per health probe
+## REFUTED 2026-08-22 — the reader churn was real, and was NOT the leak
+
+The section below identified a genuine defect and argued it explained the leak.
+**The fix worked and the leak did not change.** The hypothesis is refuted.
+
+The fix is confirmed at the mechanism level, unambiguously:
+
+| | probes | reader inits |
+|---|---|---|
+| before | 1,138 | 1,213 |
+| after | **1,843** | **13** |
+
+Nearly two thousand probes and the initialisation count never left 13. Roughly
+1,830 model loads per session were eliminated.
+
+The leak is unmoved. A 3h 50m session, matched against the pre-fix 5h 43m
+session at equal elapsed times:
+
+| Elapsed | pre-fix | post-fix |
+|---------|---------|----------|
+| 0.0h | 666 MB | 666 MB |
+| ~0.8h | 2,733 MB | 2,769 MB |
+| ~1.5h | 3,378 MB | 3,829 MB |
+| ~2.3h | 4,427 MB | 5,334 MB |
+| ~3.0h | 5,836 MB | 6,686 MB |
+| ~3.8h | 7,166 MB | 7,571 MB |
+
+Post-warm-up rate: **+1,478 MB/h before, +1,645 MB/h after** — unchanged, if
+anything marginally worse, and well inside session-to-session variation. OCR
+degradation is likewise identical: median 0.28s → 0.84s across the session,
+p95 0.49s → 4.75s, the same curve as before.
+
+**What this eliminates.** EasyOCR reader construction and destruction is not the
+allocation driving heap growth, despite ~1,800 occurrences per session in blocks
+of hundreds of MB. That is a strong negative result: it removes the largest
+identified allocator of transient memory from suspicion, and the remaining
++1,500 MB/h is entirely unattributed.
+
+**The fix is kept.** Reloading a model 1,843 times per session is wasteful
+regardless of its relationship to the leak, and the tripwire guards against
+regression. It is simply not the answer to this document's question.
+
+**Method note.** At ~0.8h the two sessions read 2,733 MB and 2,769 MB — a short
+session would have looked like confirmation. The four-hour rule is what turned
+this into a clean refutation instead of a second false positive, after the
+`MALLOC_ARENA_MAX` retraction earlier in this document.
+
+## Superseded hypothesis (kept for the evidence) — a ~300 MB model reloaded per health probe
 
 `_schedule_starting_health_probe` ran its OCR on a **fresh thread per probe**:
 
@@ -85,7 +132,7 @@ emitting 1.3 lines/sec. Design 007 exists partly because of this.
 | **Whose leak** | Wingman's own process. Game grows +157 MB/h against wingman's +1,530 MB/h, and the memory returns to the host on wingman's exit. |
 | **Cause — partly known** | glibc arena fragmentation across the OCR thread pool. `MALLOC_ARENA_MAX=2` cuts the rate 69% (5,187 to 1,620 MB/h) and delays onset from hour ~2 to hour ~3. |
 | **Cause — still unknown** | The residual +1,620 MB/h. Not yet attributed to a specific allocation path. |
-| **Fixed?** | **Prime suspect found and fixed 2026-08-22** (see above); residual unmeasured. Previously: mitigated only. A 5h43m session on 2026-08-21 reached 10.9 GB RSS with OCR median at 1.97s. |
+| **Fixed?** | **No.** Two hypotheses tested and both refuted (arena cap, reader churn). Cause unknown; +1,500 MB/h unattributed. A 5h43m session on 2026-08-21 reached 10.9 GB RSS with OCR median at 1.97s. |
 | **Mitigation in force** | `MALLOC_ARENA_MAX=2` (Makefile `WINGMAN_ENV`), plus restarting wingman every ~3 hours. |
 | **Next measurement** | `anon_mb` vs `rss_mb` on the RESOURCE line (added 2026-08-21) separates wingman's own heap from mapped capture buffers. Needs one 4h+ session. |
 

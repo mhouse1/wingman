@@ -2949,9 +2949,17 @@ class GameStateAnalyzer:
         recovery path.
         """
         lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
+        # Must cover every dismissible crop the GAME_LOBBY state declares in
+        # _STATE_CROPS, or a screen wingman has a calibrated crop for is never
+        # scanned. TAP_HERE_TO_CONTINUE and FINAL_CONTINUE were declared there
+        # and missing here: a PILOT LEVEL UP screen ("Tap Here to Continue")
+        # stranded the lobby for 40 minutes on 2026-08-22 08:40 while the crop
+        # that dismisses it sat unused. test_lobby_popup_coverage guards the
+        # two lists against drifting apart again.
         popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
                             "UNLOCK_CLOSE", "INSPECT", "event_refresh",
-                            "NEW_FLIGHT_PASS"]
+                            "NEW_FLIGHT_PASS", "TAP_HERE_TO_CONTINUE",
+                            "FINAL_CONTINUE"]
         popup_crops = [c for c in popup_crop_names if c in self.crops]
 
         if not lobby_crops and not popup_crops:
