@@ -526,9 +526,22 @@ def main():
         if current == GameState.GAME_UNKNOWN:
             unknown_anomaly.note_dismiss_attempt(crop)
 
-        if crop in ("STALL_AIRCRAFT", "STALL_EXIT_TO_DESKTOP"):
-            # Escape, never a click: on the Exit-to-Desktop modal the Cancel
-            # button sits beside an Exit button that would close the game.
+        if crop == "STALL_EXIT_TO_DESKTOP":
+            # ADR 087 supersedes ADR 084's "escape, never a click" for THIS
+            # crop. That rule assumed ESC could dismiss the modal; it cannot.
+            # On 2026-08-21 the dialog was detected continuously across ESC
+            # presses from all three lobby sources for 25 minutes and never
+            # cleared — ESC only ever opens it. Clicking Cancel is the only
+            # exit, and the crop is calibrated to the Cancel button itself:
+            # its centre sits ~130px clear of the Exit button beside it.
+            logger.warning("\033[93m🔧 Stall recovery: '%s' — clicking CANCEL (state=%s)\033[0m",
+                           crop, current.name)
+            ctrl.click_crop(analyzer.crops["STALL_EXIT_TO_DESKTOP"], block=False,
+                            count=1, region_name="STALL_EXIT_TO_DESKTOP")
+            return
+
+        if crop == "STALL_AIRCRAFT":
+            # Unchanged (ADR 084): no adjacent destructive button, ESC works.
             logger.warning("\033[93m🔧 Stall recovery: '%s' — pressing ESC (state=%s)\033[0m",
                            crop, current.name)
             ctrl.press_escape(hold_seconds=0.05, block=False)
@@ -569,9 +582,16 @@ def main():
 
     analyzer.subscribe(GameEvent.STALL_RECOVERY_ACTION, _handle_stall_recovery,
                        name="controller")
-    analyzer.subscribe(GameEvent.LOBBY_STALL,
-                       lambda: ctrl.press_escape(hold_seconds=0.05, block=False),
-                       name="controller")
+    # ADR 087 addendum 3: this beat NO LONGER presses ESC. In the lobby ESC
+    # opens the Exit-to-Desktop modal, so the "recovery" was manufacturing the
+    # blackout it was responding to — a 23s cycle of cancel-then-reopen
+    # (2026-08-21 10:48). Recovery for a lobby blackout is the stall-crop scan,
+    # which cancels that dialog; the beat's remaining job is to arm the ADR 087
+    # capture and the blackout clock.
+    # ADR 087: the same beat arms the anomaly capture, so a lobby blackout
+    # leaves evidence instead of only ESC presses in the log.
+    analyzer.subscribe(GameEvent.LOBBY_STALL, unknown_anomaly.note_lobby_stall,
+                       name="unknown_anomaly")
 
     def _emit_capture_event(event_name: str) -> None:
         if replay_assertions is not None and replay_capture is not None:
@@ -801,6 +821,19 @@ def main():
                         while not _stop.wait(timeout=45.0):
                             if analyzer.game_state != GameState.GAME_LOBBY:
                                 return
+                            if (analyzer.lobby_blackout_active()
+                                    or analyzer.exit_dialog_visible()):
+                                # ADR 087: ESC opens the Exit-to-Desktop modal,
+                                # so it must not fire into a blackout — that is
+                                # how the modal gets re-opened seconds after
+                                # recovery cancels it. Gated on the blackout,
+                                # not just the dialog flag: a single "not
+                                # found" scan clears that flag and the press
+                                # immediately re-creates the dialog.
+                                logger.info(
+                                    "GAME_LOBBY escape loop: ESC suppressed — "
+                                    "lobby blackout in progress")
+                                continue
                             logger.info("GAME_LOBBY escape loop: pressing ESC")
                             ctrl.press_escape(hold_seconds=0.05, block=False)
                     lobby_escape_thread = threading.Thread(

@@ -100,6 +100,25 @@ _BATTLE_STATES = frozenset({
 })
 
 
+
+def _fmt_rate(rate) -> str:
+    """Altitude rate for the BT log line, or why it is missing (ADR 086 d2)."""
+    return "n/a" if rate is None else f"{rate:+.0f}m/s"
+
+
+def _fmt_ttg(alt, rate) -> str:
+    """Predicted seconds to ground, for the BT log line (ADR 086 d2).
+
+    Logged EVERY tick, not only when the trigger fires. The 2026-08-21 19:42
+    review could not tell "the trigger is armed and correctly quiet" from "the
+    trigger is dead" because neither state emitted anything — a safety-critical
+    condition must be observable while it is silent.
+    """
+    if alt is None or rate is None or rate >= 0:
+        return "n/a"
+    return f"{alt / -rate:.0f}s"
+
+
 class TrackingHudHandler:
     """Target tracking (HSV contour + proportional roll) and the HUD snapshot.
 
@@ -837,8 +856,10 @@ class BehaviorTreeHandler:
         absent_s = now - self._enemy_last_seen_ts if self._enemy_last_seen_ts else 0.0
         snapshot_obj = self._analyzer.get_telemetry()
         altitude = None
+        altitude_rate = None
         if snapshot_obj is not None and snapshot_obj.altitude_fresh():
             altitude = snapshot_obj.altitude.stable_value
+            altitude_rate = getattr(snapshot_obj.altitude, "rate", None)
         # Stored for _start_climb, which runs inside tree.tick() below and
         # needs the altitude the selection was made against (ADR 075).
         self._last_altitude = altitude
@@ -863,6 +884,7 @@ class BehaviorTreeHandler:
             game_state=current_game_state,
             missiles_empty_confirmed=missiles_empty_confirmed,
             fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
+            altitude_rate=altitude_rate,
         )
         self._writer.set("snapshot", snap)
         self._tree.tick()
@@ -872,9 +894,10 @@ class BehaviorTreeHandler:
             self._last_selection = selection
         logger.debug(
             "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
-            "respawn=%s alt=%s fuel=%s mission=%s",
+            "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s",
             self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
             snap.ring_long, absent_s, snap.is_respawning, altitude,
+            _fmt_rate(altitude_rate), _fmt_ttg(altitude, altitude_rate),
             snap.fuel_pct, snap.mission_running,
         )
         if self._climb_shadow is not None:
@@ -1137,6 +1160,14 @@ class UnknownAnomalyRecorder:
         self._unknown_since = 0.0
         self._captured = 0
         self._last_capture_ts = 0.0
+        # ADR 087: a classified state whose defining crops all read empty is
+        # just as unclassifiable as GAME_UNKNOWN, but produced no evidence
+        # because the capture was gated on the state name.
+        self._blackout_since = 0.0
+        self._blackout_last_ts = 0.0
+        # LOBBY_STALL re-emits every 10s while the blackout lasts; allow three
+        # missed beats before calling the episode over.
+        self._blackout_idle_s = 30.0
         self._first_dismiss_ts = 0.0
         self._dismiss_attempts = 0
         self._dismiss_popups: "list[str]" = []
@@ -1149,12 +1180,40 @@ class UnknownAnomalyRecorder:
             self._last_capture_ts = 0.0
         else:
             self._unknown_since = 0.0
+        # ADR 087: any state change means classification is producing fresh
+        # answers again, so a blackout episode cannot span it.
+        self._blackout_since = 0.0
+        self._blackout_last_ts = 0.0
         # Dismissal history belongs to the episode: leaving GAME_UNKNOWN means
         # handling worked (or was never needed), so it must not carry forward.
         self._first_dismiss_ts = 0.0
         self._dismiss_attempts = 0
         self._dismiss_popups = []
         self._cleared_popups = []
+
+    def note_lobby_stall(self) -> None:
+        """Record a lobby blackout beat (ADR 087).
+
+        The analyzer re-emits LOBBY_STALL every 10s while no lobby crop
+        matches. A gap longer than ``_blackout_idle_s`` means the scan
+        recovered, so the next beat opens a fresh episode.
+
+        The clock starts at the FIRST beat, not at the true start of the
+        blackout, so ``stuck_for`` understates the stall by the analyzer's own
+        10s threshold. That is deliberate: it keeps this handler independent
+        of that constant, and erring late never produces a spurious capture.
+        """
+        now = self._clock()
+        if (self._blackout_since == 0.0
+                or now - self._blackout_last_ts > self._blackout_idle_s):
+            self._blackout_since = now
+            self._captured = 0
+            self._last_capture_ts = 0.0
+        self._blackout_last_ts = now
+
+    def _blackout_active(self, now: float) -> bool:
+        return (self._blackout_since != 0.0
+                and now - self._blackout_last_ts <= self._blackout_idle_s)
 
     def note_dismiss_attempt(self, popup: str) -> None:
         """Record that popup dismissal was attempted during this episode.
@@ -1190,15 +1249,23 @@ class UnknownAnomalyRecorder:
         Returns the saved path (for tests/logging), else None. Never raises —
         a capture failure must not take down the tick loop.
         """
-        if current_game_state != GameState.GAME_UNKNOWN or frame is None:
+        if frame is None:
             return None
         now = self._clock()
-        if self._unknown_since == 0.0:
-            # Startup enters GAME_UNKNOWN without a state-change callback —
-            # arm the clock on first sight instead.
-            self._unknown_since = now
+        if current_game_state == GameState.GAME_UNKNOWN:
+            if self._unknown_since == 0.0:
+                # Startup enters GAME_UNKNOWN without a state-change callback —
+                # arm the clock on first sight instead.
+                self._unknown_since = now
+                return None
+            stuck_for = now - self._unknown_since
+            episode = "GAME_UNKNOWN"
+        elif self._blackout_active(now):
+            # ADR 087: classified, but every defining crop reads empty.
+            stuck_for = now - self._blackout_since
+            episode = "%s blackout" % current_game_state.name
+        else:
             return None
-        stuck_for = now - self._unknown_since
         if stuck_for < self._after_s:
             return None
         if self._captured >= self._max_per_episode:
@@ -1223,7 +1290,8 @@ class UnknownAnomalyRecorder:
             out_dir = Path(self._dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = out_dir / f"unknown_{stamp}_stuck{int(stuck_for)}s.png"
+            slug = "unknown" if episode == "GAME_UNKNOWN" else "blackout"
+            path = out_dir / f"{slug}_{stamp}_stuck{int(stuck_for)}s.png"
             if not self._cv2.imwrite(str(path), frame):
                 logger.warning("ADR074 anomaly: screenshot write failed: %s", path)
                 return None
@@ -1243,8 +1311,8 @@ class UnknownAnomalyRecorder:
         else:
             handling = "no calibrated popup crop matched — nothing to dismiss"
         logger.warning(
-            "ADR074 anomaly: GAME_UNKNOWN stuck for %.0fs (%s) — screenshot %d/%d "
-            "saved to %s", stuck_for, handling, self._captured,
+            "ADR074 anomaly: %s stuck for %.0fs (%s) — screenshot %d/%d "
+            "saved to %s", episode, stuck_for, handling, self._captured,
             self._max_per_episode, path)
         return str(path)
 

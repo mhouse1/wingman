@@ -336,6 +336,16 @@ class Controller:
         # velocity component (no trading through vertical into reversed
         # flight). None disables.
         self._climb_max_pitch_deg = _cl_cfg.get("max_pitch_deg")
+        # ADR 086 d1 / SAF-010: the climb must hand the airframe back inside a
+        # flyable pitch band. Releasing NOSE_UP, NOSE_DOWN and AFTERBURNER
+        # together leaves it ballistic at the exit attitude — measured
+        # 2026-08-21, a climb ending at +73 deg coasted 1500 m further, stalled
+        # at 24 KPH and hit the ground with missiles still racked. None
+        # disables the push (pre-ADR-086 behaviour).
+        self._climb_pitch_lead_s = float(_cl_cfg.get("pitch_lead_s", 3.0))
+        self._climb_exit_pitch_deg = _cl_cfg.get("exit_pitch_deg")
+        self._climb_exit_pulse_s = float(_cl_cfg.get("exit_push_pulse_s", 1.0))
+        self._climb_exit_max_pulses = int(_cl_cfg.get("exit_push_max_pulses", 3))
         self._climbing = threading.Event()
         self._climb_thread: "threading.Thread | None" = None
         self._climb_stop = threading.Event()
@@ -2155,6 +2165,9 @@ class Controller:
         observe_until = 0.0
         last_rate = None
         last_angle = None   # ADR 081: flight-path angle from the same sample
+        prev_angle = None   # ADR 086 d7: previous sample, for the pitch rate
+        prev_angle_ts = None
+        pitch_rate = None   # deg/s between the last two angle samples
         ab_held = False
         above_target = False   # ADR 083 d3: latches on the first at-target read
 
@@ -2162,6 +2175,27 @@ class Controller:
         # keys — same programmatic bracket as the evade hold (d4), held
         # across all pulses so XTest auto-repeats are never read as a manual
         # takeover.
+        def _at_pitch_ceiling() -> bool:
+            """True when the nose is at, or is predicted to reach, the ceiling.
+
+            ADR 086 d7. Telemetry lands roughly every 3s while a lit burner
+            rotates the airframe at ~11deg/s, so testing the CURRENT angle
+            against the ceiling always reacts a full sample too late: a
+            relight at +57deg was at +90deg before the next read (2026-08-21
+            09:40:53). Same lead-prediction pattern ADR 083 d1 applies to
+            altitude, for the same reason.
+
+            Falls back to the current angle when no rate is known yet.
+            """
+            if self._climb_max_pitch_deg is None or last_angle is None:
+                return False
+            ceiling = float(self._climb_max_pitch_deg)
+            if last_angle >= ceiling:
+                return True
+            if pitch_rate is None or pitch_rate <= 0:
+                return False
+            return last_angle + pitch_rate * self._climb_pitch_lead_s >= ceiling
+
         guarded_keys = tuple(k for k in (NOSE_UP_KEY, NOSE_DOWN_KEY, AFTERBURNER_KEY)
                              if k in _WATCHED_MANEUVER_KEYS)
         for _key in guarded_keys:
@@ -2193,6 +2227,14 @@ class Controller:
                             fuel, fuel_floor_pct)
                     elif (not ab_held
                             and not above_target   # ADR 083 d3: never relight above target
+                            # ADR 086 d6: nor while over-angled. ADR 083 d3
+                            # found "the pitch ceiling fighting a lit burner"
+                            # is what strands high-angle stretches; the target
+                            # gate only closes that for the above-target case.
+                            # Below target and over the ceiling is the same
+                            # trap: relighting at +64deg drove 64->90deg and a
+                            # speed collapse 1241->392 (2026-08-21 08:44:50).
+                            and not _at_pitch_ceiling()   # ADR 086 d7
                             and fuel >= fuel_floor_pct + self._fuel_rearm_margin):
                         self._climb_key(AFTERBURNER_KEY, press=True)
                         ab_held = True
@@ -2242,9 +2284,7 @@ class Controller:
                     pitch_held = None
                     observe_until = now + self._climb_observe_s
                 elif pitch_held is None and now >= observe_until:
-                    if (self._climb_max_pitch_deg is not None
-                            and last_angle is not None
-                            and last_angle >= float(self._climb_max_pitch_deg)):
+                    if _at_pitch_ceiling():   # ADR 086 d7 (was: current angle only)
                         pitch_held = NOSE_DOWN_KEY
                     elif last_rate is None or last_rate < self._climb_min_rate:
                         pitch_held = NOSE_UP_KEY
@@ -2276,7 +2316,15 @@ class Controller:
                 last_counted_ts = sig_ts
                 last_rate = getattr(alt_signal, "rate", None)
                 _angle_fn = getattr(snap, "pitch_angle_deg", None)
-                last_angle = _angle_fn() if callable(_angle_fn) else None
+                _new_angle = _angle_fn() if callable(_angle_fn) else None
+                # ADR 086 d7: pitch rate across consecutive angle samples.
+                if _new_angle is not None:
+                    if prev_angle is not None and prev_angle_ts is not None:
+                        _dt = sig_ts - prev_angle_ts
+                        if _dt > 0:
+                            pitch_rate = (_new_angle - prev_angle) / _dt
+                    prev_angle, prev_angle_ts = _new_angle, sig_ts
+                last_angle = _new_angle
                 # ADR 083 d3: at or above target, thrust stops — one fresh
                 # read, no debounce. Removing the energy source is the
                 # physical fix for a zoom climb; the pitch ceiling fighting
@@ -2312,8 +2360,12 @@ class Controller:
         finally:
             _release_started = time.time()
             self._climb_key(NOSE_UP_KEY, press=False)
-            self._climb_key(NOSE_DOWN_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
+            # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE
+            # going neutral. Burner off first (above), so the push is not
+            # fighting thrust — the ADR 083 d3 finding.
+            self._climb_exit_push()
+            self._climb_key(NOSE_DOWN_KEY, press=False)
             _release_span = time.time() - _release_started
             for _key in guarded_keys:
                 self._arm_release_grace(_key, span_s=_release_span)
@@ -2325,6 +2377,60 @@ class Controller:
         """True while a climb_mode hold is in progress
         (ADR 073 3.2b — the Climb leaf's is_running_fn)."""
         return self._climbing.is_set()
+
+    def _climb_exit_push(self) -> str:
+        """Nose down into the flyable band before the climb releases (ADR 086 d1).
+
+        Bounded exactly as ADR 069 bounds the eject rotation — impulse plus
+        observation gap, a pulse budget — because that ADR established that a
+        continuously held pitch input mushes the airframe rather than rotating
+        it. Stops on the first sample showing the angle inside the band.
+
+        Blind operation is deliberate: with no telemetry this runs ONE pulse
+        and returns. An unverified small nose-down is safer than an unverified
+        ballistic climb, which is what the pre-ADR-086 exit left behind.
+
+        Returns the exit reason, for the caller's log line.
+
+        @relation(SAF-010, scope=function)
+        """
+        target = self._climb_exit_pitch_deg
+        if target is None:
+            return "disabled"
+        target = float(target)
+        pulses = 0
+        while pulses < max(1, self._climb_exit_max_pulses):
+            snap = self._eject_telemetry()
+            angle = None
+            if snap is not None:
+                fn = getattr(snap, "pitch_angle_deg", None)
+                angle = fn() if callable(fn) else None
+            if angle is not None and angle <= target:
+                if pulses:
+                    logger.info("Controller: climb exit — nose at %+.0fdeg "
+                                "(band %+.0f) after %d pulse(s)",
+                                angle, target, pulses)
+                return "in_band"
+            self._climb_key(NOSE_DOWN_KEY, press=True)
+            interrupted = self._climb_stop.wait(timeout=self._climb_exit_pulse_s)
+            self._climb_key(NOSE_DOWN_KEY, press=False)
+            pulses += 1
+            if interrupted or (self._exit_event is not None
+                               and self._exit_event.is_set()):
+                return "interrupted"
+            if angle is None:
+                # Blind: one pulse only, then hand back.
+                logger.info("Controller: climb exit — no telemetry, "
+                            "single %.1fs nose-down pulse applied",
+                            self._climb_exit_pulse_s)
+                return "blind_single_pulse"
+            # Observation gap: never act again before the airframe has had a
+            # telemetry refresh to respond (ADR 069 d2).
+            if self._climb_stop.wait(timeout=self._climb_exit_pulse_s):
+                return "interrupted"
+        logger.warning("Controller: climb exit — pitch budget (%d pulses) "
+                       "exhausted, releasing anyway", self._climb_exit_max_pulses)
+        return "budget_exhausted"
 
     def _read_stable_altitude(self) -> "float | None":
         """Fresh telemetry stable altitude, or None when unreadable."""

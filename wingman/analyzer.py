@@ -972,6 +972,8 @@ class GameStateAnalyzer:
         self._click_to_stop = threading.Event()
         _stall_cfg = config.get("stall_recovery", {}) or {}
         self._stall_action_after_s = float(_stall_cfg.get("action_after_s", 15.0))
+        self._lobby_blackout_since = 0.0   # ADR 087: sustained GAME_LOBBY blackout
+        self._exit_dialog_seen_ts = 0.0    # ADR 087: Exit-to-Desktop modal on screen
         self._stall_unready_dwell_s = float(_stall_cfg.get("unready_dwell_s", 30.0))
         self._stall_scan_interval_s = float(_stall_cfg.get("scan_interval_s", 5.0))
         self._unready_since = 0.0
@@ -2759,8 +2761,25 @@ class GameStateAnalyzer:
             if state in (GameState.GAME_UNKNOWN, GameState.GAME_STARTING, GameState.GAME_WAITING):
                 continue
             if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
-                logger.debug("Click-to OCR skipped: %s state active", state.name)
-                continue
+                # ADR 087 addendum 4: the self-suppression below assumes the FSM
+                # is RIGHT about being in the lobby. "GAME_END_B timeout —
+                # forcing recovery to GAME_LOBBY" can make it wrong, and then
+                # the lie disables the one detector that would clear the screen
+                # holding it there: on 2026-08-21 the post-match PERFORMANCE
+                # panel with "Click to Continue..." sat unread for 17 minutes
+                # while every lobby crop read blank.
+                #
+                # A lobby blackout is exactly the evidence that the premise
+                # failed, so the scan resumes. In a healthy lobby the crops
+                # match, no blackout is active, and the 2026-07-30 double
+                # click-through stays suppressed.
+                if not (state == GameState.GAME_LOBBY
+                        and self.lobby_blackout_active()):
+                    logger.debug("Click-to OCR skipped: %s state active", state.name)
+                    continue
+                logger.info(
+                    "Click-to OCR re-enabled: GAME_LOBBY blackout — the forced "
+                    "state may be wrong (ADR 087)")
             with self._click_to_frame_lock:
                 frame = self._click_to_latest_frame
             if frame is None:
@@ -2823,6 +2842,28 @@ class GameStateAnalyzer:
             self._lobby_quick_scan_thread.start()
             logger.info("Lobby quick-scan background thread started")
 
+    def lobby_blackout_active(self) -> bool:
+        """True while GAME_LOBBY has been showing no lobby crop (ADR 087).
+
+        Gates every ESC source. During a blackout ESC has no demonstrated
+        benefit and one demonstrated harm: it opens the Exit-to-Desktop modal,
+        which is itself a blackout. See exit_dialog_visible for why the
+        narrower dialog flag is not enough on its own.
+        """
+        return self._lobby_blackout_since != 0.0
+
+    def exit_dialog_visible(self, stale_after_s: float = 12.0) -> bool:
+        """True while the Exit-to-Desktop modal was seen recently (ADR 087).
+
+        Every ESC source must consult this: ESC is what opens the modal, so a
+        press while it is up re-opens what recovery just closed. The staleness
+        window covers roughly two stall-scan intervals, so the flag lapses on
+        its own if the scan stops confirming the dialog.
+        """
+        if not self._exit_dialog_seen_ts:
+            return False
+        return time.time() - self._exit_dialog_seen_ts <= stale_after_s
+
     def _stall_recovery_targets(self, state):
         """Return the stall-recovery crops eligible to act right now (ADR 084).
 
@@ -2837,6 +2878,22 @@ class GameStateAnalyzer:
                 and self._stall_state_since
                 and now - self._stall_state_since >= self._stall_action_after_s):
             targets.extend(c for c in STALL_RECOVERY_CROPS if c in self.crops)
+        # ADR 087 independent gate: a sustained GAME_LOBBY blackout is a real
+        # stall, but GAME_LOBBY is not in STALL_ACTION_STATES so the batch above
+        # never runs for it. The ESC pressed on every LOBBY_STALL beat is what
+        # OPENS the "Exit to Desktop" dialog, whose own crop then goes unscanned
+        # — wingman deadlocks against a modal it created (2026-08-21, 8 minutes,
+        # 187 blank cycles; the captured frame shows Exit highlighted as the
+        # default button).
+        #
+        # Deliberately narrower than the batch above: ONLY the dialog wingman
+        # can create itself, whose action is a Cancel click. STALL_RETRY and
+        # STALL_AIRCRAFT stay gated on a genuinely unclassifiable state.
+        if (self._lobby_blackout_since
+                and now - self._lobby_blackout_since >= self._stall_action_after_s
+                and "STALL_EXIT_TO_DESKTOP" in self.crops
+                and "STALL_EXIT_TO_DESKTOP" not in targets):
+            targets.append("STALL_EXIT_TO_DESKTOP")
         # Independent gate: a stuck UNREADY blocks classification outright, so it
         # is timed from the UNREADY read itself rather than from the state.
         if (self._unready_since
@@ -2881,6 +2938,7 @@ class GameStateAnalyzer:
                 # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
                 # counting fresh instead of comparing against a stale timestamp.
                 lobby_stall_since = 0.0
+                self._lobby_blackout_since = 0.0
             # ADR 084: dwell in an unclassifiable state, reset on any classified state
             # so a brief GAME_UNKNOWN blip mid-transition never opens the gate.
             if state in STALL_ACTION_STATES:
@@ -3020,17 +3078,23 @@ class GameStateAnalyzer:
                     if not handled and lobby_futures:
                         if lobby_stall_since == 0.0:
                             lobby_stall_since = time.time()
+                        if self._lobby_blackout_since == 0.0:
+                            # ADR 087: total blackout duration. Separate from
+                            # lobby_stall_since, which restarts on every ESC.
+                            self._lobby_blackout_since = time.time()
                         elapsed_stall = time.time() - lobby_stall_since
                         logger.info(
                             "Lobby quick-scan: no lobby crops detected (stalled %.1fs)",
                             elapsed_stall,
                         )
-                        if elapsed_stall >= 10.0 and self.has_subscribers(GameEvent.LOBBY_STALL):
-                            logger.info("Lobby quick-scan: stall threshold reached — pressing ESC")
+                        if (elapsed_stall >= 10.0
+                                and self.has_subscribers(GameEvent.LOBBY_STALL)):
+                            logger.info("Lobby quick-scan: stall threshold reached")
                             self.emit(GameEvent.LOBBY_STALL)
                             lobby_stall_since = time.time()  # cooldown: next press after another 10s
                     elif handled:
                         lobby_stall_since = 0.0
+                        self._lobby_blackout_since = 0.0
 
                 if lobby_futures and lobby_scan_start is not None:
                     logger.debug(
@@ -3155,8 +3219,15 @@ class GameStateAnalyzer:
                                 logger.warning(
                                     "\033[93m🔧 Stall recovery: '%s' detected (text='%s', state=%s)\033[0m",
                                     crop, text, state.name)
+                                if crop == "STALL_EXIT_TO_DESKTOP":
+                                    # ADR 087: ESC is what OPENS this modal, so
+                                    # every ESC source must stand down while it
+                                    # is up or they re-open what recovery closes.
+                                    self._exit_dialog_seen_ts = time.time()
                                 self.emit(GameEvent.STALL_RECOVERY_ACTION, crop)
                                 break
+                            if crop == "STALL_EXIT_TO_DESKTOP":
+                                self._exit_dialog_seen_ts = 0.0
                             logger.debug("Stall recovery: '%s' not found", crop)
 
                 cycle_elapsed = time.time() - cycle_start

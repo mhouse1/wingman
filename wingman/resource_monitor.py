@@ -38,6 +38,37 @@ logger = logging.getLogger(__name__)
 _PROC = "/proc"
 
 
+def _read_smaps_rollup(pid: str = "self") -> dict:
+    """Anonymous / file-backed / shared split for one process, in kB.
+
+    RSS alone cannot answer "whose leak". Wingman receives capture buffers
+    through the PipeWire pipeline the game feeds, and mapped pages count toward
+    VmRSS just as heap does — so a growing RSS is consistent BOTH with wingman
+    retaining its own allocations and with capture buffers accumulating. The
+    split separates them:
+
+      * ``anon`` climbing   → wingman's own heap (allocator or retention)
+      * ``file``/``shmem`` climbing → mapped buffers, i.e. the capture path
+
+    Returns {} on kernels without smaps_rollup rather than failing the sample.
+    """
+    out = {}
+    try:
+        with open(f"{_PROC}/{pid}/smaps_rollup", "r", encoding="utf-8",
+                  errors="replace") as fh:
+            for line in fh:
+                if line.startswith(("Anonymous:", "Rss:", "Shmem:",
+                                    "Private_Dirty:", "Shared_Clean:",
+                                    "Shared_Dirty:")):
+                    key, _, rest = line.partition(":")
+                    parts = rest.split()
+                    if parts:
+                        out[key] = int(parts[0])
+    except (OSError, ValueError):
+        pass
+    return out
+
+
 def _read_proc_status(pid: str = "self") -> dict:
     """Parse the VmRSS/VmSwap/VmHWM/Threads fields out of /proc/<pid>/status."""
     out = {}
@@ -210,6 +241,10 @@ class ResourceSampler:
         peak = _kb_to_mb(me.get("VmHWM"))
         swap = _kb_to_mb(me.get("VmSwap"))
         fds = self._fd_count()
+        # Whose pages are these? (see _read_smaps_rollup)
+        roll = _read_smaps_rollup("self")
+        anon = _kb_to_mb(roll.get("Anonymous"))
+        shmem = _kb_to_mb(roll.get("Shmem"))
         counts = gc.get_count()
         med, p95, n_ocr = self._ocr_window()
 
@@ -225,6 +260,7 @@ class ResourceSampler:
 
         obs = {
             "t": now, "rss": rss, "swap": swap, "peak": peak, "fds": fds,
+            "anon": anon, "shmem": shmem,
             "threads": threading.active_count(), "game_rss": game_rss,
             "game_swap": game_swap, "ocr_med": med,
             "sys_swap": self._system_swap_mb(),
@@ -247,7 +283,10 @@ class ResourceSampler:
         depth = self._pool_depth()
         line = (
             f"RESOURCE elapsed={int(now - self._session_start)}s "
-            f"rss_mb={_fmt(rss)} d_rss={_delta('rss')} peak_rss_mb={_fmt(peak)} "
+            f"rss_mb={_fmt(rss)} d_rss={_delta('rss')} "
+            f"anon_mb={_fmt(anon)} d_anon={_delta('anon')} "
+            f"shmem_mb={_fmt(shmem)} d_shmem={_delta('shmem')} "
+            f"peak_rss_mb={_fmt(peak)} "
             f"swap_mb={_fmt(swap)} threads={obs['threads']} d_threads={_delta('threads')} "
             f"fds={_fmt(fds)} d_fds={_delta('fds')} "
             f"gc=({counts[0]},{counts[1]},{counts[2]}) "

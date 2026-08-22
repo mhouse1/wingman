@@ -25,6 +25,22 @@ foundry `docs/performance/001-brave-oom-full-session-crash.md` — different
 memory class, disjoint time windows, anti-correlated. See "Relationship to the
 compositor OOM investigation".
 
+## Current status (2026-08-21)
+
+| | |
+|---|---|
+| **Problem** | Wingman RSS grows without bound across a long session; OCR latency degrades in lockstep until it exceeds the 1.5s tick budget. |
+| **Whose leak** | Wingman's own process. Game grows +157 MB/h against wingman's +1,530 MB/h, and the memory returns to the host on wingman's exit. |
+| **Cause — partly known** | glibc arena fragmentation across the OCR thread pool. `MALLOC_ARENA_MAX=2` cuts the rate 69% (5,187 to 1,620 MB/h) and delays onset from hour ~2 to hour ~3. |
+| **Cause — still unknown** | The residual +1,620 MB/h. Not yet attributed to a specific allocation path. |
+| **Fixed?** | **No.** Mitigated only. A 5h43m session on 2026-08-21 reached 10.9 GB RSS with OCR median at 1.97s. |
+| **Mitigation in force** | `MALLOC_ARENA_MAX=2` (Makefile `WINGMAN_ENV`), plus restarting wingman every ~3 hours. |
+| **Next measurement** | `anon_mb` vs `rss_mb` on the RESOURCE line (added 2026-08-21) separates wingman's own heap from mapped capture buffers. Needs one 4h+ session. |
+
+**Method rule.** No leak claim from a session shorter than four hours. Every
+premature conclusion in this document came from measuring inside the flat early
+window — hour 1 reads ~0.30s whether or not the leak is fixed.
+
 ## Evidence
 
 ### Progressive degradation (2026-08-20, 8h12m, 79 missions)
@@ -217,7 +233,12 @@ justified — the leak is confirmed wingman-side, so snapshot diffing will name
 the allocation site directly. Native allocations will need `tracemalloc` plus
 an allocator-level check, since the growth is not in the Python heap.
 
-## 2026-08-21 — ROOT CAUSE CONFIRMED: glibc arena fragmentation
+## 2026-08-21 — PARTIAL CAUSE: glibc arena fragmentation
+
+> **Superseded as a root-cause claim.** This section's conclusion was retracted
+> the same day — see "RETRACTION" below. Arena fragmentation is real and the
+> mitigation cuts the rate by 69%, but it is not the whole cause and the leak
+> is not fixed. The measurements here remain valid; only the verdict changed.
 
 The hypothesis below was tested by launching with `MALLOC_ARENA_MAX=2` and no
 code change. Identical workload (same `n_ocr`, same `ocr_med`), same host,
@@ -249,15 +270,72 @@ to all five wingman launch targets (`r`, `rd`, `newpaths`, `rr-path1`,
 `rr-live-path1`). It must be set before the process starts, since glibc reads
 it at first malloc — so this belongs in the launcher, not in Python.
 
-### Consequences for the rest of this document
+## RETRACTION 2026-08-21 16:54 — the section above was measured too early
 
-- The **OCR degradation** described above is downstream of memory pressure, so
-  capping arenas is expected to remove it. The hour-by-hour curve
-  (0.24 s → 4.85 s median) should be re-measured over a long session before
-  the reaction-latency regression is considered closed.
+**The "ROOT CAUSE CONFIRMED" claims in the preceding section are wrong.
+`MALLOC_ARENA_MAX=2` reduces the leak; it does not fix it.** They were drawn from a 56-minute session, and the
+degradation does not become visible until roughly hour three. A 5h43m session
+(55 missions, 100% click-to) shows the leak intact:
+
+| Elapsed | RSS |
+|---------|-----|
+| 0.0h | 666 MB |
+| 0.8h | 2,733 MB |
+| 2.3h | 4,427 MB |
+| 3.8h | 7,166 MB |
+| 5.3h | 10,023 MB |
+
+Sustained **+1,620 MB/h**, peak 11,101 MB, with the cap correctly applied
+(verified in the `WINGMAN_ENV` line of the Makefile and in the process
+environment). And the OCR degradation — the symptom this document exists for —
+is fully present:
+
+| Hour | n | median | p95 | max |
+|------|---|--------|-----|-----|
+| 11:00 | 1562 | 0.30s | 0.52s | 0.88s |
+| 12:00 | 2008 | 0.37s | 0.92s | 2.73s |
+| 13:00 | 1802 | 0.54s | 2.16s | 10.27s |
+| 14:00 | 1595 | 0.81s | 4.19s | 23.04s |
+| 15:00 | 1049 | 1.17s | 7.06s | 25.69s |
+| 16:00 | 729 | **1.97s** | **11.22s** | **30.95s** |
+
+Median rose 6.5x and throughput fell from 2,008 to 729 cycles/hour. Note that
+hour 1 reads 0.30s — exactly the "flat" figure the retracted section cites. A
+one-hour measurement cannot distinguish a fixed leak from an unfixed one.
+
+**What the cap did achieve:** the rate fell from +5,187 MB/h to +1,620 MB/h
+(-69%), and the onset of degradation moved from hour ~2 to hour ~3. Arena
+fragmentation was therefore a real contributor, but not the whole cause. The
+remaining +1,620 MB/h is unexplained and this document is reopened.
+
+**Method rule going forward:** no leak claim from a session shorter than four
+hours. Every premature conclusion in this document — including this author's —
+came from measuring inside the flat early window.
+
+### Consequences for the rest of this document — SUPERSEDED, see retraction above
+
+A 56-minute session (9 missions, 100% click-to) with the cap in place settles
+the downstream questions:
+
+| Metric | Pre-fix | With `MALLOC_ARENA_MAX=2` | Release baseline |
+|--------|---------|---------------------------|------------------|
+| Memory growth rate | +5,187 MB/h | **+120 MB/h** | — |
+| OCR median, hour 1 → hour 2 | 0.24 → 0.26 s (then 4.85 by hour 9) | **0.25 → 0.25 s** | — |
+| Reaction latency (session) | 2.48 s period mean | **0.28 s** | 0.39 s |
+
+The OCR curve is flat across the session instead of compounding, and reaction
+latency is now *better than the release baseline*. The regression percentages
+still shown in the session-end report are period aggregates that continue to
+include pre-fix sessions; they will decay as capped sessions accumulate.
+
+- The **OCR degradation** is downstream of memory pressure, but is NOT
+  resolved — see the retraction above. It is delayed by roughly an hour and
+  returns in full by hour 5.
 - The **false-respawn cascade** is likewise downstream: it was caused by
-  health-confirmation gaps under OCR starvation. The proposed `dead_for` floor
-  is still worth having as defence in depth, but its urgency drops.
+  health-confirmation gaps under OCR starvation. The 2026-08-21 capped
+  sessions recorded `Spawn crashes: 0` and no sub-3 s weak-tier fires. The
+  proposed `dead_for` floor remains worth having as defence in depth, but it
+  is no longer urgent.
 - The **swap correlation** in the foundry cross-reference stands, but its
   magnitude should shrink dramatically: wingman at a 2.5 GB plateau no longer
   raises the swap baseline the compositor growth starts from.
@@ -344,20 +422,56 @@ reaction latency from the session-end performance report.
 The host sampler (`~/.shell-cgroup-watch.log`) remains useful as an independent
 cross-check and for the locked-session window that wingman cannot observe.
 
-### Discriminating experiment (highest value, not yet run)
+### Discriminating experiment — DONE, answered
 
-Leave the game running; restart **only** wingman once degradation is visible
-(after ~4 hours, when p95 exceeds the tick budget). Then:
+~~Leave the game running; restart only wingman once degradation is visible.~~
 
-- If OCR timing resets to ~0.25 s and swap drops → the leak is in the wingman
-  process.
-- If timing stays degraded and swap stays high → the leak is in the game, and
-  wingman is a victim rather than the cause.
+Answered without needing the restart. The 2026-08-21 5h43m session measured
+both processes directly: wingman +1,530 MB/h against the game's +157 MB/h, and
+the host recovered the full 10.9 GB when wingman exited. **The leak is in the
+wingman process.**
+
+### Next experiment: heap or mapped buffers? (instrumented, not yet run)
+
+`VmRSS` counts shared pages as well as heap, and wingman receives capture
+buffers through the PipeWire pipeline the game feeds. So "growth in wingman's
+address space" does not by itself distinguish:
+
+- wingman retaining its own allocations → wingman's heap, or
+- capture buffers accumulating → pages originating from the game's frames.
+
+The RESOURCE line now carries the split, read from `/proc/self/smaps_rollup`:
+
+```
+RESOURCE elapsed=8112s rss_mb=2841 d_rss=+412 anon_mb=2610 d_anon=+390 shmem_mb=n/a ...
+```
+
+- `anon_mb` climbing with `rss_mb` → wingman's own heap (allocator or retention)
+- `rss_mb` climbing while `anon_mb` stays flat → the capture path
+
+`Shmem` is not exposed by every kernel (absent on this host) and degrades to
+`n/a`; the `Anonymous` vs `Rss` comparison is the one that decides it. Needs a
+single 4h+ session to read.
+
+Prior evidence favours the heap: the 2026-08-20 narrowing found the growth
+anonymous with no memfd or `/dev/shm` growth, and ruled out the capture path
+and frame retention. But that was measured against the **pre-cap** leak; the
+residual +1,620 MB/h has never been checked at this granularity.
 
 ### Interim mitigation
 
-Restart wingman every ~3 hours. Hours 1–3 stay within budget (p95 < 1.5 s);
-degradation becomes operationally significant from hour 4 onward.
+Two measures, both in force:
+
+1. `MALLOC_ARENA_MAX=2` — set for every wingman launch target via `WINGMAN_ENV`
+   in the Makefile. Cuts the growth rate 69%.
+2. Restart wingman every ~3 hours. With the cap, hours 1–3 stay within budget
+   (2026-08-21: median 0.30 s at hour 1, 0.37 s at hour 2, 0.54 s at hour 3);
+   it becomes operationally significant from hour 4 (0.81 s) and severe by
+   hour 6 (1.97 s median, 11.22 s p95).
+
+**Avoid unattended overnight runs** until the residual is understood: the same
+session peaked at 11.1 GB, which approaches the footprint that preceded the
+compositor OOM in the foundry cross-reference.
 
 ## Relationship to the compositor OOM investigation
 

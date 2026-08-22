@@ -227,7 +227,18 @@ behavior_tree:
     min_climb_rate: 30.0
     max_climb_rate: 450.0
     max_pitch_deg: 80.0
+    pitch_lead_s: 3.0           # ADR 086 d7 — telemetry interval; ceiling tests the predicted angle
+    exit_pitch_deg: 20.0        # ADR 086 d1 / SAF-010 — nose down to this band before releasing
+    exit_push_pulse_s: 1.0      # bounded impulse (ADR 069 pattern), with an equal observation gap
+    exit_push_max_pulses: 3     # budget; exhausting it releases anyway and logs WARNING
     exit_lead_s: 3.0
+    # ADR 086 d2/d3/d4 — dive recovery on predicted time-to-ground. 20s rather
+    # than the ADR's proposed 12s: the smoothed altitude the tree reads lags
+    # ~1500m in a 560 m/s dive, so 12s of PREDICTED margin was only ~4s of real
+    # margin in the 2026-08-21 18:41 crash. See "Deviation" in the ADR.
+    recover_below_time_s: 20.0
+    confirm_bypass_time_s: 10.0   # below this, fire on a single read (d3)
+    descent_memory_s: 5.0         # hold a known descent across rejected reads (d4)
     fuel_reserve_pct: 10
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}

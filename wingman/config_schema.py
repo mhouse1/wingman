@@ -278,6 +278,13 @@ SCHEMA = Section(
                 "min_climb_rate": _num(0),
                 "max_climb_rate": _num(0),
                 "max_pitch_deg": _num(0, 90),
+                "pitch_lead_s": SECONDS,
+                "recover_below_time_s": Leaf(types=NUMBER, allow_none=True),
+                "confirm_bypass_time_s": Leaf(types=NUMBER, allow_none=True),
+                "descent_memory_s": SECONDS,
+                "exit_pitch_deg": Leaf(types=NUMBER, allow_none=True),
+                "exit_push_pulse_s": SECONDS,
+                "exit_push_max_pulses": _int(1),
                 "exit_lead_s": SECONDS,
                 "fuel_reserve_pct": _num(0, 100),
                 "spawn_guard": Section(children={
