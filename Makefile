@@ -370,6 +370,9 @@ PROTON_ROOT    ?= $(HOME)/.var/app/com.heroicgameslauncher.hgl/config/heroic/too
 WINE_PREFIX    ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
 GAME_EXE       ?= $(HOME)/Games/Heroic/Metalstorm/Metalstorm.exe
 UMU_RUN        ?= $(HOME)/.local/bin/umu-run
+# Extra Unity player args, e.g. GAME_ARGS=-force-d3d11 to work around a
+# graphics-backend crash on some GPUs. Empty by default — no effect unless set.
+GAME_ARGS      ?=
 launch-game:
 	@_p=Metalstorm; \
 	 if pgrep -f "$${_p}.exe" > /dev/null 2>&1; then \
@@ -379,7 +382,7 @@ launch-game:
 	 fi
 	@rm -f /tmp/wingman-game-prerunning
 	@GAMEID=umu-0 PROTONPATH="$(PROTON_ROOT)" WINEPREFIX="$(WINE_PREFIX)" \
-	  "$(UMU_RUN)" "$(GAME_EXE)" > /tmp/wingman-game-launch.log 2>&1 & \
+	  "$(UMU_RUN)" "$(GAME_EXE)" $(GAME_ARGS) > /tmp/wingman-game-launch.log 2>&1 & \
 	echo "MetalStorm launching via umu-run (log: /tmp/wingman-game-launch.log)"
 
 # Poll until MetalStorm.exe is alive, then wait for the lobby.

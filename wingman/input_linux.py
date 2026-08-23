@@ -46,11 +46,12 @@ _WINGMAN_XAUTH = "/tmp/wingman_click_auth.db"
 
 
 def _ensure_xauthority() -> None:
-    """Ensure XAUTHORITY points to an xauth file with an explicit :0 display entry.
+    """Ensure XAUTHORITY points to an xauth file with an explicit display entry.
 
     The mutter XWayland auth file uses an empty display number (wildcard) that
     libX11 accepts but python-xlib does not match. We copy the cookie into a new
-    file with an explicit ':0' entry so python-xlib can connect.
+    file with an explicit entry for the current DISPLAY so python-xlib can
+    connect.
     """
     import glob
     import subprocess
@@ -70,7 +71,9 @@ def _ensure_xauthority() -> None:
         logger.warning("Controller: no XWayland auth file found — click may fail")
         return
 
-    # Extract the cookie and write a new db with explicit ':0' display number
+    # Extract the cookie and write a new db with an explicit entry for the
+    # actual display number (not necessarily ":0" — DISPLAY varies by session).
+    display_entry = os.environ.get("DISPLAY", ":0").strip()
     try:
         r = subprocess.run(
             ["xauth", "-f", src, "list"],
@@ -85,11 +88,14 @@ def _ensure_xauthority() -> None:
             logger.warning("Controller: could not extract MIT-MAGIC-COOKIE-1 from %s", src)
             return
         subprocess.run(
-            ["xauth", "-f", _WINGMAN_XAUTH, "add", ":0", "MIT-MAGIC-COOKIE-1", cookie],
+            ["xauth", "-f", _WINGMAN_XAUTH, "add", display_entry, "MIT-MAGIC-COOKIE-1", cookie],
             check=True, timeout=5,
         )
         os.environ["XAUTHORITY"] = _WINGMAN_XAUTH
-        logger.debug("Controller: XAUTHORITY set to %s (explicit :0 entry)", _WINGMAN_XAUTH)
+        logger.debug(
+            "Controller: XAUTHORITY set to %s (explicit %s entry)",
+            _WINGMAN_XAUTH, display_entry,
+        )
     except Exception as e:
         logger.warning("Controller: failed to create xauth db: %s", e)
 
