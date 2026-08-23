@@ -314,6 +314,17 @@ class ResourceSampler:
             logger.debug("ResourceSampler: sample failed", exc_info=True)
             return None
 
+    @property
+    def last_mi_use_mb(self) -> "int | None":
+        """Live allocated MB from the most recent sample, or None.
+
+        Performance 008's ground truth. HeapCensus prints it beside its own
+        Python-side totals so the two can be read against each other in one
+        line: Python growth that tracks it is Python-side retention, Python
+        growth that does not is native.
+        """
+        return self._last.get("mi_use")
+
     def _pool_depth(self) -> "int | None":
         if self._pool_depth_fn is None:
             return None

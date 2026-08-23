@@ -27,6 +27,7 @@ from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler
+from .heap_census import HeapCensus
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -682,6 +683,14 @@ def main():
     resource_sampler = ResourceSampler(
         cfg.get("resource_monitor", {}), perf_tracker=tracker)
     resource_sampler.set_pool_depth_source(analyzer.ocr_queue_depth)
+    # Performance 008: off unless explicitly enabled — it walks the whole heap.
+    heap_census = HeapCensus(cfg.get("heap_census", {}))
+    if heap_census.enabled:
+        logger.info(
+            "HeapCensus enabled — this blocks the tick during each walk. "
+            "Raise memory_guard.soft_limit_mb too, or the session ends before "
+            "the curve is readable (Performance 008)."
+        )
     startup_time = time.time()
     battle_ever_reached = False
 
@@ -703,6 +712,7 @@ def main():
             # resource trail — capture stalls are a symptom of the very
             # starvation this samples (Performance 008).
             resource_sampler.maybe_sample()
+            heap_census.maybe_census(mi_use_mb=resource_sampler.last_mi_use_mb)
             # ADR 090: the Performance 008 leak is unfixed and degrades
             # perception continuously — OCR p95 crosses the tick budget at
             # ~hour 3, the median at ~hour 6. A SAFE POINT is the lobby with no
@@ -1108,6 +1118,7 @@ def main():
             resource_sampler.summarize()
         except Exception as e:
             logger.warning("ResourceSampler: summarize failed: %s", e)
+        heap_census.stop()
 
 
 if __name__ == "__main__":

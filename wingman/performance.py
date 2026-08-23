@@ -74,12 +74,33 @@ def _bucket_pcts(samples: list, buckets: list) -> list:
     return result
 
 
+def _is_run_file(path: Path) -> bool:
+    """True for a PerformanceTracker run file, false for a sibling artifact.
+
+    MissionStatsTracker writes `run_<id>_stats.json` beside `run_<id>.json`
+    (ADR 055). Both match `glob("run_*.json")`, and "_stats.json" sorts AFTER
+    ".json" — so an unfiltered sort always puts a stats file last, which is the
+    file `_aggregate_folder` reads its percentiles and its version label from.
+    """
+    return not path.name.endswith("_stats.json")
+
+
 def _load_run_file(path: Path) -> "dict | None":
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning("PerformanceTracker: failed to load %s: %s", path, e)
         return None
+    # Structural check as well as the filename one above: a future sibling
+    # artifact under another suffix must be excluded by default rather than
+    # silently aggregated. Every run file ever written carries `ocr_crops`;
+    # no stats file does.
+    if not isinstance(data, dict) or not isinstance(data.get("ocr_crops"), dict):
+        logger.debug(
+            "PerformanceTracker: skipping %s — not a performance run file", path.name
+        )
+        return None
+    return data
 
 
 def _aggregate_folder(folder: Path, version_filter: str | None = None) -> "dict | None":
@@ -91,7 +112,7 @@ def _aggregate_folder(folder: Path, version_filter: str | None = None) -> "dict 
     """
     if not folder.exists():
         return None
-    files = sorted(folder.glob("run_*.json"))
+    files = sorted(f for f in folder.glob("run_*.json") if _is_run_file(f))
     run_data = [d for f in files if (d := _load_run_file(f)) is not None]
     if version_filter is not None:
         run_data = [d for d in run_data if d.get("version") == version_filter]

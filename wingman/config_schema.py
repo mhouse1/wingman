@@ -390,6 +390,14 @@ SCHEMA = Section(
             "warmup_s": SECONDS,
             "game_process_name": STR,
         }),
+        # Performance 008 — heap census, the Python-vs-native discriminator.
+        "heap_census": Section(children={
+            "enabled": BOOL,
+            "interval_s": SECONDS,
+            "top_n": _int(1),
+            "tracemalloc": BOOL,
+            "tracemalloc_depth": _int(1),
+        }),
         "performance": Section(children={
             "round_histogram": Section(children={
                 "enabled": BOOL,

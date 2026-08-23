@@ -297,6 +297,12 @@ resource_monitor:                  # Performance 008 — long-session leak diagn
   interval_s: 300.0                # 5 min -> ~100 lines per 8h session
   warmup_s: 600.0                  # rates measured AFTER this; EasyOCR model load is ~3.9GB in 5min
   game_process_name: Metalstorm.exe  # summed RSS/swap read as a GROWTH TREND, not an absolute
+heap_census:                       # Performance 008 — Python-vs-native leak fork
+  enabled: false                   # OFF by default: walks the whole heap, blocks the tick
+  interval_s: 600.0                # 10 min — the walk costs more than a RESOURCE sample
+  top_n: 12                        # rows in the by-type and by-site tables
+  tracemalloc: true                # catches bytes/str that gc.get_objects() never returns
+  tracemalloc_depth: 2             # deeper traces multiply tracemalloc's own retention
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}
