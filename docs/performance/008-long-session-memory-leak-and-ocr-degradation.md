@@ -72,6 +72,121 @@ session would have looked like confirmation. The four-hour rule is what turned
 this into a clean refutation instead of a second false positive, after the
 `MALLOC_ARENA_MAX` retraction earlier in this document.
 
+## ANSWERED 2026-08-23 — it is LIVE ALLOCATION, not fragmentation
+
+A 6h 58m session with `mallinfo2` instrumentation settles the question this
+document has been circling since 2026-08-20.
+
+| Elapsed | rss | anon | **mi_use (live)** | mi_free (arena) |
+|---------|-----|------|-------------------|-----------------|
+| 0.75h | 2,774 | 2,414 | 1,757 | 301 |
+| 2.42h | 5,016 | 4,656 | 3,874 | 405 |
+| 4.09h | 8,140 | 7,792 | 6,610 | 787 |
+| 6.60h | 13,212 | 12,864 | **10,960** | 1,491 |
+
+Over the 5.85h after warm-up:
+
+| | growth | rate | share |
+|---|--------|------|-------|
+| RSS | +10,438 MB | +1,784 MB/h | — |
+| **Live allocations** | **+9,203 MB** | **+1,573 MB/h** | **88%** |
+| Retained in arena | +1,190 MB | +203 MB/h | 11% |
+
+**Eighty-eight percent of the growth is memory the process is still using.**
+Something allocates roughly 1.6 GB per hour and never frees it.
+
+### Why this reframes everything above
+
+Both previously tested hypotheses were *fragmentation* theories:
+
+| Hypothesis | Outcome | Why it could never have worked |
+|------------|---------|-------------------------------|
+| glibc arena fragmentation (`MALLOC_ARENA_MAX=2`) | retracted | Addresses arena count; the memory is live, not fragmented |
+| EasyOCR reader churn (~1,800 reloads/session) | refuted | Allocate/free churn fragments; it does not retain |
+
+Both were plausible, both were tested, and both were aimed at the wrong
+mechanism. Fragmentation accounts for only 11% of the growth, which is roughly
+the share the arena cap already reduced.
+
+### What the other counters rule out
+
+Across the same session: **threads 19–24, fds 70–74** — both flat. Not a thread
+or descriptor leak. GC generation counters stay low and stable, but those count
+collections since the last pass, not live objects, so they exclude nothing.
+
+### Scale of the per-tick allocation
+
+At the 1.5s tick, +1,573 MB/h is about **671 KB retained per tick**. That is
+image-sized, not float-sized: the per-tick Python bookkeeping in this codebase
+(timing lists, confirmation windows, shadow-fire tuples) totals a few MB across
+an entire session and cannot account for it.
+
+### Next measurement — Python objects, or native?
+
+The remaining fork, and it must be measured rather than guessed:
+
+- **Python-side retention** — a container holding frames, crops, or tensors.
+  Detect with a periodic `gc.get_objects()` type-and-size census.
+- **Native retention** — memory held by torch or OpenCV below the Python object
+  graph, invisible to `gc`. Indicated if the census stays flat while `mi_use`
+  climbs.
+
+The census is the cheaper test and distinguishes both cases, so it goes first.
+**No hypothesis before that data** — this document has now recorded two
+confident explanations that measurement destroyed, and the pattern in both was
+reasoning from a mechanism that fit rather than from a measurement that
+discriminated.
+
+### Mitigation in force — and what it hides
+
+ADR 090 adds a memory guard: the session ends at the next lobby once RSS
+crosses 6 GB, or immediately at 10 GB. That bounds the risk while the
+allocation is still unfound.
+
+**It also suppresses the symptom.** With the guard active RSS never reaches the
+values that made this leak obvious, and OCR never degrades far enough to alarm
+anyone. **Any future investigation here must raise or disable
+`memory_guard.soft_limit_mb` to reproduce the curve above.** A session that ends
+cleanly at 6 GB is not evidence the leak is fixed.
+
+### Operational note
+
+This session reached **13.2 GB RSS at 6.9 hours** and was still climbing.
+That is past the footprint that preceded the compositor OOM in the foundry
+cross-reference. Long unattended sessions remain unsafe; the ~3 hour restart
+guidance stands and is if anything too generous.
+
+## Superseded plan — live vs retained (instrumented 2026-08-22)
+
+Two hypotheses have now been tested and refuted without either one ever
+distinguishing the two ways a heap can grow:
+
+- memory the program is **using** — something retains objects
+- memory glibc has **freed and kept** — fragmentation
+
+`anon` proved the growth is heap rather than mapped buffers, but cannot tell
+these apart. glibc reports both directly, and the RESOURCE line now carries
+them:
+
+```
+RESOURCE ... anon_mb=2450 mi_use_mb=1980 d_mi_use=+120 mi_free_mb=470 d_mi_free=+310
+```
+
+| Reading | Meaning | Where to look next |
+|---------|---------|--------------------|
+| `mi_use` climbs with RSS | live allocations retained | find the owner — object graph, caches, buffers |
+| `mi_free` climbs with RSS | freed but held in the arena | fragmentation; allocator tuning or allocation-pattern change |
+| neither climbs | growth is outside the main arena | mmap'd blocks (`hblkhd`), a non-glibc allocator, or a native library |
+
+The third row is a real possibility worth stating in advance: PyTorch and
+OpenCV both allocate outside plain `malloc` in places, and if the growth does
+not appear in either figure that is itself a strong result, because it
+eliminates the C heap entirely.
+
+Needs one session of at least four hours per the method rule below. **No
+hypothesis should be formed before that data exists** — this document has
+already recorded two confident explanations that measurement destroyed.
+
 ## Superseded hypothesis (kept for the evidence) — a ~300 MB model reloaded per health probe
 
 `_schedule_starting_health_probe` ran its OCR on a **fresh thread per probe**:
@@ -131,10 +246,10 @@ emitting 1.3 lines/sec. Design 007 exists partly because of this.
 | **Problem** | Wingman RSS grows without bound across a long session; OCR latency degrades in lockstep until it exceeds the 1.5s tick budget. |
 | **Whose leak** | Wingman's own process. Game grows +157 MB/h against wingman's +1,530 MB/h, and the memory returns to the host on wingman's exit. |
 | **Cause — partly known** | glibc arena fragmentation across the OCR thread pool. `MALLOC_ARENA_MAX=2` cuts the rate 69% (5,187 to 1,620 MB/h) and delays onset from hour ~2 to hour ~3. |
-| **Cause — still unknown** | The residual +1,620 MB/h. Not yet attributed to a specific allocation path. |
+| **Cause — narrowed 2026-08-23** | LIVE allocation (88% of growth), not fragmentation. ~671 KB retained per tick. Python-vs-native not yet determined. |
 | **Fixed?** | **No.** Two hypotheses tested and both refuted (arena cap, reader churn). Cause unknown; +1,500 MB/h unattributed. A 5h43m session on 2026-08-21 reached 10.9 GB RSS with OCR median at 1.97s. |
 | **Mitigation in force** | `MALLOC_ARENA_MAX=2` (Makefile `WINGMAN_ENV`), plus restarting wingman every ~3 hours. |
-| **Next measurement** | `anon_mb` vs `rss_mb` on the RESOURCE line (added 2026-08-21) separates wingman's own heap from mapped capture buffers. Needs one 4h+ session. |
+| **Next measurement** | `mi_use_mb` vs `mi_free_mb` (added 2026-08-22) separates live retention from arena fragmentation. Needs one 4h+ session. |
 
 **Method rule.** No leak claim from a session shorter than four hours. Every
 premature conclusion in this document came from measuring inside the flat early

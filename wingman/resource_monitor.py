@@ -27,6 +27,7 @@ Design rules:
     not due is one float comparison.
 """
 
+import ctypes
 import gc
 import logging
 import os
@@ -36,6 +37,59 @@ import time
 logger = logging.getLogger(__name__)
 
 _PROC = "/proc"
+
+
+
+class _MallInfo2(ctypes.Structure):
+    """glibc `struct mallinfo2` — all fields size_t since glibc 2.33."""
+    _fields_ = [(n, ctypes.c_size_t) for n in (
+        "arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks",
+        "fsmblks", "uordblks", "fordblks", "keepcost")]
+
+
+def _load_mallinfo2():
+    """Return a callable giving glibc allocator stats, or None."""
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        fn = libc.mallinfo2
+        fn.restype = _MallInfo2
+        fn.argtypes = []
+        fn()                      # probe once; a wrong signature fails here
+        return fn
+    except Exception:
+        return None
+
+
+_mallinfo2 = _load_mallinfo2()
+
+
+def _read_malloc_stats() -> dict:
+    """Live-vs-retained split from the allocator itself, in MB.
+
+    Answers the question RSS and `anon` cannot: whether heap growth is memory
+    the program is USING or memory glibc has freed and kept.
+
+      * ``uordblks`` climbing  -> live allocations; something retains objects
+      * ``fordblks`` climbing  -> freed but held in the arena; fragmentation
+
+    Performance 008 needs this because two hypotheses have already been tested
+    and refuted (the arena cap, then EasyOCR reader churn) without ever
+    distinguishing these two cases. Note the figures cover the main arena and
+    mmap'd blocks as glibc accounts them, so they will not sum exactly to RSS.
+
+    Returns {} where mallinfo2 is unavailable rather than failing the sample.
+    """
+    if _mallinfo2 is None:
+        return {}
+    try:
+        m = _mallinfo2()
+        return {
+            "mi_use": int(m.uordblks / 1048576),    # live
+            "mi_free": int(m.fordblks / 1048576),   # freed, retained in arena
+            "mi_mmap": int(m.hblkhd / 1048576),     # mmap'd regions
+        }
+    except Exception:
+        return {}
 
 
 def _read_smaps_rollup(pid: str = "self") -> dict:
@@ -134,6 +188,39 @@ class ResourceSampler:
         self._last: dict = {}
         self._samples = 0
         self._pool_depth_fn = None
+        # ADR 090 memory guard. The leak is unfixed (Performance 008) and
+        # degrades perception continuously: OCR p95 crosses the 1.5s tick
+        # budget at ~hour 3 and the median at ~hour 6, while RSS reached
+        # 13.2 GB at 6.9h — past the footprint that preceded the compositor
+        # OOM in the foundry cross-reference. Until the allocation is found,
+        # bound the damage.
+        _guard = cfg.get("memory_guard", {}) or {}
+        self._guard_enabled = bool(_guard.get("enabled", True))
+        self._guard_soft_mb = float(_guard.get("soft_limit_mb", 6000))
+        self._guard_hard_mb = float(_guard.get("hard_limit_mb", 10000))
+        self._guard_armed = False       # soft limit crossed; await a safe point
+        self._guard_hard = False        # hard limit crossed; stop now
+        self._guard_peak_mb = 0.0
+
+    def should_stop(self, at_safe_point: bool) -> bool:
+        """True when the session should end to bound the Performance 008 leak.
+
+        Two thresholds, deliberately different in urgency:
+
+        * soft — stop at the next SAFE POINT. Restarting mid-mission abandons
+          an aircraft in flight, so the guard arms and waits for the caller to
+          say it is between missions.
+        * hard — stop immediately. Past this the risk of an out-of-memory kill
+          taking the desktop session with it outweighs one lost mission.
+        """
+        if not self._guard_enabled:
+            return False
+        return self._guard_hard or (self._guard_armed and at_safe_point)
+
+    def guard_reason(self) -> str:
+        if self._guard_hard:
+            return f"hard limit {self._guard_hard_mb:.0f} MB"
+        return f"soft limit {self._guard_soft_mb:.0f} MB at a safe point"
 
     def set_pool_depth_source(self, fn) -> None:
         """Wire a callable returning current OCR queue depth (FUTURE 001 item 5)."""
@@ -245,6 +332,9 @@ class ResourceSampler:
         roll = _read_smaps_rollup("self")
         anon = _kb_to_mb(roll.get("Anonymous"))
         shmem = _kb_to_mb(roll.get("Shmem"))
+        # Performance 008: live vs retained, straight from the allocator.
+        mi = _read_malloc_stats()
+        mi_use, mi_free = mi.get("mi_use"), mi.get("mi_free")
         counts = gc.get_count()
         med, p95, n_ocr = self._ocr_window()
 
@@ -258,9 +348,24 @@ class ResourceSampler:
                 swap_sum += st.get("VmSwap", 0)
             game_rss, game_swap = _kb_to_mb(rss_sum), _kb_to_mb(swap_sum)
 
+        if self._guard_enabled and isinstance(rss, int):
+            self._guard_peak_mb = max(self._guard_peak_mb, float(rss))
+            if not self._guard_armed and rss >= self._guard_soft_mb:
+                self._guard_armed = True
+                logger.warning(
+                    "MEMORY GUARD armed: rss %d MB >= soft limit %.0f MB — "
+                    "will stop at the next safe point (ADR 090)",
+                    rss, self._guard_soft_mb)
+            if not self._guard_hard and rss >= self._guard_hard_mb:
+                self._guard_hard = True
+                logger.error(
+                    "MEMORY GUARD hard limit: rss %d MB >= %.0f MB — stopping "
+                    "regardless of state (ADR 090)", rss, self._guard_hard_mb)
+
         obs = {
             "t": now, "rss": rss, "swap": swap, "peak": peak, "fds": fds,
             "anon": anon, "shmem": shmem,
+            "mi_use": mi_use, "mi_free": mi_free,
             "threads": threading.active_count(), "game_rss": game_rss,
             "game_swap": game_swap, "ocr_med": med,
             "sys_swap": self._system_swap_mb(),
@@ -285,6 +390,8 @@ class ResourceSampler:
             f"RESOURCE elapsed={int(now - self._session_start)}s "
             f"rss_mb={_fmt(rss)} d_rss={_delta('rss')} "
             f"anon_mb={_fmt(anon)} d_anon={_delta('anon')} "
+            f"mi_use_mb={_fmt(mi_use)} d_mi_use={_delta('mi_use')} "
+            f"mi_free_mb={_fmt(mi_free)} d_mi_free={_delta('mi_free')} "
             f"shmem_mb={_fmt(shmem)} d_shmem={_delta('shmem')} "
             f"peak_rss_mb={_fmt(peak)} "
             f"swap_mb={_fmt(swap)} threads={obs['threads']} d_threads={_delta('threads')} "
@@ -350,6 +457,8 @@ class ResourceSampler:
             lines = [
                 f"RESOURCE SUMMARY elapsed={hours:.1f}h samples={self._samples}"
                 f" measured={measured_h:.1f}h (rates exclude {self._warmup_s / 60:.0f}min warm-up)",
+                f"  malloc  live {_span('mi_use', 'MB')}"
+                f"   retained-in-arena {_span('mi_free', 'MB')}\n"
                 f"  wingman rss {_span('rss', 'MB')}"
                 + (f"  rate={self_rate:+.0f} MB/h" if self_rate is not None else "")
                 + f"  peak={self._last.get('peak', 'n/a')}MB",

@@ -288,6 +288,10 @@ telemetry:
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,
     rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0,
     abort_on_rearm: true}   # ADR 088: cancel the dive if missiles rearm mid-descent
+# ADR 090 — bound the unfixed Performance 008 leak. Soft limit stops at the
+# next lobby (no mission in flight); hard limit stops immediately, because an
+# OOM kill can take the whole desktop session down with it.
+memory_guard: {enabled: true, soft_limit_mb: 6000, hard_limit_mb: 10000}
 resource_monitor:                  # Performance 008 — long-session leak diagnosis
   enabled: true                    # emits one greppable RESOURCE line per interval
   interval_s: 300.0                # 5 min -> ~100 lines per 8h session

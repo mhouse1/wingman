@@ -703,6 +703,19 @@ def main():
             # resource trail — capture stalls are a symptom of the very
             # starvation this samples (Performance 008).
             resource_sampler.maybe_sample()
+            # ADR 090: the Performance 008 leak is unfixed and degrades
+            # perception continuously — OCR p95 crosses the tick budget at
+            # ~hour 3, the median at ~hour 6. A SAFE POINT is the lobby with no
+            # mission running: stopping there costs nothing, while stopping
+            # mid-mission abandons an aircraft in flight.
+            _safe = (analyzer.game_state == GameState.GAME_LOBBY
+                     and not ctrl.is_mission_running())
+            if resource_sampler.should_stop(_safe):
+                logger.warning(
+                    "\033[93m🛑 MEMORY GUARD: ending session (%s) — restart to "
+                    "reset perception latency (ADR 090)\033[0m",
+                    resource_sampler.guard_reason())
+                break
             # Capture and analyze frame
             frame = cap.get_frame()
             if frame is None:

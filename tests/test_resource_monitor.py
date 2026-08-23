@@ -385,3 +385,87 @@ def test_moderate_growth_in_short_window_still_withheld():
     out = s.summarize()
     assert "too short" in out, out
     assert "SEVERE" not in out
+
+
+# ---------------------------------------------------------------------------
+# Performance 008: live-vs-retained split from the allocator
+# ---------------------------------------------------------------------------
+
+def test_malloc_stats_probe_returns_sane_fields():
+    """glibc mallinfo2 distinguishes what RSS and anon cannot: memory in USE
+    from memory freed and retained in the arena (fragmentation)."""
+    from wingman.resource_monitor import _read_malloc_stats
+    m = _read_malloc_stats()
+    if not m:
+        import pytest
+        pytest.skip("mallinfo2 unavailable on this libc")
+    for k in ("mi_use", "mi_free", "mi_mmap"):
+        assert k in m, f"missing {k}"
+        assert isinstance(m[k], int) and m[k] >= 0, f"{k}={m[k]!r}"
+
+
+def test_malloc_probe_never_raises(monkeypatch):
+    """A diagnostic must not be able to break the tick loop."""
+    import wingman.resource_monitor as rm
+
+    def _boom():
+        raise OSError("libc exploded")
+
+    monkeypatch.setattr(rm, "_mallinfo2", _boom)
+    assert rm._read_malloc_stats() == {}
+
+
+def test_malloc_probe_degrades_when_unavailable(monkeypatch):
+    import wingman.resource_monitor as rm
+    monkeypatch.setattr(rm, "_mallinfo2", None)
+    assert rm._read_malloc_stats() == {}
+
+
+# ---------------------------------------------------------------------------
+# ADR 090: memory guard — bound the unfixed Performance 008 leak
+# ---------------------------------------------------------------------------
+
+def _guard(**over):
+    from wingman.resource_monitor import ResourceSampler
+    cfg = {"enabled": True, "interval_s": 10.0,
+           "memory_guard": {"enabled": True, "soft_limit_mb": 6000,
+                            "hard_limit_mb": 10000}}
+    cfg["memory_guard"].update(over)
+    return ResourceSampler(cfg)
+
+
+def test_guard_quiet_below_the_soft_limit():
+    s = _guard()
+    s._guard_enabled = True
+    assert s.should_stop(at_safe_point=True) is False
+
+
+def test_soft_limit_waits_for_a_safe_point():
+    """Stopping mid-mission abandons an aircraft in flight; the lobby is free."""
+    s = _guard()
+    s._guard_armed = True
+    assert s.should_stop(at_safe_point=False) is False, "stopped mid-mission"
+    assert s.should_stop(at_safe_point=True) is True
+
+
+def test_hard_limit_stops_regardless_of_state():
+    """Past the hard limit an OOM kill can take the desktop session with it —
+    that outweighs one abandoned mission."""
+    s = _guard()
+    s._guard_hard = True
+    assert s.should_stop(at_safe_point=False) is True
+
+
+def test_guard_can_be_disabled():
+    s = _guard(enabled=False)
+    s._guard_hard = True
+    s._guard_armed = True
+    assert s.should_stop(at_safe_point=True) is False
+
+
+def test_guard_reason_names_the_threshold_that_fired():
+    s = _guard()
+    s._guard_armed = True
+    assert "soft" in s.guard_reason()
+    s._guard_hard = True
+    assert "hard" in s.guard_reason()

@@ -379,6 +379,11 @@ SCHEMA = Section(
         }),
 
         # Performance 008 — periodic RESOURCE line for long-session leak diagnosis.
+    "memory_guard": Section({          # ADR 090
+        "enabled": BOOL,
+        "soft_limit_mb": _int(1),
+        "hard_limit_mb": _int(1),
+    }),
         "resource_monitor": Section(children={
             "enabled": BOOL,
             "interval_s": SECONDS,
