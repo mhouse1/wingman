@@ -57,6 +57,7 @@ import logging
 import sys
 import time
 import tracemalloc
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,19 @@ class HeapCensus:
 
     def _census(self, now: float, mi_use_mb) -> str:
         t0 = time.perf_counter()
+
+        # Introspecting arbitrary heap objects fires other libraries' lazy
+        # deprecation shims — torch/typing_extensions raise FutureWarning from
+        # inside `getattr(obj, "__dict__")` on objects this code merely looked
+        # at. Those warnings say nothing about wingman and would land in the log
+        # of a leak-hunting session as pure noise. The suppression is global for
+        # its duration (Python has no per-thread filters), so it is scoped as
+        # tightly as possible around the walk and nothing else.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return self._census_locked(now, mi_use_mb, t0)
+
+    def _census_locked(self, now: float, mi_use_mb, t0: float) -> str:
 
         by_type: dict = {}
         objs = gc.get_objects()

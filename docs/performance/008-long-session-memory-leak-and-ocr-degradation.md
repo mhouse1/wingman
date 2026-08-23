@@ -137,6 +137,62 @@ confident explanations that measurement destroyed, and the pattern in both was
 reasoning from a mechanism that fit rather than from a measurement that
 discriminated.
 
+### Instrumented 2026-08-23 — the census exists, and one trap was found building it
+
+`wingman/heap_census.py` implements the census this section calls for, off by
+default (`heap_census.enabled: false`). It reports both lanes on one line:
+
+    HEAPCENSUS elapsed=200s py_mb=269 d_py=+265 objects=39467 \
+               tm_mb=265 d_tm=+264 mi_use_mb=404 census_ms=247
+
+**A `gc.get_objects()` census on its own would have sent this investigation to
+the wrong branch.** Measured directly:
+
+| | 64 MB of retained `ndarray` |
+|---|---|
+| `gc.is_tracked(arr)` | **False** |
+| present in `gc.get_objects()` | **No** |
+| tracemalloc growth | **64.0 MB** |
+
+A non-object-dtype ndarray cannot take part in a reference cycle, so numpy
+leaves it untracked and the gc walk never returns it. `bytes` and `bytearray`
+behave the same way. A census built only on `gc.get_objects()` would have shown
+a flat Python heap while gigabytes of frames accumulated — which reads exactly
+like "native retention" and would have closed the Python branch on a leak that
+is squarely Python-side.
+
+Two consequences, both now built in:
+
+1. **tracemalloc is the lane to trust for payload**, not the gc walk. numpy
+   registers its data allocations with it, so frames and crops are visible, and
+   each carries a traceback naming the allocating line.
+2. The gc census additionally scans the *contents* of tracked containers and
+   attributes untracked payload found there, so the by-type table still names
+   the container holding the frames rather than reporting nothing.
+
+Validated against a planted leak of the real shape — 40 frames of
+`(1200, 1920, 3) uint8` retained in a list:
+
+```
+  by-type (top 6 of 176 types, by bytes):
+    numpy.ndarray                   263.7MB               n=40
+  by-site (tracemalloc, top 6 by growth since last census):
+      +263.7MB  (now   263.7MB, +122 blocks)  <the appending line>
+```
+
+Both lanes found it and the by-site table named the line. `census_ms` is
+reported every time so the diagnostic's own cost on the tick is never hidden.
+
+**How to read the result when the real session runs it:**
+
+    tm_mb climbing with mi_use     -> Python-allocated. by-site names the line.
+    tm_mb FLAT while mi_use climbs -> genuinely native (torch/OpenCV C++ buffers
+                                      below the Python allocator).
+
+**Not yet run against a real session.** The numbers above are a planted control,
+not the leak. Running it for real needs `heap_census.enabled: true` and a raised
+`memory_guard.soft_limit_mb`, per the warning immediately below.
+
 ### Mitigation in force — and what it hides
 
 ADR 090 adds a memory guard: the session ends at the next lobby once RSS
