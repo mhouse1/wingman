@@ -148,7 +148,20 @@ class HeapCensus:
         self._interval = float(cfg.get("interval_s", _DEFAULT_INTERVAL_S))
         self._top_n = int(cfg.get("top_n", _DEFAULT_TOP_N))
         self._use_tracemalloc = bool(cfg.get("tracemalloc", True))
+        # The gc walk plus payload scan measured 2.2-3.7 s on a process holding
+        # only torch and easyocr imports — against a 1.5 s tick, and worse on the
+        # live process. gc.get_objects() itself is 18 ms of that; the cost is
+        # walking every container's contents. tracemalloc answers the same
+        # question in 15 ms and names the allocating line, so the gc lane is
+        # opt-in for when the container TYPE is wanted and a stalled tick is
+        # acceptable — never during a session that is also flying the aircraft.
+        self._use_gc = bool(cfg.get("gc_census", False))
         self._depth = int(cfg.get("tracemalloc_depth", _DEFAULT_DEPTH))
+        # take_snapshot() scales with accumulated traces: measured 13 ms at the
+        # start of a session and 5,515 ms at 95 minutes, which is past the tick
+        # budget. Disarm rather than let a diagnostic degrade the thing it is
+        # measuring. 0 disables the guard.
+        self._max_ms = float(cfg.get("max_census_ms", 2500.0))
         self._clock = clock
 
         self._start = clock()
@@ -212,8 +225,8 @@ class HeapCensus:
     def _census_locked(self, now: float, mi_use_mb, t0: float) -> str:
 
         by_type: dict = {}
-        objs = gc.get_objects()
         total_bytes = n_objects = 0
+        objs = gc.get_objects() if self._use_gc else []
         # Payloads are reached through their holder, so the same array seen from
         # two containers must be counted once. Ids only — never the objects, or
         # the census would itself pin the heap it is measuring.
@@ -248,8 +261,9 @@ class HeapCensus:
             # on the heap while the rest of this method runs.
             del objs
 
-        py_mb = total_bytes / 1048576.0
-        d_py = "n/a" if self._prev_py_mb is None else f"{py_mb - self._prev_py_mb:+.0f}"
+        py_mb = (total_bytes / 1048576.0) if self._use_gc else None
+        d_py = ("n/a" if (py_mb is None or self._prev_py_mb is None)
+                else f"{py_mb - self._prev_py_mb:+.0f}")
 
         tm_mb = None
         top_sites: list = []
@@ -268,16 +282,30 @@ class HeapCensus:
 
         census_ms = (time.perf_counter() - t0) * 1000.0
 
+        # tracemalloc's own traces are part of this process's RSS. Report them
+        # so a leak hunt can subtract the instrument from the measurement.
+        tm_overhead_mb = None
+        if self._use_tracemalloc and tracemalloc.is_tracing():
+            try:
+                tm_overhead_mb = tracemalloc.get_tracemalloc_memory() / 1048576.0
+            except Exception:
+                pass
+
         lines = [
             f"HEAPCENSUS elapsed={int(now - self._start)}s "
-            f"py_mb={py_mb:.0f} d_py={d_py} objects={n_objects} "
+            f"py_mb={'off' if py_mb is None else f'{py_mb:.0f}'} d_py={d_py} "
+            f"objects={n_objects if self._use_gc else 'off'} "
             f"tm_mb={'n/a' if tm_mb is None else f'{tm_mb:.0f}'} d_tm={d_tm} "
+            f"tm_overhead_mb={'n/a' if tm_overhead_mb is None else f'{tm_overhead_mb:.0f}'} "
             f"mi_use_mb={'n/a' if mi_use_mb is None else mi_use_mb} "
             f"census_ms={census_ms:.0f}"
         ]
 
         ranked = sorted(by_type.items(), key=lambda kv: -kv[1][1])[:self._top_n]
-        lines.append(f"  by-type (top {len(ranked)} of {len(by_type)} types, by bytes):")
+        if not self._use_gc:
+            ranked = []
+        else:
+            lines.append(f"  by-type (top {len(ranked)} of {len(by_type)} types, by bytes):")
         for name, (cnt, tot) in ranked:
             p_cnt, p_tot = self._prev_by_type.get(name, (None, None))
             d_cnt = "" if p_cnt is None else f" ({cnt - p_cnt:+d})"
@@ -296,4 +324,14 @@ class HeapCensus:
         self._prev_py_mb, self._prev_tm_mb = py_mb, tm_mb
         block = "\n".join(lines)
         logger.info(block)
+
+        if self._max_ms and census_ms > self._max_ms:
+            logger.warning(
+                "HeapCensus: census took %.0f ms (limit %.0f) — disabling. "
+                "tracemalloc snapshot cost grows with accumulated traces; the "
+                "attribution it already produced stands.",
+                census_ms, self._max_ms,
+            )
+            self._enabled = False
+            self.stop()
         return block

@@ -397,6 +397,8 @@ SCHEMA = Section(
             "top_n": _int(1),
             "tracemalloc": BOOL,
             "tracemalloc_depth": _int(1),
+            "gc_census": BOOL,
+            "max_census_ms": _int(0),
         }),
         "performance": Section(children={
             "round_histogram": Section(children={

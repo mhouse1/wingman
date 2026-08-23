@@ -162,16 +162,61 @@ _XKEY_ALIASES = {
 }
 
 
+# --- Shared XTest display (ADR 091) -----------------------------------------
+# Key injection used to open a throwaway Xlib Display per event. Every
+# Display.__init__ rebuilds the resource classes at Xlib/display.py:121, and
+# those survive both close() and gc.collect() — measured at ~16.2 KB retained
+# per construction. Over a 1h46m session that was 1,277 MB from this one site,
+# 96% of all post-warm-up heap growth (Performance 008).
+#
+# So: one connection, reused. Xlib Display objects are NOT safe for concurrent
+# use, and injection comes from the main loop, the behaviour tree and hotkey
+# callbacks — the per-call Displays were providing isolation for free, so the
+# shared one has to take a lock instead.
+_display_lock = threading.RLock()
+_shared_display = None
+
+
+def _shared_xtest_display(display_name: str):
+    """Return the process-wide XTest display, opening it on first use.
+
+    Callers must hold `_display_lock`.
+    """
+    global _shared_display
+    if _shared_display is None:
+        from Xlib import display as _xdisplay
+        _shared_display = _xdisplay.Display(display_name)
+        logger.debug("XTest: opened shared display %r", display_name)
+    return _shared_display
+
+
+def _drop_shared_display() -> None:
+    """Close and forget the shared display so the next call reconnects.
+
+    Called on any injection failure: a half-dead connection must not be reused
+    for the release half of a press/release pair.
+    """
+    global _shared_display
+    d, _shared_display = _shared_display, None
+    if d is None:
+        return
+    try:
+        d.close()
+    except Exception:
+        pass
+
+
 def _linux_key_event(key: str, event_type) -> None:
     """Inject a single KeyPress or KeyRelease event via XTest.
 
-    Retries once on transient failure: each call opens a throwaway Display, so
-    a single failed connection between a press and its release would otherwise
-    leave the key logically held in the X server for the rest of the session
-    (XTest key state is server-side and does not die with this client).
+    Retries once on transient failure, dropping the shared connection in
+    between so the retry reconnects: a single failed injection between a press
+    and its release would otherwise leave the key logically held in the X
+    server for the rest of the session (XTest key state is server-side and does
+    not die with this client).
     """
     _ensure_xauthority()
-    from Xlib import display as _xdisplay, XK as _XK
+    from Xlib import XK as _XK
     from Xlib.ext import xtest as _xtest
     xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
     keysym = _XK.string_to_keysym(xk_name)
@@ -180,10 +225,10 @@ def _linux_key_event(key: str, event_type) -> None:
         return
     display_name = os.environ.get("DISPLAY", ":0").strip()
     last_err = None
-    for attempt in (1, 2):
-        try:
-            d = _xdisplay.Display(display_name)
+    with _display_lock:
+        for attempt in (1, 2):
             try:
+                d = _shared_xtest_display(display_name)
                 keycode = d.keysym_to_keycode(keysym)
                 if keycode == 0:
                     logger.warning("Linux key: no keycode for keysym %d (%r)", keysym, key)
@@ -191,12 +236,11 @@ def _linux_key_event(key: str, event_type) -> None:
                 _xtest.fake_input(d, event_type, keycode)
                 d.sync()
                 return
-            finally:
-                d.close()
-        except Exception as e:
-            last_err = e
-            if attempt == 1:
-                time.sleep(0.05)
+            except Exception as e:
+                last_err = e
+                _drop_shared_display()
+                if attempt == 1:
+                    time.sleep(0.05)
     logger.error("Linux key event for %r failed after retry: %s", key, last_err)
 
 

@@ -12,6 +12,8 @@ long session. Respawn-crop OCR median rises from ~0.24 s in the first hour to
 tick budget. All crops degrade uniformly, which is the signature of resource
 starvation rather than a defect in any one OCR path.
 
+**ANSWERED 2026-08-23 — see the next section. The leak was a new X11 connection opened per key event; fixed in ADR 091, 94.7% reduction measured. The narrative below is kept as the investigation record.**
+
 The mechanism is a memory leak: system swap climbed **4.3 GB → 14.8 GB** during
 the 2026-08-20 session and collapsed to 3.6 GB within minutes of exit. Every
 session starts clean at ~0.25 s median regardless of how degraded the previous
@@ -24,6 +26,66 @@ and the safety-critical incoming→flare reaction path regressed **+533%**.
 foundry `docs/performance/001-brave-oom-full-session-crash.md` — different
 memory class, disjoint time windows, anti-correlated. See "Relationship to the
 compositor OOM investigation".
+
+## ANSWERED 2026-08-23 — a new X11 connection per key event. Fixed in ADR 091.
+
+The census this document asked for ran once and named the site.
+
+`_linux_key_event` opened a throwaway `Xlib.display.Display` for every key press
+and every key release. Each `Display.__init__` rebuilds the Xlib resource
+classes at `Xlib/display.py:121`, and those survive both `close()` and
+`gc.collect()`.
+
+Retained bytes attributed to that single line, 1h 46m session, 17 missions:
+
+| min | 5 | 15 | 30 | 45 | 60 | 75 | 90 | 105 |
+|-----|---|----|----|----|----|----|----|-----|
+| MB | 4.4 | 30.9 | 122.0 | 229.6 | 433.5 | 621.8 | 934.6 | **1277.2** |
+
+- **728 MB/h from one line — 96% of all post-warm-up live-heap growth.**
+- 307,144 live blocks added, none released.
+- Controlled measurement: **~16.2 KB retained per `Display()` construction**,
+  surviving `gc.collect()`. 1,277 MB implies ~80,700 constructions, matching the
+  session's logged control activity (1,538 `fire_active_weapon`, 212 `climb`,
+  158 `eject_and_dive`, 120 `deploy_flares` — each a press *and* a release).
+
+**The Python-vs-native fork is closed: Python-side.** Post-warm-up, tracemalloc's
+delta tracked `mallinfo2`'s almost exactly (+82/+82, +87/+88, +118/+118,
++109/+109 MB). The 1,300 MB native gap in the first interval was torch loading
+model weights — warm-up only.
+
+**Why the two earlier hypotheses missed it.** Both were framed around the OCR
+pipeline, because that is where the *symptom* appeared. The allocation was in
+the input path, which nothing in this document had looked at. The census found
+it in one session precisely because it attributes rather than hypothesises.
+
+**Fix and result** — ADR 091, one shared display, reused. Measured with real
+Xlib over 400 iterations with `gc.collect()` either side:
+
+| | retained | per event | top site |
+|---|---|---|---|
+| before | 5.84 MB | 14.9 KB | `Xlib/display.py:121` |
+| after | 0.31 MB | 0.79 KB | tracemalloc's own overhead |
+
+**94.7% reduction.**
+
+### Still open after ADR 091
+
+- The remaining ~4% of growth is unattributed. It needs its own long session to
+  characterise, and it may be ordinary drift rather than a leak.
+- **The fix is not yet validated on a long session.** The numbers above are a
+  controlled measurement plus a one-session attribution, not a post-fix soak.
+  ADR 090's memory guard stays armed until a real session confirms the curve.
+- `_linux_click` has the same per-call `Display()` pattern, deliberately left
+  alone — low hundreds of calls per session, ~1-2 MB, and its sleeps must not be
+  held under the injection lock.
+
+### Instrument note
+
+`take_snapshot()` cost grows with accumulated traces: **13 ms at session start,
+5,515 ms at 95 minutes**, past the tick budget. `heap_census.max_census_ms`
+(default 2500) now disarms the census when it crosses that, so a diagnostic
+cannot degrade what it is measuring. `heap_census.enabled` is back to `false`.
 
 ## REFUTED 2026-08-22 — the reader churn was real, and was NOT the leak
 
@@ -182,6 +244,24 @@ Validated against a planted leak of the real shape — 40 frames of
 
 Both lanes found it and the by-site table named the line. `census_ms` is
 reported every time so the diagnostic's own cost on the tick is never hidden.
+
+**Cost — measured 2026-08-23, and it decided the default.** On a process holding
+only the `torch`/`easyocr`/`cv2` imports (no readers built, no 4 GB heap):
+
+| lane | cost per census |
+|------|-----------------|
+| tracemalloc snapshot | **15 ms** |
+| `gc.get_objects()` alone | 18 ms |
+| gc walk **plus payload scan** | **2,200-3,800 ms** |
+
+Against a 1.5 s tick, the payload scan is a multi-second freeze — through a
+missile engagement, on the live process, worse. So `gc_census` defaults to
+**false** and the census runs tracemalloc-only, which costs nothing measurable
+and is the lane that names the allocating line anyway. Turn the gc lane on only
+when the container *type* is wanted and a stalled tick is acceptable.
+
+`tm_overhead_mb` reports tracemalloc's own trace memory each census, so the
+instrument can be subtracted from the measurement rather than mistaken for it.
 
 **How to read the result when the real session runs it:**
 

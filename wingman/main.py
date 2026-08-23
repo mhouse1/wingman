@@ -687,9 +687,10 @@ def main():
     heap_census = HeapCensus(cfg.get("heap_census", {}))
     if heap_census.enabled:
         logger.info(
-            "HeapCensus enabled — this blocks the tick during each walk. "
-            "Raise memory_guard.soft_limit_mb too, or the session ends before "
-            "the curve is readable (Performance 008)."
+            "HeapCensus enabled (Performance 008 attribution run). tracemalloc "
+            "adds per-allocation overhead, so this session's run_*.json reads "
+            "slow — keep it out of the release baseline. If heap_census."
+            "gc_census is also on, expect a multi-second tick stall per census."
         )
     startup_time = time.time()
     battle_ever_reached = False
