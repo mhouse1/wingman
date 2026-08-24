@@ -28,6 +28,7 @@ from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler
 from .heap_census import HeapCensus
+from .liveness_guard import LivenessGuard
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -541,6 +542,26 @@ def main():
                             count=1, region_name="STALL_EXIT_TO_DESKTOP")
             return
 
+        if crop == "STALL_PROFILE":
+            # ADR 093. Detection is the overlay's title; the click target is its
+            # close control in the opposite corner, so this is a detect-one /
+            # click-another pair like event_refresh and event_refresh_dismiss.
+            # Clicking the title itself does nothing — it is a label, not a
+            # button — which is why PROFILE_DISMISS exists as its own crop.
+            logger.warning(
+                "\033[93m🔧 Stall recovery: '%s' — closing the profile overlay "
+                "(state=%s)\033[0m", crop, current.name)
+            if "STALL_PROFILE_DISMISS" in analyzer.crops:
+                ctrl.click_crop(analyzer.crops["STALL_PROFILE_DISMISS"], block=False,
+                                count=1, region_name="STALL_PROFILE_DISMISS")
+            else:
+                # Calibration missing rather than absent by design: ESC is the
+                # honest fallback and still beats sitting inert.
+                logger.warning("Stall recovery: STALL_PROFILE_DISMISS not calibrated "
+                               "— pressing ESC instead")
+                ctrl.press_escape(hold_seconds=0.05, block=False)
+            return
+
         if crop == "STALL_AIRCRAFT":
             # Unchanged (ADR 084): no adjacent destructive button, ESC works.
             logger.warning("\033[93m🔧 Stall recovery: '%s' — pressing ESC (state=%s)\033[0m",
@@ -684,6 +705,11 @@ def main():
         cfg.get("resource_monitor", {}), perf_tracker=tracker)
     resource_sampler.set_pool_depth_source(analyzer.ocr_queue_depth)
     # Performance 008: off unless explicitly enabled — it walks the whole heap.
+    # ADR 093: bound a session that has stopped making progress. The 2026-08-24
+    # livelock ran 110 minutes inert because nothing was watching for absence of
+    # work — this is the generic backstop, in the shape of ADR 090's guard.
+    liveness = LivenessGuard(cfg.get("liveness_guard", {}))
+    _liveness_ocr_offsets = None
     heap_census = HeapCensus(cfg.get("heap_census", {}))
     if heap_census.enabled:
         logger.info(
@@ -714,6 +740,17 @@ def main():
             # starvation this samples (Performance 008).
             resource_sampler.maybe_sample()
             heap_census.maybe_census(mi_use_mb=resource_sampler.last_mi_use_mb)
+            # ADR 093 liveness: OCR happening at all is progress. Own offsets —
+            # snapshot_since does not drain, so this cannot starve the sampler.
+            if liveness.enabled:
+                try:
+                    _lv_stats, _liveness_ocr_offsets = tracker.snapshot_since(
+                        _liveness_ocr_offsets)
+                    if any(_lv_stats.values()) if _lv_stats else False:
+                        liveness.note_progress("OCR")
+                except Exception:
+                    pass
+                liveness.check()
             # ADR 090: the Performance 008 leak is unfixed and degrades
             # perception continuously — OCR p95 crosses the tick budget at
             # ~hour 3, the median at ~hour 6. A SAFE POINT is the lobby with no
@@ -721,6 +758,11 @@ def main():
             # mid-mission abandons an aircraft in flight.
             _safe = (analyzer.game_state == GameState.GAME_LOBBY
                      and not ctrl.is_mission_running())
+            if liveness.should_stop() and _safe:
+                logger.warning(
+                    "\033[93m🛑 LIVENESS GUARD: ending session (%s) — wingman "
+                    "stopped making progress (ADR 093)\033[0m", liveness.reason)
+                break
             if resource_sampler.should_stop(_safe):
                 logger.warning(
                     "\033[93m🛑 MEMORY GUARD: ending session (%s) — restart to "
@@ -808,6 +850,7 @@ def main():
                 unknown_state_since = 0.0
 
             if current_game_state != last_game_state:
+                liveness.note_progress("state change")
                 logger.info("\033[96m🎮 Game state: %s → %s\033[0m",
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
@@ -845,7 +888,7 @@ def main():
                         while not _stop.wait(timeout=45.0):
                             if analyzer.game_state != GameState.GAME_LOBBY:
                                 return
-                            if (analyzer.lobby_blackout_active()
+                            if (analyzer.blackout_esc_suppressed()
                                     or analyzer.exit_dialog_visible()):
                                 # ADR 087: ESC opens the Exit-to-Desktop modal,
                                 # so it must not fire into a blackout — that is
@@ -856,8 +899,17 @@ def main():
                                 # immediately re-creates the dialog.
                                 logger.info(
                                     "GAME_LOBBY escape loop: ESC suppressed — "
-                                    "lobby blackout in progress")
+                                    "lobby blackout in progress (%.0fs)",
+                                    analyzer.lobby_blackout_age_s())
                                 continue
+                            if analyzer.lobby_blackout_active():
+                                # ADR 093: past the ceiling. Say so loudly —
+                                # this is the path that was missing for 110
+                                # minutes on 2026-08-24.
+                                logger.warning(
+                                    "GAME_LOBBY escape loop: blackout %.0fs past the "
+                                    "ESC ceiling — pressing ESC anyway (ADR 093)",
+                                    analyzer.lobby_blackout_age_s())
                             logger.info("GAME_LOBBY escape loop: pressing ESC")
                             ctrl.press_escape(hold_seconds=0.05, block=False)
                     lobby_escape_thread = threading.Thread(

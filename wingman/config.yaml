@@ -143,6 +143,15 @@ crops:
     - [0.3764, 0.4833]
     - [0.4396, 0.5167]
     text: [CANCEL]
+  STALL_PROFILE:
+    coords:
+    - [0.0306, 0.0278]
+    - [0.1, 0.0578]
+    text: [PROFILE, ROFILE, PROFIL]
+  STALL_PROFILE_DISMISS:
+    coords:
+    - [0.9443, 0.0125]
+    - [0.9766, 0.0708]
   STALL_MULTI_PLAYER:
     coords:
     - [0.3826, 0.91]
@@ -160,6 +169,18 @@ crops:
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
+# ADR 093: the ADR 087 ESC suppression is a delay, not a veto. Past this the
+# escape loop presses ESC even during a blackout — a bounded cancel-then-reopen
+# cycle beats sitting inert, which cost 110 minutes on 2026-08-24. 0 disables
+# the ceiling and restores pure ADR 087 behaviour.
+lobby_blackout:
+  blackout_esc_ceiling_s: 120.0
+# ADR 093: progress watchdog. Progress = an FSM state change OR OCR activity;
+# only losing BOTH is a stall, so a long battle or a quiet lobby cannot trip it.
+liveness_guard:
+  enabled: true
+  stall_limit_s: 300.0        # log loudly, let recovery escalate
+  hard_limit_s: 900.0         # end the session at the next safe point
 stall_recovery:
   action_after_s: 15.0        # dwell in GAME_UNKNOWN/GAME_STARTING_STALLED before acting
   unready_dwell_s: 30.0       # UNREADY suppressing the PLAY click before leaving the squad
@@ -168,7 +189,9 @@ stall_recovery:
   cooldown_s: 20.0            # per-crop minimum between recovery actions
 
 unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 5,
-  dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies}
+  dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies,
+  # ADR 093: keep warning after the capture cap — silence must mean healthy.
+  stuck_warn_interval_s: 300.0, stuck_warn_max_interval_s: 1800.0}
 respawn_detection:
   use_ocr: true
   use_gpu: false

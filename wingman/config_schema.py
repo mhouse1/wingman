@@ -148,6 +148,8 @@ SCHEMA = Section(
             "max_per_episode": _int(0),
             "dismiss_grace_s": SECONDS,
             "dir": STR,
+            "stuck_warn_interval_s": SECONDS,
+            "stuck_warn_max_interval_s": SECONDS,
         }),
 
         "respawn_detection": Section(children={
@@ -384,6 +386,16 @@ SCHEMA = Section(
         "soft_limit_mb": _int(1),
         "hard_limit_mb": _int(1),
     }),
+        # ADR 093 — progress watchdog.
+        "liveness_guard": Section(children={
+            "enabled": BOOL,
+            "stall_limit_s": SECONDS,
+            "hard_limit_s": SECONDS,
+        }),
+        # ADR 093 — ceiling on the ADR 087 blackout ESC suppression.
+        "lobby_blackout": Section(children={
+            "blackout_esc_ceiling_s": SECONDS,
+        }),
         "resource_monitor": Section(children={
             "enabled": BOOL,
             "interval_s": SECONDS,

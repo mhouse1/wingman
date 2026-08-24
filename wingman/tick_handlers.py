@@ -1156,6 +1156,15 @@ class UnknownAnomalyRecorder:
         # re-clicked every cycle without clearing still gets captured as evidence
         # that handling failed.
         self._dismiss_grace_s = float(cfg.get("dismiss_grace_s", 20.0))
+        # ADR 093: the screenshot cap used to silence the WARNING too, so the
+        # 2026-08-24 livelock stopped complaining at 511s and ran another 100
+        # minutes in silence. Captures stay capped — the fifth frame of an
+        # unchanging screen adds nothing — but the complaint continues on a
+        # doubling interval for as long as the condition holds.
+        self._stuck_warn_interval_s = float(cfg.get("stuck_warn_interval_s", 300.0))
+        self._stuck_warn_max_s = float(cfg.get("stuck_warn_max_interval_s", 1800.0))
+        self._last_stuck_warn_ts = 0.0
+        self._stuck_warns = 0
         self._clock = clock
         self._unknown_since = 0.0
         self._captured = 0
@@ -1184,6 +1193,8 @@ class UnknownAnomalyRecorder:
         # answers again, so a blackout episode cannot span it.
         self._blackout_since = 0.0
         self._blackout_last_ts = 0.0
+        self._last_stuck_warn_ts = 0.0
+        self._stuck_warns = 0
         # Dismissal history belongs to the episode: leaving GAME_UNKNOWN means
         # handling worked (or was never needed), so it must not carry forward.
         self._first_dismiss_ts = 0.0
@@ -1209,6 +1220,8 @@ class UnknownAnomalyRecorder:
             self._blackout_since = now
             self._captured = 0
             self._last_capture_ts = 0.0
+            self._last_stuck_warn_ts = 0.0
+            self._stuck_warns = 0
         self._blackout_last_ts = now
 
     def _blackout_active(self, now: float) -> bool:
@@ -1243,6 +1256,23 @@ class UnknownAnomalyRecorder:
             self._first_dismiss_ts = 0.0
             self._dismiss_popups = []
 
+    def _warn_still_stuck(self, now: float, episode: str, stuck_for: float) -> None:
+        """Keep complaining after the screenshot cap (ADR 093).
+
+        Silence must mean healthy. The interval doubles up to a ceiling so a
+        multi-hour stall neither spams the log nor goes quiet.
+        """
+        interval = min(self._stuck_warn_interval_s * (2 ** self._stuck_warns),
+                       self._stuck_warn_max_s)
+        if self._last_stuck_warn_ts and now - self._last_stuck_warn_ts < interval:
+            return
+        self._last_stuck_warn_ts = now
+        self._stuck_warns += 1
+        logger.warning(
+            "ADR093: %s STILL stuck after %.0fs (%.0f min) — screenshot cap "
+            "%d reached, no further captures. Recovery has not worked.",
+            episode, stuck_for, stuck_for / 60.0, self._max_per_episode)
+
     def tick(self, frame, current_game_state) -> "str | None":
         """Capture when GAME_UNKNOWN has persisted past the threshold.
 
@@ -1269,6 +1299,7 @@ class UnknownAnomalyRecorder:
         if stuck_for < self._after_s:
             return None
         if self._captured >= self._max_per_episode:
+            self._warn_still_stuck(now, episode, stuck_for)
             return None
         # Handling was attempted and may still be taking effect — a popup that
         # clears is not an anomaly, so hold the capture until the grace window

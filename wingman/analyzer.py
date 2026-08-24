@@ -49,7 +49,8 @@ STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
 # Scan order: most specific screen first. The batch stops at the first hit, so a
 # generic match must never pre-empt a precise one.
-STALL_RECOVERY_CROPS = ("STALL_RETRY", "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
+STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_RETRY",
+                        "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
 
 # Gated on UNREADY dwell rather than state dwell: UNREADY makes
 # scan_region_for_play_button return None, which makes _classify_unknown_state
@@ -992,6 +993,10 @@ class GameStateAnalyzer:
         self._click_to_stop = threading.Event()
         _stall_cfg = config.get("stall_recovery", {}) or {}
         self._stall_action_after_s = float(_stall_cfg.get("action_after_s", 15.0))
+        # ADR 093: ceiling past which the ADR 087 ESC suppression lifts.
+        _blk_cfg = config.get("lobby_blackout", {}) or {}
+        self._blackout_esc_ceiling_s = float(
+            _blk_cfg.get("blackout_esc_ceiling_s", 120.0))
         self._lobby_blackout_since = 0.0   # ADR 087: sustained GAME_LOBBY blackout
         self._exit_dialog_seen_ts = 0.0    # ADR 087: Exit-to-Desktop modal on screen
         self._stall_unready_dwell_s = float(_stall_cfg.get("unready_dwell_s", 30.0))
@@ -2884,6 +2889,34 @@ class GameStateAnalyzer:
         """
         return self._lobby_blackout_since != 0.0
 
+    def lobby_blackout_age_s(self) -> float:
+        """Seconds since the current lobby blackout began, 0.0 if none."""
+        if self._lobby_blackout_since == 0.0:
+            return 0.0
+        return max(0.0, time.time() - self._lobby_blackout_since)
+
+    def blackout_esc_suppressed(self) -> bool:
+        """True while ESC must stay suppressed for a lobby blackout (ADR 093).
+
+        ADR 087 suppressed ESC during a blackout because ESC opens the
+        Exit-to-Desktop modal, re-creating it seconds after recovery cancels
+        it. That reasoning is sound but had no ceiling, so when the blackout
+        came from a screen no crop recognises the suppression became permanent
+        — on 2026-08-24 a PROFILE overlay held the session inert for 110
+        minutes with every recovery path ineligible.
+
+        So the suppression is a delay, not a veto. Past the ceiling the trade
+        inverts: the cancel-then-reopen cycle is bounded and self-correcting
+        (STALL_EXIT_TO_DESKTOP cancels the dialog, at ~23s per iteration),
+        while paralysis is terminal. Churn beats paralysis.
+        """
+        if not self.lobby_blackout_active():
+            return False
+        ceiling = self._blackout_esc_ceiling_s
+        if ceiling <= 0:
+            return True          # ceiling disabled — ADR 087 behaviour
+        return self.lobby_blackout_age_s() < ceiling
+
     def exit_dialog_visible(self, stale_after_s: float = 12.0) -> bool:
         """True while the Exit-to-Desktop modal was seen recently (ADR 087).
 
@@ -2926,6 +2959,17 @@ class GameStateAnalyzer:
                 and "STALL_EXIT_TO_DESKTOP" in self.crops
                 and "STALL_EXIT_TO_DESKTOP" not in targets):
             targets.append("STALL_EXIT_TO_DESKTOP")
+        # ADR 093: a full-screen PROFILE overlay is neither the lobby, nor a
+        # calibrated popup, nor the exit dialog, so on 2026-08-24 all three
+        # recovery paths found nothing and wingman sat inert for 110 minutes.
+        # Eligible on the same blackout gate and for the same reason as the
+        # dialog above: the action is a close-button click, strictly
+        # de-escalating, with no destructive control beside it.
+        if (self._lobby_blackout_since
+                and now - self._lobby_blackout_since >= self._stall_action_after_s
+                and "STALL_PROFILE" in self.crops
+                and "STALL_PROFILE" not in targets):
+            targets.insert(0, "STALL_PROFILE")
         # Independent gate: a stuck UNREADY blocks classification outright, so it
         # is timed from the UNREADY read itself rather than from the state.
         if (self._unready_since

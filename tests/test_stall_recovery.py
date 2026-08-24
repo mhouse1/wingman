@@ -57,20 +57,30 @@ class TestStallGate:
         targets = analyzer._stall_recovery_targets(state)
         assert targets == list(STALL_RECOVERY_CROPS)
 
-    def test_lobby_blackout_past_dwell_opens_only_the_exit_dialog(self, analyzer):
-        """ADR 087: a sustained lobby blackout may cancel the Exit dialog.
+    def test_lobby_blackout_past_dwell_opens_only_de_escalating_crops(self, analyzer):
+        """ADR 087, widened by ADR 093: a sustained lobby blackout may act on
+        the screens it can dismiss without escalating.
 
         The ESC pressed on every LOBBY_STALL beat is what opens "Exit to
         Desktop"; GAME_LOBBY is not in STALL_ACTION_STATES, so its crop was
         never scanned and wingman deadlocked against a modal it created
-        (2026-08-21: 8 minutes, 187 blank cycles). Only that one crop opens —
-        STALL_RETRY and STALL_AIRCRAFT remain gated on an unclassifiable state.
+        (2026-08-21: 8 minutes, 187 blank cycles). ADR 093 added STALL_PROFILE
+        on the same gate for the same reason, after a PROFILE overlay stranded
+        a session for 110 minutes with nothing eligible to dismiss it.
+
+        The invariant ADR 087 was really protecting is unchanged and is what
+        this test now asserts: both eligible crops are a single de-escalating
+        click, and the INVASIVE ones stay gated on a genuinely unclassifiable
+        state. Widening this set again needs the same argument.
         """
         analyzer._stall_state_since = 0.0
         analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
         targets = analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
-        assert targets == ["STALL_EXIT_TO_DESKTOP"], \
-            f"lobby blackout must open exactly the exit dialog, got {targets}"
+        assert set(targets) == {"STALL_PROFILE", "STALL_EXIT_TO_DESKTOP"}, \
+            f"lobby blackout must open exactly the de-escalating crops, got {targets}"
+        for invasive in ("STALL_RETRY", "STALL_AIRCRAFT"):
+            assert invasive not in targets, \
+                f"{invasive} must stay gated on an unclassifiable state (ADR 084)"
 
     def test_lobby_blackout_within_dwell_is_shut(self, analyzer):
         """A brief blank patch between lobby frames is not a stall."""
@@ -214,3 +224,51 @@ class TestEventWiring:
         assert GameState.GAME_WAITING not in STALL_ACTION_STATES
         assert set(STALL_ACTION_STATES) == {GameState.GAME_UNKNOWN,
                                             GameState.GAME_STARTING_STALLED}
+
+
+class TestStuckWarningPersists:
+    """ADR 093: the screenshot cap must not silence the warning.
+
+    On 2026-08-24 the last complaint was at 511s — the fifth and final capture —
+    while the livelock ran another 100 minutes in total silence. An unattended
+    session must keep saying it is stuck.
+    """
+
+    def _recorder(self, clock):
+        from wingman.tick_handlers import UnknownAnomalyRecorder as R
+        return R({"screenshot_after_s": 30.0, "recapture_interval_s": 120.0,
+                  "max_per_episode": 5, "stuck_warn_interval_s": 300.0,
+                  "stuck_warn_max_interval_s": 1800.0}, clock=clock)
+
+    def test_warns_again_after_the_capture_cap(self, caplog):
+        now = [1000.0]
+        rec = self._recorder(lambda: now[0])
+        rec._captured = 5                      # cap already reached
+        with caplog.at_level("WARNING"):
+            rec._warn_still_stuck(now[0], "GAME_LOBBY blackout", 600.0)
+        assert any("STILL stuck" in r.getMessage() for r in caplog.records)
+
+    def test_warning_is_throttled_then_repeats(self):
+        """After the first warning the interval doubles to 600s, so 500s of
+        silence is correct and 700s is not."""
+        now = [1000.0]
+        rec = self._recorder(lambda: now[0])
+        rec._warn_still_stuck(now[0], "ep", 600.0)
+        first = rec._stuck_warns
+        now[0] += 500
+        rec._warn_still_stuck(now[0], "ep", 1100.0)
+        assert rec._stuck_warns == first, "must throttle inside the doubled interval"
+        now[0] += 200          # 700s since the last warning, past the 600s interval
+        rec._warn_still_stuck(now[0], "ep", 1300.0)
+        assert rec._stuck_warns == first + 1, "must warn again past the interval"
+
+    def test_interval_doubles_but_is_capped(self):
+        now = [1000.0]
+        rec = self._recorder(lambda: now[0])
+        for _ in range(12):
+            now[0] += 5000                     # always past any interval
+            rec._warn_still_stuck(now[0], "ep", now[0])
+        interval = min(rec._stuck_warn_interval_s * (2 ** rec._stuck_warns),
+                       rec._stuck_warn_max_s)
+        assert interval <= rec._stuck_warn_max_s, "interval must stay capped"
+        assert rec._stuck_warns >= 10, "a long stall must keep complaining"
