@@ -1,0 +1,66 @@
+{
+  "wingman_version": "1.8.5",
+  "run_id": "20260821_102824",
+  "session_start_ts": 1787322504.882,
+  "session_duration_s": 516.1,
+  "missions_started": 0,
+  "missions_click_to": 0,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 0,
+  "total_flare_bursts": 0,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 0,
+  "total_missile_evades": 0,
+  "spawn_crashes": {
+    "window_s": 10.0,
+    "min_s": 3.0,
+    "count": 0,
+    "died_after_s": [],
+    "immediate_redetects": 0,
+    "redetect_after_s": []
+  },
+  "missile_engagements": {
+    "window_s": 10.0,
+    "engagements": 0,
+    "evaded_total": 0,
+    "evaded_died": 0,
+    "evaded_survival": null,
+    "not_evaded_total": 0,
+    "not_evaded_died": 0,
+    "not_evaded_survival": null,
+    "detail": []
+  },
+  "avg_mission_duration_s": null,
+  "missions": [],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 0,
+    "ocr_respawns": 0,
+    "matched": 0,
+    "matched_within_5s": 0,
+    "false_fires": 0,
+    "missed_ocr_respawns": 0,
+    "fire_deltas_s": [],
+    "max_confirmed_gap_s": 0.0,
+    "confirmed_gaps_over_threshold": 0,
+    "ocr_edge_latencies": [],
+    "edge_since_confirmed_mean_s": null,
+    "edge_since_confirmed_max_s": null
+  },
+  "health_dropouts": {
+    "buckets": {
+      "lt2s": 0,
+      "2to5s": 0,
+      "5to10s": 0,
+      "10to20s": 0,
+      "gte20s": 0
+    },
+    "count": 0,
+    "over_5s": 0,
+    "p95_s": null,
+    "max_s": null
+  },
+  "stats_path": "docs/performance/current/run_20260821_102824_stats.json"
+}

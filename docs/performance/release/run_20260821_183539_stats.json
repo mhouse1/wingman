@@ -1,0 +1,86 @@
+{
+  "wingman_version": "1.8.5",
+  "run_id": "20260821_183539",
+  "session_start_ts": 1787351739.587,
+  "session_duration_s": 326.2,
+  "missions_started": 1,
+  "missions_click_to": 0,
+  "missions_missiles_empty": 1,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 1,
+  "total_flare_bursts": 5,
+  "total_flare_reloads": 1,
+  "total_manual_takeovers": 2,
+  "total_missile_evades": 0,
+  "spawn_crashes": {
+    "window_s": 10.0,
+    "min_s": 3.0,
+    "count": 0,
+    "died_after_s": [],
+    "immediate_redetects": 0,
+    "redetect_after_s": []
+  },
+  "missile_engagements": {
+    "window_s": 10.0,
+    "engagements": 1,
+    "evaded_total": 0,
+    "evaded_died": 0,
+    "evaded_survival": null,
+    "not_evaded_total": 1,
+    "not_evaded_died": 0,
+    "not_evaded_survival": 1.0,
+    "detail": [
+      {
+        "ts": 1787351883.207,
+        "alerts": 5,
+        "evaded": false,
+        "died_after_s": null
+      }
+    ]
+  },
+  "avg_mission_duration_s": 264.2,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1787351801.555,
+      "duration_s": 264.2,
+      "respawn_count": 1,
+      "flare_burst_count": 5,
+      "flare_reload_count": 1,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 2,
+      "outcome": "missiles_empty"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 1,
+    "ocr_respawns": 0,
+    "matched": 0,
+    "matched_within_5s": 0,
+    "false_fires": 1,
+    "missed_ocr_respawns": 0,
+    "fire_deltas_s": [],
+    "max_confirmed_gap_s": 10.45,
+    "confirmed_gaps_over_threshold": 2,
+    "ocr_edge_latencies": [],
+    "edge_since_confirmed_mean_s": null,
+    "edge_since_confirmed_max_s": null
+  },
+  "health_dropouts": {
+    "buckets": {
+      "lt2s": 78,
+      "2to5s": 4,
+      "5to10s": 3,
+      "10to20s": 0,
+      "gte20s": 0
+    },
+    "count": 85,
+    "over_5s": 3,
+    "p95_s": 4.43,
+    "max_s": 6.06
+  },
+  "stats_path": "docs/performance/current/run_20260821_183539_stats.json"
+}
