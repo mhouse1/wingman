@@ -3,6 +3,8 @@
 Pure-module tests: no OCR, no threads, plain numbers only.
 """
 
+import dataclasses
+
 import pytest
 
 from wingman.telemetry import (
@@ -11,7 +13,6 @@ from wingman.telemetry import (
     BAND_LEVEL,
     BAND_STEEP_CLIMB,
     BAND_STEEP_DIVE,
-    MPH_TO_FPS,
     TREND_FALLING,
     TREND_FLAT,
     TREND_RISING,
@@ -427,7 +428,7 @@ class TestRatioUsesInstantaneousSpeed:
 class TestSnapshot:
     def test_snapshot_is_immutable(self):
         snap = TelemetrySnapshot()
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             snap.taken_at_s = 99.0
 
     def test_reset_clears_both_signals(self):

@@ -65,7 +65,7 @@ def test_run_ocr_in_background(image_path: str = "RESPAWN.png"):
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(1)
-    
+
     # Force exit to avoid hanging on EasyOCR threads
     sys.stdout.flush()
     sys.stderr.flush()
@@ -96,7 +96,7 @@ def capture_and_test_with_visualization():
     print(f"[OK] Screenshot saved to {screenshot_path}")
 
     test_with_visualization(screenshot_path)
-    
+
     # Force exit to avoid hanging on EasyOCR threads (called by test_with_visualization)
     sys.stdout.flush()
     sys.stderr.flush()
@@ -125,12 +125,12 @@ def test_respawn_detection(image_path: str = "RESPAWN.png"):
 
     print("Analyzing frame...")
     state = analyzer.analyze_frame(frame)
-    
+
     # Wait for background OCR thread to complete
     if analyzer._background_ocr_thread and analyzer._background_ocr_thread.is_alive():
         print("Waiting for OCR to complete...")
         analyzer._background_ocr_thread.join(timeout=120)
-    
+
     # Re-analyze to get updated cache result
     state = analyzer.analyze_frame(frame)
 
@@ -145,7 +145,7 @@ def test_respawn_detection(image_path: str = "RESPAWN.png"):
     else:
         print("[FAIL] Respawn screen NOT detected")
         print("\nTry running with --grid flag to visualize detection regions:")
-    print("=" * 60)    
+    print("=" * 60)
     # Force exit to avoid hanging on EasyOCR threads
     sys.stdout.flush()
     sys.stderr.flush()
@@ -186,7 +186,7 @@ def test_multiple_images():
         print(f"[OK] {img_path.name:40s} | {status:8s} | Conf: {confidence:.2%}")
 
     print("=" * 60)
-    
+
     # Force exit to avoid hanging on EasyOCR threads
     sys.stdout.flush()
     sys.stderr.flush()
@@ -237,7 +237,7 @@ def test_with_visualization(image_path: str = "RESPAWN.png"):
         output_highlighted = str(output_dir / "output_grid_highlighted.png")
         cv2.imwrite(output_highlighted, frame_with_crops)
         print(f"[OK] Saved highlighted grid to {output_highlighted}")
-        print(f"\n[OK] Respawn detected in region(s): ['respawn']")
+        print("\n[OK] Respawn detected in region(s): ['respawn']")
         print(f"  Confidence: {state['respawn_confidence']:.2%}")
     else:
         print("\n[FAIL] Respawn NOT detected in any region")

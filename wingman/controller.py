@@ -1,20 +1,28 @@
-import os
-import time
-import logging
-import threading
 import contextlib
-
-from .telemetry import TREND_RISING
 import ctypes
+import logging
 import sys
-import cv2
-import numpy as np
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
+
+import cv2
 from mss import mss
 
-from .crop_region import CropCoords, crop_centre, draw_crops
 from .analyzer import GameState
+from .controller_config import ControllerConfig
+from .crop_region import CropCoords, crop_centre, draw_crops
+from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
+    _WINGMAN_XAUTH,
+    _XKEY_ALIASES,
+    _ensure_xauthority,
+    _linux_click,
+    _linux_key_event,
+    _LinuxXTestKeyboard,
+    _XKeyEvent,
+    maybe_install_linux_keyboard,
+)
 
 try:
     import keyboard as keyboard_module
@@ -23,401 +31,18 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+# Module-level so tests can monkeypatch `controller.keyboard_module` in one place.
+keyboard_module = maybe_install_linux_keyboard(keyboard_module)
 
-_WINGMAN_XAUTH = "/tmp/wingman_click_auth.db"
-
-
-def _ensure_xauthority() -> None:
-    """Ensure XAUTHORITY points to an xauth file with an explicit :0 display entry.
-
-    The mutter XWayland auth file uses an empty display number (wildcard) that
-    libX11 accepts but python-xlib does not match. We copy the cookie into a new
-    file with an explicit ':0' entry so python-xlib can connect.
-    """
-    import glob
-    import subprocess
-
-    if os.environ.get("XAUTHORITY") == _WINGMAN_XAUTH and os.path.exists(_WINGMAN_XAUTH):
-        return
-
-    # Locate the mutter XWayland auth file
-    uid = os.getuid() if hasattr(os, "getuid") else 0
-    src = None
-    for path in glob.glob(f"/run/user/{uid}/.mutter-Xwaylandauth.*"):
-        src = path
-        break
-    if src is None:
-        src = os.environ.get("XAUTHORITY", "")
-    if not src or not os.path.exists(src):
-        logger.warning("Controller: no XWayland auth file found — click may fail")
-        return
-
-    # Extract the cookie and write a new db with explicit ':0' display number
-    try:
-        r = subprocess.run(
-            ["xauth", "-f", src, "list"],
-            capture_output=True, text=True, timeout=5,
-        )
-        cookie = None
-        for line in r.stdout.splitlines():
-            if "MIT-MAGIC-COOKIE-1" in line:
-                cookie = line.split()[-1]
-                break
-        if not cookie:
-            logger.warning("Controller: could not extract MIT-MAGIC-COOKIE-1 from %s", src)
-            return
-        subprocess.run(
-            ["xauth", "-f", _WINGMAN_XAUTH, "add", ":0", "MIT-MAGIC-COOKIE-1", cookie],
-            check=True, timeout=5,
-        )
-        os.environ["XAUTHORITY"] = _WINGMAN_XAUTH
-        logger.debug("Controller: XAUTHORITY set to %s (explicit :0 entry)", _WINGMAN_XAUTH)
-    except Exception as e:
-        logger.warning("Controller: failed to create xauth db: %s", e)
-
-
-def _linux_click(x: int, y: int, count: int = 1) -> None:
-    """Left-click at absolute screen coordinates via python-xlib XTest.
-
-    Works for XWayland windows (Wine/DXVK games) without root.
-    XAUTHORITY is resolved from the mutter socket if not set in the environment.
-    """
-    _ensure_xauthority()
-    try:
-        from Xlib import display as _xdisplay, X as _X
-        from Xlib.ext import xtest as _xtest
-        display_name = os.environ.get("DISPLAY", ":0").strip()
-        d = _xdisplay.Display(display_name)
-        _xtest.fake_input(d, _X.MotionNotify, x=x, y=y)
-        d.sync()
-        time.sleep(0.05)
-        for i in range(count):
-            _xtest.fake_input(d, _X.ButtonPress, detail=1)
-            d.sync()
-            time.sleep(0.05)
-            _xtest.fake_input(d, _X.ButtonRelease, detail=1)
-            d.sync()
-            if i < count - 1:
-                time.sleep(0.5)
-        d.close()
-    except Exception as e:
-        logger.error("Linux click at (%d, %d) failed: %s", x, y, e)
-
-
-# XK name overrides for key names that differ from python-xlib's XK strings
-_XKEY_ALIASES = {
-    "space": "space",
-    "backspace": "BackSpace",
-    "enter": "Return",
-    "escape": "Escape",
-    "esc": "Escape",
-    "tab": "Tab",
-    "shift": "Shift_L",
-    "ctrl": "Control_L",
-    "alt": "Alt_L",
-    "end": "End",
-    "home": "Home",
-    "up": "Up",
-    "down": "Down",
-    "left": "Left",
-    "right": "Right",
-    # Punctuation must use its X11 keysym NAME — string_to_keysym(';') returns
-    # 0 (observed 2026-08-11 07:27:22: "unknown keysym for ';'" from cleanup's
-    # YAW_LEFT release; ADR 070 V1). Letters and digits resolve as themselves.
-    ";": "semicolon",
-    "'": "apostrophe",
-    ",": "comma",
-    ".": "period",
-    "/": "slash",
-    "\\": "backslash",
-    "[": "bracketleft",
-    "]": "bracketright",
-    "-": "minus",
-    "=": "equal",
-    "`": "grave",
-}
-
-
-def _linux_key_event(key: str, event_type) -> None:
-    """Inject a single KeyPress or KeyRelease event via XTest.
-
-    Retries once on transient failure: each call opens a throwaway Display, so
-    a single failed connection between a press and its release would otherwise
-    leave the key logically held in the X server for the rest of the session
-    (XTest key state is server-side and does not die with this client).
-    """
-    _ensure_xauthority()
-    from Xlib import display as _xdisplay, X as _X, XK as _XK
-    from Xlib.ext import xtest as _xtest
-    xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
-    keysym = _XK.string_to_keysym(xk_name)
-    if keysym == 0:
-        logger.warning("Linux key: unknown keysym for %r", key)
-        return
-    display_name = os.environ.get("DISPLAY", ":0").strip()
-    last_err = None
-    for attempt in (1, 2):
-        try:
-            d = _xdisplay.Display(display_name)
-            try:
-                keycode = d.keysym_to_keycode(keysym)
-                if keycode == 0:
-                    logger.warning("Linux key: no keycode for keysym %d (%r)", keysym, key)
-                    return
-                _xtest.fake_input(d, event_type, keycode)
-                d.sync()
-                return
-            finally:
-                d.close()
-        except Exception as e:
-            last_err = e
-            if attempt == 1:
-                time.sleep(0.05)
-    logger.error("Linux key event for %r failed after retry: %s", key, last_err)
-
-
-class _XKeyEvent:
-    """Minimal keyboard event passed to hotkey callbacks, mirroring keyboard.KeyboardEvent."""
-    __slots__ = ("name", "is_injected", "event_type")
-
-    def __init__(self, name: str, is_injected: bool) -> None:
-        self.name = name
-        self.is_injected = is_injected
-        self.event_type = "down"
-
-
-class _LinuxXTestKeyboard:
-    """Drop-in shim for the `keyboard` module on Linux.
-
-    - press / release / press_and_release: XTest injection, no root required.
-    - on_press_key / add_hotkey: XGrabKey passive grab on the root window,
-      no root required. Works for XWayland windows (including Wine/DXVK games).
-      Keys are caught when any XWayland window has focus; native-Wayland windows
-      (e.g. VS Code) will not trigger the grab.
-    - Callbacks receive an _XKeyEvent with .name and .is_injected matching the
-      keyboard.KeyboardEvent interface. XTest-injected events have is_injected=True
-      (X11 send_event bit), so maneuver-key takeover logic ignores them correctly.
-    """
-
-    def __init__(self) -> None:
-        self._pending: dict[str, object] = {}        # key_name -> callback, not yet grabbed
-        self._grabbed: dict[int, tuple] = {}          # keycode -> (key_name, callback)
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._ctrl_display = None   # used by unhook_all to disable the record context
-        self._record_ctx = None
-
-    # --- Key injection (transient Display, no shared state) ---
-
-    def press(self, key: str) -> None:
-        from Xlib import X as _X
-        _linux_key_event(key, _X.KeyPress)
-
-    def release(self, key: str) -> None:
-        from Xlib import X as _X
-        _linux_key_event(key, _X.KeyRelease)
-
-    def press_and_release(self, key: str) -> None:
-        from Xlib import X as _X
-        _linux_key_event(key, _X.KeyPress)
-        time.sleep(0.05)
-        _linux_key_event(key, _X.KeyRelease)
-
-    # --- Hotkey registration ---
-
-    def on_press_key(self, key: str, callback, suppress=False) -> None:
-        with self._lock:
-            self._pending[key.lower()] = callback
-        self._ensure_listener()
-
-    def add_hotkey(self, key: str, callback, *args, **kwargs) -> None:
-        self.on_press_key(key, callback)
-
-    def unhook_all(self) -> None:
-        self._stop.set()
-        if self._ctrl_display is not None and self._record_ctx is not None:
-            try:
-                self._ctrl_display.record_disable_context(self._record_ctx)
-                self._ctrl_display.flush()
-            except Exception:
-                pass
-
-    # --- Listener thread ---
-
-    def _ensure_listener(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._listener_loop, daemon=True, name="XKeyListener"
-        )
-        self._thread.start()
-
-    def _listener_loop(self) -> None:
-        """Observe keyboard events via XRecord without consuming them.
-
-        XGrabKey was ruled out because it prevents grabbed keys from reaching the
-        game window. XRecord delivers events to our handler non-destructively —
-        the game still receives every keystroke.
-
-        XRecord requires two display connections:
-          d_rec  — creates the context + calls record_enable_context (blocks)
-          d_ctrl — calls record_disable_context to stop d_rec (stored for unhook_all)
-
-        The outer loop retries on transient display errors (e.g. XWayland dropping
-        the connection). It exits only when _stop is set (via unhook_all).
-        """
-        reconnect_attempts = 0
-        while not self._stop.is_set():
-            _ensure_xauthority()
-            d_rec = None
-            d_ctrl = None
-            iter_done = threading.Event()  # wakes _stop_watcher when this iteration ends, so it can't outlive its Display connections
-            try:
-                from Xlib import display as _xdisplay, X as _X, XK as _XK
-                from Xlib.ext import record as _record
-                from Xlib.protocol import rq as _rq
-
-                display_name = os.environ.get("DISPLAY", ":0").strip()
-
-                # Resolve keycodes for pending registrations. On reconnect, _pending is
-                # empty but _grabbed still holds previously resolved keycodes, which are
-                # stable across reconnects to the same X server.
-                d_setup = _xdisplay.Display(display_name)
-                with self._lock:
-                    snapshot = dict(self._pending)
-                    self._pending.clear()
-                for key_name, callback in snapshot.items():
-                    xk_name = _XKEY_ALIASES.get(key_name, key_name)
-                    keysym = _XK.string_to_keysym(xk_name)
-                    if not keysym:
-                        logger.warning("XKey: unknown keysym for %r", key_name)
-                        continue
-                    keycode = d_setup.keysym_to_keycode(keysym)
-                    if not keycode:
-                        logger.warning("XKey: no keycode for %r", key_name)
-                        continue
-                    self._grabbed[keycode] = (key_name, callback)
-                    logger.debug("XKey: registered %r (keycode=%d)", key_name, keycode)
-                d_setup.close()
-
-                # d_rec: owns the recording context (create + enable, blocks)
-                # d_ctrl: used only to disable the context (stored for unhook_all)
-                d_rec = _xdisplay.Display(display_name)
-                d_ctrl = _xdisplay.Display(display_name)
-
-                ctx = d_rec.record_create_context(
-                    0,
-                    [_record.AllClients],
-                    [{
-                        "core_requests": (0, 0),
-                        "core_replies": (0, 0),
-                        "ext_requests": (0, 0, 0, 0),
-                        "ext_replies": (0, 0, 0, 0),
-                        "delivered_events": (0, 0),
-                        "device_events": (_X.KeyPress, _X.KeyPress),
-                        "errors": (0, 0),
-                        "client_started": False,
-                        "client_died": False,
-                    }],
-                )
-
-                self._ctrl_display = d_ctrl
-                self._record_ctx = ctx
-
-                # Watcher: unblocks record_enable_context when _stop is set (e.g. on
-                # abnormal exit where cleanup() never runs), or exits without acting
-                # once this iteration has already ended (e.g. a reconnect after a
-                # transient error) so it doesn't linger holding a stale Display.
-                def _stop_watcher():
-                    while not self._stop.is_set() and not iter_done.is_set():
-                        if self._stop.wait(timeout=0.5):
-                            break
-                    if iter_done.is_set() and not self._stop.is_set():
-                        return
-                    try:
-                        d_ctrl.record_disable_context(ctx)
-                        d_ctrl.flush()
-                    except Exception:
-                        pass
-
-                threading.Thread(target=_stop_watcher, daemon=True, name="XKeyListener-stop").start()
-
-                _ef = _rq.EventField(None)
-
-                def _record_handler(reply):
-                    if reply.category != _record.FromServer:
-                        return
-                    data = reply.data
-                    while len(data) >= 32:
-                        event, data = _ef.parse_binary_value(
-                            data, d_rec.display, None, None
-                        )
-                        if event.type != _X.KeyPress:
-                            continue
-                        # Pick up any keys registered after the loop started
-                        with self._lock:
-                            new = dict(self._pending)
-                            self._pending.clear()
-                        if new:
-                            d_tmp = _xdisplay.Display(display_name)
-                            for kn, cb in new.items():
-                                xkn = _XKEY_ALIASES.get(kn, kn)
-                                ks = _XK.string_to_keysym(xkn)
-                                kc = d_tmp.keysym_to_keycode(ks) if ks else 0
-                                if kc:
-                                    self._grabbed[kc] = (kn, cb)
-                                    logger.debug("XKey: registered %r (keycode=%d)", kn, kc)
-                            d_tmp.close()
-
-                        entry = self._grabbed.get(event.detail)
-                        if not entry:
-                            continue
-                        key_name, cb = entry
-                        ev_obj = _XKeyEvent(name=key_name,
-                                            is_injected=bool(event.send_event))
-                        try:
-                            cb(ev_obj)
-                        except Exception as exc:
-                            logger.error("XKey callback error for %r: %s", key_name, exc)
-
-                if reconnect_attempts:
-                    logger.info("XKey: display reconnected after %d attempt(s) — hotkeys active again", reconnect_attempts)
-                    reconnect_attempts = 0
-
-                # Blocks until record_disable_context is called (from unhook_all)
-                d_rec.record_enable_context(ctx, _record_handler)
-                d_rec.record_free_context(ctx)
-                d_rec.close()
-                d_ctrl.close()
-                self._ctrl_display = None
-                self._record_ctx = None
-                break  # clean exit: _stop was set via unhook_all
-            except Exception as e:
-                logger.error("XKey listener thread died: %s", e)
-                iter_done.set()  # let this iteration's _stop_watcher exit instead of leaking
-                if d_rec is not None:
-                    try:
-                        d_rec.close()
-                    except Exception:
-                        pass
-                if d_ctrl is not None:
-                    try:
-                        d_ctrl.close()
-                    except Exception:
-                        pass
-                self._ctrl_display = None
-                self._record_ctx = None
-                if not self._stop.is_set():
-                    reconnect_attempts += 1
-                    logger.info("XKey: reconnecting display in 3s (attempt %d)", reconnect_attempts)
-                    self._stop.wait(timeout=3.0)
-
-
-if sys.platform != "win32":
-    keyboard_module = _LinuxXTestKeyboard()
-    logger.debug("Controller: using XTest keyboard shim (no root required)")
+# A failed key RELEASE is the start of a stuck-key incident, and the key does not
+# come back when this process dies: on Linux XTest key state lives in the X
+# SERVER and survives for the whole session; on Windows the injected key stays
+# down in the OS input queue until something releases it. The consequence is the
+# same on both — uncommanded flight input the operator cannot clear — so the
+# ERROR is unconditional and only the mechanism named in it is platform-specific.
+_LATCH_NOTE = ("key may stay latched in the X server for this session"
+               if sys.platform != "win32"
+               else "key may stay held down in the Windows input queue")
 
 
 # Key bindings
@@ -458,7 +83,7 @@ EMOTE2 # Help!
 EMOTE3 # Defend
 EMOTE4 # Attack, bind to T, use with HLDD003's target painting mode for marking targets to attack with the weapon loop
 EMOTE5 # Goodluck , bind to 'u', the same key as J20 mission for easy access at the start of a match
-EMOTE6 # Well Played  
+EMOTE6 # Well Played
 EMOTE7 # Wow!
 EMOTE8 # Thanks!
 EMOTE9 # Good Game!
@@ -478,7 +103,46 @@ REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
 class Controller:
-    def __init__(self, region, fire_button="left", fire_hold_seconds: float = 0.0, exit_event=None, analyzer=None, weapon_loop_interval: float = None, capture=None, on_auto_mission_key=None, crops: "dict[str, CropCoords] | None" = None, target_painting_mode: bool = False, simulate_os_input: bool = False, disable_hotkeys: bool = False, capture_with_overlay: bool = True, starting_max_wait_s: float = 90.0, telemetry_cfg: "dict | None" = None, good_luck_wait_s: float = 13.0, good_luck_bypass_on_alive: bool = True, missile_evade_cfg: "dict | None" = None, climb_cfg: "dict | None" = None, fuel_cfg: "dict | None" = None, capture_stale_inject_s: float = 10.0):
+    def __init__(
+        self,
+        region,
+        *,
+        config: "ControllerConfig | None" = None,
+        analyzer=None,
+        capture=None,
+        exit_event=None,
+        on_auto_mission_key=None,
+        crops: "dict[str, CropCoords] | None" = None,
+    ):
+        """Wire the controller.
+
+        Collaborators are explicit arguments; every tuned value lives in
+        `config` (Future 002 A-02 — this signature was 21 parameters, four of
+        them raw `*_cfg` dicts appended one per feature).
+
+        The config fields are unpacked to locals below under their historical
+        names. That is deliberate: it confines this change to the signature and
+        keeps the ~460-line body — and the behaviour the gates cover — byte
+        identical, so the parameter-object change cannot hide a semantic one.
+        """
+        self.config = config if config is not None else ControllerConfig()
+        _c = self.config
+        fire_button = _c.fire_button
+        fire_hold_seconds = _c.fire_hold_seconds
+        weapon_loop_interval = _c.weapon_loop_interval
+        target_painting_mode = _c.target_painting_mode
+        simulate_os_input = _c.simulate_os_input
+        disable_hotkeys = _c.disable_hotkeys
+        capture_with_overlay = _c.capture_with_overlay
+        starting_max_wait_s = _c.starting_max_wait_s
+        good_luck_wait_s = _c.good_luck_wait_s
+        good_luck_bypass_on_alive = _c.good_luck_bypass_on_alive
+        capture_stale_inject_s = _c.capture_stale_inject_s
+        telemetry_cfg = _c.telemetry
+        missile_evade_cfg = _c.missile_evade
+        climb_cfg = _c.climb
+        fuel_cfg = _c.fuel
+
         # region is (left, top, width, height)
         self.region = region
         self.fire_button = fire_button
@@ -672,6 +336,18 @@ class Controller:
         # velocity component (no trading through vertical into reversed
         # flight). None disables.
         self._climb_max_pitch_deg = _cl_cfg.get("max_pitch_deg")
+        # ADR 086 d1 / SAF-010: the climb must hand the airframe back inside a
+        # flyable pitch band. Releasing NOSE_UP, NOSE_DOWN and AFTERBURNER
+        # together leaves it ballistic at the exit attitude — measured
+        # 2026-08-21, a climb ending at +73 deg coasted 1500 m further, stalled
+        # at 24 KPH and hit the ground with missiles still racked. None
+        # disables the push (pre-ADR-086 behaviour).
+        self._climb_pitch_lead_s = float(_cl_cfg.get("pitch_lead_s", 3.0))
+        # ADR 088: abort a dive whose premise (empty rack) has expired.
+        self._eject_abort_on_rearm = bool(_ecl.get("abort_on_rearm", True))
+        self._climb_exit_pitch_deg = _cl_cfg.get("exit_pitch_deg")
+        self._climb_exit_pulse_s = float(_cl_cfg.get("exit_push_pulse_s", 1.0))
+        self._climb_exit_max_pulses = int(_cl_cfg.get("exit_push_max_pulses", 3))
         self._climbing = threading.Event()
         self._climb_thread: "threading.Thread | None" = None
         self._climb_stop = threading.Event()
@@ -743,7 +419,7 @@ class Controller:
         _kbd_ok = True
         if keyboard_module and not self._disable_hotkeys:
             try:
-                def exit_script_hotkey(e):
+                def exit_script_hotkey(_e):
                     logger.info("Controller: Backspace key pressed - exiting script")
                     if self._exit_event:
                         self._exit_event.set()
@@ -764,7 +440,7 @@ class Controller:
             # Cancel mission hotkey (End)
             try:
                 self._last_cancel_key_ts = 0.0
-                def cancel_mission_hotkey(e):
+                def cancel_mission_hotkey(_e):
                     now = time.time()
                     if now - self._last_cancel_key_ts < 0.5:  # debounce: ignore key-repeat
                         return
@@ -802,7 +478,7 @@ class Controller:
 
             try:
                 self._last_j20_key_ts = 0.0
-                def start_j20_mission(e):
+                def start_j20_mission(_e):
                     # Our own game_starting-loop presses echo back through
                     # XRecord — recognize them by the programmatic bracket +
                     # release grace, NOT by FSM state.
@@ -851,7 +527,7 @@ class Controller:
                 logger.exception("Controller: failed to register J20 mission hotkey")
 
             try:
-                def start_loiter_mission(e):
+                def start_loiter_mission(_e):
                     logger.info("Controller: '%s' key pressed - starting loiter mission", MISSION_LOITER_KEY)
                     self._set_last_mission("loiter")
                     threading.Thread(target=self.mission_loiter, daemon=True).start()
@@ -864,7 +540,7 @@ class Controller:
             try:
                 self._simulate_respawn_flag = threading.Event()
                 self._last_b_press_time = 0.0
-                def simulate_respawn(e):
+                def simulate_respawn(_e):
                     now = time.time()
                     if now - self._last_b_press_time < 0.5:  # debounce: ignore key-repeat
                         return
@@ -888,7 +564,7 @@ class Controller:
                     if self._capture is not None and self._analyzer is not None:
                         try:
                             frame = self._capture.grab_from_thread()
-                            
+
                             # Create output directory if it doesn't exist
                             output_dir = Path("tests/test-output")
                             output_dir.mkdir(parents=True, exist_ok=True)
@@ -918,7 +594,7 @@ class Controller:
             # Padlock camera cooldown hotkey: when P is pressed manually, suppress
             # the padlock loop for 10 seconds so it doesn't immediately re-lock.
             try:
-                def padlock_key_pressed(e):
+                def padlock_key_pressed(_e):
                     # Only a *manual* press should suppress the loop. Without this
                     # guard the loop's own padlock_camera() presses echo back through
                     # this hook and set the 10s cooldown on every tick, halving the
@@ -1098,7 +774,13 @@ class Controller:
                         except Exception:
                             logger.exception("Controller: _on_manual_takeover_frame callback failed")
             except Exception:
-                pass
+                # SAF-001: takeover is a safety transition. The flight-input
+                # stop above has already run, so swallowing keeps the aircraft
+                # safe — but a silent swallow here would hide a failed
+                # trigger_event("manual_takeover"), leaving the FSM in
+                # GAME_BATTLE while the operator believes they have control.
+                logger.exception(
+                    "Controller: manual-takeover FSM transition failed after flight input was stopped")
         return True
 
 
@@ -1110,7 +792,7 @@ class Controller:
         """
         # Use generic executor to perform the key press
         self._execute_key_press(NOSE_UP_KEY, hold_seconds=hold_seconds, block=block, action_name='nose_up')
-    
+
     def nose_down(self, hold_seconds: float = 2.5, block: bool = True):
         """Nose-down maneuver: presses and holds the configured nose-down key.
 
@@ -1151,7 +833,7 @@ class Controller:
             action_name: optional label for logging
         """
         label = action_name or key
-        
+
         # Add color coding for specific actions
         color_start = ""
         color_end = ""
@@ -1170,7 +852,7 @@ class Controller:
         if action_name == "fire_active_weapon":
             complete_color_start = ""
             complete_color_end = ""
-        
+
         logger.debug("%sController: %s - pressing '%s' key for %s seconds%s", color_start, label, key, hold_seconds, color_end)
 
         def _do_press():
@@ -1273,9 +955,8 @@ class Controller:
         if error_norm < 0:
             self.roll_left(hold_seconds=hold, block=False)
             return "left"
-        else:
-            self.roll_right(hold_seconds=hold, block=False)
-            return "right"
+        self.roll_right(hold_seconds=hold, block=False)
+        return "right"
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
@@ -1371,7 +1052,9 @@ class Controller:
             try:
                 (keyboard_module.press if press else keyboard_module.release)(key)
             except Exception:
-                pass
+                logger.error("Controller: %s of %r failed during %s%s",
+                             "press" if press else "release", key, note,
+                             "" if press else f" — {_LATCH_NOTE}")
             return
 
         if press == (key in self._eject_held_keys):
@@ -1382,7 +1065,7 @@ class Controller:
             try:
                 keyboard_module.press(key)
             except Exception:
-                pass
+                logger.error("Controller: press of %r failed during %s", key, note)
             return
 
         self._eject_held_keys.discard(key)
@@ -1390,7 +1073,8 @@ class Controller:
         try:
             keyboard_module.release(key)
         except Exception:
-            pass
+            logger.error("Controller: release of %r failed during %s — %s",
+                         key, note, _LATCH_NOTE)
         finally:
             # Arm the suppression window BEFORE dropping the count so there is no
             # instant where neither guard is active. Scaled by release latency —
@@ -1489,7 +1173,7 @@ class Controller:
     def _eject_descent_control(self) -> bool:
         """Impulse rotation and ballistic descent (ADR 069).
 
-        Returns True when cancelled (respawn). The outcome is left in
+        Returns True when cancelled (respawn or ADR 088 d1 rearm). The outcome is left in
         self._eject_phase_exit_reason.
 
         Two alternating regimes, one criterion:
@@ -1507,6 +1191,8 @@ class Controller:
         The criterion is the raw altitude rate, never the flight-path angle:
         the angle ratio saturates at 90 degrees exactly when the aircraft is
         accelerating hardest, which is precisely during a good dive (Fault A).
+
+        @relation(SAF-012, scope=function)
         """
         start = time.time()
         pulses = 0
@@ -1529,6 +1215,24 @@ class Controller:
                     "— releasing", self._eject_cl_max_s)
                 self._eject_phase_exit_reason = "timeout"
                 return False
+
+            # ADR 088: the eject fires on an EMPTY rack, but the game rearms on
+            # a timer and the dive outlives that timer. Observed 2026-08-22
+            # 01:51:33 — missiles went 0 -> 1 thirteen seconds into a dive
+            # started because the count was 0, and the aircraft flew a usable
+            # missile into the ground. Re-check the premise while acting on it.
+            if self._eject_abort_on_rearm and self._analyzer is not None:
+                try:
+                    _mis = self._analyzer.get_ammo_missiles()
+                except Exception:
+                    _mis = None
+                if isinstance(_mis, int) and _mis > 0:
+                    logger.warning(
+                        "Controller: eject_and_dive — ABORT, %d missile(s) "
+                        "rearmed mid-descent (ADR 088)", _mis)
+                    self._eject_phase_exit_reason = "rearmed"
+                    self._eject_stop_reason = "rearmed"
+                    return True
 
             snap = self._eject_telemetry()
             rate = None
@@ -1789,7 +1493,29 @@ class Controller:
                     logger.info(
                         "Controller: eject_and_dive — descent control ended (%s) "
                         "— holding until respawn", self._eject_phase_exit_reason or "unknown")
-                    self._eject_stop.wait(timeout=self._eject_cl_max_s)
+                    # ADR 088 d1: the hold outlives the rearm timer just as the
+                    # descent does, so it needs the same re-check. Polled rather
+                    # than a single wait — with one wait, 4 of 85 dives still
+                    # completed carrying missiles (2026-08-22 02:18 session),
+                    # because the rack refilled AFTER descent control ended.
+                    _hold_deadline = time.time() + self._eject_cl_max_s
+                    while not self._eject_stop.wait(
+                            timeout=self._eject_cl_check_interval_s):
+                        if time.time() >= _hold_deadline:
+                            break
+                        if not (self._eject_abort_on_rearm
+                                and self._analyzer is not None):
+                            continue
+                        try:
+                            _mis = self._analyzer.get_ammo_missiles()
+                        except Exception:
+                            _mis = None
+                        if isinstance(_mis, int) and _mis > 0:
+                            logger.warning(
+                                "Controller: eject_and_dive — ABORT during hold, "
+                                "%d missile(s) rearmed (ADR 088 d1)", _mis)
+                            self._eject_stop_reason = "rearmed"
+                            break
             finally:
                 self._ejecting.clear()
                 self._eject_nose_held_total_s = None
@@ -1929,7 +1655,8 @@ class Controller:
                 try:
                     keyboard_module.release(ROLL_RIGHT_KEY)
                 except Exception:
-                    pass
+                    logger.error("Controller: release of %r failed ending disengage roll — %s",
+                                 ROLL_RIGHT_KEY, _LATCH_NOTE)
                 self._arm_release_grace(ROLL_RIGHT_KEY,
                                         span_s=time.time() - _release_started)
                 self._dec_programmatic_key(ROLL_RIGHT_KEY)
@@ -2200,7 +1927,8 @@ class Controller:
                     try:
                         keyboard_module.release(_key)
                     except Exception:
-                        pass
+                        logger.error("Controller: release of %r failed ending missile evade — %s",
+                                     _key, _LATCH_NOTE)
             _release_span = time.time() - _release_started
             # Physical release first, THEN the grace + counter drop, so repeats
             # already queued in the XRecord pipeline cannot be misread as the
@@ -2481,6 +2209,9 @@ class Controller:
         observe_until = 0.0
         last_rate = None
         last_angle = None   # ADR 081: flight-path angle from the same sample
+        prev_angle = None   # ADR 086 d7: previous sample, for the pitch rate
+        prev_angle_ts = None
+        pitch_rate = None   # deg/s between the last two angle samples
         ab_held = False
         above_target = False   # ADR 083 d3: latches on the first at-target read
 
@@ -2488,6 +2219,27 @@ class Controller:
         # keys — same programmatic bracket as the evade hold (d4), held
         # across all pulses so XTest auto-repeats are never read as a manual
         # takeover.
+        def _at_pitch_ceiling() -> bool:
+            """True when the nose is at, or is predicted to reach, the ceiling.
+
+            ADR 086 d7. Telemetry lands roughly every 3s while a lit burner
+            rotates the airframe at ~11deg/s, so testing the CURRENT angle
+            against the ceiling always reacts a full sample too late: a
+            relight at +57deg was at +90deg before the next read (2026-08-21
+            09:40:53). Same lead-prediction pattern ADR 083 d1 applies to
+            altitude, for the same reason.
+
+            Falls back to the current angle when no rate is known yet.
+            """
+            if self._climb_max_pitch_deg is None or last_angle is None:
+                return False
+            ceiling = float(self._climb_max_pitch_deg)
+            if last_angle >= ceiling:
+                return True
+            if pitch_rate is None or pitch_rate <= 0:
+                return False
+            return last_angle + pitch_rate * self._climb_pitch_lead_s >= ceiling
+
         guarded_keys = tuple(k for k in (NOSE_UP_KEY, NOSE_DOWN_KEY, AFTERBURNER_KEY)
                              if k in _WATCHED_MANEUVER_KEYS)
         for _key in guarded_keys:
@@ -2510,15 +2262,36 @@ class Controller:
                 # re-press only after the rearm margin refills.
                 fuel = self._read_fuel_pct()
                 if fuel is not None:
-                    if ab_held and fuel <= fuel_floor_pct:
+                    _incoming = self._incoming_now()
+                    if ab_held and fuel <= fuel_floor_pct and not _incoming:
                         self._climb_key(AFTERBURNER_KEY, press=False)
                         ab_held = False
                         logger.info(
                             "Controller: climb — fuel %d%% reached floor %.0f%% "
                             "— afterburner released (recharge/reserve)",
                             fuel, fuel_floor_pct)
+                    elif not ab_held and _incoming and fuel > 0:
+                        # ADR 088: outrunning a missile outranks every reserve
+                        # policy. Overrides the ADR 075 floor and the ADR 083 d3
+                        # above-target cut, down to (not including) empty —
+                        # at 0% the burner produces no thrust and a held key
+                        # blocks recharge, so that ADR 075 limit still stands.
+                        self._climb_key(AFTERBURNER_KEY, press=True)
+                        ab_held = True
+                        logger.info(
+                            "Controller: climb — INCOMING, afterburner forced on "
+                            "(fuel %d%%, reserve floor %.0f%% overridden)",
+                            fuel, fuel_floor_pct)
                     elif (not ab_held
                             and not above_target   # ADR 083 d3: never relight above target
+                            # ADR 086 d6: nor while over-angled. ADR 083 d3
+                            # found "the pitch ceiling fighting a lit burner"
+                            # is what strands high-angle stretches; the target
+                            # gate only closes that for the above-target case.
+                            # Below target and over the ceiling is the same
+                            # trap: relighting at +64deg drove 64->90deg and a
+                            # speed collapse 1241->392 (2026-08-21 08:44:50).
+                            and not _at_pitch_ceiling()   # ADR 086 d7
                             and fuel >= fuel_floor_pct + self._fuel_rearm_margin):
                         self._climb_key(AFTERBURNER_KEY, press=True)
                         ab_held = True
@@ -2568,9 +2341,7 @@ class Controller:
                     pitch_held = None
                     observe_until = now + self._climb_observe_s
                 elif pitch_held is None and now >= observe_until:
-                    if (self._climb_max_pitch_deg is not None
-                            and last_angle is not None
-                            and last_angle >= float(self._climb_max_pitch_deg)):
+                    if _at_pitch_ceiling():   # ADR 086 d7 (was: current angle only)
                         pitch_held = NOSE_DOWN_KEY
                     elif last_rate is None or last_rate < self._climb_min_rate:
                         pitch_held = NOSE_UP_KEY
@@ -2602,7 +2373,15 @@ class Controller:
                 last_counted_ts = sig_ts
                 last_rate = getattr(alt_signal, "rate", None)
                 _angle_fn = getattr(snap, "pitch_angle_deg", None)
-                last_angle = _angle_fn() if callable(_angle_fn) else None
+                _new_angle = _angle_fn() if callable(_angle_fn) else None
+                # ADR 086 d7: pitch rate across consecutive angle samples.
+                if _new_angle is not None:
+                    if prev_angle is not None and prev_angle_ts is not None:
+                        _dt = sig_ts - prev_angle_ts
+                        if _dt > 0:
+                            pitch_rate = (_new_angle - prev_angle) / _dt
+                    prev_angle, prev_angle_ts = _new_angle, sig_ts
+                last_angle = _new_angle
                 # ADR 083 d3: at or above target, thrust stops — one fresh
                 # read, no debounce. Removing the energy source is the
                 # physical fix for a zoom climb; the pitch ceiling fighting
@@ -2611,7 +2390,14 @@ class Controller:
                 # gate, which keeps its floor/rearm behaviour below target.
                 if alt >= exit_alt and not above_target:
                     above_target = True
-                    if ab_held:
+                    if ab_held and self._incoming_now():
+                        # ADR 088: this is the cut observed stranding an evade
+                        # (2026-08-22 01:47:39, burner cut 1.7s after the
+                        # manoeuvre limit released with incoming still present).
+                        logger.info(
+                            "Controller: climb — reached target alt %.0f but "
+                            "INCOMING — holding afterburner", exit_alt)
+                    elif ab_held:
                         self._climb_key(AFTERBURNER_KEY, press=False)
                         ab_held = False
                         logger.info(
@@ -2638,8 +2424,12 @@ class Controller:
         finally:
             _release_started = time.time()
             self._climb_key(NOSE_UP_KEY, press=False)
-            self._climb_key(NOSE_DOWN_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
+            # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE
+            # going neutral. Burner off first (above), so the push is not
+            # fighting thrust — the ADR 083 d3 finding.
+            self._climb_exit_push()
+            self._climb_key(NOSE_DOWN_KEY, press=False)
             _release_span = time.time() - _release_started
             for _key in guarded_keys:
                 self._arm_release_grace(_key, span_s=_release_span)
@@ -2651,6 +2441,76 @@ class Controller:
         """True while a climb_mode hold is in progress
         (ADR 073 3.2b — the Climb leaf's is_running_fn)."""
         return self._climbing.is_set()
+
+    def _incoming_now(self) -> bool:
+        """True while an incoming-missile alert is on screen (ADR 088).
+
+        Cheap cache read — the analyzer already maintains this for the evade
+        tactic; this is a second consumer, not a second detector.
+
+        @relation(SAF-013, scope=function)
+        """
+        if self._analyzer is None:
+            return False
+        try:
+            detected, _, _ = self._analyzer.get_incoming_cache_result()
+            return bool(detected)
+        except Exception:
+            return False   # a diagnostic read must never break the climb loop
+
+    def _climb_exit_push(self) -> str:
+        """Nose down into the flyable band before the climb releases (ADR 086 d1).
+
+        Bounded exactly as ADR 069 bounds the eject rotation — impulse plus
+        observation gap, a pulse budget — because that ADR established that a
+        continuously held pitch input mushes the airframe rather than rotating
+        it. Stops on the first sample showing the angle inside the band.
+
+        Blind operation is deliberate: with no telemetry this runs ONE pulse
+        and returns. An unverified small nose-down is safer than an unverified
+        ballistic climb, which is what the pre-ADR-086 exit left behind.
+
+        Returns the exit reason, for the caller's log line.
+
+        @relation(SAF-010, scope=function)
+        """
+        target = self._climb_exit_pitch_deg
+        if target is None:
+            return "disabled"
+        target = float(target)
+        pulses = 0
+        while pulses < max(1, self._climb_exit_max_pulses):
+            snap = self._eject_telemetry()
+            angle = None
+            if snap is not None:
+                fn = getattr(snap, "pitch_angle_deg", None)
+                angle = fn() if callable(fn) else None
+            if angle is not None and angle <= target:
+                if pulses:
+                    logger.info("Controller: climb exit — nose at %+.0fdeg "
+                                "(band %+.0f) after %d pulse(s)",
+                                angle, target, pulses)
+                return "in_band"
+            self._climb_key(NOSE_DOWN_KEY, press=True)
+            interrupted = self._climb_stop.wait(timeout=self._climb_exit_pulse_s)
+            self._climb_key(NOSE_DOWN_KEY, press=False)
+            pulses += 1
+            if interrupted or (self._exit_event is not None
+                               and self._exit_event.is_set()):
+                return "interrupted"
+            if angle is None:
+                # Blind: one pulse only, then hand back.
+                logger.info("Controller: climb exit — no telemetry, "
+                            "single %.1fs nose-down pulse applied",
+                            self._climb_exit_pulse_s)
+                return "blind_single_pulse"
+            # Observation gap: never act again before the airframe has had a
+            # telemetry refresh to respond (ADR 069 d2).
+            if self._climb_stop.wait(timeout=self._climb_exit_pulse_s):
+                return "interrupted"
+        logger.warning("Controller: climb exit — pitch budget (%d pulses) "
+                       "exhausted, releasing anyway", self._climb_exit_max_pulses)
+        return "budget_exhausted"
 
     def _read_stable_altitude(self) -> "float | None":
         """Fresh telemetry stable altitude, or None when unreadable."""
@@ -2675,17 +2535,17 @@ class Controller:
 
     def start_weapon_loop(self, interval: float | None = None):
         """Start continuously firing the active weapon in a loop.
-        
+
         Args:
             interval: Time between shots in seconds (default 0.2)
         """
         if self._weapon_loop_active:
             logger.debug("Controller: weapon loop already running")
             return
-        
+
         if interval is not None:
             self._weapon_loop_interval = float(interval)
-        
+
         self._weapon_loop_active = True
         self._weapon_loop_stop.clear()
 
@@ -2719,7 +2579,7 @@ class Controller:
         if not self._weapon_loop_active:
             logger.debug("Controller: weapon loop not running")
             return
-        
+
         logger.info("Controller: stopping weapon loop")
         self._weapon_loop_stop.set()
         self._weapon_loop_active = False
@@ -2897,10 +2757,10 @@ class Controller:
 
         # Wait for the mission runner thread to fully exit
         mission_a.join(timeout=2.0)
-        
+
         # Small delay to let keyboard library settle after key presses
         time.sleep(0.2)
-        
+
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
     def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6, region_name: str = None):
@@ -3408,7 +3268,9 @@ class Controller:
                 try:
                     keyboard_module.release(_key)
                 except Exception:
-                    pass
+                    # Last-chance safety net on shutdown: this is the release
+                    # that stops a key surviving the process. Never silent.
+                    logger.error("Controller: cleanup release of %r failed — %s", _key, _LATCH_NOTE)
             logger.info("Controller: all injectable keys released")
 
         # 3. Deregister hooks last so the guards above stay active meanwhile.

@@ -29,7 +29,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import yaml
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 # ---------------------------------------------------------------------------
 # Path resolution — works whether run from repo root or tests/
@@ -54,7 +54,128 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(fh) or {}
 
 
+def _fmt_coord_pair(pair) -> str:
+    return "[" + ", ".join(_fmt_num(v) for v in pair) + "]"
+
+
+def _fmt_num(v) -> str:
+    """Render a coordinate the way the hand-maintained config.yaml does."""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v)) if abs(v) >= 1 else f"{v:.1f}"
+    return repr(v)
+
+
+def _crops_block_span(lines: "list[str]") -> "tuple[int, int] | None":
+    """Return [start, end) line indices of the top-level `crops:` block body."""
+    for i, line in enumerate(lines):
+        if line.rstrip() == "crops:":
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j]
+                if nxt.strip() and not nxt.startswith((" ", "\t")):
+                    break
+                j += 1
+            # Trailing blank/comment lines belong to whatever follows, not to crops.
+            while j > i + 1 and not lines[j - 1].strip():
+                j -= 1
+            return i + 1, j
+    return None
+
+
+def _crop_entry_spans(lines: "list[str]", start: int, end: int) -> "dict[str, tuple[int, int]]":
+    """Map crop name -> [start, end) line indices of that crop's body."""
+    spans, current, current_start = {}, None, None
+    for i in range(start, end):
+        stripped = lines[i].strip()
+        if (lines[i].startswith("  ") and not lines[i].startswith("   ")
+                and stripped.endswith(":") and not stripped.startswith("#")):
+            if current is not None:
+                spans[current] = (current_start, i)
+            current, current_start = stripped[:-1], i + 1
+    if current is not None:
+        spans[current] = (current_start, end)
+    return spans
+
+
+def _replace_coords(lines: "list[str]", body_start: int, body_end: int, coords) -> bool:
+    """Rewrite just the `coords:` list items inside one crop body. True if applied."""
+    for i in range(body_start, body_end):
+        if lines[i].strip() == "coords:":
+            j = i + 1
+            while j < body_end and lines[j].lstrip().startswith("- "):
+                j += 1
+            indent = " " * (len(lines[i]) - len(lines[i].lstrip()))
+            lines[i + 1:j] = [f"{indent}- {_fmt_coord_pair(pair)}\n" for pair in coords]
+            return True
+    return False
+
+
+def _apply_crop_edits(original: str, crops: dict) -> "str | None":
+    """Return config text with only changed crop coords rewritten, or None.
+
+    None means the change cannot be expressed as a coords-only edit, and the
+    caller must fall back to a full dump.
+    """
+    lines = original.splitlines(keepends=True)
+    span = _crops_block_span(lines)
+    if span is None:
+        return None
+    start, end = span
+    entries = _crop_entry_spans(lines, start, end)
+
+    # Apply edits back-to-front so earlier spans stay valid.
+    for name in sorted(entries, key=lambda n: entries[n][0], reverse=True):
+        if name not in crops:
+            return None  # a crop was removed — not a coords-only edit
+        coords = (crops[name] or {}).get("coords")
+        if coords is None:
+            return None
+        if not _replace_coords(lines, *entries[name], coords):
+            return None
+
+    # Crops that are new to the file (make add-crops) are appended to the block.
+    new_names = [n for n in crops if n not in entries]
+    if new_names:
+        block = []
+        for name in new_names:
+            entry = crops[name] or {}
+            if set(entry) - {"coords", "text"}:
+                return None  # unexpected shape — let the dump path handle it
+            block.append(f"  {name}:\n    coords:\n")
+            for pair in entry.get("coords", []):
+                block.append(f"    - {_fmt_coord_pair(pair)}\n")
+            if entry.get("text"):
+                block.append("    text: [" + ", ".join(entry["text"]) + "]\n")
+        lines[end:end] = block
+    return "".join(lines)
+
+
 def _save_config(path: Path, cfg: dict) -> None:
+    """Write config.yaml, preserving every comment outside the edited coords.
+
+    Closes code review CR-015-05 / Future 002 A-08. The previous implementation
+    was `yaml.dump(cfg)`, which reformats the whole file and strips every
+    comment in it — including the ADR breadcrumbs above `eject_closed_loop`,
+    `stall_recovery`, and the missile-evade block. Calibration only ever changes
+    `crops.<name>.coords`, so the edit is applied to those lines textually and
+    every other byte of the file is left exactly as it was.
+
+    The result is re-parsed and compared against the in-memory config before it
+    is written; if the surgical path cannot reproduce the intended config, it
+    falls back to a full dump but backs the original up and says so loudly,
+    rather than silently destroying the annotations.
+    """
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    if original:
+        updated = _apply_crop_edits(original, cfg.get("crops") or {})
+        if updated is not None and yaml.safe_load(updated) == cfg:
+            path.write_text(updated, encoding="utf-8")
+            return
+        backup = path.with_suffix(path.suffix + ".bak")
+        backup.write_text(original, encoding="utf-8")
+        print(f"WARNING: could not apply a comment-preserving edit to {path}; "
+              f"falling back to a full rewrite. Comments in the file will be "
+              f"lost — the original is saved at {backup}.")
     with path.open("w", encoding="utf-8") as fh:
         yaml.dump(cfg, fh, default_flow_style=None, sort_keys=False, allow_unicode=True)
 

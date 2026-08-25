@@ -15,15 +15,20 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.4"
-WINGMAN_VERSION_DETAILS = "Part2: Make J20 mission sequence behavior driven instead of hard coded"
+WINGMAN_VERSION = "1.8.5"
+WINGMAN_VERSION_DETAILS = "resolve tech debt"
 
 from .capture import Capture
-from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON, MISSION_J20_KEY
+from .config_schema import assert_valid_config
+from .controller_config import ControllerConfig
+from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
 from .analyzer import GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
+from .resource_monitor import ResourceSampler
+from .heap_census import HeapCensus
+from .liveness_guard import LivenessGuard
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -52,9 +57,20 @@ class RespawnState(Enum):
     RESPAWNING = auto()      # Respawn screen active; restart fires on health return
 
 
-def load_config(path):
+def load_config(path, *, validate: bool = True):
+    """Load config.yaml and validate it against the declared schema.
+
+    Validation is fail-fast by design (Future 002 A-03): an unknown or
+    mistyped key means the program would otherwise run on a silent code
+    default, which has already shipped a wrong value to production once.
+    Pass validate=False only for tooling that intentionally works on a
+    partial config.
+    """
     with open(path, "r") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    if validate:
+        assert_valid_config(cfg, source=str(path))
+    return cfg
 
 
 def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8, sleep_fn=time.sleep):
@@ -85,6 +101,23 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
 
 
+def _invite_click_target(accept_invite: bool, crops) -> "str | None":
+    """Which crop dismisses a party-invite popup, given the accept/decline policy.
+
+    ACCEPT and REJECT are two buttons in the *same* dialog, and the INVITED crop
+    is positioned on ACCEPT — so declining an invite means clicking a different
+    crop, not skipping the click. An undismissed invite dialog sits over the
+    lobby and strands the FSM.
+
+    Returns None when the crop the policy calls for is not calibrated. The
+    caller must then click nothing: falling back to the other button would
+    silently invert the operator's decision, which is a worse failure than a
+    dialog left up (ADR 084 stall recovery already handles a stranded lobby).
+    """
+    target = "INVITED" if accept_invite else "REJECT"
+    return target if target in crops else None
+
+
 def _alive_transition_disposition(state, alive_after_observed_death: bool) -> str:
     """Classify an alive (dead→alive health) transition by FSM state (ADR 061).
 
@@ -96,7 +129,7 @@ def _alive_transition_disposition(state, alive_after_observed_death: bool) -> st
       consume_spurious — GAME_BATTLE_EJECT without an observed death: the
                          synthetic eject-start transition; consume it.
       consume_other    — any other state (manual, lobby, ...): consume it.
-    
+
     @relation(SAF-002, scope=function)
     """
     if state == GameState.GAME_BATTLE:
@@ -187,7 +220,7 @@ def main():
 
     cfg = load_config(args.config)
     logger.info("Configuration loaded from %s", args.config)
-    
+
 
     region = (
         cfg["region"]["left"],
@@ -212,8 +245,9 @@ def main():
     try:
         import signal
         signal.signal(signal.SIGTERM, lambda _sig, _frm: exit_requested.set())
-    except (ValueError, OSError):  # non-main thread or unsupported platform
-        pass
+    except (ValueError, OSError) as e:  # non-main thread or unsupported platform
+        print(f"WARNING: SIGTERM handler not installed ({e}); "
+              "a SIGTERM may leave injected keys held", file=sys.stderr)
     replay_mode = bool(args.replay_config)
     capture_mode = bool(args.capture_path_config)
     replay_capture = None
@@ -295,6 +329,12 @@ def main():
     tracker = PerformanceTracker(cfg, version=WINGMAN_VERSION)
     analyzer = GameStateAnalyzer(cfg, tracker=tracker)  # also usable as a context manager via __enter__/__exit__
 
+    # Party invites are DECLINED by default: accepting drops the aircraft into
+    # someone else's squad mid-session, which silently changes what an unattended
+    # soak is actually measuring.
+    accept_invite = bool(cfg.get("accept_invite", False))
+    logger.info("Party invites: %s", "ACCEPT" if accept_invite else "DECLINE (accept_invite=false)")
+
     unattended_mode = cfg.get("unattended_mode", False)
     unattended_active = threading.Event()
     if unattended_mode:
@@ -329,26 +369,24 @@ def main():
     debug_cfg = cfg.get("debug", {})
     target_painting_mode = j20_cfg.get("target_painting_mode", False)
     capture_with_overlay = bool(debug_cfg.get("capture_with_overlay", True))
+    # Every tuned value comes from the validated config; only the run-mode flags
+    # (which the YAML cannot know) are overridden here. See ControllerConfig.
     ctrl = Controller(
         region,
+        config=ControllerConfig.from_config(
+            cfg,
+            weapon_loop_interval=weapon_loop_interval,
+            starting_max_wait_s=starting_max_wait_s,
+            target_painting_mode=target_painting_mode,
+            capture_with_overlay=capture_with_overlay,
+            simulate_os_input=replay_mode,
+            disable_hotkeys=(replay_mode or capture_mode),
+        ),
         analyzer=analyzer,
-        weapon_loop_interval=weapon_loop_interval,
-        exit_event=exit_requested,
         capture=cap,
+        exit_event=exit_requested,
         on_auto_mission_key=_on_auto_mission_key,
         crops=analyzer.crops,
-        target_painting_mode=target_painting_mode,
-        simulate_os_input=replay_mode,
-        disable_hotkeys=(replay_mode or capture_mode),
-        capture_with_overlay=capture_with_overlay,
-        starting_max_wait_s=starting_max_wait_s,
-        good_luck_wait_s=float(mission_cfg.get("good_luck_wait_s", 13.0)),
-        good_luck_bypass_on_alive=bool(mission_cfg.get("good_luck_bypass_on_alive", True)),
-        telemetry_cfg=cfg.get("telemetry", {}),
-        missile_evade_cfg=cfg.get("behavior_tree", {}).get("missile_evade", {}),
-        climb_cfg=cfg.get("behavior_tree", {}).get("climb", {}),
-        fuel_cfg=cfg.get("fuel", {}),
-        capture_stale_inject_s=float(mission_cfg.get("capture_stale_inject_s", 10.0)),
     )
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry
@@ -427,6 +465,14 @@ def main():
             ctrl.press_escape(hold_seconds=0.05, block=False)
             return
         click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
+        if popup == "INVITED":
+            click_target = _invite_click_target(accept_invite, analyzer.crops)
+            if click_target is None:
+                logger.error(
+                    "INVITED: no '%s' crop calibrated — invite left undismissed rather than "
+                    "clicking the opposite button (run 'make calibrate-crop CROP=REJECT')",
+                    "INVITED" if accept_invite else "REJECT")
+                return
         ctrl.click_crop(analyzer.crops[click_target], block=False, count=1, region_name=click_target)
         if popup == "REVEAL_ALL":
             def _reveal_all_second_click():
@@ -438,6 +484,10 @@ def main():
                 ctrl.click_crop(analyzer.crops["REVEAL_ALL"], block=False, count=1, region_name="REVEAL_ALL")
             threading.Thread(target=_reveal_all_second_click, daemon=True).start()
         elif popup == "INVITED":
+            if not accept_invite:
+                # REJECT closes the dialog outright — there is no squad to ready up in.
+                logger.info("\033[93m📋 INVITED declined — REJECT clicked\033[0m")
+                return
             if replay_mode:
                 logger.info("INVITED popup click-through skipped in replay mode")
                 return
@@ -478,9 +528,42 @@ def main():
         if current == GameState.GAME_UNKNOWN:
             unknown_anomaly.note_dismiss_attempt(crop)
 
-        if crop in ("STALL_AIRCRAFT", "STALL_EXIT_TO_DESKTOP"):
-            # Escape, never a click: on the Exit-to-Desktop modal the Cancel
-            # button sits beside an Exit button that would close the game.
+        if crop == "STALL_EXIT_TO_DESKTOP":
+            # ADR 087 supersedes ADR 084's "escape, never a click" for THIS
+            # crop. That rule assumed ESC could dismiss the modal; it cannot.
+            # On 2026-08-21 the dialog was detected continuously across ESC
+            # presses from all three lobby sources for 25 minutes and never
+            # cleared — ESC only ever opens it. Clicking Cancel is the only
+            # exit, and the crop is calibrated to the Cancel button itself:
+            # its centre sits ~130px clear of the Exit button beside it.
+            logger.warning("\033[93m🔧 Stall recovery: '%s' — clicking CANCEL (state=%s)\033[0m",
+                           crop, current.name)
+            ctrl.click_crop(analyzer.crops["STALL_EXIT_TO_DESKTOP"], block=False,
+                            count=1, region_name="STALL_EXIT_TO_DESKTOP")
+            return
+
+        if crop == "STALL_PROFILE":
+            # ADR 093. Detection is the overlay's title; the click target is its
+            # close control in the opposite corner, so this is a detect-one /
+            # click-another pair like event_refresh and event_refresh_dismiss.
+            # Clicking the title itself does nothing — it is a label, not a
+            # button — which is why PROFILE_DISMISS exists as its own crop.
+            logger.warning(
+                "\033[93m🔧 Stall recovery: '%s' — closing the profile overlay "
+                "(state=%s)\033[0m", crop, current.name)
+            if "STALL_PROFILE_DISMISS" in analyzer.crops:
+                ctrl.click_crop(analyzer.crops["STALL_PROFILE_DISMISS"], block=False,
+                                count=1, region_name="STALL_PROFILE_DISMISS")
+            else:
+                # Calibration missing rather than absent by design: ESC is the
+                # honest fallback and still beats sitting inert.
+                logger.warning("Stall recovery: STALL_PROFILE_DISMISS not calibrated "
+                               "— pressing ESC instead")
+                ctrl.press_escape(hold_seconds=0.05, block=False)
+            return
+
+        if crop == "STALL_AIRCRAFT":
+            # Unchanged (ADR 084): no adjacent destructive button, ESC works.
             logger.warning("\033[93m🔧 Stall recovery: '%s' — pressing ESC (state=%s)\033[0m",
                            crop, current.name)
             ctrl.press_escape(hold_seconds=0.05, block=False)
@@ -521,9 +604,16 @@ def main():
 
     analyzer.subscribe(GameEvent.STALL_RECOVERY_ACTION, _handle_stall_recovery,
                        name="controller")
-    analyzer.subscribe(GameEvent.LOBBY_STALL,
-                       lambda: ctrl.press_escape(hold_seconds=0.05, block=False),
-                       name="controller")
+    # ADR 087 addendum 3: this beat NO LONGER presses ESC. In the lobby ESC
+    # opens the Exit-to-Desktop modal, so the "recovery" was manufacturing the
+    # blackout it was responding to — a 23s cycle of cancel-then-reopen
+    # (2026-08-21 10:48). Recovery for a lobby blackout is the stall-crop scan,
+    # which cancels that dialog; the beat's remaining job is to arm the ADR 087
+    # capture and the blackout clock.
+    # ADR 087: the same beat arms the anomaly capture, so a lobby blackout
+    # leaves evidence instead of only ESC presses in the log.
+    analyzer.subscribe(GameEvent.LOBBY_STALL, unknown_anomaly.note_lobby_stall,
+                       name="unknown_anomaly")
 
     def _emit_capture_event(event_name: str) -> None:
         if replay_assertions is not None and replay_capture is not None:
@@ -610,6 +700,24 @@ def main():
     )
     health_dropout = HealthDropoutRecorder(
         (cfg.get("health", {}) or {}).get("dropout_capture", {}), analyzer)
+    # Performance 008: periodic RESOURCE line for long-session leak diagnosis.
+    resource_sampler = ResourceSampler(
+        cfg.get("resource_monitor", {}), perf_tracker=tracker)
+    resource_sampler.set_pool_depth_source(analyzer.ocr_queue_depth)
+    # Performance 008: off unless explicitly enabled — it walks the whole heap.
+    # ADR 093: bound a session that has stopped making progress. The 2026-08-24
+    # livelock ran 110 minutes inert because nothing was watching for absence of
+    # work — this is the generic backstop, in the shape of ADR 090's guard.
+    liveness = LivenessGuard(cfg.get("liveness_guard", {}))
+    _liveness_ocr_offsets = None
+    heap_census = HeapCensus(cfg.get("heap_census", {}))
+    if heap_census.enabled:
+        logger.info(
+            "HeapCensus enabled (Performance 008 attribution run). tracemalloc "
+            "adds per-allocation overhead, so this session's run_*.json reads "
+            "slow — keep it out of the release baseline. If heap_census."
+            "gc_census is also on, expect a multi-second tick stall per census."
+        )
     startup_time = time.time()
     battle_ever_reached = False
 
@@ -625,6 +733,41 @@ def main():
             loop_start = time.time()
             if exit_requested.is_set():
                 logger.info("Exit requested, shutting down")
+                break
+            # Self-throttled; a no-op float comparison on ticks that aren't due.
+            # Placed before the capture so a stalled capture path still leaves a
+            # resource trail — capture stalls are a symptom of the very
+            # starvation this samples (Performance 008).
+            resource_sampler.maybe_sample()
+            heap_census.maybe_census(mi_use_mb=resource_sampler.last_mi_use_mb)
+            # ADR 093 liveness: OCR happening at all is progress. Own offsets —
+            # snapshot_since does not drain, so this cannot starve the sampler.
+            if liveness.enabled:
+                try:
+                    _lv_stats, _liveness_ocr_offsets = tracker.snapshot_since(
+                        _liveness_ocr_offsets)
+                    if any(_lv_stats.values()) if _lv_stats else False:
+                        liveness.note_progress("OCR")
+                except Exception:
+                    pass
+                liveness.check()
+            # ADR 090: the Performance 008 leak is unfixed and degrades
+            # perception continuously — OCR p95 crosses the tick budget at
+            # ~hour 3, the median at ~hour 6. A SAFE POINT is the lobby with no
+            # mission running: stopping there costs nothing, while stopping
+            # mid-mission abandons an aircraft in flight.
+            _safe = (analyzer.game_state == GameState.GAME_LOBBY
+                     and not ctrl.is_mission_running())
+            if liveness.should_stop() and _safe:
+                logger.warning(
+                    "\033[93m🛑 LIVENESS GUARD: ending session (%s) — wingman "
+                    "stopped making progress (ADR 093)\033[0m", liveness.reason)
+                break
+            if resource_sampler.should_stop(_safe):
+                logger.warning(
+                    "\033[93m🛑 MEMORY GUARD: ending session (%s) — restart to "
+                    "reset perception latency (ADR 090)\033[0m",
+                    resource_sampler.guard_reason())
                 break
             # Capture and analyze frame
             frame = cap.get_frame()
@@ -707,6 +850,7 @@ def main():
                 unknown_state_since = 0.0
 
             if current_game_state != last_game_state:
+                liveness.note_progress("state change")
                 logger.info("\033[96m🎮 Game state: %s → %s\033[0m",
                             last_game_state.name if last_game_state else "UNKNOWN",
                             current_game_state.name if current_game_state else "UNKNOWN")
@@ -744,6 +888,28 @@ def main():
                         while not _stop.wait(timeout=45.0):
                             if analyzer.game_state != GameState.GAME_LOBBY:
                                 return
+                            if (analyzer.blackout_esc_suppressed()
+                                    or analyzer.exit_dialog_visible()):
+                                # ADR 087: ESC opens the Exit-to-Desktop modal,
+                                # so it must not fire into a blackout — that is
+                                # how the modal gets re-opened seconds after
+                                # recovery cancels it. Gated on the blackout,
+                                # not just the dialog flag: a single "not
+                                # found" scan clears that flag and the press
+                                # immediately re-creates the dialog.
+                                logger.info(
+                                    "GAME_LOBBY escape loop: ESC suppressed — "
+                                    "lobby blackout in progress (%.0fs)",
+                                    analyzer.lobby_blackout_age_s())
+                                continue
+                            if analyzer.lobby_blackout_active():
+                                # ADR 093: past the ceiling. Say so loudly —
+                                # this is the path that was missing for 110
+                                # minutes on 2026-08-24.
+                                logger.warning(
+                                    "GAME_LOBBY escape loop: blackout %.0fs past the "
+                                    "ESC ceiling — pressing ESC anyway (ADR 093)",
+                                    analyzer.lobby_blackout_age_s())
                             logger.info("GAME_LOBBY escape loop: pressing ESC")
                             ctrl.press_escape(hold_seconds=0.05, block=False)
                     lobby_escape_thread = threading.Thread(
@@ -998,6 +1164,14 @@ def main():
                 stats_tracker.print_summary()
             except Exception as e:
                 logger.warning("MissionStatsTracker: finalize failed: %s", e)
+        # Performance 008: growth rates and the leak-attribution verdict. Emitted
+        # after the stats summary so a long session ends with the one line the
+        # investigation actually reads.
+        try:
+            resource_sampler.summarize()
+        except Exception as e:
+            logger.warning("ResourceSampler: summarize failed: %s", e)
+        heap_census.stop()
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ import time
 import pytest
 import yaml
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 
 from constants import CONFIG_PATH
 from wingman.controller import Controller
@@ -35,10 +36,12 @@ def ctrl(monkeypatch):
     c = Controller(
         region,
         analyzer=None,
-        weapon_loop_interval=0.01,  # fast weapon loop for test speed
         exit_event=exit_event,
         capture=None,
         on_auto_mission_key=None,
+        config=ControllerConfig(
+            weapon_loop_interval=0.01,  # fast weapon loop for test speed
+        )
     )
     yield c
     exit_event.set()
@@ -163,7 +166,9 @@ def _make_starting_ctrl(monkeypatch, analyzer, starting_max_wait_s: float = 90.0
         analyzer=analyzer,
         exit_event=threading.Event(),
         capture=None,
-        starting_max_wait_s=starting_max_wait_s,
+        config=ControllerConfig(
+            starting_max_wait_s=starting_max_wait_s,
+        )
     )
 
 
@@ -265,7 +270,7 @@ def test_starting_max_wait_s_stored_on_controller(monkeypatch):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     cfg = _load_config()
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
-    ctrl = Controller(region, starting_max_wait_s=42.5)
+    ctrl = Controller(region, config=ControllerConfig(starting_max_wait_s=42.5))
     assert ctrl._starting_max_wait_s == 42.5
 
 
@@ -356,8 +361,10 @@ def _make_starting_ctrl_with_capture(monkeypatch, analyzer, capture) -> Controll
         analyzer=analyzer,
         exit_event=threading.Event(),
         capture=capture,
-        simulate_os_input=True,
-        capture_stale_inject_s=10.0,
+        config=ControllerConfig(
+            simulate_os_input=True,
+            capture_stale_inject_s=10.0,
+        )
     )
 
 

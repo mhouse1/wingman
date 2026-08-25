@@ -1,18 +1,36 @@
 {
-  "timestamp": "2026-08-20T01:36:08.741343",
-  "version": "1.8.4",
+  "timestamp": "2026-08-25T00:12:25.256670",
+  "version": "1.8.5",
   "tests": {
+    "test_path1_ocr_regression": {
+      "duration": 95.10886134699103,
+      "runs": 1,
+      "min": 95.10886134699103,
+      "max": 95.10886134699103
+    },
+    "test_path2_ocr_regression": {
+      "duration": 74.17964853998274,
+      "runs": 1,
+      "min": 74.17964853998274,
+      "max": 74.17964853998274
+    },
+    "test_telemetry_corpus_exact_match_rate": {
+      "duration": 6.916987073986093,
+      "runs": 1,
+      "min": 6.916987073986093,
+      "max": 6.916987073986093
+    },
     "test_stall_crop_detects_its_marker": {
-      "duration": 2.5315598862471234,
-      "runs": 4,
-      "min": 1.9613072339998325,
-      "max": 2.9198615179921035
+      "duration": 0.7156231372035109,
+      "runs": 5,
+      "min": 0.05664618601440452,
+      "max": 1.8447756360110361
     },
     "test_stall_crop_does_not_fire_on_a_clean_lobby": {
-      "duration": 1.1179868125000212,
-      "runs": 4,
-      "min": 0.6881567880045623,
-      "max": 1.8070664629922248
+      "duration": 0.17648425919469446,
+      "runs": 5,
+      "min": 0.06281599699286744,
+      "max": 0.5821577360038646
     }
   }
 }

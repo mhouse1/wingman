@@ -504,3 +504,141 @@ def test_emergency_band_ignores_mission_and_missiles(sustain_harness):
 def test_incoming_beats_sustain_climb(sustain_harness):
     snap = make_snap(altitude=5000.0, incoming_detected=True)
     assert tick(sustain_harness, snap) == TACTIC_MISSILE_EVADE
+
+
+class TestTimeToGroundRecovery:
+    """ADR 086 d2/d3/d4 — dive recovery triggers on predicted time to ground.
+
+    Replays the 2026-08-21 18:41 crash: the aircraft mushed at 9203 m and dived
+    to 2301 m in 27 s with 2 missiles aboard while the tree kept selecting
+    Engage. The altitude band never opened, because every altitude on the way
+    down was far ABOVE `enter_below_alt` until it was much too late.
+    """
+
+    @staticmethod
+    def _cond(clock, **kw):
+        opts = dict(recover_below_time_s=20.0, confirm_bypass_time_s=10.0,
+                    descent_memory_s=5.0, clock=clock)
+        opts.update(kw)
+        return make_climb_condition(500, 1000, **opts)
+
+    def test_altitude_band_alone_never_fires_in_the_observed_dive(self):
+        """The regression: altitude alone is blind to a dive through it."""
+        cond = make_climb_condition(500, 1000, confirm_reads=1)
+        for alt in (9203, 8226, 5669, 4096, 2301):
+            assert cond(make_snap(altitude=float(alt), altitude_rate=-560.0)) is False, \
+                f"altitude band should not fire at {alt} m (it never did)"
+
+    def test_fires_on_time_to_ground_while_still_high(self):
+        """6636 m at -338 m/s is ~19.6 s from impact — inside the 20 s window,
+        and ~10 s before the observed impact rather than 4 s."""
+        clock = FakeClock()
+        cond = self._cond(clock, confirm_reads=1)
+        assert cond(make_snap(altitude=6636.0, altitude_rate=-338.0)) is True
+
+    def test_does_not_fire_in_a_gentle_descent(self):
+        """Same altitude, ordinary rate: 6636 m at -50 m/s is 133 s away."""
+        clock = FakeClock()
+        cond = self._cond(clock, confirm_reads=1)
+        assert cond(make_snap(altitude=6636.0, altitude_rate=-50.0)) is False
+
+    def test_does_not_fire_while_climbing(self):
+        clock = FakeClock()
+        cond = self._cond(clock, confirm_reads=1)
+        assert cond(make_snap(altitude=3000.0, altitude_rate=+200.0)) is False
+
+    def test_single_read_bypass_inside_the_margin(self):
+        """d3: with confirm_reads=2, a 6 s time-to-ground must not wait for a
+        second read — the wait spends the margin the trigger protects."""
+        clock = FakeClock()
+        cond = self._cond(clock, confirm_reads=2)
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
+
+    def test_outside_bypass_still_debounces(self):
+        """A 15 s time-to-ground is urgent but not immediate: honour the
+        confirm count so one bad reading cannot command a climb."""
+        clock = FakeClock()
+        cond = self._cond(clock, confirm_reads=2)
+        snap = make_snap(altitude=7500.0, altitude_rate=-500.0)
+        assert cond(snap) is False, "fired on a single read outside the bypass"
+        assert cond(snap) is True
+
+    def test_rejected_telemetry_holds_the_descent(self):
+        """d4: a rejected reading mid-dive is evidence of rapid change, not of
+        safety. The plausibility filter rejected twice during the real dive."""
+        clock = FakeClock()
+        cond = self._cond(clock, confirm_reads=1)
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
+        clock.advance(2.0)
+        assert cond(make_snap(altitude=None, altitude_rate=None)) is True, \
+            "blind read cleared an established dive"
+
+    def test_descent_memory_expires(self):
+        """The hold is bounded — it must not latch a climb forever."""
+        clock = FakeClock()
+        cond = make_climb_condition(500, 1000, recover_below_time_s=20.0,
+                                    confirm_bypass_time_s=10.0,
+                                    descent_memory_s=5.0, confirm_reads=1,
+                                    clock=clock)
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
+        clock.advance(30.0)
+        # Recovered and climbing again: the band may now release normally.
+        assert cond(make_snap(altitude=6000.0, altitude_rate=+50.0)) is False
+
+    def test_emergency_survives_the_band_release(self):
+        """The dive happens far ABOVE exit_above_alt, so ordinary hysteresis
+        would clear the recovery on the very tick it started."""
+        clock = FakeClock()
+        cond = self._cond(clock, confirm_reads=1)
+        assert cond(make_snap(altitude=8000.0, altitude_rate=-500.0)) is True
+        assert cond(make_snap(altitude=7000.0, altitude_rate=-500.0)) is True
+
+    def test_disabled_when_unconfigured(self):
+        """Unset thresholds leave the pure ADR 073 altitude band."""
+        cond = make_climb_condition(500, 1000, confirm_reads=1)
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-900.0)) is False
+
+
+class TestDiveRecoveryRespawnGuard:
+    """ADR 086 d2: a respawn is an altitude discontinuity, not a descent.
+
+    Live false positive 2026-08-21 21:28:49 — DIVE RECOVERY fired "2s to
+    ground" at a smoothed 324 m while the newly respawned aircraft was at 10 m
+    and climbing away at +513 m/s. The smoothed value had carried the dead
+    aircraft's fall across the respawn boundary.
+    """
+
+    @staticmethod
+    def _cond(clock):
+        return make_climb_condition(500, 1000, recover_below_time_s=20.0,
+                                    confirm_bypass_time_s=10.0,
+                                    descent_memory_s=5.0, confirm_reads=1,
+                                    clock=clock)
+
+    def test_does_not_fire_on_the_first_samples_after_respawn(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        cond(make_snap(is_respawning=True, altitude=None, altitude_rate=None))
+        # Above enter_below_alt, so ONLY the time-to-ground trigger could fire.
+        # Stale carry-over: looks like a dive, is actually a dead aircraft.
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is False, \
+            "fired on the respawn discontinuity"
+
+    def test_still_fires_once_settled_after_a_respawn(self):
+        """The guard must delay the trigger, never disable it."""
+        clock = FakeClock()
+        cond = self._cond(clock)
+        cond(make_snap(is_respawning=True, altitude=None, altitude_rate=None))
+        cond(make_snap(altitude=5000.0, altitude_rate=+100.0))   # settling 1
+        cond(make_snap(altitude=5200.0, altitude_rate=+100.0))   # settling 2
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True, \
+            "guard suppressed a genuine dive after the aircraft had settled"
+
+    def test_a_later_respawn_re_arms_the_guard(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        for _ in range(3):
+            cond(make_snap(altitude=5000.0, altitude_rate=+50.0))
+        cond(make_snap(is_respawning=True, altitude=None, altitude_rate=None))
+        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is False, \
+            "guard did not re-arm on the second respawn"

@@ -2,11 +2,28 @@
 
 import json
 import logging
+import os
+import re
 import threading
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_ACCOUNT_ENV = "WINGMAN_ACCOUNT"
+_ACCOUNT_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def account_tag() -> str:
+    """Account label for this run, or "" when unset (Research 005).
+
+    Set by the per-account `make r1`/`r2` targets. Sanitised because it becomes
+    part of a filename: anything outside [A-Za-z0-9_-] would let an account
+    name containing a path separator write outside the output directory.
+    """
+    raw = (os.environ.get(_ACCOUNT_ENV) or "").strip()
+    return _ACCOUNT_SAFE.sub("_", raw)[:32] if raw else ""
+
 
 _CROPS = ("incoming", "respawn", "health", "ammo_flares", "ammo_missiles", "telemetry")
 
@@ -57,12 +74,33 @@ def _bucket_pcts(samples: list, buckets: list) -> list:
     return result
 
 
+def _is_run_file(path: Path) -> bool:
+    """True for a PerformanceTracker run file, false for a sibling artifact.
+
+    MissionStatsTracker writes `run_<id>_stats.json` beside `run_<id>.json`
+    (ADR 055). Both match `glob("run_*.json")`, and "_stats.json" sorts AFTER
+    ".json" — so an unfiltered sort always puts a stats file last, which is the
+    file `_aggregate_folder` reads its percentiles and its version label from.
+    """
+    return not path.name.endswith("_stats.json")
+
+
 def _load_run_file(path: Path) -> "dict | None":
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning("PerformanceTracker: failed to load %s: %s", path, e)
         return None
+    # Structural check as well as the filename one above: a future sibling
+    # artifact under another suffix must be excluded by default rather than
+    # silently aggregated. Every run file ever written carries `ocr_crops`;
+    # no stats file does.
+    if not isinstance(data, dict) or not isinstance(data.get("ocr_crops"), dict):
+        logger.debug(
+            "PerformanceTracker: skipping %s — not a performance run file", path.name
+        )
+        return None
+    return data
 
 
 def _aggregate_folder(folder: Path, version_filter: str | None = None) -> "dict | None":
@@ -74,7 +112,7 @@ def _aggregate_folder(folder: Path, version_filter: str | None = None) -> "dict 
     """
     if not folder.exists():
         return None
-    files = sorted(folder.glob("run_*.json"))
+    files = sorted(f for f in folder.glob("run_*.json") if _is_run_file(f))
     run_data = [d for f in files if (d := _load_run_file(f)) is not None]
     if version_filter is not None:
         run_data = [d for d in run_data if d.get("version") == version_filter]
@@ -157,6 +195,13 @@ class PerformanceTracker:
         self._lock = threading.Lock()
         self._session_start    = time.time()
         self.run_id            = time.strftime("%Y%m%d_%H%M%S", time.localtime(self._session_start))
+        # Research 005: multi-account runs write into one directory. Different
+        # accounts fly different jets with different missiles, so an untagged
+        # mix silently corrupts the regression baseline and is near-impossible
+        # to unpick afterwards. Tag at the source; set by the r1/r2 targets.
+        self.account = account_tag()
+        if self.account:
+            self.run_id = f"{self.run_id}_{self.account}"
         self._rounds           = 0
 
         # Per-round buffers — cleared after each on_enter_game_lobby() emission
@@ -178,6 +223,26 @@ class PerformanceTracker:
         with self._lock:
             self._round_crops[crop_name].append(seconds)
             self._session_crops[crop_name].append(seconds)
+
+    def snapshot_since(self, offsets: "dict | None") -> tuple:
+        """Per-crop OCR samples recorded since `offsets`, plus new offsets.
+
+        Read-only window accessor for the ResourceSampler (Performance 008):
+        it slices the session buffers rather than draining them, so the
+        round/session aggregates and the regression gate are unaffected.
+        Passing None returns an empty window and just marks the current
+        position — the first call establishes a baseline rather than dumping
+        the whole session so far.
+        """
+        with self._lock:
+            marks = {c: len(self._session_crops[c]) for c in _CROPS}
+            if offsets is None:
+                return {}, marks
+            window = {
+                c: self._session_crops[c][offsets.get(c, 0):marks[c]]
+                for c in _CROPS
+            }
+        return window, marks
 
     def record_reaction(self, seconds: float) -> None:
         """Record one incoming→flare reaction latency. Called from main thread."""
@@ -291,6 +356,7 @@ class PerformanceTracker:
         data = {
             "version":   self._version,
             "run_id":    run_id,
+            "account":   self.account or None,
             "start_ts":  round(self._session_start, 3),
             "end_ts":    round(end_ts, 3),
             "rounds":    rounds,

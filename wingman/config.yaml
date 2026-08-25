@@ -1,4 +1,8 @@
 unattended_mode: true
+# Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
+# Default false — accepting drops the aircraft into someone else's squad
+# mid-session and silently changes what an unattended soak is measuring.
+accept_invite: false
 loop_interval_sec: 1.5
 region: {left: 0, top: 0, width: 1920, height: 1200}
 monitor: 1
@@ -139,6 +143,15 @@ crops:
     - [0.3764, 0.4833]
     - [0.4396, 0.5167]
     text: [CANCEL]
+  STALL_PROFILE:
+    coords:
+    - [0.0306, 0.0278]
+    - [0.1, 0.0578]
+    text: [PROFILE, ROFILE, PROFIL]
+  STALL_PROFILE_DISMISS:
+    coords:
+    - [0.9443, 0.0125]
+    - [0.9766, 0.0708]
   STALL_MULTI_PLAYER:
     coords:
     - [0.3826, 0.91]
@@ -149,9 +162,25 @@ crops:
     - [0.4681, 0.5344]
     - [0.5285, 0.5644]
     text: [RETRY]
+  REJECT:
+    coords:
+    - [0.3451, 0.58]
+    - [0.4146, 0.61]
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
+# ADR 093: the ADR 087 ESC suppression is a delay, not a veto. Past this the
+# escape loop presses ESC even during a blackout — a bounded cancel-then-reopen
+# cycle beats sitting inert, which cost 110 minutes on 2026-08-24. 0 disables
+# the ceiling and restores pure ADR 087 behaviour.
+lobby_blackout:
+  blackout_esc_ceiling_s: 120.0
+# ADR 093: progress watchdog. Progress = an FSM state change OR OCR activity;
+# only losing BOTH is a stall, so a long battle or a quiet lobby cannot trip it.
+liveness_guard:
+  enabled: true
+  stall_limit_s: 300.0        # log loudly, let recovery escalate
+  hard_limit_s: 900.0         # end the session at the next safe point
 stall_recovery:
   action_after_s: 15.0        # dwell in GAME_UNKNOWN/GAME_STARTING_STALLED before acting
   unready_dwell_s: 30.0       # UNREADY suppressing the PLAY click before leaving the squad
@@ -160,7 +189,9 @@ stall_recovery:
   cooldown_s: 20.0            # per-crop minimum between recovery actions
 
 unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 5,
-  dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies}
+  dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies,
+  # ADR 093: keep warning after the capture cap — silence must mean healthy.
+  stuck_warn_interval_s: 300.0, stuck_warn_max_interval_s: 1800.0}
 respawn_detection:
   use_ocr: true
   use_gpu: false
@@ -219,7 +250,18 @@ behavior_tree:
     min_climb_rate: 30.0
     max_climb_rate: 450.0
     max_pitch_deg: 80.0
+    pitch_lead_s: 3.0           # ADR 086 d7 — telemetry interval; ceiling tests the predicted angle
+    exit_pitch_deg: 20.0        # ADR 086 d1 / SAF-010 — nose down to this band before releasing
+    exit_push_pulse_s: 1.0      # bounded impulse (ADR 069 pattern), with an equal observation gap
+    exit_push_max_pulses: 3     # budget; exhausting it releases anyway and logs WARNING
     exit_lead_s: 3.0
+    # ADR 086 d2/d3/d4 — dive recovery on predicted time-to-ground. 20s rather
+    # than the ADR's proposed 12s: the smoothed altitude the tree reads lags
+    # ~1500m in a 560 m/s dive, so 12s of PREDICTED margin was only ~4s of real
+    # margin in the 2026-08-21 18:41 crash. See "Deviation" in the ADR.
+    recover_below_time_s: 20.0
+    confirm_bypass_time_s: 10.0   # below this, fire on a single read (d3)
+    descent_memory_s: 5.0         # hold a known descent across rejected reads (d4)
     fuel_reserve_pct: 10
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}
@@ -267,7 +309,25 @@ telemetry:
   eject_closed_loop: {enabled: true, check_interval_s: 1.5, confirm_consecutive: 2,
     legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,
-    rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0}
+    rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0,
+    abort_on_rearm: true}   # ADR 088: cancel the dive if missiles rearm mid-descent
+# ADR 090 — bound the unfixed Performance 008 leak. Soft limit stops at the
+# next lobby (no mission in flight); hard limit stops immediately, because an
+# OOM kill can take the whole desktop session down with it.
+memory_guard: {enabled: true, soft_limit_mb: 6000, hard_limit_mb: 10000}
+resource_monitor:                  # Performance 008 — long-session leak diagnosis
+  enabled: true                    # emits one greppable RESOURCE line per interval
+  interval_s: 300.0                # 5 min -> ~100 lines per 8h session
+  warmup_s: 600.0                  # rates measured AFTER this; EasyOCR model load is ~3.9GB in 5min
+  game_process_name: Metalstorm.exe  # summed RSS/swap read as a GROWTH TREND, not an absolute
+heap_census:                       # Performance 008 — Python-vs-native leak fork
+  enabled: false                   # diagnostic only — the 2026-08-23 run answered it (ADR 091)
+  interval_s: 300.0                # matches resource_monitor, so the two lines interleave
+  top_n: 12                        # rows in the by-type and by-site tables
+  tracemalloc: true                # 15ms per census, names the allocating line — the lane to use
+  gc_census: false                 # 2-4s STALL against a 1.5s tick: only when the aircraft is idle
+  tracemalloc_depth: 2             # deeper traces multiply tracemalloc's own retention
+  max_census_ms: 2500              # self-disarm: snapshot cost reached 5.5s at 95 min
 performance:
   round_histogram: {enabled: true, png_enabled: false, png_every_n_rounds: 0, output_dir: docs/performance}
   regression: {min_sessions: 5, min_cycles: 1000, threshold_pct: 20}

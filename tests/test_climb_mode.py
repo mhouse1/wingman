@@ -10,6 +10,7 @@ import threading
 import time
 
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 from wingman.controller import (
     AFTERBURNER_KEY,
     Controller,
@@ -81,8 +82,10 @@ def _make_ctrl(monkeypatch, kb, analyzer, climb_cfg):
         analyzer=analyzer,
         exit_event=threading.Event(),
         capture=None,
-        disable_hotkeys=True,
-        climb_cfg=climb_cfg,
+        config=ControllerConfig(
+            disable_hotkeys=True,
+            climb=climb_cfg,
+        ),
     )
 
 
@@ -150,7 +153,6 @@ def test_max_climb_backstop(monkeypatch):
     cfg = dict(CFG, max_climb_s=0.5)
     ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
 
-    t0 = time.time()
     ctrl.climb_mode()
     assert _wait_done(ctrl), "climb did not end at the backstop"
     for key in CLIMB_KEYS:
@@ -336,6 +338,104 @@ def test_climb_burner_respects_fuel_floor(monkeypatch):
     analyzer.set_fuel(30)          # >= floor + rearm margin (default 5)
     time.sleep(0.6)
     assert len(_presses(kb, AFTERBURNER_KEY)) >= 2, "burner not re-engaged after recovery"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_climb_burner_does_not_relight_while_over_pitch_ceiling(monkeypatch):
+    """ADR 086 d6: fuel recovery must not relight the burner while the aircraft
+    is at or above max_pitch_deg, even below the target altitude.
+
+    ADR 083 d3 cut thrust above the target because "the pitch ceiling fighting
+    a lit burner" strands high-angle stretches, but gated only on altitude.
+    Below target and over the ceiling is the same trap: on 2026-08-21 a relight
+    at +64deg carried the nose to +90deg and collapsed speed 1241->392, where
+    the elevator has no authority and neither the ceiling nor the ADR 086 d1
+    exit push could recover it.
+    """
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=3000.0, ts=t0, fuel=50)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=6.0, max_pitch_deg=80.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=9000.0, max_s=6.0, fuel_floor_pct=10.0)
+    time.sleep(0.4)
+    assert _presses(kb, AFTERBURNER_KEY), "burner not engaged with fuel above floor"
+
+    analyzer.set_fuel(10)                       # at the floor -> burner released
+    time.sleep(0.6)
+    assert _releases(kb, AFTERBURNER_KEY), "burner not released at the reserve floor"
+    lit_at_ceiling = len(_presses(kb, AFTERBURNER_KEY))
+
+    # Over-angled and still well below the target altitude.
+    analyzer.set(4000.0, t0 + 1.0, angle=85.0)
+    time.sleep(0.4)
+    analyzer.set_fuel(40)                       # recovery would normally relight
+    time.sleep(0.8)
+    assert len(_presses(kb, AFTERBURNER_KEY)) == lit_at_ceiling, \
+        "burner relit while over the pitch ceiling"
+
+    # Back inside the ceiling with the same fuel: the gate is angle-specific,
+    # not a blanket block, so the burner must come back.
+    analyzer.set(5000.0, t0 + 2.0, angle=40.0)
+    time.sleep(0.8)
+    assert len(_presses(kb, AFTERBURNER_KEY)) > lit_at_ceiling, \
+        "burner never relit after the nose came back inside the ceiling"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_climb_burner_blocked_by_predicted_pitch_ceiling(monkeypatch):
+    """ADR 086 d7: the ceiling tests the PREDICTED angle, not the current one.
+
+    d6 gated the relight on the current angle and was too permissive to help:
+    telemetry lands every ~3s while a lit burner rotates at ~11deg/s, so
+    relights at +48deg and +57deg — both legally under the 80deg ceiling —
+    had the nose at +90deg before the next read (2026-08-21 09:40). Rising at
+    that rate, +57deg is already committed to the ceiling and must not relight.
+    """
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=1000.0, ts=t0, fuel=50)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=8.0, max_pitch_deg=80.0, pitch_lead_s=3.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=9000.0, max_s=8.0, fuel_floor_pct=10.0)
+    time.sleep(0.4)
+    analyzer.set_fuel(10)                        # drop to floor -> burner off
+    time.sleep(0.6)
+    assert _releases(kb, AFTERBURNER_KEY), "burner not released at the floor"
+    lit_before = len(_presses(kb, AFTERBURNER_KEY))
+
+    # Two samples 3s apart rising 46 -> 57 deg == ~3.7 deg/s. Predicted at the
+    # next sample: 57 + 3.7*3 == ~68 deg, still under the ceiling -> may relight.
+    analyzer.set(2000.0, t0 + 1.0, angle=46.0)
+    time.sleep(0.4)
+    analyzer.set(3000.0, t0 + 4.0, angle=57.0)
+    time.sleep(0.4)
+    analyzer.set_fuel(40)
+    time.sleep(0.6)
+    assert len(_presses(kb, AFTERBURNER_KEY)) > lit_before, \
+        "a gently rising nose well under the ceiling must still relight"
+
+    analyzer.set_fuel(10)                        # off again for the steep case
+    time.sleep(0.6)
+    lit_before = len(_presses(kb, AFTERBURNER_KEY))
+
+    # Now rising 24 -> 57 in 3s == 11 deg/s, the observed burner rate. The
+    # current angle (57) is legal, but 57 + 11*3 == 90 blows through the
+    # ceiling before the next read, so this must NOT relight.
+    analyzer.set(4000.0, t0 + 7.0, angle=24.0)
+    time.sleep(0.4)
+    analyzer.set(5000.0, t0 + 10.0, angle=57.0)
+    time.sleep(0.4)
+    analyzer.set_fuel(40)
+    time.sleep(0.6)
+    assert len(_presses(kb, AFTERBURNER_KEY)) == lit_before, \
+        "burner relit at a pitch rate that reaches the ceiling before the next read"
 
     ctrl._climb_stop.set()
     assert _wait_done(ctrl)
@@ -655,5 +755,165 @@ def test_burner_cut_at_target_and_never_relit(monkeypatch):
     time.sleep(0.4)
     assert len(_presses(kb, AFTERBURNER_KEY)) == lit_before, \
         "burner relit above target"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 086 d1 / SAF-010 — exit attitude
+# ---------------------------------------------------------------------------
+
+from wingman.controller import NOSE_DOWN_KEY  # noqa: E402
+
+EXIT_CFG = dict(CFG, exit_pitch_deg=20.0, exit_push_pulse_s=0.05,
+                exit_push_max_pulses=3)
+
+
+def test_exit_pushes_nose_down_when_leaving_climb_nose_high(monkeypatch):
+    """Regression, live 2026-08-21 06:01: the climb released NOSE_UP,
+    NOSE_DOWN and AFTERBURNER together at +73 deg, leaving the aircraft
+    ballistic. It coasted 1500 m further, stalled at 24 KPH and hit the
+    ground with two missiles still racked."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(fuel=90)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, EXIT_CFG)
+    analyzer.set(1200.0, time.time(), fresh=True, angle=73.0)   # nose high
+
+    reason = ctrl._climb_exit_push()
+
+    assert _presses(kb, NOSE_DOWN_KEY), "climb exited without lowering the nose"
+    assert _releases(kb, NOSE_DOWN_KEY), "nose-down never released"
+    assert reason == "budget_exhausted"   # angle never improves in this stub
+
+
+def test_exit_push_stops_once_inside_the_band(monkeypatch):
+    """The push must stop on the first in-band sample, not spend its budget."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(fuel=90)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, EXIT_CFG)
+    analyzer.set(1200.0, time.time(), fresh=True, angle=12.0)   # already flyable
+
+    reason = ctrl._climb_exit_push()
+
+    assert reason == "in_band"
+    assert not _presses(kb, NOSE_DOWN_KEY), "pushed despite already being in band"
+
+
+def test_exit_push_is_single_pulse_when_blind(monkeypatch):
+    """No telemetry: one bounded pulse, then hand back. An unverified small
+    nose-down beats an unverified ballistic climb."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(fuel=90)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, EXIT_CFG)
+    analyzer.set(None, None, fresh=False, angle=None)
+
+    reason = ctrl._climb_exit_push()
+
+    assert reason == "blind_single_pulse"
+    assert len(_presses(kb, NOSE_DOWN_KEY)) == 1
+    assert len(_releases(kb, NOSE_DOWN_KEY)) == 1
+
+
+def test_exit_push_budget_is_bounded(monkeypatch):
+    """A nose that never comes down must not pin NOSE_DOWN indefinitely —
+    the ADR 069 nose-hold-budget failure class."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(fuel=90)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, EXIT_CFG)
+    analyzer.set(1200.0, time.time(), fresh=True, angle=88.0)
+
+    reason = ctrl._climb_exit_push()
+
+    assert reason == "budget_exhausted"
+    assert len(_presses(kb, NOSE_DOWN_KEY)) == 3
+    assert len(_releases(kb, NOSE_DOWN_KEY)) == 3, "a pulse was left held"
+
+
+def test_exit_push_disabled_when_unconfigured(monkeypatch):
+    """exit_pitch_deg unset keeps the pre-ADR-086 behaviour, so the change is
+    opt-out without touching code."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(fuel=90)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)   # no exit_pitch_deg
+    analyzer.set(1200.0, time.time(), fresh=True, angle=73.0)
+
+    assert ctrl._climb_exit_push() == "disabled"
+    assert not _presses(kb, NOSE_DOWN_KEY)
+
+
+def test_exit_push_yields_to_stop_event(monkeypatch):
+    """Manual takeover / cleanup must cut the exit push (SAF-001, SAF-008)."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(fuel=90)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, EXIT_CFG)
+    analyzer.set(1200.0, time.time(), fresh=True, angle=73.0)
+    ctrl._climb_stop.set()
+
+    reason = ctrl._climb_exit_push()
+
+    assert reason == "interrupted"
+    assert len(_presses(kb, NOSE_DOWN_KEY)) <= 1
+    assert len(_releases(kb, NOSE_DOWN_KEY)) == len(_presses(kb, NOSE_DOWN_KEY))
+
+
+# ---------------------------------------------------------------------------
+# ADR 088: an inbound missile outranks every afterburner reserve policy
+# ---------------------------------------------------------------------------
+
+class _IncomingAnalyzer(_FakeTelemetryAnalyzer):
+    """Telemetry stand-in that can also report an incoming-missile alert."""
+
+    def __init__(self, *a, incoming=False, **kw):
+        super().__init__(*a, **kw)
+        self._incoming = incoming
+
+    def set_incoming(self, value):
+        with self._lock:
+            self._incoming = value
+
+    def get_incoming_cache_result(self):
+        with self._lock:
+            return (self._incoming, 1.0, "test")
+
+
+def test_incoming_overrides_the_fuel_reserve_floor(monkeypatch):
+    """ADR 088: outrunning a missile beats preserving the evade reserve.
+
+    Observed 2026-08-22 01:47:39 — the evade released at its manoeuvre limit
+    with incoming still present, Climb took over, and the burner was cut 1.7s
+    later. The aircraft coasted while a missile was inbound.
+    """
+    analyzer = _IncomingAnalyzer(stable_value=None, ts=None, fresh=False, fuel=50)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=8.0))
+
+    ctrl.climb_mode(target_alt=9000.0, max_s=8.0, fuel_floor_pct=10.0)
+    time.sleep(0.4)
+    analyzer.set_fuel(8)                    # below the floor -> normally released
+    time.sleep(0.6)
+    assert _releases(kb, AFTERBURNER_KEY), "burner not released at the floor"
+    lit = len(_presses(kb, AFTERBURNER_KEY))
+
+    analyzer.set_incoming(True)             # missile inbound, fuel still 8%
+    time.sleep(0.8)
+    assert len(_presses(kb, AFTERBURNER_KEY)) > lit, \
+        "burner not forced on for an inbound missile below the reserve floor"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_incoming_does_not_force_burner_on_an_empty_tank(monkeypatch):
+    """ADR 075 still stands at 0%: no thrust, and a held key blocks recharge."""
+    analyzer = _IncomingAnalyzer(stable_value=None, ts=None, fresh=False,
+                                 fuel=0, incoming=True)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=6.0))
+
+    ctrl.climb_mode(target_alt=9000.0, max_s=6.0, fuel_floor_pct=10.0)
+    time.sleep(0.8)
+    assert not _presses(kb, AFTERBURNER_KEY), \
+        "burner pressed with an empty tank despite ADR 075"
+
     ctrl._climb_stop.set()
     assert _wait_done(ctrl)

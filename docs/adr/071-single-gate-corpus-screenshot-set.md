@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-08-13 | 1.7.1           |
+| Accepted | 2026-08-13 | 1.7.1           |
 
 Builds on [ADR 037](037-timed-screenshot-replay-integration-testing.md)
 (replay paths), [ADR 041](041-live-replay-auto-capture-for-integration-screenshots.md)

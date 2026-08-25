@@ -16,7 +16,7 @@ HEALTH_SPIKE_FACTOR = 1.5  # reject readings more than 50 % above the establishe
 
 from transitions import Machine, MachineError
 
-from .crop_region import get_crop, load_crops, draw_crops
+from .crop_region import CropCoords, get_crop, load_crops, draw_crops
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
 
 
@@ -49,7 +49,8 @@ STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
 # Scan order: most specific screen first. The batch stops at the first hit, so a
 # generic match must never pre-empt a precise one.
-STALL_RECOVERY_CROPS = ("STALL_RETRY", "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
+STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_RETRY",
+                        "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
 
 # Gated on UNREADY dwell rather than state dwell: UNREADY makes
 # scan_region_for_play_button return None, which makes _classify_unknown_state
@@ -214,8 +215,20 @@ _TELEMETRY_ROW_CONF_MIN = 0.6
 _use_gpu: bool = False
 
 
+# Readers are thread-local and each holds ~300 MB of model weights, so the
+# legitimate lifetime total is roughly one per LONG-LIVED thread: 13 pool
+# workers plus a handful of analyzer daemons. Initialising on a transient
+# thread allocates and discards a model per call — 1,138 GAME_STARTING health
+# probes produced 1,213 initialisations on 2026-08-22 before that probe was
+# moved onto the pool. This counter makes a recurrence self-reporting instead
+# of hiding in the console at INFO.
+_OCR_READER_INIT_BUDGET = 25
+_ocr_reader_inits = 0
+
+
 def _get_thread_ocr_reader():
     """Return the EasyOCR reader for the current thread, initializing it on first call."""
+    global _ocr_reader_inits
     if not getattr(_thread_local, 'reader', None):
         with _ocr_init_lock:
             _thread_local.reader = None
@@ -223,7 +236,15 @@ def _get_thread_ocr_reader():
                 try:
                     _thread_local.reader = easyocr.Reader(['en'], gpu=_use_gpu, verbose=False)
                     mode = "GPU" if _use_gpu else "CPU"
-                    logger.info("OCR thread %d: initialized EasyOCR reader (%s)", threading.get_ident(), mode)
+                    _ocr_reader_inits += 1
+                    if _ocr_reader_inits > _OCR_READER_INIT_BUDGET:
+                        logger.warning(
+                            "OCR reader init #%d on thread '%s' — exceeds the %d expected "
+                            "for long-lived threads. Something is running OCR on transient "
+                            "threads; each init allocates ~300 MB (Performance 008).",
+                            _ocr_reader_inits, threading.current_thread().name,
+                            _OCR_READER_INIT_BUDGET)
+                    logger.debug("OCR thread %d: initialized EasyOCR reader (%s)", threading.get_ident(), mode)
                 except Exception as e:
                     logger.warning("OCR thread %d: EasyOCR init failed: %s", threading.get_ident(), e)
     return _thread_local.reader
@@ -243,7 +264,7 @@ def _process_respawn_region(respawn_frame):
         return (False, 0.0, None)
 
     t_start = time.time()
-    
+
     # Preprocess respawn region
     gray_respawn = cv2.cvtColor(respawn_frame, cv2.COLOR_BGR2GRAY)
     _, binary_respawn = cv2.threshold(gray_respawn, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -263,7 +284,7 @@ def _process_respawn_region(respawn_frame):
     # Log all OCR results for debugging
     logger.debug(f"Respawn OCR results: {results}")
 
-    for label, text_clean, conf in results:
+    for label, text_clean, _conf in results:
         if _respawn_text_matches(text_clean):
             logger.debug(f"Respawn detected (variant: {label}, text: {text_clean})")
             return (True, ocr_time, text_clean)
@@ -636,7 +657,7 @@ def _levenshtein_distance_simple(a: str, b: str) -> int:
         return len(b)
     if not b:
         return len(a)
-    
+
     prev_row = list(range(len(b) + 1))
     for i, char_a in enumerate(a, start=1):
         curr_row = [i]
@@ -848,7 +869,7 @@ def _scan_minimap_red(
 
 class GameStateAnalyzer:
     """Analyzes game screenshots to determine current game state."""
-    
+
     def __init__(self, config, tracker=None):
         """
         Initialize analyzer with configuration.
@@ -859,7 +880,6 @@ class GameStateAnalyzer:
         """
         self._tracker = tracker
         startup_cfg = config.get("startup_state_detection", {})
-        mission_cfg = config.get("mission", {})
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
 
@@ -896,7 +916,7 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
-        
+
         # OCR result caching for performance (avoid running OCR every frame)
         self._ocr_cache = {
             'result': (False, 0.0, None),  # (is_respawning, confidence, method)
@@ -904,7 +924,7 @@ class GameStateAnalyzer:
             'cooldown': respawn_cfg.get("ocr_cooldown", 0.1)  # Seconds between OCR runs
         }
         self._ocr_cache_lock = threading.Lock()  # Thread-safe cache updates
-        
+
         # Incoming missile cache (separate from respawn)
         self._incoming_cache = {
             'result': (False, 0.0, None),  # (is_incoming, confidence, method)
@@ -973,6 +993,12 @@ class GameStateAnalyzer:
         self._click_to_stop = threading.Event()
         _stall_cfg = config.get("stall_recovery", {}) or {}
         self._stall_action_after_s = float(_stall_cfg.get("action_after_s", 15.0))
+        # ADR 093: ceiling past which the ADR 087 ESC suppression lifts.
+        _blk_cfg = config.get("lobby_blackout", {}) or {}
+        self._blackout_esc_ceiling_s = float(
+            _blk_cfg.get("blackout_esc_ceiling_s", 120.0))
+        self._lobby_blackout_since = 0.0   # ADR 087: sustained GAME_LOBBY blackout
+        self._exit_dialog_seen_ts = 0.0    # ADR 087: Exit-to-Desktop modal on screen
         self._stall_unready_dwell_s = float(_stall_cfg.get("unready_dwell_s", 30.0))
         self._stall_scan_interval_s = float(_stall_cfg.get("scan_interval_s", 5.0))
         self._unready_since = 0.0
@@ -1157,24 +1183,24 @@ class GameStateAnalyzer:
 
         # Fallback HSV detection (if OCR unavailable)
         self.respawn_text_hsv_lower = np.array(
-            respawn_cfg.get("text_hsv_lower", [0, 0, 180]), 
+            respawn_cfg.get("text_hsv_lower", [0, 0, 180]),
             dtype=np.uint8
         )
         self.respawn_text_hsv_upper = np.array(
-            respawn_cfg.get("text_hsv_upper", [180, 50, 255]), 
+            respawn_cfg.get("text_hsv_upper", [180, 50, 255]),
             dtype=np.uint8
         )
-        
+
         debug_cfg = config.get("debug", {})
         self.debug = debug_cfg.get("show_window", False)
         self.show_grid_highlighted = debug_cfg.get("show_grid_highlighted", False)
-        
+
         # Debug output directory for OCR preprocessing images
         debug_output_dir = debug_cfg.get("debug_output_dir", "tests/test-output")
         self.debug_output_dir = Path(debug_output_dir)
         if not self.debug_output_dir.exists():
             self.debug_output_dir.mkdir(parents=True, exist_ok=True)
-        
+
 
     @property
     def ocr_executor(self):
@@ -1204,7 +1230,7 @@ class GameStateAnalyzer:
                 if self._background_ocr_lock.locked():
                     self._background_ocr_lock.release()
         return self._ocr_executor
-    
+
     def _trigger(self, trigger_name: str) -> bool:
         """Thread-safe FSM trigger dispatch. Returns False on invalid transitions.
 
@@ -1488,6 +1514,23 @@ class GameStateAnalyzer:
         with self._incoming_cache_lock:
             return self._incoming_cache['timestamp']
 
+    def ocr_queue_depth(self) -> "int | None":
+        """Work queued but not yet started in the OCR pool (Performance 008).
+
+        Pool saturation is the mechanism FUTURE 001 item 5 predicted and the
+        2026-08-14 soak measured indirectly (0.1 s polls stretched to 2-3.5 s).
+        Sampling the depth makes it a first-class observation. Returns None
+        when the pool has not been created or the attribute is unavailable —
+        this is a diagnostic, never a correctness dependency.
+        """
+        executor = self._ocr_executor
+        if executor is None:
+            return None
+        try:
+            return executor._work_queue.qsize()
+        except Exception:
+            return None
+
     def get_click_to_cache_result(self):
         """Return the cached click-to tuple (detected, confidence, method)."""
         with self._click_to_cache_lock:
@@ -1727,7 +1770,19 @@ class GameStateAnalyzer:
             finally:
                 self._starting_probe_running = False
 
-        threading.Thread(target=_probe, daemon=True, name="starting-health-probe").start()
+        # Run on the OCR pool, NOT a fresh thread. EasyOCR readers are
+        # thread-local (~300 MB of model weights each), so a per-probe thread
+        # built and discarded one on every probe: 1,138 probes produced 1,213
+        # reader initialisations in the 2026-08-22 02:18 session against a
+        # single 13-worker pool. That is ~350 GB of allocate/free churn per
+        # session and a prime suspect for the Performance 008 heap growth.
+        # The executor was already fetched above as a guard and then unused.
+        try:
+            executor.submit(_probe)
+        except RuntimeError as e:
+            # Pool shutting down: drop the probe rather than resurrect a thread.
+            self._starting_probe_running = False
+            logger.debug("Analyzer: health probe not submitted (%s)", e)
 
     def arm_starting_health_scan(self):
         """Enable the GAME_STARTING health-only probe and reset its instrumentation.
@@ -2119,9 +2174,18 @@ class GameStateAnalyzer:
                     tier, dead_for,
                 )
             else:
+                # Performance 008: carry the evidence that distinguishes a real
+                # respawn from an OCR-starvation artifact. A death->respawn
+                # cycle cannot complete in under ~8s (the overlay alone runs
+                # that long), so a short dead_for beside a long preceding OCR
+                # pass is a confirmation gap, not a death — 17 of 31 weak fires
+                # in the 2026-08-20 session looked like this. Logged rather
+                # than acted on until the ADR 064 amendment lands.
                 logger.info(
-                    "\033[93m💛 HEALTH RESPAWN FALLBACK firing (tier=%s, dead_for=%.1fs) — OCR missed this respawn (ADR 064 dual)\033[0m",
-                    tier, dead_for,
+                    "\033[93m💛 HEALTH RESPAWN FALLBACK firing (tier=%s, dead_for=%.1fs) — OCR missed this respawn (ADR 064 dual)"
+                    " [context: health_window=%s last_respawn_ocr=%.2fs]\033[0m",
+                    tier, dead_for, list(self._health_window),
+                    getattr(self, "_last_respawn_ocr_s", float("nan")),
                 )
                 self.health_respawn_event.set()
         else:
@@ -2247,7 +2311,7 @@ class GameStateAnalyzer:
     def __exit__(self, *_):
         self.cleanup()
         return False
-    
+
     def analyze_frame(self, frame):
         """Analyze a single frame and return game state.
 
@@ -2263,7 +2327,7 @@ class GameStateAnalyzer:
         if frame is None or frame.size == 0:
             logger.warning("Analyzer: received invalid frame")
             return self._empty_state()
-        
+
         # Keep latest full frame available for the click_to background thread
         with self._click_to_frame_lock:
             self._click_to_latest_frame = frame
@@ -2327,11 +2391,11 @@ class GameStateAnalyzer:
             logger.debug("Click-to background thread started")
 
         respawn_detected, confidence, method = self._detect_respawn(frame)
-        
+
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
-        
+
         # Detect incoming missiles - use cached result from background OCR
         with self._incoming_cache_lock:
             incoming_detected, incoming_conf, incoming_method = self._incoming_cache['result']
@@ -2365,29 +2429,28 @@ class GameStateAnalyzer:
                 logger.warning("Failed to save highlighted grid: %s", e)
 
 
-        
+
         return state
-    
+
     def _detect_respawn(self, frame):
         """
         Detect if respawn screen is visible using OCR.
         Looks for "RESPAWN" text in the frame.
-        
+
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
         if self.use_ocr and easyocr:
             return self._detect_respawn_ocr(frame)
-        else:
-            if not easyocr:
-                logger.warning("EasyOCR not available, respawn detection disabled")
-            return False, 0.0, None
-    
+        if not easyocr:
+            logger.warning("EasyOCR not available, respawn detection disabled")
+        return False, 0.0, None
+
     def _detect_respawn_ocr(self, frame):
         """
         Use EasyOCR to detect "RESPAWN" text in the frame.
         Non-blocking: uses caching + background thread to avoid blocking main loop.
-        
+
         Returns:
             tuple: (is_respawning: bool, confidence: float, method: str)
         """
@@ -2421,7 +2484,7 @@ class GameStateAnalyzer:
                 if self.debug:
                     logger.debug("Using cached OCR result (%.2fs old)", time_since_last_ocr)
                 return cached_result
-        
+
         # Cache expired - schedule background OCR (non-blocking).
         # If OCR is already running, update pending frame; otherwise, start thread.
         if not self._background_ocr_lock.acquire(timeout=5.0):
@@ -2447,7 +2510,7 @@ class GameStateAnalyzer:
 
         # Return cached result (may be stale) while background OCR runs
         return cached_result
-    
+
     def _run_ocr_in_background(self):
         """Run OCR in background using thread pool for parallel region processing."""
         while not self._background_ocr_stop.is_set():
@@ -2519,6 +2582,9 @@ class GameStateAnalyzer:
                     # Wait for respawn result first — update its cache immediately so the
                     # main loop can react without waiting for the (often slower) incoming OCR.
                     respawn_detected, respawn_ocr_time, respawn_text = respawn_future.result(timeout=120)
+                    # Performance 008: the fallback-fire log reads this to show
+                    # whether a "death" coincided with a starved OCR pass.
+                    self._last_respawn_ocr_s = respawn_ocr_time
                     if self._tracker:
                         self._tracker.record_ocr_crop("respawn", respawn_ocr_time)
 
@@ -2539,15 +2605,12 @@ class GameStateAnalyzer:
                     incoming_processing_time = float(incoming_eval.get("processing_time", 0.0))
                     if self._tracker:
                         self._tracker.record_ocr_crop("incoming", incoming_processing_time)
-                    t3 = time.time()
 
                     template_score = float(incoming_eval.get("template_score", -1.0))
                     template_hit = bool(incoming_eval.get("template_hit", False))
                     near_threshold = bool(incoming_eval.get("near_threshold", False))
                     template_label = incoming_eval.get("template_label")
-                    fallback_used = bool(incoming_eval.get("fallback_used", False))
                     fallback_hit = bool(incoming_eval.get("fallback_hit", False))
-                    fallback_variant = incoming_eval.get("fallback_variant")
                     fallback_text = incoming_eval.get("fallback_text")
                     fallback_raw = incoming_eval.get("fallback_raw") or []
 
@@ -2572,11 +2635,7 @@ class GameStateAnalyzer:
                     detection_source = "none"
                     detected_label = None
 
-                    if template_hit:
-                        incoming_detected = True
-                        detection_source = "template"
-                        detected_label = template_label
-                    elif near_threshold_confirmation:
+                    if template_hit or near_threshold_confirmation:
                         incoming_detected = True
                         detection_source = "template"
                         detected_label = template_label
@@ -2726,7 +2785,7 @@ class GameStateAnalyzer:
                 self._background_ocr_frame = None
                 self._background_ocr_running = False
                 return
-    
+
     def _run_click_to_in_background(self):
         """Poll for 'Click to Continue' on a low-frequency independent schedule.
 
@@ -2739,8 +2798,25 @@ class GameStateAnalyzer:
             if state in (GameState.GAME_UNKNOWN, GameState.GAME_STARTING, GameState.GAME_WAITING):
                 continue
             if state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
-                logger.debug("Click-to OCR skipped: %s state active", state.name)
-                continue
+                # ADR 087 addendum 4: the self-suppression below assumes the FSM
+                # is RIGHT about being in the lobby. "GAME_END_B timeout —
+                # forcing recovery to GAME_LOBBY" can make it wrong, and then
+                # the lie disables the one detector that would clear the screen
+                # holding it there: on 2026-08-21 the post-match PERFORMANCE
+                # panel with "Click to Continue..." sat unread for 17 minutes
+                # while every lobby crop read blank.
+                #
+                # A lobby blackout is exactly the evidence that the premise
+                # failed, so the scan resumes. In a healthy lobby the crops
+                # match, no blackout is active, and the 2026-07-30 double
+                # click-through stays suppressed.
+                if not (state == GameState.GAME_LOBBY
+                        and self.lobby_blackout_active()):
+                    logger.debug("Click-to OCR skipped: %s state active", state.name)
+                    continue
+                logger.info(
+                    "Click-to OCR re-enabled: GAME_LOBBY blackout — the forced "
+                    "state may be wrong (ADR 087)")
             with self._click_to_frame_lock:
                 frame = self._click_to_latest_frame
             if frame is None:
@@ -2803,6 +2879,56 @@ class GameStateAnalyzer:
             self._lobby_quick_scan_thread.start()
             logger.info("Lobby quick-scan background thread started")
 
+    def lobby_blackout_active(self) -> bool:
+        """True while GAME_LOBBY has been showing no lobby crop (ADR 087).
+
+        Gates every ESC source. During a blackout ESC has no demonstrated
+        benefit and one demonstrated harm: it opens the Exit-to-Desktop modal,
+        which is itself a blackout. See exit_dialog_visible for why the
+        narrower dialog flag is not enough on its own.
+        """
+        return self._lobby_blackout_since != 0.0
+
+    def lobby_blackout_age_s(self) -> float:
+        """Seconds since the current lobby blackout began, 0.0 if none."""
+        if self._lobby_blackout_since == 0.0:
+            return 0.0
+        return max(0.0, time.time() - self._lobby_blackout_since)
+
+    def blackout_esc_suppressed(self) -> bool:
+        """True while ESC must stay suppressed for a lobby blackout (ADR 093).
+
+        ADR 087 suppressed ESC during a blackout because ESC opens the
+        Exit-to-Desktop modal, re-creating it seconds after recovery cancels
+        it. That reasoning is sound but had no ceiling, so when the blackout
+        came from a screen no crop recognises the suppression became permanent
+        — on 2026-08-24 a PROFILE overlay held the session inert for 110
+        minutes with every recovery path ineligible.
+
+        So the suppression is a delay, not a veto. Past the ceiling the trade
+        inverts: the cancel-then-reopen cycle is bounded and self-correcting
+        (STALL_EXIT_TO_DESKTOP cancels the dialog, at ~23s per iteration),
+        while paralysis is terminal. Churn beats paralysis.
+        """
+        if not self.lobby_blackout_active():
+            return False
+        ceiling = self._blackout_esc_ceiling_s
+        if ceiling <= 0:
+            return True          # ceiling disabled — ADR 087 behaviour
+        return self.lobby_blackout_age_s() < ceiling
+
+    def exit_dialog_visible(self, stale_after_s: float = 12.0) -> bool:
+        """True while the Exit-to-Desktop modal was seen recently (ADR 087).
+
+        Every ESC source must consult this: ESC is what opens the modal, so a
+        press while it is up re-opens what recovery just closed. The staleness
+        window covers roughly two stall-scan intervals, so the flag lapses on
+        its own if the scan stops confirming the dialog.
+        """
+        if not self._exit_dialog_seen_ts:
+            return False
+        return time.time() - self._exit_dialog_seen_ts <= stale_after_s
+
     def _stall_recovery_targets(self, state):
         """Return the stall-recovery crops eligible to act right now (ADR 084).
 
@@ -2817,6 +2943,33 @@ class GameStateAnalyzer:
                 and self._stall_state_since
                 and now - self._stall_state_since >= self._stall_action_after_s):
             targets.extend(c for c in STALL_RECOVERY_CROPS if c in self.crops)
+        # ADR 087 independent gate: a sustained GAME_LOBBY blackout is a real
+        # stall, but GAME_LOBBY is not in STALL_ACTION_STATES so the batch above
+        # never runs for it. The ESC pressed on every LOBBY_STALL beat is what
+        # OPENS the "Exit to Desktop" dialog, whose own crop then goes unscanned
+        # — wingman deadlocks against a modal it created (2026-08-21, 8 minutes,
+        # 187 blank cycles; the captured frame shows Exit highlighted as the
+        # default button).
+        #
+        # Deliberately narrower than the batch above: ONLY the dialog wingman
+        # can create itself, whose action is a Cancel click. STALL_RETRY and
+        # STALL_AIRCRAFT stay gated on a genuinely unclassifiable state.
+        if (self._lobby_blackout_since
+                and now - self._lobby_blackout_since >= self._stall_action_after_s
+                and "STALL_EXIT_TO_DESKTOP" in self.crops
+                and "STALL_EXIT_TO_DESKTOP" not in targets):
+            targets.append("STALL_EXIT_TO_DESKTOP")
+        # ADR 093: a full-screen PROFILE overlay is neither the lobby, nor a
+        # calibrated popup, nor the exit dialog, so on 2026-08-24 all three
+        # recovery paths found nothing and wingman sat inert for 110 minutes.
+        # Eligible on the same blackout gate and for the same reason as the
+        # dialog above: the action is a close-button click, strictly
+        # de-escalating, with no destructive control beside it.
+        if (self._lobby_blackout_since
+                and now - self._lobby_blackout_since >= self._stall_action_after_s
+                and "STALL_PROFILE" in self.crops
+                and "STALL_PROFILE" not in targets):
+            targets.insert(0, "STALL_PROFILE")
         # Independent gate: a stuck UNREADY blocks classification outright, so it
         # is timed from the UNREADY read itself rather than from the state.
         if (self._unready_since
@@ -2840,9 +2993,17 @@ class GameStateAnalyzer:
         recovery path.
         """
         lobby_crops = [c for c in ("CANCEL", "UNREADY", "PLAY", "READY") if c in self.crops]
+        # Must cover every dismissible crop the GAME_LOBBY state declares in
+        # _STATE_CROPS, or a screen wingman has a calibrated crop for is never
+        # scanned. TAP_HERE_TO_CONTINUE and FINAL_CONTINUE were declared there
+        # and missing here: a PILOT LEVEL UP screen ("Tap Here to Continue")
+        # stranded the lobby for 40 minutes on 2026-08-22 08:40 while the crop
+        # that dismisses it sat unused. test_lobby_popup_coverage guards the
+        # two lists against drifting apart again.
         popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
                             "UNLOCK_CLOSE", "INSPECT", "event_refresh",
-                            "NEW_FLIGHT_PASS"]
+                            "NEW_FLIGHT_PASS", "TAP_HERE_TO_CONTINUE",
+                            "FINAL_CONTINUE"]
         popup_crops = [c for c in popup_crop_names if c in self.crops]
 
         if not lobby_crops and not popup_crops:
@@ -2861,6 +3022,7 @@ class GameStateAnalyzer:
                 # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
                 # counting fresh instead of comparing against a stale timestamp.
                 lobby_stall_since = 0.0
+                self._lobby_blackout_since = 0.0
             # ADR 084: dwell in an unclassifiable state, reset on any classified state
             # so a brief GAME_UNKNOWN blip mid-transition never opens the gate.
             if state in STALL_ACTION_STATES:
@@ -3000,17 +3162,23 @@ class GameStateAnalyzer:
                     if not handled and lobby_futures:
                         if lobby_stall_since == 0.0:
                             lobby_stall_since = time.time()
+                        if self._lobby_blackout_since == 0.0:
+                            # ADR 087: total blackout duration. Separate from
+                            # lobby_stall_since, which restarts on every ESC.
+                            self._lobby_blackout_since = time.time()
                         elapsed_stall = time.time() - lobby_stall_since
                         logger.info(
                             "Lobby quick-scan: no lobby crops detected (stalled %.1fs)",
                             elapsed_stall,
                         )
-                        if elapsed_stall >= 10.0 and self.has_subscribers(GameEvent.LOBBY_STALL):
-                            logger.info("Lobby quick-scan: stall threshold reached — pressing ESC")
+                        if (elapsed_stall >= 10.0
+                                and self.has_subscribers(GameEvent.LOBBY_STALL)):
+                            logger.info("Lobby quick-scan: stall threshold reached")
                             self.emit(GameEvent.LOBBY_STALL)
                             lobby_stall_since = time.time()  # cooldown: next press after another 10s
                     elif handled:
                         lobby_stall_since = 0.0
+                        self._lobby_blackout_since = 0.0
 
                 if lobby_futures and lobby_scan_start is not None:
                     logger.debug(
@@ -3135,8 +3303,15 @@ class GameStateAnalyzer:
                                 logger.warning(
                                     "\033[93m🔧 Stall recovery: '%s' detected (text='%s', state=%s)\033[0m",
                                     crop, text, state.name)
+                                if crop == "STALL_EXIT_TO_DESKTOP":
+                                    # ADR 087: ESC is what OPENS this modal, so
+                                    # every ESC source must stand down while it
+                                    # is up or they re-open what recovery closes.
+                                    self._exit_dialog_seen_ts = time.time()
                                 self.emit(GameEvent.STALL_RECOVERY_ACTION, crop)
                                 break
+                            if crop == "STALL_EXIT_TO_DESKTOP":
+                                self._exit_dialog_seen_ts = 0.0
                             logger.debug("Stall recovery: '%s' not found", crop)
 
                 cycle_elapsed = time.time() - cycle_start
@@ -3223,7 +3398,7 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.debug("Analyzer: health OCR failed in unknown classification: %s", e)
             return None
-    
+
     def reset_cache(self):
         """Reset OCR caches - useful when switching between different images/scenes."""
         with self._ocr_cache_lock:

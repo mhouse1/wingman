@@ -295,19 +295,19 @@ class TestOrientNoseToTarget:
 
     def test_deadband_suppresses_command(self):
         ctrl = self._ctrl()
-        with patch.object(ctrl, "roll_left") as rl, patch.object(ctrl, "roll_right") as rr:
+        with patch.object(ctrl, "roll_left"), patch.object(ctrl, "roll_right"):
             result = ctrl.orient_nose_to_target(0.03, deadband=0.05)
         assert result is None
 
     def test_negative_error_rolls_left(self):
         ctrl = self._ctrl()
-        with patch.object(ctrl, "roll_left") as rl, patch.object(ctrl, "roll_right") as rr:
+        with patch.object(ctrl, "roll_left"), patch.object(ctrl, "roll_right"):
             result = ctrl.orient_nose_to_target(-0.5, deadband=0.05)
         assert result == "left"
 
     def test_positive_error_rolls_right(self):
         ctrl = self._ctrl()
-        with patch.object(ctrl, "roll_right") as rr:
+        with patch.object(ctrl, "roll_right"):
             result = ctrl.orient_nose_to_target(0.5, deadband=0.05)
         assert result == "right"
 
@@ -336,7 +336,7 @@ class TestOrientNoseToTarget:
 
     def test_cooldown_suppresses_second_call(self):
         ctrl = self._ctrl()
-        with patch.object(ctrl, "roll_right") as rr:
+        with patch.object(ctrl, "roll_right"):
             ctrl.orient_nose_to_target(0.5, cooldown_sec=10.0)
             result = ctrl.orient_nose_to_target(0.5, cooldown_sec=10.0)
         assert result is None
@@ -344,7 +344,7 @@ class TestOrientNoseToTarget:
     def test_cooldown_allows_after_elapsed(self):
         ctrl = self._ctrl()
         ctrl._last_orient_ts = time.time() - 1.0
-        with patch.object(ctrl, "roll_right") as rr:
+        with patch.object(ctrl, "roll_right"):
             result = ctrl.orient_nose_to_target(0.5, cooldown_sec=0.5)
         assert result == "right"
 
@@ -393,7 +393,7 @@ class TestReferenceFrame:
         if obs["centroid_x"] is not None:
             # Re-run internal detect to inspect raw contours
             raw = t._detect_targets(frame)
-            for cx, cy, area in raw:
+            for _cx, _cy, area in raw:
                 # All accepted contours must have passed the aspect-ratio filter —
                 # they were accepted, so aspect ratio >= 2.5. Just sanity-check area.
                 assert area >= 12, "Contour below min_contour_area was accepted"

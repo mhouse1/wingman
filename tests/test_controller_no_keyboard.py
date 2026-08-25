@@ -11,6 +11,7 @@ import time
 import pytest
 import yaml
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 
 from constants import CONFIG_PATH
 from wingman.controller import Controller
@@ -52,10 +53,12 @@ def ctrl(monkeypatch):
     c = Controller(
         region,
         analyzer=None,
-        weapon_loop_interval=0.5,
         exit_event=exit_event,
         capture=None,
         on_auto_mission_key=None,
+        config=ControllerConfig(
+            weapon_loop_interval=0.5,
+        )
     )
     yield c
     exit_event.set()
@@ -325,7 +328,7 @@ def test_eject_key_releases_before_dropping_the_guard(monkeypatch):
     monkeypatch.setattr(controller_module, "keyboard_module", _RecordingKbd())
     cfg = _load_config()
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
-    ctrl = Controller(region, analyzer=None, disable_hotkeys=True)
+    ctrl = Controller(region, analyzer=None, config=ControllerConfig(disable_hotkeys=True))
 
     ctrl._eject_key(True, "k")
     ctrl._eject_key(False, "k")

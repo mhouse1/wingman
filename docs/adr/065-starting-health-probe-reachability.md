@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-08-06 | 1.7.1           |
+| Accepted | 2026-08-06 | 1.7.1           |
 
 Repairs [ADR 032](032-game-battle-alive-fallback-trigger.md) (Accepted), whose
 decision was correct but whose implementation never executed. ADR 032 is not

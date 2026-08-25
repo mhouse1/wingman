@@ -1,0 +1,885 @@
+# Performance 008 — Long-Session Memory Leak and Progressive OCR Degradation
+
+| Status | Date       | Wingman Version |
+|--------|------------|-----------------|
+| Active | 2026-08-21 | 1.8.5           |
+
+## Summary
+
+Wingman's OCR pipeline degrades **progressively and reproducibly** across a
+long session. Respawn-crop OCR median rises from ~0.24 s in the first hour to
+**4.85 s by hour nine**, p95 from 0.38 s to 16.9 s — against a 1.5 s main-loop
+tick budget. All crops degrade uniformly, which is the signature of resource
+starvation rather than a defect in any one OCR path.
+
+**ANSWERED 2026-08-23 — see the next section. The leak was a new X11 connection opened per key event; fixed in ADR 091, 94.7% reduction measured. The narrative below is kept as the investigation record.**
+
+The mechanism is a memory leak: system swap climbed **4.3 GB → 14.8 GB** during
+the 2026-08-20 session and collapsed to 3.6 GB within minutes of exit. Every
+session starts clean at ~0.25 s median regardless of how degraded the previous
+one became, so **restarting wingman fully resets it**.
+
+Downstream, the starvation manufactures false respawns (see "Secondary damage"),
+and the safety-critical incoming→flare reaction path regressed **+533%**.
+
+**Not the same phenomenon as the Brave/compositor OOM** tracked in
+foundry `docs/performance/001-brave-oom-full-session-crash.md` — different
+memory class, disjoint time windows, anti-correlated. See "Relationship to the
+compositor OOM investigation".
+
+## ANSWERED 2026-08-23 — a new X11 connection per key event. Fixed in ADR 091.
+
+The census this document asked for ran once and named the site.
+
+`_linux_key_event` opened a throwaway `Xlib.display.Display` for every key press
+and every key release. Each `Display.__init__` rebuilds the Xlib resource
+classes at `Xlib/display.py:121`, and those survive both `close()` and
+`gc.collect()`.
+
+Retained bytes attributed to that single line, 1h 46m session, 17 missions:
+
+| min | 5 | 15 | 30 | 45 | 60 | 75 | 90 | 105 |
+|-----|---|----|----|----|----|----|----|-----|
+| MB | 4.4 | 30.9 | 122.0 | 229.6 | 433.5 | 621.8 | 934.6 | **1277.2** |
+
+- **728 MB/h from one line — 96% of all post-warm-up live-heap growth.**
+- 307,144 live blocks added, none released.
+- Controlled measurement: **~16.2 KB retained per `Display()` construction**,
+  surviving `gc.collect()`. 1,277 MB implies ~80,700 constructions, matching the
+  session's logged control activity (1,538 `fire_active_weapon`, 212 `climb`,
+  158 `eject_and_dive`, 120 `deploy_flares` — each a press *and* a release).
+
+**The Python-vs-native fork is closed: Python-side.** Post-warm-up, tracemalloc's
+delta tracked `mallinfo2`'s almost exactly (+82/+82, +87/+88, +118/+118,
++109/+109 MB). The 1,300 MB native gap in the first interval was torch loading
+model weights — warm-up only.
+
+**Why the two earlier hypotheses missed it.** Both were framed around the OCR
+pipeline, because that is where the *symptom* appeared. The allocation was in
+the input path, which nothing in this document had looked at. The census found
+it in one session precisely because it attributes rather than hypothesises.
+
+**Fix and result** — ADR 091, one shared display, reused. Measured with real
+Xlib over 400 iterations with `gc.collect()` either side:
+
+| | retained | per event | top site |
+|---|---|---|---|
+| before | 5.84 MB | 14.9 KB | `Xlib/display.py:121` |
+| after | 0.31 MB | 0.79 KB | tracemalloc's own overhead |
+
+**94.7% reduction.**
+
+### Still open after ADR 091
+
+- The remaining ~4% of growth is unattributed. It needs its own long session to
+  characterise, and it may be ordinary drift rather than a leak.
+- **The fix is not yet validated on a long session.** The numbers above are a
+  controlled measurement plus a one-session attribution, not a post-fix soak.
+  ADR 090's memory guard stays armed until a real session confirms the curve.
+- `_linux_click` has the same per-call `Display()` pattern, deliberately left
+  alone — low hundreds of calls per session, ~1-2 MB, and its sleeps must not be
+  held under the injection lock.
+
+### Instrument note
+
+`take_snapshot()` cost grows with accumulated traces: **13 ms at session start,
+5,515 ms at 95 minutes**, past the tick budget. `heap_census.max_census_ms`
+(default 2500) now disarms the census when it crosses that, so a diagnostic
+cannot degrade what it is measuring. `heap_census.enabled` is back to `false`.
+
+## REFUTED 2026-08-22 — the reader churn was real, and was NOT the leak
+
+The section below identified a genuine defect and argued it explained the leak.
+**The fix worked and the leak did not change.** The hypothesis is refuted.
+
+The fix is confirmed at the mechanism level, unambiguously:
+
+| | probes | reader inits |
+|---|---|---|
+| before | 1,138 | 1,213 |
+| after | **1,843** | **13** |
+
+Nearly two thousand probes and the initialisation count never left 13. Roughly
+1,830 model loads per session were eliminated.
+
+The leak is unmoved. A 3h 50m session, matched against the pre-fix 5h 43m
+session at equal elapsed times:
+
+| Elapsed | pre-fix | post-fix |
+|---------|---------|----------|
+| 0.0h | 666 MB | 666 MB |
+| ~0.8h | 2,733 MB | 2,769 MB |
+| ~1.5h | 3,378 MB | 3,829 MB |
+| ~2.3h | 4,427 MB | 5,334 MB |
+| ~3.0h | 5,836 MB | 6,686 MB |
+| ~3.8h | 7,166 MB | 7,571 MB |
+
+Post-warm-up rate: **+1,478 MB/h before, +1,645 MB/h after** — unchanged, if
+anything marginally worse, and well inside session-to-session variation. OCR
+degradation is likewise identical: median 0.28s → 0.84s across the session,
+p95 0.49s → 4.75s, the same curve as before.
+
+**What this eliminates.** EasyOCR reader construction and destruction is not the
+allocation driving heap growth, despite ~1,800 occurrences per session in blocks
+of hundreds of MB. That is a strong negative result: it removes the largest
+identified allocator of transient memory from suspicion, and the remaining
++1,500 MB/h is entirely unattributed.
+
+**The fix is kept.** Reloading a model 1,843 times per session is wasteful
+regardless of its relationship to the leak, and the tripwire guards against
+regression. It is simply not the answer to this document's question.
+
+**Method note.** At ~0.8h the two sessions read 2,733 MB and 2,769 MB — a short
+session would have looked like confirmation. The four-hour rule is what turned
+this into a clean refutation instead of a second false positive, after the
+`MALLOC_ARENA_MAX` retraction earlier in this document.
+
+## ANSWERED 2026-08-23 — it is LIVE ALLOCATION, not fragmentation
+
+A 6h 58m session with `mallinfo2` instrumentation settles the question this
+document has been circling since 2026-08-20.
+
+| Elapsed | rss | anon | **mi_use (live)** | mi_free (arena) |
+|---------|-----|------|-------------------|-----------------|
+| 0.75h | 2,774 | 2,414 | 1,757 | 301 |
+| 2.42h | 5,016 | 4,656 | 3,874 | 405 |
+| 4.09h | 8,140 | 7,792 | 6,610 | 787 |
+| 6.60h | 13,212 | 12,864 | **10,960** | 1,491 |
+
+Over the 5.85h after warm-up:
+
+| | growth | rate | share |
+|---|--------|------|-------|
+| RSS | +10,438 MB | +1,784 MB/h | — |
+| **Live allocations** | **+9,203 MB** | **+1,573 MB/h** | **88%** |
+| Retained in arena | +1,190 MB | +203 MB/h | 11% |
+
+**Eighty-eight percent of the growth is memory the process is still using.**
+Something allocates roughly 1.6 GB per hour and never frees it.
+
+### Why this reframes everything above
+
+Both previously tested hypotheses were *fragmentation* theories:
+
+| Hypothesis | Outcome | Why it could never have worked |
+|------------|---------|-------------------------------|
+| glibc arena fragmentation (`MALLOC_ARENA_MAX=2`) | retracted | Addresses arena count; the memory is live, not fragmented |
+| EasyOCR reader churn (~1,800 reloads/session) | refuted | Allocate/free churn fragments; it does not retain |
+
+Both were plausible, both were tested, and both were aimed at the wrong
+mechanism. Fragmentation accounts for only 11% of the growth, which is roughly
+the share the arena cap already reduced.
+
+### What the other counters rule out
+
+Across the same session: **threads 19–24, fds 70–74** — both flat. Not a thread
+or descriptor leak. GC generation counters stay low and stable, but those count
+collections since the last pass, not live objects, so they exclude nothing.
+
+### Scale of the per-tick allocation
+
+At the 1.5s tick, +1,573 MB/h is about **671 KB retained per tick**. That is
+image-sized, not float-sized: the per-tick Python bookkeeping in this codebase
+(timing lists, confirmation windows, shadow-fire tuples) totals a few MB across
+an entire session and cannot account for it.
+
+### Next measurement — Python objects, or native?
+
+The remaining fork, and it must be measured rather than guessed:
+
+- **Python-side retention** — a container holding frames, crops, or tensors.
+  Detect with a periodic `gc.get_objects()` type-and-size census.
+- **Native retention** — memory held by torch or OpenCV below the Python object
+  graph, invisible to `gc`. Indicated if the census stays flat while `mi_use`
+  climbs.
+
+The census is the cheaper test and distinguishes both cases, so it goes first.
+**No hypothesis before that data** — this document has now recorded two
+confident explanations that measurement destroyed, and the pattern in both was
+reasoning from a mechanism that fit rather than from a measurement that
+discriminated.
+
+### Instrumented 2026-08-23 — the census exists, and one trap was found building it
+
+`wingman/heap_census.py` implements the census this section calls for, off by
+default (`heap_census.enabled: false`). It reports both lanes on one line:
+
+    HEAPCENSUS elapsed=200s py_mb=269 d_py=+265 objects=39467 \
+               tm_mb=265 d_tm=+264 mi_use_mb=404 census_ms=247
+
+**A `gc.get_objects()` census on its own would have sent this investigation to
+the wrong branch.** Measured directly:
+
+| | 64 MB of retained `ndarray` |
+|---|---|
+| `gc.is_tracked(arr)` | **False** |
+| present in `gc.get_objects()` | **No** |
+| tracemalloc growth | **64.0 MB** |
+
+A non-object-dtype ndarray cannot take part in a reference cycle, so numpy
+leaves it untracked and the gc walk never returns it. `bytes` and `bytearray`
+behave the same way. A census built only on `gc.get_objects()` would have shown
+a flat Python heap while gigabytes of frames accumulated — which reads exactly
+like "native retention" and would have closed the Python branch on a leak that
+is squarely Python-side.
+
+Two consequences, both now built in:
+
+1. **tracemalloc is the lane to trust for payload**, not the gc walk. numpy
+   registers its data allocations with it, so frames and crops are visible, and
+   each carries a traceback naming the allocating line.
+2. The gc census additionally scans the *contents* of tracked containers and
+   attributes untracked payload found there, so the by-type table still names
+   the container holding the frames rather than reporting nothing.
+
+Validated against a planted leak of the real shape — 40 frames of
+`(1200, 1920, 3) uint8` retained in a list:
+
+```
+  by-type (top 6 of 176 types, by bytes):
+    numpy.ndarray                   263.7MB               n=40
+  by-site (tracemalloc, top 6 by growth since last census):
+      +263.7MB  (now   263.7MB, +122 blocks)  <the appending line>
+```
+
+Both lanes found it and the by-site table named the line. `census_ms` is
+reported every time so the diagnostic's own cost on the tick is never hidden.
+
+**Cost — measured 2026-08-23, and it decided the default.** On a process holding
+only the `torch`/`easyocr`/`cv2` imports (no readers built, no 4 GB heap):
+
+| lane | cost per census |
+|------|-----------------|
+| tracemalloc snapshot | **15 ms** |
+| `gc.get_objects()` alone | 18 ms |
+| gc walk **plus payload scan** | **2,200-3,800 ms** |
+
+Against a 1.5 s tick, the payload scan is a multi-second freeze — through a
+missile engagement, on the live process, worse. So `gc_census` defaults to
+**false** and the census runs tracemalloc-only, which costs nothing measurable
+and is the lane that names the allocating line anyway. Turn the gc lane on only
+when the container *type* is wanted and a stalled tick is acceptable.
+
+`tm_overhead_mb` reports tracemalloc's own trace memory each census, so the
+instrument can be subtracted from the measurement rather than mistaken for it.
+
+**How to read the result when the real session runs it:**
+
+    tm_mb climbing with mi_use     -> Python-allocated. by-site names the line.
+    tm_mb FLAT while mi_use climbs -> genuinely native (torch/OpenCV C++ buffers
+                                      below the Python allocator).
+
+**Not yet run against a real session.** The numbers above are a planted control,
+not the leak. Running it for real needs `heap_census.enabled: true` and a raised
+`memory_guard.soft_limit_mb`, per the warning immediately below.
+
+### Mitigation in force — and what it hides
+
+ADR 090 adds a memory guard: the session ends at the next lobby once RSS
+crosses 6 GB, or immediately at 10 GB. That bounds the risk while the
+allocation is still unfound.
+
+**It also suppresses the symptom.** With the guard active RSS never reaches the
+values that made this leak obvious, and OCR never degrades far enough to alarm
+anyone. **Any future investigation here must raise or disable
+`memory_guard.soft_limit_mb` to reproduce the curve above.** A session that ends
+cleanly at 6 GB is not evidence the leak is fixed.
+
+### Operational note
+
+This session reached **13.2 GB RSS at 6.9 hours** and was still climbing.
+That is past the footprint that preceded the compositor OOM in the foundry
+cross-reference. Long unattended sessions remain unsafe; the ~3 hour restart
+guidance stands and is if anything too generous.
+
+## Superseded plan — live vs retained (instrumented 2026-08-22)
+
+Two hypotheses have now been tested and refuted without either one ever
+distinguishing the two ways a heap can grow:
+
+- memory the program is **using** — something retains objects
+- memory glibc has **freed and kept** — fragmentation
+
+`anon` proved the growth is heap rather than mapped buffers, but cannot tell
+these apart. glibc reports both directly, and the RESOURCE line now carries
+them:
+
+```
+RESOURCE ... anon_mb=2450 mi_use_mb=1980 d_mi_use=+120 mi_free_mb=470 d_mi_free=+310
+```
+
+| Reading | Meaning | Where to look next |
+|---------|---------|--------------------|
+| `mi_use` climbs with RSS | live allocations retained | find the owner — object graph, caches, buffers |
+| `mi_free` climbs with RSS | freed but held in the arena | fragmentation; allocator tuning or allocation-pattern change |
+| neither climbs | growth is outside the main arena | mmap'd blocks (`hblkhd`), a non-glibc allocator, or a native library |
+
+The third row is a real possibility worth stating in advance: PyTorch and
+OpenCV both allocate outside plain `malloc` in places, and if the growth does
+not appear in either figure that is itself a strong result, because it
+eliminates the C heap entirely.
+
+Needs one session of at least four hours per the method rule below. **No
+hypothesis should be formed before that data exists** — this document has
+already recorded two confident explanations that measurement destroyed.
+
+## Superseded hypothesis (kept for the evidence) — a ~300 MB model reloaded per health probe
+
+`_schedule_starting_health_probe` ran its OCR on a **fresh thread per probe**:
+
+```python
+executor = self.ocr_executor          # fetched as a guard...
+if executor is None:
+    return
+...
+threading.Thread(target=_probe, daemon=True, name="starting-health-probe").start()
+```
+
+The executor was fetched, checked, and then not used. EasyOCR readers are
+thread-local and hold roughly 300 MB of model weights, so every probe built one
+on its new thread, ran a single OCR, and discarded it when the thread died.
+
+Measured on the 3h 18m session of 2026-08-22:
+
+| | |
+|---|---|
+| GAME_STARTING health probes | 1,138 |
+| EasyOCR reader initialisations | 1,213 |
+| ThreadPoolExecutor instances | 1 (13 workers) |
+| Distinct thread ids seen | 44 (up to 78 inits on one reused id) |
+| Legitimate expected total | ~16 (13 pool workers + 3 daemons) |
+
+That is on the order of **350 GB of allocate/free churn per session** in
+~300 MB blocks — a textbook driver of glibc arena fragmentation, and it fits
+every constraint this document had accumulated:
+
+- growth is **anonymous heap**, not mapped buffers — matches large transient mallocs
+- **Python object counts stay flat** — the readers really are freed
+- `MALLOC_ARENA_MAX=2` helped 69% but did not fix it — fewer arenas to fragment,
+  same churn
+- frames, threads and fds were all correctly ruled out — none of them was it
+- **OCR degrades progressively** — both the reloads themselves and allocation
+  slowing as the heap fragments
+
+**Fix:** the probe now submits to the existing pool. A tripwire warns if reader
+initialisations exceed 25 in a session, so a recurrence announces itself, and
+the per-init log moved from INFO to DEBUG — it had been firing 1,213 times a
+session and reading as noise.
+
+**Not yet confirmed as the whole cause.** The mechanism is verified and the fit
+is strong, but the residual rate after the fix has not been measured. That needs
+a session of at least four hours per the method rule below. If the rate drops to
+the ~50 MB/h noise floor this document closes; if it merely improves, the
+remainder is still unattributed.
+
+**How it hid:** the clue printed 1,213 times per session at INFO, in a console
+emitting 1.3 lines/sec. Design 007 exists partly because of this.
+
+## Current status (2026-08-21)
+
+| | |
+|---|---|
+| **Problem** | Wingman RSS grows without bound across a long session; OCR latency degrades in lockstep until it exceeds the 1.5s tick budget. |
+| **Whose leak** | Wingman's own process. Game grows +157 MB/h against wingman's +1,530 MB/h, and the memory returns to the host on wingman's exit. |
+| **Cause — partly known** | glibc arena fragmentation across the OCR thread pool. `MALLOC_ARENA_MAX=2` cuts the rate 69% (5,187 to 1,620 MB/h) and delays onset from hour ~2 to hour ~3. |
+| **Cause — narrowed 2026-08-23** | LIVE allocation (88% of growth), not fragmentation. ~671 KB retained per tick. Python-vs-native not yet determined. |
+| **Fixed?** | **No.** Two hypotheses tested and both refuted (arena cap, reader churn). Cause unknown; +1,500 MB/h unattributed. A 5h43m session on 2026-08-21 reached 10.9 GB RSS with OCR median at 1.97s. |
+| **Mitigation in force** | `MALLOC_ARENA_MAX=2` (Makefile `WINGMAN_ENV`), plus restarting wingman every ~3 hours. |
+| **Next measurement** | `mi_use_mb` vs `mi_free_mb` (added 2026-08-22) separates live retention from arena fragmentation. Needs one 4h+ session. |
+
+**Method rule.** No leak claim from a session shorter than four hours. Every
+premature conclusion in this document came from measuring inside the flat early
+window — hour 1 reads ~0.30s whether or not the leak is fixed.
+
+## Evidence
+
+### Progressive degradation (2026-08-20, 8h12m, 79 missions)
+
+Respawn-crop OCR duration by hour of the session:
+
+| Hour | Samples | Median | p95 | Max |
+|------|---------|--------|-----|-----|
+| 07 | 1768 | 0.24 s | 0.38 s | 0.73 s |
+| 08 | 1844 | 0.26 s | 0.67 s | 2.52 s |
+| 09 | 1811 | 0.32 s | 1.64 s | 8.03 s |
+| 10 | 1652 | 0.47 s | 2.71 s | 12.50 s |
+| 11 | 1492 | 0.66 s | 4.15 s | 20.97 s |
+| 12 | 1040 | 0.86 s | 6.63 s | 22.79 s |
+| 13 | 740 | 1.95 s | 10.65 s | 38.85 s |
+| 14 | 474 | 2.55 s | 16.86 s | 33.69 s |
+| 15 | 66 | 4.85 s | 16.46 s | 27.86 s |
+
+Sample count per hour is itself a symptom: tick throughput fell by ~73%
+(1768 → 474) as the loop slowed.
+
+### Reproducible across sessions, resets on restart
+
+| Session | Duration | Hour-1 median / p95 | Final-hour median / p95 |
+|---------|----------|---------------------|-------------------------|
+| 2026-08-19 23:22 | ~6 h | 0.26 s / 0.39 s | 0.44 s / 4.05 s |
+| 2026-08-20 03:51 | ~2 h | 0.24 s / 0.40 s | 0.27 s / 1.15 s |
+| 2026-08-20 07:07 | ~8 h | 0.24 s / 0.38 s | 4.85 s / 16.46 s |
+
+Every session begins at the same clean baseline. The degradation is a function
+of time-in-session, not of accumulated wall-clock or machine uptime.
+
+### Memory correlation (host sampler, 10-minute cadence)
+
+System swap during the 2026-08-20 session, from `~/.shell-cgroup-watch.log`:
+
+| Time | Swap | Wingman |
+|------|------|---------|
+| 07:19 | 4,281 MB | yes |
+| 09:25 | 12,371 MB | yes |
+| 12:34 | 12,856 MB | yes |
+| 14:40 | 14,762 MB | yes |
+| 15:22 | 4,642 MB | **no** |
+| 15:43 | 3,641 MB | no |
+
+Across the full sampler history, bucketing each 10-minute delta by wingman state:
+
+| Wingman | Samples | Mean Δswap | Mean Δshmem |
+|---------|---------|------------|-------------|
+| running | 742 | **+56.7 MB** | −85.5 MB |
+| off | 1598 | −25.1 MB | +43.6 MB |
+
+The leaked class is **anonymous memory** (swap-backed). Compositor-cgroup
+`shmem` stays flat (~715 MB) throughout a wingman session.
+
+### Regression against the release baseline
+
+The performance gate is already flagging this (session-end report, 2026-08-20):
+
+| Crop | Release baseline | Current period | Δ |
+|------|------------------|----------------|---|
+| incoming | 0.45 s | 1.06 s | +137% |
+| respawn | 0.41 s | 1.00 s | +143% |
+| health | 0.42 s | 1.00 s | +140% |
+| telemetry | 0.66 s | 1.35 s | +106% |
+| **reaction** (incoming→flare) | **0.39 s** | **2.48 s** | **+533%** |
+
+Reaction latency is the safety-critical number: it is the delay between an
+incoming-missile detection and the flare burst.
+
+## Secondary damage: manufactured false respawns
+
+OCR starvation produces health-confirmation gaps, which the ADR 064 weak-tier
+fallback misreads as death-and-respawn episodes. Traced instance
+(2026-08-20 13:14):
+
+```
+13:14:14  Respawn OCR: 8.42s                      <- pipeline starved
+13:14:14  health read 250 unconfirmed (window=[250]) — holding previous value
+13:14:14  Health respawn detector: death mark set (tier=weak)
+13:14:16  health alive transition False→True — resetting health ceiling
+13:14:16  HEALTH RESPAWN FALLBACK firing (tier=weak, dead_for=1.8s)
+          → mission cancelled → restarted
+```
+
+The aircraft never died: health read 250 on both sides of the gap. Across the
+session, **17 of 31 weak-tier fallback fires had `dead_for` < 3 s** (median
+2.8 s, minimum 0.2 s). A real death→respawn cycle cannot complete that fast —
+the respawn overlay alone displays for roughly 8 s.
+
+This is what the session summary's `Spawn crashes: 5` / `redetect churn: 12`
+counters are actually catching. They are not crashes.
+
+**Proposed guard (not yet implemented):** a minimum-`dead_for` floor on
+weak-tier fallback fires. The value is already computed at the fire site; a 3 s
+floor rejects all 17 false fires while leaving the 14 legitimate ones
+untouched. This would be a third gate alongside ADR 064's existing state gate
+and alive-transition gate, and needs an ADR 064 amendment.
+
+## 2026-08-20 23:04 — attribution answered: the leak is wingman-side
+
+The first session run with the new `RESOURCE` instrumentation settled the
+attribution question in 25 minutes, and the leak is far more violent than the
+8-hour session suggested:
+
+| elapsed | wingman rss | game rss | threads | fds | gc gen2 |
+|---------|-------------|----------|---------|-----|---------|
+| 0 s | 681 MB | 1139 MB | 2 | 73 | 11 |
+| 300 s | 4,598 MB | 1381 MB | 22 | 69 | 9 |
+| 601 s | 7,112 MB | 1510 MB | 23 | 69 | 53 |
+| 902 s | 10,144 MB | 1552 MB | 20 | 69 | 52 |
+| 1202 s | 12,172 MB | 1591 MB | 19 | 69 | 53 |
+| 1502 s | 15,879 MB | 1608 MB | 23 | 69 | 73 |
+
+**+15.2 GB in 25 minutes (+36,300 MB/h)** while the game grew 469 MB. The
+session was stopped manually at 15.9 GB with 6.5 GB of host memory remaining;
+available memory returned to 22.3 GB immediately on exit, confirming wingman
+held all of it.
+
+What the instrumentation rules out directly:
+
+- **Not the game** — 469 MB over the same window, two orders of magnitude less.
+- **Not a thread leak** — thread count flat at 19–23 across the whole climb.
+- **Not an fd leak** — 69 throughout, *below* the t=0 value of 73. This
+  specifically exonerates the leaked-X-Display-connection hypothesis that
+  Future 001 raised.
+- **Not Python-tracked objects** — gc gen2 stayed in the 9–73 range while RSS
+  grew 15 GB. `/proc/<pid>/smaps_rollup` showed **12.1 GB of private dirty
+  anonymous** memory, i.e. native allocation (torch/OpenCV/EasyOCR), not
+  Python heap the collector can see.
+- **Not OCR degradation-driven** — `ocr_med` stayed 0.22–0.27 s and
+  `pool_depth` stayed 0 for the entire climb. This is important: it means the
+  **memory leak precedes the OCR degradation** rather than resulting from it.
+  The 8-hour session's OCR collapse is downstream of memory pressure, not a
+  peer symptom.
+
+### Narrowing experiments — what is ruled OUT
+
+Each was run as a bounded standalone script measuring `VmRSS` across a loop.
+Recorded so the next investigator does not repeat them:
+
+| Path | Test | Result |
+|------|------|--------|
+| Screen capture | `Capture.get_frame()` x120 | **Clean.** +53 MB pipeline warm-up, then exactly flat. 0 MB/frame. |
+| Full analysis, static frame | `analyze_frame` x60 on one battle frame | **Plateau.** Rose to 3.1 GB (13 thread-local EasyOCR readers), fell back to 2.7 GB, flat. |
+| Full analysis, varied frames | `analyze_frame` x120 cycling 9 distinct gate frames | **Plateau.** 1770 -> 2968 MB during pool warm, then flat from frame 30 onward. |
+| Minimap components | `detect_enemy_map_components` x600 | **Clean.** +1 MB total. |
+| Frame retention | source audit | **Clean.** Every frame attribute is single-slot (overwritten, not appended); every `deque` carries a `maxlen`. |
+
+A correction worth recording: gc generation counts were initially read as
+evidence against a frame-retention leak. That inference is invalid — **gc
+counts objects, not bytes**, so a list holding 800 numpy frames is ~800 objects
+(a negligible gen2 count) and 15 GB of RSS. The audit above, not the gc
+numbers, is what actually rules retention out.
+
+### Leading hypothesis: glibc arena fragmentation across the OCR thread pool
+
+Everything reproducible in isolation plateaus; only the full live loop climbs.
+The remaining candidate that fits every observation is allocator-level:
+
+- glibc gives each thread its own malloc arena (up to 8 x cores). The OCR pool
+  runs 13 workers, each allocating and freeing numpy/torch buffers of
+  *varying* sizes every tick.
+- Freed blocks are returned to their arena, not to the OS, and glibc's dynamic
+  `M_MMAP_THRESHOLD` climbs as it observes large frees — so 18 MB frame-sized
+  allocations that initially used `mmap` (returned on free) migrate to the
+  heap (retained on free).
+- The result is RSS that grows with tick count, is private dirty anonymous,
+  is invisible to Python's gc, never appears in a short single-path test, and
+  is released in full at process exit — which is every symptom observed.
+
+**Cheap test, not yet run:** launch with `MALLOC_ARENA_MAX=2` (and optionally
+`M_MMAP_THRESHOLD` pinned via `MALLOC_MMAP_THRESHOLD_=131072`) for a bounded
+10-minute session and compare the `RESOURCE` slope against the 2026-08-20
+23:04 baseline of ~3 GB per 5-minute interval. No code change is required to
+test it. If the slope collapses, the fix is an environment setting in the
+launcher plus a periodic `malloc_trim(0)` via `ctypes`.
+
+If that does not explain it, the next step is `--tracemalloc` (Future 001
+Tier 2) to catch any Python-side allocation, paired with an allocator-level
+check, since a pure-native leak will not appear in tracemalloc at all.
+
+The gap between the isolated tests (plateau) and live operation (linear climb)
+is now the whole question. The difference is that live runs **fresh frames
+every tick** through the full handler stack, where the tests reused one frame
+through a single path.
+
+**Next experiment:** `--tracemalloc` (Future 001 Tier 2) is now clearly
+justified — the leak is confirmed wingman-side, so snapshot diffing will name
+the allocation site directly. Native allocations will need `tracemalloc` plus
+an allocator-level check, since the growth is not in the Python heap.
+
+## 2026-08-21 — PARTIAL CAUSE: glibc arena fragmentation
+
+> **Superseded as a root-cause claim.** This section's conclusion was retracted
+> the same day — see "RETRACTION" below. Arena fragmentation is real and the
+> mitigation cuts the rate by 69%, but it is not the whole cause and the leak
+> is not fixed. The measurements here remain valid; only the verdict changed.
+
+The hypothesis below was tested by launching with `MALLOC_ARENA_MAX=2` and no
+code change. Identical workload (same `n_ocr`, same `ocr_med`), same host,
+same game build:
+
+| elapsed | default arenas | `MALLOC_ARENA_MAX=2` | reduction |
+|---------|----------------|----------------------|-----------|
+| 0 s | 681 MB | 684 MB | baseline match |
+| 300 s | 4,598 MB | 2,453 MB | -47% |
+| 601 s | 7,112 MB | 2,637 MB | -63% |
+| 902 s | 10,144 MB | **2,545 MB** | **-75%** |
+
+Interval growth is the decisive number: the 300→601 s interval grew
+**+2,514 MB** with default arenas and **+184 MB** with the cap. RSS then went
+*down* between the 601 s and 902 s samples (2,637 → 2,545 MB) — memory being
+returned to the OS, which never happened in any prior session.
+
+**~2.5 GB is wingman's real footprint** (13 thread-local EasyOCR readers), and
+it is exactly the plateau the isolated `analyze_frame` tests reached. Every
+byte above it in prior sessions was allocator fragmentation, not live data.
+
+This also explains why every isolated test plateaued while live climbed: the
+tests were effectively single-arena, whereas the live loop spreads allocations
+across 13 worker arenas that never release to the OS. The tests were not
+missing the leak — they were not able to reproduce its precondition.
+
+**Fix applied:** `WINGMAN_ENV := MALLOC_ARENA_MAX=2` in the Makefile, applied
+to all five wingman launch targets (`r`, `rd`, `newpaths`, `rr-path1`,
+`rr-live-path1`). It must be set before the process starts, since glibc reads
+it at first malloc — so this belongs in the launcher, not in Python.
+
+## RETRACTION 2026-08-21 16:54 — the section above was measured too early
+
+**The "ROOT CAUSE CONFIRMED" claims in the preceding section are wrong.
+`MALLOC_ARENA_MAX=2` reduces the leak; it does not fix it.** They were drawn from a 56-minute session, and the
+degradation does not become visible until roughly hour three. A 5h43m session
+(55 missions, 100% click-to) shows the leak intact:
+
+| Elapsed | RSS |
+|---------|-----|
+| 0.0h | 666 MB |
+| 0.8h | 2,733 MB |
+| 2.3h | 4,427 MB |
+| 3.8h | 7,166 MB |
+| 5.3h | 10,023 MB |
+
+Sustained **+1,620 MB/h**, peak 11,101 MB, with the cap correctly applied
+(verified in the `WINGMAN_ENV` line of the Makefile and in the process
+environment). And the OCR degradation — the symptom this document exists for —
+is fully present:
+
+| Hour | n | median | p95 | max |
+|------|---|--------|-----|-----|
+| 11:00 | 1562 | 0.30s | 0.52s | 0.88s |
+| 12:00 | 2008 | 0.37s | 0.92s | 2.73s |
+| 13:00 | 1802 | 0.54s | 2.16s | 10.27s |
+| 14:00 | 1595 | 0.81s | 4.19s | 23.04s |
+| 15:00 | 1049 | 1.17s | 7.06s | 25.69s |
+| 16:00 | 729 | **1.97s** | **11.22s** | **30.95s** |
+
+Median rose 6.5x and throughput fell from 2,008 to 729 cycles/hour. Note that
+hour 1 reads 0.30s — exactly the "flat" figure the retracted section cites. A
+one-hour measurement cannot distinguish a fixed leak from an unfixed one.
+
+**What the cap did achieve:** the rate fell from +5,187 MB/h to +1,620 MB/h
+(-69%), and the onset of degradation moved from hour ~2 to hour ~3. Arena
+fragmentation was therefore a real contributor, but not the whole cause. The
+remaining +1,620 MB/h is unexplained and this document is reopened.
+
+**Method rule going forward:** no leak claim from a session shorter than four
+hours. Every premature conclusion in this document — including this author's —
+came from measuring inside the flat early window.
+
+### Consequences for the rest of this document — SUPERSEDED, see retraction above
+
+A 56-minute session (9 missions, 100% click-to) with the cap in place settles
+the downstream questions:
+
+| Metric | Pre-fix | With `MALLOC_ARENA_MAX=2` | Release baseline |
+|--------|---------|---------------------------|------------------|
+| Memory growth rate | +5,187 MB/h | **+120 MB/h** | — |
+| OCR median, hour 1 → hour 2 | 0.24 → 0.26 s (then 4.85 by hour 9) | **0.25 → 0.25 s** | — |
+| Reaction latency (session) | 2.48 s period mean | **0.28 s** | 0.39 s |
+
+The OCR curve is flat across the session instead of compounding, and reaction
+latency is now *better than the release baseline*. The regression percentages
+still shown in the session-end report are period aggregates that continue to
+include pre-fix sessions; they will decay as capped sessions accumulate.
+
+- The **OCR degradation** is downstream of memory pressure, but is NOT
+  resolved — see the retraction above. It is delayed by roughly an hour and
+  returns in full by hour 5.
+- The **false-respawn cascade** is likewise downstream: it was caused by
+  health-confirmation gaps under OCR starvation. The 2026-08-21 capped
+  sessions recorded `Spawn crashes: 0` and no sub-3 s weak-tier fires. The
+  proposed `dead_for` floor remains worth having as defence in depth, but it
+  is no longer urgent.
+- The **swap correlation** in the foundry cross-reference stands, but its
+  magnitude should shrink dramatically: wingman at a 2.5 GB plateau no longer
+  raises the swap baseline the compositor growth starts from.
+
+Still open: whether `MALLOC_ARENA_MAX=2` costs measurable OCR throughput under
+contention (13 threads sharing 2 arenas serialise more in malloc). `ocr_med`
+held at 0.23-0.24 s through this session, matching the uncapped baseline, so
+there is no early sign of a cost — but this needs a long session to confirm.
+
+## What is not yet known
+
+- ~~**Which process leaks.**~~ **Answered 2026-08-20 23:04: wingman.** See the
+  section above — 36,300 MB/h against the game's 1,120 MB/h, with memory
+  returned to the host on wingman's exit. The restart experiment is no longer
+  needed.
+- **Which allocation path.** No memfd or `/dev/shm` growth accompanies it
+  (both flat across the session), so it is ordinary heap/anon memory — EasyOCR
+  tensors, OpenCV buffers, accumulated Python objects, or leaked X Display
+  connections (`_linux_key_event` opens a fresh Display per key event) are all
+  untested candidates.
+- **Why the observed rate varies so widely.** The 08-20 07:07 session implied
+  ~1.3 GB/h from swap growth; the 23:04 session measured 36 GB/h directly.
+  These are not necessarily inconsistent — swap growth measures *displacement*
+  of other processes, which only begins once wingman has already consumed the
+  free memory, so the earlier figure is a lower bound rather than the leak
+  rate. Whether wingman plateaus near ~16 GB (its peak when stopped) or
+  continues climbing is untested; the 23:04 session was halted before the
+  answer was visible.
+
+## Monitoring plan
+
+### In-log instrumentation (added 2026-08-20, v1.8.0)
+
+`wingman/resource_monitor.py` emits one `RESOURCE` line every
+`resource_monitor.interval_s` (default 300 s, ~100 lines per 8-hour session),
+starting with a t=0 baseline:
+
+```
+RESOURCE elapsed=8112s rss_mb=2841 swap_mb=1203 threads=31 fds=147
+         gc=(412,29,7) ocr_med=0.47 ocr_p95=2.71 n_ocr=1652
+         game_rss_mb=6210 game_swap_mb=3401 sys_swap_mb=12371
+```
+
+Every field earns its place against a specific open question:
+
+| Field | Answers |
+|-------|---------|
+| `rss_mb`, `swap_mb` (self) vs `game_rss_mb`, `game_swap_mb` | **Which process leaks** — settles the attribution question without the restart experiment |
+| `threads` | Daemon threads not being reaped |
+| `fds` | Leaked X Display connections (`_linux_key_event` opens one per key event) |
+| `gc=(g0,g1,g2)` | Python object accumulation vs native (EasyOCR/OpenCV) allocation. Secondary — `rss_mb` is the primary signal |
+| `ocr_med`, `ocr_p95`, `n_ocr` | Degradation **for that interval only**, not cumulative — so the curve is readable inline |
+| `sys_swap_mb` | Keeps the host correlation self-contained; no external sampler needed |
+| `elapsed` | Session-relative bucketing without wall-clock arithmetic |
+
+Notes: the OCR window is a read-only slice of the `PerformanceTracker` session
+buffers (`snapshot_since`), so it cannot disturb the regression gate. Game
+RSS/swap is summed across all matching processes and **double-counts shared
+pages** — read it as a growth trend, never an absolute. Every probe is
+individually guarded; a failing probe degrades to `n/a` rather than losing the
+line, and the sampler cannot raise into the main loop.
+
+Weak-tier fallback fires now also carry their diagnostic context:
+
+```
+HEALTH RESPAWN FALLBACK firing (tier=weak, dead_for=1.8s) — OCR missed this respawn
+  [context: health_window=[250] last_respawn_ocr=8.42s]
+```
+
+which makes the false-respawn mechanism self-evident at the fire site rather
+than something to reconstruct.
+
+### Per-session analysis recipe
+
+```bash
+grep RESOURCE wingman.log            # the whole curve, one row per 5 min
+grep -c "dead_for=[0-2]\." wingman.log   # false-respawn count (sub-3s fires)
+```
+
+Then record: session duration; `rss_mb`/`game_rss_mb` at t=0 vs end; whether
+`threads` or `fds` grew; the `ocr_med` curve; the false-respawn count; and
+reaction latency from the session-end performance report.
+
+The host sampler (`~/.shell-cgroup-watch.log`) remains useful as an independent
+cross-check and for the locked-session window that wingman cannot observe.
+
+### Discriminating experiment — DONE, answered
+
+~~Leave the game running; restart only wingman once degradation is visible.~~
+
+Answered without needing the restart. The 2026-08-21 5h43m session measured
+both processes directly: wingman +1,530 MB/h against the game's +157 MB/h, and
+the host recovered the full 10.9 GB when wingman exited. **The leak is in the
+wingman process.**
+
+### Heap or mapped buffers? — ANSWERED 2026-08-21: heap
+
+The 2h 19m acct1 session is the first with the `anon_mb` split. The result is
+unambiguous:
+
+| Elapsed | rss_mb | anon_mb | rss − anon |
+|---------|--------|---------|------------|
+| 0.0h | 685 | 379 | 306 |
+| 0.5h | 2521 | 2202 | 319 |
+| 1.0h | 3062 | 2742 | 320 |
+| 1.5h | 3537 | 3218 | 319 |
+| 2.0h | 4282 | 3962 | 320 |
+
+**The non-anonymous portion is flat at ~320 MB for the entire session.** RSS grew
++3597 MB and anonymous memory grew +3583 MB — essentially all of it.
+
+So the growth is **wingman's own heap**, not mapped capture buffers. The
+PipeWire capture path is exonerated by direct measurement rather than by
+inference, closing the ambiguity noted in the retraction above: `VmRSS` could
+not distinguish the two, and now it does not have to.
+
+This narrows the remaining +1,000–1,600 MB/h to allocator behaviour or genuine
+Python-side retention within the process. The 2026-08-20 narrowing already ruled
+out frame retention, thread growth, fd growth and Python object counts, and
+`MALLOC_ARENA_MAX=2` removed the arena component it could reach — so the
+residual is most likely fragmentation the cap does not address, but that is
+inference, not measurement.
+
+**Note on the four-hour rule.** This session is 2.3h, below the threshold for a
+*rate* claim, and its +1,001 MB/h is reported as such. The attribution finding
+above is not a rate claim: a constant rss−anon gap across 28 samples is
+decisive regardless of session length.
+
+### Superseded plan (kept for context)
+
+`VmRSS` counts shared pages as well as heap, and wingman receives capture
+buffers through the PipeWire pipeline the game feeds. So "growth in wingman's
+address space" does not by itself distinguish:
+
+- wingman retaining its own allocations → wingman's heap, or
+- capture buffers accumulating → pages originating from the game's frames.
+
+The RESOURCE line now carries the split, read from `/proc/self/smaps_rollup`:
+
+```
+RESOURCE elapsed=8112s rss_mb=2841 d_rss=+412 anon_mb=2610 d_anon=+390 shmem_mb=n/a ...
+```
+
+- `anon_mb` climbing with `rss_mb` → wingman's own heap (allocator or retention)
+- `rss_mb` climbing while `anon_mb` stays flat → the capture path
+
+`Shmem` is not exposed by every kernel (absent on this host) and degrades to
+`n/a`; the `Anonymous` vs `Rss` comparison is the one that decides it. Needs a
+single 4h+ session to read.
+
+Prior evidence favours the heap: the 2026-08-20 narrowing found the growth
+anonymous with no memfd or `/dev/shm` growth, and ruled out the capture path
+and frame retention. But that was measured against the **pre-cap** leak; the
+residual +1,620 MB/h has never been checked at this granularity.
+
+### Interim mitigation
+
+Two measures, both in force:
+
+1. `MALLOC_ARENA_MAX=2` — set for every wingman launch target via `WINGMAN_ENV`
+   in the Makefile. Cuts the growth rate 69%.
+2. Restart wingman every ~3 hours. With the cap, hours 1–3 stay within budget
+   (2026-08-21: median 0.30 s at hour 1, 0.37 s at hour 2, 0.54 s at hour 3);
+   it becomes operationally significant from hour 4 (0.81 s) and severe by
+   hour 6 (1.97 s median, 11.22 s p95).
+
+**Avoid unattended overnight runs** until the residual is understood: the same
+session peaked at 11.1 GB, which approaches the footprint that preceded the
+compositor OOM in the foundry cross-reference.
+
+## Relationship to the compositor OOM investigation
+
+Foundry tracks a separate host-level failure in
+`docs/performance/001-brave-oom-full-session-crash.md`: compositor-cgroup
+`shmem` growing 6+ GB/hour **while the session is locked**, pinned
+unevictable, until the OOM killer takes down the GNOME session. That
+investigation already ruled out wingman's PipeWire screencast as its cause
+(467 locked samples, all with `wingman=no`).
+
+This document is a **different phenomenon**, and the two are cleanly separable:
+
+| | Compositor OOM (foundry 001) | This leak |
+|---|---|---|
+| Memory class | `shmem`, pinned unevictable | anonymous (swap-backed) |
+| Charged to | GNOME Shell cgroup | process heap |
+| Occurs while | session **locked** | wingman **running** (always unlocked) |
+| Mean Δ per sample | +43.6 MB shmem (wingman off) | +56.7 MB swap (wingman on) |
+| Released by | unlocking | wingman exit |
+
+They are **anti-correlated and never overlap in time**, because wingman only
+runs while the operator is active.
+
+They do, however, **compound as risk**: both consume the same 24.5 GB swap
+device, and an 8-hour wingman session leaves the machine at ~14.8 GB swap used
+before the operator locks the screen and the compositor growth begins from that
+elevated baseline. Neither investigation should be closed on the strength of
+the other's evidence.

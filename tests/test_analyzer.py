@@ -115,14 +115,14 @@ def test_respawn_detection_positive(analyzer: GameStateAnalyzer, require_analyze
 def test_respawn_detection_negative(analyzer: GameStateAnalyzer, require_analyzer_easyocr, image_path: Path):
     frame = _load_image(image_path)
     analyzer.reset_cache()
-    
+
     # First call schedules background OCR
     state = analyzer.analyze_frame(frame)
-    
+
     # Wait for background OCR thread to complete
     if analyzer._background_ocr_thread and analyzer._background_ocr_thread.is_alive():
         analyzer._background_ocr_thread.join(timeout=30)
-    
+
     # Re-analyze to get updated cache result
     state = analyzer.analyze_frame(frame)
 

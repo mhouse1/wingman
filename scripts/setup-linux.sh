@@ -3,13 +3,27 @@
 #
 # Automates:
 #   1. Flatpak + Heroic Games Launcher install
-#   2. Proton-GE-latest download into Heroic's tools directory
-#   3. User added to 'input' group (for Wingman key injection)
+#   2. Proton-GE-latest download into Heroic's tools directory (so the Wingman
+#      Makefile's PROTON_ROOT default resolves without an override — Heroic
+#      left to its own defaults does not always pick GE-Proton)
+#   3. i386 multiarch + 32-bit GL/Vulkan libs (Steam Runtime container
+#      requirement — needed even though MetalStorm itself is 64-bit)
+#   4. uv install, `uv sync --all-groups`, and the gi/PyGObject venv bridge
+#   5. umu-run symlink (Heroic bundles its own copy; there's no separate
+#      install for it) — added after MetalStorm install, since that's the
+#      point at which Heroic is guaranteed to have fetched it
+#
+# Does NOT touch `input` group membership — obsolete since ADR 053: Wingman's
+# Linux input path uses XTest/XRecord, which needs neither root nor that group.
 #
 # Requires manual steps (script pauses and prompts):
 #   - Epic Games Store login (OAuth in browser)
 #   - MetalStorm install in Heroic UI
 #   No per-game Wine/UMU configuration needed — Heroic defaults work out of the box.
+#
+# See docs/job-aids/010-run-metalstorm-on-linux.md for the full narrative,
+# including troubleshooting for failure modes this script can't safely
+# auto-fix (e.g. a machine with a broken/incomplete apt sources list).
 
 set -euo pipefail
 
@@ -93,15 +107,82 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4 — input group (Wingman key injection)
+# Step 4 — i386 multiarch (Steam Runtime container requirement)
 # ---------------------------------------------------------------------------
-info "Checking 'input' group membership..."
-if groups | grep -qw input; then
-    info "Already in 'input' group."
+# umu-run/Proton launch the game inside a Steam Runtime container
+# (pressure-vessel). That container's library-capture step needs i386 enabled
+# to inject the host's real GPU driver — without it DXVK inside the container
+# sees zero Vulkan adapters and the game crashes on launch (`DXVK: No adapters
+# found`), even though the host GPU works fine outside the container. This is
+# required even though MetalStorm itself is a 64-bit game.
+info "Checking i386 (32-bit) multiarch support..."
+if dpkg --print-foreign-architectures | grep -qx i386; then
+    info "i386 architecture already enabled."
 else
-    warn "Adding ${USER} to 'input' group (required for Wingman key injection)..."
-    sudo usermod -aG input "$USER"
-    warn "Group change takes effect after you log out and back in."
+    info "Enabling i386 architecture..."
+    sudo dpkg --add-architecture i386
+    sudo apt-get update -qq
+fi
+if dpkg -s libgl1:i386 mesa-vulkan-drivers:i386 libvulkan1:i386 &>/dev/null; then
+    info "32-bit GL/Vulkan libraries already installed."
+else
+    info "Installing 32-bit GL/Vulkan libraries..."
+    if ! sudo apt-get install -y libgl1:i386 mesa-vulkan-drivers:i386 libvulkan1:i386; then
+        warn "i386 library install failed with unmet dependencies. Do NOT force it"
+        warn "with 'apt --fix-broken install' or '-f' — that can be destructive."
+        warn "This usually means either a pending-upgrade backlog (try 'sudo apt"
+        warn "upgrade' first) or a missing apt pocket — check 'grep Suites:"
+        warn "/etc/apt/sources.list.d/ubuntu.sources' lists all four suites (noble,"
+        warn "noble-updates, noble-backports, noble-security). See the troubleshooting"
+        warn "section of docs/job-aids/010-run-metalstorm-on-linux.md for the fix."
+        die "i386 library install failed — see guidance above, then re-run this script."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5 — uv, Python dependencies, and the gi (PyGObject) venv bridge
+# ---------------------------------------------------------------------------
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+info "Checking python3-tk (needed by wingman/calibrate.py and make test)..."
+if dpkg -s python3-tk &>/dev/null; then
+    info "python3-tk already installed."
+else
+    sudo apt-get install -y python3-tk
+fi
+
+info "Checking python3-gi and GStreamer introspection data..."
+if dpkg -s python3-gi gir1.2-gstreamer-1.0 &>/dev/null; then
+    info "python3-gi / gir1.2-gstreamer-1.0 already installed."
+else
+    sudo apt-get install -y python3-gi gir1.2-gstreamer-1.0
+fi
+
+info "Checking uv..."
+if ! command -v uv &>/dev/null; then
+    info "Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # shellcheck disable=SC1091
+    source "$HOME/.local/bin/env"
+fi
+
+info "Running 'uv sync --all-groups' in ${REPO_ROOT}..."
+( cd "$REPO_ROOT" && uv sync --all-groups )
+
+info "Bridging gi (PyGObject) into the uv-managed venv..."
+SITE_PACKAGES="$(cd "$REPO_ROOT" && uv run --active python -c \
+    "import sysconfig; print(sysconfig.get_paths()['purelib'])")"
+echo "/usr/lib/python3/dist-packages" > "${SITE_PACKAGES}/system_gi_bridge.pth"
+if ( cd "$REPO_ROOT" && uv run --active python -c "
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst
+Gst.init(None)
+" 2>/dev/null ); then
+    info "gi bridge verified — 'import gi.repository.Gst' works in the venv."
+else
+    warn "gi bridge written but verification import failed — check manually with:"
+    warn "  uv run --active python -c \"import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst\""
 fi
 
 # ---------------------------------------------------------------------------
@@ -120,17 +201,41 @@ pause "Log in to Epic Games Store inside Heroic (click Log In → Epic Games Sto
 pause "In Heroic Library, find MetalStorm and click Install. Wait for it to complete, then launch the game — no Wine or UMU settings changes needed, Heroic defaults work. Press Enter when the game loads"
 
 # ---------------------------------------------------------------------------
+# Step 6 — umu-run standalone symlink
+# ---------------------------------------------------------------------------
+# Heroic bundles its own copy for internal use; there's no separate install
+# for it upstream. It only exists once Heroic has actually run/updated a
+# umu-based launch, which the manual gate above should have triggered.
+UMU_BUNDLED="${HEROIC_CONFIG}/tools/runtimes/umu/umu-run"
+info "Checking for umu-run..."
+mkdir -p "$HOME/.local/bin"
+if [[ -e "$HOME/.local/bin/umu-run" ]]; then
+    info "umu-run already present at ~/.local/bin/umu-run."
+elif [[ -f "$UMU_BUNDLED" ]]; then
+    ln -sf "$UMU_BUNDLED" "$HOME/.local/bin/umu-run"
+    info "Symlinked umu-run -> ${UMU_BUNDLED}"
+else
+    warn "Heroic's bundled umu-run not found at ${UMU_BUNDLED}."
+    warn "Launch MetalStorm at least once from Heroic, then re-run this script,"
+    warn "or symlink manually once it appears."
+fi
+
+# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${GRN}${BLD}Setup complete.${RST}"
 echo ""
 echo "Next steps:"
-echo "  • Launch MetalStorm from Heroic and confirm the game loads with keyboard/mouse working."
+echo "  • Check what Proton build Heroic actually installed — this script's Proton-GE"
+echo "    download should make the Wingman Makefile default (PROTON_ROOT) resolve"
+echo "    without an override, but confirm with:"
+echo "      ls ${PROTON_DIR}/"
+echo "  • If the game crashes instantly with a Xalia/SDL 'No displays available' error,"
+echo "    export PROTON_USE_XALIA=0 before launching (see job-aid 010 troubleshooting)."
 echo "  • Then run Wingman from the repo root:"
-echo "      make preflight   # verify dependencies + group membership"
+echo "      make preflight   # verify dependencies"
+echo "      make g           # launch the game alone first, confirm it comes up windowed"
 echo "      make r           # start Wingman"
 echo ""
-if ! groups | grep -qw input; then
-    warn "Remember: log out and back in for the 'input' group change to take effect before running Wingman."
-fi
+echo "See docs/job-aids/010-run-metalstorm-on-linux.md for the full troubleshooting table."

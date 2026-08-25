@@ -219,7 +219,7 @@ class _PipeWireBackend:
         x11_offset = self._detect_via_x11()
         if x11_offset is not None:
             ox, oy = x11_offset
-            if 0 <= ox and ox + gw <= fw and 0 <= oy and oy + gh <= fh:
+            if ox >= 0 and ox + gw <= fw and oy >= 0 and oy + gh <= fh:
                 return x11_offset
             logger.warning(
                 "PipeWireBackend: xwininfo position (%d,%d) out of bounds for %dx%d frame — "
@@ -347,7 +347,7 @@ class _PipeWireBackend:
                 x11 = self._detect_via_x11()
                 if x11 is not None:
                     ox11, oy11 = x11
-                    if 0 <= ox11 and ox11 + gw <= fw and 0 <= oy11 and oy11 + gh <= fh:
+                    if ox11 >= 0 and ox11 + gw <= fw and oy11 >= 0 and oy11 + gh <= fh:
                         self._game_offset = x11
                         self._miss_count = 0
                         self._detection_warned = False
@@ -368,8 +368,8 @@ class _PipeWireBackend:
                             import cv2 as _cv2
                             _half = _cv2.resize(arr, (fw // 2, fh // 2))
                             _cv2.imwrite("/tmp/wingman_detect_fail.png", _half)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Capture: could not write detect-fail debug image: %s", e)
                     self._miss_count += 1
                     # Start background frame-diff detection on first miss and every
                     # _REDETECT_AFTER non-detecting misses thereafter.

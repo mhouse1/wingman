@@ -9,7 +9,6 @@ Usage: uv run pytest tests/test_tick_handlers.py -q
 import time
 from types import SimpleNamespace
 
-import pytest
 
 from wingman.analyzer import GameState
 from wingman.tick_handlers import WaitingFallbackHandler
@@ -787,6 +786,50 @@ class TestUnknownAnomalyRecorder:
             return state["now"]
         clock.state = state
         return clock
+
+    def test_lobby_blackout_captures_evidence(self, tmp_path):
+        """ADR 087: a classified state whose crops all read empty is captured.
+
+        On 2026-08-21 wingman sat in GAME_LOBBY for 8 minutes with every lobby
+        crop blank, pressing ESC on a loop. No screenshot was taken because the
+        capture was gated on GAME_UNKNOWN, so the screen that caused it could
+        not be identified afterwards.
+        """
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock)
+        # Blackout beats arrive every 10s from the analyzer.
+        r.note_lobby_stall()
+        assert r.tick(self._frame(), GameState.GAME_LOBBY) is None
+        clock.state["now"] += 10.0
+        r.note_lobby_stall()
+        assert r.tick(self._frame(), GameState.GAME_LOBBY) is None, \
+            "captured before the threshold"
+        clock.state["now"] += 25.0          # 35s since the first beat
+        r.note_lobby_stall()
+        path = r.tick(self._frame(), GameState.GAME_LOBBY)
+        assert path is not None, "no evidence captured for a lobby blackout"
+        assert "blackout" in str(path), f"episode not named in {path}"
+
+    def test_lobby_blackout_stops_when_scan_recovers(self, tmp_path):
+        """A recovered scan stops emitting beats; the episode must lapse."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock)
+        r.note_lobby_stall()
+        clock.state["now"] += 40.0          # past the threshold, but no new beat
+        assert r.tick(self._frame(), GameState.GAME_LOBBY) is None, \
+            "captured after the blackout had already cleared"
+        assert list(tmp_path.iterdir()) == []
+
+    def test_state_change_ends_blackout_episode(self, tmp_path):
+        """Classification producing a new answer means the blackout is over."""
+        clock = self._clock()
+        r = self._recorder(tmp_path, clock)
+        r.note_lobby_stall()
+        clock.state["now"] += 35.0
+        r.on_state_change(GameState.GAME_BATTLE, GameState.GAME_LOBBY)
+        r.note_lobby_stall()                # fresh episode, clock restarts
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
 
     def test_normal_startup_never_captures(self, tmp_path):
         clock = self._clock()

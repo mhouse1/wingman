@@ -21,10 +21,13 @@ decorator): once a tactic is selected it stays selected for a minimum
 duration, preventing selection flapping.
 """
 
+import logging
 import time
 from dataclasses import dataclass
 
 import py_trees
+
+logger = logging.getLogger(__name__)
 
 from .analyzer import GameState
 
@@ -66,6 +69,11 @@ class AnalyzerSnapshot:
     # None when unread or stale. Consumed by the Controller's burner gating,
     # carried here so tactics and logging see the same frozen value.
     fuel_pct: "int | None" = None
+    # ADR 086 d2: signed altitude rate in m/s, negative while descending. The
+    # emergency recovery trigger needs the RATE, not just the value — an
+    # altitude threshold cannot distinguish a cruise through 4000 m from a
+    # 560 m/s dive through it, and on 2026-08-21 18:41 it did not.
+    altitude_rate: "float | None" = None
 
     @property
     def contacts(self) -> int:
@@ -190,10 +198,20 @@ def make_disengage_condition(absent_after_s: float):
     return disengage
 
 
+# Fresh altitude samples required after a respawn before the time-to-ground
+# trigger is trusted again (ADR 086 d2). Sessions start already settled — only
+# an observed respawn imposes the wait.
+_SETTLED = 2
+
+
 def make_climb_condition(enter_below_alt: "float | None",
                          exit_above_alt: "float | None",
                          is_running_fn=None,
-                         confirm_reads: int = 1):
+                         confirm_reads: int = 1,
+                         recover_below_time_s: "float | None" = None,
+                         confirm_bypass_time_s: "float | None" = None,
+                         descent_memory_s: float = 5.0,
+                         clock=time.time):
     """ADR 073: hysteresis band on the telemetry stable altitude.
 
     Enters below ``enter_below_alt``, releases only at or above
@@ -214,13 +232,85 @@ def make_climb_condition(enter_below_alt: "float | None",
     one bad high must never release a genuine one. None reads neither count
     toward nor reset a streak (the freeze policy applied to the debounce).
     """
-    state = {"active": False, "streak": 0}
+    state = {"active": False, "streak": 0, "ttg_streak": 0,
+             "last_ttg": None, "last_ttg_ts": 0.0, "post_respawn": _SETTLED}
+
+    def _time_to_ground(snapshot, now):
+        """Seconds to impact at the current descent rate, or None.
+
+        ADR 086 d4: a REJECTED reading during an established descent is
+        evidence of rapid change, not of safety, so the last known descent is
+        held for ``descent_memory_s``. Absence of perception must not read as
+        absence of danger.
+        """
+        alt = snapshot.altitude
+        rate = getattr(snapshot, "altitude_rate", None)
+        if alt is not None and rate is not None and rate < 0:
+            ttg = alt / -rate
+            state["last_ttg"], state["last_ttg_ts"] = ttg, now
+            return ttg
+        if (state["last_ttg"] is not None
+                and now - state["last_ttg_ts"] <= descent_memory_s):
+            return state["last_ttg"]
+        return None
 
     def climb(snapshot: AnalyzerSnapshot) -> bool:
         if enter_below_alt is None or exit_above_alt is None:
             return False   # ADR 073: disabled until calibrated
+
+        # ADR 086 d2: the emergency trigger is predicted TIME to ground, not
+        # altitude. On 2026-08-21 18:41 the aircraft dived 9203 m -> 2301 m in
+        # 27 s with 2 missiles aboard while the tree kept selecting Engage:
+        # the altitude band never opened because the smoothed altitude lags
+        # ~1500 m in a 560 m/s dive and the aircraft hit the ground first.
+        now = clock()
+
+        # ADR 086 d2: a respawn is an altitude DISCONTINUITY, not a descent.
+        # The smoothed value carries the dead aircraft's numbers across it, so
+        # the first post-respawn samples describe a fall that already ended.
+        # Observed 2026-08-21 21:28:49 — fired "2s to ground" at a smoothed
+        # 324m while the new aircraft was at 10m and climbing away at +513m/s.
+        if snapshot.is_respawning:
+            state["post_respawn"] = 0
+            state["last_ttg"] = None
+            state["ttg_streak"] = 0
+        elif snapshot.altitude is not None:
+            state["post_respawn"] += 1
+
+        ttg = _time_to_ground(snapshot, now)
+        emergency = False
+        # Two clean samples since the respawn before the emergency is trusted:
+        # enough to establish a rate that describes the LIVING aircraft.
+        settled = state["post_respawn"] >= _SETTLED
+        if settled and recover_below_time_s is not None and ttg is not None \
+                and ttg < float(recover_below_time_s):
+            if (confirm_bypass_time_s is not None
+                    and ttg < float(confirm_bypass_time_s)):
+                # ADR 086 d3: inside the bypass window, waiting for a second
+                # read spends the very margin the trigger exists to protect.
+                emergency = True
+            else:
+                state["ttg_streak"] += 1
+                emergency = state["ttg_streak"] >= max(1, int(confirm_reads))
+            if emergency and not state["active"]:
+                logger.warning(
+                    "BT: DIVE RECOVERY — %.0fs to ground (alt=%s rate=%s) — "
+                    "climb forced (ADR 086 d2)",
+                    ttg,
+                    "n/a" if snapshot.altitude is None else f"{snapshot.altitude:.0f}m",
+                    "held" if getattr(snapshot, "altitude_rate", None) is None
+                    else f"{snapshot.altitude_rate:+.0f}m/s")
+        else:
+            state["ttg_streak"] = 0
+
         alt = snapshot.altitude
-        if alt is not None:
+        if emergency:
+            # The band must not release a recovery it did not start: in this
+            # dive the altitude was far ABOVE exit_above_alt the whole way
+            # down, so the ordinary hysteresis would have cleared it instantly.
+            state["active"] = True
+            state["streak"] = 0
+        elif alt is not None:
             if state["active"]:
                 crossing = alt >= exit_above_alt
             else:
@@ -272,7 +362,7 @@ def has_contacts(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.contacts > 0
 
 
-def always(snapshot: AnalyzerSnapshot) -> bool:
+def always(_snapshot: AnalyzerSnapshot) -> bool:
     return True
 
 
@@ -360,7 +450,12 @@ def build_tree(bt_cfg: dict, clock=time.time,
             climb_cfg.get("enter_below_alt"),
             climb_cfg.get("exit_above_alt"),
             is_running_fn=climb_fns[1] if climb_fns is not None else None,
-            confirm_reads=int(climb_cfg.get("confirm_reads", 1)))
+            confirm_reads=int(climb_cfg.get("confirm_reads", 1)),
+            # ADR 086 d2/d3/d4 — time-to-ground recovery. Unset disables it and
+            # leaves the pure ADR 073 altitude band.
+            recover_below_time_s=climb_cfg.get("recover_below_time_s"),
+            confirm_bypass_time_s=climb_cfg.get("confirm_bypass_time_s"),
+            descent_memory_s=float(climb_cfg.get("descent_memory_s", 5.0)))
         # ADR 075: the armed altitude-sustain band shares the leaf with the
         # emergency band. Both closures are evaluated EVERY tick (no
         # short-circuit) so neither hysteresis state machine goes stale while

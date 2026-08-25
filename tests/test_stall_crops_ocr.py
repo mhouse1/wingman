@@ -1,4 +1,4 @@
-"""ADR 084: real-OCR verification of the four stall-recovery crops.
+"""ADR 084: real-OCR verification of the stall-recovery crops.
 
 Guards calibration drift. The gate logic in tests/test_stall_recovery.py decides
 WHEN to act; this decides whether the crop can see the screen at all. A crop
@@ -30,6 +30,8 @@ STALL_CASES = [
     ("STALL_EXIT_TO_DESKTOP", "STALL_EXIT_TO_DESKTOP.png", "CANCEL"),
     ("STALL_MULTI_PLAYER",    "STALL_MULTI_PLAYER.png",    "X"),
     ("STALL_RETRY",           "STALL_RETRY.png",           "RETRY"),
+    # ADR 093: the PROFILE overlay that livelocked a session for 110 minutes.
+    ("STALL_PROFILE",         "STALL_PROFILE.png",         "PROFILE"),
 ]
 
 

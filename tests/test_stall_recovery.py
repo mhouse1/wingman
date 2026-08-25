@@ -57,6 +57,106 @@ class TestStallGate:
         targets = analyzer._stall_recovery_targets(state)
         assert targets == list(STALL_RECOVERY_CROPS)
 
+    def test_lobby_blackout_past_dwell_opens_only_de_escalating_crops(self, analyzer):
+        """ADR 087, widened by ADR 093: a sustained lobby blackout may act on
+        the screens it can dismiss without escalating.
+
+        The ESC pressed on every LOBBY_STALL beat is what opens "Exit to
+        Desktop"; GAME_LOBBY is not in STALL_ACTION_STATES, so its crop was
+        never scanned and wingman deadlocked against a modal it created
+        (2026-08-21: 8 minutes, 187 blank cycles). ADR 093 added STALL_PROFILE
+        on the same gate for the same reason, after a PROFILE overlay stranded
+        a session for 110 minutes with nothing eligible to dismiss it.
+
+        The invariant ADR 087 was really protecting is unchanged and is what
+        this test now asserts: both eligible crops are a single de-escalating
+        click, and the INVASIVE ones stay gated on a genuinely unclassifiable
+        state. Widening this set again needs the same argument.
+        """
+        analyzer._stall_state_since = 0.0
+        analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
+        targets = analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
+        assert set(targets) == {"STALL_PROFILE", "STALL_EXIT_TO_DESKTOP"}, \
+            f"lobby blackout must open exactly the de-escalating crops, got {targets}"
+        for invasive in ("STALL_RETRY", "STALL_AIRCRAFT"):
+            assert invasive not in targets, \
+                f"{invasive} must stay gated on an unclassifiable state (ADR 084)"
+
+    def test_lobby_blackout_within_dwell_is_shut(self, analyzer):
+        """A brief blank patch between lobby frames is not a stall."""
+        analyzer._stall_state_since = 0.0
+        analyzer._lobby_blackout_since = time.time()
+        assert analyzer._stall_recovery_targets(GameState.GAME_LOBBY) == []
+
+    def test_unset_lobby_blackout_clock_is_shut(self, analyzer):
+        analyzer._stall_state_since = 0.0
+        analyzer._lobby_blackout_since = 0.0
+        assert analyzer._stall_recovery_targets(GameState.GAME_LOBBY) == []
+
+    def test_lobby_blackout_does_not_duplicate_in_a_real_stall(self, analyzer):
+        """Both gates open at once: the crop must appear exactly once."""
+        analyzer._stall_state_since = time.time() - (analyzer._stall_action_after_s + 1.0)
+        analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
+        targets = analyzer._stall_recovery_targets(GameState.GAME_UNKNOWN)
+        assert targets.count("STALL_EXIT_TO_DESKTOP") == 1, targets
+
+    def test_exit_dialog_flag_suppresses_and_lapses(self, analyzer):
+        """ADR 087: every ESC source stands down while the modal is up.
+
+        ESC is what OPENS Exit-to-Desktop, so a press while it is on screen
+        re-opens what the Cancel click just closed — the 2026-08-21 deadlock,
+        where three ESC sources fought one 20s-cooldown recovery for 25
+        minutes. The flag must also lapse on its own so a cleared dialog does
+        not suppress ESC forever.
+        """
+        assert analyzer.exit_dialog_visible() is False, "unset flag must not suppress"
+        analyzer._exit_dialog_seen_ts = time.time()
+        assert analyzer.exit_dialog_visible() is True
+        analyzer._exit_dialog_seen_ts = time.time() - 60.0
+        assert analyzer.exit_dialog_visible() is False, "stale flag must lapse"
+
+    def test_blackout_flag_gates_esc_independently_of_the_dialog(self, analyzer):
+        """ADR 087 addendum 3: ESC is gated on the blackout, not the dialog.
+
+        A single 'not found' scan clears the dialog flag, and the ESC that then
+        fired re-created the dialog 1.4s later — a 23s cancel-then-reopen cycle
+        (2026-08-21 10:48). The blackout outlasts those gaps, so it is the
+        correct gate.
+        """
+        analyzer._lobby_blackout_since = 0.0
+        assert analyzer.lobby_blackout_active() is False
+        analyzer._lobby_blackout_since = time.time()
+        analyzer._exit_dialog_seen_ts = 0.0      # dialog momentarily "not found"
+        assert analyzer.exit_dialog_visible() is False
+        assert analyzer.lobby_blackout_active() is True, \
+            "ESC must stay suppressed across a momentary dialog miss"
+
+    def test_click_to_suppression_yields_to_a_lobby_blackout(self, analyzer):
+        """ADR 087 addendum 4: a forced GAME_LOBBY must not blind click-to OCR.
+
+        `GAME_END_B timeout — forcing recovery to GAME_LOBBY` can assert a state
+        the game is not in. The click-to scan self-suppresses in GAME_LOBBY, so
+        the forced state disabled the one detector that clears the screen
+        holding it there: on 2026-08-21 the post-match PERFORMANCE panel with
+        "Click to Continue..." went unread for 17 minutes.
+
+        The suppression must hold in a healthy lobby (2026-07-30 double
+        click-through) and yield during a blackout.
+        """
+        def suppressed(state):
+            # Mirrors the guard in _run_click_to_in_background.
+            return not (state == GameState.GAME_LOBBY
+                        and analyzer.lobby_blackout_active())
+
+        analyzer._lobby_blackout_since = 0.0
+        assert suppressed(GameState.GAME_LOBBY), \
+            "healthy lobby must keep the 2026-07-30 suppression"
+        analyzer._lobby_blackout_since = time.time()
+        assert not suppressed(GameState.GAME_LOBBY), \
+            "blackout must re-enable click-to OCR"
+        assert suppressed(GameState.GAME_END_B), \
+            "GAME_END_B suppression is unconditional"
+
     def test_unset_dwell_clock_is_shut(self, analyzer):
         """_stall_state_since == 0 means 'not stalled', not 'stalled since epoch'."""
         analyzer._stall_state_since = 0.0
@@ -124,3 +224,51 @@ class TestEventWiring:
         assert GameState.GAME_WAITING not in STALL_ACTION_STATES
         assert set(STALL_ACTION_STATES) == {GameState.GAME_UNKNOWN,
                                             GameState.GAME_STARTING_STALLED}
+
+
+class TestStuckWarningPersists:
+    """ADR 093: the screenshot cap must not silence the warning.
+
+    On 2026-08-24 the last complaint was at 511s — the fifth and final capture —
+    while the livelock ran another 100 minutes in total silence. An unattended
+    session must keep saying it is stuck.
+    """
+
+    def _recorder(self, clock):
+        from wingman.tick_handlers import UnknownAnomalyRecorder as R
+        return R({"screenshot_after_s": 30.0, "recapture_interval_s": 120.0,
+                  "max_per_episode": 5, "stuck_warn_interval_s": 300.0,
+                  "stuck_warn_max_interval_s": 1800.0}, clock=clock)
+
+    def test_warns_again_after_the_capture_cap(self, caplog):
+        now = [1000.0]
+        rec = self._recorder(lambda: now[0])
+        rec._captured = 5                      # cap already reached
+        with caplog.at_level("WARNING"):
+            rec._warn_still_stuck(now[0], "GAME_LOBBY blackout", 600.0)
+        assert any("STILL stuck" in r.getMessage() for r in caplog.records)
+
+    def test_warning_is_throttled_then_repeats(self):
+        """After the first warning the interval doubles to 600s, so 500s of
+        silence is correct and 700s is not."""
+        now = [1000.0]
+        rec = self._recorder(lambda: now[0])
+        rec._warn_still_stuck(now[0], "ep", 600.0)
+        first = rec._stuck_warns
+        now[0] += 500
+        rec._warn_still_stuck(now[0], "ep", 1100.0)
+        assert rec._stuck_warns == first, "must throttle inside the doubled interval"
+        now[0] += 200          # 700s since the last warning, past the 600s interval
+        rec._warn_still_stuck(now[0], "ep", 1300.0)
+        assert rec._stuck_warns == first + 1, "must warn again past the interval"
+
+    def test_interval_doubles_but_is_capped(self):
+        now = [1000.0]
+        rec = self._recorder(lambda: now[0])
+        for _ in range(12):
+            now[0] += 5000                     # always past any interval
+            rec._warn_still_stuck(now[0], "ep", now[0])
+        interval = min(rec._stuck_warn_interval_s * (2 ** rec._stuck_warns),
+                       rec._stuck_warn_max_s)
+        assert interval <= rec._stuck_warn_max_s, "interval must stay capped"
+        assert rec._stuck_warns >= 10, "a long stall must keep complaining"

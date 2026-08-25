@@ -23,8 +23,50 @@ dependencies = [
 dev = [
 	"pytest",
 	"pytest-html",
+	"ruff>=0.16.3",
 	"strictdoc==0.27.1",
 ]
+
+# Coding standard: Research 006. Ruff defaults (PEP 8) plus a small curated
+# extension set, chosen against this codebase's actual failure modes rather
+# than enabled wholesale. `make lint` runs it; `make tp` gates on it.
+[tool.ruff]
+line-length = 100
+target-version = "py310"   # matches requires-python above
+extend-exclude = [".venv", "docs", "test_screenshots"]
+
+[tool.ruff.lint]
+select = [
+	"E", "W",    # pycodestyle - PEP 8 core
+	"F",         # pyflakes - unused imports and vars, undefined names
+	"B",         # bugbear - mutable defaults, loop-variable capture in closures
+	"SIM",       # simplifications - collapsible ifs, redundant bool logic
+	"ARG",       # unused function arguments - dead callback params
+	"RET",       # inconsistent return paths
+]
+ignore = [
+	"E501",      # line length - the formatter owns it
+	"E741",      # ambiguous name 'l' - ROLL_RIGHT_KEY is the game's key binding
+	"RET504",    # named return values document intent in the control paths here
+	"SIM108",    # ternaries hurt readability in the tuning-heavy branches
+	# Module preambles legitimately precede imports here: WINGMAN_VERSION at the
+	# top of main.py, and the sys.path bootstrap the standalone scripts need.
+	"E402",
+	# Ruff declines to autofix the 7 remaining nested ifs because collapsing them
+	# would relocate the explanatory comments between the two conditions. In this
+	# codebase those comments are the primary artifact (they carry the incident
+	# that motivated the branch), so the nesting stays and the rule goes.
+	"SIM102",
+]
+
+[tool.ruff.lint.flake8-unused-arguments]
+# *args/**kwargs on the keyboard-module shim exist to match the real module's
+# signature, not to be read.
+ignore-variadic-names = true
+
+[tool.ruff.lint.per-file-ignores]
+# Tests build deliberately odd objects and shadow names to exercise edge cases.
+"tests/*" = ["ARG", "B008", "SIM117"]
 
 [tool.uv]
 # optional uv-specific configuration can go here

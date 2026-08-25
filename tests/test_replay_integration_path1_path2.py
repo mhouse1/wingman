@@ -379,9 +379,6 @@ class FakeController:
     def reload_flares(self) -> None:
         self._intents.append({"action_type": "reload_flares"})
 
-    def disengage_roll_right(self) -> None:
-        self._intents.append({"action_type": "disengage_roll_right"})
-
     def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
         self._intents.append({"action_type": "padlock_target_switch"})
 

@@ -10,6 +10,7 @@ import threading
 import time
 
 import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
 from wingman.analyzer import GameState
 from wingman.controller import Controller, NOSE_UP_KEY
 
@@ -42,8 +43,10 @@ def _make_ctrl(monkeypatch, kb, analyzer, climb_cfg=None):
         analyzer=analyzer,
         exit_event=threading.Event(),
         capture=None,
-        disable_hotkeys=True,
-        climb_cfg=climb_cfg or SG_CFG,
+        config=ControllerConfig(
+            disable_hotkeys=True,
+            climb=climb_cfg or SG_CFG,
+        )
     )
 
 

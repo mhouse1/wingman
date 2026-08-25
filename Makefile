@@ -36,12 +36,22 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash g r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
+.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
 PYTEST_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active pytest,$(PYTHON) -m pytest)
 PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
+# Performance 008: cap glibc malloc arenas for every wingman run.
+# The OCR pool runs 13 worker threads; glibc gives each its own arena, and
+# freed blocks are returned to the arena rather than the OS. Measured
+# 2026-08-21 over identical workloads (same n_ocr, same ocr_med):
+#   default arenas   681 ->  4598 ->  7112 -> 10144 MB at 0/300/600/900 s
+#   MALLOC_ARENA_MAX=2  684 ->  2453 ->  2637 ->  2545 MB  (plateau, memory returned)
+# 2.5 GB is wingman's real footprint (13 thread-local EasyOCR readers);
+# everything above it was arena fragmentation, not live data. Must be set
+# before the process starts — glibc reads it at first malloc.
+WINGMAN_ENV := MALLOC_ARENA_MAX=2
 CAPTURE_PATH ?= PATH1
 # Real-game capture (make p1/p2/p3) must outlast a full mission cycle
 # (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
@@ -68,6 +78,25 @@ RR_LIVE_PATH1_VALIDATION_SUMMARY ?= tests/test-output/runtime_live_validation.pa
 RR_LIVE_PATH1_PRESENTER_LOG ?= tests/test-output/live_presenter.path1.log
 RR_LIVE_PATH1_PRESENTER_GRACE_S ?= 8.0
 
+# Coding standard gate (Research 006). Rules and rationale live in
+# pyproject.toml [tool.ruff.lint]; this target is what make tp gates on.
+#
+# `ruff format` is deliberately NOT part of this gate yet. Research 006 step 3
+# calls for applying it once as a dedicated, behaviour-free commit; until that
+# lands, `make lint` would fail on formatting alone and hide real findings.
+# Sequence: run `make format` on its own, review and commit that diff, then move
+# `format-check` into `lint` below.
+lint:
+	uv run ruff check .
+	@echo "PASS: ruff lint clean"
+
+# One-time (then routine) formatter pass — review the diff before committing.
+format:
+	uv run ruff format .
+
+format-check:
+	uv run ruff format --check .
+
 # Validate host environment before first run (ADR 047)
 preflight:
 	$(PYTHON_RUN) tests/preflight.py
@@ -86,7 +115,7 @@ reqs: reqs-gate
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_heap_census.py tests/test_performance_aggregate.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py tests/test_ocr_reader_reuse.py tests/test_lobby_popup_coverage.py tests/test_stall_profile_recovery.py tests/test_liveness_guard.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -134,11 +163,11 @@ test-perf: test test-perf-csv test-perf-chart
 
 # Preview performance trends including current uncommitted data
 # Includes ADR044 PATH1 runtime replay gate and ADR045 live-screen gate.
-tp: test reqs-gate rr-path1-gate rr-live-path1-gate
+tp: lint test reqs-gate rr-path1-gate rr-live-path1-gate
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
-	@echo "✅ Performance preview complete (test + ADR044/ADR045 runtime gates + runtime metrics)!"
+	@echo "✅ Performance preview complete (lint + test + ADR044/ADR045 runtime gates + runtime metrics)!"
 	@echo "📊 View trends: tests/test-output/performance-trends.html"
 	@echo "📈 CSV data: tests/test-output/performance-history.csv"
 	@echo "📊 Runtime preview: docs/performance/runtime-performance-trends.preview.html"
@@ -149,7 +178,7 @@ tp: test reqs-gate rr-path1-gate rr-live-path1-gate
 	@echo ""
 
 # Full preview including ADR037 PATH1/PATH2 real-OCR integration tests.
-tp-full: test rr-path1-gate rr-live-path1-gate ocr
+tp-full: lint test rr-path1-gate rr-live-path1-gate ocr
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
@@ -245,6 +274,9 @@ p:
 squash:
 	git rebase -i --autosquash origin/main
 
+q:
+	git pull
+
 
 
 # On Linux (Wayland): auto-launch MetalStorm and set up PipeWire capture before running.
@@ -261,10 +293,77 @@ endif
 g: $(GAME_LAUNCH_DEPS)
 
 r: $(GAME_LAUNCH_DEPS)
-	$(PYTHON_RUN) -m wingman.main
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main
 
 rd: $(GAME_LAUNCH_DEPS)
-	$(PYTHON_RUN) -m wingman.main --log-file wingman.log
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main --log-file wingman.log
+
+# ---------------------------------------------------------------------------
+# Per-account run targets (Research 005)
+#
+# One Wine prefix per account, one shared GAME_EXE. The game's session lives in
+# the prefix registry (Software\\Starform\\Metalstorm holds auth_token,
+# selectedAccountId and generatedDeviceIdentifier), so a prefix IS an account.
+# launch-game kills any running instance first, so switching accounts is just
+# running the other target.
+#
+# WINGMAN_ACCOUNT tags run_*.json / run_*_stats.json so accounts at different
+# progression never silently share a performance baseline.
+#
+# ONE-TIME BOOTSTRAP per account, before its first `make rN`:
+#   1. cp -a $(HOME)/Games/Heroic/Prefixes/Metalstorm \
+#            $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct1
+#   2. make g1          # launches from that prefix — comes up LOGGED OUT
+#   3. Log in as the intended account, quit cleanly.
+#   4. make g1 again — the login persists.
+#
+# VERIFIED 2026-08-21 (Research 005 Q1). The copy carries the Proton first-run
+# setup but NOT the session, so each prefix is an independent account rather
+# than a clone of one login — no risk of two targets sharing a session. The
+# duplicated generatedDeviceIdentifier did not prevent a fresh login.
+ACCT1_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct1
+ACCT2_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct2
+
+# Proton's prefix update (wineboot) on first launch of a COPIED prefix resets
+# Wine-owned registry keys while leaving app keys intact, so a cp -a prefix
+# loses its virtual desktop and launches true-fullscreen — which breaks the
+# capture region, game_window_offset, and every calibrated crop. Idempotent, so
+# it is a dependency of every per-account launch rather than a manual step.
+VIRTUAL_DESKTOP_SIZE ?= 1920x1200
+
+# Copy settings + keybindings from the main prefix into a per-account prefix,
+# WITHOUT copying identity (ADR 052 Open Question 3). Deliberately manual, not a
+# launch dependency: it overwrites the target's settings, so running it on every
+# launch would discard any per-account tweak.
+#   make sync-settings-1     # main prefix -> acct1
+#   make sync-settings-1 DRY=--dry-run
+SETTINGS_SRC_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
+
+sync-settings-1:
+	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
+	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT1_PREFIX)" $(DRY)
+
+sync-settings-2:
+	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
+	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT2_PREFIX)" $(DRY)
+
+ensure-virtual-desktop:
+	@$(PYTHON_RUN) scripts/ensure-virtual-desktop.py \
+	  "$(WINE_PREFIX)" "$(VIRTUAL_DESKTOP_SIZE)"
+
+g1: WINE_PREFIX := $(ACCT1_PREFIX)
+g1: ensure-virtual-desktop g
+g2: WINE_PREFIX := $(ACCT2_PREFIX)
+g2: ensure-virtual-desktop g
+
+r1: WINE_PREFIX := $(ACCT1_PREFIX)
+r1: WINGMAN_ENV += WINGMAN_ACCOUNT=acct1
+r1: ensure-virtual-desktop rd
+r2: WINE_PREFIX := $(ACCT2_PREFIX)
+r2: WINGMAN_ENV += WINGMAN_ACCOUNT=acct2
+r2: ensure-virtual-desktop rd
+
+.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.
@@ -274,6 +373,9 @@ PROTON_ROOT    ?= $(HOME)/.var/app/com.heroicgameslauncher.hgl/config/heroic/too
 WINE_PREFIX    ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
 GAME_EXE       ?= $(HOME)/Games/Heroic/Metalstorm/Metalstorm.exe
 UMU_RUN        ?= $(HOME)/.local/bin/umu-run
+# Extra Unity player args, e.g. GAME_ARGS=-force-d3d11 to work around a
+# graphics-backend crash on some GPUs. Empty by default — no effect unless set.
+GAME_ARGS      ?=
 launch-game:
 	@_p=Metalstorm; \
 	 if pgrep -f "$${_p}.exe" > /dev/null 2>&1; then \
@@ -283,7 +385,7 @@ launch-game:
 	 fi
 	@rm -f /tmp/wingman-game-prerunning
 	@GAMEID=umu-0 PROTONPATH="$(PROTON_ROOT)" WINEPREFIX="$(WINE_PREFIX)" \
-	  "$(UMU_RUN)" "$(GAME_EXE)" > /tmp/wingman-game-launch.log 2>&1 & \
+	  "$(UMU_RUN)" "$(GAME_EXE)" $(GAME_ARGS) > /tmp/wingman-game-launch.log 2>&1 & \
 	echo "MetalStorm launching via umu-run (log: /tmp/wingman-game-launch.log)"
 
 # Poll until MetalStorm.exe is alive, then wait for the lobby.
@@ -361,7 +463,7 @@ ti:
 rr-path1:
 	mkdir -p tests/test-output
 	rm -f $(RR_PATH1_LOG) $(RR_PATH1_ASSERTIONS) $(RR_PATH1_INTENTS) $(RR_PATH1_REPORT) $(RR_PATH1_SUMMARY)
-	$(PYTHON_RUN) -m wingman.main \
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--replay-config $(RR_PATH1_CONFIG) \
 		--replay-path $(RR_PATH1_NAME) \
@@ -401,7 +503,7 @@ rr-live-path1:
 		wait $$PRES_PID || true; \
 		exit 1; \
 	fi; \
-	$(PYTHON_RUN) -m wingman.main \
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--capture-path-config $(RR_LIVE_PATH1_CAPTURE_CONFIG) \
 		--capture-path $(RR_LIVE_PATH1_NAME) \
@@ -435,7 +537,7 @@ rr-live-path1-gate:
 #   make newpaths CAPTURE_PATH=PATH2
 #   make newpaths CAPTURE_PATH=PATH3
 newpaths: $(GAME_LAUNCH_DEPS)
-	$(PYTHON_RUN) -m wingman.main \
+	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--capture-path-config tests/replay_paths/adr037_paths.yaml \
 		--capture-path $(CAPTURE_PATH) \

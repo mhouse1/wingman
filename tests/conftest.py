@@ -89,8 +89,8 @@ def strict_timing(request):
 def pytest_runtest_makereport(item, call):
     """Collect test timing data for performance validation."""
     outcome = yield
-    report = outcome.get_result()
-    
+    outcome.get_result()   # called for its side effect; the report itself is unused
+
     # Collect timing for the actual test call (not setup/teardown)
     if call.when == "call":
         test_name = item.name.split('[')[0]  # Remove parametrize suffix
@@ -140,13 +140,13 @@ def pytest_sessionfinish(session, exitstatus):
     _release_all_injectable_keys()
     output_dir = Path(__file__).parent / "test-output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     performance_data = {
         'timestamp': datetime.now().isoformat(),
         'version': WINGMAN_VERSION,
         'tests': {}
     }
-    
+
     # Calculate average duration for each test (handle parametrized tests)
     for test_name, durations in _test_timings.items():
         avg_duration = sum(durations) / len(durations)
@@ -156,7 +156,7 @@ def pytest_sessionfinish(session, exitstatus):
             'min': min(durations),
             'max': max(durations)
         }
-    
+
     # Write performance.json
     perf_file = output_dir / "performance.json"
     try:
@@ -175,7 +175,7 @@ def test_timings():
 @pytest.hookimpl(optionalhook=True)
 def pytest_html_results_summary(prefix, summary, postfix):
     prefix.extend([f"Wingman Version: {WINGMAN_VERSION}"])
-    
+
     # Add debug OCR images to the summary section
     test_output_dir = Path(__file__).parent / "test-output"
     debug_images = [
@@ -183,7 +183,7 @@ def pytest_html_results_summary(prefix, summary, postfix):
         ("debug_ocr_binary.png", "OCR Binary Thresholding"),
         ("debug_ocr_downscaled.png", "OCR Downscaled for Recognition"),
     ]
-    
+
     # Check if any debug images exist
     images_html = ""
     for filename, label in debug_images:
@@ -194,9 +194,9 @@ def pytest_html_results_summary(prefix, summary, postfix):
                 with open(image_path, 'rb') as f:
                     img_data = base64.b64encode(f.read()).decode('utf-8')
                 images_html += f'<div style="margin: 20px 0;"><h4>{label}</h4><img src="data:image/png;base64,{img_data}" style="max-width: 600px; border: 1px solid #ddd;"></div>'
-            except Exception as e:
+            except Exception:
                 pass
-    
+
     if images_html:
         # Add images section to postfix (bottom of summary)
         postfix.extend([
