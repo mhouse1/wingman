@@ -6,8 +6,6 @@ watching for absence of work. These pin the two generic protections — the guar
 that notices, and the ceiling that stops ESC suppression being permanent.
 """
 
-import pytest
-
 from wingman.liveness_guard import LivenessGuard
 
 

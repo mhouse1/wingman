@@ -52,6 +52,7 @@ leak-hunting session must raise `memory_guard.soft_limit_mb` as Performance 008
 warns, or the session ends before the signal is clear.
 """
 
+import contextlib
 import gc
 import logging
 import sys
@@ -286,10 +287,8 @@ class HeapCensus:
         # so a leak hunt can subtract the instrument from the measurement.
         tm_overhead_mb = None
         if self._use_tracemalloc and tracemalloc.is_tracing():
-            try:
+            with contextlib.suppress(Exception):
                 tm_overhead_mb = tracemalloc.get_tracemalloc_memory() / 1048576.0
-            except Exception:
-                pass
 
         lines = [
             f"HEAPCENSUS elapsed={int(now - self._start)}s "

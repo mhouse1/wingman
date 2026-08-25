@@ -14,7 +14,6 @@ NOT in STALL_ACTION_STATES), and that the crop reads the real captured frames.
 import time
 from pathlib import Path
 
-import pytest
 import yaml
 
 from wingman import analyzer as analyzer_module
@@ -103,19 +102,10 @@ def test_reference_frame_is_present_and_real():
     assert REFERENCE.stat().st_size > 10_000, "reference frame looks like a placeholder"
 
 
-@pytest.mark.slow
-def test_crop_reads_profile_on_the_reference_frame():
-    """The regression that matters: the crop must fire on the actual screen
-    that caused the livelock, not on a synthetic fixture."""
-    cv2 = pytest.importorskip("cv2")
-    easyocr = pytest.importorskip("easyocr")
-    img = cv2.imread(str(REFERENCE))
-    if img is None or img.mean() < 1.0:
-        pytest.skip("placeholder screenshot")
-    h, w = img.shape[:2]
-    (x0, y0), (x1, y1) = CROPS["STALL_PROFILE"]["coords"]
-    patch = img[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
-    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-    text = "".join(t.upper().replace(" ", "") for t in reader.readtext(patch, detail=0))
-    assert any(v in text for v in CROPS["STALL_PROFILE"]["text"]), \
-        f"{REFERENCE.name}: crop read {text!r}"
+# The real-OCR regression for this crop lives in tests/test_stall_crops_ocr.py
+# alongside the other STALL_* crops. That harness is strictly better than a
+# hand-rolled easyocr call here: it goes through the production
+# _process_crop_region path, and it also asserts the crop does NOT fire on an
+# ordinary lobby frame — a false positive would click the screen corner during
+# healthy play. This file keeps the gating and wiring tests; the pixels are
+# tested there.

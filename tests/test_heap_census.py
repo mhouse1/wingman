@@ -7,7 +7,6 @@ module — that a planted retention actually shows up in the tables.
 """
 
 import numpy as np
-import pytest
 
 from wingman.heap_census import HeapCensus, _sizeof
 

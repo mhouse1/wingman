@@ -33,6 +33,7 @@ Two invariants this file must keep:
    build instead.
 """
 
+import contextlib
 import logging
 import os
 import sys
@@ -200,10 +201,10 @@ def _drop_shared_display() -> None:
     d, _shared_display = _shared_display, None
     if d is None:
         return
-    try:
+    # A connection dropped because it broke will usually fail to close cleanly;
+    # that is the normal path here, not an error worth surfacing.
+    with contextlib.suppress(Exception):
         d.close()
-    except Exception:
-        pass
 
 
 def _linux_key_event(key: str, event_type) -> None:
