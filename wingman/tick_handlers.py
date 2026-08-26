@@ -525,10 +525,29 @@ class AmmoEventsHandler:
         logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
         self._last_incoming_alert_ts = incoming_ts
         if self._perf is not None:
+            now = time.time()
             try:
-                self._perf.record_reaction(time.time() - incoming_ts)
+                self._perf.record_reaction(now - incoming_ts)
             except Exception as e:
                 logger.warning("PerformanceTracker: record_reaction failed: %s", e)
+            # ADR 096: split that total into detector versus dispatch. Guarded
+            # separately so a diagnostic failure cannot cost the flare burst,
+            # and skipped when the marks are absent (pre-instrumentation logs).
+            try:
+                frame_ts, pass_ts, detect_done_ts = \
+                    self._analyzer.get_incoming_latency_marks()
+                if frame_ts and detect_done_ts and detect_done_ts >= pass_ts:
+                    self._perf.record_reaction_segments(
+                        capture_to_pass=max(0.0, pass_ts - frame_ts),
+                        detect=max(0.0, detect_done_ts - pass_ts),
+                        dispatch=max(0.0, now - detect_done_ts))
+                    logger.debug(
+                        "ADR096 reaction split: capture->pass %.3fs, detect %.3fs, "
+                        "dispatch %.3fs (total %.3fs)",
+                        pass_ts - frame_ts, detect_done_ts - pass_ts,
+                        now - detect_done_ts, now - frame_ts)
+            except Exception as e:
+                logger.debug("ADR096: reaction split unavailable: %s", e)
         if self._stats is not None:
             self._stats.on_event("flare_burst_deployed", time.time())
 

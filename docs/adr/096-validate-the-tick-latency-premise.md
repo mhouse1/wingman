@@ -27,13 +27,20 @@ self._perf.record_reaction(time.time() - incoming_ts)
 ```
 
 `incoming_ts` is set at `analyzer.py:2688`, inside `_run_ocr_in_background`,
-**at the moment the detection result is cached**. So the 0.486 s recorded across
-725 sessions is not detection latency and not end-to-end latency — it is the gap
-between *a detection existing* and *the tick handler acting on it*.
+from `current_time` — which is assigned once at `analyzer.py:2527` as
+`current_time = t0`, **at the start of the background pass**, not when the
+detection finishes.
 
-That is the tick tax, measured, with no inference in it at all. It is already
-strong evidence for HLDD 008's premise, and it was recorded by accident rather
-than by design.
+So the 0.486 s recorded across 725 sessions is the interval from *the background
+pass beginning* to *the tick handler acting on its result*. It bundles two
+things that this experiment needs separated:
+
+    0.486 s  =  (detection duration)  +  (wait for the tick handler to pick it up)
+
+It is therefore evidence for HLDD 008's premise but not proof of it: a large
+number here is consistent with a slow detector as well as with a slow dispatch.
+Splitting it is the first thing the instrumentation below must do, and it is why
+"just read the existing metric" is not a substitute for this work.
 
 **But it is only one of three segments.** The full path is:
 
@@ -48,11 +55,14 @@ flowchart TD
 | segment | what it costs | instrumented today |
 |---------|---------------|--------------------|
 | A to B — frame age at capture | unknown | **no** |
-| B to C — capture to detection | unknown | partially (`incoming_processing_time`) |
-| C to D — cache to tick pickup | **0.486 s mean** | yes, as `reaction` |
+| B to C — capture to background-pass start | unknown | **no** |
+| C — detection duration | unknown | partially (`incoming_processing_time`) |
+| C to D — wait for tick pickup | — | **no, not separately** |
+| (C + C-to-D combined) | **0.486 s mean** | yes, as `reaction` |
 | D to E — injection | sub-millisecond after ADR 091 | no, but bounded |
 
-Only the third is measured. The design decision rests on the sum.
+Only the combined figure is measured, and it is the one that most needs
+splitting. The design decision rests on the sum of all four.
 
 ## Decision
 

@@ -929,6 +929,13 @@ class GameStateAnalyzer:
         self._incoming_cache = {
             'result': (False, 0.0, None),  # (is_incoming, confidence, method)
             'timestamp': 0.0,
+            # ADR 096: the reaction metric bundles detection duration with the
+            # wait for tick pickup. These split it. `frame_ts` is when the frame
+            # this result came from was captured; `detect_done_ts` is when the
+            # detector finished. Both monotonic-free (time.time) to match
+            # `timestamp` and the tick handler's clock.
+            'frame_ts': 0.0,
+            'detect_done_ts': 0.0,
         }
         self._incoming_cache_lock = threading.Lock()
         incoming_cfg = config.get("incoming_detection", {})
@@ -1174,6 +1181,7 @@ class GameStateAnalyzer:
         self._ocr_executor = None
         self._ocr_executor_initialized = False
         self._background_ocr_frame = None
+        self._background_ocr_frame_ts = 0.0   # ADR 096: capture time of that frame
         self._background_ocr_pending_frame = None
         self._background_ocr_running = False
         self._background_ocr_thread = None  # Still use a thread to coordinate async results
@@ -1513,6 +1521,18 @@ class GameStateAnalyzer:
         """Return timestamp for the latest incoming cache update."""
         with self._incoming_cache_lock:
             return self._incoming_cache['timestamp']
+
+    def get_incoming_latency_marks(self) -> "tuple[float, float, float]":
+        """(frame_ts, pass_start_ts, detect_done_ts) for the cached result (ADR 096).
+
+        Splits what the `reaction` metric bundles: detection duration versus the
+        wait for the tick handler to pick the result up. Zeros mean the marks
+        predate this instrumentation or no detection has run yet.
+        """
+        with self._incoming_cache_lock:
+            return (self._incoming_cache.get('frame_ts', 0.0),
+                    self._incoming_cache['timestamp'],
+                    self._incoming_cache.get('detect_done_ts', 0.0))
 
     def ocr_queue_depth(self) -> "int | None":
         """Work queued but not yet started in the OCR pool (Performance 008).
@@ -2496,6 +2516,7 @@ class GameStateAnalyzer:
                 logger.debug("Background OCR busy; will process latest pending frame next")
             else:
                 self._background_ocr_frame = frame
+                self._background_ocr_frame_ts = time.time()   # ADR 096
                 self._background_ocr_pending_frame = None
                 self._background_ocr_running = True
                 self._background_ocr_thread = threading.Thread(
@@ -2686,6 +2707,10 @@ class GameStateAnalyzer:
                     with self._incoming_cache_lock:
                         self._incoming_cache['result'] = incoming_result
                         self._incoming_cache['timestamp'] = current_time
+                        # ADR 096: keep `timestamp` as-is so the historical
+                        # `reaction` series stays comparable, and add the split.
+                        self._incoming_cache['frame_ts'] = self._background_ocr_frame_ts
+                        self._incoming_cache['detect_done_ts'] = time.time()
                     if incoming_detected:
                         self.incoming_event.set()
 
