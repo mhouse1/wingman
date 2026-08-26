@@ -1,8 +1,13 @@
 # ADR 090 — Memory Guard: Bound the Session Instead of the Leak
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-22 | 1.8.5           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-25 | 1.8.5           |
+
+**Accepted 2026-08-25.** Implemented and in force in every session since
+2026-08-23. Its role has since changed: ADR 091 removed the leak this was
+written to survive, so it is now a backstop against the *next* one rather than
+the primary mitigation the Context below describes.
 
 ## Context
 
@@ -122,7 +127,40 @@ normal per-scene variation.
 next unattended overnight run is a plausible desktop OOM, and the diagnosis has
 already outlived two refuted hypotheses.
 
-## Validation
+## Validation — status at acceptance, 2026-08-25
+
+| | how it is covered |
+|---|---|
+| V1 soft limit waits | `test_soft_limit_waits_for_a_safe_point` |
+| V2 hard limit does not wait | `test_hard_limit_stops_regardless_of_state` |
+| V3 clean shutdown | **by construction — see below** |
+| V4 no effect below the limits | `test_guard_quiet_below_the_soft_limit` |
+
+Also covered: `test_guard_can_be_disabled`, `test_guard_reason_names_the_threshold_that_fired`.
+
+**V3 needs no test.** The guard does not have its own exit path. Every exit from
+the main loop — the normal `Exit requested`, the ADR 093 liveness guard, replay
+and capture completion, and this guard — is a plain `break`, and every shutdown
+step (`stats_tracker.finalize`, `resource_sampler.summarize`, the session
+summary) runs after the loop. An AST scan of `main()` on 2026-08-25 found seven
+`break` statements and no `os._exit` or equivalent bypass. The guard therefore
+*cannot* write a different set of artifacts than a normal exit; it takes the
+identical route. That is a stronger guarantee than a test asserting the two
+happen to match.
+
+**It has never fired in production, and that is the expected outcome.** Sessions
+since the guard shipped peak between 693 and 3,130 MB against a 6,000 MB soft
+limit, because ADR 091 removed the leak two days later. One archived session did
+peak at 14,011 MB — above the hard limit — but it ran 2026-08-22 17:29 to
+2026-08-23 00:28, before `memory_guard` existed in `config.yaml` (03:02 the same
+day), and its log contains no guard lines. Not a missed fire.
+
+The consequence to be honest about: **the production trigger path is exercised
+by unit tests only.** A guard that never fires is one working correctly when
+there is nothing to guard against, but nobody has watched this one stop a real
+session.
+
+### Original validation plan
 
 **V1 — soft limit waits.** With `soft_limit_mb` set low enough to trigger mid
 session, the log shows `MEMORY GUARD armed` during a mission and the session

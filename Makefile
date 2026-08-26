@@ -33,10 +33,11 @@
 #   make y           -> run ADR37 replay integration smoke test (placeholder screenshots)
 #   make ti          -> run integration tests (PATH1 + PATH2 real-OCR, alias for make ocr)
 #   make newpaths    -> capture screenshots for PATH1 or PATH2 using live Wingman play
+#   make leak-check  -> ADR 092 leak gate over logs/ (0 pass, 1 fail, 2 insufficient)
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
+.PHONY: leak-check leak-check-gate test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -115,7 +116,7 @@ reqs: reqs-gate
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_heap_census.py tests/test_performance_aggregate.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py tests/test_ocr_reader_reuse.py tests/test_lobby_popup_coverage.py tests/test_stall_profile_recovery.py tests/test_liveness_guard.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_heap_census.py tests/test_performance_aggregate.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py tests/test_ocr_reader_reuse.py tests/test_lobby_popup_coverage.py tests/test_stall_profile_recovery.py tests/test_liveness_guard.py tests/test_leak_gate.py tests/test_handle_construction_sites.py tests/test_keybindings.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -163,7 +164,37 @@ test-perf: test test-perf-csv test-perf-chart
 
 # Preview performance trends including current uncommitted data
 # Includes ADR044 PATH1 runtime replay gate and ADR045 live-screen gate.
-tp: lint test reqs-gate rr-path1-gate rr-live-path1-gate
+# ADR 092: leak gate over the archived RESOURCE lines. Three outcomes, and
+# INSUFFICIENT is never a pass — short sessions underread an accumulating defect
+# roughly tenfold, so a green light from a 20-minute run retires the question
+# while the defect is live.
+#
+#   exit 0 PASS   exit 1 FAIL   exit 2 INSUFFICIENT DATA
+#
+# tp warns on INSUFFICIENT and keeps going: it runs constantly and must stay
+# usable without a recent soak. wrelease treats it as a failure, because
+# shipping a build whose memory behaviour was never measured on a long session
+# is exactly how the last leak shipped.
+leak-check:
+	@$(PYTHON_RUN) scripts/leak-check.py $(LEAK_ARGS)
+
+leak-check-gate:
+	@$(PYTHON_RUN) scripts/leak-check.py $(LEAK_ARGS); rc=$$?; \
+	if [ $$rc -eq 1 ]; then \
+		echo ""; echo "❌ LEAK GATE FAILED — see ADR 092 / Performance 008"; exit 1; \
+	elif [ $$rc -eq 2 ]; then \
+		echo ""; echo "⚠️  LEAK GATE: insufficient data — NOT a pass."; \
+		echo "   Run a session of at least 1h before trusting a clean result."; \
+	fi
+
+# The gate set both preview targets must run. Shared so the two cannot drift:
+# tp-full is documented as "tp + the ADR037 real-OCR lane" (CLAUDE.md), and it
+# had silently fallen behind — reqs-gate was missing, and leak-check-gate was
+# added to tp alone, leaving the "full" gate weaker than the fast one. A single
+# variable makes that class of mistake impossible rather than comment-enforced.
+TP_GATES := lint test reqs-gate rr-path1-gate rr-live-path1-gate leak-check-gate
+
+tp: $(TP_GATES)
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
@@ -178,7 +209,7 @@ tp: lint test reqs-gate rr-path1-gate rr-live-path1-gate
 	@echo ""
 
 # Full preview including ADR037 PATH1/PATH2 real-OCR integration tests.
-tp-full: lint test rr-path1-gate rr-live-path1-gate ocr
+tp-full: $(TP_GATES) ocr
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
@@ -205,6 +236,18 @@ clean:
 # and there will be no performance history to commit if you haven't generated the performance.json file with the latest data
 # once you ran wrelease you can then run make p to push the commit with the new version and performance data to GitHub
 wrelease:
+	@echo "ADR 092 leak gate (release: insufficient data blocks too)…"
+	@$(PYTHON_RUN) scripts/leak-check.py $(LEAK_ARGS); rc=$$?; \
+	if [ $$rc -ne 0 ]; then \
+		echo ""; \
+		if [ $$rc -eq 2 ]; then \
+			echo "❌ Refusing to release: memory behaviour has never been measured"; \
+			echo "   on a qualifying session. Run one of at least 1h (ADR 092)."; \
+		else \
+			echo "❌ Refusing to release: the leak gate failed (ADR 092)."; \
+		fi; \
+		exit 1; \
+	fi
 	@count=$$(ls docs/performance/current/run_*.json 2>/dev/null | wc -l); \
 	if [ "$$count" -lt 5 ]; then \
 		echo "WARNING: only $$count session(s) in docs/performance/current/ — recommended minimum is 5."; \

@@ -386,6 +386,18 @@ SCHEMA = Section(
         "soft_limit_mb": _int(1),
         "hard_limit_mb": _int(1),
     }),
+        # ADR 092 — leak gate thresholds.
+        "leak_gate": Section(children={
+            "log_dir": STR,
+            "warmup_s": SECONDS,
+            "min_window_h": _num(0),
+            "min_samples": _int(1),
+            "mi_use_pass_mb_h": _num(0),
+            "mi_use_fail_mb_h": _num(0),
+            "rss_pass_mb_h": _num(0),
+            "rss_fail_mb_h": _num(0),
+            "history_sessions": _int(1),
+        }),
         # ADR 093 — progress watchdog.
         "liveness_guard": Section(children={
             "enabled": BOOL,

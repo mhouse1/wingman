@@ -1,8 +1,12 @@
 # ADR 092 — Leak Detection: Source-Site Guard and Log-Based Gate
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-23 | 1.8.5           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-25 | 1.8.5           |
+
+**Implemented and accepted 2026-08-25.** Status table above kept at the
+creation version; see the header of the Open items section for the current
+state.
 
 ## Context
 
@@ -152,6 +156,33 @@ session is exactly how the last leak shipped, so `wrelease` treats absence of
 evidence as a failure. `tp` runs far more often and must stay usable without a
 recent soak.
 
+## What was built
+
+| piece | where |
+|-------|-------|
+| Source-site guard | `tests/test_handle_construction_sites.py` — AST scan of `wingman/*.py`, registry keyed by `(module, enclosing function)` |
+| Leak gate | `scripts/leak-check.py`, `make leak-check` |
+| Thresholds | `config.yaml` under `leak_gate:` |
+| `tp` wiring | `leak-check-gate` prerequisite — FAIL blocks, INSUFFICIENT warns |
+| `wrelease` wiring | runs first; **both** FAIL and INSUFFICIENT block |
+
+Two design details that changed during implementation, both worth recording:
+
+**Only two rate outcomes, not three.** The draft implied `pass_at`/`fail_at`
+might produce a middle verdict. They do not: INSUFFICIENT is about whether the
+*data* supports a conclusion, never about where the rate sits. `fail_at` now
+only labels severity, so a borderline result reads differently from a runaway
+one without inventing a third rate verdict that means neither.
+
+**An inert session is refused, not passed.** Not in the original design, and
+necessary: Anomaly 001's livelocked session shows almost no growth *because it
+did no work*, and would otherwise have sailed through as a clean PASS. The gate
+now rejects any session where more than half the post-warm-up samples show
+`n_ocr=0`.
+
+`--log-dir` is authoritative — the live `wingman.log` is only folded in for the
+default directory, so tests can select exactly what they mean.
+
 ## Validation
 
 The gate is unusually testable: ~170 archived logs exist with known answers.
@@ -168,10 +199,26 @@ Unit tests assert the corpus outcomes directly.
 | any pre-2026-08-21 log | — | no RESOURCE lines | **INSUFFICIENT** |
 
 Corpus assertions pin behaviour against real data but depend on files that are
-gitignored and machine-local, so they must **skip, not fail**, when the corpus is
+gitignored and machine-local, so they **skip, not fail**, when the corpus is
 absent. Synthetic fixtures carry the deterministic edge cases: warm-up excluded
 from the rate, game-side growth not failing the wingman gate, `mi_use` preferred
 over `rss`, malformed and truncated lines ignored.
+
+**Verified 2026-08-25 against the real corpus**, all as specified:
+
+| input | outcome |
+|-------|---------|
+| pre-fix 6.77h session (+1491 MB/h) | FAIL, exit 1 |
+| pre-fix 2.26h session (+974) | FAIL |
+| post-ADR-091 3.01h (+2) and 4.34h (-0) | PASS, exit 0 |
+| 0.75h session | INSUFFICIENT, exit 2 |
+| Anomaly 001 livelock session | INSUFFICIENT (inert) |
+| empty log directory | INSUFFICIENT |
+
+The source-site guard was verified by **reintroducing the ADR 091 defect** — a
+per-call `Display()` in `_linux_key_event` — which fails two of its tests with
+the intended explanation. A guard that cannot fail is inert, so this is checked
+rather than assumed.
 
 ## Consequences
 
@@ -184,6 +231,42 @@ over `rss`, malformed and truncated lines ignored.
   legitimately added. That friction is the mechanism, not a side effect.
 - Neither mechanism detects a leak *during* a session. ADR 090's memory guard
   remains the only in-flight protection.
+
+## Open items — resolved at acceptance, 2026-08-25
+
+1. ~~**Thresholds are unexercised in anger.**~~ **Exercised on real data.** The
+   gate now returns PASS on six live post-ADR-091 sessions (3.0–9.0h, −4 to
+   +3 MB/h), FAIL on the archived pre-fix sessions (+974 and +1,491 MB/h),
+   INSUFFICIENT on short sessions and on the Anomaly 001 livelock run. What had
+   not happened was a *release* decision — see item 2.
+2. ~~**`wrelease` now requires a qualifying session.**~~ **Verified.** The
+   release-gate branch is Makefile recipe shell, so it would otherwise only run
+   during an actual release — the worst moment to find it wrong. It is now
+   tested by extracting the block **verbatim from the real recipe** and running
+   it, so a copy in the tests cannot drift from what `wrelease` does:
+
+   | input | exit | reaches the release body |
+   |-------|------|--------------------------|
+   | qualifying flat session | 0 | **yes** |
+   | qualifying leaking session | non-zero | no — "leak gate failed" |
+   | no qualifying session | non-zero | no — "never been measured" |
+
+   A fourth test pins that the gate is the *first* step of `wrelease`, so it
+   cannot drift after work that is hard to undo.
+3. **Still open: `_WATCHED` covers `Display` only.** Research 009 lists other
+   constructor categories; none are guarded. This is a scope limit rather than a
+   defect, and does not gate acceptance — extending it needs a reason, since a
+   guard that fires on everything gets disabled.
+
+### Known at acceptance
+
+- **No real release has run through this gate yet.** The branching is verified
+  against the actual recipe text, but `make wrelease` end to end has not been
+  invoked since the gate was added.
+- The thresholds separate the known corpus cleanly with wide margins (−4..+3
+  against a 100 pass line; +974..+1,491 against a 400 fail line). They have not
+  been tested against a *marginal* leak, which is where a threshold is actually
+  chosen well or badly.
 
 ## Alternatives considered
 
