@@ -15,8 +15,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.5"
-WINGMAN_VERSION_DETAILS = "resolve tech debt"
+WINGMAN_VERSION = "1.8.6"
+WINGMAN_VERSION_DETAILS = "Map Detection"
 
 from .capture import Capture
 from .config_schema import assert_valid_config
