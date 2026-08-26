@@ -15,7 +15,7 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.6"
+WINGMAN_VERSION = "1.8.7"
 WINGMAN_VERSION_DETAILS = "Map Detection"
 
 from .capture import Capture
@@ -29,6 +29,7 @@ from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler
 from .heap_census import HeapCensus
 from .liveness_guard import LivenessGuard
+from .game_shutdown import close_game
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -720,6 +721,7 @@ def main():
         )
     startup_time = time.time()
     battle_ever_reached = False
+    finish_round_exit = False        # ADR 094: set when the operator's deferred stop fires
 
     def _stop_lobby_escape_loop():
         nonlocal lobby_escape_stop, lobby_escape_thread
@@ -758,6 +760,15 @@ def main():
             # mid-mission abandons an aircraft in flight.
             _safe = (analyzer.game_state == GameState.GAME_LOBBY
                      and not ctrl.is_mission_running())
+            # ADR 094: the operator's deferred stop, at the same safe point the
+            # guards use. Checked first only because it is the deliberate one —
+            # the outcome is the same single break either way.
+            if ctrl.finish_round_requested() and _safe:
+                logger.warning(
+                    "\033[93m🏁 FINISH ROUND: stopping at lobby — round complete "
+                    "(ADR 094)\033[0m")
+                finish_round_exit = True
+                break
             if liveness.should_stop() and _safe:
                 logger.warning(
                     "\033[93m🛑 LIVENESS GUARD: ending session (%s) — wingman "
@@ -1172,6 +1183,22 @@ def main():
         except Exception as e:
             logger.warning("ResourceSampler: summarize failed: %s", e)
         heap_census.stop()
+        # ADR 094: close MetalStorm LAST — after the session summary, the
+        # performance artifacts and the mission stats are on disk, so a hung or
+        # failed close cannot cost the session's data. Only the operator's
+        # deliberate finish-round stop does this: a guard exit means "restart
+        # wingman", and the operator wants the client still up for that.
+        if finish_round_exit:
+            _fr_cfg = cfg.get("finish_round_then_exit", {}) or {}
+            if _fr_cfg.get("close_game", True):
+                close_game(
+                    process_name=(cfg.get("resource_monitor", {}) or {}).get(
+                        "game_process_name", "Metalstorm.exe"),
+                    grace_s=float(_fr_cfg.get("game_term_grace_s", 5.0)),
+                )
+            else:
+                logger.info("FINISH ROUND: close_game disabled — leaving "
+                            "MetalStorm running")
 
 
 if __name__ == "__main__":

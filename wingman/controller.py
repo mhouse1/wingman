@@ -138,6 +138,10 @@ class Controller:
         self._mission_complete = threading.Event()
         self._mission_cancel = threading.Event()
         self._exit_event = exit_event  # Event to signal program exit
+        # ADR 094: deferred exit. Set by the FINISH_ROUND_THEN_EXIT hotkey and
+        # read by the main loop at its safe point. An Event rather than a bool
+        # because the hotkey toggles it from the listener thread.
+        self._finish_round_event = threading.Event()
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
@@ -521,6 +525,34 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to start loiter mission", MISSION_LOITER_KEY)
             except Exception:
                 logger.exception("Controller: failed to register loiter mission hotkey")
+
+            # ADR 094: finish the round, then exit. Deferred, and reversible.
+            try:
+                self._last_finish_round_press = 0.0
+                def finish_round_then_exit(_e):
+                    now = time.time()
+                    if now - self._last_finish_round_press < 0.5:
+                        return                      # debounce key-repeat
+                    self._last_finish_round_press = now
+                    if self._finish_round_event.is_set():
+                        # A deferred action that cannot be recalled is a trap:
+                        # the operator waits minutes with no way back except
+                        # killing the process (ADR 094).
+                        self._finish_round_event.clear()
+                        logger.info("\033[93m🏁 FINISH ROUND: cancelled — the "
+                                    "session continues\033[0m")
+                        return
+                    self._finish_round_event.set()
+                    logger.info("\033[93m🏁 FINISH ROUND: requested — wingman will "
+                                "stop at the next lobby, then close MetalStorm "
+                                "(ADR 094). Press '%s' again to cancel.\033[0m",
+                                FINISH_ROUND_THEN_EXIT)
+                keyboard_module.on_press_key(FINISH_ROUND_THEN_EXIT,
+                                             finish_round_then_exit, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to finish the round "
+                            "then exit", FINISH_ROUND_THEN_EXIT)
+            except Exception:
+                logger.exception("Controller: failed to register finish-round hotkey")
 
             # Register hotkey for simulating respawn detected (for testing)
             try:
@@ -2961,6 +2993,14 @@ class Controller:
         logger.info("\033[91mController: cancel_mission called\033[0m")
         self._mission_cancel.set()
         self.stop_weapon_loop()
+
+    def finish_round_requested(self) -> bool:
+        """True while a deferred finish-round-then-exit is pending (ADR 094)."""
+        return self._finish_round_event.is_set()
+
+    def request_finish_round(self, requested: bool = True) -> None:
+        """Set or clear the deferred exit. Exposed for tests and future callers."""
+        self._finish_round_event.set() if requested else self._finish_round_event.clear()
 
     def is_mission_running(self) -> bool:
         """Return True when a mission thread currently holds the mission lock."""

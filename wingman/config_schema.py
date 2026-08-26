@@ -386,6 +386,11 @@ SCHEMA = Section(
         "soft_limit_mb": _int(1),
         "hard_limit_mb": _int(1),
     }),
+        # ADR 094 — finish-round-then-exit hotkey.
+        "finish_round_then_exit": Section(children={
+            "close_game": BOOL,
+            "game_term_grace_s": SECONDS,
+        }),
         # ADR 092 — leak gate thresholds.
         "leak_gate": Section(children={
             "log_dir": STR,

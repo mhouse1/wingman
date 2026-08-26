@@ -169,6 +169,12 @@ crops:
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
+# ADR 094: the FINISH_ROUND_THEN_EXIT hotkey ('z'). Finishes the round, exits
+# wingman at the next lobby, then closes MetalStorm. Guard-triggered exits are
+# unaffected — they mean "restart wingman", so the client stays up.
+finish_round_then_exit:
+  close_game: true            # false stops wingman only
+  game_term_grace_s: 5.0      # SIGTERM to SIGKILL, matching launch-game's settle
 # ADR 092: leak gate thresholds. `make leak-check` measures post-warm-up growth
 # from the archived RESOURCE lines. INSUFFICIENT is never a pass — short
 # sessions underread an accumulating defect roughly tenfold.

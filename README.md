@@ -2,7 +2,7 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.8.3 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04).
+Current version: v1.8.7 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04), on **CPU only**, from a low-end laptop to a desktop workstation.
 
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
@@ -103,7 +103,49 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 
 ---
 
+## Hardware Target — CPU Only, Deliberately
+
+Wingman runs entirely on the **CPU**. `respawn_detection.use_gpu` exists and is
+set to `false`, and every calibration, performance baseline and regression
+threshold in the project was measured that way.
+
+That is a design decision, not an oversight. The target range is **a low-end
+laptop through to a desktop workstation**, with no GPU requirement, because:
+
+- The GPU is already busy running MetalStorm. A wingman that costs the game
+  frames has made the aircraft harder to fly, not easier.
+- One hardware profile means one set of baselines. The 725-session release
+  baseline, the ADR 092 leak gate thresholds and the ADR 090 memory-guard limits
+  are all calibrated against CPU behaviour, and a second profile would silently
+  split every one of them.
+- GPU inference is not bit-identical to CPU, and the ADR 044 replay gate and
+  ADR 037 real-OCR lane both assert on OCR output.
+
+The foundation comes first. A high-performance GPU profile — batched GPU OCR, a
+per-frame fast path for missile detection, and reaction latency bounded by frame
+rate rather than by the 1.5 s tick — is designed in
+[`docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md`](docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md).
+It is a design, not a plan; nothing there is scheduled, and the CPU path would
+remain the default.
+
+---
+
 ## Runtime Performance
+
+Measured across the release baseline — **725 sessions, 604,263 OCR samples**:
+
+| crop | mean | p95 |
+|------|------|-----|
+| incoming | 0.460 s | 0.373 s |
+| respawn | 0.423 s | 0.228 s |
+| health | 0.432 s | 0.380 s |
+| ammo_flares | 0.375 s | 0.207 s |
+| ammo_missiles | 0.384 s | 0.195 s |
+| telemetry | 0.666 s | 0.374 s |
+| **incoming to flare** | **0.486 s** | — |
+
+Sampling is on a fixed **1.5 s tick**, with 13 thread-local EasyOCR readers
+across 33 calibrated crops.
 
 Every session writes per-crop OCR timings and incoming→flare reaction latency to `docs/performance/current/`, which `make wrelease` promotes into `docs/performance/release/` as the comparison baseline. `PerformanceTracker` fails the run if the current session regresses against that baseline beyond the thresholds in `config.yaml`.
 
@@ -227,6 +269,12 @@ Roadmap: `docs/PROJECT_AI_ROADMAP.md` · Architecture: `docs/architecture.md` ·
 | `docs/adr/056-game-battle-eject-fsm-state.md` | Eject as a first-class FSM state |
 | `docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md` | Eject descent: impulse rotation + ballistic phase |
 | `docs/adr/059-health-gated-immediate-mission-restart.md` | One restart path: mission restarts when health returns |
+
+### Design documents (HLDD)
+
+| Document | Description |
+|---|---|
+| `docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md` | **A GPU-accelerated real-time profile** — batched GPU OCR, per-frame missile detection, and what must not regress. Design only; the CPU path stays the default |
 
 ### Perception and detection
 
