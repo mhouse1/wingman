@@ -12,7 +12,7 @@ long session. Respawn-crop OCR median rises from ~0.24 s in the first hour to
 tick budget. All crops degrade uniformly, which is the signature of resource
 starvation rather than a defect in any one OCR path.
 
-**ANSWERED 2026-08-23 — see the next section. The leak was a new X11 connection opened per key event; fixed in ADR 091, 94.7% reduction measured. The narrative below is kept as the investigation record.**
+**ANSWERED 2026-08-23, CLOSED 2026-08-25 — see the next section. The leak was a new X11 connection opened per key event, fixed in ADR 091 (Accepted). Field-validated across six sessions of 3.0 to 9.0 hours: growth went from +952..+1,666 MB/h to −4..+3, and the OCR degradation described below no longer occurs — 0.25 s at hour nine, not 4.85 s. The narrative below is kept as the investigation record.**
 
 The mechanism is a memory leak: system swap climbed **4.3 GB → 14.8 GB** during
 the 2026-08-20 session and collapsed to 3.6 GB within minutes of exit. Every
@@ -69,16 +69,103 @@ Xlib over 400 iterations with `gc.collect()` either side:
 
 **94.7% reduction.**
 
-### Still open after ADR 091
+### CLOSED 2026-08-25 — validated in the field, ADR 091 Accepted
 
-- The remaining ~4% of growth is unattributed. It needs its own long session to
-  characterise, and it may be ordinary drift rather than a leak.
-- **The fix is not yet validated on a long session.** The numbers above are a
-  controlled measurement plus a one-session attribution, not a post-fix soak.
-  ADR 090's memory guard stays armed until a real session confirms the curve.
-- `_linux_click` has the same per-call `Display()` pattern, deliberately left
-  alone — low hundreds of calls per session, ~1-2 MB, and its sleeps must not be
-  held under the injection lock.
+The three items this section listed as open are resolved.
+
+- ~~The remaining ~4% of growth is unattributed.~~ **It is not 4%, it is zero.**
+  The predicted residual was ~38 MB/h; six post-fix sessions spanning 3.0 to 9.0
+  hours measure **−4 to +3 MB/h** against a pre-fix range of +952 to +1,666.
+- ~~The fix is not yet validated on a long session.~~ **Validated at 9h 12m** —
+  the same duration band as this document's founding evidence:
+
+  | | pre-fix, 2026-08-20 (8h12m) | post-fix, 2026-08-25 (9h12m) |
+  |---|---|---|
+  | peak RSS | ~13,200 MB | **2,915 MB** |
+  | system swap | 4.3 → 14.8 GB | 2,366 → 2,365 MB |
+  | respawn OCR median | 0.24 → **4.85 s** | 0.23 → **0.25 s** |
+  | OCR p95 | 0.38 → **16.9 s** | 0.35 → **0.44 s** |
+
+  The Summary at the top of this document opens by citing "4.85 s by hour nine".
+  That figure is now directly contradicted at matching duration on the fixed
+  build, by an independent measurement path from `mallinfo2` — which matters,
+  because this investigation began from the OCR symptom rather than from memory.
+
+- ~~`_linux_click` deliberately left alone.~~ Still true, now tracked as
+  **Roadmap 002** rather than only as a note inside an Accepted ADR.
+
+ADR 090's memory guard stays armed regardless: it is a backstop against the
+*next* leak, not a mitigation for this one.
+
+**What remains genuinely open** is not wingman's: MetalStorm grows ~165 MB/h on
+its own and is now the only thing on the machine that does, which makes it the
+binding constraint on unattended session length. Recorded as **Anomaly 002**.
+
+### The six validating sessions
+
+Every post-fix session with a post-warm-up window of 2h or more, measured on
+live allocation (`mi_use`), against the two pre-fix sessions carrying the same
+instrumentation:
+
+| session (log end time) | window | `mi_use` | peak RSS | max OCR med |
+|------------------------|--------|----------|----------|-------------|
+| `wingman_20260823_002829` **pre-fix** | 6.77h | **+1491** | 14,011 MB | **11.97 s** |
+| `wingman_20260823_065033` **pre-fix** | 2.26h | **+974** | 4,792 MB | 0.55 s |
+| `wingman_20260823_230230` | 3.01h | +2 | 2,835 MB | 0.29 s |
+| `wingman_20260824_091431` | 4.34h | −0 | 2,809 MB | 0.24 s |
+| `wingman_20260824_180336` | 7.68h | +3 | 2,974 MB | 0.30 s |
+| `wingman_20260824_234843` | 4.43h | −4 | 2,937 MB | 0.24 s |
+| `wingman_20260825_065344` | 4.43h | −0 | 2,965 MB | 0.24 s |
+| `wingman_20260825_172600` | 9.02h | +3 | 2,915 MB | 0.25 s |
+
+Peak RSS collapses from 14,011 MB to a 2,809–2,974 MB band that does not widen
+with duration — the 9.02h session peaks *lower* than the 3.01h one.
+
+One session is deliberately excluded. `wingman_20260824_033917` reads +41 MB/h
+over a 3.25h window, which would pass, but 23 of its 40 post-warm-up samples
+show `n_ocr=0`: it spent 110 minutes livelocked (Anomaly 001) and its flat curve
+reflects doing no work rather than leaking no memory. Its active portion reads
++2 MB/h. **A session that stops working looks exactly like a session that stopped
+leaking**, which is why the leak gate rejects rather than passes them.
+
+### Why this hid for two months, and what now catches it
+
+The fix is the smaller half of this document's lesson. A defect running at up to
+1,666 MB/h was invisible because nothing was looking:
+
+| gap | now closed by |
+|-----|---------------|
+| The symptom surfaced in OCR, far from the cause in the input path | nothing — this is a reasoning lesson, recorded in Research 009 |
+| Short sessions underread it roughly tenfold (0.75h runs measured +120 and +288 while the same code leaked >1,300) | the gate refuses to score a session under `min_window_h`, returning INSUFFICIENT rather than a false pass |
+| Memory was never recorded per session, so no trend could accumulate | the `RESOURCE` lines this document added, plus `make leak-check` reading them across the whole archive |
+| Nothing failed when it regressed | `make tp` (FAIL blocks, INSUFFICIENT warns) and `make wrelease` (both block) |
+| A new per-call handle could be reintroduced silently | `tests/test_handle_construction_sites.py` pins the construction sites by AST |
+
+Both mechanisms are ADR 092. The gate reports the current archive as:
+
+```
+latest qualifying : wingman.log  (9.02h window)
+  wingman growth  : +3 MB/h   (pass under 100)
+  game growth     : +147 MB/h (reported, never gated — Anomaly 002)
+  history         : median +899 MB/h, range -4 to +5187 over 14 sessions
+PASS
+```
+
+That history line is this document's whole story in one row: the median of the
+archive is still the leak, because most of the archive predates the fix.
+
+### If this reopens
+
+1. `make leak-check` — the gate over every archived session. INSUFFICIENT means
+   run a longer session, **not** that nothing is wrong.
+2. If it fails, enable `heap_census` (`enabled: true`) and run 60–90 minutes.
+   Attribution needs accumulated bytes above the noise floor, not a long
+   baseline; the original cause was named in a single session this way.
+3. Read `tm_mb` against `mi_use_mb`: tracking together means Python-side and the
+   by-site table names the line; `tm_mb` flat while `mi_use` climbs means native
+   allocation below the Python allocator.
+4. Raise `memory_guard.soft_limit_mb` first, or ADR 090 ends the session before
+   the curve is readable — see the Instrument note below.
 
 ### Instrument note
 

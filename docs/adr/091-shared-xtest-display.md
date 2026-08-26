@@ -1,8 +1,11 @@
 # ADR 091 — Shared XTest Display for Key Injection
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-08-23 | 1.8.5           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-08-25 | 1.8.5           |
+
+**Accepted 2026-08-25** after six post-fix sessions spanning 3.0 to 9.0 hours.
+See "Validation" below.
 
 ## Context
 
@@ -92,6 +95,44 @@ Measured with real Xlib, 400 iterations, `gc.collect()` either side:
 
 **94.7% reduction**, and the offending site leaves the table.
 
+## Validation — accepted 2026-08-25
+
+Every condition this ADR set for itself is met.
+
+| condition (from Consequences, below) | outcome |
+|---|---|
+| "the remaining ~4% is unattributed and needs its own session to characterise" | **characterised: it is not 4%, it is zero.** The predicted residual was ~38 MB/h; six sessions measure −4 to +3 |
+| "limits should not be relaxed until a long session confirms the new curve" | confirmed at a 9.02h window; ADR 090's guard left untouched |
+| "contention is not expected to be observable" | not observed across ~30h of real sessions — 0 errors, OCR flat, reaction latency normal |
+
+| | sessions | window | post-warm-up `mi_use` |
+|---|---|---|---|
+| pre-fix | 6 | 2.1–6.8 h | **+952 to +1,666 MB/h** |
+| post-fix | 6 | 3.0–9.0 h | **−4 to +3 MB/h** |
+
+The decisive session is 2026-08-25 08:14, 9h 12m — the same duration band as
+Performance 008's founding evidence, which recorded respawn-crop OCR rising to
+**4.85 s by hour nine** and RSS reaching 13.2 GB with 14.8 GB of system swap:
+
+| | pre-fix, 2026-08-20 (8h12m) | post-fix, 2026-08-25 (9h12m) |
+|---|---|---|
+| peak RSS | ~13,200 MB | **2,915 MB** |
+| system swap | 4.3 → 14.8 GB | 2,366 → 2,365 MB |
+| OCR median | 0.24 → 4.85 s | 0.23 → **0.25 s** |
+| OCR p95 | 0.38 → 16.9 s | 0.35 → **0.44 s** |
+
+That the OCR symptom disappears too matters: it is an independent measurement
+path from `mallinfo2`, and Performance 008 was opened because of the OCR
+degradation rather than because of memory.
+
+### Known at acceptance
+
+- **The drop-and-reconnect path has never fired in production.** No display has
+  died mid-session, so that branch is covered by unit tests only. It is an error
+  path that cannot be forced, so waiting for it would mean waiting indefinitely.
+- **`_linux_click` still constructs per call** — see "Not done". Tracked in
+  Roadmap 002 so it survives this ADR becoming a historical record.
+
 ## Consequences
 
 - The dominant term in the Performance 008 leak is removed. The remaining ~4%
@@ -116,6 +157,9 @@ pattern. It is deliberately left alone: clicks number in the low hundreds per
 session (~1-2 MB, negligible beside 1,277 MB), and its sequence contains
 multi-hundred-millisecond sleeps that must not be held under the injection
 lock. Worth fixing, but not as part of a change to the safety-critical key path.
+
+Carried forward as **Roadmap 002** — an Accepted ADR is a historical record, so
+a live to-do left only in this section would quietly stop being one.
 
 ## References
 

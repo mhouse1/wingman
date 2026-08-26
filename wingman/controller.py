@@ -45,50 +45,36 @@ _LATCH_NOTE = ("key may stay latched in the X server for this session"
                else "key may stay held down in the Windows input queue")
 
 
-# Key bindings
-NOSE_UP_KEY = 'i' # FLIGHT_CONTROL_KEY
-NOSE_DOWN_KEY = 'k' # FLIGHT_CONTROL_KEY
-ROLL_LEFT_KEY = 'j' # FLIGHT_CONTROL_KEY
-ROLL_RIGHT_KEY = 'l' # FLIGHT_CONTROL_KEY
-YAW_LEFT = ';' # yaw axis - left rudder (ADR 070)
-AFTERBURNER_KEY = 'e'
-AIRBRAKE_KEY = 'd'
-DEPLOY_FLARES_KEY = 'space'
-FIRE_MACHINE_GUN = 'a'
-FIRE_ACTIVE_WEAPON = 'f'
-WINGSWEEP_KEY = 'w'
-SWITCH_WEAPON = 'g'
-SPECIAL_ABILITY = 'q'
-PADLOCK_CAMERA = 'p'
-ALT_FLIGHT_KEYS = ('up', 'down', 'left', 'right')  # Arrow keys also trigger GAME_BATTLE_MANUAL
-# Keys the maneuver-key hotkey listener watches as a manual-takeover signal.
-# Anything held programmatically from this set MUST be bracketed with
-# _inc_programmatic_key / release grace, or its XTest auto-repeats read as the
-# player and self-cancel the mission (ADR 070 d4).
-_WATCHED_MANEUVER_KEYS = (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
-                          *ALT_FLIGHT_KEYS)
-TOGGLE_WEAPON_LOOP_KEY = 'x'  # Press X to toggle weapon firing loop
-MISSION_J20_KEY = 'u'  # Press U to start J20 mission
-MISSION_LOITER_KEY = 'y'  # Press Y to start loiter mission
-CANCEL_MISSION_KEY = 'end'   # Press End to cancel active mission
-CAPTURE_SCREEN_SHOT = 'v'  # Press V to capture a screenshot (for testing/debugging)
-AUTO_MISSION_KEY = 'm'  # Press M to start an automatic mission based on detected game state (not implemented yet)
-SIMULATE_RESPAWN_KEY = 'b'  # Press B to inject a fake respawn OCR result (testing)
-
-# Available Emotes in-game
-# The list here are for future use when implementing hldd003's request for emote support, and are not currently used in the codebase.
-"""
-EMOTE1 # Moving to , bind to numpad 1
-EMOTE2 # Help!
-EMOTE3 # Defend
-EMOTE4 # Attack, bind to T, use with HLDD003's target painting mode for marking targets to attack with the weapon loop
-EMOTE5 # Goodluck , bind to 'u', the same key as J20 mission for easy access at the start of a match
-EMOTE6 # Well Played
-EMOTE7 # Wow!
-EMOTE8 # Thanks!
-EMOTE9 # Good Game!
-EMOTE10 # Oops!
-"""
+# Key bindings and the emote list live in keybindings.py so they are findable
+# without reading the controller. Re-exported here because callers and tests
+# import them from this module.
+from .keybindings import (                                          # noqa: F401
+    AFTERBURNER_KEY,
+    AIRBRAKE_KEY,
+    ALT_FLIGHT_KEYS,
+    AUTO_MISSION_KEY,
+    CANCEL_MISSION_KEY,
+    CAPTURE_SCREEN_SHOT,
+    DEPLOY_FLARES_KEY,
+    EMOTES,
+    FINISH_ROUND_THEN_EXIT,
+    FIRE_ACTIVE_WEAPON,
+    FIRE_MACHINE_GUN,
+    MISSION_J20_KEY,
+    MISSION_LOITER_KEY,
+    NOSE_DOWN_KEY,
+    NOSE_UP_KEY,
+    PADLOCK_CAMERA,
+    ROLL_LEFT_KEY,
+    ROLL_RIGHT_KEY,
+    SIMULATE_RESPAWN_KEY,
+    SPECIAL_ABILITY,
+    SWITCH_WEAPON,
+    TOGGLE_WEAPON_LOOP_KEY,
+    WINGSWEEP_KEY,
+    YAW_LEFT,
+    _WATCHED_MANEUVER_KEYS,
+)
 
 # Region name constants — used as log labels in click_grid_region and elsewhere.
 # Defining them as constants means the string is written once; a rename is a

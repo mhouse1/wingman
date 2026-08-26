@@ -169,6 +169,19 @@ crops:
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
+# ADR 092: leak gate thresholds. `make leak-check` measures post-warm-up growth
+# from the archived RESOURCE lines. INSUFFICIENT is never a pass — short
+# sessions underread an accumulating defect roughly tenfold.
+leak_gate:
+  log_dir: logs
+  warmup_s: 600.0              # OCR model load; rates are anchored after this
+  min_window_h: 1.0            # below this a session cannot support a verdict
+  min_samples: 5
+  mi_use_pass_mb_h: 100.0      # live allocation — the trustworthy signal
+  mi_use_fail_mb_h: 400.0      # at or over this, the failure is unambiguous
+  rss_pass_mb_h: 200.0         # fallback for logs predating mallinfo2; wider,
+  rss_fail_mb_h: 600.0         #   because arena retention inflates RSS
+  history_sessions: 10
 # ADR 093: the ADR 087 ESC suppression is a delay, not a veto. Past this the
 # escape loop presses ESC even during a blackout — a bounded cancel-then-reopen
 # cycle beats sitting inert, which cost 110 minutes on 2026-08-24. 0 disables
