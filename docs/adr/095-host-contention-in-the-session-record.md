@@ -4,6 +4,9 @@
 |--------|------------|-----------------|
 | Draft  | 2026-08-26 | 1.8.7           |
 
+**Scope reduced 2026-08-26**, before implementation, on evidence that arrived
+after this was written — see "What the evidence changed".
+
 ## Context
 
 Wingman shares VEDA with Jenkins, Redmine, Docker, a GNOME desktop, a browser,
@@ -41,10 +44,50 @@ foundry ADR 021 adds the lever — **TRIAL**, a one-gesture stand-down of Jenkin
 Redmine and Docker before a session. This ADR is the wingman half: make the
 session record say whether that lever was pulled.
 
+## What the evidence changed
+
+This ADR originally proposed three things: record load, record it per session,
+and warn at startup when the machine is loaded. Measurements taken on
+2026-08-26, after it was written, argue for keeping the first two and dropping
+the third.
+
+**Co-tenant load does not measurably affect today's results.** Three sessions
+the same morning, one of them with the lab services stood down under TRIAL
+(foundry ADR 021) and two with them running:
+
+| session | TRIAL | reaction | incoming | respawn |
+|---------|-------|----------|----------|---------|
+| 02:07 | no | 0.250 s | 0.283 s | 0.264 s |
+| 04:51 | no | 0.245 s | 0.258 s | 0.237 s |
+| 08:56 | **yes** | 0.246 s | 0.264 s | 0.242 s |
+
+Indistinguishable. And ADR 096's instrumentation shows why: **99.6% of reaction
+latency is the detection pass and 0.0% is dispatch**, so the cost is work inside
+wingman's own OCR pool rather than contention for cores. A session at load
+average 9.4 still finished 8/8 missions at 0.25 s OCR.
+
+So a startup warning would have to pick a load threshold that matters, and no
+measured threshold does. Choosing one anyway is exactly the "number with no
+evidence behind it" that ADR 094 declined to invent.
+
+**The recording still earns its place**, for a reason the original text
+under-sold: ADR 092's leak gate and the regression comparison both judge a
+session against an archive of prior sessions, and today carry an unstated
+assumption that conditions were equivalent. Recording the conditions makes those
+comparisons defensible rather than hopeful — and answering "was that session
+under TRIAL?" should be a field lookup, not an afternoon of cross-referencing,
+which is what it took today.
+
+**The alerting half is not rejected, it is conditional.** HLDD 008's
+frame-bounded design has none of the slack that currently hides contention, and
+lists this ADR as a prerequisite. When that exists, revisit — with a threshold
+derived from measurement rather than guessed.
+
 ## Decision
 
 Record host contention alongside wingman's own resource figures, so a session's
 performance data can be judged against the conditions it was measured in.
+**Record it; do not alarm on it.**
 
 ### 1. Load average in the `RESOURCE` line
 
@@ -66,19 +109,25 @@ are interpretable on other hardware.
 JSON is the artifact that survives and that the aggregators read, so context
 that matters for comparability belongs there.
 
-### 3. A startup note when the machine is already loaded
+### 3. The host mode, from foundry's own interface
 
-If load average or swap is high at startup, log it once, at INFO, naming TRIAL:
+`rd-mode status --json` (foundry HLDD 001) reports whether the host is in R&D
+mode or TRIAL. `wingman/host_mode.py` already queries it at startup to print the
+TRIAL banner; the mode it returns is recorded rather than discarded.
 
-```
-Host: load 9.4/20 cores, swap 3.2 GB in use at startup — consider TRIAL
-(foundry ADR 021) before a measurement soak
-```
+This is the single most useful field, because it is categorical rather than a
+noisy scalar: "was this session under TRIAL?" is answerable exactly, and it is
+the question that actually gets asked.
 
-**A note, not a gate.** Wingman must never refuse to run because the machine is
-busy: unattended operation is the point, and a session on a loaded machine is
-still a valid session — it is simply one whose timings should be read with that
-in mind.
+`unknown` is recorded as `unknown` — never collapsed to `trial` — per HLDD 001's
+contract.
+
+### Deliberately not done: a startup warning
+
+Dropped before implementation. See "What the evidence changed": no measured load
+threshold affects today's results, so any threshold would be invented. Revisit
+if HLDD 008's frame-bounded profile is built, when contention will matter and a
+threshold can be derived from measurement.
 
 ### What this deliberately does not do
 
@@ -132,9 +181,9 @@ purpose.
   `leak-check.py` field regex without change.
 - **V2** — `run_*.json` carries the host-context block, and `_load_run_file`
   still accepts both new and pre-ADR-095 files.
-- **V3** — the startup note fires on a loaded machine and stays silent on a
-  quiet one.
-- **V4** — a loaded machine never prevents a session starting.
+- **V3** — the host mode is recorded, and `unknown` is never written as `trial`.
+- **V4** — a loaded machine never prevents a session starting, and nothing warns
+  about load.
 - **V5** — reading `/proc/loadavg` never raises into the tick; a platform
   without it degrades to `n/a`, as the other probes already do.
 

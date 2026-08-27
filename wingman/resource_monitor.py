@@ -155,6 +155,22 @@ _MIN_VERDICT_HOURS = 1.0
 _WARMUP_S = 600.0
 
 
+def read_loadavg() -> "tuple[float, float, float] | None":
+    """The three /proc/loadavg figures, or None where unavailable (ADR 095).
+
+    Recorded, never alarmed on: three sessions on 2026-08-26 — one under TRIAL,
+    two with the lab services up — were indistinguishable, and ADR 096 shows
+    99.6% of reaction latency is wingman's own detection pass rather than
+    contention. This is context for comparing sessions, not a health signal.
+    """
+    try:
+        with open(f"{_PROC}/loadavg", "r", encoding="utf-8") as fh:
+            parts = fh.read().split()
+        return (float(parts[0]), float(parts[1]), float(parts[2]))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _kb_to_mb(kb) -> "int | None":
     return int(kb / 1024) if isinstance(kb, int) else None
 
@@ -381,6 +397,8 @@ class ResourceSampler:
             "game_swap": game_swap, "ocr_med": med,
             "sys_swap": self._system_swap_mb(),
         }
+        _la = read_loadavg()                      # ADR 095
+        obs["load1"], obs["load5"], obs["load15"] = _la if _la else (None, None, None)
         if self._first is None:
             self._first = dict(obs)
         if self._anchor is None and (now - self._session_start) >= self._warmup_s:
@@ -412,6 +430,7 @@ class ResourceSampler:
             f"pool_depth={_fmt(depth)} "
             f"game_rss_mb={_fmt(game_rss)} d_game_rss={_delta('game_rss')} "
             f"game_swap_mb={_fmt(game_swap)} sys_swap_mb={_fmt(obs['sys_swap'])}"
+            f" load={_fmt(obs['load1'])}/{_fmt(obs['load5'])}/{_fmt(obs['load15'])}"
         )
         logger.info(line)
         return line

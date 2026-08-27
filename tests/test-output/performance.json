@@ -1,72 +1,5130 @@
 {
-  "timestamp": "2026-08-26T07:26:13.027512",
+  "timestamp": "2026-08-26T15:29:33.039028",
   "version": "1.8.7",
   "tests": {
-    "test_segments_reach_the_run_file": {
-      "duration": 0.00048385601257905364,
+    "test_wingman_smoke_launch": {
+      "duration": 5.4564967285841703e-05,
       "runs": 1,
-      "min": 0.00048385601257905364,
-      "max": 0.00048385601257905364
+      "min": 5.4564967285841703e-05,
+      "max": 5.4564967285841703e-05
+    },
+    "test_level1_static_screenshot": {
+      "duration": 7.175852578016929,
+      "runs": 1,
+      "min": 7.175852578016929,
+      "max": 7.175852578016929
+    },
+    "test_respawn_detection_positive": {
+      "duration": 2.8025753014953807,
+      "runs": 2,
+      "min": 1.8669916940270923,
+      "max": 3.738158908963669
+    },
+    "test_respawn_detection_negative": {
+      "duration": 3.6870715123368427,
+      "runs": 3,
+      "min": 1.7185737760155462,
+      "max": 7.606536610983312
+    },
+    "test_level2_live_capture": {
+      "duration": 1.43158392701298,
+      "runs": 1,
+      "min": 1.43158392701298,
+      "max": 1.43158392701298
+    },
+    "test_get_frame_and_analyze_frame": {
+      "duration": 0.12188501103082672,
+      "runs": 1,
+      "min": 0.12188501103082672,
+      "max": 0.12188501103082672
+    },
+    "test_level3_unit_ocr": {
+      "duration": 4.000361107988283,
+      "runs": 1,
+      "min": 4.000361107988283,
+      "max": 4.000361107988283
+    },
+    "test_level4_region33_contains_lick_to_c": {
+      "duration": 1.0480858440278098,
+      "runs": 1,
+      "min": 1.0480858440278098,
+      "max": 1.0480858440278098
+    },
+    "test_level4_region9_contains_inco": {
+      "duration": 0.15856763999909163,
+      "runs": 1,
+      "min": 0.15856763999909163,
+      "max": 0.15856763999909163
+    },
+    "test_level5_performance_validation": {
+      "duration": 0.0008280749898403883,
+      "runs": 1,
+      "min": 0.0008280749898403883,
+      "max": 0.0008280749898403883
+    },
+    "test_click_through_game_end_transitions_to_lobby": {
+      "duration": 9.306601714342833e-05,
+      "runs": 1,
+      "min": 9.306601714342833e-05,
+      "max": 9.306601714342833e-05
+    },
+    "test_startup_stall_never_shuts_down_the_host": {
+      "duration": 0.0004577990039251745,
+      "runs": 1,
+      "min": 0.0004577990039251745,
+      "max": 0.0004577990039251745
+    },
+    "test_respawn_text_matches": {
+      "duration": 8.045011458711492e-05,
+      "runs": 9,
+      "min": 3.5138975363224745e-05,
+      "max": 0.000112100038677454
+    },
+    "test_game_starting_blocks_respawn_detection": {
+      "duration": 0.023700453981291503,
+      "runs": 1,
+      "min": 0.023700453981291503,
+      "max": 0.023700453981291503
+    },
+    "test_game_battle_does_not_block_respawn_detection": {
+      "duration": 0.025374613993335515,
+      "runs": 1,
+      "min": 0.025374613993335515,
+      "max": 0.025374613993335515
+    },
+    "test_game_end_b_blocks_background_ocr_scheduling": {
+      "duration": 0.023061521991621703,
+      "runs": 1,
+      "min": 0.023061521991621703,
+      "max": 0.023061521991621703
+    },
+    "test_incoming_template_detection_positive": {
+      "duration": 0.026931246975436807,
+      "runs": 1,
+      "min": 0.026931246975436807,
+      "max": 0.026931246975436807
+    },
+    "test_incoming_template_detection_negative_blank": {
+      "duration": 0.026498701015952975,
+      "runs": 1,
+      "min": 0.026498701015952975,
+      "max": 0.026498701015952975
+    },
+    "test_incoming_ocr_fallback_when_template_disabled": {
+      "duration": 0.026984155003447086,
+      "runs": 1,
+      "min": 0.026984155003447086,
+      "max": 0.026984155003447086
+    },
+    "test_incoming_ocr_fallback_degraded_reads": {
+      "duration": 0.027109591329159837,
+      "runs": 9,
+      "min": 0.026808294001966715,
+      "max": 0.027875417028553784
+    },
+    "test_waiting_cancel_baseline_capture_and_diff": {
+      "duration": 0.0012547189835458994,
+      "runs": 1,
+      "min": 0.0012547189835458994,
+      "max": 0.0012547189835458994
+    },
+    "test_waiting_cancel_diff_none_without_baseline": {
+      "duration": 8.680298924446106e-05,
+      "runs": 1,
+      "min": 8.680298924446106e-05,
+      "max": 8.680298924446106e-05
+    },
+    "test_unknown_starts_and_classifies_to_lobby_with_debounce": {
+      "duration": 0.03788110503228381,
+      "runs": 1,
+      "min": 0.03788110503228381,
+      "max": 0.03788110503228381
+    },
+    "test_unknown_precedence_prefers_end_over_lobby_and_battle": {
+      "duration": 0.03793163096997887,
+      "runs": 1,
+      "min": 0.03793163096997887,
+      "max": 0.03793163096997887
+    },
+    "test_unknown_stays_unknown_without_classifier_hit": {
+      "duration": 0.037503330036997795,
+      "runs": 1,
+      "min": 0.037503330036997795,
+      "max": 0.037503330036997795
+    },
+    "test_telemetry_split_labels_in_same_box": {
+      "duration": 0.00011312897549942136,
+      "runs": 1,
+      "min": 0.00011312897549942136,
+      "max": 0.00011312897549942136
+    },
+    "test_telemetry_split_number_and_label_separate_boxes": {
+      "duration": 4.555995110422373e-05,
+      "runs": 1,
+      "min": 4.555995110422373e-05,
+      "max": 4.555995110422373e-05
+    },
+    "test_telemetry_split_single_line_assigned_by_crop_half": {
+      "duration": 4.811497638002038e-05,
+      "runs": 1,
+      "min": 4.811497638002038e-05,
+      "max": 4.811497638002038e-05
+    },
+    "test_telemetry_split_ignores_boxes_without_digits_and_empty": {
+      "duration": 3.738404484465718e-05,
+      "runs": 1,
+      "min": 3.738404484465718e-05,
+      "max": 3.738404484465718e-05
+    },
+    "test_telemetry_harvest_never_blocks_and_feeds_filter": {
+      "duration": 0.00013553397729992867,
+      "runs": 1,
+      "min": 0.00013553397729992867,
+      "max": 0.00013553397729992867
+    },
+    "test_telemetry_split_row_confidence_is_minimum_of_digit_boxes": {
+      "duration": 0.0001890509738586843,
+      "runs": 1,
+      "min": 0.0001890509738586843,
+      "max": 0.0001890509738586843
+    },
+    "test_fuel_reading_range_gate_and_staleness": {
+      "duration": 8.646002970635891e-05,
+      "runs": 1,
+      "min": 8.646002970635891e-05,
+      "max": 8.646002970635891e-05
+    },
+    "test_hsv_mask_isolates_green_on_sky": {
+      "duration": 0.00018216203898191452,
+      "runs": 1,
+      "min": 0.00018216203898191452,
+      "max": 0.00018216203898191452
+    },
+    "test_green_label_tries_three_variants": {
+      "duration": 0.00010535097680985928,
+      "runs": 1,
+      "min": 0.00010535097680985928,
+      "max": 0.00010535097680985928
+    },
+    "test_ammo_label_keeps_legacy_two_variants": {
+      "duration": 7.342401659116149e-05,
+      "runs": 1,
+      "min": 7.342401659116149e-05,
+      "max": 7.342401659116149e-05
+    },
+    "test_green_label_first_variant_wins_early": {
+      "duration": 9.059195872396231e-05,
+      "runs": 1,
+      "min": 9.059195872396231e-05,
+      "max": 9.059195872396231e-05
+    },
+    "test_cleanup_shuts_down_executor": {
+      "duration": 10.737224755983334,
+      "runs": 1,
+      "min": 10.737224755983334,
+      "max": 10.737224755983334
+    },
+    "test_cleanup_signals_click_to_thread": {
+      "duration": 10.93832986796042,
+      "runs": 1,
+      "min": 10.93832986796042,
+      "max": 10.93832986796042
+    },
+    "test_context_manager_calls_cleanup": {
+      "duration": 10.816054002032615,
+      "runs": 1,
+      "min": 10.816054002032615,
+      "max": 10.816054002032615
+    },
+    "test_no_threads_leaked_after_cleanup": {
+      "duration": 10.668351792963222,
+      "runs": 1,
+      "min": 10.668351792963222,
+      "max": 10.668351792963222
+    },
+    "test_trigger_runs_side_effect_callbacks_outside_state_lock": {
+      "duration": 0.028005803003907204,
+      "runs": 1,
+      "min": 0.028005803003907204,
+      "max": 0.028005803003907204
+    },
+    "test_fsm_unattended_lifecycle_and_starting_loop_callbacks": {
+      "duration": 0.03178387903608382,
+      "runs": 1,
+      "min": 0.03178387903608382,
+      "max": 0.03178387903608382
+    },
+    "test_cancel_releases_lock_within_two_seconds": {
+      "duration": 0.02079525199951604,
+      "runs": 1,
+      "min": 0.02079525199951604,
+      "max": 0.02079525199951604
+    },
+    "test_cancel_prevents_new_missions": {
+      "duration": 5.891901673749089e-05,
+      "runs": 1,
+      "min": 5.891901673749089e-05,
+      "max": 5.891901673749089e-05
+    },
+    "test_mission_lock_not_held_after_cancel_completion": {
+      "duration": 0.2015565579640679,
+      "runs": 1,
+      "min": 0.2015565579640679,
+      "max": 0.2015565579640679
+    },
+    "test_stale_cancel_before_loop_start_does_not_prevent_loop": {
+      "duration": 0.36296425899490714,
+      "runs": 1,
+      "min": 0.36296425899490714,
+      "max": 0.36296425899490714
+    },
+    "test_cancel_during_game_starting_fires_starting_timeout": {
+      "duration": 0.22261214500758797,
+      "runs": 1,
+      "min": 0.22261214500758797,
+      "max": 0.22261214500758797
+    },
+    "test_exit_during_game_starting_does_not_fire_timeout": {
+      "duration": 0.46274029300548136,
+      "runs": 1,
+      "min": 0.46274029300548136,
+      "max": 0.46274029300548136
+    },
+    "test_fsm_transition_away_from_starting_does_not_fire_timeout": {
+      "duration": 0.46238906600046903,
+      "runs": 1,
+      "min": 0.46238906600046903,
+      "max": 0.46238906600046903
+    },
+    "test_starting_max_wait_s_stored_on_controller": {
+      "duration": 0.011666743957903236,
+      "runs": 1,
+      "min": 0.011666743957903236,
+      "max": 0.011666743957903236
+    },
+    "test_good_luck_wait_is_bypassed_by_battle_alive": {
+      "duration": 1.3560395200038329,
+      "runs": 1,
+      "min": 1.3560395200038329,
+      "max": 1.3560395200038329
+    },
+    "test_good_luck_bypass_can_be_disabled": {
+      "duration": 2.2654728030320257,
+      "runs": 1,
+      "min": 2.2654728030320257,
+      "max": 2.2654728030320257
+    },
+    "test_good_luck_wait_config_defaults": {
+      "duration": 0.010574130981694907,
+      "runs": 1,
+      "min": 0.010574130981694907,
+      "max": 0.010574130981694907
+    },
+    "test_stale_capture_suppresses_game_starting_press": {
+      "duration": 0.5107313410262577,
+      "runs": 1,
+      "min": 0.5107313410262577,
+      "max": 0.5107313410262577
+    },
+    "test_fresh_capture_allows_game_starting_press": {
+      "duration": 0.5129209959995933,
+      "runs": 1,
+      "min": 0.5129209959995933,
+      "max": 0.5129209959995933
+    },
+    "test_capture_without_freshness_tracking_allows_press": {
+      "duration": 0.513511368946638,
+      "runs": 1,
+      "min": 0.513511368946638,
+      "max": 0.513511368946638
+    },
+    "test_ignores_battle_before_startup_done": {
+      "duration": 0.00038992002373561263,
+      "runs": 1,
+      "min": 0.00038992002373561263,
+      "max": 0.00038992002373561263
+    },
+    "test_counts_after_startup_done": {
+      "duration": 0.00034668605076149106,
+      "runs": 1,
+      "min": 0.00034668605076149106,
+      "max": 0.00034668605076149106
+    },
+    "test_single_complete_mission": {
+      "duration": 0.00032621901482343674,
+      "runs": 1,
+      "min": 0.00032621901482343674,
+      "max": 0.00032621901482343674
+    },
+    "test_multiple_missions": {
+      "duration": 0.00019021902699023485,
+      "runs": 1,
+      "min": 0.00019021902699023485,
+      "max": 0.00019021902699023485
+    },
+    "test_mission_indices_sequential": {
+      "duration": 0.00018643599469214678,
+      "runs": 1,
+      "min": 0.00018643599469214678,
+      "max": 0.00018643599469214678
+    },
+    "test_avg_duration": {
+      "duration": 0.0001799939782358706,
+      "runs": 1,
+      "min": 0.0001799939782358706,
+      "max": 0.0001799939782358706
+    },
+    "test_click_to_outcome": {
+      "duration": 0.0001402949565090239,
+      "runs": 1,
+      "min": 0.0001402949565090239,
+      "max": 0.0001402949565090239
+    },
+    "test_click_to_outcome_ordering_race": {
+      "duration": 0.0001283619785681367,
+      "runs": 1,
+      "min": 0.0001283619785681367,
+      "max": 0.0001283619785681367
+    },
+    "test_missiles_empty_outcome": {
+      "duration": 0.0001285789767280221,
+      "runs": 1,
+      "min": 0.0001285789767280221,
+      "max": 0.0001285789767280221
+    },
+    "test_lobby_exit_outcome": {
+      "duration": 0.00013487099204212427,
+      "runs": 1,
+      "min": 0.00013487099204212427,
+      "max": 0.00013487099204212427
+    },
+    "test_unknown_outcome_on_finalize": {
+      "duration": 0.000135298992972821,
+      "runs": 1,
+      "min": 0.000135298992972821,
+      "max": 0.000135298992972821
+    },
+    "test_respawn_counted_per_mission_and_session": {
+      "duration": 0.00018674402963370085,
+      "runs": 1,
+      "min": 0.00018674402963370085,
+      "max": 0.00018674402963370085
+    },
+    "test_flare_burst_counted": {
+      "duration": 0.0001629610196687281,
+      "runs": 1,
+      "min": 0.0001629610196687281,
+      "max": 0.0001629610196687281
+    },
+    "test_flare_reload_counted": {
+      "duration": 0.00013171497266739607,
+      "runs": 1,
+      "min": 0.00013171497266739607,
+      "max": 0.00013171497266739607
+    },
+    "test_no_missiles_abort_flag": {
+      "duration": 0.00012587895616889,
+      "runs": 1,
+      "min": 0.00012587895616889,
+      "max": 0.00012587895616889
+    },
+    "test_manual_takeover_counted": {
+      "duration": 0.00013189302990213037,
+      "runs": 1,
+      "min": 0.00013189302990213037,
+      "max": 0.00013189302990213037
+    },
+    "test_eject_excursion_is_one_mission_not_three": {
+      "duration": 0.00013762200251221657,
+      "runs": 1,
+      "min": 0.00013762200251221657,
+      "max": 0.00013762200251221657
+    },
+    "test_takeover_from_eject_state_is_counted": {
+      "duration": 0.00013266701716929674,
+      "runs": 1,
+      "min": 0.00013266701716929674,
+      "max": 0.00013266701716929674
+    },
+    "test_takeover_that_opens_a_mission_is_counted": {
+      "duration": 0.0001252790098078549,
+      "runs": 1,
+      "min": 0.0001252790098078549,
+      "max": 0.0001252790098078549
+    },
+    "test_repeated_manual_state_does_not_double_count": {
+      "duration": 0.00013595499331131577,
+      "runs": 1,
+      "min": 0.00013595499331131577,
+      "max": 0.00013595499331131577
+    },
+    "test_click_to_finish_after_an_eject_is_not_booked_as_missiles_empty": {
+      "duration": 0.0001331379753537476,
+      "runs": 1,
+      "min": 0.0001331379753537476,
+      "max": 0.0001331379753537476
+    },
+    "test_missiles_empty_still_used_when_nothing_supersedes_it": {
+      "duration": 0.0001315660192631185,
+      "runs": 1,
+      "min": 0.0001315660192631185,
+      "max": 0.0001315660192631185
+    },
+    "test_events_outside_mission_only_go_to_totals": {
+      "duration": 0.00018255901522934437,
+      "runs": 1,
+      "min": 0.00018255901522934437,
+      "max": 0.00018255901522934437
+    },
+    "test_events_accumulate_across_missions": {
+      "duration": 0.00014160398859530687,
+      "runs": 1,
+      "min": 0.00014160398859530687,
+      "max": 0.00014160398859530687
+    },
+    "test_outcome_counts_sum_to_missions_started": {
+      "duration": 0.00013673101784661412,
+      "runs": 1,
+      "min": 0.00013673101784661412,
+      "max": 0.00013673101784661412
+    },
+    "test_zero_missions": {
+      "duration": 0.00011755101149901748,
+      "runs": 1,
+      "min": 0.00011755101149901748,
+      "max": 0.00011755101149901748
+    },
+    "test_json_written_to_output_dir": {
+      "duration": 0.00022773200180381536,
+      "runs": 1,
+      "min": 0.00022773200180381536,
+      "max": 0.00022773200180381536
+    },
+    "test_json_content_valid": {
+      "duration": 0.0001701939618214965,
+      "runs": 1,
+      "min": 0.0001701939618214965,
+      "max": 0.0001701939618214965
+    },
+    "test_run_id_defaults_to_session_timestamp": {
+      "duration": 0.00012097501894459128,
+      "runs": 1,
+      "min": 0.00012097501894459128,
+      "max": 0.00012097501894459128
+    },
+    "test_finalize_idempotent_mission_count": {
+      "duration": 0.0001364499912597239,
+      "runs": 1,
+      "min": 0.0001364499912597239,
+      "max": 0.0001364499912597239
+    },
+    "test_volley_alerts_group_into_one_engagement": {
+      "duration": 0.00012943701585754752,
+      "runs": 1,
+      "min": 0.00012943701585754752,
+      "max": 0.00012943701585754752
+    },
+    "test_separate_volleys_are_separate_engagements": {
+      "duration": 0.00013357697753235698,
+      "runs": 1,
+      "min": 0.00013357697753235698,
+      "max": 0.00013357697753235698
+    },
+    "test_evade_attributed_to_its_alert": {
+      "duration": 0.00013171404134482145,
+      "runs": 1,
+      "min": 0.00013171404134482145,
+      "max": 0.00013171404134482145
+    },
+    "test_death_in_window_counts_against_its_engagement": {
+      "duration": 0.00022676103981211782,
+      "runs": 1,
+      "min": 0.00022676103981211782,
+      "max": 0.00022676103981211782
+    },
+    "test_death_outside_window_is_not_attributed": {
+      "duration": 0.0001305940095335245,
+      "runs": 1,
+      "min": 0.0001305940095335245,
+      "max": 0.0001305940095335245
+    },
+    "test_survival_split_by_evade": {
+      "duration": 0.00014174601528793573,
+      "runs": 1,
+      "min": 0.00014174601528793573,
+      "max": 0.00014174601528793573
+    },
+    "test_no_engagements_reports_none_not_zero": {
+      "duration": 0.0001240390120074153,
+      "runs": 1,
+      "min": 0.0001240390120074153,
+      "max": 0.0001240390120074153
+    },
+    "test_print_summary_with_engagements": {
+      "duration": 0.0003369550104252994,
+      "runs": 1,
+      "min": 0.0003369550104252994,
+      "max": 0.0003369550104252994
+    },
+    "test_death_soon_after_restart_counts": {
+      "duration": 0.00013950502034276724,
+      "runs": 1,
+      "min": 0.00013950502034276724,
+      "max": 0.00013950502034276724
+    },
+    "test_death_outside_window_does_not_count": {
+      "duration": 0.00012623803922906518,
+      "runs": 1,
+      "min": 0.00012623803922906518,
+      "max": 0.00012623803922906518
+    },
+    "test_one_candidate_per_life": {
+      "duration": 0.00013207702431827784,
+      "runs": 1,
+      "min": 0.00013207702431827784,
+      "max": 0.00013207702431827784
+    },
+    "test_sub_floor_death_is_redetect_not_crash": {
+      "duration": 0.00012968300143256783,
+      "runs": 1,
+      "min": 0.00012968300143256783,
+      "max": 0.00012968300143256783
+    },
+    "test_just_under_floor_is_redetect": {
+      "duration": 0.0001274500391446054,
+      "runs": 1,
+      "min": 0.0001274500391446054,
+      "max": 0.0001274500391446054
+    },
+    "test_at_floor_counts_as_crash": {
+      "duration": 0.00012442999286577106,
+      "runs": 1,
+      "min": 0.00012442999286577106,
+      "max": 0.00012442999286577106
+    },
+    "test_redetect_consumes_the_stamp": {
+      "duration": 0.0001737169804982841,
+      "runs": 1,
+      "min": 0.0001737169804982841,
+      "max": 0.0001737169804982841
+    },
+    "test_summary_reports_both_counts": {
+      "duration": 0.00023646204499527812,
+      "runs": 1,
+      "min": 0.00023646204499527812,
+      "max": 0.00023646204499527812
+    },
+    "test_death_with_no_restart_is_not_a_spawn_crash": {
+      "duration": 0.0001263089943677187,
+      "runs": 1,
+      "min": 0.0001263089943677187,
+      "max": 0.0001263089943677187
+    },
+    "test_init_without_keyboard": {
+      "duration": 4.624103894457221e-05,
+      "runs": 1,
+      "min": 4.624103894457221e-05,
+      "max": 4.624103894457221e-05
+    },
+    "test_deploy_flares_without_keyboard": {
+      "duration": 5.584495374932885e-05,
+      "runs": 1,
+      "min": 5.584495374932885e-05,
+      "max": 5.584495374932885e-05
+    },
+    "test_cancel_mission_without_keyboard": {
+      "duration": 5.194696132093668e-05,
+      "runs": 1,
+      "min": 5.194696132093668e-05,
+      "max": 5.194696132093668e-05
+    },
+    "test_is_mission_running_without_keyboard": {
+      "duration": 4.891701973974705e-05,
+      "runs": 1,
+      "min": 4.891701973974705e-05,
+      "max": 4.891701973974705e-05
+    },
+    "test_restart_last_mission_no_history": {
+      "duration": 0.05072813603328541,
+      "runs": 1,
+      "min": 0.05072813603328541,
+      "max": 0.05072813603328541
+    },
+    "test_restart_last_mission_returns_false_when_running": {
+      "duration": 6.111699622124434e-05,
+      "runs": 1,
+      "min": 6.111699622124434e-05,
+      "max": 6.111699622124434e-05
+    },
+    "test_maneuver_key_triggers_manual_takeover_in_battle": {
+      "duration": 0.009693051979411393,
+      "runs": 1,
+      "min": 0.009693051979411393,
+      "max": 0.009693051979411393
+    },
+    "test_maneuver_key_does_not_trigger_manual_takeover_outside_battle": {
+      "duration": 0.009492366982158273,
+      "runs": 1,
+      "min": 0.009492366982158273,
+      "max": 0.009492366982158273
+    },
+    "test_maneuver_key_ignores_injected_events": {
+      "duration": 0.009569322981406003,
+      "runs": 1,
+      "min": 0.009569322981406003,
+      "max": 0.009569322981406003
+    },
+    "test_maneuver_key_suppressed_for_key_wingman_is_holding": {
+      "duration": 0.009497117949649692,
+      "runs": 1,
+      "min": 0.009497117949649692,
+      "max": 0.009497117949649692
+    },
+    "test_maneuver_key_not_suppressed_for_different_key_wingman_is_holding": {
+      "duration": 0.009548252040985972,
+      "runs": 1,
+      "min": 0.009548252040985972,
+      "max": 0.009548252040985972
+    },
+    "test_post_release_grace_suppresses_stale_autorepeat": {
+      "duration": 0.009379440976772457,
+      "runs": 1,
+      "min": 0.009379440976772457,
+      "max": 0.009379440976772457
+    },
+    "test_grace_expires_so_real_presses_still_take_over": {
+      "duration": 0.009498529019765556,
+      "runs": 1,
+      "min": 0.009498529019765556,
+      "max": 0.009498529019765556
+    },
+    "test_eject_key_releases_before_dropping_the_guard": {
+      "duration": 0.00961712998105213,
+      "runs": 1,
+      "min": 0.00961712998105213,
+      "max": 0.00961712998105213
+    },
+    "test_padlock_hotkey_ignores_wingmans_own_press": {
+      "duration": 0.009648228995501995,
+      "runs": 1,
+      "min": 0.009648228995501995,
+      "max": 0.009648228995501995
+    },
+    "test_genuine_u_press_during_game_starting_starts_mission": {
+      "duration": 0.009443407005164772,
+      "runs": 1,
+      "min": 0.009443407005164772,
+      "max": 0.009443407005164772
+    },
+    "test_wingmans_own_u_press_is_ignored_as_echo": {
+      "duration": 0.009521525003947318,
+      "runs": 1,
+      "min": 0.009521525003947318,
+      "max": 0.009521525003947318
+    },
+    "test_j20_hotkey_forces_battle_via_fsm_trigger": {
+      "duration": 0.00957896700128913,
+      "runs": 1,
+      "min": 0.00957896700128913,
+      "max": 0.00957896700128913
+    },
+    "test_toggle_weapon_loop_accepts_a_key_event": {
+      "duration": 0.000758111011236906,
+      "runs": 1,
+      "min": 0.000758111011236906,
+      "max": 0.000758111011236906
+    },
+    "test_every_injectable_key_resolves_to_a_keysym": {
+      "duration": 0.0009392400388605893,
+      "runs": 1,
+      "min": 0.0009392400388605893,
+      "max": 0.0009392400388605893
+    },
+    "test_delayed_echo_within_release_grace_is_ignored": {
+      "duration": 0.4100566460401751,
+      "runs": 1,
+      "min": 0.4100566460401751,
+      "max": 0.4100566460401751
+    },
+    "test_release_grace_scales_with_release_latency": {
+      "duration": 0.013259927975013852,
+      "runs": 1,
+      "min": 0.013259927975013852,
+      "max": 0.013259927975013852
+    },
+    "test_first_reading_seeds_unconditionally_within_bounds": {
+      "duration": 7.678498513996601e-05,
+      "runs": 1,
+      "min": 7.678498513996601e-05,
+      "max": 7.678498513996601e-05
+    },
+    "test_gradual_change_accepted_and_rate_derived": {
+      "duration": 6.865698378533125e-05,
+      "runs": 1,
+      "min": 6.865698378533125e-05,
+      "max": 6.865698378533125e-05
+    },
+    "test_stable_value_is_windowed_mean": {
+      "duration": 5.616201087832451e-05,
+      "runs": 1,
+      "min": 5.616201087832451e-05,
+      "max": 5.616201087832451e-05
+    },
+    "test_stray_digit_altitude_spike_rejected": {
+      "duration": 4.998402437195182e-05,
+      "runs": 1,
+      "min": 4.998402437195182e-05,
+      "max": 4.998402437195182e-05
+    },
+    "test_max_rate_dive_is_accepted": {
+      "duration": 5.078903632238507e-05,
+      "runs": 1,
+      "min": 5.078903632238507e-05,
+      "max": 5.078903632238507e-05
+    },
+    "test_bogus_speed_does_not_inflate_altitude_gate_same_tick": {
+      "duration": 4.867400275543332e-05,
+      "runs": 1,
+      "min": 4.867400275543332e-05,
+      "max": 4.867400275543332e-05
+    },
+    "test_stale_speed_falls_back_to_envelope_bound": {
+      "duration": 4.938000347465277e-05,
+      "runs": 1,
+      "min": 4.938000347465277e-05,
+      "max": 4.938000347465277e-05
+    },
+    "test_throttled_cadence_does_not_widen_the_speed_gate": {
+      "duration": 4.763901233673096e-05,
+      "runs": 1,
+      "min": 4.763901233673096e-05,
+      "max": 4.763901233673096e-05
+    },
+    "test_gate_is_skipped_once_the_seed_is_stale": {
+      "duration": 4.3535022996366024e-05,
+      "runs": 1,
+      "min": 4.3535022996366024e-05,
+      "max": 4.3535022996366024e-05
+    },
+    "test_steep_dive_is_accepted_at_throttled_cadence": {
+      "duration": 6.429600762203336e-05,
+      "runs": 1,
+      "min": 6.429600762203336e-05,
+      "max": 6.429600762203336e-05
+    },
+    "test_stale_seed_bypass_does_not_fabricate_a_rate_across_the_gap": {
+      "duration": 5.199096631258726e-05,
+      "runs": 1,
+      "min": 5.199096631258726e-05,
+      "max": 5.199096631258726e-05
+    },
+    "test_speed_acceleration_envelope": {
+      "duration": 4.6857050620019436e-05,
+      "runs": 1,
+      "min": 4.6857050620019436e-05,
+      "max": 4.6857050620019436e-05
+    },
+    "test_bogus_seed_cannot_lock_out_real_values": {
+      "duration": 4.5829976443201303e-05,
+      "runs": 1,
+      "min": 4.5829976443201303e-05,
+      "max": 4.5829976443201303e-05
+    },
+    "test_out_of_envelope_stream_never_becomes_seed": {
+      "duration": 4.428700776770711e-05,
+      "runs": 1,
+      "min": 4.428700776770711e-05,
+      "max": 4.428700776770711e-05
+    },
+    "test_accept_resets_rejected_streak": {
+      "duration": 4.344095941632986e-05,
+      "runs": 1,
+      "min": 4.344095941632986e-05,
+      "max": 4.344095941632986e-05
+    },
+    "test_trend_classification": {
+      "duration": 4.8850022722035646e-05,
+      "runs": 1,
+      "min": 4.8850022722035646e-05,
+      "max": 4.8850022722035646e-05
+    },
+    "test_staleness_from_snapshot_time": {
+      "duration": 4.6222994569689035e-05,
+      "runs": 1,
+      "min": 4.6222994569689035e-05,
+      "max": 4.6222994569689035e-05
+    },
+    "test_rejection_keeps_age_growing": {
+      "duration": 4.7549023292958736e-05,
+      "runs": 1,
+      "min": 4.7549023292958736e-05,
+      "max": 4.7549023292958736e-05
+    },
+    "test_level_flight": {
+      "duration": 3.408599877730012e-05,
+      "runs": 1,
+      "min": 3.408599877730012e-05,
+      "max": 3.408599877730012e-05
+    },
+    "test_shallow_dive_20_degrees_at_600kph": {
+      "duration": 3.682402893900871e-05,
+      "runs": 1,
+      "min": 3.682402893900871e-05,
+      "max": 3.682402893900871e-05
+    },
+    "test_30_degree_dive_is_not_steep": {
+      "duration": 3.5567034501582384e-05,
+      "runs": 1,
+      "min": 3.5567034501582384e-05,
+      "max": 3.5567034501582384e-05
+    },
+    "test_vertical_dive_at_600kph": {
+      "duration": 3.336201189085841e-05,
+      "runs": 1,
+      "min": 3.336201189085841e-05,
+      "max": 3.336201189085841e-05
+    },
+    "test_steep_climb": {
+      "duration": 3.2961019314825535e-05,
+      "runs": 1,
+      "min": 3.2961019314825535e-05,
+      "max": 3.2961019314825535e-05
+    },
+    "test_shallow_climb": {
+      "duration": 3.712798934429884e-05,
+      "runs": 1,
+      "min": 3.712798934429884e-05,
+      "max": 3.712798934429884e-05
+    },
+    "test_missing_inputs_return_none": {
+      "duration": 3.4908473026007414e-05,
+      "runs": 2,
+      "min": 3.475596895441413e-05,
+      "max": 3.50609770976007e-05
+    },
+    "test_too_slow_for_meaningful_ratio": {
+      "duration": 3.3724005334079266e-05,
+      "runs": 2,
+      "min": 3.3118005376309156e-05,
+      "max": 3.4330005291849375e-05
+    },
+    "test_snapshot_pitch_band_requires_both_signals_fresh": {
+      "duration": 5.4887961596250534e-05,
+      "runs": 1,
+      "min": 5.4887961596250534e-05,
+      "max": 5.4887961596250534e-05
+    },
+    "test_level_flight_is_zero": {
+      "duration": 4.371698014438152e-05,
+      "runs": 1,
+      "min": 4.371698014438152e-05,
+      "max": 4.371698014438152e-05
+    },
+    "test_30_degree_dive": {
+      "duration": 4.8089015763252974e-05,
+      "runs": 1,
+      "min": 4.8089015763252974e-05,
+      "max": 4.8089015763252974e-05
+    },
+    "test_30_degree_climb": {
+      "duration": 3.951299004256725e-05,
+      "runs": 1,
+      "min": 3.951299004256725e-05,
+      "max": 3.951299004256725e-05
+    },
+    "test_uses_metric_conversion_not_mph": {
+      "duration": 3.836699761450291e-05,
+      "runs": 1,
+      "min": 3.836699761450291e-05,
+      "max": 3.836699761450291e-05
+    },
+    "test_ratio_past_vertical_saturates_at_90": {
+      "duration": 3.8690981455147266e-05,
+      "runs": 1,
+      "min": 3.8690981455147266e-05,
+      "max": 3.8690981455147266e-05
+    },
+    "test_snapshot_pitch_angle_requires_both_signals_fresh": {
+      "duration": 6.0064950957894325e-05,
+      "runs": 1,
+      "min": 6.0064950957894325e-05,
+      "max": 6.0064950957894325e-05
+    },
+    "test_level_band": {
+      "duration": 3.620400093495846e-05,
+      "runs": 1,
+      "min": 3.620400093495846e-05,
+      "max": 3.620400093495846e-05
+    },
+    "test_dive_and_climb_bands": {
+      "duration": 3.3337040804326534e-05,
+      "runs": 1,
+      "min": 3.3337040804326534e-05,
+      "max": 3.3337040804326534e-05
+    },
+    "test_steep_bands": {
+      "duration": 3.2952986657619476e-05,
+      "runs": 1,
+      "min": 3.2952986657619476e-05,
+      "max": 3.2952986657619476e-05
+    },
+    "test_none_angle_returns_none": {
+      "duration": 3.119197208434343e-05,
+      "runs": 1,
+      "min": 3.119197208434343e-05,
+      "max": 3.119197208434343e-05
+    },
+    "test_angle_is_not_saturated_by_smoothing_lag": {
+      "duration": 4.655495285987854e-05,
+      "runs": 1,
+      "min": 4.655495285987854e-05,
+      "max": 4.655495285987854e-05
+    },
+    "test_band_uses_the_same_instantaneous_speed": {
+      "duration": 3.8094993215054274e-05,
+      "runs": 1,
+      "min": 3.8094993215054274e-05,
+      "max": 3.8094993215054274e-05
+    },
+    "test_missing_speed_value_yields_no_angle": {
+      "duration": 3.8833997678011656e-05,
+      "runs": 1,
+      "min": 3.8833997678011656e-05,
+      "max": 3.8833997678011656e-05
+    },
+    "test_snapshot_is_immutable": {
+      "duration": 5.666597280651331e-05,
+      "runs": 1,
+      "min": 5.666597280651331e-05,
+      "max": 5.666597280651331e-05
+    },
+    "test_reset_clears_both_signals": {
+      "duration": 4.5178981963545084e-05,
+      "runs": 1,
+      "min": 4.5178981963545084e-05,
+      "max": 4.5178981963545084e-05
+    },
+    "test_shallow_descent_issues_rotation_pulse": {
+      "duration": 0.06113376299617812,
+      "runs": 1,
+      "min": 0.06113376299617812,
+      "max": 0.06113376299617812
+    },
+    "test_rotation_pulse_is_bounded_not_held": {
+      "duration": 0.10172052000416443,
+      "runs": 1,
+      "min": 0.10172052000416443,
+      "max": 0.10172052000416443
+    },
+    "test_pulses_are_bounded_by_the_budget": {
+      "duration": 0.35338430799311027,
+      "runs": 1,
+      "min": 0.35338430799311027,
+      "max": 0.35338430799311027
+    },
+    "test_target_angle_establishes_dive_and_releases_nose": {
+      "duration": 0.3020688030519523,
+      "runs": 1,
+      "min": 0.3020688030519523,
+      "max": 0.3020688030519523
+    },
+    "test_single_sub_floor_sample_does_not_resume_rotation": {
+      "duration": 0.501822306017857,
+      "runs": 1,
+      "min": 0.501822306017857,
+      "max": 0.501822306017857
+    },
+    "test_sustained_degradation_resumes_rotation": {
+      "duration": 0.26325781497871503,
+      "runs": 1,
+      "min": 0.26325781497871503,
+      "max": 0.26325781497871503
+    },
+    "test_afterburner_not_engaged_while_shallow": {
+      "duration": 0.061253388004843146,
+      "runs": 1,
+      "min": 0.061253388004843146,
+      "max": 0.061253388004843146
+    },
+    "test_afterburner_engages_once_descending": {
+      "duration": 0.061369130038656294,
+      "runs": 1,
+      "min": 0.061369130038656294,
+      "max": 0.061369130038656294
+    },
+    "test_afterburner_released_if_descent_goes_shallow": {
+      "duration": 0.20208183297654614,
+      "runs": 1,
+      "min": 0.20208183297654614,
+      "max": 0.20208183297654614
+    },
+    "test_climb_after_descent_releases_as_over_rotation": {
+      "duration": 0.402220016985666,
+      "runs": 1,
+      "min": 0.402220016985666,
+      "max": 0.402220016985666
+    },
+    "test_zoom_climb_without_prior_descent_keeps_rotating": {
+      "duration": 0.06111573299858719,
+      "runs": 1,
+      "min": 0.06111573299858719,
+      "max": 0.06111573299858719
+    },
+    "test_single_spurious_climb_sample_is_not_over_rotation": {
+      "duration": 0.40106956200907007,
+      "runs": 1,
+      "min": 0.40106956200907007,
+      "max": 0.40106956200907007
+    },
+    "test_no_telemetry_never_actuates": {
+      "duration": 0.30203787999926135,
+      "runs": 1,
+      "min": 0.30203787999926135,
+      "max": 0.30203787999926135
+    },
+    "test_telemetry_loss_after_established_keeps_the_verdict": {
+      "duration": 0.4032426149933599,
+      "runs": 1,
+      "min": 0.4032426149933599,
+      "max": 0.4032426149933599
+    },
+    "test_fresh_altitude_with_no_rate_does_not_crash": {
+      "duration": 0.3020135370315984,
+      "runs": 1,
+      "min": 0.3020135370315984,
+      "max": 0.3020135370315984
+    },
+    "test_frozen_sensor_is_not_new_evidence": {
+      "duration": 0.35208075697300956,
+      "runs": 1,
+      "min": 0.35208075697300956,
+      "max": 0.35208075697300956
+    },
+    "test_cancellation_returns_true": {
+      "duration": 0.00019984098616987467,
+      "runs": 1,
+      "min": 0.00019984098616987467,
+      "max": 0.00019984098616987467
+    },
+    "test_wall_clock_backstop_ends_the_sequence": {
+      "duration": 0.302140137006063,
+      "runs": 1,
+      "min": 0.302140137006063,
+      "max": 0.302140137006063
+    },
+    "test_eject_and_dive_releases_every_key": {
+      "duration": 0.6040689419605769,
+      "runs": 1,
+      "min": 0.6040689419605769,
+      "max": 0.6040689419605769
+    },
+    "test_shallow_but_fast_dive_is_not_established": {
+      "duration": 0.061178247968200594,
+      "runs": 1,
+      "min": 0.061178247968200594,
+      "max": 0.061178247968200594
+    },
+    "test_shallow_but_fast_dive_does_not_engage_afterburner": {
+      "duration": 0.061115776014048606,
+      "runs": 1,
+      "min": 0.061115776014048606,
+      "max": 0.061115776014048606
+    },
+    "test_established_dive_that_sags_shallow_resumes_rotation": {
+      "duration": 0.263225472997874,
+      "runs": 1,
+      "min": 0.263225472997874,
+      "max": 0.263225472997874
+    },
+    "test_deadband_between_target_and_floor_is_left_alone": {
+      "duration": 0.5016107560368255,
+      "runs": 1,
+      "min": 0.5016107560368255,
+      "max": 0.5016107560368255
+    },
+    "test_rate_fallback_when_angle_unavailable": {
+      "duration": 0.10163517197361216,
+      "runs": 1,
+      "min": 0.10163517197361216,
+      "max": 0.10163517197361216
+    },
+    "test_descent_aborts_when_missiles_rearm": {
+      "duration": 0.22097841301001608,
+      "runs": 1,
+      "min": 0.22097841301001608,
+      "max": 0.22097841301001608
+    },
+    "test_descent_continues_while_rack_stays_empty": {
+      "duration": 0.6014399339910597,
+      "runs": 1,
+      "min": 0.6014399339910597,
+      "max": 0.6014399339910597
+    },
+    "test_hold_phase_also_aborts_on_rearm": {
+      "duration": 1.1212135499808937,
+      "runs": 1,
+      "min": 1.1212135499808937,
+      "max": 1.1212135499808937
+    },
+    "test_hold_phase_is_not_cut_short_without_a_rearm": {
+      "duration": 2.614679716003593,
+      "runs": 1,
+      "min": 2.614679716003593,
+      "max": 2.614679716003593
+    },
+    "test_disengage_roll_survives_its_own_cancel_and_restarts": {
+      "duration": 0.40146173199173063,
+      "runs": 1,
+      "min": 0.40146173199173063,
+      "max": 0.40146173199173063
+    },
+    "test_disengage_restart_waits_for_mission_teardown": {
+      "duration": 0.8024920760071836,
+      "runs": 1,
+      "min": 0.8024920760071836,
+      "max": 0.8024920760071836
+    },
+    "test_disengage_roll_aborts_on_exit_event": {
+      "duration": 0.0005013810005038977,
+      "runs": 1,
+      "min": 0.0005013810005038977,
+      "max": 0.0005013810005038977
+    },
+    "test_clear_after_fresh_negative_samples": {
+      "duration": 0.320767812023405,
+      "runs": 1,
+      "min": 0.320767812023405,
+      "max": 0.320767812023405
+    },
+    "test_stalled_cache_does_not_end_evade": {
+      "duration": 0.7047704379656352,
+      "runs": 1,
+      "min": 0.7047704379656352,
+      "max": 0.7047704379656352
+    },
+    "test_max_hold_cap_on_stuck_positive": {
+      "duration": 0.5041580749675632,
+      "runs": 1,
+      "min": 0.5041580749675632,
+      "max": 0.5041580749675632
+    },
+    "test_release_on_exit_event": {
+      "duration": 0.11128022597404197,
+      "runs": 1,
+      "min": 0.11128022597404197,
+      "max": 0.11128022597404197
+    },
+    "test_duplicate_start_suppressed": {
+      "duration": 0.43712234299164265,
+      "runs": 2,
+      "min": 0.4032306809676811,
+      "max": 0.4710140050156042
+    },
+    "test_fresh_positive_extends_hold": {
+      "duration": 0.7219637209782377,
+      "runs": 1,
+      "min": 0.7219637209782377,
+      "max": 0.7219637209782377
+    },
+    "test_roll_right_bracketed_and_grace_armed": {
+      "duration": 0.5132727070013061,
+      "runs": 1,
+      "min": 0.5132727070013061,
+      "max": 0.5132727070013061
+    },
+    "test_simulate_mode_records_intents": {
+      "duration": 0.40376273199217394,
+      "runs": 1,
+      "min": 0.40376273199217394,
+      "max": 0.40376273199217394
+    },
+    "test_evade_yields_when_eject_starts_mid_hold": {
+      "duration": 0.21133853297214955,
+      "runs": 1,
+      "min": 0.21133853297214955,
+      "max": 0.21133853297214955
+    },
+    "test_evade_does_not_start_while_ejecting": {
+      "duration": 0.0001717749983072281,
+      "runs": 1,
+      "min": 0.0001717749983072281,
+      "max": 0.0001717749983072281
+    },
+    "test_evade_release_cannot_desync_eject_afterburner": {
+      "duration": 0.2112863429938443,
+      "runs": 1,
+      "min": 0.2112863429938443,
+      "max": 0.2112863429938443
+    },
+    "test_manoeuvre_limit_is_a_normal_exit": {
+      "duration": 0.7017494959873147,
+      "runs": 1,
+      "min": 0.7017494959873147,
+      "max": 0.7017494959873147
+    },
+    "test_pitch_down_variant_holds_and_brackets_nose_down": {
+      "duration": 0.4124050379614346,
+      "runs": 1,
+      "min": 0.4124050379614346,
+      "max": 0.4124050379614346
+    },
+    "test_pitch_down_off_by_default_leaves_nose_alone": {
+      "duration": 0.4033938219654374,
+      "runs": 1,
+      "min": 0.4033938219654374,
+      "max": 0.4033938219654374
+    },
+    "test_burner_released_at_zero_fuel_manoeuvre_keys_stay_held": {
+      "duration": 0.8211455330019817,
+      "runs": 1,
+      "min": 0.8211455330019817,
+      "max": 0.8211455330019817
+    },
+    "test_unknown_fuel_keeps_burner_held_in_evade": {
+      "duration": 0.32084720802959055,
+      "runs": 1,
+      "min": 0.32084720802959055,
+      "max": 0.32084720802959055
+    },
+    "test_manual_takeover_state_ends_evade": {
+      "duration": 0.22099371894728392,
+      "runs": 1,
+      "min": 0.22099371894728392,
+      "max": 0.22099371894728392
+    },
+    "test_first_sample_is_immediate_then_throttled": {
+      "duration": 0.10611295502167195,
+      "runs": 1,
+      "min": 0.10611295502167195,
+      "max": 0.10611295502167195
+    },
+    "test_line_carries_every_diagnostic_field": {
+      "duration": 0.05225764698116109,
+      "runs": 1,
+      "min": 0.05225764698116109,
+      "max": 0.05225764698116109
+    },
+    "test_disabled_sampler_emits_nothing": {
+      "duration": 5.555001553148031e-05,
+      "runs": 1,
+      "min": 5.555001553148031e-05,
+      "max": 5.555001553148031e-05
+    },
+    "test_interval_has_a_floor": {
+      "duration": 4.257098771631718e-05,
+      "runs": 1,
+      "min": 4.257098771631718e-05,
+      "max": 4.257098771631718e-05
+    },
+    "test_ocr_window_is_per_interval_not_cumulative": {
+      "duration": 0.15505145699717104,
+      "runs": 1,
+      "min": 0.15505145699717104,
+      "max": 0.15505145699717104
+    },
+    "test_snapshot_since_does_not_drain_the_tracker": {
+      "duration": 7.860199548304081e-05,
+      "runs": 1,
+      "min": 7.860199548304081e-05,
+      "max": 7.860199548304081e-05
+    },
+    "test_sampler_never_raises_when_probes_fail": {
+      "duration": 0.0008494020439684391,
+      "runs": 1,
+      "min": 0.0008494020439684391,
+      "max": 0.0008494020439684391
+    },
+    "test_broken_perf_tracker_does_not_break_sampling": {
+      "duration": 0.05243484699167311,
+      "runs": 1,
+      "min": 0.05243484699167311,
+      "max": 0.05243484699167311
+    },
+    "test_self_memory_fields_are_real_numbers": {
+      "duration": 0.051728823978919536,
+      "runs": 1,
+      "min": 0.051728823978919536,
+      "max": 0.051728823978919536
+    },
+    "test_game_process_absent_reports_na": {
+      "duration": 0.05259334098082036,
+      "runs": 1,
+      "min": 0.05259334098082036,
+      "max": 0.05259334098082036
+    },
+    "test_verdict_attributes_growth_to_wingman": {
+      "duration": 8.372595766559243e-05,
+      "runs": 1,
+      "min": 8.372595766559243e-05,
+      "max": 8.372595766559243e-05
+    },
+    "test_verdict_attributes_growth_to_game": {
+      "duration": 6.008398486301303e-05,
+      "runs": 1,
+      "min": 6.008398486301303e-05,
+      "max": 6.008398486301303e-05
+    },
+    "test_verdict_reports_both_when_both_grow": {
+      "duration": 5.41150220669806e-05,
+      "runs": 1,
+      "min": 5.41150220669806e-05,
+      "max": 5.41150220669806e-05
+    },
+    "test_verdict_declines_to_call_a_leak_on_flat_session": {
+      "duration": 5.4639007430523634e-05,
+      "runs": 1,
+      "min": 5.4639007430523634e-05,
+      "max": 5.4639007430523634e-05
+    },
+    "test_verdict_refuses_attribution_on_short_session": {
+      "duration": 5.141302244737744e-05,
+      "runs": 1,
+      "min": 5.141302244737744e-05,
+      "max": 5.141302244737744e-05
+    },
+    "test_summary_needs_two_samples": {
+      "duration": 0.05126870603999123,
+      "runs": 1,
+      "min": 0.05126870603999123,
+      "max": 0.05126870603999123
+    },
+    "test_summary_never_raises_on_partial_data": {
+      "duration": 7.849896792322397e-05,
+      "runs": 1,
+      "min": 7.849896792322397e-05,
+      "max": 7.849896792322397e-05
+    },
+    "test_line_carries_deltas_and_pool_depth": {
+      "duration": 0.051612867042422295,
+      "runs": 1,
+      "min": 0.051612867042422295,
+      "max": 0.051612867042422295
+    },
+    "test_pool_depth_source_failure_degrades_to_na": {
+      "duration": 0.05178231297759339,
+      "runs": 1,
+      "min": 0.05178231297759339,
+      "max": 0.05178231297759339
+    },
+    "test_warmup_allocation_is_not_reported_as_a_leak": {
+      "duration": 8.142495062202215e-05,
+      "runs": 1,
+      "min": 8.142495062202215e-05,
+      "max": 8.142495062202215e-05
+    },
+    "test_real_leak_after_warmup_is_still_caught": {
+      "duration": 6.194500019773841e-05,
+      "runs": 1,
+      "min": 6.194500019773841e-05,
+      "max": 6.194500019773841e-05
+    },
+    "test_verdict_withheld_before_warmup_completes": {
+      "duration": 5.527597386389971e-05,
+      "runs": 1,
+      "min": 5.527597386389971e-05,
+      "max": 5.527597386389971e-05
+    },
+    "test_severe_leak_is_named_even_in_a_short_window": {
+      "duration": 5.577597767114639e-05,
+      "runs": 1,
+      "min": 5.577597767114639e-05,
+      "max": 5.577597767114639e-05
+    },
+    "test_moderate_growth_in_short_window_still_withheld": {
+      "duration": 5.304999649524689e-05,
+      "runs": 1,
+      "min": 5.304999649524689e-05,
+      "max": 5.304999649524689e-05
+    },
+    "test_malloc_stats_probe_returns_sane_fields": {
+      "duration": 0.0008656239951960742,
+      "runs": 1,
+      "min": 0.0008656239951960742,
+      "max": 0.0008656239951960742
+    },
+    "test_malloc_probe_never_raises": {
+      "duration": 4.4876011088490486e-05,
+      "runs": 1,
+      "min": 4.4876011088490486e-05,
+      "max": 4.4876011088490486e-05
+    },
+    "test_malloc_probe_degrades_when_unavailable": {
+      "duration": 3.515701973810792e-05,
+      "runs": 1,
+      "min": 3.515701973810792e-05,
+      "max": 3.515701973810792e-05
+    },
+    "test_guard_quiet_below_the_soft_limit": {
+      "duration": 4.1065970435738564e-05,
+      "runs": 1,
+      "min": 4.1065970435738564e-05,
+      "max": 4.1065970435738564e-05
+    },
+    "test_soft_limit_waits_for_a_safe_point": {
+      "duration": 3.808399196714163e-05,
+      "runs": 1,
+      "min": 3.808399196714163e-05,
+      "max": 3.808399196714163e-05
+    },
+    "test_hard_limit_stops_regardless_of_state": {
+      "duration": 3.60140111297369e-05,
+      "runs": 1,
+      "min": 3.60140111297369e-05,
+      "max": 3.60140111297369e-05
+    },
+    "test_guard_can_be_disabled": {
+      "duration": 3.661098890006542e-05,
+      "runs": 1,
+      "min": 3.661098890006542e-05,
+      "max": 3.661098890006542e-05
+    },
+    "test_guard_reason_names_the_threshold_that_fired": {
+      "duration": 3.892602398991585e-05,
+      "runs": 1,
+      "min": 3.892602398991585e-05,
+      "max": 3.892602398991585e-05
+    },
+    "test_disabled_by_default": {
+      "duration": 4.42580203525722e-05,
+      "runs": 1,
+      "min": 4.42580203525722e-05,
+      "max": 4.42580203525722e-05
+    },
+    "test_throttled_to_the_interval": {
+      "duration": 6.320595275610685e-05,
+      "runs": 1,
+      "min": 6.320595275610685e-05,
+      "max": 6.320595275610685e-05
+    },
+    "test_emits_the_greppable_header": {
+      "duration": 4.8647983931005e-05,
+      "runs": 1,
+      "min": 4.8647983931005e-05,
+      "max": 4.8647983931005e-05
+    },
+    "test_first_census_reports_no_deltas": {
+      "duration": 4.8042042180895805e-05,
+      "runs": 1,
+      "min": 4.8042042180895805e-05,
+      "max": 4.8042042180895805e-05
+    },
+    "test_gc_lane_is_off_by_default": {
+      "duration": 4.474999150261283e-05,
+      "runs": 1,
+      "min": 4.474999150261283e-05,
+      "max": 4.474999150261283e-05
+    },
+    "test_second_census_reports_deltas": {
+      "duration": 0.5741396279772744,
+      "runs": 1,
+      "min": 0.5741396279772744,
+      "max": 0.5741396279772744
+    },
+    "test_planted_retention_appears_in_the_by_type_table": {
+      "duration": 0.5776335310074501,
+      "runs": 1,
+      "min": 0.5776335310074501,
+      "max": 0.5776335310074501
+    },
+    "test_nbytes_types_are_sized_by_payload_not_header": {
+      "duration": 0.0001657090033404529,
+      "runs": 1,
+      "min": 0.0001657090033404529,
+      "max": 0.0001657090033404529
+    },
+    "test_sizeof_never_raises_on_a_hostile_object": {
+      "duration": 5.7537981774657965e-05,
+      "runs": 1,
+      "min": 5.7537981774657965e-05,
+      "max": 5.7537981774657965e-05
+    },
+    "test_census_never_raises_into_the_main_loop": {
+      "duration": 6.896298145875335e-05,
+      "runs": 1,
+      "min": 6.896298145875335e-05,
+      "max": 6.896298145875335e-05
+    },
+    "test_tracemalloc_lane_reports_sites_and_stops_cleanly": {
+      "duration": 0.0037188130081631243,
+      "runs": 1,
+      "min": 0.0037188130081631243,
+      "max": 0.0037188130081631243
+    },
+    "test_stop_leaves_foreign_tracing_alone": {
+      "duration": 0.00010470196139067411,
+      "runs": 1,
+      "min": 0.00010470196139067411,
+      "max": 0.00010470196139067411
+    },
+    "test_tracemalloc_only_lane_still_finds_a_planted_leak": {
+      "duration": 0.004342330037616193,
+      "runs": 1,
+      "min": 0.004342330037616193,
+      "max": 0.004342330037616193
+    },
+    "test_tracemalloc_overhead_is_reported": {
+      "duration": 0.00010325101902708411,
+      "runs": 1,
+      "min": 0.00010325101902708411,
+      "max": 0.00010325101902708411
+    },
+    "test_census_disarms_itself_when_it_gets_too_slow": {
+      "duration": 5.3800002206116915e-05,
+      "runs": 1,
+      "min": 5.3800002206116915e-05,
+      "max": 5.3800002206116915e-05
+    },
+    "test_guard_can_be_disabled_with_zero": {
+      "duration": 5.36720035597682e-05,
+      "runs": 1,
+      "min": 5.36720035597682e-05,
+      "max": 5.36720035597682e-05
+    },
+    "test_stats_file_is_not_loaded_as_a_run": {
+      "duration": 0.00014269695384427905,
+      "runs": 1,
+      "min": 0.00014269695384427905,
+      "max": 0.00014269695384427905
+    },
+    "test_stats_files_excluded_from_session_count": {
+      "duration": 0.00031375500839203596,
+      "runs": 1,
+      "min": 0.00031375500839203596,
+      "max": 0.00031375500839203596
+    },
+    "test_percentiles_come_from_the_newest_run_not_a_stats_file": {
+      "duration": 0.00018138502491638064,
+      "runs": 1,
+      "min": 0.00018138502491638064,
+      "max": 0.00018138502491638064
+    },
+    "test_version_label_comes_from_the_newest_run_not_a_stats_file": {
+      "duration": 0.00018048897618427873,
+      "runs": 1,
+      "min": 0.00018048897618427873,
+      "max": 0.00018048897618427873
+    },
+    "test_version_filter_matches_after_stats_exclusion": {
+      "duration": 0.0002760360366664827,
+      "runs": 1,
+      "min": 0.0002760360366664827,
+      "max": 0.0002760360366664827
+    },
+    "test_means_are_weighted_by_n_and_unaffected_by_stats_files": {
+      "duration": 0.00019408698426559567,
+      "runs": 1,
+      "min": 0.00019408698426559567,
+      "max": 0.00019408698426559567
+    },
+    "test_unrelated_json_under_the_run_prefix_is_skipped": {
+      "duration": 0.00016889901598915458,
+      "runs": 1,
+      "min": 0.00016889901598915458,
+      "max": 0.00016889901598915458
+    },
+    "test_folder_with_only_stats_files_aggregates_to_nothing": {
+      "duration": 9.40790050663054e-05,
+      "runs": 1,
+      "min": 9.40790050663054e-05,
+      "max": 9.40790050663054e-05
+    },
+    "test_exits_on_confirmed_fresh_recovery": {
+      "duration": 0.762425423017703,
+      "runs": 1,
+      "min": 0.762425423017703,
+      "max": 0.762425423017703
+    },
+    "test_stalled_signal_does_not_end_climb": {
+      "duration": 1.0083171320147812,
+      "runs": 1,
+      "min": 1.0083171320147812,
+      "max": 1.0083171320147812
+    },
+    "test_max_climb_backstop": {
+      "duration": 0.5042996509582736,
+      "runs": 1,
+      "min": 0.5042996509582736,
+      "max": 0.5042996509582736
+    },
+    "test_suppressed_while_ejecting": {
+      "duration": 0.00018894701497629285,
+      "runs": 1,
+      "min": 0.00018894701497629285,
+      "max": 0.00018894701497629285
+    },
+    "test_evade_preempts_running_climb": {
+      "duration": 0.2612311859847978,
+      "runs": 1,
+      "min": 0.2612311859847978,
+      "max": 0.2612311859847978
+    },
+    "test_nose_up_programmatic_bracket": {
+      "duration": 0.5129647090216167,
+      "runs": 1,
+      "min": 0.5129647090216167,
+      "max": 0.5129647090216167
+    },
+    "test_no_start_without_exit_threshold": {
+      "duration": 0.00017787597607821226,
+      "runs": 1,
+      "min": 0.00017787597607821226,
+      "max": 0.00017787597607821226
+    },
+    "test_target_alt_overrides_config_band": {
+      "duration": 1.2659463860327378,
+      "runs": 1,
+      "min": 1.2659463860327378,
+      "max": 1.2659463860327378
+    },
+    "test_target_alt_reached_ends_climb": {
+      "duration": 0.7620961890206672,
+      "runs": 1,
+      "min": 0.7620961890206672,
+      "max": 0.7620961890206672
+    },
+    "test_fuel_config_defaults": {
+      "duration": 0.00017081102123484015,
+      "runs": 1,
+      "min": 0.00017081102123484015,
+      "max": 0.00017081102123484015
+    },
+    "test_pitch_is_pulsed_not_held": {
+      "duration": 2.0159524449845776,
+      "runs": 1,
+      "min": 2.0159524449845776,
+      "max": 2.0159524449845776
+    },
+    "test_healthy_climb_rate_suppresses_pulse": {
+      "duration": 1.2623892549891025,
+      "runs": 1,
+      "min": 1.2623892549891025,
+      "max": 1.2623892549891025
+    },
+    "test_climb_burner_respects_fuel_floor": {
+      "duration": 1.6214170950115658,
+      "runs": 1,
+      "min": 1.6214170950115658,
+      "max": 1.6214170950115658
+    },
+    "test_climb_burner_does_not_relight_while_over_pitch_ceiling": {
+      "duration": 3.021765218989458,
+      "runs": 1,
+      "min": 3.021765218989458,
+      "max": 3.021765218989458
+    },
+    "test_climb_burner_blocked_by_predicted_pitch_ceiling": {
+      "duration": 4.422569986025337,
+      "runs": 1,
+      "min": 4.422569986025337,
+      "max": 4.422569986025337
+    },
+    "test_climb_starts_without_burner_when_fuel_empty": {
+      "duration": 0.42098240996710956,
+      "runs": 1,
+      "min": 0.42098240996710956,
+      "max": 0.42098240996710956
+    },
+    "test_climb_unknown_fuel_keeps_legacy_burner_hold": {
+      "duration": 0.32101275702007115,
+      "runs": 1,
+      "min": 0.32101275702007115,
+      "max": 0.32101275702007115
+    },
+    "test_manual_takeover_state_ends_climb": {
+      "duration": 0.261379495030269,
+      "runs": 1,
+      "min": 0.261379495030269,
+      "max": 0.261379495030269
+    },
+    "test_takeover_handler_stops_running_climb": {
+      "duration": 0.2209837919799611,
+      "runs": 1,
+      "min": 0.2209837919799611,
+      "max": 0.2209837919799611
+    },
+    "test_nose_down_pulse_above_rate_ceiling": {
+      "duration": 1.5219650309882127,
+      "runs": 1,
+      "min": 1.5219650309882127,
+      "max": 1.5219650309882127
+    },
+    "test_no_pulse_between_rate_bands": {
+      "duration": 1.5037423489848152,
+      "runs": 1,
+      "min": 1.5037423489848152,
+      "max": 1.5037423489848152
+    },
+    "test_unset_ceiling_disables_nose_down": {
+      "duration": 1.0026067169965245,
+      "runs": 1,
+      "min": 1.0026067169965245,
+      "max": 1.0026067169965245
+    },
+    "test_over_angle_pulses_nose_down_despite_low_rate": {
+      "duration": 1.2716153410146944,
+      "runs": 1,
+      "min": 1.2716153410146944,
+      "max": 1.2716153410146944
+    },
+    "test_below_ceiling_keeps_rate_logic": {
+      "duration": 1.5055665909894742,
+      "runs": 1,
+      "min": 1.5055665909894742,
+      "max": 1.5055665909894742
+    },
+    "test_unset_ceiling_reproduces_legacy_behavior": {
+      "duration": 1.0036650539841503,
+      "runs": 1,
+      "min": 1.0036650539841503,
+      "max": 1.0036650539841503
+    },
+    "test_lead_exits_a_sample_early": {
+      "duration": 0.5023456459748559,
+      "runs": 1,
+      "min": 0.5023456459748559,
+      "max": 0.5023456459748559
+    },
+    "test_unknown_rate_falls_back_to_raw_altitude": {
+      "duration": 1.2682496029883623,
+      "runs": 1,
+      "min": 1.2682496029883623,
+      "max": 1.2682496029883623
+    },
+    "test_zero_lead_reproduces_legacy_exit": {
+      "duration": 1.2685111290193163,
+      "runs": 1,
+      "min": 1.2685111290193163,
+      "max": 1.2685111290193163
+    },
+    "test_confirm_reads_still_debounces_the_prediction": {
+      "duration": 0.621221171983052,
+      "runs": 1,
+      "min": 0.621221171983052,
+      "max": 0.621221171983052
+    },
+    "test_burner_cut_at_target_and_never_relit": {
+      "duration": 1.1215032290201634,
+      "runs": 1,
+      "min": 1.1215032290201634,
+      "max": 1.1215032290201634
+    },
+    "test_exit_pushes_nose_down_when_leaving_climb_nose_high": {
+      "duration": 0.3014144229819067,
+      "runs": 1,
+      "min": 0.3014144229819067,
+      "max": 0.3014144229819067
+    },
+    "test_exit_push_stops_once_inside_the_band": {
+      "duration": 0.00018211000133305788,
+      "runs": 1,
+      "min": 0.00018211000133305788,
+      "max": 0.00018211000133305788
+    },
+    "test_exit_push_is_single_pulse_when_blind": {
+      "duration": 0.05048391502350569,
+      "runs": 1,
+      "min": 0.05048391502350569,
+      "max": 0.05048391502350569
+    },
+    "test_exit_push_budget_is_bounded": {
+      "duration": 0.3014838559902273,
+      "runs": 1,
+      "min": 0.3014838559902273,
+      "max": 0.3014838559902273
+    },
+    "test_exit_push_disabled_when_unconfigured": {
+      "duration": 0.00017798400949686766,
+      "runs": 1,
+      "min": 0.00017798400949686766,
+      "max": 0.00017798400949686766
+    },
+    "test_exit_push_yields_to_stop_event": {
+      "duration": 0.00017309101531282067,
+      "runs": 1,
+      "min": 0.00017309101531282067,
+      "max": 0.00017309101531282067
+    },
+    "test_incoming_overrides_the_fuel_reserve_floor": {
+      "duration": 1.8215477949706838,
+      "runs": 1,
+      "min": 1.8215477949706838,
+      "max": 1.8215477949706838
+    },
+    "test_incoming_does_not_force_burner_on_an_empty_tank": {
+      "duration": 0.8210787340067327,
+      "runs": 1,
+      "min": 0.8210787340067327,
+      "max": 0.8210787340067327
+    },
+    "test_live_capture_engine_quality_gate_rejects_black_frame": {
+      "duration": 0.00022650498431175947,
+      "runs": 1,
+      "min": 0.00022650498431175947,
+      "max": 0.00022650498431175947
+    },
+    "test_live_capture_engine_captures_after_debounce": {
+      "duration": 0.00042768201092258096,
+      "runs": 1,
+      "min": 0.00042768201092258096,
+      "max": 0.00042768201092258096
+    },
+    "test_live_capture_engine_existing_file_is_terminal_failure": {
+      "duration": 0.00018801999976858497,
+      "runs": 1,
+      "min": 0.00018801999976858497,
+      "max": 0.00018801999976858497
+    },
+    "test_live_capture_engine_summary_records_absolute_timestamps": {
+      "duration": 0.00016837200382724404,
+      "runs": 1,
+      "min": 0.00016837200382724404,
+      "max": 0.00016837200382724404
+    },
+    "test_live_capture_engine_state_enter_trigger_ready_from_current_state": {
+      "duration": 0.000164338038302958,
+      "runs": 1,
+      "min": 0.000164338038302958,
+      "max": 0.000164338038302958
+    },
+    "test_live_capture_engine_auto_resumes_to_matching_state": {
+      "duration": 0.00016021798364818096,
+      "runs": 1,
+      "min": 0.00016021798364818096,
+      "max": 0.00016021798364818096
+    },
+    "test_live_capture_engine_auto_resume_waits_for_known_state": {
+      "duration": 0.00016030401457101107,
+      "runs": 1,
+      "min": 0.00016030401457101107,
+      "max": 0.00016030401457101107
+    },
+    "test_live_capture_engine_lookahead_buffer_captures_next_step": {
+      "duration": 0.00016971200238913298,
+      "runs": 1,
+      "min": 0.00016971200238913298,
+      "max": 0.00016971200238913298
+    },
+    "test_live_capture_engine_lookahead_buffer_chains_two_steps": {
+      "duration": 0.00019973400048911572,
+      "runs": 1,
+      "min": 0.00019973400048911572,
+      "max": 0.00019973400048911572
+    },
+    "test_live_capture_engine_timeout_retry_mode_does_not_fail_or_advance": {
+      "duration": 6.449397187680006e-05,
+      "runs": 1,
+      "min": 6.449397187680006e-05,
+      "max": 6.449397187680006e-05
+    },
+    "test_live_capture_engine_out_of_order_mode_captures_later_step_first": {
+      "duration": 0.00017355696763843298,
+      "runs": 1,
+      "min": 0.00017355696763843298,
+      "max": 0.00017355696763843298
+    },
+    "test_live_capture_engine_reuse_from_copies_existing_file": {
+      "duration": 0.0002824229886755347,
+      "runs": 1,
+      "min": 0.0002824229886755347,
+      "max": 0.0002824229886755347
+    },
+    "test_live_capture_engine_out_of_order_requires_fresh_trigger": {
+      "duration": 7.794704288244247e-05,
+      "runs": 1,
+      "min": 7.794704288244247e-05,
+      "max": 7.794704288244247e-05
+    },
+    "test_live_capture_engine_out_of_order_overall_timeout_fails_pending_steps": {
+      "duration": 0.0001355540007352829,
+      "runs": 1,
+      "min": 0.0001355540007352829,
+      "max": 0.0001355540007352829
+    },
+    "test_oo_trigger_captures_when_state_exits_same_tick": {
+      "duration": 0.00013228500029072165,
+      "runs": 1,
+      "min": 0.00013228500029072165,
+      "max": 0.00013228500029072165
+    },
+    "test_oo_one_shot_trigger_captures_on_first_ready_evaluate": {
+      "duration": 0.0001333060208708048,
+      "runs": 1,
+      "min": 0.0001333060208708048,
+      "max": 0.0001333060208708048
+    },
+    "test_oo_stale_state_does_not_satisfy_trigger_step": {
+      "duration": 7.538602221757174e-05,
+      "runs": 1,
+      "min": 7.538602221757174e-05,
+      "max": 7.538602221757174e-05
+    },
+    "test_load_replay_paths_accepts_top_level_mapping": {
+      "duration": 0.0002903689746744931,
+      "runs": 1,
+      "min": 0.0002903689746744931,
+      "max": 0.0002903689746744931
+    },
+    "test_replay_capture_persists_frame_until_replaced": {
+      "duration": 0.00038199900882318616,
+      "runs": 1,
+      "min": 0.00038199900882318616,
+      "max": 0.00038199900882318616
+    },
+    "test_replay_capture_reports_activated_steps": {
+      "duration": 0.00033511396031826735,
+      "runs": 1,
+      "min": 0.00033511396031826735,
+      "max": 0.00033511396031826735
+    },
+    "test_required_and_missing_screenshot_detection": {
+      "duration": 0.00027865200536325574,
+      "runs": 1,
+      "min": 0.00027865200536325574,
+      "max": 0.00027865200536325574
+    },
+    "test_load_replay_paths_parses_step_expectations": {
+      "duration": 0.00025187304709106684,
+      "runs": 1,
+      "min": 0.00025187304709106684,
+      "max": 0.00025187304709106684
+    },
+    "test_replay_assertion_engine_passes_when_state_and_trigger_arrive_in_window": {
+      "duration": 0.0002713659778237343,
+      "runs": 1,
+      "min": 0.0002713659778237343,
+      "max": 0.0002713659778237343
+    },
+    "test_replay_assertion_engine_buffers_next_checkpoints_early_trigger": {
+      "duration": 0.00037942599738016725,
+      "runs": 1,
+      "min": 0.00037942599738016725,
+      "max": 0.00037942599738016725
+    },
+    "test_replay_assertion_engine_still_fails_on_genuinely_out_of_order_trigger": {
+      "duration": 0.0004216830129735172,
+      "runs": 1,
+      "min": 0.0004216830129735172,
+      "max": 0.0004216830129735172
+    },
+    "test_replay_assertion_engine_fails_on_timeout": {
+      "duration": 0.0002630480448715389,
+      "runs": 1,
+      "min": 0.0002630480448715389,
+      "max": 0.0002630480448715389
+    },
+    "test_controller_simulated_input_records_action_intents": {
+      "duration": 0.050513149006292224,
+      "runs": 1,
+      "min": 0.050513149006292224,
+      "max": 0.050513149006292224
+    },
+    "test_initial_mode_is_searching": {
+      "duration": 0.00014864496188238263,
+      "runs": 1,
+      "min": 0.00014864496188238263,
+      "max": 0.00014864496188238263
+    },
+    "test_first_update_transitions_to_acquiring": {
+      "duration": 0.0009126820368692279,
+      "runs": 1,
+      "min": 0.0009126820368692279,
+      "max": 0.0009126820368692279
+    },
+    "test_target_detected_transitions_to_tracking": {
+      "duration": 0.0010159749654121697,
+      "runs": 1,
+      "min": 0.0010159749654121697,
+      "max": 0.0010159749654121697
+    },
+    "test_miss_after_tracking_enters_lost_grace": {
+      "duration": 0.0011086490121670067,
+      "runs": 1,
+      "min": 0.0011086490121670067,
+      "max": 0.0011086490121670067
+    },
+    "test_reacquire_in_grace_returns_to_tracking": {
+      "duration": 0.0013909349800087512,
+      "runs": 1,
+      "min": 0.0013909349800087512,
+      "max": 0.0013909349800087512
+    },
+    "test_grace_timeout_returns_to_acquiring": {
+      "duration": 0.051997289003338665,
+      "runs": 1,
+      "min": 0.051997289003338665,
+      "max": 0.051997289003338665
+    },
+    "test_reset_clears_state": {
+      "duration": 0.0016383370384573936,
+      "runs": 1,
+      "min": 0.0016383370384573936,
+      "max": 0.0016383370384573936
+    },
+    "test_tall_bar_is_detected": {
+      "duration": 0.0008755350136198103,
+      "runs": 1,
+      "min": 0.0008755350136198103,
+      "max": 0.0008755350136198103
+    },
+    "test_circle_is_rejected": {
+      "duration": 0.0004534329636953771,
+      "runs": 1,
+      "min": 0.0004534329636953771,
+      "max": 0.0004534329636953771
+    },
+    "test_wide_blob_is_rejected": {
+      "duration": 0.0004880430060438812,
+      "runs": 1,
+      "min": 0.0004880430060438812,
+      "max": 0.0004880430060438812
+    },
+    "test_target_at_center_gives_zero_error": {
+      "duration": 0.0004098190111108124,
+      "runs": 1,
+      "min": 0.0004098190111108124,
+      "max": 0.0004098190111108124
+    },
+    "test_target_left_of_center_gives_negative_error": {
+      "duration": 0.00040248403092846274,
+      "runs": 1,
+      "min": 0.00040248403092846274,
+      "max": 0.00040248403092846274
+    },
+    "test_target_right_of_center_gives_positive_error": {
+      "duration": 0.0005064759752713144,
+      "runs": 1,
+      "min": 0.0005064759752713144,
+      "max": 0.0005064759752713144
+    },
+    "test_error_clamped_to_unit_range": {
+      "duration": 0.0005077290115877986,
+      "runs": 1,
+      "min": 0.0005077290115877986,
+      "max": 0.0005077290115877986
+    },
+    "test_no_error_when_no_target": {
+      "duration": 0.00047603296115994453,
+      "runs": 1,
+      "min": 0.00047603296115994453,
+      "max": 0.00047603296115994453
+    },
+    "test_picks_nearer_of_two_targets_on_first_frame": {
+      "duration": 0.00036179000744596124,
+      "runs": 1,
+      "min": 0.00036179000744596124,
+      "max": 0.00036179000744596124
+    },
+    "test_tracks_nearer_target_on_subsequent_frames": {
+      "duration": 0.000683892983943224,
+      "runs": 1,
+      "min": 0.000683892983943224,
+      "max": 0.000683892983943224
+    },
+    "test_prefers_red_when_both_present": {
+      "duration": 0.0003794949734583497,
+      "runs": 1,
+      "min": 0.0003794949734583497,
+      "max": 0.0003794949734583497
+    },
+    "test_falls_back_to_green_when_no_red": {
+      "duration": 0.0003517240402288735,
+      "runs": 1,
+      "min": 0.0003517240402288735,
+      "max": 0.0003517240402288735
+    },
+    "test_deadband_suppresses_command": {
+      "duration": 0.0002404149854555726,
+      "runs": 1,
+      "min": 0.0002404149854555726,
+      "max": 0.0002404149854555726
+    },
+    "test_negative_error_rolls_left": {
+      "duration": 0.0002694989670999348,
+      "runs": 1,
+      "min": 0.0002694989670999348,
+      "max": 0.0002694989670999348
+    },
+    "test_positive_error_rolls_right": {
+      "duration": 0.00014628097414970398,
+      "runs": 1,
+      "min": 0.00014628097414970398,
+      "max": 0.00014628097414970398
+    },
+    "test_hold_is_proportional_and_clamped": {
+      "duration": 4.68819634988904e-05,
+      "runs": 1,
+      "min": 4.68819634988904e-05,
+      "max": 4.68819634988904e-05
+    },
+    "test_hold_clamped_to_min": {
+      "duration": 3.992201527580619e-05,
+      "runs": 1,
+      "min": 3.992201527580619e-05,
+      "max": 3.992201527580619e-05
+    },
+    "test_hold_clamped_to_max": {
+      "duration": 3.9991980884224176e-05,
+      "runs": 1,
+      "min": 3.9991980884224176e-05,
+      "max": 3.9991980884224176e-05
+    },
+    "test_cooldown_suppresses_second_call": {
+      "duration": 0.00015571300173178315,
+      "runs": 1,
+      "min": 0.00015571300173178315,
+      "max": 0.00015571300173178315
+    },
+    "test_cooldown_allows_after_elapsed": {
+      "duration": 0.00019911897834390402,
+      "runs": 1,
+      "min": 0.00019911897834390402,
+      "max": 0.00019911897834390402
+    },
+    "test_reference_frame_detects_markers": {
+      "duration": 0.033069205994252115,
+      "runs": 1,
+      "min": 0.033069205994252115,
+      "max": 0.033069205994252115
+    },
+    "test_reference_frame_rejects_reticle": {
+      "duration": 0.03660346398828551,
+      "runs": 1,
+      "min": 0.03660346398828551,
+      "max": 0.03660346398828551
+    },
+    "test_maybe_render_writes_file": {
+      "duration": 0.0020642129820771515,
+      "runs": 1,
+      "min": 0.0020642129820771515,
+      "max": 0.0020642129820771515
+    },
+    "test_maybe_render_respects_interval": {
+      "duration": 0.0013637350057251751,
+      "runs": 1,
+      "min": 0.0013637350057251751,
+      "max": 0.0013637350057251751
+    },
+    "test_from_config_disabled": {
+      "duration": 9.866803884506226e-05,
+      "runs": 1,
+      "min": 9.866803884506226e-05,
+      "max": 9.866803884506226e-05
+    },
+    "test_from_config_enabled": {
+      "duration": 0.00013009196845814586,
+      "runs": 1,
+      "min": 0.00013009196845814586,
+      "max": 0.00013009196845814586
+    },
+    "test_from_config_tracking_enabled_activates_hud": {
+      "duration": 0.0004002359928563237,
+      "runs": 1,
+      "min": 0.0004002359928563237,
+      "max": 0.0004002359928563237
+    },
+    "test_from_config_feh_not_launched_when_tracking_disabled": {
+      "duration": 0.00015127903316169977,
+      "runs": 1,
+      "min": 0.00015127903316169977,
+      "max": 0.00015127903316169977
+    },
+    "test_from_config_feh_launched_when_tracking_enabled": {
+      "duration": 0.00027193501591682434,
+      "runs": 1,
+      "min": 0.00027193501591682434,
+      "max": 0.00027193501591682434
+    },
+    "test_render_with_tracking_obs": {
+      "duration": 0.0027659169863909483,
+      "runs": 1,
+      "min": 0.0027659169863909483,
+      "max": 0.0027659169863909483
+    },
+    "test_atomic_write_no_partial_read": {
+      "duration": 0.0022225260036066175,
+      "runs": 1,
+      "min": 0.0022225260036066175,
+      "max": 0.0022225260036066175
+    },
+    "test_update_waiting_fallback_triggers_after_thresholds": {
+      "duration": 4.7640001866966486e-05,
+      "runs": 1,
+      "min": 4.7640001866966486e-05,
+      "max": 4.7640001866966486e-05
+    },
+    "test_update_waiting_fallback_resets_when_play_visible": {
+      "duration": 3.921397728845477e-05,
+      "runs": 1,
+      "min": 3.921397728845477e-05,
+      "max": 3.921397728845477e-05
+    },
+    "test_update_waiting_fallback_does_not_run_without_baseline_diff": {
+      "duration": 3.868900239467621e-05,
+      "runs": 1,
+      "min": 3.868900239467621e-05,
+      "max": 3.868900239467621e-05
+    },
+    "test_update_waiting_fallback_not_before_min_elapsed": {
+      "duration": 3.622000804170966e-05,
+      "runs": 1,
+      "min": 3.622000804170966e-05,
+      "max": 3.622000804170966e-05
+    },
+    "test_update_waiting_fallback_requires_cancel_crop": {
+      "duration": 3.5864999517798424e-05,
+      "runs": 1,
+      "min": 3.5864999517798424e-05,
+      "max": 3.5864999517798424e-05
+    },
+    "test_first_read_alone_never_confirms": {
+      "duration": 8.33550002425909e-05,
+      "runs": 1,
+      "min": 8.33550002425909e-05,
+      "max": 8.33550002425909e-05
+    },
+    "test_second_agreeing_read_confirms": {
+      "duration": 0.00011114700464531779,
+      "runs": 1,
+      "min": 0.00011114700464531779,
+      "max": 0.00011114700464531779
+    },
+    "test_tolerance_allows_near_values": {
+      "duration": 0.00010553200263530016,
+      "runs": 1,
+      "min": 0.00010553200263530016,
+      "max": 0.00010553200263530016
+    },
+    "test_fragment_never_confirms": {
+      "duration": 0.00012835301458835602,
+      "runs": 1,
+      "min": 0.00012835301458835602,
+      "max": 0.00012835301458835602
+    },
+    "test_max_plausible_discarded_before_window": {
+      "duration": 0.00010227400343865156,
+      "runs": 1,
+      "min": 0.00010227400343865156,
+      "max": 0.00010227400343865156
+    },
+    "test_replay_real_garbage_session": {
+      "duration": 0.000172782049048692,
+      "runs": 1,
+      "min": 0.000172782049048692,
+      "max": 0.000172782049048692
+    },
+    "test_window_flushed_on_respawn_reset": {
+      "duration": 0.00011391699081286788,
+      "runs": 1,
+      "min": 0.00011391699081286788,
+      "max": 0.00011391699081286788
+    },
+    "test_unconfirmed_reads_do_not_block_the_weak_tier": {
+      "duration": 0.06050211697584018,
+      "runs": 1,
+      "min": 0.06050211697584018,
+      "max": 0.06050211697584018
+    },
+    "test_confirmed_zero_reads_set_observed_death": {
+      "duration": 0.00011135201202705503,
+      "runs": 1,
+      "min": 0.00011135201202705503,
+      "max": 0.00011135201202705503
+    },
+    "test_synthetic_reset_does_not_set_observed_death": {
+      "duration": 9.578699246048927e-05,
+      "runs": 1,
+      "min": 9.578699246048927e-05,
+      "max": 9.578699246048927e-05
+    },
+    "test_synthetic_reset_clears_prior_observed_flag": {
+      "duration": 0.00011472398182377219,
+      "runs": 1,
+      "min": 0.00011472398182377219,
+      "max": 0.00011472398182377219
+    },
+    "test_no_digits_fallback_does_not_set_observed_death": {
+      "duration": 0.06051383796148002,
+      "runs": 1,
+      "min": 0.06051383796148002,
+      "max": 0.06051383796148002
+    },
+    "test_alive_transition_latches_observed_death": {
+      "duration": 0.00013705401215702295,
+      "runs": 1,
+      "min": 0.00013705401215702295,
+      "max": 0.00013705401215702295
+    },
+    "test_alive_transition_after_synthetic_death_latches_false": {
+      "duration": 0.00011754001025110483,
+      "runs": 1,
+      "min": 0.00011754001025110483,
+      "max": 0.00011754001025110483
+    },
+    "test_single_zero_bounce_rejected_at_value_layer": {
+      "duration": 0.0001123010297305882,
+      "runs": 1,
+      "min": 0.0001123010297305882,
+      "max": 0.0001123010297305882
+    },
+    "test_zero_followed_by_no_digits_confirms_death": {
+      "duration": 0.00014376197941601276,
+      "runs": 1,
+      "min": 0.00014376197941601276,
+      "max": 0.00014376197941601276
+    },
+    "test_battle_state_takes_restart_path": {
+      "duration": 4.8899033572524786e-05,
+      "runs": 1,
+      "min": 4.8899033572524786e-05,
+      "max": 4.8899033572524786e-05
+    },
+    "test_eject_with_observed_death_terminates_eject": {
+      "duration": 4.023598739877343e-05,
+      "runs": 1,
+      "min": 4.023598739877343e-05,
+      "max": 4.023598739877343e-05
+    },
+    "test_eject_without_observed_death_is_spurious": {
+      "duration": 3.847398329526186e-05,
+      "runs": 1,
+      "min": 3.847398329526186e-05,
+      "max": 3.847398329526186e-05
+    },
+    "test_manual_and_other_states_consume": {
+      "duration": 3.7545047234743834e-05,
+      "runs": 1,
+      "min": 3.7545047234743834e-05,
+      "max": 3.7545047234743834e-05
+    },
+    "test_default_window_is_6s_from_config": {
+      "duration": 7.685297168791294e-05,
+      "runs": 1,
+      "min": 7.685297168791294e-05,
+      "max": 7.685297168791294e-05
+    },
+    "test_dropout_shorter_than_window_keeps_alive": {
+      "duration": 0.00010823900811374187,
+      "runs": 1,
+      "min": 0.00010823900811374187,
+      "max": 0.00010823900811374187
+    },
+    "test_dropout_past_window_clears_alive": {
+      "duration": 0.060484287969302386,
+      "runs": 1,
+      "min": 0.060484287969302386,
+      "max": 0.060484287969302386
+    },
+    "test_recovery_before_window_never_fires_alive_event": {
+      "duration": 0.00012017000699415803,
+      "runs": 1,
+      "min": 0.00012017000699415803,
+      "max": 0.00012017000699415803
+    },
+    "test_strong_tier_fire_on_alive_after_confirmed_zero": {
+      "duration": 0.0001201499835588038,
+      "runs": 1,
+      "min": 0.0001201499835588038,
+      "max": 0.0001201499835588038
+    },
+    "test_weak_tier_fire_on_alive_after_no_digits_window": {
+      "duration": 0.0604191449820064,
+      "runs": 1,
+      "min": 0.0604191449820064,
+      "max": 0.0604191449820064
+    },
+    "test_strong_upgrades_weak_mark": {
+      "duration": 0.06055394600844011,
+      "runs": 1,
+      "min": 0.06055394600844011,
+      "max": 0.06055394600844011
+    },
+    "test_no_fire_without_mark": {
+      "duration": 0.00011473899940028787,
+      "runs": 1,
+      "min": 0.00011473899940028787,
+      "max": 0.00011473899940028787
+    },
+    "test_weak_mark_suppressed_while_telemetry_live": {
+      "duration": 0.06052489299327135,
+      "runs": 1,
+      "min": 0.06052489299327135,
+      "max": 0.06052489299327135
+    },
+    "test_weak_mark_forms_when_telemetry_stale": {
+      "duration": 0.06059653504053131,
+      "runs": 1,
+      "min": 0.06059653504053131,
+      "max": 0.06059653504053131
+    },
+    "test_strong_tier_unaffected_by_live_telemetry": {
+      "duration": 0.00012855901150032878,
+      "runs": 1,
+      "min": 0.00012855901150032878,
+      "max": 0.00012855901150032878
+    },
+    "test_synthetic_death_never_marks_or_fires": {
+      "duration": 0.00012018601410090923,
+      "runs": 1,
+      "min": 0.00012018601410090923,
+      "max": 0.00012018601410090923
+    },
+    "test_mark_cleared_when_leaving_battle": {
+      "duration": 0.00015555403660982847,
+      "runs": 1,
+      "min": 0.00015555403660982847,
+      "max": 0.00015555403660982847
+    },
+    "test_lobby_entry_clears_mark": {
+      "duration": 0.00013217097148299217,
+      "runs": 1,
+      "min": 0.00013217097148299217,
+      "max": 0.00013217097148299217
+    },
+    "test_stale_mark_discarded_instead_of_firing": {
+      "duration": 0.00012296205386519432,
+      "runs": 1,
+      "min": 0.00012296205386519432,
+      "max": 0.00012296205386519432
+    },
+    "test_mode_ocr_disables_shadow": {
+      "duration": 0.037636810971889645,
+      "runs": 1,
+      "min": 0.037636810971889645,
+      "max": 0.037636810971889645
+    },
+    "test_unimplemented_modes_fall_back_to_shadow": {
+      "duration": 0.11322038900107145,
+      "runs": 1,
+      "min": 0.11322038900107145,
+      "max": 0.11322038900107145
+    },
+    "test_reset_health_for_respawn_does_not_clear_shadow_clock": {
+      "duration": 0.060512226016726345,
+      "runs": 1,
+      "min": 0.060512226016726345,
+      "max": 0.060512226016726345
+    },
+    "test_garbage_overlay_marks_but_needs_transition_to_fire": {
+      "duration": 0.060594947019126266,
+      "runs": 1,
+      "min": 0.060594947019126266,
+      "max": 0.060594947019126266
+    },
+    "test_fire_on_first_confirmed_read_after_gap": {
+      "duration": 0.060542432009242475,
+      "runs": 1,
+      "min": 0.060542432009242475,
+      "max": 0.060542432009242475
+    },
+    "test_weak_fire_suppressed_outside_game_battle": {
+      "duration": 0.06046257499838248,
+      "runs": 1,
+      "min": 0.06046257499838248,
+      "max": 0.06046257499838248
+    },
+    "test_sub1_values_excluded_from_decline_prior": {
+      "duration": 0.1600618099910207,
+      "runs": 1,
+      "min": 0.1600618099910207,
+      "max": 0.1600618099910207
+    },
+    "test_mid_combat_gap_without_transition_never_fires": {
+      "duration": 0.06061955401673913,
+      "runs": 1,
+      "min": 0.06061955401673913,
+      "max": 0.06061955401673913
+    },
+    "test_confirmed_stream_never_marks": {
+      "duration": 0.00012847897596657276,
+      "runs": 1,
+      "min": 0.00012847897596657276,
+      "max": 0.00012847897596657276
+    },
+    "test_decline_halves_the_window": {
+      "duration": 0.1583732559811324,
+      "runs": 1,
+      "min": 0.1583732559811324,
+      "max": 0.1583732559811324
+    },
+    "test_no_decline_needs_full_window": {
+      "duration": 0.27991202898556367,
+      "runs": 1,
+      "min": 0.27991202898556367,
+      "max": 0.27991202898556367
+    },
+    "test_confirmed_gap_instrumentation": {
+      "duration": 0.06056101998547092,
+      "runs": 1,
+      "min": 0.06056101998547092,
+      "max": 0.06056101998547092
+    },
+    "test_dual_fire_sets_health_respawn_event": {
+      "duration": 0.04023417900316417,
+      "runs": 1,
+      "min": 0.04023417900316417,
+      "max": 0.04023417900316417
+    },
+    "test_dual_stands_down_when_ocr_owns_episode": {
+      "duration": 0.03760236100060865,
+      "runs": 1,
+      "min": 0.03760236100060865,
+      "max": 0.03760236100060865
+    },
+    "test_dual_stands_down_after_recent_ocr_edge": {
+      "duration": 0.03760941600194201,
+      "runs": 1,
+      "min": 0.03760941600194201,
+      "max": 0.03760941600194201
+    },
+    "test_shadow_mode_never_sets_event": {
+      "duration": 0.0001245299936272204,
+      "runs": 1,
+      "min": 0.0001245299936272204,
+      "max": 0.0001245299936272204
+    },
+    "test_battle_exit_clears_pending_event": {
+      "duration": 0.03796970198163763,
+      "runs": 1,
+      "min": 0.03796970198163763,
+      "max": 0.03796970198163763
+    },
+    "test_ocr_edge_latency_recorded": {
+      "duration": 0.06047814397606999,
+      "runs": 1,
+      "min": 0.06047814397606999,
+      "max": 0.06047814397606999
+    },
+    "test_ocr_edge_latency_none_before_any_confirmed_read": {
+      "duration": 8.880801033228636e-05,
+      "runs": 1,
+      "min": 8.880801033228636e-05,
+      "max": 8.880801033228636e-05
+    },
+    "test_matched_fire_within_5s": {
+      "duration": 0.00013154599582776427,
+      "runs": 1,
+      "min": 0.00013154599582776427,
+      "max": 0.00013154599582776427
+    },
+    "test_fire_without_edge_is_false_fire": {
+      "duration": 0.00013529800344258547,
+      "runs": 1,
+      "min": 0.00013529800344258547,
+      "max": 0.00013529800344258547
+    },
+    "test_edge_without_fire_is_missed": {
+      "duration": 0.00010246201418340206,
+      "runs": 1,
+      "min": 0.00010246201418340206,
+      "max": 0.00010246201418340206
+    },
+    "test_continuous_detection_counts_one_edge": {
+      "duration": 9.300903184339404e-05,
+      "runs": 1,
+      "min": 9.300903184339404e-05,
+      "max": 9.300903184339404e-05
+    },
+    "test_finalize_embeds_extra_section": {
+      "duration": 0.00016817403957247734,
+      "runs": 1,
+      "min": 0.00016817403957247734,
+      "max": 0.00016817403957247734
+    },
+    "test_extra_cannot_clobber_builtin_fields": {
+      "duration": 0.00012064899783581495,
+      "runs": 1,
+      "min": 0.00012064899783581495,
+      "max": 0.00012064899783581495
+    },
+    "test_probe_does_not_run_until_armed": {
+      "duration": 0.037557104020379484,
+      "runs": 1,
+      "min": 0.037557104020379484,
+      "max": 0.037557104020379484
+    },
+    "test_arming_allows_the_probe_to_schedule": {
+      "duration": 0.03755638899747282,
+      "runs": 1,
+      "min": 0.03755638899747282,
+      "max": 0.03755638899747282
+    },
+    "test_probe_never_reports_a_respawn": {
+      "duration": 10.172233066987246,
+      "runs": 1,
+      "min": 10.172233066987246,
+      "max": 10.172233066987246
+    },
+    "test_lobby_and_waiting_still_skip_ocr_entirely": {
+      "duration": 0.03979125601472333,
+      "runs": 1,
+      "min": 0.03979125601472333,
+      "max": 0.03979125601472333
+    },
+    "test_disarm_reports_a_summary_and_stops_the_probe": {
+      "duration": 0.04514395695878193,
+      "runs": 1,
+      "min": 0.04514395695878193,
+      "max": 0.04514395695878193
+    },
+    "test_live_gap_lands_in_the_right_bucket": {
+      "duration": 0.00012344494462013245,
+      "runs": 1,
+      "min": 0.00012344494462013245,
+      "max": 0.00012344494462013245
+    },
+    "test_stale_seen_gap_is_excluded": {
+      "duration": 0.00011756597086787224,
+      "runs": 1,
+      "min": 0.00011756597086787224,
+      "max": 0.00011756597086787224
+    },
+    "test_respawn_reset_taints_the_open_gap": {
+      "duration": 0.0001193430507555604,
+      "runs": 1,
+      "min": 0.0001193430507555604,
+      "max": 0.0001193430507555604
+    },
+    "test_non_battle_gap_is_excluded": {
+      "duration": 0.00012895901454612613,
+      "runs": 1,
+      "min": 0.00012895901454612613,
+      "max": 0.00012895901454612613
+    },
+    "test_summary_shape_when_empty": {
+      "duration": 9.720597881823778e-05,
+      "runs": 1,
+      "min": 9.720597881823778e-05,
+      "max": 9.720597881823778e-05
+    },
+    "test_gap_accessor": {
+      "duration": 0.00010500004282221198,
+      "runs": 1,
+      "min": 0.00010500004282221198,
+      "max": 0.00010500004282221198
+    },
+    "test_single_subscriber_receives_payload": {
+      "duration": 9.493599645793438e-05,
+      "runs": 1,
+      "min": 9.493599645793438e-05,
+      "max": 9.493599645793438e-05
+    },
+    "test_multi_subscriber_fan_out": {
+      "duration": 0.00010096398182213306,
+      "runs": 1,
+      "min": 0.00010096398182213306,
+      "max": 0.00010096398182213306
+    },
+    "test_duplicate_name_raises": {
+      "duration": 0.00019218999659642577,
+      "runs": 1,
+      "min": 0.00019218999659642577,
+      "max": 0.00019218999659642577
+    },
+    "test_duplicate_name_replaces_when_asked": {
+      "duration": 9.9916011095047e-05,
+      "runs": 1,
+      "min": 9.9916011095047e-05,
+      "max": 9.9916011095047e-05
+    },
+    "test_same_name_different_events_is_fine": {
+      "duration": 9.397801477462053e-05,
+      "runs": 1,
+      "min": 9.397801477462053e-05,
+      "max": 9.397801477462053e-05
+    },
+    "test_non_event_raises_at_registration": {
+      "duration": 9.685300756245852e-05,
+      "runs": 1,
+      "min": 9.685300756245852e-05,
+      "max": 9.685300756245852e-05
+    },
+    "test_non_callable_raises_at_registration": {
+      "duration": 0.00010150898015126586,
+      "runs": 1,
+      "min": 0.00010150898015126586,
+      "max": 0.00010150898015126586
+    },
+    "test_emit_with_no_subscribers_is_a_noop": {
+      "duration": 8.958199759945273e-05,
+      "runs": 1,
+      "min": 8.958199759945273e-05,
+      "max": 8.958199759945273e-05
+    },
+    "test_subscriber_exception_is_isolated": {
+      "duration": 0.00010225799633190036,
+      "runs": 1,
+      "min": 0.00010225799633190036,
+      "max": 0.00010225799633190036
+    },
+    "test_subscriber_may_subscribe_during_dispatch": {
+      "duration": 0.0001030050334520638,
+      "runs": 1,
+      "min": 0.0001030050334520638,
+      "max": 0.0001030050334520638
+    },
+    "test_has_subscribers_and_unsubscribe": {
+      "duration": 9.514304110780358e-05,
+      "runs": 1,
+      "min": 9.514304110780358e-05,
+      "max": 9.514304110780358e-05
+    },
+    "test_setter_registers_and_fires": {
+      "duration": 9.598501492291689e-05,
+      "runs": 1,
+      "min": 9.598501492291689e-05,
+      "max": 9.598501492291689e-05
+    },
+    "test_setter_called_twice_replaces_not_duplicates": {
+      "duration": 9.451195364817977e-05,
+      "runs": 1,
+      "min": 9.451195364817977e-05,
+      "max": 9.451195364817977e-05
+    },
+    "test_setter_and_named_subscriber_coexist": {
+      "duration": 0.00010227801976725459,
+      "runs": 1,
+      "min": 0.00010227801976725459,
+      "max": 0.00010227801976725459
+    },
+    "test_transition_emits_fsm_event": {
+      "duration": 0.00012783100828528404,
+      "runs": 1,
+      "min": 0.00012783100828528404,
+      "max": 0.00012783100828528404
+    },
+    "test_invalid_trigger_emits_nothing": {
+      "duration": 0.00011613901006057858,
+      "runs": 1,
+      "min": 0.00011613901006057858,
+      "max": 0.00011613901006057858
+    },
+    "test_cancel_mission_emitted_on_lobby_entry": {
+      "duration": 0.00012292497558519244,
+      "runs": 1,
+      "min": 0.00012292497558519244,
+      "max": 0.00012292497558519244
+    },
+    "test_game_unknown_is_dismissable": {
+      "duration": 4.8848974984139204e-05,
+      "runs": 1,
+      "min": 4.8848974984139204e-05,
+      "max": 4.8848974984139204e-05
+    },
+    "test_stalled_is_dismissable": {
+      "duration": 4.076102050021291e-05,
+      "runs": 1,
+      "min": 4.076102050021291e-05,
+      "max": 4.076102050021291e-05
+    },
+    "test_battle_states_never_dismiss": {
+      "duration": 3.8277998100966215e-05,
+      "runs": 1,
+      "min": 3.8277998100966215e-05,
+      "max": 3.8277998100966215e-05
+    },
+    "test_classified_states_never_open_the_gate": {
+      "duration": 9.289539884775877e-05,
+      "runs": 5,
+      "min": 7.79289985075593e-05,
+      "max": 0.00014160299906507134
+    },
+    "test_stalled_state_without_dwell_is_shut": {
+      "duration": 9.345149737782776e-05,
+      "runs": 2,
+      "min": 8.00970010459423e-05,
+      "max": 0.00010680599370971322
+    },
+    "test_stalled_state_past_dwell_opens_the_gate": {
+      "duration": 8.368052658624947e-05,
+      "runs": 2,
+      "min": 8.167501073330641e-05,
+      "max": 8.568604243919253e-05
+    },
+    "test_lobby_blackout_past_dwell_opens_only_de_escalating_crops": {
+      "duration": 9.144801879301667e-05,
+      "runs": 1,
+      "min": 9.144801879301667e-05,
+      "max": 9.144801879301667e-05
+    },
+    "test_lobby_blackout_within_dwell_is_shut": {
+      "duration": 8.677598088979721e-05,
+      "runs": 1,
+      "min": 8.677598088979721e-05,
+      "max": 8.677598088979721e-05
+    },
+    "test_unset_lobby_blackout_clock_is_shut": {
+      "duration": 0.00010194804053753614,
+      "runs": 1,
+      "min": 0.00010194804053753614,
+      "max": 0.00010194804053753614
+    },
+    "test_lobby_blackout_does_not_duplicate_in_a_real_stall": {
+      "duration": 8.499401155859232e-05,
+      "runs": 1,
+      "min": 8.499401155859232e-05,
+      "max": 8.499401155859232e-05
+    },
+    "test_exit_dialog_flag_suppresses_and_lapses": {
+      "duration": 8.623901521787047e-05,
+      "runs": 1,
+      "min": 8.623901521787047e-05,
+      "max": 8.623901521787047e-05
+    },
+    "test_blackout_flag_gates_esc_independently_of_the_dialog": {
+      "duration": 8.27810144983232e-05,
+      "runs": 1,
+      "min": 8.27810144983232e-05,
+      "max": 8.27810144983232e-05
+    },
+    "test_click_to_suppression_yields_to_a_lobby_blackout": {
+      "duration": 9.004701860249043e-05,
+      "runs": 1,
+      "min": 9.004701860249043e-05,
+      "max": 9.004701860249043e-05
+    },
+    "test_unset_dwell_clock_is_shut": {
+      "duration": 9.075697744265199e-05,
+      "runs": 1,
+      "min": 9.075697744265199e-05,
+      "max": 9.075697744265199e-05
+    },
+    "test_scan_order_is_most_specific_first": {
+      "duration": 8.731603156775236e-05,
+      "runs": 1,
+      "min": 8.731603156775236e-05,
+      "max": 8.731603156775236e-05
+    },
+    "test_unready_below_dwell_is_shut": {
+      "duration": 8.277903543785214e-05,
+      "runs": 1,
+      "min": 8.277903543785214e-05,
+      "max": 8.277903543785214e-05
+    },
+    "test_unready_past_dwell_fires_in_classified_lobby": {
+      "duration": 8.64759786054492e-05,
+      "runs": 1,
+      "min": 8.64759786054492e-05,
+      "max": 8.64759786054492e-05
+    },
+    "test_unready_past_dwell_also_fires_while_unclassified": {
+      "duration": 9.010103531181812e-05,
+      "runs": 1,
+      "min": 9.010103531181812e-05,
+      "max": 9.010103531181812e-05
+    },
+    "test_cleared_unready_shuts_the_gate": {
+      "duration": 8.453999180346727e-05,
+      "runs": 1,
+      "min": 8.453999180346727e-05,
+      "max": 8.453999180346727e-05
+    },
+    "test_absent_crop_is_dropped_from_targets": {
+      "duration": 8.746597450226545e-05,
+      "runs": 1,
+      "min": 8.746597450226545e-05,
+      "max": 8.746597450226545e-05
+    },
+    "test_all_four_crops_have_text_matchers": {
+      "duration": 9.189598495140672e-05,
+      "runs": 1,
+      "min": 9.189598495140672e-05,
+      "max": 9.189598495140672e-05
+    },
+    "test_stall_recovery_action_event_fans_out": {
+      "duration": 8.774100570008159e-05,
+      "runs": 1,
+      "min": 8.774100570008159e-05,
+      "max": 8.774100570008159e-05
+    },
+    "test_stall_states_exclude_lobby_and_waiting": {
+      "duration": 4.711700603365898e-05,
+      "runs": 1,
+      "min": 4.711700603365898e-05,
+      "max": 4.711700603365898e-05
+    },
+    "test_warns_again_after_the_capture_cap": {
+      "duration": 0.0002550949575379491,
+      "runs": 1,
+      "min": 0.0002550949575379491,
+      "max": 0.0002550949575379491
+    },
+    "test_warning_is_throttled_then_repeats": {
+      "duration": 4.786299541592598e-05,
+      "runs": 1,
+      "min": 4.786299541592598e-05,
+      "max": 4.786299541592598e-05
+    },
+    "test_interval_doubles_but_is_capped": {
+      "duration": 4.9918016884475946e-05,
+      "runs": 1,
+      "min": 4.9918016884475946e-05,
+      "max": 4.9918016884475946e-05
+    },
+    "test_entering_waiting_arms_the_clock": {
+      "duration": 5.515594966709614e-05,
+      "runs": 1,
+      "min": 5.515594966709614e-05,
+      "max": 5.515594966709614e-05
+    },
+    "test_leaving_waiting_clears_the_clock": {
+      "duration": 4.3647014535963535e-05,
+      "runs": 1,
+      "min": 4.3647014535963535e-05,
+      "max": 4.3647014535963535e-05
+    },
+    "test_tick_is_inert_outside_waiting": {
+      "duration": 4.291202640160918e-05,
+      "runs": 1,
+      "min": 4.291202640160918e-05,
+      "max": 4.291202640160918e-05
+    },
+    "test_cancel_detected_triggers_transition": {
+      "duration": 4.452199209481478e-05,
+      "runs": 1,
+      "min": 4.452199209481478e-05,
+      "max": 4.452199209481478e-05
+    },
+    "test_timeout_returns_to_lobby": {
+      "duration": 4.288298077881336e-05,
+      "runs": 1,
+      "min": 4.288298077881336e-05,
+      "max": 4.288298077881336e-05
+    },
+    "test_fallback_promotes_and_requests_continue": {
+      "duration": 4.993699258193374e-05,
+      "runs": 1,
+      "min": 4.993699258193374e-05,
+      "max": 4.993699258193374e-05
+    },
+    "test_visible_play_resets_the_score": {
+      "duration": 4.7831039410084486e-05,
+      "runs": 1,
+      "min": 4.7831039410084486e-05,
+      "max": 4.7831039410084486e-05
+    },
+    "test_disabled_fallback_never_promotes": {
+      "duration": 4.396203439682722e-05,
+      "runs": 1,
+      "min": 4.396203439682722e-05,
+      "max": 4.396203439682722e-05
+    },
+    "test_visible_play_is_reclicked_after_interval": {
+      "duration": 4.56830020993948e-05,
+      "runs": 1,
+      "min": 4.56830020993948e-05,
+      "max": 4.56830020993948e-05
+    },
+    "test_absent_play_is_not_clicked": {
+      "duration": 4.4504995457828045e-05,
+      "runs": 1,
+      "min": 4.4504995457828045e-05,
+      "max": 4.4504995457828045e-05
+    },
+    "test_state_is_private_to_the_handler": {
+      "duration": 4.158896626904607e-05,
+      "runs": 1,
+      "min": 4.158896626904607e-05,
+      "max": 4.158896626904607e-05
+    },
+    "test_inert_until_armed": {
+      "duration": 4.3853011447936296e-05,
+      "runs": 1,
+      "min": 4.3853011447936296e-05,
+      "max": 4.3853011447936296e-05
+    },
+    "test_battle_entry_arms_the_clock": {
+      "duration": 4.20999713242054e-05,
+      "runs": 1,
+      "min": 4.20999713242054e-05,
+      "max": 4.20999713242054e-05
+    },
+    "test_non_battle_entry_does_not_arm": {
+      "duration": 3.657001070678234e-05,
+      "runs": 1,
+      "min": 3.657001070678234e-05,
+      "max": 3.657001070678234e-05
+    },
+    "test_red_seen_keeps_resetting_the_clock": {
+      "duration": 3.8717000279575586e-05,
+      "runs": 1,
+      "min": 3.8717000279575586e-05,
+      "max": 3.8717000279575586e-05
+    },
+    "test_idle_window_triggers_disengage": {
+      "duration": 4.024902591481805e-05,
+      "runs": 1,
+      "min": 4.024902591481805e-05,
+      "max": 4.024902591481805e-05
+    },
+    "test_no_disengage_without_running_mission": {
+      "duration": 3.7771009374409914e-05,
+      "runs": 1,
+      "min": 3.7771009374409914e-05,
+      "max": 3.7771009374409914e-05
+    },
+    "test_disengage_resets_clock_so_it_does_not_repeat": {
+      "duration": 4.0508981328457594e-05,
+      "runs": 1,
+      "min": 4.0508981328457594e-05,
+      "max": 4.0508981328457594e-05
+    },
+    "test_inert_outside_battle": {
+      "duration": 3.865602775476873e-05,
+      "runs": 2,
+      "min": 3.7934049032628536e-05,
+      "max": 3.937800647690892e-05
+    },
+    "test_requires_consecutive_confirmations": {
+      "duration": 5.771400174126029e-05,
+      "runs": 1,
+      "min": 5.771400174126029e-05,
+      "max": 5.771400174126029e-05
+    },
+    "test_no_eject_without_running_mission": {
+      "duration": 4.208303289487958e-05,
+      "runs": 1,
+      "min": 4.208303289487958e-05,
+      "max": 4.208303289487958e-05
+    },
+    "test_no_eject_outside_game_battle": {
+      "duration": 4.144496051594615e-05,
+      "runs": 1,
+      "min": 4.144496051594615e-05,
+      "max": 4.144496051594615e-05
+    },
+    "test_respawn_screen_suppresses": {
+      "duration": 4.155404167249799e-05,
+      "runs": 1,
+      "min": 4.155404167249799e-05,
+      "max": 4.155404167249799e-05
+    },
+    "test_post_respawn_window_suppresses": {
+      "duration": 4.204304423183203e-05,
+      "runs": 1,
+      "min": 4.204304423183203e-05,
+      "max": 4.204304423183203e-05
+    },
+    "test_positive_missile_count_resets_the_streak": {
+      "duration": 4.195299698039889e-05,
+      "runs": 1,
+      "min": 4.195299698039889e-05,
+      "max": 4.195299698039889e-05
+    },
+    "test_confirmation_raises_flag_without_actuating": {
+      "duration": 4.2548985220491886e-05,
+      "runs": 1,
+      "min": 4.2548985220491886e-05,
+      "max": 4.2548985220491886e-05
+    },
+    "test_fire_eject_actuates_the_shared_path": {
+      "duration": 4.01680008508265e-05,
+      "runs": 1,
+      "min": 4.01680008508265e-05,
+      "max": 4.01680008508265e-05
+    },
+    "test_suppression_gates_still_apply": {
+      "duration": 4.293600795790553e-05,
+      "runs": 1,
+      "min": 4.293600795790553e-05,
+      "max": 4.293600795790553e-05
+    },
+    "test_respawn_suppression_clears_a_pending_verdict": {
+      "duration": 4.185200668871403e-05,
+      "runs": 1,
+      "min": 4.185200668871403e-05,
+      "max": 4.185200668871403e-05
+    },
+    "test_state_change_clears_a_pending_verdict": {
+      "duration": 4.134495975449681e-05,
+      "runs": 1,
+      "min": 4.134495975449681e-05,
+      "max": 4.134495975449681e-05
+    },
+    "test_two_missiles_fired_switches_target": {
+      "duration": 4.2180996388196945e-05,
+      "runs": 1,
+      "min": 4.2180996388196945e-05,
+      "max": 4.2180996388196945e-05
+    },
+    "test_reload_resets_the_partial_count": {
+      "duration": 3.87780019082129e-05,
+      "runs": 1,
+      "min": 3.87780019082129e-05,
+      "max": 3.87780019082129e-05
+    },
+    "test_low_flares_reloads_once_within_cooldown": {
+      "duration": 4.2719009798020124e-05,
+      "runs": 1,
+      "min": 4.2719009798020124e-05,
+      "max": 4.2719009798020124e-05
+    },
+    "test_low_flares_inert_outside_battle": {
+      "duration": 3.940804162994027e-05,
+      "runs": 1,
+      "min": 3.940804162994027e-05,
+      "max": 3.940804162994027e-05
+    },
+    "test_incoming_deploys_flares_once_per_detection": {
+      "duration": 0.0003865569597110152,
+      "runs": 1,
+      "min": 0.0003865569597110152,
+      "max": 0.0003865569597110152
+    },
+    "test_incoming_suppressed_after_respawn": {
+      "duration": 4.930497379973531e-05,
+      "runs": 1,
+      "min": 4.930497379973531e-05,
+      "max": 4.930497379973531e-05
+    },
+    "test_tick_events_only_fires_set_events": {
+      "duration": 4.5177992433309555e-05,
+      "runs": 1,
+      "min": 4.5177992433309555e-05,
+      "max": 4.5177992433309555e-05
+    },
+    "test_restarts_when_clear_and_stable": {
+      "duration": 6.485602352768183e-05,
+      "runs": 1,
+      "min": 6.485602352768183e-05,
+      "max": 6.485602352768183e-05
+    },
+    "test_deferral_rearms_the_one_shot_event": {
+      "duration": 4.3975014705210924e-05,
+      "runs": 1,
+      "min": 4.3975014705210924e-05,
+      "max": 4.3975014705210924e-05
+    },
+    "test_stability_window_defers_and_rearms": {
+      "duration": 4.285597242414951e-05,
+      "runs": 1,
+      "min": 4.285597242414951e-05,
+      "max": 4.285597242414951e-05
+    },
+    "test_eject_with_observed_death_terminates_eject_and_rearms": {
+      "duration": 4.342501051723957e-05,
+      "runs": 1,
+      "min": 4.342501051723957e-05,
+      "max": 4.342501051723957e-05
+    },
+    "test_eject_without_observed_death_is_consumed": {
+      "duration": 4.242494469508529e-05,
+      "runs": 1,
+      "min": 4.242494469508529e-05,
+      "max": 4.242494469508529e-05
+    },
+    "test_manual_state_never_restarts": {
+      "duration": 4.269799683243036e-05,
+      "runs": 1,
+      "min": 4.269799683243036e-05,
+      "max": 4.269799683243036e-05
+    },
+    "test_teardown_race_defers_and_rearms": {
+      "duration": 4.3620995711535215e-05,
+      "runs": 1,
+      "min": 4.3620995711535215e-05,
+      "max": 4.3620995711535215e-05
+    },
+    "test_genuine_running_mission_consumes_without_rearm": {
+      "duration": 4.3993000872433186e-05,
+      "runs": 1,
+      "min": 4.3993000872433186e-05,
+      "max": 4.3993000872433186e-05
+    },
+    "test_empty_missiles_skips_restart": {
+      "duration": 4.245300078764558e-05,
+      "runs": 1,
+      "min": 4.245300078764558e-05,
+      "max": 4.245300078764558e-05
+    },
+    "test_auto_restart_disabled_consumes": {
+      "duration": 4.293600795790553e-05,
+      "runs": 1,
+      "min": 4.293600795790553e-05,
+      "max": 4.293600795790553e-05
+    },
+    "test_detection_runs_the_flow_and_requests_continue": {
+      "duration": 8.43430170789361e-05,
+      "runs": 1,
+      "min": 8.43430170789361e-05,
+      "max": 8.43430170789361e-05
+    },
+    "test_no_respawn_is_a_noop": {
+      "duration": 4.102796083316207e-05,
+      "runs": 1,
+      "min": 4.102796083316207e-05,
+      "max": 4.102796083316207e-05
+    },
+    "test_eject_is_stopped_even_when_cooldown_suppresses_restart": {
+      "duration": 4.7945999540388584e-05,
+      "runs": 1,
+      "min": 4.7945999540388584e-05,
+      "max": 4.7945999540388584e-05
+    },
+    "test_health_fallback_event_triggers_the_flow": {
+      "duration": 4.434597212821245e-05,
+      "runs": 1,
+      "min": 4.434597212821245e-05,
+      "max": 4.434597212821245e-05
+    },
+    "test_manual_death_returns_to_auto": {
+      "duration": 4.4715008698403835e-05,
+      "runs": 1,
+      "min": 4.4715008698403835e-05,
+      "max": 4.4715008698403835e-05
+    },
+    "test_latch_dedupes_while_screen_persists": {
+      "duration": 4.4407963287085295e-05,
+      "runs": 1,
+      "min": 4.4407963287085295e-05,
+      "max": 4.4407963287085295e-05
+    },
+    "test_gameplay_resumed_clears_the_latch": {
+      "duration": 4.541600355878472e-05,
+      "runs": 1,
+      "min": 4.541600355878472e-05,
+      "max": 4.541600355878472e-05
+    },
+    "test_collaborators_are_called_explicitly_not_via_shared_state": {
+      "duration": 4.736002301797271e-05,
+      "runs": 1,
+      "min": 4.736002301797271e-05,
+      "max": 4.736002301797271e-05
+    },
+    "test_tracks_and_orients_in_battle": {
+      "duration": 5.04140043631196e-05,
+      "runs": 1,
+      "min": 5.04140043631196e-05,
+      "max": 5.04140043631196e-05
+    },
+    "test_no_autonomous_roll_without_running_mission": {
+      "duration": 4.123803228139877e-05,
+      "runs": 1,
+      "min": 4.123803228139877e-05,
+      "max": 4.123803228139877e-05
+    },
+    "test_no_tracking_in_manual_mode": {
+      "duration": 3.901601303368807e-05,
+      "runs": 1,
+      "min": 3.901601303368807e-05,
+      "max": 3.901601303368807e-05
+    },
+    "test_disabled_tracker_is_skipped": {
+      "duration": 3.942300099879503e-05,
+      "runs": 1,
+      "min": 3.942300099879503e-05,
+      "max": 3.942300099879503e-05
+    },
+    "test_hud_renders_in_manual_mode_too": {
+      "duration": 3.908801591023803e-05,
+      "runs": 1,
+      "min": 3.908801591023803e-05,
+      "max": 3.908801591023803e-05
+    },
+    "test_hud_not_rendered_outside_battle": {
+      "duration": 3.9888022001832724e-05,
+      "runs": 1,
+      "min": 3.9888022001832724e-05,
+      "max": 3.9888022001832724e-05
+    },
+    "test_hud_receives_the_tracking_observation": {
+      "duration": 4.274898674339056e-05,
+      "runs": 1,
+      "min": 4.274898674339056e-05,
+      "max": 4.274898674339056e-05
+    },
+    "test_leaving_battle_resets_the_tracker": {
+      "duration": 3.922905307263136e-05,
+      "runs": 1,
+      "min": 3.922905307263136e-05,
+      "max": 3.922905307263136e-05
+    },
+    "test_moving_between_battle_states_does_not_reset": {
+      "duration": 4.0785002056509256e-05,
+      "runs": 1,
+      "min": 4.0785002056509256e-05,
+      "max": 4.0785002056509256e-05
+    },
+    "test_entering_battle_does_not_reset": {
+      "duration": 4.3067033402621746e-05,
+      "runs": 1,
+      "min": 4.3067033402621746e-05,
+      "max": 4.3067033402621746e-05
+    },
+    "test_lobby_blackout_captures_evidence": {
+      "duration": 0.0001667799660935998,
+      "runs": 1,
+      "min": 0.0001667799660935998,
+      "max": 0.0001667799660935998
+    },
+    "test_lobby_blackout_stops_when_scan_recovers": {
+      "duration": 5.845498526468873e-05,
+      "runs": 1,
+      "min": 5.845498526468873e-05,
+      "max": 5.845498526468873e-05
+    },
+    "test_state_change_ends_blackout_episode": {
+      "duration": 5.6055025197565556e-05,
+      "runs": 1,
+      "min": 5.6055025197565556e-05,
+      "max": 5.6055025197565556e-05
+    },
+    "test_normal_startup_never_captures": {
+      "duration": 5.5119977332651615e-05,
+      "runs": 1,
+      "min": 5.5119977332651615e-05,
+      "max": 5.5119977332651615e-05
+    },
+    "test_captures_after_threshold_with_stuck_duration_in_name": {
+      "duration": 0.00012168299872428179,
+      "runs": 1,
+      "min": 0.00012168299872428179,
+      "max": 0.00012168299872428179
+    },
+    "test_recapture_interval_and_episode_cap": {
+      "duration": 0.00014428398571908474,
+      "runs": 1,
+      "min": 0.00014428398571908474,
+      "max": 0.00014428398571908474
+    },
+    "test_episode_reset_on_reentry": {
+      "duration": 0.000177742971573025,
+      "runs": 1,
+      "min": 0.000177742971573025,
+      "max": 0.000177742971573025
+    },
+    "test_other_states_ignored": {
+      "duration": 5.617801798507571e-05,
+      "runs": 1,
+      "min": 5.617801798507571e-05,
+      "max": 5.617801798507571e-05
+    },
+    "test_dismissal_attempt_defers_capture": {
+      "duration": 6.071903044357896e-05,
+      "runs": 1,
+      "min": 6.071903044357896e-05,
+      "max": 6.071903044357896e-05
+    },
+    "test_capture_proceeds_when_dismissal_does_not_clear": {
+      "duration": 0.00011737796012312174,
+      "runs": 1,
+      "min": 0.00011737796012312174,
+      "max": 0.00011737796012312174
+    },
+    "test_successful_dismissal_never_captures": {
+      "duration": 5.821202648803592e-05,
+      "runs": 1,
+      "min": 5.821202648803592e-05,
+      "max": 5.821202648803592e-05
+    },
+    "test_dismiss_history_resets_between_episodes": {
+      "duration": 0.0001022180076688528,
+      "runs": 1,
+      "min": 0.0001022180076688528,
+      "max": 0.0001022180076688528
+    },
+    "test_no_dismissal_still_captures_immediately": {
+      "duration": 9.749300079420209e-05,
+      "runs": 1,
+      "min": 9.749300079420209e-05,
+      "max": 9.749300079420209e-05
+    },
+    "test_popup_absent_ends_grace_and_records_cleared": {
+      "duration": 0.0001078030327335,
+      "runs": 1,
+      "min": 0.0001078030327335,
+      "max": 0.0001078030327335
+    },
+    "test_popup_absent_before_any_dismissal_is_a_noop": {
+      "duration": 0.00010139297228306532,
+      "runs": 1,
+      "min": 0.00010139297228306532,
+      "max": 0.00010139297228306532
+    },
+    "test_popup_reappearing_after_clear_re_arms_grace": {
+      "duration": 6.073503755033016e-05,
+      "runs": 1,
+      "min": 6.073503755033016e-05,
+      "max": 6.073503755033016e-05
+    },
+    "test_short_gap_never_captures": {
+      "duration": 6.116298027336597e-05,
+      "runs": 1,
+      "min": 6.116298027336597e-05,
+      "max": 6.116298027336597e-05
+    },
+    "test_captures_past_threshold_with_gap_in_name": {
+      "duration": 0.00011702999472618103,
+      "runs": 1,
+      "min": 0.00011702999472618103,
+      "max": 0.00011702999472618103
+    },
+    "test_stale_telemetry_gap_never_captures": {
+      "duration": 5.40449982509017e-05,
+      "runs": 1,
+      "min": 5.40449982509017e-05,
+      "max": 5.40449982509017e-05
+    },
+    "test_one_per_episode_plus_recapture_and_session_cap": {
+      "duration": 0.00014574301894754171,
+      "runs": 1,
+      "min": 0.00014574301894754171,
+      "max": 0.00014574301894754171
+    },
+    "test_confirmed_read_resets_episode": {
+      "duration": 0.00015095702838152647,
+      "runs": 1,
+      "min": 0.00015095702838152647,
+      "max": 0.00015095702838152647
+    },
+    "test_non_battle_state_never_captures": {
+      "duration": 5.461799446493387e-05,
+      "runs": 1,
+      "min": 5.461799446493387e-05,
+      "max": 5.461799446493387e-05
+    },
+    "test_disabled_config_is_noop": {
+      "duration": 5.224999040365219e-05,
+      "runs": 1,
+      "min": 5.224999040365219e-05,
+      "max": 5.224999040365219e-05
+    },
+    "test_ring_of_boundaries": {
+      "duration": 4.119798541069031e-05,
+      "runs": 1,
+      "min": 4.119798541069031e-05,
+      "max": 4.119798541069031e-05
+    },
+    "test_bin_rings_counts_and_per_ring_bearing": {
+      "duration": 6.382499122992158e-05,
+      "runs": 1,
+      "min": 6.382499122992158e-05,
+      "max": 6.382499122992158e-05
+    },
+    "test_bin_rings_empty_ring_is_none": {
+      "duration": 4.1350023820996284e-05,
+      "runs": 1,
+      "min": 4.1350023820996284e-05,
+      "max": 4.1350023820996284e-05
+    },
+    "test_bin_rings_area_weighting_within_ring": {
+      "duration": 4.858698230236769e-05,
+      "runs": 1,
+      "min": 4.858698230236769e-05,
+      "max": 4.858698230236769e-05
+    },
+    "test_no_telemetry_never_commands": {
+      "duration": 5.321897333487868e-05,
+      "runs": 1,
+      "min": 5.321897333487868e-05,
+      "max": 5.321897333487868e-05
+    },
+    "test_below_safe_floor_never_commands": {
+      "duration": 4.145299317315221e-05,
+      "runs": 1,
+      "min": 4.145299317315221e-05,
+      "max": 4.145299317315221e-05
+    },
+    "test_scan_failure_never_commands": {
+      "duration": 4.451395943760872e-05,
+      "runs": 1,
+      "min": 4.451395943760872e-05,
+      "max": 4.451395943760872e-05
+    },
+    "test_empty_components_is_idle": {
+      "duration": 4.702300066128373e-05,
+      "runs": 1,
+      "min": 4.702300066128373e-05,
+      "max": 4.702300066128373e-05
+    },
+    "test_mid_beats_long": {
+      "duration": 5.7079014368355274e-05,
+      "runs": 1,
+      "min": 5.7079014368355274e-05,
+      "max": 5.7079014368355274e-05
+    },
+    "test_long_fallback_and_saturation": {
+      "duration": 4.965101834386587e-05,
+      "runs": 1,
+      "min": 4.965101834386587e-05,
+      "max": 4.965101834386587e-05
+    },
+    "test_deadzone_is_on_course": {
+      "duration": 4.694698145613074e-05,
+      "runs": 1,
+      "min": 4.694698145613074e-05,
+      "max": 4.694698145613074e-05
+    },
+    "test_orbit_entry_is_debounced": {
+      "duration": 4.885095404461026e-05,
+      "runs": 1,
+      "min": 4.885095404461026e-05,
+      "max": 4.885095404461026e-05
+    },
+    "test_orbit_exit_is_debounced": {
+      "duration": 9.040097938850522e-05,
+      "runs": 1,
+      "min": 9.040097938850522e-05,
+      "max": 9.040097938850522e-05
+    },
+    "test_short_ring_min_count_threshold": {
+      "duration": 4.623999120667577e-05,
+      "runs": 1,
+      "min": 4.623999120667577e-05,
+      "max": 4.623999120667577e-05
+    },
+    "test_orbit_direction_configurable": {
+      "duration": 4.8340007197111845e-05,
+      "runs": 1,
+      "min": 4.8340007197111845e-05,
+      "max": 4.8340007197111845e-05
+    },
+    "test_ema_reseeds_on_large_target_jump": {
+      "duration": 5.287799285724759e-05,
+      "runs": 1,
+      "min": 5.287799285724759e-05,
+      "max": 5.287799285724759e-05
+    },
+    "test_boundary_crossing_contact_keeps_smoothing": {
+      "duration": 5.4841977544128895e-05,
+      "runs": 1,
+      "min": 5.4841977544128895e-05,
+      "max": 5.4841977544128895e-05
+    },
+    "test_boundary_flap_steering_direction_is_stable": {
+      "duration": 6.483698962256312e-05,
+      "runs": 1,
+      "min": 6.483698962256312e-05,
+      "max": 6.483698962256312e-05
+    },
+    "test_engaged_ring_empty_while_debouncing_holds_quietly": {
+      "duration": 4.879699554294348e-05,
+      "runs": 1,
+      "min": 4.879699554294348e-05,
+      "max": 4.879699554294348e-05
+    },
+    "test_rear_commit_no_reversal_on_astern_sign_flip": {
+      "duration": 4.9971044063568115e-05,
+      "runs": 1,
+      "min": 4.9971044063568115e-05,
+      "max": 4.9971044063568115e-05
+    },
+    "test_rear_commit_releases_as_target_sweeps_forward": {
+      "duration": 5.885801510885358e-05,
+      "runs": 1,
+      "min": 5.885801510885358e-05,
+      "max": 5.885801510885358e-05
+    },
+    "test_rear_commit_holds_through_tail_crossing": {
+      "duration": 4.8124988097697496e-05,
+      "runs": 1,
+      "min": 4.8124988097697496e-05,
+      "max": 4.8124988097697496e-05
+    },
+    "test_rear_commit_cleared_by_target_reseed": {
+      "duration": 5.965697346255183e-05,
+      "runs": 1,
+      "min": 5.965697346255183e-05,
+      "max": 5.965697346255183e-05
+    },
+    "test_reset_returns_to_idle": {
+      "duration": 4.5021006371825933e-05,
+      "runs": 1,
+      "min": 4.5021006371825933e-05,
+      "max": 4.5021006371825933e-05
+    },
+    "test_deadband_norm_matches_deadzone": {
+      "duration": 3.540801117196679e-05,
+      "runs": 1,
+      "min": 3.540801117196679e-05,
+      "max": 3.540801117196679e-05
+    },
+    "test_logged_radius_sequence_is_mode_stable": {
+      "duration": 6.205099634826183e-05,
+      "runs": 1,
+      "min": 6.205099634826183e-05,
+      "max": 6.205099634826183e-05
+    },
+    "test_ema_first_sample_passes_through": {
+      "duration": 4.021200584247708e-05,
+      "runs": 1,
+      "min": 4.021200584247708e-05,
+      "max": 4.021200584247708e-05
+    },
+    "test_ema_none_passes_through_and_keeps_state": {
+      "duration": 3.845401806756854e-05,
+      "runs": 1,
+      "min": 3.845401806756854e-05,
+      "max": 3.845401806756854e-05
+    },
+    "test_ema_reseeds_after_long_gap": {
+      "duration": 3.714795457199216e-05,
+      "runs": 1,
+      "min": 3.714795457199216e-05,
+      "max": 3.714795457199216e-05
+    },
+    "test_ema_damps_single_tick_swing": {
+      "duration": 3.544799983501434e-05,
+      "runs": 1,
+      "min": 3.544799983501434e-05,
+      "max": 3.544799983501434e-05
+    },
+    "test_ema_reset_clears_state": {
+      "duration": 3.779598046094179e-05,
+      "runs": 1,
+      "min": 3.779598046094179e-05,
+      "max": 3.779598046094179e-05
+    },
+    "test_empty_crop_returns_none": {
+      "duration": 0.0007636909722350538,
+      "runs": 1,
+      "min": 0.0007636909722350538,
+      "max": 0.0007636909722350538
+    },
+    "test_single_dot_bearing": {
+      "duration": 0.0006493735127151012,
+      "runs": 8,
+      "min": 0.0004983859835192561,
+      "max": 0.0007235550438053906
+    },
+    "test_single_dot_radius": {
+      "duration": 0.0005155026835078994,
+      "runs": 3,
+      "min": 0.0005145100294612348,
+      "max": 0.0005163230234757066
+    },
+    "test_two_dots_area_weighted_centroid": {
+      "duration": 0.0005135660176165402,
+      "runs": 1,
+      "min": 0.0005135660176165402,
+      "max": 0.0005135660176165402
+    },
+    "test_red_outside_circle_mask_is_ignored": {
+      "duration": 0.00048150098882615566,
+      "runs": 1,
+      "min": 0.00048150098882615566,
+      "max": 0.00048150098882615566
+    },
+    "test_oversized_component_rejected": {
+      "duration": 0.0004987180000171065,
+      "runs": 1,
+      "min": 0.0004987180000171065,
+      "max": 0.0004987180000171065
+    },
+    "test_undersized_component_rejected": {
+      "duration": 0.0005566210020333529,
+      "runs": 1,
+      "min": 0.0005566210020333529,
+      "max": 0.0005566210020333529
+    },
+    "test_wraparound_red_hue_detected": {
+      "duration": 0.0005674499552696943,
+      "runs": 1,
+      "min": 0.0005674499552696943,
+      "max": 0.0005674499552696943
+    },
+    "test_reference_frame_cluster_bearing": {
+      "duration": 0.04135592799866572,
+      "runs": 1,
+      "min": 0.04135592799866572,
+      "max": 0.04135592799866572
+    },
+    "test_reference_frame_rejects_lock_ring_and_route_line": {
+      "duration": 0.07070497795939445,
+      "runs": 1,
+      "min": 0.07070497795939445,
+      "max": 0.07070497795939445
+    },
+    "test_desert_cluster_bearing": {
+      "duration": 0.036689353990368545,
+      "runs": 1,
+      "min": 0.036689353990368545,
+      "max": 0.036689353990368545
+    },
+    "test_rim_merged_output_well_formed": {
+      "duration": 0.040072421019431204,
+      "runs": 1,
+      "min": 0.040072421019431204,
+      "max": 0.040072421019431204
+    },
+    "test_method_matches_pure_function_and_caches": {
+      "duration": 0.07020254305098206,
+      "runs": 1,
+      "min": 0.07020254305098206,
+      "max": 0.07020254305098206
+    },
+    "test_method_failsafe_without_minimap_crop": {
+      "duration": 0.00034509197575971484,
+      "runs": 1,
+      "min": 0.00034509197575971484,
+      "max": 0.00034509197575971484
+    },
+    "test_components_synthetic_dot_polar": {
+      "duration": 0.0007200479740276933,
+      "runs": 1,
+      "min": 0.0007200479740276933,
+      "max": 0.0007200479740276933
+    },
+    "test_aggregate_matches_components": {
+      "duration": 0.0012136480072513223,
+      "runs": 1,
+      "min": 0.0012136480072513223,
+      "max": 0.0012136480072513223
+    },
+    "test_reference_frame_ring_occupancy": {
+      "duration": 0.03997146099573001,
+      "runs": 1,
+      "min": 0.03997146099573001,
+      "max": 0.03997146099573001
+    },
+    "test_desert_ring_occupancy": {
+      "duration": 0.03668359003495425,
+      "runs": 1,
+      "min": 0.03668359003495425,
+      "max": 0.03668359003495425
+    },
+    "test_rim_merged_ring_occupancy": {
+      "duration": 0.04047280800295994,
+      "runs": 1,
+      "min": 0.04047280800295994,
+      "max": 0.04047280800295994
+    },
+    "test_components_method_matches_pure_function": {
+      "duration": 0.06964135396992788,
+      "runs": 1,
+      "min": 0.06964135396992788,
+      "max": 0.06964135396992788
+    },
+    "test_components_method_empty_on_black_frame": {
+      "duration": 0.0009125869837589562,
+      "runs": 1,
+      "min": 0.0009125869837589562,
+      "max": 0.0009125869837589562
+    },
+    "test_idle_outside_battle": {
+      "duration": 0.00011309899855405092,
+      "runs": 1,
+      "min": 0.00011309899855405092,
+      "max": 0.00011309899855405092
+    },
+    "test_respawn_wait_beats_everything_in_battle": {
+      "duration": 7.146201096475124e-05,
+      "runs": 1,
+      "min": 7.146201096475124e-05,
+      "max": 7.146201096475124e-05
+    },
+    "test_eject_on_missiles_empty_beats_engage": {
+      "duration": 6.737204967066646e-05,
+      "runs": 1,
+      "min": 6.737204967066646e-05,
+      "max": 6.737204967066646e-05
+    },
+    "test_engage_when_any_ring_occupied": {
+      "duration": 0.00012733199400827289,
+      "runs": 1,
+      "min": 0.00012733199400827289,
+      "max": 0.00012733199400827289
+    },
+    "test_attack_support_is_the_fallback": {
+      "duration": 7.462297799065709e-05,
+      "runs": 1,
+      "min": 7.462297799065709e-05,
+      "max": 7.462297799065709e-05
+    },
+    "test_disengage_selects_after_absence_and_holds": {
+      "duration": 0.00010960298823192716,
+      "runs": 1,
+      "min": 0.00010960298823192716,
+      "max": 0.00010960298823192716
+    },
+    "test_evade_disabled_without_threshold": {
+      "duration": 7.213401840999722e-05,
+      "runs": 1,
+      "min": 7.213401840999722e-05,
+      "max": 7.213401840999722e-05
+    },
+    "test_evade_selected_when_threshold_configured": {
+      "duration": 0.00023464899277314544,
+      "runs": 1,
+      "min": 0.00023464899277314544,
+      "max": 0.00023464899277314544
+    },
+    "test_missiles_unknown_is_not_empty": {
+      "duration": 6.984994979575276e-05,
+      "runs": 1,
+      "min": 6.984994979575276e-05,
+      "max": 6.984994979575276e-05
+    },
+    "test_actuated_eject_fires_on_confirmed_verdict_only": {
+      "duration": 0.00016668497119098902,
+      "runs": 1,
+      "min": 0.00016668497119098902,
+      "max": 0.00016668497119098902
+    },
+    "test_actuated_eject_does_not_restart_while_running": {
+      "duration": 0.0001417479943484068,
+      "runs": 1,
+      "min": 0.0001417479943484068,
+      "max": 0.0001417479943484068
+    },
+    "test_actuated_eject_switchaway_does_not_cancel": {
+      "duration": 0.00014101696433499455,
+      "runs": 1,
+      "min": 0.00014101696433499455,
+      "max": 0.00014101696433499455
+    },
+    "test_actuated_disengage_fires_once_per_selection": {
+      "duration": 0.0003854630049318075,
+      "runs": 1,
+      "min": 0.0003854630049318075,
+      "max": 0.0003854630049318075
+    },
+    "test_missile_evade_beats_engage": {
+      "duration": 6.597203901037574e-05,
+      "runs": 1,
+      "min": 6.597203901037574e-05,
+      "max": 6.597203901037574e-05
+    },
+    "test_eject_beats_missile_evade": {
+      "duration": 5.984498420730233e-05,
+      "runs": 1,
+      "min": 5.984498420730233e-05,
+      "max": 5.984498420730233e-05
+    },
+    "test_respawn_beats_missile_evade": {
+      "duration": 5.890097236260772e-05,
+      "runs": 1,
+      "min": 5.890097236260772e-05,
+      "max": 5.890097236260772e-05
+    },
+    "test_missile_evade_ignores_mission_running": {
+      "duration": 6.26620021648705e-05,
+      "runs": 1,
+      "min": 6.26620021648705e-05,
+      "max": 6.26620021648705e-05
+    },
+    "test_missile_evade_not_selected_when_clear": {
+      "duration": 7.170095341280103e-05,
+      "runs": 1,
+      "min": 7.170095341280103e-05,
+      "max": 7.170095341280103e-05
+    },
+    "test_actuated_missile_evade_sticky_while_running": {
+      "duration": 0.00016517797484993935,
+      "runs": 1,
+      "min": 0.00016517797484993935,
+      "max": 0.00016517797484993935
+    },
+    "test_actuated_missile_evade_does_not_restart_while_running": {
+      "duration": 0.0001391629921272397,
+      "runs": 1,
+      "min": 0.0001391629921272397,
+      "max": 0.0001391629921272397
+    },
+    "test_selection_only_missile_evade_not_sticky": {
+      "duration": 8.210801752284169e-05,
+      "runs": 1,
+      "min": 8.210801752284169e-05,
+      "max": 8.210801752284169e-05
+    },
+    "test_minimum_hold_decorator_unit": {
+      "duration": 6.727204890921712e-05,
+      "runs": 1,
+      "min": 6.727204890921712e-05,
+      "max": 6.727204890921712e-05
+    },
+    "test_climb_absent_from_default_tree": {
+      "duration": 9.447499178349972e-05,
+      "runs": 1,
+      "min": 9.447499178349972e-05,
+      "max": 9.447499178349972e-05
+    },
+    "test_climb_selected_below_enter_threshold": {
+      "duration": 9.395298548042774e-05,
+      "runs": 1,
+      "min": 9.395298548042774e-05,
+      "max": 9.395298548042774e-05
+    },
+    "test_climb_hysteresis_band": {
+      "duration": 0.00018013000953942537,
+      "runs": 1,
+      "min": 0.00018013000953942537,
+      "max": 0.00018013000953942537
+    },
+    "test_climb_freezes_on_missing_altitude": {
+      "duration": 0.00015369598986580968,
+      "runs": 1,
+      "min": 0.00015369598986580968,
+      "max": 0.00015369598986580968
+    },
+    "test_climb_yields_to_defensive_tactics": {
+      "duration": 8.677301229909062e-05,
+      "runs": 1,
+      "min": 8.677301229909062e-05,
+      "max": 8.677301229909062e-05
+    },
+    "test_climb_disabled_without_thresholds": {
+      "duration": 0.00020428403513506055,
+      "runs": 1,
+      "min": 0.00020428403513506055,
+      "max": 0.00020428403513506055
+    },
+    "test_climb_condition_sticky_while_actuated": {
+      "duration": 4.4043001253157854e-05,
+      "runs": 1,
+      "min": 4.4043001253157854e-05,
+      "max": 4.4043001253157854e-05
+    },
+    "test_single_garbage_low_does_not_enter": {
+      "duration": 4.568201256915927e-05,
+      "runs": 1,
+      "min": 4.568201256915927e-05,
+      "max": 4.568201256915927e-05
+    },
+    "test_two_consecutive_lows_enter": {
+      "duration": 4.3898995500057936e-05,
+      "runs": 1,
+      "min": 4.3898995500057936e-05,
+      "max": 4.3898995500057936e-05
+    },
+    "test_none_neither_counts_nor_resets": {
+      "duration": 4.4791027903556824e-05,
+      "runs": 1,
+      "min": 4.4791027903556824e-05,
+      "max": 4.4791027903556824e-05
+    },
+    "test_single_garbage_high_does_not_release": {
+      "duration": 4.794396227225661e-05,
+      "runs": 1,
+      "min": 4.794396227225661e-05,
+      "max": 4.794396227225661e-05
+    },
+    "test_default_confirm_reads_is_immediate": {
+      "duration": 4.222302231937647e-05,
+      "runs": 1,
+      "min": 4.222302231937647e-05,
+      "max": 4.222302231937647e-05
+    },
+    "test_sustain_climb_selected_below_operating_alt_while_armed": {
+      "duration": 7.371901301667094e-05,
+      "runs": 1,
+      "min": 7.371901301667094e-05,
+      "max": 7.371901301667094e-05
+    },
+    "test_sustain_climb_beats_engage": {
+      "duration": 7.304799510166049e-05,
+      "runs": 1,
+      "min": 7.304799510166049e-05,
+      "max": 7.304799510166049e-05
+    },
+    "test_sustain_requires_missiles": {
+      "duration": 9.264802793040872e-05,
+      "runs": 1,
+      "min": 9.264802793040872e-05,
+      "max": 9.264802793040872e-05
+    },
+    "test_sustain_requires_mission_running": {
+      "duration": 7.504498353227973e-05,
+      "runs": 1,
+      "min": 7.504498353227973e-05,
+      "max": 7.504498353227973e-05
+    },
+    "test_sustain_hysteresis_band": {
+      "duration": 0.00014996202662587166,
+      "runs": 1,
+      "min": 0.00014996202662587166,
+      "max": 0.00014996202662587166
+    },
+    "test_emergency_band_ignores_mission_and_missiles": {
+      "duration": 7.269298657774925e-05,
+      "runs": 1,
+      "min": 7.269298657774925e-05,
+      "max": 7.269298657774925e-05
+    },
+    "test_incoming_beats_sustain_climb": {
+      "duration": 6.0699007008224726e-05,
+      "runs": 1,
+      "min": 6.0699007008224726e-05,
+      "max": 6.0699007008224726e-05
+    },
+    "test_altitude_band_alone_never_fires_in_the_observed_dive": {
+      "duration": 5.208497168496251e-05,
+      "runs": 1,
+      "min": 5.208497168496251e-05,
+      "max": 5.208497168496251e-05
+    },
+    "test_fires_on_time_to_ground_while_still_high": {
+      "duration": 5.383603274822235e-05,
+      "runs": 1,
+      "min": 5.383603274822235e-05,
+      "max": 5.383603274822235e-05
+    },
+    "test_does_not_fire_in_a_gentle_descent": {
+      "duration": 4.333502147346735e-05,
+      "runs": 1,
+      "min": 4.333502147346735e-05,
+      "max": 4.333502147346735e-05
+    },
+    "test_does_not_fire_while_climbing": {
+      "duration": 4.431704292073846e-05,
+      "runs": 1,
+      "min": 4.431704292073846e-05,
+      "max": 4.431704292073846e-05
+    },
+    "test_single_read_bypass_inside_the_margin": {
+      "duration": 4.577002255246043e-05,
+      "runs": 1,
+      "min": 4.577002255246043e-05,
+      "max": 4.577002255246043e-05
+    },
+    "test_outside_bypass_still_debounces": {
+      "duration": 4.690600326284766e-05,
+      "runs": 1,
+      "min": 4.690600326284766e-05,
+      "max": 4.690600326284766e-05
+    },
+    "test_rejected_telemetry_holds_the_descent": {
+      "duration": 5.0708011258393526e-05,
+      "runs": 1,
+      "min": 5.0708011258393526e-05,
+      "max": 5.0708011258393526e-05
+    },
+    "test_descent_memory_expires": {
+      "duration": 5.256896838545799e-05,
+      "runs": 1,
+      "min": 5.256896838545799e-05,
+      "max": 5.256896838545799e-05
+    },
+    "test_emergency_survives_the_band_release": {
+      "duration": 4.895101301372051e-05,
+      "runs": 1,
+      "min": 4.895101301372051e-05,
+      "max": 4.895101301372051e-05
+    },
+    "test_disabled_when_unconfigured": {
+      "duration": 4.15450194850564e-05,
+      "runs": 1,
+      "min": 4.15450194850564e-05,
+      "max": 4.15450194850564e-05
+    },
+    "test_does_not_fire_on_the_first_samples_after_respawn": {
+      "duration": 4.664104199036956e-05,
+      "runs": 1,
+      "min": 4.664104199036956e-05,
+      "max": 4.664104199036956e-05
+    },
+    "test_still_fires_once_settled_after_a_respawn": {
+      "duration": 5.089002661406994e-05,
+      "runs": 1,
+      "min": 5.089002661406994e-05,
+      "max": 5.089002661406994e-05
+    },
+    "test_a_later_respawn_re_arms_the_guard": {
+      "duration": 5.0331000238657e-05,
+      "runs": 1,
+      "min": 5.0331000238657e-05,
+      "max": 5.0331000238657e-05
+    },
+    "test_shipped_config_is_valid": {
+      "duration": 0.00021912198280915618,
+      "runs": 1,
+      "min": 0.00021912198280915618,
+      "max": 0.00021912198280915618
+    },
+    "test_americanised_manoeuvre_key_is_rejected": {
+      "duration": 0.00039206596557050943,
+      "runs": 1,
+      "min": 0.00039206596557050943,
+      "max": 0.00039206596557050943
+    },
+    "test_type_and_range_violations_are_caught": {
+      "duration": 0.0003134085647096591,
+      "runs": 7,
+      "min": 0.0003057459834963083,
+      "max": 0.00031974795274436474
+    },
+    "test_bool_does_not_satisfy_an_int_leaf": {
+      "duration": 0.0003116370062343776,
+      "runs": 1,
+      "min": 0.0003116370062343776,
+      "max": 0.0003116370062343776
+    },
+    "test_missing_required_key_is_caught": {
+      "duration": 0.00030731194419786334,
+      "runs": 1,
+      "min": 0.00030731194419786334,
+      "max": 0.00030731194419786334
+    },
+    "test_null_is_rejected_unless_declared_nullable": {
+      "duration": 0.0003155220183543861,
+      "runs": 1,
+      "min": 0.0003155220183543861,
+      "max": 0.0003155220183543861
+    },
+    "test_crop_names_are_free_but_crop_shape_is_not": {
+      "duration": 0.0004317029961384833,
+      "runs": 1,
+      "min": 0.0004317029961384833,
+      "max": 0.0004317029961384833
+    },
+    "test_all_problems_are_reported_at_once": {
+      "duration": 0.00044237897964194417,
+      "runs": 1,
+      "min": 0.00044237897964194417,
+      "max": 0.00044237897964194417
+    },
+    "test_valid_config_does_not_raise": {
+      "duration": 0.00015121896285563707,
+      "runs": 1,
+      "min": 0.00015121896285563707,
+      "max": 0.00015121896285563707
+    },
+    "test_no_config_key_is_read_without_being_declared": {
+      "duration": 0.1562074120156467,
+      "runs": 1,
+      "min": 0.1562074120156467,
+      "max": 0.1562074120156467
+    },
+    "test_from_config_reads_each_block_from_its_real_home": {
+      "duration": 7.065600948408246e-05,
+      "runs": 1,
+      "min": 7.065600948408246e-05,
+      "max": 7.065600948408246e-05
+    },
+    "test_overrides_apply_without_touching_the_rest": {
+      "duration": 6.133801070973277e-05,
+      "runs": 1,
+      "min": 6.133801070973277e-05,
+      "max": 6.133801070973277e-05
+    },
+    "test_misspelled_override_raises": {
+      "duration": 6.413599476218224e-05,
+      "runs": 1,
+      "min": 6.413599476218224e-05,
+      "max": 6.413599476218224e-05
+    },
+    "test_empty_config_falls_back_to_declared_defaults": {
+      "duration": 4.137196810916066e-05,
+      "runs": 1,
+      "min": 4.137196810916066e-05,
+      "max": 4.137196810916066e-05
+    },
+    "test_config_is_frozen": {
+      "duration": 4.260399146005511e-05,
+      "runs": 1,
+      "min": 4.260399146005511e-05,
+      "max": 4.260399146005511e-05
+    },
+    "test_controller_accepts_the_object_and_keeps_it": {
+      "duration": 8.78210412338376e-05,
+      "runs": 1,
+      "min": 8.78210412338376e-05,
+      "max": 8.78210412338376e-05
+    },
+    "test_controller_defaults_when_no_config_given": {
+      "duration": 7.431994890794158e-05,
+      "runs": 1,
+      "min": 7.431994890794158e-05,
+      "max": 7.431994890794158e-05
+    },
+    "test_tuning_values_are_no_longer_constructor_arguments": {
+      "duration": 4.190899198874831e-05,
+      "runs": 1,
+      "min": 4.190899198874831e-05,
+      "max": 4.190899198874831e-05
+    },
+    "test_coord_edit_changes_only_the_coord_lines": {
+      "duration": 0.019235092971939594,
+      "runs": 1,
+      "min": 0.019235092971939594,
+      "max": 0.019235092971939594
+    },
+    "test_every_comment_survives_a_calibration_write": {
+      "duration": 0.01901139400433749,
+      "runs": 1,
+      "min": 0.01901139400433749,
+      "max": 0.01901139400433749
+    },
+    "test_written_config_round_trips_to_the_intended_mapping": {
+      "duration": 0.028851531038526446,
+      "runs": 1,
+      "min": 0.028851531038526446,
+      "max": 0.028851531038526446
+    },
+    "test_written_config_still_passes_the_schema": {
+      "duration": 0.028599276032764465,
+      "runs": 1,
+      "min": 0.028599276032764465,
+      "max": 0.028599276032764465
+    },
+    "test_new_crop_is_appended_without_disturbing_the_rest": {
+      "duration": 0.0290015289792791,
+      "runs": 1,
+      "min": 0.0290015289792791,
+      "max": 0.0290015289792791
+    },
+    "test_unrepresentable_change_backs_up_before_falling_back": {
+      "duration": 0.022690334008075297,
+      "runs": 1,
+      "min": 0.022690334008075297,
+      "max": 0.022690334008075297
+    },
+    "test_controller_still_re_exports_the_moved_symbols": {
+      "duration": 4.773697583004832e-05,
+      "runs": 1,
+      "min": 4.773697583004832e-05,
+      "max": 4.773697583004832e-05
+    },
+    "test_keyboard_module_is_a_controller_level_name": {
+      "duration": 4.122103564441204e-05,
+      "runs": 1,
+      "min": 4.122103564441204e-05,
+      "max": 4.122103564441204e-05
+    },
+    "test_punctuation_keys_resolve_through_the_alias_table": {
+      "duration": 3.597000613808632e-05,
+      "runs": 1,
+      "min": 3.597000613808632e-05,
+      "max": 3.597000613808632e-05
+    },
+    "test_listener_closures_bind_their_loop_variables": {
+      "duration": 0.00047691550571471453,
+      "runs": 2,
+      "min": 0.00041901401709765196,
+      "max": 0.0005348169943317771
+    },
+    "test_shim_matches_the_keyboard_module_call_signature": {
+      "duration": 5.46920346096158e-05,
+      "runs": 1,
+      "min": 5.46920346096158e-05,
+      "max": 5.46920346096158e-05
+    },
+    "test_maybe_install_returns_the_fallback_on_windows": {
+      "duration": 3.944500349462032e-05,
+      "runs": 1,
+      "min": 3.944500349462032e-05,
+      "max": 3.944500349462032e-05
+    },
+    "test_maybe_install_returns_the_shim_elsewhere": {
+      "duration": 4.881899803876877e-05,
+      "runs": 1,
+      "min": 4.881899803876877e-05,
+      "max": 4.881899803876877e-05
+    },
+    "test_listener_thread_is_stoppable": {
+      "duration": 4.322099266573787e-05,
+      "runs": 1,
+      "min": 4.322099266573787e-05,
+      "max": 4.322099266573787e-05
+    },
+    "test_module_scope_imports_are_stdlib_only": {
+      "duration": 0.0013983889948576689,
+      "runs": 1,
+      "min": 0.0013983889948576689,
+      "max": 0.0013983889948576689
+    },
+    "test_controller_imports_without_a_display": {
+      "duration": 4.4782005716115236e-05,
+      "runs": 1,
+      "min": 4.4782005716115236e-05,
+      "max": 4.4782005716115236e-05
+    },
+    "test_repeated_key_events_open_exactly_one_display": {
+      "duration": 0.00042309099808335304,
+      "runs": 1,
+      "min": 0.00042309099808335304,
+      "max": 0.00042309099808335304
+    },
+    "test_the_shared_display_is_not_closed_between_events": {
+      "duration": 5.133898230269551e-05,
+      "runs": 1,
+      "min": 5.133898230269551e-05,
+      "max": 5.133898230269551e-05
+    },
+    "test_injection_failure_drops_the_connection_and_the_retry_reconnects": {
+      "duration": 0.05037972202990204,
+      "runs": 1,
+      "min": 0.05037972202990204,
+      "max": 0.05037972202990204
+    },
+    "test_persistent_failure_gives_up_after_two_attempts": {
+      "duration": 0.00047767802607268095,
+      "runs": 1,
+      "min": 0.00047767802607268095,
+      "max": 0.00047767802607268095
+    },
+    "test_unknown_keysym_opens_no_display": {
+      "duration": 9.954802226275206e-05,
+      "runs": 1,
+      "min": 9.954802226275206e-05,
+      "max": 9.954802226275206e-05
+    },
+    "test_concurrent_injection_is_serialised": {
+      "duration": 0.01471942599164322,
+      "runs": 1,
+      "min": 0.01471942599164322,
+      "max": 0.01471942599164322
+    },
+    "test_drop_shared_display_survives_a_failing_close": {
+      "duration": 0.00010501703945919871,
+      "runs": 1,
+      "min": 0.00010501703945919871,
+      "max": 0.00010501703945919871
+    },
+    "test_declining_clicks_reject": {
+      "duration": 7.471098797395825e-05,
+      "runs": 1,
+      "min": 7.471098797395825e-05,
+      "max": 7.471098797395825e-05
+    },
+    "test_accepting_clicks_the_invited_crop": {
+      "duration": 6.992905400693417e-05,
+      "runs": 1,
+      "min": 6.992905400693417e-05,
+      "max": 6.992905400693417e-05
+    },
+    "test_missing_crop_yields_no_click_rather_than_the_other_button": {
+      "duration": 5.8934499975293875e-05,
+      "runs": 2,
+      "min": 4.4226995669305325e-05,
+      "max": 7.364200428128242e-05
+    },
+    "test_decline_never_resolves_to_the_accept_button": {
+      "duration": 4.189199535176158e-05,
+      "runs": 1,
+      "min": 4.189199535176158e-05,
+      "max": 4.189199535176158e-05
+    },
+    "test_shipped_config_declines_by_default": {
+      "duration": 5.134398816153407e-05,
+      "runs": 1,
+      "min": 5.134398816153407e-05,
+      "max": 5.134398816153407e-05
+    },
+    "test_reject_crop_is_calibrated": {
+      "duration": 4.00469871237874e-05,
+      "runs": 1,
+      "min": 4.00469871237874e-05,
+      "max": 4.00469871237874e-05
+    },
+    "test_accept_invite_is_declared_in_the_schema": {
+      "duration": 0.00031008804216980934,
+      "runs": 1,
+      "min": 0.00031008804216980934,
+      "max": 0.00031008804216980934
+    },
+    "test_unset_is_empty_so_run_ids_are_unchanged": {
+      "duration": 4.209898179396987e-05,
+      "runs": 1,
+      "min": 4.209898179396987e-05,
+      "max": 4.209898179396987e-05
+    },
+    "test_tag_is_passed_through": {
+      "duration": 4.601897671818733e-05,
+      "runs": 1,
+      "min": 4.601897671818733e-05,
+      "max": 4.601897671818733e-05
+    },
+    "test_blank_and_whitespace_are_treated_as_unset": {
+      "duration": 4.026701208204031e-05,
+      "runs": 1,
+      "min": 4.026701208204031e-05,
+      "max": 4.026701208204031e-05
+    },
+    "test_path_separators_cannot_escape_the_output_directory": {
+      "duration": 4.1116029024124146e-05,
+      "runs": 1,
+      "min": 4.1116029024124146e-05,
+      "max": 4.1116029024124146e-05
+    },
+    "test_tag_is_length_bounded": {
+      "duration": 4.510098369792104e-05,
+      "runs": 1,
+      "min": 4.510098369792104e-05,
+      "max": 4.510098369792104e-05
+    },
+    "test_health_probe_runs_on_the_pool_not_a_new_thread": {
+      "duration": 0.00018519203877076507,
+      "runs": 1,
+      "min": 0.00018519203877076507,
+      "max": 0.00018519203877076507
+    },
+    "test_reader_init_is_budgeted_and_warns": {
+      "duration": 0.00012896402040496469,
+      "runs": 1,
+      "min": 0.00012896402040496469,
+      "max": 0.00012896402040496469
+    },
+    "test_reader_init_is_not_logged_at_info": {
+      "duration": 0.00015305995475500822,
+      "runs": 1,
+      "min": 0.00015305995475500822,
+      "max": 0.00015305995475500822
+    },
+    "test_probe_is_submitted_to_the_pool_and_spawns_no_thread": {
+      "duration": 0.0002761699724942446,
+      "runs": 1,
+      "min": 0.0002761699724942446,
+      "max": 0.0002761699724942446
+    },
+    "test_every_dismissible_lobby_crop_is_scanned": {
+      "duration": 0.00023632898228242993,
+      "runs": 1,
+      "min": 0.00023632898228242993,
+      "max": 0.00023632898228242993
+    },
+    "test_tap_here_to_continue_is_scanned_and_calibrated": {
+      "duration": 0.009844607033301145,
+      "runs": 1,
+      "min": 0.009844607033301145,
+      "max": 0.009844607033301145
+    },
+    "test_scanned_popups_are_all_calibrated": {
+      "duration": 0.009779723011888564,
+      "runs": 1,
+      "min": 0.009779723011888564,
+      "max": 0.009779723011888564
+    },
+    "test_profile_crop_is_calibrated": {
+      "duration": 4.39360155723989e-05,
+      "runs": 1,
+      "min": 4.39360155723989e-05,
+      "max": 4.39360155723989e-05
+    },
+    "test_profile_dismiss_is_a_separate_click_target": {
+      "duration": 3.833399387076497e-05,
+      "runs": 1,
+      "min": 3.833399387076497e-05,
+      "max": 3.833399387076497e-05
+    },
+    "test_profile_is_in_the_stall_recovery_batch": {
+      "duration": 3.498903242871165e-05,
+      "runs": 1,
+      "min": 3.498903242871165e-05,
+      "max": 3.498903242871165e-05
+    },
+    "test_profile_eligible_on_a_sustained_lobby_blackout": {
+      "duration": 4.4854008592665195e-05,
+      "runs": 1,
+      "min": 4.4854008592665195e-05,
+      "max": 4.4854008592665195e-05
+    },
+    "test_profile_not_eligible_before_the_blackout_matures": {
+      "duration": 3.7721998523920774e-05,
+      "runs": 1,
+      "min": 3.7721998523920774e-05,
+      "max": 3.7721998523920774e-05
+    },
+    "test_profile_not_eligible_during_healthy_lobby": {
+      "duration": 3.6438985262066126e-05,
+      "runs": 1,
+      "min": 3.6438985262066126e-05,
+      "max": 3.6438985262066126e-05
+    },
+    "test_profile_is_scanned_before_the_generic_targets": {
+      "duration": 3.716797800734639e-05,
+      "runs": 1,
+      "min": 3.716797800734639e-05,
+      "max": 3.716797800734639e-05
+    },
+    "test_absent_crop_is_simply_not_offered": {
+      "duration": 3.806600579991937e-05,
+      "runs": 1,
+      "min": 3.806600579991937e-05,
+      "max": 3.806600579991937e-05
+    },
+    "test_reference_frame_is_present_and_real": {
+      "duration": 4.8686983063817024e-05,
+      "runs": 1,
+      "min": 4.8686983063817024e-05,
+      "max": 4.8686983063817024e-05
+    },
+    "test_quiet_below_the_soft_limit": {
+      "duration": 5.201500607654452e-05,
+      "runs": 1,
+      "min": 5.201500607654452e-05,
+      "max": 5.201500607654452e-05
+    },
+    "test_soft_limit_fires_but_does_not_stop": {
+      "duration": 4.43090102635324e-05,
+      "runs": 1,
+      "min": 4.43090102635324e-05,
+      "max": 4.43090102635324e-05
+    },
+    "test_hard_limit_stops": {
+      "duration": 4.376203287392855e-05,
+      "runs": 1,
+      "min": 4.376203287392855e-05,
+      "max": 4.376203287392855e-05
+    },
+    "test_progress_resets_the_clock": {
+      "duration": 3.879901487380266e-05,
+      "runs": 1,
+      "min": 3.879901487380266e-05,
+      "max": 3.879901487380266e-05
+    },
+    "test_state_change_alone_counts_as_progress": {
+      "duration": 3.993196878582239e-05,
+      "runs": 1,
+      "min": 3.993196878582239e-05,
+      "max": 3.993196878582239e-05
+    },
+    "test_ocr_alone_counts_as_progress": {
+      "duration": 3.940402530133724e-05,
+      "runs": 1,
+      "min": 3.940402530133724e-05,
+      "max": 3.940402530133724e-05
+    },
+    "test_the_livelock_shape_is_caught": {
+      "duration": 3.913004184141755e-05,
+      "runs": 1,
+      "min": 3.913004184141755e-05,
+      "max": 3.913004184141755e-05
+    },
+    "test_disabled_guard_never_fires": {
+      "duration": 3.547896631062031e-05,
+      "runs": 1,
+      "min": 3.547896631062031e-05,
+      "max": 3.547896631062031e-05
+    },
+    "test_check_never_raises": {
+      "duration": 4.805502248927951e-05,
+      "runs": 1,
+      "min": 4.805502248927951e-05,
+      "max": 4.805502248927951e-05
+    },
+    "test_stall_clears_when_progress_resumes": {
+      "duration": 4.175101639702916e-05,
+      "runs": 1,
+      "min": 4.175101639702916e-05,
+      "max": 4.175101639702916e-05
+    },
+    "test_no_blackout_means_no_suppression": {
+      "duration": 3.5787990782409906e-05,
+      "runs": 1,
+      "min": 3.5787990782409906e-05,
+      "max": 3.5787990782409906e-05
+    },
+    "test_esc_suppressed_below_the_ceiling": {
+      "duration": 3.631599247455597e-05,
+      "runs": 1,
+      "min": 3.631599247455597e-05,
+      "max": 3.631599247455597e-05
+    },
+    "test_esc_released_past_the_ceiling": {
+      "duration": 3.759498940780759e-05,
+      "runs": 1,
+      "min": 3.759498940780759e-05,
+      "max": 3.759498940780759e-05
+    },
+    "test_zero_ceiling_restores_adr087_behaviour": {
+      "duration": 3.549002576619387e-05,
+      "runs": 1,
+      "min": 3.549002576619387e-05,
+      "max": 3.549002576619387e-05
+    },
+    "test_flat_session_passes": {
+      "duration": 0.00019904697546735406,
+      "runs": 1,
+      "min": 0.00019904697546735406,
+      "max": 0.00019904697546735406
+    },
+    "test_leaking_session_fails": {
+      "duration": 0.00016260502161458135,
+      "runs": 1,
+      "min": 0.00016260502161458135,
+      "max": 0.00016260502161458135
+    },
+    "test_borderline_leak_fails_but_is_labelled": {
+      "duration": 0.00015940703451633453,
+      "runs": 1,
+      "min": 0.00015940703451633453,
+      "max": 0.00015940703451633453
+    },
+    "test_short_session_does_not_qualify": {
+      "duration": 0.00010673399083316326,
+      "runs": 1,
+      "min": 0.00010673399083316326,
+      "max": 0.00010673399083316326
+    },
+    "test_warmup_is_excluded_from_the_rate": {
+      "duration": 0.00015661102952435613,
+      "runs": 1,
+      "min": 0.00015661102952435613,
+      "max": 0.00015661102952435613
+    },
+    "test_game_growth_never_fails_the_gate": {
+      "duration": 0.00016976502956822515,
+      "runs": 1,
+      "min": 0.00016976502956822515,
+      "max": 0.00016976502956822515
+    },
+    "test_mi_use_is_preferred_over_rss": {
+      "duration": 0.00020096002845093608,
+      "runs": 1,
+      "min": 0.00020096002845093608,
+      "max": 0.00020096002845093608
+    },
+    "test_rss_fallback_when_mi_use_absent": {
+      "duration": 0.000159434974193573,
+      "runs": 1,
+      "min": 0.000159434974193573,
+      "max": 0.000159434974193573
+    },
+    "test_inert_session_is_refused": {
+      "duration": 0.00015378399984911084,
+      "runs": 1,
+      "min": 0.00015378399984911084,
+      "max": 0.00015378399984911084
+    },
+    "test_malformed_lines_are_ignored": {
+      "duration": 0.00014589499915018678,
+      "runs": 1,
+      "min": 0.00014589499915018678,
+      "max": 0.00014589499915018678
+    },
+    "test_empty_and_unreadable_logs_never_raise": {
+      "duration": 9.037897689267993e-05,
+      "runs": 1,
+      "min": 9.037897689267993e-05,
+      "max": 9.037897689267993e-05
+    },
+    "test_no_logs_reports_insufficient_not_pass": {
+      "duration": 0.009952045977115631,
+      "runs": 1,
+      "min": 0.009952045977115631,
+      "max": 0.009952045977115631
+    },
+    "test_corpus_verdicts": {
+      "duration": 0.021069337512017228,
+      "runs": 4,
+      "min": 0.013258300023153424,
+      "max": 0.029384536028373986
+    },
+    "test_corpus_short_session_is_insufficient": {
+      "duration": 0.004359575978014618,
+      "runs": 1,
+      "min": 0.004359575978014618,
+      "max": 0.004359575978014618
+    },
+    "test_corpus_livelock_session_is_refused": {
+      "duration": 0.012646457005757838,
+      "runs": 1,
+      "min": 0.012646457005757838,
+      "max": 0.012646457005757838
+    },
+    "test_cli_exit_codes": {
+      "duration": 0.0812792869983241,
+      "runs": 1,
+      "min": 0.0812792869983241,
+      "max": 0.0812792869983241
+    },
+    "test_release_gate_proceeds_on_pass": {
+      "duration": 0.05128681304631755,
+      "runs": 1,
+      "min": 0.05128681304631755,
+      "max": 0.05128681304631755
+    },
+    "test_release_gate_blocks_on_fail": {
+      "duration": 0.048148464993573725,
+      "runs": 1,
+      "min": 0.048148464993573725,
+      "max": 0.048148464993573725
+    },
+    "test_release_gate_blocks_on_insufficient": {
+      "duration": 0.0482312020030804,
+      "runs": 1,
+      "min": 0.0482312020030804,
+      "max": 0.0482312020030804
+    },
+    "test_release_gate_runs_before_anything_else": {
+      "duration": 0.0004213930224068463,
+      "runs": 1,
+      "min": 0.0004213930224068463,
+      "max": 0.0004213930224068463
+    },
+    "test_no_unapproved_handle_construction_sites": {
+      "duration": 0.08412133401725441,
+      "runs": 1,
+      "min": 0.08412133401725441,
+      "max": 0.08412133401725441
+    },
+    "test_approved_sites_have_not_multiplied": {
+      "duration": 0.06698323995806277,
+      "runs": 1,
+      "min": 0.06698323995806277,
+      "max": 0.06698323995806277
+    },
+    "test_registry_has_no_stale_entries": {
+      "duration": 0.06724532000953332,
+      "runs": 1,
+      "min": 0.06724532000953332,
+      "max": 0.06724532000953332
+    },
+    "test_every_approved_site_states_a_reason": {
+      "duration": 5.053699715062976e-05,
+      "runs": 1,
+      "min": 5.053699715062976e-05,
+      "max": 5.053699715062976e-05
+    },
+    "test_the_shared_factory_is_still_the_only_factory": {
+      "duration": 0.16187551396433264,
+      "runs": 1,
+      "min": 0.16187551396433264,
+      "max": 0.16187551396433264
+    },
+    "test_scanner_finds_a_planted_site": {
+      "duration": 0.00013911002315580845,
+      "runs": 1,
+      "min": 0.00013911002315580845,
+      "max": 0.00013911002315580845
+    },
+    "test_scanner_ignores_the_name_in_comments_and_strings": {
+      "duration": 0.00011114700464531779,
+      "runs": 1,
+      "min": 0.00011114700464531779,
+      "max": 0.00011114700464531779
+    },
+    "test_controller_still_re_exports_every_binding": {
+      "duration": 5.331297870725393e-05,
+      "runs": 1,
+      "min": 5.331297870725393e-05,
+      "max": 5.331297870725393e-05
+    },
+    "test_every_binding_is_defined": {
+      "duration": 3.975199069827795e-05,
+      "runs": 1,
+      "min": 3.975199069827795e-05,
+      "max": 3.975199069827795e-05
+    },
+    "test_no_game_key_is_also_a_wingman_hotkey": {
+      "duration": 4.064803943037987e-05,
+      "runs": 1,
+      "min": 4.064803943037987e-05,
+      "max": 4.064803943037987e-05
+    },
+    "test_game_keys_are_unique": {
+      "duration": 3.770401235669851e-05,
+      "runs": 1,
+      "min": 3.770401235669851e-05,
+      "max": 3.770401235669851e-05
+    },
+    "test_watched_maneuver_keys_are_flight_controls_plus_arrows": {
+      "duration": 3.717601066455245e-05,
+      "runs": 1,
+      "min": 3.717601066455245e-05,
+      "max": 3.717601066455245e-05
+    },
+    "test_emotes_are_documented_but_not_bound": {
+      "duration": 4.1045015677809715e-05,
+      "runs": 1,
+      "min": 4.1045015677809715e-05,
+      "max": 4.1045015677809715e-05
+    },
+    "test_absent_game_is_not_an_error": {
+      "duration": 4.50009829364717e-05,
+      "runs": 1,
+      "min": 4.50009829364717e-05,
+      "max": 4.50009829364717e-05
+    },
+    "test_sigterm_is_enough_when_the_game_exits": {
+      "duration": 4.916801117360592e-05,
+      "runs": 1,
+      "min": 4.916801117360592e-05,
+      "max": 4.916801117360592e-05
+    },
+    "test_sigkill_escalates_for_a_survivor": {
+      "duration": 5.2153016440570354e-05,
+      "runs": 1,
+      "min": 5.2153016440570354e-05,
+      "max": 5.2153016440570354e-05
+    },
+    "test_a_failing_signal_never_raises": {
+      "duration": 4.3015985284000635e-05,
+      "runs": 1,
+      "min": 4.3015985284000635e-05,
+      "max": 4.3015985284000635e-05
+    },
+    "test_already_gone_between_scan_and_signal_is_success": {
+      "duration": 4.1670980863273144e-05,
+      "runs": 1,
+      "min": 4.1670980863273144e-05,
+      "max": 4.1670980863273144e-05
+    },
+    "test_find_game_pids_never_raises_on_a_broken_proc": {
+      "duration": 4.108203575015068e-05,
+      "runs": 1,
+      "min": 4.108203575015068e-05,
+      "max": 4.108203575015068e-05
+    },
+    "test_find_game_pids_ignores_non_pid_entries": {
+      "duration": 0.00012784497812390327,
+      "runs": 1,
+      "min": 0.00012784497812390327,
+      "max": 0.00012784497812390327
+    },
+    "test_find_game_pids_does_not_match_wingman_itself": {
+      "duration": 0.00010597903747111559,
+      "runs": 1,
+      "min": 0.00010597903747111559,
+      "max": 0.00010597903747111559
+    },
+    "test_request_and_cancel_toggle": {
+      "duration": 5.5464974138885736e-05,
+      "runs": 1,
+      "min": 5.5464974138885736e-05,
+      "max": 5.5464974138885736e-05
+    },
+    "test_safe_point_condition_matches_the_guards": {
+      "duration": 9.403901640325785e-05,
+      "runs": 1,
+      "min": 9.403901640325785e-05,
+      "max": 9.403901640325785e-05
+    },
+    "test_game_close_happens_after_the_artifacts": {
+      "duration": 0.00013471097918227315,
+      "runs": 1,
+      "min": 0.00013471097918227315,
+      "max": 0.00013471097918227315
+    },
+    "test_only_the_deliberate_stop_closes_the_game": {
+      "duration": 9.011296788230538e-05,
+      "runs": 1,
+      "min": 9.011296788230538e-05,
+      "max": 9.011296788230538e-05
+    },
+    "test_hotkey_is_not_a_maneuver_key": {
+      "duration": 3.931001992896199e-05,
+      "runs": 1,
+      "min": 3.931001992896199e-05,
+      "max": 3.931001992896199e-05
+    },
+    "test_close_game_can_be_disabled": {
+      "duration": 0.010199546988587826,
+      "runs": 1,
+      "min": 0.010199546988587826,
+      "max": 0.010199546988587826
+    },
+    "test_segments_reach_the_run_file": {
+      "duration": 0.0002721219789236784,
+      "runs": 1,
+      "min": 0.0002721219789236784,
+      "max": 0.0002721219789236784
     },
     "test_segments_sum_to_the_total": {
-      "duration": 0.0002761489595286548,
+      "duration": 0.0002006579888984561,
       "runs": 1,
-      "min": 0.0002761489595286548,
-      "max": 0.0002761489595286548
+      "min": 0.0002006579888984561,
+      "max": 0.0002006579888984561
     },
     "test_the_historical_reaction_series_is_unchanged": {
-      "duration": 0.00018910301150754094,
+      "duration": 0.00020076899090781808,
       "runs": 1,
-      "min": 0.00018910301150754094,
-      "max": 0.00018910301150754094
+      "min": 0.00020076899090781808,
+      "max": 0.00020076899090781808
     },
     "test_absent_segments_are_null_not_missing": {
-      "duration": 0.00016075395978987217,
+      "duration": 0.00017233501421287656,
       "runs": 1,
-      "min": 0.00016075395978987217,
-      "max": 0.00016075395978987217
+      "min": 0.00017233501421287656,
+      "max": 0.00017233501421287656
     },
     "test_pre_adr096_files_still_load": {
-      "duration": 0.0002318299957551062,
+      "duration": 0.00023919600062072277,
       "runs": 1,
-      "min": 0.0002318299957551062,
-      "max": 0.0002318299957551062
+      "min": 0.00023919600062072277,
+      "max": 0.00023919600062072277
     },
     "test_recording_never_raises": {
-      "duration": 5.0618022214621305e-05,
+      "duration": 5.3490977734327316e-05,
       "runs": 1,
-      "min": 5.0618022214621305e-05,
-      "max": 5.0618022214621305e-05
+      "min": 5.3490977734327316e-05,
+      "max": 5.3490977734327316e-05
     },
     "test_disabled_tracker_records_nothing": {
-      "duration": 4.6413042582571507e-05,
+      "duration": 4.720600554719567e-05,
       "runs": 1,
-      "min": 4.6413042582571507e-05,
-      "max": 4.6413042582571507e-05
+      "min": 4.720600554719567e-05,
+      "max": 4.720600554719567e-05
     },
     "test_analyzer_exposes_latency_marks": {
-      "duration": 3.994902363047004e-05,
+      "duration": 4.0557992178946733e-05,
       "runs": 1,
-      "min": 3.994902363047004e-05,
-      "max": 3.994902363047004e-05
+      "min": 4.0557992178946733e-05,
+      "max": 4.0557992178946733e-05
     },
     "test_marks_are_zero_before_any_detection": {
-      "duration": 3.9367994759231806e-05,
+      "duration": 4.258297849446535e-05,
       "runs": 1,
-      "min": 3.9367994759231806e-05,
-      "max": 3.9367994759231806e-05
+      "min": 4.258297849446535e-05,
+      "max": 4.258297849446535e-05
     },
     "test_tick_handler_skips_when_marks_are_absent": {
-      "duration": 0.00029297900618985295,
+      "duration": 9.212002623826265e-05,
       "runs": 1,
-      "min": 0.00029297900618985295,
-      "max": 0.00029297900618985295
+      "min": 9.212002623826265e-05,
+      "max": 9.212002623826265e-05
     },
     "test_split_failure_cannot_cost_the_flare_burst": {
-      "duration": 0.0002556209801696241,
+      "duration": 0.00010656699305400252,
       "runs": 1,
-      "min": 0.0002556209801696241,
-      "max": 0.0002556209801696241
+      "min": 0.00010656699305400252,
+      "max": 0.00010656699305400252
+    },
+    "test_trial_produces_a_banner": {
+      "duration": 7.135799387469888e-05,
+      "runs": 1,
+      "min": 7.135799387469888e-05,
+      "max": 7.135799387469888e-05
+    },
+    "test_only_trial_gets_a_banner": {
+      "duration": 4.9839974963106215e-05,
+      "runs": 4,
+      "min": 4.764896584674716e-05,
+      "max": 5.294498987495899e-05
+    },
+    "test_banner_lines_are_uniform_width": {
+      "duration": 5.3645053412765265e-05,
+      "runs": 1,
+      "min": 5.3645053412765265e-05,
+      "max": 5.3645053412765265e-05
+    },
+    "test_unknown_is_not_trial": {
+      "duration": 0.0002354669850319624,
+      "runs": 1,
+      "min": 0.0002354669850319624,
+      "max": 0.0002354669850319624
+    },
+    "test_unrecognised_schema_is_refused_politely": {
+      "duration": 0.00014845700934529305,
+      "runs": 1,
+      "min": 0.00014845700934529305,
+      "max": 0.00014845700934529305
+    },
+    "test_nonzero_exit_is_not_an_error_if_json_was_produced": {
+      "duration": 5.0088041462004185e-05,
+      "runs": 1,
+      "min": 5.0088041462004185e-05,
+      "max": 5.0088041462004185e-05
+    },
+    "test_all_five_modes_are_handled": {
+      "duration": 8.594401879236102e-05,
+      "runs": 1,
+      "min": 8.594401879236102e-05,
+      "max": 8.594401879236102e-05
+    },
+    "test_transam_is_reported": {
+      "duration": 0.00012336502550169826,
+      "runs": 1,
+      "min": 0.00012336502550169826,
+      "max": 0.00012336502550169826
+    },
+    "test_absent_tool_is_silent_and_not_trial": {
+      "duration": 4.068599082529545e-05,
+      "runs": 1,
+      "min": 4.068599082529545e-05,
+      "max": 4.068599082529545e-05
+    },
+    "test_timeout_does_not_raise": {
+      "duration": 4.5182008761912584e-05,
+      "runs": 1,
+      "min": 4.5182008761912584e-05,
+      "max": 4.5182008761912584e-05
+    },
+    "test_garbage_output_does_not_raise": {
+      "duration": 0.00010894797742366791,
+      "runs": 1,
+      "min": 0.00010894797742366791,
+      "max": 0.00010894797742366791
+    },
+    "test_json_that_is_not_an_object_does_not_raise": {
+      "duration": 4.21029981225729e-05,
+      "runs": 1,
+      "min": 4.21029981225729e-05,
+      "max": 4.21029981225729e-05
+    },
+    "test_the_state_file_is_never_read": {
+      "duration": 7.102999370545149e-05,
+      "runs": 1,
+      "min": 7.102999370545149e-05,
+      "max": 7.102999370545149e-05
+    },
+    "test_loadavg_is_readable": {
+      "duration": 5.761801730841398e-05,
+      "runs": 1,
+      "min": 5.761801730841398e-05,
+      "max": 5.761801730841398e-05
+    },
+    "test_resource_line_carries_load": {
+      "duration": 0.055429664032999426,
+      "runs": 1,
+      "min": 0.055429664032999426,
+      "max": 0.055429664032999426
+    },
+    "test_resource_line_still_parses_for_the_leak_gate": {
+      "duration": 0.053922818042337894,
+      "runs": 1,
+      "min": 0.053922818042337894,
+      "max": 0.053922818042337894
+    },
+    "test_host_block_reaches_the_run_file": {
+      "duration": 0.00024230399867519736,
+      "runs": 1,
+      "min": 0.00024230399867519736,
+      "max": 0.00024230399867519736
+    },
+    "test_unknown_mode_is_recorded_as_unknown": {
+      "duration": 0.00017202302115038037,
+      "runs": 1,
+      "min": 0.00017202302115038037,
+      "max": 0.00017202302115038037
+    },
+    "test_context_merges_across_calls": {
+      "duration": 0.00017562799621373415,
+      "runs": 1,
+      "min": 0.00017562799621373415,
+      "max": 0.00017562799621373415
+    },
+    "test_none_values_are_not_recorded": {
+      "duration": 0.00017346598906442523,
+      "runs": 1,
+      "min": 0.00017346598906442523,
+      "max": 0.00017346598906442523
+    },
+    "test_absent_context_writes_null_not_a_stub": {
+      "duration": 0.00016504101222380996,
+      "runs": 1,
+      "min": 0.00016504101222380996,
+      "max": 0.00016504101222380996
+    },
+    "test_set_host_context_never_raises": {
+      "duration": 5.6173012126237154e-05,
+      "runs": 1,
+      "min": 5.6173012126237154e-05,
+      "max": 5.6173012126237154e-05
+    },
+    "test_pre_adr095_files_still_load": {
+      "duration": 0.0002242299960926175,
+      "runs": 1,
+      "min": 0.0002242299960926175,
+      "max": 0.0002242299960926175
+    },
+    "test_nothing_warns_about_load": {
+      "duration": 0.0002649970119819045,
+      "runs": 1,
+      "min": 0.0002649970119819045,
+      "max": 0.0002649970119819045
+    },
+    "test_load_end_is_captured_before_analyzer_cleanup": {
+      "duration": 0.00029352400451898575,
+      "runs": 1,
+      "min": 0.00029352400451898575,
+      "max": 0.00029352400451898575
+    },
+    "test_on_session_end_is_what_writes_the_run_file": {
+      "duration": 0.00019912602147087455,
+      "runs": 1,
+      "min": 0.00019912602147087455,
+      "max": 0.00019912602147087455
     }
   }
 }

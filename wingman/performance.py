@@ -209,6 +209,7 @@ class PerformanceTracker:
         self._round_reaction: list = []
 
         self._reaction_segments: list = []   # ADR 096
+        self._host: dict = {}                # ADR 095: conditions this ran under
         # Session-level buffers — accumulate until on_session_end()
         self._session_crops: dict   = {c: [] for c in _CROPS}
         self._session_reaction: list = []
@@ -244,6 +245,19 @@ class PerformanceTracker:
                 for c in _CROPS
             }
         return window, marks
+
+    def set_host_context(self, **fields) -> None:
+        """Merge host conditions into the session record (ADR 095).
+
+        Recorded so a session can be compared against the archive honestly —
+        ADR 092's leak gate and the regression baseline both judge a session
+        against prior ones and today assume conditions were equivalent. Nothing
+        alarms on these values; see the ADR for why no threshold is invented.
+        """
+        try:
+            self._host.update({k: v for k, v in fields.items() if v is not None})
+        except Exception as e:
+            logger.debug("PerformanceTracker: set_host_context failed: %s", e)
 
     def record_reaction_segments(self, capture_to_pass: float, detect: float,
                                 dispatch: float) -> None:
@@ -401,6 +415,7 @@ class PerformanceTracker:
             "ocr_crops": ocr_out,
             "reaction":  reaction_out,
             "reaction_segments": seg_out,
+            "host": self._host or None,
         }
 
         out_path = out_dir / f"run_{run_id}.json"

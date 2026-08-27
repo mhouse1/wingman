@@ -5,6 +5,8 @@ import yaml
 import time
 import logging
 import threading
+import socket
+import os
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -26,9 +28,10 @@ from .analyzer import GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STA
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
-from .resource_monitor import ResourceSampler
+from .resource_monitor import ResourceSampler, read_loadavg
 from .heap_census import HeapCensus
 from .liveness_guard import LivenessGuard
+from .host_mode import log_host_mode
 from .game_shutdown import close_game
 from .tick_handlers import (
     AmmoEventsHandler,
@@ -221,6 +224,12 @@ def main():
 
     cfg = load_config(args.config)
     logger.info("Configuration loaded from %s", args.config)
+
+    # foundry HLDD 001: say which host mode this session is running under.
+    # TRIAL latches and nothing restores it, so a session can silently run
+    # with Jenkins and Redmine down — worth stating loudly at the top of the
+    # log rather than leaving it to be inferred from the machine afterwards.
+    host_mode = log_host_mode()
 
 
     region = (
@@ -705,6 +714,18 @@ def main():
     resource_sampler = ResourceSampler(
         cfg.get("resource_monitor", {}), perf_tracker=tracker)
     resource_sampler.set_pool_depth_source(analyzer.ocr_queue_depth)
+    # ADR 095: record the conditions this session ran under, so it can be
+    # compared against the archive rather than assumed equivalent to it.
+    try:
+        _la = read_loadavg()
+        tracker.set_host_context(
+            hostname=socket.gethostname(),
+            cpu_count=os.cpu_count(),
+            rd_mode=host_mode,                    # rd | trial | mixed | none | unknown
+            load_start=list(_la) if _la else None,
+        )
+    except Exception as e:
+        logger.debug("ADR095: host context unavailable at start: %s", e)
     # Performance 008: off unless explicitly enabled — it walks the whole heap.
     # ADR 093: bound a session that has stopped making progress. The 2026-08-24
     # livelock ran 110 minutes inert because nothing was watching for absence of
@@ -1164,6 +1185,15 @@ def main():
         if hasattr(cap, "cleanup"):
             cap.cleanup()
         ctrl.cleanup()
+        # ADR 095: the run file is written from inside analyzer.cleanup(), via
+        # on_session_end() once the OCR pool has joined. load_end has to be taken
+        # BEFORE that call or it misses the file entirely — the 2026-08-26 14:37
+        # session recorded load_start and no load_end for exactly this reason.
+        try:
+            _la_end = read_loadavg()
+            tracker.set_host_context(load_end=list(_la_end) if _la_end else None)
+        except Exception as e:
+            logger.debug("ADR095: host context unavailable at end: %s", e)
         analyzer.cleanup()
         if stats_tracker is not None:
             try:
