@@ -318,6 +318,10 @@ telemetry:
   plausibility_margin: 1.5
   max_gate_dt_s: 1.5
   reseed_after_rejections: 3
+  max_alt_rate_mps: 1000       # ADR 097 D2: absolute vertical-rate ceiling.
+                               # Calibrated on 2026-08-27: plausible dives top
+                               # out at 919 m/s, artefacts start at 1036 m/s.
+  reseed_agreement_m: 150      # ADR 097 D3: agreeing rejects mean a poisoned anchor
   smoothing_window: 3
   stale_after_s: 6.0
   trend_min_alt_rate_fps: 20.0

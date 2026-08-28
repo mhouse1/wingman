@@ -355,6 +355,10 @@ SCHEMA = Section(
             "plausibility_margin": _num(0),
             "max_gate_dt_s": SECONDS,
             "reseed_after_rejections": _int(1),
+            # ADR 097: the altitude gate is an absolute vertical-rate ceiling
+            # (D2) plus agreement-based anchor reseeding (D3).
+            "max_alt_rate_mps": _num(0),
+            "reseed_agreement_m": _num(0),
             "smoothing_window": _int(1),
             "stale_after_s": SECONDS,
             "trend_min_alt_rate_fps": _num(0),

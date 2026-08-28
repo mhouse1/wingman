@@ -59,6 +59,7 @@ class TelemetrySignal:
     rate: float | None = None         # units/s between the last two accepted readings
     trend: str = TREND_UNKNOWN
     rejected_streak: int = 0          # consecutive rejections since last accept
+    last_rejected_raw: float | None = None  # ADR 097 D3: previous rejected reading
 
     def age_s(self, now_s: float) -> float | None:
         if self.ts is None:
@@ -249,6 +250,12 @@ class TelemetryProcessor:
         # sample interval. See _gate().
         self.max_gate_dt_s = float(cfg.get("max_gate_dt_s", 1.5))
         self.reseed_after_rejections = max(1, int(cfg.get("reseed_after_rejections", 3)))
+        # ADR 097 D2: the altitude gate — an absolute vertical-rate ceiling,
+        # independent of speed. See _altitude_bound_mps() for the calibration.
+        self.max_alt_rate_mps = float(cfg.get("max_alt_rate_mps", 1000.0))
+        # ADR 097 D3: consecutive rejections that agree with each other to
+        # within this many metres are a poisoned anchor, not a noisy sensor.
+        self.reseed_agreement_m = float(cfg.get("reseed_agreement_m", 150.0))
         self.smoothing_window = max(1, int(cfg.get("smoothing_window", 3)))
         self.stale_after_s = float(cfg.get("stale_after_s", 6.0))
         self.trend_min_alt_rate_fps = float(cfg.get("trend_min_alt_rate_fps", 20.0))
@@ -302,7 +309,7 @@ class TelemetryProcessor:
                 raw=float(altitude_raw),
                 now_s=now_s,
                 absolute_max=self.max_altitude_ft,
-                max_delta_per_s=self._altitude_bound_fps(now_s) * self.plausibility_margin,
+                max_delta_per_s=self._altitude_bound_mps(),
                 trend_min_rate=self.trend_min_alt_rate_fps,
                 # The altitude bound is PHYSICS (vertical speed cannot exceed
                 # total speed), so it scales correctly with the real gap and
@@ -327,16 +334,41 @@ class TelemetryProcessor:
             stale_after_s=self.stale_after_s,
         )
 
-    def _altitude_bound_fps(self, now_s: float) -> float:
-        """Max plausible climb/descent rate: vertical speed cannot exceed total
-        speed. Falls back to the aircraft envelope maximum when the speed
-        signal is stale, so a dead speed read cannot freeze the altitude gate.
+    def _altitude_bound_mps(self) -> float:
+        """Max plausible climb/descent rate, in m/s — an absolute ceiling, NOT
+        derived from speed.
+
+        The gate this replaces bounded altitude change by "vertical speed
+        cannot exceed total speed", computed as speed_kph * MPH_TO_FPS. Two
+        things were wrong with it (ADR 097).
+
+        The arithmetic: the HUD is metric — speed reads KPH, altitude reads
+        metres (ADR 067) — so multiplying a KPH figure by 1.4667 and comparing
+        the result against a delta in metres left the gate 3.6 x 1.4667 =
+        5.28x looser than its own premise. On 2026-08-27 21:35:38 it admitted a
+        5513 m single-sample drop (6700 -> 1187) while the aircraft was above
+        6 km and climbing, which ADR 086 d2 read as "3s to ground".
+
+        The premise: correcting the units alone rejects 7 of that session's 31
+        REAL dives, because a stalled or falling aircraft descends faster than
+        its forward airspeed — the same case pitch_angle_deg() handles by
+        clamping its ratio to plus or minus 1. Vertical rate is simply not
+        bounded by displayed speed in the regime where dives matter.
+
+        So the bound is an absolute ceiling instead, and speed does not enter
+        it at all. That also severs a coupling worth losing: the old gate
+        widened with the last accepted speed, so a misread on one OCR crop
+        (this session accepted speeds of 1999 and 2652) licensed a misread on
+        the other.
+
+        The ceiling is calibrated on the 2026-08-27 session's 9020 accepted
+        rate samples, which separate cleanly: 97.3 percent of descents fall
+        below 1000 m/s and decay smoothly (p97 is 871), then the population
+        breaks — p98 is 1505 — into a distinct artefact cluster. Measured
+        against the dive events themselves, the plausible ones top out at
+        919 m/s and the impossible ones start at 1036 m/s.
         """
-        if self._speed.value is not None and self._speed.is_fresh(now_s, self.stale_after_s):
-            bound_mph = max(float(self._speed.value), 60.0)  # floor: parked reads of 0 must not zero the gate
-        else:
-            bound_mph = self.max_speed_mph
-        return bound_mph * MPH_TO_FPS
+        return self.max_alt_rate_mps
 
     def _update_signal(
         self,
@@ -399,7 +431,19 @@ class TelemetryProcessor:
     ) -> TelemetrySignal:
         self.rejected_total += 1
         streak = signal.rejected_streak + 1
-        if streak >= self.reseed_after_rejections:
+        # ADR 097 D3: consecutive rejections that agree with EACH OTHER while
+        # disagreeing with the anchor mean the anchor is the wrong value, not
+        # the readings. The count-only rule below needs three rejections to
+        # notice; agreement is the stronger signal and needs two. On
+        # 2026-08-27 21:35 the anchor was a bogus 1187 m and the filter spent
+        # three rejections turning away 7394 and 7498 — readings 104 m apart
+        # and both correct — while publishing the error.
+        agrees = (
+            seedable
+            and signal.last_rejected_raw is not None
+            and abs(raw - signal.last_rejected_raw) <= self.reseed_agreement_m
+        )
+        if agrees or streak >= self.reseed_after_rejections:
             # The seed itself is suspect — recalibrate. A delta-rejected
             # stream is usually the consistent real value blocked by a bogus
             # seed, so seed from it; out-of-envelope streams clear to empty
@@ -420,6 +464,7 @@ class TelemetryProcessor:
             rate=signal.rate,
             trend=signal.trend,
             rejected_streak=streak,
+            last_rejected_raw=raw,
         )
 
     def _accept(
