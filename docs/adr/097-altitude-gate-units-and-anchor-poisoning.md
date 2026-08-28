@@ -2,7 +2,7 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft    | 2026-08-28 | 1.8.7           |
+| Accepted | 2026-08-28 | 1.8.7           |
 
 ## Context
 
@@ -194,7 +194,33 @@ never merely a noisy log.
 - V2. The 21:35:38 sequence unit-tested end to end: 1187 rejects, and the following 7394 is accepted rather than turned away against a poisoned anchor. **Done** (`tests/test_altitude_gate_adr097.py`).
 - V3. Rejections rise 11.6 to 16.5 percent while genuine descent samples fall 0.7 percent — the rise is the artefacts, not the signal. **Done.**
 - V4. ADR 038's 2026-07-30 starvation case: the corrected gate must not suppress dive confirmation. The fastest real dive (919 m/s) is admitted and the slowest artefact (1036 m/s) is rejected, both pinned as tests. **Done.**
-- V5. Live session. Confirm `DIVE RECOVERY` events with rates above 1000 m/s reach zero, and that dive-driven recoveries still fire when the aircraft genuinely descends. **Pending.**
+- V5. Live sessions. **Done** — see below.
+
+### V5 result: eight live sessions, 2026-08-28
+
+Measured over every session in which ADR 086 d2 existed. Sessions before
+2026-08-21 are excluded from the baseline: the feature had not shipped, so
+including them dilutes the pre-fix rate by more than half and makes the effect
+look weaker than it is.
+
+| Window | Sessions | Hours | Impossible | Genuine | imp/h | gen/h |
+|----------|---------:|------:|-----------:|--------:|------:|------:|
+| Pre-fix  | 46 | 97.09 | **194** | 607 | 2.00 | 6.25 |
+| Post-fix | 8  |  7.47 | **0**   |  47 | 0.00 | 6.29 |
+
+At the pre-fix rate, 7.5 post-fix hours should have produced about 15 impossible
+events. Zero occurred; P(that by chance) is 3.3e-07.
+
+**The genuine dive rate is unchanged: 6.25/h before, 6.29/h after — 101 percent
+retained.** This is the number that matters most, because the risk in this
+change was never the artefacts but the ADR 038 starvation case, where too tight
+a gate produces zero dive confirmations and drives blind nose-down re-issues.
+That has not happened. The gate rejects artefacts and nothing else.
+
+The ceiling behaves as calibrated. Maximum published descent rate fell from
+2683 m/s to 879 m/s, with no post-fix sample above the 1000 m/s boundary —
+consistent with the split the calibration found, plausible dives topping out at
+919 m/s and artefacts starting at 1036 m/s.
 
 ## References
 

@@ -23,7 +23,8 @@ WINGMAN_VERSION_DETAILS = "Map Detection"
 from .capture import Capture
 from .config_schema import assert_valid_config
 from .controller_config import ControllerConfig
-from .controller import Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON
+from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON,
+                         set_focus_guard)
 from .analyzer import GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
@@ -31,6 +32,7 @@ from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler, read_loadavg
 from .heap_census import HeapCensus
 from .liveness_guard import LivenessGuard
+from .focus_guard import FocusGuard
 from .host_mode import log_host_mode
 from .game_shutdown import close_game
 from .tick_handlers import (
@@ -230,6 +232,13 @@ def main():
     # with Jenkins and Redmine down — worth stating loudly at the top of the
     # log rather than leaving it to be inferred from the machine afterwards.
     host_mode = log_host_mode()
+    # ADR 098: gate injection on the game having focus. Installed process-wide
+    # because the injection sites are module-level in controller.
+    focus_guard = FocusGuard(cfg.get("focus_guard", {}))
+    set_focus_guard(focus_guard)
+    if focus_guard.enabled:
+        logger.info("ADR 098: focus guard ACTIVE - injection suppressed when the "
+                    "game does not have focus")
 
 
     region = (

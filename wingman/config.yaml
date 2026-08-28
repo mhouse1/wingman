@@ -229,6 +229,10 @@ health:
   dropout_capture: {enabled: true, capture_after_s: 5.0, recapture_interval_s: 60.0,
     max_per_session: 12}
 fuel: {stale_after_s: 6.0, rearm_margin_pct: 5}
+# ADR 098: suppress injection when the game does not have focus. Off until a
+# full session confirms it never suppresses legitimate presses (ADR 098 D6).
+# on_unknown: "inject" (default) or "suppress" — see ADR 098 D4.
+focus_guard: {enabled: true, ttl_s: 1.0, session_ttl_s: 5.0, on_unknown: inject}
 incoming_detection:
   incoming_template_matching_enabled: true
   incoming_template_threshold: 0.82

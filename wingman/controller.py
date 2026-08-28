@@ -34,6 +34,49 @@ logger = logging.getLogger(__name__)
 # Module-level so tests can monkeypatch `controller.keyboard_module` in one place.
 keyboard_module = maybe_install_linux_keyboard(keyboard_module)
 
+# ADR 098: the focus guard. Set by Controller.__init__ from config; None means
+# no guard (every injection allowed), which is also the default.
+focus_guard = None
+
+
+def set_focus_guard(guard) -> None:
+    """Install the process-wide focus guard (ADR 098)."""
+    global focus_guard
+    focus_guard = guard
+
+
+def _press_key(key) -> bool:
+    """Inject a key press unless the focus guard forbids it (ADR 098).
+
+    Returns True if the key was actually pressed. Callers keep their hold loop,
+    their release, and their finally blocks either way: gating the control flow
+    instead collapses a two-second hold into zero and, at the disengage-roll
+    site, skipped the stop_search_and_destroy_loop() cleanup that a started loop
+    depends on. Releasing a key that was never pressed is a harmless no-op.
+    """
+    if not _may_inject("key"):
+        return False
+    keyboard_module.press(key)
+    return True
+
+
+def _may_inject(what: str = "key") -> bool:
+    """Gate for every injection call site. Never raises.
+
+    Gating happens HERE rather than at the 17 individual press sites: one place
+    cannot be forgotten when a new tactic adds a keypress. Observation paths
+    (on_press_key, add_hotkey, XRecord) are deliberately NOT gated — they read
+    the operator's own keys and must keep working while focus is elsewhere,
+    which is exactly when the operator is most likely to want the exit hotkey.
+    """
+    guard = focus_guard
+    if guard is None:
+        return True
+    try:
+        return guard.may_inject(what)
+    except Exception:                        # noqa: BLE001 - never break the loop
+        return True
+
 # A failed key RELEASE is the start of a stuck-key incident, and the key does not
 # come back when this process dies: on Linux XTest key state lives in the X
 # SERVER and survives for the whole session; on Windows the injected key stays
@@ -895,7 +938,7 @@ class Controller:
                 self._inc_programmatic_key(key)
                 release_span = 0.0  # measured below; finally must not NameError
                 try:
-                    keyboard_module.press(key)
+                    _press_key(key)
                     start = time.time()
                     while (time.time() - start) < hold_seconds:
                         if not ignore_cancel:
@@ -1081,7 +1124,7 @@ class Controller:
             self._eject_held_keys.add(key)
             self._inc_programmatic_key(key)
             try:
-                keyboard_module.press(key)
+                _press_key(key)
             except Exception:
                 logger.error("Controller: press of %r failed during %s", key, note)
             return
@@ -1656,7 +1699,7 @@ class Controller:
             # immediately self-cancelled into manual takeover.
             self._inc_programmatic_key(ROLL_RIGHT_KEY)
             try:
-                keyboard_module.press(ROLL_RIGHT_KEY)
+                _press_key(ROLL_RIGHT_KEY)
                 # NOT _interruptible_sleep: cancel_mission() above set
                 # _mission_cancel, which would abort the roll after
                 # milliseconds and leave the aircraft flying straight out of
@@ -1831,7 +1874,7 @@ class Controller:
                     self._record_action_intent("key_press", key=_key, action="missile_evade")
                 else:
                     try:
-                        keyboard_module.press(_key)
+                        _press_key(_key)
                     except Exception:
                         logger.exception("Controller: missile_evade press failed for '%s'", _key)
 
@@ -2833,7 +2876,8 @@ class Controller:
                     abs_y = int(game_oy + (row_idx + 0.5) * cell_h)
                     logger.info("\033[93m📋 Clicking %s at (%d, %d) [game offset %d,%d] x%d\033[0m",
                                 label, abs_x, abs_y, game_ox, game_oy, count)
-                    _linux_click(abs_x, abs_y, count)
+                    if _may_inject("click"):
+                        _linux_click(abs_x, abs_y, count)
                     if count > 1 and self._ready_button_region:
                         rbn = self._ready_button_region
                         row_rb = (rbn - 1) // grid_cols
@@ -2946,7 +2990,8 @@ class Controller:
                     abs_x, abs_y = crop_centre(coords, cap_w, cap_h, game_ox, game_oy)
                     logger.info("\033[93m📋 Clicking %s at (%d, %d) [game offset %d,%d] x%d\033[0m",
                                 label, abs_x, abs_y, game_ox, game_oy, count)
-                    _linux_click(abs_x, abs_y, count)
+                    if _may_inject("click"):
+                        _linux_click(abs_x, abs_y, count)
                     return
 
                 # Windows: use win32api

@@ -4,6 +4,28 @@
 |--------|------------|-----------------|
 | Draft  | 2026-08-26 | 1.8.7           |
 
+
+## Premise correction (ADR 096)
+
+**The central claim below — that the 1.5 s tick, not OCR inference, bounds
+reaction latency — has been measured and is false.** Reaction latency is
+99.7 percent detection: detect 0.2504 s, dispatch 0.0003 s, capture-to-pass
+0.0005 s, over 174 samples.
+
+This does not remove the case for the hardware; it relocates it. The corrected
+premise is that **neural inference bounds perception rate, and perception rate
+bounds decision quality**. Two consequences for the design below:
+
+- Pure OpenCV work is not the constraint. `cv2.matchTemplate` runs 8 templates
+  in 3.0 ms, about 329 Hz on the CPU already in the machine, so the 10 to 20 Hz
+  terrain loop HLDD 001 specifies needs no new hardware to be proved out.
+- EasyOCR costs 250 to 700 ms per crop with an empty pool queue, and every
+  state-derived decision waits on it. That is the workload a GPU changes.
+
+Sections arguing from tick rate need restating in terms of inference cost before
+this design is used to justify a purchase. ADR 096 E2 — measuring EasyOCR on a
+GPU against our own crops — is the outstanding number.
+
 ## Purpose
 
 Wingman today is deliberately CPU-only. `respawn_detection.use_gpu` exists and

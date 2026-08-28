@@ -346,6 +346,16 @@ SCHEMA = Section(
             "interval_sec": SECONDS,
         }),
 
+        # ADR 098: focus guard for key injection
+        "focus_guard": Section(children={
+            "enabled": BOOL,
+            "ttl_s": SECONDS,
+            "session_ttl_s": SECONDS,
+            "on_unknown": STR,
+            "display": STR,
+            "process_name": STR,
+        }),
+
         # ADR 038 / 067 / 069
         "telemetry": Section(children={
             "max_speed_mph": _num(0),

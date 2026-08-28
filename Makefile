@@ -53,6 +53,12 @@ PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
 # everything above it was arena fragmentation, not live data. Must be set
 # before the process starts — glibc reads it at first malloc.
 WINGMAN_ENV := MALLOC_ARENA_MAX=2
+# Run the live loop below the desktop's priority. 13 OCR workers plus the
+# game saturated a 20-core box (load 20.5 on 2026-08-28), which starved the
+# GNOME compositor and produced "not responding" dialogs for VS Code. The
+# tick has slack (1.5s tick, detect p50 0.25s per ADR 096), so wingman can
+# afford to yield. Override with "make rd WINGMAN_NICE=" to run unniced.
+WINGMAN_NICE ?= nice -n 10
 CAPTURE_PATH ?= PATH1
 # Real-game capture (make p1/p2/p3) must outlast a full mission cycle
 # (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
@@ -116,7 +122,7 @@ reqs: reqs-gate
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_heap_census.py tests/test_performance_aggregate.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py tests/test_ocr_reader_reuse.py tests/test_lobby_popup_coverage.py tests/test_stall_profile_recovery.py tests/test_liveness_guard.py tests/test_leak_gate.py tests/test_handle_construction_sites.py tests/test_keybindings.py tests/test_finish_round_then_exit.py tests/test_reaction_segments.py tests/test_host_mode.py tests/test_host_context.py tests/test_altitude_gate_adr097.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_heap_census.py tests/test_performance_aggregate.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py tests/test_ocr_reader_reuse.py tests/test_lobby_popup_coverage.py tests/test_stall_profile_recovery.py tests/test_liveness_guard.py tests/test_leak_gate.py tests/test_handle_construction_sites.py tests/test_keybindings.py tests/test_finish_round_then_exit.py tests/test_reaction_segments.py tests/test_host_mode.py tests/test_host_context.py tests/test_altitude_gate_adr097.py tests/test_focus_probe.py tests/test_focus_guard.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -336,10 +342,10 @@ endif
 g: $(GAME_LAUNCH_DEPS)
 
 r: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main
+	$(WINGMAN_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main
 
 rd: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main --log-file wingman.log
+	$(WINGMAN_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log
 
 # ---------------------------------------------------------------------------
 # Per-account run targets (Research 005)
@@ -389,6 +395,21 @@ sync-settings-1:
 sync-settings-2:
 	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
 	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT2_PREFIX)" $(DRY)
+
+# Does an X11 focus guard work on this Wayland session? Run this, then alt-tab
+# between the game and another window for the duration. See scripts/focus-probe.py.
+focus-probe:
+	$(PYTHON_RUN) scripts/focus-probe.py --seconds $(or $(SECONDS),120) --out focus-probe.log
+
+# Same probe, armed alongside a live run: it waits for the game to appear, then
+# samples while r1 holds the foreground. One terminal, not two.
+r1-probe:
+	@nohup $(PYTHON_RUN) scripts/focus-probe.py --wait-for-game 300 \
+	  --seconds $(or $(SECONDS),120) --out focus-probe.log > focus-probe.out 2>&1 &
+	@echo "focus probe armed — sampling starts when the game window appears."
+	@echo "ALT-TAB between the game and another window while it runs."
+	@echo "Results: focus-probe.log"
+	@$(MAKE) r1
 
 ensure-virtual-desktop:
 	@$(PYTHON_RUN) scripts/ensure-virtual-desktop.py \
