@@ -1,3 +1,18 @@
+# ADR 099: run the game on its own nested X display, where it is the only
+# client and therefore always focused, and whose root window is a real
+# framebuffer XGetImage can read. Wingman then cannot type into the operator's
+# editor because they no longer share a display.
+#
+# Only capture and injection move to `display`. Hotkey observation deliberately
+# stays on the operator's DISPLAY, so backspace / end / i-j-k-l keep working
+# from wherever they are actually typed.
+#
+# Override per run without editing this file: make rd NESTED=0
+nested:
+  enabled: true
+  display: ":3"
+  size: "1920x1200"
+
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
 # Default false — accepting drops the aircraft into someone else's squad

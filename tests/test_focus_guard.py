@@ -276,3 +276,32 @@ def test_both_injection_kinds_are_reported(what, caplog):
     with a, b, c, caplog.at_level(logging.WARNING):
         assert g.may_inject(what) is False
     assert any(what in r.message for r in caplog.records)
+
+
+# --- ADR 099: the guard must watch the display injection targets -------------
+
+def test_guard_follows_injection_to_the_nested_display():
+    """The 2026-08-29 regression. The guard resolves its display from config or
+    DISPLAY; with the game nested and DISPLAY still on the operator's screen it
+    found no game window, concluded "not the game", and suppressed every click —
+    10 suppressions and a 154 s stall in GAME_WAITING. The guard had silently
+    disabled the thing it exists to protect."""
+    from wingman.focus_guard import config_for_display
+    assert config_for_display({"enabled": True}, ":3")["display"] == ":3"
+
+
+def test_an_explicit_guard_display_still_wins():
+    from wingman.focus_guard import config_for_display
+    assert config_for_display({"display": ":9"}, ":3")["display"] == ":9"
+
+
+def test_the_on_screen_lane_leaves_the_guard_display_alone():
+    from wingman.focus_guard import config_for_display
+    assert "display" not in config_for_display({"enabled": True}, None)
+
+
+def test_config_for_display_does_not_mutate_the_caller_config():
+    from wingman.focus_guard import config_for_display
+    original = {"enabled": True}
+    config_for_display(original, ":3")
+    assert original == {"enabled": True}

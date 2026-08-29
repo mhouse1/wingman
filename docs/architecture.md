@@ -2,7 +2,7 @@
 
 | Status | Date | Wingman Version |
 |---|---|---|
-| Active | 2026-08-14 | 1.8.0 |
+| Active | 2026-08-29 | 1.8.7 |
 
 ## Overview
 
@@ -310,6 +310,62 @@ flowchart LR
 
 ---
 
+## Display Topology (ADR 098 / ADR 099)
+
+Wingman is positional by nature: it injects at the X server's **focus** and
+captures the **screen**. Both follow whatever the operator is looking at, so a
+naive single-display setup types into their editor the moment they alt-tab.
+
+The nested display lane removes the shared channel rather than policing it. The
+game runs on its own rootful Xwayland, where it is the only client and therefore
+always focused, and whose root window is a real framebuffer `XGetImage` can read.
+
+```mermaid
+flowchart TB
+  subgraph op["Operator display"]
+    ed["Editor and terminal"]
+    kb["Physical keyboard"]
+  end
+  subgraph nest["Nested display"]
+    wd["Wine Desktop at origin"]
+    fb["Root framebuffer"]
+  end
+  wg["Wingman process"]
+  wd --> fb
+  wg -->|"XTest keys and clicks"| fb
+  fb -->|"mss XGetImage"| wg
+  kb -->|"XRecord hotkeys"| wg
+  wg -.->|"cannot reach"| ed
+```
+
+**`DISPLAY` has four consumers and they do not all want the same value.** This is
+the single most important fact about this subsystem — three of the four were
+wrong at some point during implementation, each failing in a different way:
+
+| Consumer | Code | Display | Wrong value looks like |
+|---|---|---|---|
+| Capture | `capture.py` `_MssBackend` | nested | OCR reads the operator's desktop |
+| Key and mouse injection | `input_linux.py` `_inject_display_name` | nested | Keystrokes land in the editor |
+| Hotkey observation (XRecord) | `input_linux.py` `_listener_loop` | **operator** | Backspace and takeover keys dead |
+| Focus guard | `focus_guard.py` `config_for_display` | nested | Every key and click suppressed |
+
+Capture takes an explicit display (`mss(display=...)`), injection reads a
+module-level override set by `set_injection_display()`, and the focus guard is
+handed the injection display via `config_for_display()`. Only the XRecord
+listener still reads `os.environ["DISPLAY"]` — deliberately, because it must
+watch the keyboard where the operator's hands actually are. Manual takeover is a
+safety property, not a convenience.
+
+The lane is switched by `nested.enabled` in `config.yaml`, not by a separate run
+target, so the Makefile and wingman cannot disagree about which lane is active.
+A single environment variable cannot express the table above.
+
+With the game alone on its own display, ADR 098's focus guard becomes a
+tautology there (the game always has focus) and remains the protection for the
+on-screen lane.
+
+---
+
 ## Configuration
 
 All tunable values live in `wingman/config.yaml`. Key bindings are module-level constants in `controller.py`.
@@ -326,6 +382,8 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `behavior_tree` | Selector mode (off / shadow / active), disengage/evade holds, `missile_evade` block (ADR 024/070) |
 | `j20_mission` / `minimap` | Ring-engage geometry, orbit cadence, blob band (Design 003) |
 | `telemetry` | Plausibility bounds, smoothing, `eject_closed_loop` thresholds (ADR 038/067/069) |
+| `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make rd NESTED=0` |
+| `focus_guard` | Suppress injection when the game lacks focus (ADR 098); follows the nested display automatically |
 | `performance` | Regression gate thresholds and histogram output |
 
 ---
@@ -489,3 +547,7 @@ Player presses NOSE_UP / NOSE_DOWN / ROLL_LEFT / ROLL_RIGHT during GAME_BATTLE
 | [070](adr/070-missile-evade-tactic.md) | MISSILE_EVADE_MODE behavior tactic |
 | [071](adr/071-single-gate-corpus-screenshot-set.md) | Single gate-corpus screenshot set |
 | [072](adr/072-calibration-screenshot-consolidation.md) | Calibration screenshots consolidated onto the gate corpus |
+| [098](adr/098-focus-guard-for-key-injection.md) | Focus guard for key injection |
+| [099](adr/099-nested-display-lane-for-unattended-operation.md) | Nested display lane for unattended operation |
+
+*(This index is incomplete: ADRs 073-097 are not yet listed.)*

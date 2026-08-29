@@ -6,9 +6,11 @@ bind their loop variables rather than capture them.
 """
 
 import inspect
+import os
 import pathlib
 import threading
 import time
+import unittest.mock as mock
 
 import pytest
 
@@ -277,3 +279,36 @@ def test_drop_shared_display_survives_a_failing_close(xtest_env):
     xtest_env.opened[0].close = boom
     input_linux._drop_shared_display()          # must not raise
     assert input_linux._shared_display is None
+
+
+# --- ADR 099: injection and observation use DIFFERENT displays ---------------
+
+def test_injection_display_defaults_to_the_environment():
+    from wingman import input_linux as il
+    il.set_injection_display(None)
+    with mock.patch.dict("os.environ", {"DISPLAY": ":0"}):
+        assert il._inject_display_name() == ":0"
+
+
+def test_injection_display_override_does_not_move_observation():
+    """The whole point of the split. Capture and injection go to the nested
+    display; the XRecord hotkey listener must keep watching the operator's
+    display, or backspace / end / i-j-k-l only register while the nested window
+    has focus — i.e. exactly when the operator is NOT working elsewhere."""
+    from wingman import input_linux as il
+    try:
+        with mock.patch.dict("os.environ", {"DISPLAY": ":0"}):
+            il.set_injection_display(":3")
+            assert il._inject_display_name() == ":3"
+            # Observation reads os.environ directly and is untouched.
+            assert os.environ["DISPLAY"] == ":0"
+    finally:
+        il.set_injection_display(None)
+
+
+def test_injection_display_can_be_cleared():
+    from wingman import input_linux as il
+    il.set_injection_display(":3")
+    il.set_injection_display(None)
+    with mock.patch.dict("os.environ", {"DISPLAY": ":0"}):
+        assert il._inject_display_name() == ":0"

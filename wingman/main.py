@@ -32,7 +32,7 @@ from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler, read_loadavg
 from .heap_census import HeapCensus
 from .liveness_guard import LivenessGuard
-from .focus_guard import FocusGuard
+from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
 from .game_shutdown import close_game
 from .tick_handlers import (
@@ -232,9 +232,40 @@ def main():
     # with Jenkins and Redmine down — worth stating loudly at the top of the
     # log rather than leaving it to be inferred from the machine afterwards.
     host_mode = log_host_mode()
+    # ADR 099: the nested display lane. The game runs on its own X server, where
+    # it is the only client and so always focused. ONLY capture and injection
+    # move there - hotkey observation stays on the operator's DISPLAY, because
+    # XRecord must watch the keyboard where their hands actually are. See the
+    # note in input_linux.set_injection_display.
+    _nested = cfg.get("nested", {}) or {}
+    _nested_on = bool(_nested.get("enabled", False))
+    _nested_override = os.environ.get("WINGMAN_NESTED", "").strip().lower()
+    if _nested_override in ("0", "false", "no"):
+        _nested_on = False
+    elif _nested_override in ("1", "true", "yes"):
+        _nested_on = True
+    nested_display = None
+    if _nested_on and sys.platform != "win32":
+        nested_display = str(_nested.get("display") or ":3").strip()
+        from .input_linux import set_injection_display
+        set_injection_display(nested_display)
+        logger.info("ADR 099: nested lane ACTIVE - capture and injection on %s, "
+                    "hotkeys observed on %s", nested_display,
+                    os.environ.get("DISPLAY", ":0"))
+
     # ADR 098: gate injection on the game having focus. Installed process-wide
     # because the injection sites are module-level in controller.
-    focus_guard = FocusGuard(cfg.get("focus_guard", {}))
+    #
+    # ADR 099: the guard must interrogate the display injection actually targets.
+    # Left on the operator's display while the game runs nested, it finds no game
+    # window, concludes "not the game" and suppresses every key and click - the
+    # guard silently disabling the thing it exists to protect. An explicit
+    # focus_guard.display in config still wins.
+    _fg_cfg = config_for_display(cfg.get("focus_guard", {}), nested_display)
+    if nested_display and _fg_cfg.get("display") == nested_display:
+        logger.info("ADR 099: focus guard follows injection to display %s",
+                    nested_display)
+    focus_guard = FocusGuard(_fg_cfg)
     set_focus_guard(focus_guard)
     if focus_guard.enabled:
         logger.info("ADR 098: focus guard ACTIVE - injection suppressed when the "
@@ -343,7 +374,8 @@ def main():
             offset_note,
         )
     else:
-        cap = Capture(region, monitor_index, game_window_offset=game_window_offset)
+        cap = Capture(region, monitor_index, game_window_offset=game_window_offset,
+                      display=nested_display)
 
     tracker = PerformanceTracker(cfg, version=WINGMAN_VERSION)
     analyzer = GameStateAnalyzer(cfg, tracker=tracker)  # also usable as a context manager via __enter__/__exit__

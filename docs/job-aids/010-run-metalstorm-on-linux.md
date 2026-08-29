@@ -216,6 +216,28 @@ make r      # INFO console
 make rd     # DEBUG log to wingman.log
 ```
 
+By default the game is launched onto a **nested X display** (`nested.enabled: true`
+in `wingman/config.yaml`, ADR 099) rather than your desktop. `make r` starts the
+nested server, launches the game onto it, focuses it, and runs Wingman — all as
+prerequisites, so there is no extra step. You can use the machine normally while
+a session runs.
+
+```bash
+make nested-status   # up? which window holds focus?
+make nested-stop     # tear it down
+make rd NESTED=0     # run on your own screen instead, for one run
+```
+
+Two things about the nested lane that are not obvious:
+
+- **The nested server needs your Wayland session.** Xwayland is itself a Wayland
+  client, so `nested-setup` runs *without* the game's env. `WAYLAND_DISPLAY` is
+  stripped for the game only — that stops Wine choosing `winewayland.drv` and
+  bypassing the nested display — and stripping it for the server is fatal.
+- **The nested window has no window manager.** Nothing repositions the game, so
+  it maps at the origin and `game_window_offset` is exactly zero. Closing the
+  nested server window takes the whole lane down with it.
+
 Run `make preflight` first to surface any missing dependencies:
 
 ```bash
@@ -254,6 +276,9 @@ values win over the defaults):
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
+| Every click and key suppressed, `FocusGuard: game does not have focus (None)` | ADR 098's guard is querying the wrong display — the game is on the nested one | Ensure `focus_guard.display` is unset in config so it follows the injection display automatically (ADR 099 D6) |
+| Hotkeys (backspace, `end`, `i/j/k/l`) do nothing | Hotkey observation moved off your display | XRecord must stay on the operator's `DISPLAY`; only capture and injection move (ADR 099 D4) |
+| Game exits at launch with `vulkan: No DRI3 support detected` | The nested server is Xephyr, which has no DRI3, so DXVK cannot present | Use rootful Xwayland — `scripts/nested-display.py` does. Xephyr cannot run the game at all |
 | `umu-shim: No such file or directory` | Launched Heroic from VS Code snap terminal | Open GNOME Terminal (not VS Code) and launch Heroic from there |
 | `PROTONPATH '...GE-Proton-latest' is not valid, toolmanifest.vdf not found` | `PROTON_ROOT` default doesn't match what's actually installed | `ls .../tools/proton/` (Step 4) and override `PROTON_ROOT` (Step 9) |
 | `/bin/sh: 1: umu-run: not found` (in `/tmp/wingman-game-launch.log`) | `umu-run` never installed at `~/.local/bin/umu-run` | Step 7 — symlink Heroic's bundled copy |

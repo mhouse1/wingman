@@ -346,6 +346,13 @@ SCHEMA = Section(
             "interval_sec": SECONDS,
         }),
 
+        # ADR 099: nested display lane
+        "nested": Section(children={
+            "enabled": BOOL,
+            "display": STR,
+            "size": STR,
+        }),
+
         # ADR 098: focus guard for key injection
         "focus_guard": Section(children={
             "enabled": BOOL,

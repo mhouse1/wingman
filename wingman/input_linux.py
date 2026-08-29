@@ -111,7 +111,7 @@ def _linux_click(x: int, y: int, count: int = 1) -> None:
     try:
         from Xlib import display as _xdisplay, X as _X
         from Xlib.ext import xtest as _xtest
-        display_name = os.environ.get("DISPLAY", ":0").strip()
+        display_name = _inject_display_name()
         d = _xdisplay.Display(display_name)
         _xtest.fake_input(d, _X.MotionNotify, x=x, y=y)
         d.sync()
@@ -161,6 +161,41 @@ _XKEY_ALIASES = {
     "=": "equal",
     "`": "grave",
 }
+
+
+# --- Injection vs observation display (ADR 099) ------------------------------
+#
+# DISPLAY does three jobs in this module and they do NOT want the same value
+# once the game runs on a nested display:
+#
+#   capture + injection  ->  the nested display, where the game lives
+#   hotkey observation   ->  the OPERATOR's display, where their hands are
+#
+# XRecord in `_listener_loop` observes real keypresses so the operator can hit
+# backspace to exit or i/j/k/l to take over. Point that at the nested display
+# and those keys are only seen while the nested window has focus - i.e. exactly
+# when the operator is NOT working elsewhere, which is the entire point of the
+# lane. Manual takeover is a safety property, so the two displays are split:
+# injection reads this override, observation keeps reading os.environ.
+_injection_display = None
+
+
+def set_injection_display(display_name) -> None:
+    """Route key/mouse injection to `display_name` (None restores DISPLAY).
+
+    Observation is deliberately unaffected - see the note above.
+    """
+    global _injection_display
+    _injection_display = display_name.strip() if display_name else None
+    if _injection_display:
+        logger.info("ADR 099: injection routed to display %r (hotkeys still "
+                    "observed on %r)", _injection_display,
+                    os.environ.get("DISPLAY", ":0").strip())
+
+
+def _inject_display_name() -> str:
+    """Display for XTest injection: the override if set, else DISPLAY."""
+    return _injection_display or os.environ.get("DISPLAY", ":0").strip()
 
 
 # --- Shared XTest display (ADR 091) -----------------------------------------
@@ -224,7 +259,7 @@ def _linux_key_event(key: str, event_type) -> None:
     if keysym == 0:
         logger.warning("Linux key: unknown keysym for %r", key)
         return
-    display_name = os.environ.get("DISPLAY", ":0").strip()
+    display_name = _inject_display_name()
     last_err = None
     with _display_lock:
         for attempt in (1, 2):

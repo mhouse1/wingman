@@ -93,6 +93,26 @@ def game_session_pids(process_name: str = GAME_PROCESS_NAME) -> "set[int]":
     return session
 
 
+def config_for_display(cfg, injection_display):
+    """focus_guard config aimed at the display injection actually targets.
+
+    ADR 099 moves capture and injection to a nested display while the operator's
+    DISPLAY stays put. The guard resolves its own display from
+    `cfg["display"] or os.environ["DISPLAY"]`, so left alone it interrogates the
+    operator's screen, finds no game window there, concludes "not the game" and
+    suppresses every key and click - the guard silently disabling the very thing
+    it exists to protect. Observed 2026-08-29: 10 suppressed clicks and a
+    154 s stall in GAME_WAITING before matchmaking fell back.
+
+    An explicit `focus_guard.display` in config still wins, so the operator can
+    always pin it.
+    """
+    out = dict(cfg or {})
+    if injection_display and not out.get("display"):
+        out["display"] = injection_display
+    return out
+
+
 class FocusGuard:
     """Answers "does the game have focus?" for the injection path.
 

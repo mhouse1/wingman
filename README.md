@@ -172,7 +172,7 @@ uv sync --all-groups
 
 1. Install MetalStorm via Heroic Games Launcher (Flatpak) with Proton-GE.
 2. Install `umu-run` standalone — Makefile variables `UMU_RUN`, `PROTON_ROOT`, `WINE_PREFIX`, `GAME_EXE` point to your install.
-3. Run `make r` once to trigger the one-time PipeWire screen-share dialog; subsequent runs skip it automatically.
+3. Run `make r` once to trigger the one-time PipeWire screen-share dialog; subsequent runs skip it automatically. (Not needed while the nested display lane is enabled — it captures its own X server directly and never uses the portal.)
 4. Set MetalStorm's Controls mode to **Controller / Joystick** in-game settings (required for pitch input under Wine — see ADR 051).
 5. Configure in-game keybindings as described in `docs/job-aids/011-wingman-keybindings.md`.
 
@@ -188,6 +188,23 @@ make rd    # run with DEBUG logs written to wingman.log
 On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not already running, waits for the lobby to appear, then starts Wingman. No manual game launch step is needed.
 
 On Windows, launch MetalStorm manually before running `make r`.
+
+### Using the computer while Wingman runs
+
+By default (`nested.enabled: true` in `wingman/config.yaml`) the game runs on its
+own nested X display. Wingman captures and injects there, so its keystrokes
+cannot reach whatever you are typing in — you can use the machine normally while
+a session runs. Your hotkeys still work, because hotkey observation deliberately
+stays on your own display.
+
+```bash
+make rd              # honours nested.enabled
+make rd NESTED=0     # force the on-screen lane for one run
+make nested-status   # is the lane up, and what holds focus
+make nested-stop     # tear the nested server down
+```
+
+See ADR 099 and `docs/hldd/009-nested-display-isolation-hldd.md` for the design.
 
 ---
 
