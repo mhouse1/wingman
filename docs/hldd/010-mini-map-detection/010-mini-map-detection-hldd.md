@@ -18,12 +18,41 @@ Wingman flies out of the playable area and is ejected.
 
 The current minimap logic (Design 003 / ADR 028, `engage_nav.py`) steers toward
 enemy contacts on the assumption that *flying toward enemies keeps you inside
-the map*. That assumption has no mechanism behind it. Contacts sit wherever they
-sit, including on or beyond the boundary, so the navigator will happily fly
-across the edge while doing exactly what it was designed to do.
+the map*.
+
+**That assumption is sound as far as it goes.** Battle clusters near the centre,
+so tracking contacts does bias the aircraft inward, and a working navigator
+prevents a real share of edge approaches. The problem is not that the idea is
+wrong — it is that the navigator is silent exactly when the aircraft needs it.
+
+ADR 028's mode table, row 4: *no enemies detected — Idle, no command.* With no
+contacts the navigator issues nothing and the aircraft holds its heading
+indefinitely. Counting enemy blobs on each frame with the configured
+`enemy_hsv` bounds inside the minimap mask:
+
+| Frame | enemy blobs | navigator mode |
+|-------|------------:|----------------|
+| Step0 (flying away) | 0 | Idle — no command |
+| Step1 (**at the boundary**) | **0** | **Idle — no command** |
+| Step2 (already outside) | 3 | would steer, too late |
+
+At Step1 — the last moment a turn could have saved the aircraft — there is
+nothing on the minimap to track, so no amount of fixing ADR 028 produces a
+command. The failure happens in the navigator's blind spot, not in its logic.
+
+Step2 is the mirror image: three contacts appear, and they lie back toward the
+map, so the navigator would steer inward — correctly, but with five seconds left
+on the countdown.
+
+Two consequences follow. Contacts near the edge actively pull the aircraft
+outward, since the navigator has no term opposing them. And "battle is typically
+central" is a statement about the common case, while ejection is a tail event; a
+guard exists for the tail.
 
 There is no boundary signal anywhere in the codebase today — no crop, no
-detector, no tactic. `grep` for `RETURN TO BATTLE` returns nothing.
+detector, no tactic. `grep` for `RETURN TO BATTLE` returns nothing. No tactic in
+the selector takes horizontal position as an input at all: Climb (ADR 073) keys
+on altitude alone, and Engage keys on contacts.
 
 ### The sequence
 
@@ -270,7 +299,16 @@ No tuning values in this document — they belong in `config.yaml`.
 4. **Does the boundary curve significantly within the minimap?** Nearest-pixel
    treats it as locally straight, which the frames support but do not prove.
 5. **Altitude ceiling.** The same eject mechanic may apply vertically; out of
-   scope here, but the guard is the natural home if so.
+   scope here, but the guard is the natural home if so. This matters beyond
+   this document: a proposal to hold sustained vertical climbs as a combat
+   tactic would trade a horizontal ejection for a vertical one if a ceiling
+   exists. Cheap to settle — climb until the banner appears, or confirm it
+   does not.
+6. **How much does a working ADR 028 cover?** The navigator and this guard are
+   complementary, not alternatives: fixing the navigator removes edge
+   approaches while contacts are visible, and the guard covers the
+   no-contact blind spot the frames land in. Worth measuring the split from
+   live telemetry so the guard's trigger can be tuned rather than guessed.
 
 ## References
 
