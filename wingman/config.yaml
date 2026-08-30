@@ -281,6 +281,14 @@ mission: {manual_takeover: {persist_through_respawn: true},
   starting_health_probe_interval_s: 0.4, capture_stale_inject_s: 10.0}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
+# mission_loiter ('y'): the survival hold. Two behaviours only — climb to the
+# hold band, then orbit inside it. Altitude buys reaction time and a continuous
+# turn denies a firing solution; nothing else contributes to staying alive, so
+# nothing else is in the loop. Flares stay with the incoming-missile detector,
+# which knows when one is actually inbound.
+loiter_mission: {target_alt: 7000, hysteresis_m: 500, orbit_direction: right,
+  orbit_roll_interval_s: 3.0, orbit_roll_hold_s: 0.6, tick_s: 1.0}
+
 j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_altitude: 500,
   bearing_deadzone_deg: 12, short_ring_min_count: 1, ring_debounce_ticks: 2, ema_reseed_angle_deg: 60,
   rear_commit_deg: 150, rear_release_deg: 90, orbit_direction: right, orbit_roll_hold_s: 0.3,

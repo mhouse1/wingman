@@ -384,6 +384,15 @@ class Controller:
         # and re-applied only when the telemetry climb RATE decays — the
         # eject dive controller's pattern, inverted. AFTERBURNER stays held.
         self._climb_pulse_s = float(_cl_cfg.get("pitch_pulse_s", 1.5))
+        # mission_loiter: survival hold. Altitude buys reaction time and the
+        # turn denies a firing solution, so those are the only two things it does.
+        _lo = (config.get("loiter_mission", {}) or {}) if isinstance(config, dict) else {}
+        self._loiter_target_alt = float(_lo.get("target_alt", 7000))
+        self._loiter_hysteresis_m = float(_lo.get("hysteresis_m", 500))
+        self._loiter_orbit_direction = str(_lo.get("orbit_direction", "right"))
+        self._loiter_orbit_interval_s = float(_lo.get("orbit_roll_interval_s", 3.0))
+        self._loiter_orbit_hold_s = float(_lo.get("orbit_roll_hold_s", 0.6))
+        self._loiter_tick_s = float(_lo.get("tick_s", 1.0))
         self._climb_observe_s = float(_cl_cfg.get("pulse_observe_s", 2.5))
         self._climb_min_rate = float(_cl_cfg.get("min_climb_rate", 30.0))
         # ADR 076 d3: over-rotation ceiling. The spawn guard can hand the
@@ -2781,84 +2790,112 @@ class Controller:
         return True
 
     def mission_loiter(self):
-        """This mission sequence performs a predefined set of maneuvers for the Aaarvark, it flies up and tries to stay up
-        Compatible Jets: F111, F-14, Mig-23, J20
+        """Stay alive: climb to a holding altitude and orbit there.
+
+        Behaviour-driven, not a fixed sequence. The previous implementation was
+        thirteen scripted manoeuvres — nose_up, wingsweep, three afterburner
+        holds, five rolls, two flare drops — executed once with no feedback. It
+        could not tell whether it had actually gained any altitude, it dropped
+        flares at moments unrelated to any threat, and after roughly ninety
+        seconds it simply ended, leaving the aircraft wherever the script had
+        put it.
+
+        The objective here is survival, and survival has exactly two
+        requirements: be high, and keep turning. So the loop reads altitude and
+        decides:
+
+          below the hold band   -> climb
+          inside the hold band  -> orbit with roll pulses
+          telemetry unavailable -> command nothing
+
+        Climbing delegates to ``climb_mode`` (ADR 073) rather than pulsing pitch
+        here: that already owns the pitch axis and carries the fuel floor, the
+        duration cap and the fresh-read confirmation. Reimplementing it would
+        mean a second, untested climb with none of those bounds.
+
+        Flares are deliberately absent. They are driven by incoming-missile
+        detection on the tick loop, which knows when one is inbound; dropping
+        them on a timer wastes the countermeasure and leaves none for the moment
+        it matters.
+
+        Runs until cancelled. Never commands on stale telemetry: an altitude
+        read that has aged out says nothing about where the aircraft is, and a
+        climb ordered on a stale reading is a climb ordered blind.
+
+        @relation(SAF-001, scope=function)
         """
-        # Check if mission is already running
         acquired = self._mission_lock.acquire(blocking=False)
         if not acquired:
             logger.debug("Controller: mission already in progress, skipping")
             return
 
-        logger.info("\033[92mController: mission_loiter - starting mission sequence\033[0m")
+        logger.info("\033[92mController: mission_loiter - holding to stay alive "
+                    "(target %.0f m)\033[0m", self._loiter_target_alt)
         self._mission_complete.clear()
         self._mission_cancel.clear()
 
         def _mission_runner():
+            last_orbit_ts = 0.0
+            last_state = None
+            no_telemetry_since = 0.0
             try:
-                # Execute mission maneuvers (maneuvers log their own activity)
-                self.nose_up(2.0)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after nose_up")
-                    return
-                self.wingsweep()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after wingsweep")
-                    return
-                self.afterburner(10.0)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after afterburner")
-                    return
-                self.afterburner(10.0)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after afterburner")
-                    return
-                self.wingsweep()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after wingsweep")
-                    return
-                self.roll_right(4)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_right")
-                    return
-                self.afterburner(10)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after afterburner")
-                    return
-                self.deploy_flares()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after deploy_flares")
-                    return
-                self.roll_left(10)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_left")
-                    return
-                self.deploy_flares()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after deploy_flares")
-                    return
-                self.roll_right(30)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_right")
-                    return
-                self.roll_left(30)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled")
-                    return
-                #self.nose_down(4.0)
-                #time.sleep(10.0)  # additional wait time to stabilize
-                logger.info("\033[91mController: mission_loiter - sequence complete\033[0m")
+                while not self._mission_cancel.is_set():
+                    if self._exit_event and self._exit_event.is_set():
+                        break
+
+                    snap = (self._analyzer.get_telemetry()
+                            if self._analyzer is not None else None)
+                    now = time.time()
+                    fresh = snap is not None and snap.altitude_fresh
+                    alt = snap.altitude.stable if fresh else None
+
+                    if alt is None:
+                        # Hold whatever attitude the aircraft has. Commanding on
+                        # a stale read is commanding blind.
+                        if not no_telemetry_since:
+                            no_telemetry_since = now
+                            logger.info("Controller: mission_loiter - no fresh "
+                                        "altitude, holding attitude")
+                        self._mission_cancel.wait(timeout=self._loiter_tick_s)
+                        continue
+                    no_telemetry_since = 0.0
+
+                    if alt < self._loiter_target_alt - self._loiter_hysteresis_m:
+                        if last_state != "climb":
+                            logger.info("Controller: mission_loiter - climbing "
+                                        "(%.0f m below %.0f m hold)",
+                                        self._loiter_target_alt - alt,
+                                        self._loiter_target_alt)
+                            last_state = "climb"
+                        # Idempotent while its thread is alive (ADR 070 d8).
+                        self.climb_mode(target_alt=self._loiter_target_alt)
+                    else:
+                        if last_state != "orbit":
+                            logger.info("Controller: mission_loiter - holding at "
+                                        "%.0f m, orbiting %s", alt,
+                                        self._loiter_orbit_direction)
+                            last_state = "orbit"
+                        if now - last_orbit_ts >= self._loiter_orbit_interval_s:
+                            last_orbit_ts = now
+                            roll = (self.roll_right
+                                    if self._loiter_orbit_direction == "right"
+                                    else self.roll_left)
+                            roll(hold_seconds=self._loiter_orbit_hold_s, block=False)
+
+                    self._mission_cancel.wait(timeout=self._loiter_tick_s)
+                logger.info("\033[91mController: mission_loiter - ended\033[0m")
             except Exception:
                 logger.exception("Controller: mission_loiter failed")
             finally:
+                # The loop may have left a roll or a climb running.
+                self._climb_stop.set()
                 self._mission_complete.set()
                 if self._mission_lock.locked():
                     self._mission_lock.release()
 
-        mission_a = threading.Thread(target=_mission_runner, daemon=True)
-        mission_a.start()
+        threading.Thread(target=_mission_runner, daemon=True,
+                         name="MissionLoiter").start()
 
-        # Wait for mission to complete or exit requested
         while not self._mission_complete.wait(timeout=0.05):
             if self._exit_event and self._exit_event.is_set():
                 logger.info("Controller: exit requested, aborting mission wait")

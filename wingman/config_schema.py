@@ -129,6 +129,15 @@ SCHEMA = Section(
                 "y": Leaf(types=(int,), allow_none=True),
             },
         ),
+        # mission_loiter: the survival hold
+        "loiter_mission": Section(children={
+            "target_alt": _num(0),
+            "hysteresis_m": _num(0),
+            "orbit_direction": STR,
+            "orbit_roll_interval_s": SECONDS,
+            "orbit_roll_hold_s": SECONDS,
+            "tick_s": SECONDS,
+        }),
         "enemy_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
         # Design 010 instrumentation
         "return_to_battle": Section(children={
