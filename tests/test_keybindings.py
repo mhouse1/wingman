@@ -81,3 +81,21 @@ def test_emotes_are_documented_but_not_bound():
     assert keybindings.EMOTES["EMOTE5"] == "Good luck"
     bound = {getattr(keybindings, n) for n in GAME_KEYS | HOTKEYS}
     assert not (set(keybindings.EMOTES) & bound), "emote names must not be key values"
+
+
+def test_the_takeover_key_is_watched_and_never_injected():
+    """SAF-001. Two properties that must hold together: wingman watches for it,
+    and wingman never presses it."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY, _WATCHED_MANEUVER_KEYS
+    from wingman.controller import INJECTABLE_KEYS, TAKEOVER_KEYS
+    assert MANUAL_TAKEOVER_KEY in _WATCHED_MANEUVER_KEYS
+    assert MANUAL_TAKEOVER_KEY in TAKEOVER_KEYS
+    assert MANUAL_TAKEOVER_KEY not in INJECTABLE_KEYS
+
+
+def test_the_takeover_key_does_not_collide_with_another_hotkey():
+    import wingman.keybindings as kb
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    others = [v for n, v in vars(kb).items()
+              if n.isupper() and isinstance(v, str) and n != "MANUAL_TAKEOVER_KEY"]
+    assert MANUAL_TAKEOVER_KEY not in others

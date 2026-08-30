@@ -41,6 +41,7 @@ TACTIC_EVADE = "Evade"
 TACTIC_DISENGAGE = "Disengage"
 TACTIC_CLIMB = "Climb"
 TACTIC_ENGAGE = "Engage"
+TACTIC_REGROUP = "Regroup"
 TACTIC_ATTACK_SUPPORT = "AttackSupport"
 
 
@@ -74,6 +75,11 @@ class AnalyzerSnapshot:
     # altitude threshold cannot distinguish a cruise through 4000 m from a
     # 560 m/s dive through it, and on 2026-08-21 18:41 it did not.
     altitude_rate: "float | None" = None
+    # ADR 028 revision 4: friendly / objective minimap icons. Consumed only by
+    # Regroup, which fills the ticks where no enemy renders — 59% of them,
+    # measured 2026-08-30 — and where the tree previously flew the mission
+    # script with nothing steering toward the battle.
+    friendly_contacts: int = 0
 
     @property
     def contacts(self) -> int:
@@ -362,12 +368,24 @@ def has_contacts(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.contacts > 0
 
 
+def has_friendlies(snapshot: AnalyzerSnapshot) -> bool:
+    """Friendly or objective icons visible with no enemy on the minimap.
+
+    ADR 028 revision 4. The enemy check is not redundant: Engage sits above
+    Regroup in the selector and would win anyway, but making the exclusion
+    explicit keeps the condition true to its name if the order is ever
+    changed.
+    """
+    return snapshot.contacts == 0 and snapshot.friendly_contacts > 0
+
+
 def always(_snapshot: AnalyzerSnapshot) -> bool:
     return True
 
 
 def build_tree(bt_cfg: dict, clock=time.time,
-               actuators: "dict | None" = None) -> py_trees.trees.BehaviourTree:
+               actuators: "dict | None" = None,
+               regroup_enabled: bool = False) -> py_trees.trees.BehaviourTree:
     """Construct the ADR 024 selector. Pure construction — no analyzer refs.
 
     ``actuators`` (Phase 3.1b) maps tactic name → ``(start_fn, is_running_fn)``
@@ -475,7 +493,26 @@ def build_tree(bt_cfg: dict, clock=time.time,
             climb_condition = emergency
         climb_leaf = ConditionTactic(TACTIC_CLIMB, climb_condition,
                                      **climb_kwargs)
-        children.insert(len(children) - 2, climb_leaf)   # above Engage
+        # Insert by NAME, not by offset. This was `len(children) - 2`, which
+        # silently meant "above Engage" only while exactly two leaves followed
+        # it; adding Regroup in ADR 028 revision 4 pushed Climb below Engage
+        # and inverted the priority the ADR 073 tests assert.
+        _engage_at = next(i for i, c in enumerate(children)
+                          if c.name == TACTIC_ENGAGE)
+        children.insert(_engage_at, climb_leaf)
+
+    # ADR 028 revision 4. The leaf is added only when regroup is enabled, so
+    # `minimap.regroup_enabled: false` disables the FEATURE rather than half of
+    # it. Gating the navigator mode alone left the leaf still being selected —
+    # 21 selections in a nine-minute run with the flag off — which silently
+    # invalidates any A/B comparison the flag is used for.
+    #
+    # Below Engage: a real target always outranks regrouping. Above
+    # AttackSupport: that leaf is `always`, so anything below it is unreachable.
+    if regroup_enabled:
+        _support_at = next(i for i, c in enumerate(children)
+                           if c.name == TACTIC_ATTACK_SUPPORT)
+        children.insert(_support_at, ConditionTactic(TACTIC_REGROUP, has_friendlies))
 
     root = py_trees.composites.Selector(
         name="TacticSelector",

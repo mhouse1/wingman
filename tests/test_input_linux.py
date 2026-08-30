@@ -359,3 +359,171 @@ def test_listener_loop_takes_its_display_rather_than_reading_the_environment():
     assert "display_name" in sig.parameters
     src = inspect.getsource(input_linux._LinuxXTestKeyboard._listener_loop)
     assert 'os.environ.get("DISPLAY"' not in src
+
+
+# --- ADR 099: ordinary typing must not fly the aircraft ----------------------
+#
+# Observed 2026-08-30 08:27. Before the nested lane the game held focus on the
+# operator's display, so bare single-letter hotkeys were unreachable by ordinary
+# typing — the keys went to the game. Moving the game to its own display freed
+# the operator's keyboard, which is the point, and simultaneously made every
+# hotkey fire from ordinary typing: stray 'm' presses forced GAME_LOBBY three
+# times, cancelling matchmaking, and the session never reached battle. 'z' would
+# have closed the game outright.
+
+CTRL_ALT = (1 << 2) | (1 << 3)
+
+
+def _lane(injection=":3", injected=("p", "u", "i", "k")):
+    from wingman import input_linux as il
+    il.set_injection_display(injection)
+    il.set_injected_keys(injected)
+    return il
+
+
+def test_bare_typing_on_the_operator_display_is_ignored():
+    il = _lane()
+    try:
+        assert il.should_deliver_hotkey(":0", "m", 0) is False
+        assert il.should_deliver_hotkey(":0", "z", 0) is False
+    finally:
+        il.set_injection_display(None)
+
+
+def test_the_modifier_makes_a_hotkey_deliverable():
+    il = _lane()
+    try:
+        assert il.should_deliver_hotkey(":0", "m", CTRL_ALT) is True
+    finally:
+        il.set_injection_display(None)
+
+
+def test_a_partial_modifier_is_not_enough():
+    il = _lane()
+    try:
+        assert il.should_deliver_hotkey(":0", "m", 1 << 2) is False   # ctrl only
+        assert il.should_deliver_hotkey(":0", "m", 1 << 3) is False   # alt only
+    finally:
+        il.set_injection_display(None)
+
+
+def test_bare_keys_still_work_on_the_nested_display():
+    """Typing there requires focusing the game window, which is deliberate."""
+    il = _lane()
+    try:
+        assert il.should_deliver_hotkey(":3", "m", 0) is True
+        assert il.should_deliver_hotkey(":3", "z", 0) is True
+    finally:
+        il.set_injection_display(None)
+
+
+def test_the_dedicated_takeover_key_reaches_the_handler():
+    """SAF-001: Enter is never injected by wingman, so on the injection display
+    there is nothing to discriminate — no timing assumption, no calibration.
+
+    The timing-based attempt it replaced was measured failing: echoes arrived
+    1.67-9.74 s after release against a 1.0 s grace, producing four spurious
+    takeovers in 23 minutes on 2026-08-30."""
+    from wingman.controller import INJECTABLE_KEYS
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    assert MANUAL_TAKEOVER_KEY not in INJECTABLE_KEYS, \
+        "a takeover key wingman injects is indistinguishable from its own press"
+    il = _lane(injected=INJECTABLE_KEYS)
+    try:
+        assert il.should_deliver_hotkey(":3", MANUAL_TAKEOVER_KEY, 0) is True
+    finally:
+        il.set_injection_display(None)
+
+
+def test_takeover_on_the_injection_display_uses_arrow_keys():
+    """SAF-001 names arrow keys alongside i/j/k/l, and wingman never injects
+    them — so on the injection display they are the unambiguous takeover path.
+
+    i/j/k/l cannot serve there: echo discrimination assumes a prompt echo, and
+    on the nested lane under 13 OCR workers echoes arrived 1.67-9.74 s after
+    release against a 1.0 s grace window, causing four spurious takeovers in
+    23 minutes on 2026-08-30. Widening the grace would suppress the operator's
+    own presses for the same seconds, against SAF-001's 2.0 s bound."""
+    il = _lane(injected=("p", "u", "i", "k", "j", "l"))
+    try:
+        for arrow in ("up", "down", "left", "right"):
+            assert il.should_deliver_hotkey(":3", arrow, 0) is True
+        for flight in ("i", "j", "k", "l"):
+            assert il.should_deliver_hotkey(":3", flight, 0) is False
+    finally:
+        il.set_injection_display(None)
+
+
+def test_flight_keys_still_take_over_from_the_operator_display():
+    """The i/j/k/l path is not lost — it moves to the operator's display, where
+    wingman injects nothing and the modifier separates it from typing."""
+    il = _lane(injected=("p", "u", "i", "k", "j", "l"))
+    try:
+        assert il.should_deliver_hotkey(":0", "i", CTRL_ALT) is True
+        assert il.should_deliver_hotkey(":0", "i", 0) is False
+    finally:
+        il.set_injection_display(None)
+
+
+def test_wingmans_own_injected_keys_are_ignored_on_the_injection_display():
+    il = _lane()
+    try:
+        assert il.should_deliver_hotkey(":3", "p", 0) is False
+        assert il.should_deliver_hotkey(":3", "u", 0) is False
+    finally:
+        il.set_injection_display(None)
+
+
+def test_the_on_screen_lane_is_completely_unchanged():
+    """One display, game focused: both filters must be inert."""
+    from wingman import input_linux as il
+    il.set_injection_display(None)
+    for key in ("m", "z", "p", "u"):
+        assert il.should_deliver_hotkey(":0", key, 0) is True
+
+
+def test_every_injectable_key_is_declared():
+    """SAF-007's list is now load-bearing twice: keys missing from it are both
+    left pressed on exit and able to self-trigger their own hotkey."""
+    from wingman.controller import INJECTABLE_KEYS
+    from wingman.keybindings import PADLOCK_CAMERA, MISSION_J20_KEY, NOSE_UP_KEY
+    for k in (PADLOCK_CAMERA, MISSION_J20_KEY, NOSE_UP_KEY, "escape"):
+        assert k in INJECTABLE_KEYS
+
+
+def test_the_handback_key_is_delivered_only_during_manual():
+    """SAF-001: 'u' hands the aircraft back — the key the operator already used
+    for this in GAME_BATTLE.
+
+    It is one wingman injects itself (the game-starting loop presses it), so it
+    is delivered on the injection display ONLY while the takeover is active,
+    where wingman injects nothing but flares and there is nothing it could be
+    confused with."""
+    from wingman.controller import INJECTABLE_KEYS
+    from wingman.keybindings import MISSION_J20_KEY
+    assert MISSION_J20_KEY in INJECTABLE_KEYS, \
+        "if wingman stops injecting 'u', this exception is no longer needed"
+    il = _lane(injected=INJECTABLE_KEYS)
+    manual = {"on": False}
+    il.set_handback_keys((MISSION_J20_KEY,), manual_state_fn=lambda: manual["on"])
+    try:
+        assert il.should_deliver_hotkey(":3", MISSION_J20_KEY, 0) is False
+        manual["on"] = True
+        assert il.should_deliver_hotkey(":3", MISSION_J20_KEY, 0) is True
+    finally:
+        il.set_handback_keys((), manual_state_fn=lambda: False)
+        il.set_injection_display(None)
+
+
+def test_a_broken_manual_predicate_does_not_open_the_gate():
+    from wingman.controller import INJECTABLE_KEYS
+    from wingman.keybindings import MISSION_J20_KEY
+    def boom():
+        raise RuntimeError("state unavailable")
+    il = _lane(injected=INJECTABLE_KEYS)
+    il.set_handback_keys((MISSION_J20_KEY,), manual_state_fn=boom)
+    try:
+        assert il.should_deliver_hotkey(":3", MISSION_J20_KEY, 0) is False
+    finally:
+        il.set_handback_keys((), manual_state_fn=lambda: False)
+        il.set_injection_display(None)

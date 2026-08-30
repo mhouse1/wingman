@@ -180,8 +180,14 @@ flowchart LR
     D --> E[Evade]
     E --> F[Disengage]
     F --> G[Engage]
-    G --> H[AttackSupport]
+    G --> R[Regroup]
+    R --> H[AttackSupport]
 ```
+
+Climb (ADR 073) is inserted above Engage when enabled. It is inserted **by
+name**, not by list offset: the original `len(children) - 2` meant "above
+Engage" only while exactly two leaves followed, and adding Regroup silently
+pushed Climb below Engage until it was fixed.
 
 | Leaf | Condition | Actuation |
 |---|---|---|
@@ -192,7 +198,15 @@ flowchart LR
 | Evade | health threshold — unset, selection-only | none (uncalibrated) |
 | Disengage | all rings empty 30 s (MinimumHold) | `disengage_roll_right` |
 | Engage | any minimap ring occupied | ring-engage geometry (`engage_nav.py`) |
+| Regroup | friendly icons visible and no enemy (ADR 028 rev 4) | steer to the aggregate friendly centroid |
 | AttackSupport | always | fallback |
+
+**Why Regroup exists.** The enemy rings are empty for ~57% of battle ticks, and
+the navigator issued no command on those — the aircraft held its heading until
+it left the arena. Friendly and objective icons mark where the battle is when no
+enemy renders, and the two signals are complementary in practice. It sits below
+Engage (a real target always wins) and above AttackSupport (which is `always`,
+so anything below it is unreachable).
 
 Actuating tactics self-terminate in their own Controller threads (clear timers, budgets, caps) — `ConditionTactic.terminate` is deliberately a no-op so selector churn cannot abort a manoeuvre mid-flight. Tactics that share keys (eject and evade both own AFTERBURNER) are excluded both by selector priority **and** a runtime yield check (ADR 070 d11), because priority orders selections, not thread lifetimes.
 
@@ -396,6 +410,8 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `j20_mission` / `minimap` | Ring-engage geometry, orbit cadence, blob band (Design 003) |
 | `telemetry` | Plausibility bounds, smoothing, `eject_closed_loop` thresholds (ADR 038/067/069) |
 | `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make rd NESTED=0` |
+| `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
+| `return_to_battle` | Design 010 instrumentation: colour trigger `region`, narrower `ocr_region` for the once-per-crossing confirmation, and partial `text` tokens |
 | `focus_guard` | Suppress injection when the game lacks focus (ADR 098); follows the nested display automatically |
 | `performance` | Regression gate thresholds and histogram output |
 
@@ -562,5 +578,6 @@ Player presses NOSE_UP / NOSE_DOWN / ROLL_LEFT / ROLL_RIGHT during GAME_BATTLE
 | [072](adr/072-calibration-screenshot-consolidation.md) | Calibration screenshots consolidated onto the gate corpus |
 | [098](adr/098-focus-guard-for-key-injection.md) | Focus guard for key injection |
 | [099](adr/099-nested-display-lane-for-unattended-operation.md) | Nested display lane for unattended operation |
+| [028 rev 4](adr/028-enemy-quadrant-detection-and-nose-orientation.md) | Regroup: steer to friendlies when no enemy is on the minimap |
 
 *(This index is incomplete: ADRs 073-097 are not yet listed.)*

@@ -41,8 +41,16 @@ ALT_FLIGHT_KEYS = ('up', 'down', 'left', 'right')
 # Anything held programmatically from this set MUST be bracketed with
 # _inc_programmatic_key / release grace, or its XTest auto-repeats read as the
 # player and self-cancel the mission (ADR 070 d4).
+# SAF-001: dedicated manual-takeover key. Deliberately one wingman NEVER
+# injects — on a shared display its own presses and the operator's are
+# indistinguishable in content, and telling them apart by timing was measured
+# failing (echoes 1.67-9.74 s late against a 1.0 s grace, four spurious
+# takeovers in 23 minutes, 2026-08-30). Enter is chosen for size: it is found
+# without looking, which is the point of a control you reach for in a hurry.
+MANUAL_TAKEOVER_KEY = 'enter'
+
 _WATCHED_MANEUVER_KEYS = (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
-                          *ALT_FLIGHT_KEYS)
+                          *ALT_FLIGHT_KEYS, MANUAL_TAKEOVER_KEY)
 
 # --- Wingman's own hotkeys --------------------------------------------------
 # These are wingman controls, not game controls: they are grabbed from the

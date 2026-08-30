@@ -418,3 +418,167 @@ def test_capture_without_freshness_tracking_allows_press(monkeypatch):
 
     analyzer.game_state = GameState.GAME_LOBBY
     time.sleep(0.2)
+
+
+# --- SAF-001: manual takeover hands over the aircraft completely -------------
+#
+# Observed 2026-08-30: after takeover the aircraft climbed 550 m to 7655 m on
+# its own, with 'e' (afterburner), 'p' (padlock) and 'k' (pitch) still held down
+# on the X server. The FSM transition stopped the SELECTION but not the presses
+# already in flight, and the operator could not fly.
+
+def _ctrl_in_state(state):
+    from wingman.controller import Controller
+    import threading
+    c = Controller.__new__(Controller)
+    c._analyzer = type("A", (), {"game_state": state})()
+    c._simulate_os_input = False
+    c._programmatic_key_lock = threading.Lock()
+    c._programmatic_key_counts = {}
+    return c
+
+
+def test_flight_keys_are_suppressed_during_manual_takeover():
+    from wingman.analyzer import GameState
+    from wingman.keybindings import NOSE_UP_KEY, AFTERBURNER_KEY
+    c = _ctrl_in_state(GameState.GAME_BATTLE_MANUAL)
+    assert c._manual_takeover_active() is True
+    for key in (NOSE_UP_KEY, AFTERBURNER_KEY, "p"):
+        assert key != "flares"
+
+
+def test_flares_remain_the_sole_automation_during_takeover():
+    """The one exception: a defensive reflex the operator cannot reasonably win,
+    and it commands no flight axis."""
+    import pathlib
+    src = pathlib.Path("wingman/controller.py").read_text()
+    guard = src[src.index("if key != DEPLOY_FLARES_KEY and self._manual_takeover_active():"):]
+    assert "return" in guard[:200]
+
+
+def test_the_guard_sits_at_the_single_key_press_choke_point():
+    """Enforcing at each caller would leave wingman holding a control surface
+    the first time one is missed — there are mission threads, tactic holds,
+    weapon and padlock loops and recovery paths."""
+    import pathlib
+    src = pathlib.Path("wingman/controller.py").read_text()
+    body = src[src.index("def _execute_key_press("):src.index("def _execute_key_press(") + 2000]
+    assert "_manual_takeover_active()" in body
+
+
+def test_takeover_is_driven_from_the_fsm_entry_hook():
+    """However takeover was reached — maneuver key, arrow, or any future path."""
+    import pathlib
+    az = pathlib.Path("wingman/analyzer.py").read_text()
+    hook = az[az.index("def on_enter_GAME_BATTLE_MANUAL"):]
+    assert "MANUAL_TAKEOVER" in hook[:600]
+    mn = pathlib.Path("wingman/main.py").read_text()
+    assert "GameEvent.MANUAL_TAKEOVER, ctrl.release_for_manual_takeover" in mn
+
+
+def test_release_covers_every_injectable_key():
+    import pathlib
+    src = pathlib.Path("wingman/controller.py").read_text()
+    fn = src[src.index("def release_for_manual_takeover"):]
+    assert "INJECTABLE_KEYS" in fn[:1400]
+    for stop in ("_eject_stop", "_me_stop", "_climb_stop", "_sg_stop", "cancel_mission"):
+        assert stop in fn[:1400], stop
+
+
+# --- SAF-001: a respawn does not revoke the operator's takeover --------------
+#
+# Measured 2026-08-30: both takeover windows ended on respawn detection, at 15 s
+# and 85 s. Taking control and losing the aircraft to the next death is not
+# manual control in any useful sense.
+
+def test_respawn_no_longer_revokes_manual_by_default():
+    import pathlib, yaml
+    cfg = yaml.safe_load(pathlib.Path("wingman/config.yaml").read_text())
+    assert cfg["mission"]["manual_takeover"]["persist_through_respawn"] is True
+
+
+def test_the_respawn_reset_is_gated_on_the_flag():
+    import pathlib
+    src = pathlib.Path("wingman/tick_handlers.py").read_text()
+    blk = src[src.index("if self._manual_persists_through_respawn:"):]
+    assert 'analyzer.trigger_event("respawn_reset")' in blk[:900], \
+        "the reset must still be reachable when the flag is off"
+
+
+def test_no_auto_restart_is_promised_while_manual():
+    """The 2026-07-31 07:42 failure this design replaces was not the persistence
+    itself but a restart promised and never fired — the scheduler was
+    GAME_BATTLE-gated while the FSM sat in manual."""
+    import pathlib
+    src = pathlib.Path("wingman/tick_handlers.py").read_text()
+    assert "if not (self._manual_persists_through_respawn" in src
+    assert "GameState.GAME_BATTLE_MANUAL)" in src
+
+
+def test_the_operator_can_hand_control_back():
+    """Persistence needs a deliberate way out or the session is stuck in manual
+    until the round ends."""
+    import pathlib
+    src = pathlib.Path("wingman/controller.py").read_text()
+    assert "def _release_manual_if_active" in src
+    assert 'self._analyzer.trigger_event("manual_release")' in src
+    hk = src[src.index("def _on_auto_mission_hotkey"):]
+    assert "GameState.GAME_BATTLE_MANUAL:" in hk[:1400]
+    assert "_release_manual_if_active()" in hk[:1400]
+
+
+def test_manual_release_is_a_real_fsm_transition():
+    from wingman.analyzer import _FSM_TRANSITIONS as TRANSITIONS
+    t = [x for x in TRANSITIONS if x["trigger"] == "manual_release"]
+    assert len(t) == 1
+    assert t[0]["source"] == "GAME_BATTLE_MANUAL" and t[0]["dest"] == "GAME_BATTLE"
+
+
+# --- Two instances must never fly the same aircraft --------------------------
+#
+# Observed 2026-08-30: two wingman instances ran for over an hour, both
+# injecting into the same display. A manual takeover in one left the other still
+# commanding the aircraft — reported as "alternate inputs overriding my own".
+# Neither log said anything, because each instance was behaving correctly on its
+# own; the fault only exists between them.
+
+def test_a_second_instance_is_refused():
+    import uuid
+    from wingman.main import _claim_single_instance
+    name = f"wingman-test-{uuid.uuid4()}"   # never the production name
+    first = _claim_single_instance(name)
+    try:
+        assert first is not None
+        assert _claim_single_instance(name) is None, "second instance must be refused"
+    finally:
+        if first is not None:
+            first.close()
+
+
+def test_the_claim_leaves_no_stale_lock():
+    """Abstract socket, not a PID file: the kernel releases the name however the
+    process dies, so a SIGKILLed instance cannot block the next start."""
+    import uuid
+    from wingman.main import _claim_single_instance
+    name = f"wingman-test-{uuid.uuid4()}"
+    first = _claim_single_instance(name)
+    assert first is not None
+    first.close()                          # simulate death
+    second = _claim_single_instance(name)  # must succeed immediately
+    try:
+        assert second is not None
+    finally:
+        second.close()
+
+
+def test_the_guard_runs_before_anything_touches_the_game():
+    import pathlib
+    # Comments are stripped: main.py mentions these names in prose too, and
+    # matching that would check the wrong thing.
+    src = "\n".join(
+        ln for ln in pathlib.Path("wingman/main.py").read_text().splitlines()
+        if not ln.strip().startswith("#"))
+    claim = src.index("_instance_lock = _claim_single_instance()")
+    for later in ("set_injection_display(nested_display)", "cap = Capture(",
+                  "ctrl = Controller("):
+        assert src.index(later) > claim, f"{later} must come after the claim"

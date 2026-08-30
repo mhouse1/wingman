@@ -79,6 +79,7 @@ class GameEvent(Enum):
     CANCEL_MISSION = auto()            # ()          — transition requires mission cancel
     START_GAME_STARTING_LOOP = auto()  # ()          — entered GAME_STARTING
     LOBBY_PLAY_CLICK = auto()          # (crop, frame)
+    MANUAL_TAKEOVER = auto()           # SAF-001: operator has the aircraft
     LOBBY_POPUP_CLICK = auto()         # (crop,)
     LOBBY_POPUP_ABSENT = auto()        # ()          — popup batch completed, none detected
     STALL_RECOVERY_ACTION = auto()     # (crop,)     — stall-recovery screen detected (ADR 084)
@@ -764,6 +765,10 @@ _FSM_TRANSITIONS = [
     {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL", "GAME_BATTLE_EJECT"], "dest": "GAME_END_B"},
     {"trigger": "manual_takeover",    "source": ["GAME_BATTLE", "GAME_BATTLE_EJECT"], "dest": "GAME_BATTLE_MANUAL"},
     {"trigger": "respawn_reset",      "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
+    # SAF-001: the operator hands the aircraft back explicitly. Without
+    # this, takeover survived only until the next death — measured
+    # 2026-08-30 at 15 s and 85 s, both ended by respawn detection.
+    {"trigger": "manual_release",     "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
     {"trigger": "eject_started",      "source": "GAME_BATTLE",            "dest": "GAME_BATTLE_EJECT"},
     {"trigger": "eject_complete",     "source": "GAME_BATTLE_EJECT",      "dest": "GAME_BATTLE"},
     {"trigger": "manual_force_battle", "source": "*",                    "dest": "GAME_BATTLE"},
@@ -794,6 +799,7 @@ def _scan_minimap_components(
     min_blob_px: int,
     max_blob_px: int,
     circle_mask=None,
+    hue_wraps: bool = True,
 ):
     """Per-component polar scan of the minimap crop (Design 003 revision 3).
 
@@ -813,10 +819,15 @@ def _scan_minimap_components(
         circle_mask = _minimap_circle_mask(width, height, radius_px)
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
-    # Always include the wrap-around red range (hue 170–180), as detect_enemy_red does
-    wrap_lower = np.array([170, hsv_lower[1], hsv_lower[2]], dtype=np.uint8)
-    wrap_upper = np.array([180, hsv_upper[1], hsv_upper[2]], dtype=np.uint8)
-    mask |= cv2.inRange(hsv, wrap_lower, wrap_upper)
+    # Red straddles the hue origin, so the enemy scan must also take the
+    # 170-180 band, as detect_enemy_red does. ADR 028 revision 4 reuses this
+    # scan for the friendly icons, whose hue sits mid-range: adding the
+    # wrap-around band there would fold red enemies into the friendly count and
+    # steer the aircraft at the thing it is meant to be avoiding.
+    if hue_wraps:
+        wrap_lower = np.array([170, hsv_lower[1], hsv_lower[2]], dtype=np.uint8)
+        wrap_upper = np.array([180, hsv_upper[1], hsv_upper[2]], dtype=np.uint8)
+        mask |= cv2.inRange(hsv, wrap_lower, wrap_upper)
     mask &= circle_mask
     n_labels, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
     centre_x = (width - 1) / 2.0
@@ -923,6 +934,28 @@ class GameStateAnalyzer:
         # MINIMAP red-icon scan parameters (Design 003 / ADR 028)
         minimap_cfg = config.get("minimap", {})
         self._minimap_mask_radius_frac = float(minimap_cfg.get("mask_radius_frac", 0.93))
+        # ADR 028 revision 4: friendly / objective icons, used only when no
+        # enemy is on the minimap. Measured on the Design 010 frames at hue
+        # 40-85; deliberately NOT the enemy bounds and never hue-wrapped.
+        _friendly_cfg = minimap_cfg.get("friendly_hsv", {}) or {}
+        self._friendly_hsv_lower = np.array(
+            _friendly_cfg.get("lower", [40, 90, 90]), dtype=np.uint8)
+        self._friendly_hsv_upper = np.array(
+            _friendly_cfg.get("upper", [85, 255, 255]), dtype=np.uint8)
+        # Design 010 instrumentation: map-boundary polyline and the
+        # RETURN TO BATTLE banner. Nothing steers on these yet.
+        _b_cfg = minimap_cfg.get("boundary_hsv", {}) or {}
+        self._boundary_hsv_lower = np.array(_b_cfg.get("lower", [8, 120, 120]), dtype=np.uint8)
+        self._boundary_hsv_upper = np.array(_b_cfg.get("upper", [28, 255, 255]), dtype=np.uint8)
+        self._boundary_min_px = int(minimap_cfg.get("boundary_min_px", 20))
+        self._boundary_min_span_frac = float(
+            minimap_cfg.get("boundary_min_span_frac", 0.5))
+        _rtb = config.get("return_to_battle", {}) or {}
+        self._rtb_region = tuple(_rtb.get("region", [0.36, 0.32, 0.64, 0.378]))
+        self._rtb_min_frac = float(_rtb.get("min_red_frac", 0.10))
+        self._rtb_ocr_region = tuple(_rtb.get("ocr_region", [0.44, 0.32, 0.56, 0.378]))
+        self._rtb_tokens = [str(t).upper() for t in _rtb.get(
+            "text", ["RETURNTO", "TOBATTLE", "NTOBAT", "RNTOBAT", "TOBAT"])]
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
@@ -1710,6 +1743,11 @@ class GameStateAnalyzer:
 
     def on_enter_GAME_BATTLE_MANUAL(self):
         logger.info("FSM: entering GAME_BATTLE_MANUAL — manual takeover active, auto-restart suppressed")
+        # SAF-001: stop every writer and release every key, however takeover was
+        # reached. The transition alone leaves tactic holds running in their own
+        # threads and keys already pressed still pressed — X holds key state,
+        # not this process.
+        self.emit(GameEvent.MANUAL_TAKEOVER)
 
     def on_enter_GAME_BATTLE_EJECT(self):
         logger.info("FSM: entering GAME_BATTLE_EJECT — eject sequence active")
@@ -3546,6 +3584,169 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.warning("Analyzer: detect_enemy_map_bearing failed: %s", e)
             return empty
+
+    def detect_map_boundary(self, frame) -> "tuple | None":
+        """Nearest map-boundary point on the minimap, or None.
+
+        Design 010, INSTRUMENTATION ONLY — nothing steers on this yet. Returns
+        ``(nearest_dist_frac, forward_offset_frac)`` in units of the minimap
+        radius, with forward measured along the nose (up). Positive forward
+        offset means the boundary lies ahead.
+
+        Measured on the Design 010 frames, across three different maps
+        including a night one: Step0 (flying away) 0.59 / -0.59, Step1 (about
+        to cross) 0.10 / +0.09, Step2 (outside) 0.62 / +0.61. The boundary is a
+        HUD overlay drawn at a constant colour — hue 16.9-18.5 while the map
+        background ranged V 66.6-118.4 — so the mask does not care which map is
+        loaded.
+        """
+        if self.crops is None or "MINIMAP" not in self.crops:
+            return None
+        try:
+            crop = get_crop(frame, *self.crops["MINIMAP"][:4])
+            height, width = crop.shape[:2]
+            radius = min(width, height) / 2.0
+            if radius <= 0:
+                return None
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, self._boundary_hsv_lower, self._boundary_hsv_upper)
+            cache = self._minimap_circle_cache
+            if cache is None or cache[0] != width or cache[1] != height:
+                r_px = self._minimap_mask_radius_frac * radius
+                cache = (width, height, _minimap_circle_mask(width, height, r_px))
+                self._minimap_circle_cache = cache
+            mask &= cache[2]
+            # The boundary is a LINE. Requiring spatial coherence is not
+            # polish: live 2026-08-30, a pixel-count-only mask read a median
+            # 0.23R with the boundary "ahead" on a 52% coin flip, which is
+            # terrain in the amber hue band (sand, sunlit rock), not a map
+            # edge. Measured on the Design 010 frames the real line spans
+            # 0.85-1.62 R while the noise components span 0.01 R, so the
+            # separation is close to two orders of magnitude.
+            n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+                (mask > 0).astype(np.uint8), connectivity=8)
+            min_span = self._boundary_min_span_frac * radius
+            keep = [i for i in range(1, n_labels)
+                    if max(stats[i, cv2.CC_STAT_WIDTH],
+                           stats[i, cv2.CC_STAT_HEIGHT]) >= min_span]
+            if not keep:
+                return None
+            mask = np.isin(labels, keep)
+            ys, xs = np.nonzero(mask)
+            if len(xs) < self._boundary_min_px:
+                return None
+            cx = (width - 1) / 2.0
+            cy = (height - 1) / 2.0
+            dx = xs - cx
+            dy = ys - cy
+            dist = np.hypot(dx, dy)
+            i = int(np.argmin(dist))
+            return (float(dist[i] / radius), float(-dy[i] / radius))
+        except Exception as e:
+            logger.warning("Analyzer: detect_map_boundary failed: %s", e)
+            return None
+
+    def detect_return_to_battle(self, frame) -> bool:
+        """True while the RETURN TO BATTLE banner is on screen (Design 010).
+
+        Colour test rather than OCR: the plate separates at 0.390 red fraction
+        against 0.000-0.007 on frames without it, and instrumentation must not
+        add an OCR crop to the tick budget. EJECTED occupies the same position
+        with a dark plate and does NOT match, which is the distinction that
+        matters — one is a warning, the other is the outcome.
+        """
+        try:
+            x1, y1, x2, y2 = self._rtb_region
+            h, w = frame.shape[:2]
+            crop = frame[int(y1 * h):int(y2 * h), int(x1 * w):int(x2 * w)]
+            if crop.size == 0:
+                return False
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            m = cv2.inRange(hsv, np.array([0, 90, 60], np.uint8),
+                            np.array([10, 255, 200], np.uint8))
+            m |= cv2.inRange(hsv, np.array([170, 90, 60], np.uint8),
+                             np.array([179, 255, 200], np.uint8))
+            frac = float((m > 0).mean())
+            # Logged so min_red_frac can be tuned from the distribution of real
+            # and false triggers rather than from the four calibration frames.
+            # Raising it would cut wasted confirmations but risks MISSES, which
+            # are the invisible failure here — OCR only ever retracts, never
+            # adds — so it is left permissive and arbitrated instead.
+            if frac >= self._rtb_min_frac:
+                logger.debug("RTB: red_frac=%.3f (threshold %.3f)",
+                             frac, self._rtb_min_frac)
+            return bool(frac >= self._rtb_min_frac)
+        except Exception as e:
+            logger.warning("Analyzer: detect_return_to_battle failed: %s", e)
+            return False
+
+    def confirm_return_to_battle_async(self, frame, on_result) -> None:
+        """OCR the banner ONCE per crossing to confirm the colour verdict.
+
+        The colour test decides in 0.07 ms and drives the counting; this is the
+        audit trail behind it, so a future red HUD element cannot silently
+        inflate the crossing count. Submitted to the OCR pool rather than run
+        inline: a read costs ~340 ms at p95, which is a fifth of the tick budget
+        and must never land on the tick that detected the crossing.
+        """
+        try:
+            # A NARROWER crop than the colour test uses. The colour test wants
+            # the whole plate for a stable red fraction; the OCR only needs
+            # enough of the middle to match a partial token, and the middle
+            # slice reads in 63 ms against 123 ms for the full banner. Narrower
+            # still (115 px) works for this banner but is not adopted: the
+            # countdown digit shifts the centring, and there is only one banner
+            # frame to validate against.
+            x1, y1, x2, y2 = self._rtb_ocr_region
+            h, w = frame.shape[:2]
+            crop = frame[int(y1 * h):int(y2 * h), int(x1 * w):int(x2 * w)].copy()
+            if crop.size == 0:
+                return
+            executor = self.ocr_executor
+            if executor is None:
+                return
+            # Partial tokens, as the incoming crop does with MING / ARNING. A
+            # narrowed crop degrades characters at the edges — measured reads
+            # include 'ETURNTOBATTLE:' and 'JRNTOBATTE' — so matching the full
+            # string would reject banners that are plainly present.
+            fut = executor.submit(_process_text_region, crop,
+                                  self._rtb_tokens)
+            fut.add_done_callback(
+                lambda f: on_result(f.result()[0], f.result()[2]))
+        except Exception as e:
+            logger.debug("Analyzer: RTB confirmation skipped: %s", e)
+
+    def detect_friendly_map_components(self, frame) -> "list | None":
+        """Friendly / objective minimap icons, same polar form as the enemy scan.
+
+        ADR 028 revision 4. The enemy scan answers "where is the fight?"; this
+        answers "where is the fight when nothing red is visible?", which on the
+        measured frames is 57% of battle ticks. Same return shape, so the
+        navigator can bin it through the identical ring logic.
+        """
+        if self.crops is None or "MINIMAP" not in self.crops:
+            return None
+        try:
+            crop = get_crop(frame, *self.crops["MINIMAP"][:4])
+            height, width = crop.shape[:2]
+            cache = self._minimap_circle_cache
+            if cache is None or cache[0] != width or cache[1] != height:
+                radius_px = self._minimap_mask_radius_frac * min(width, height) / 2.0
+                cache = (width, height, _minimap_circle_mask(width, height, radius_px))
+                self._minimap_circle_cache = cache
+            return _scan_minimap_components(
+                crop,
+                self._friendly_hsv_lower,
+                self._friendly_hsv_upper,
+                self._minimap_mask_radius_frac,
+                self._minimap_min_blob_px,
+                self._minimap_max_blob_px,
+                circle_mask=cache[2],
+                hue_wraps=False,   # green does not straddle the hue origin
+            )
+        except Exception as e:
+            logger.warning("Analyzer: detect_friendly_map_components failed: %s", e)
+            return None
 
     def detect_enemy_map_components(self, frame) -> "list | None":
         """Per-component polar scan of the MINIMAP crop (Design 003 revision 3).

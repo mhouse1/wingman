@@ -178,6 +178,55 @@ _XKEY_ALIASES = {
 # lane. Manual takeover is a safety property, so the two displays are split:
 # injection reads this override, observation keeps reading os.environ.
 _injection_display = None
+_injected_keys = frozenset()
+# SAF-001: flight-control and arrow keys must ALWAYS reach the handler, even on
+# the injection display where wingman presses them itself. Discriminating
+# wingman's own echoes from the operator's hand is SAF-001.1's job and belongs
+# to `_programmatic_key_counts` plus its post-release grace window, which is the
+# mechanism that ran for a year before the nested lane existed — injection and
+# observation shared one display then, so every injected maneuver key echoed
+# back and was correctly ignored.
+#
+# Filtering them here instead silently removed manual takeover: with the game on
+# its own display, pressing i/j/k/l at the game window did nothing at all.
+_takeover_keys = frozenset()
+# SAF-001: keys the operator uses to hand the aircraft BACK. Delivered on the
+# injection display too, but only while the takeover is active — wingman
+# injects nothing during manual except flares, so there is nothing they could
+# be confused with. Outside manual they stay filtered, because wingman does
+# press them itself ('u' starts the J20 mission).
+_handback_keys = frozenset()
+_manual_state_fn = None
+
+
+def set_handback_keys(keys, manual_state_fn=None) -> None:
+    """Declare the hand-back keys and how to ask whether manual is active."""
+    global _handback_keys, _manual_state_fn
+    _handback_keys = {str(k).lower() for k in (keys or ())}
+    if manual_state_fn is not None:
+        _manual_state_fn = manual_state_fn
+
+
+def _manual_active() -> bool:
+    try:
+        return bool(_manual_state_fn and _manual_state_fn())
+    except Exception:
+        return False
+
+# ADR 099: X modifier mask required for hotkeys observed on the OPERATOR's
+# display while the nested lane is active. ControlMask (1<<2) | Mod1Mask (1<<3).
+#
+# Before the nested lane the game held focus on the operator's display, so bare
+# single-letter hotkeys were unreachable by ordinary typing — the keys went to
+# the game. Moving the game to its own display freed the operator's keyboard,
+# which is the point, and simultaneously made every hotkey fire from ordinary
+# typing: observed 2026-08-30, stray 'm' presses forced GAME_LOBBY three times
+# and cancelled matchmaking so the session never reached battle. 'z' would have
+# closed the game outright.
+#
+# On the NESTED display bare keys still work: the only way to type there is to
+# focus the game window, which is an explicit act.
+_OPERATOR_MOD_MASK = (1 << 2) | (1 << 3)
 
 
 def set_injection_display(display_name) -> None:
@@ -196,6 +245,81 @@ def set_injection_display(display_name) -> None:
 def _inject_display_name() -> str:
     """Display for XTest injection: the override if set, else DISPLAY."""
     return _injection_display or os.environ.get("DISPLAY", ":0").strip()
+
+
+def set_takeover_keys(keys) -> None:
+    """Declare the keys that must never be filtered (SAF-001)."""
+    global _takeover_keys
+    _takeover_keys = {str(k).lower() for k in (keys or ())}
+
+
+def set_injected_keys(keys) -> None:
+    """Declare the keys wingman itself injects (ADR 099).
+
+    On the INJECTION display these are wingman's own keystrokes, never the
+    operator's, and must not fire operator hotkeys. Before the nested lane this
+    could not happen — injection went to one display and observation to another —
+    so adding the second listener introduced it.
+
+    Observed 2026-08-30 08:27: wingman's own 'u', 'p' and 'm' injections fired
+    the J20-mission, padlock and force-lobby hotkeys, which drove the FSM into a
+    GAME_STARTING/GAME_LOBBY oscillation that never reached battle.
+
+    Filtering by display is race-free, unlike counting presses and debiting them
+    on observation: XRecord delivery is asynchronous, so a count can already
+    have been decremented by the time its own event arrives. The maneuver path
+    needs a post-release grace window for exactly that reason.
+    """
+    global _injected_keys
+    _injected_keys = {str(k).lower() for k in (keys or ())}
+
+
+def should_deliver_hotkey(display_name: str, key_name: str, state: int) -> bool:
+    """Should an observed keypress fire its operator hotkey? ADR 099.
+
+    Two filters, and they apply to different displays:
+
+    - On the INJECTION display, a key wingman injects is wingman's own. Filtering
+      by display is race-free, unlike counting presses and debiting them on
+      observation, because XRecord delivery is asynchronous.
+    - On the OPERATOR's display, while the game lives elsewhere, a bare keypress
+      is ordinary typing and must not drive the aircraft.
+
+    With no nested lane there is one display, the game holds focus on it, and
+    both filters are inert — the on-screen lane behaves exactly as before.
+    """
+    if _injection_display is None:
+        return True
+    if display_name == _injection_display:
+        # SAF-001: the hand-back key gets through while the operator holds the
+        # aircraft. Wingman injects nothing during manual but flares, so this
+        # cannot be one of its own presses; outside manual it stays filtered
+        # because wingman does press it itself.
+        if _manual_active() and key_name.lower() in _handback_keys:
+            return True
+        # SAF-001: takeover on this display uses only keys wingman NEVER injects
+        # — ENTER and the arrow keys. On a shared display wingman's own presses
+        # and the operator's are indistinguishable in content, and telling them
+        # apart by timing was measured failing: echoes arrived 1.67-9.74 s after
+        # release against a 1.0 s grace, producing four spurious takeovers in
+        # 23 minutes on 2026-08-30. A key wingman never presses has nothing to
+        # discriminate.
+        # — the arrow keys, which the requirement names explicitly alongside
+        # i/j/k/l. For i/j/k/l here the two sources are indistinguishable:
+        #
+        # Echo discrimination (SAF-001.1) assumes an injected key echoes back
+        # promptly, and it did while injection and observation shared one
+        # display. On the nested lane, under 13 OCR workers, echoes were
+        # measured arriving 1.67-9.74 s after release against a 1.0 s grace
+        # window — four spurious takeovers in 23 minutes on 2026-08-30, each
+        # dropping the aircraft out of automation mid-round.
+        #
+        # Widening the grace is not a fix: it would suppress the operator's own
+        # presses for the same seconds, against SAF-001's 2.0 s cessation bound.
+        # Arrow keys carry no such ambiguity, so takeover on the injection
+        # display is unconditional and race-free through them.
+        return key_name.lower() not in _injected_keys
+    return (state & _OPERATOR_MOD_MASK) == _OPERATOR_MOD_MASK
 
 
 def _observe_display_names() -> "list[str]":
@@ -279,7 +403,7 @@ def _linux_key_event(key: str, event_type) -> None:
     not die with this client).
     """
     _ensure_xauthority()
-    from Xlib import XK as _XK
+    from Xlib import X as _X, XK as _XK
     from Xlib.ext import xtest as _xtest
     xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
     keysym = _XK.string_to_keysym(xk_name)
@@ -534,6 +658,10 @@ class _LinuxXTestKeyboard:
                         if not entry:
                             continue
                         key_name, cb = entry
+                        if not should_deliver_hotkey(
+                                display_name, key_name,
+                                getattr(event, "state", 0)):
+                            continue
                         ev_obj = _XKeyEvent(name=key_name,
                                             is_injected=bool(event.send_event))
                         try:

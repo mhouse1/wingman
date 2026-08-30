@@ -102,6 +102,30 @@ def start(display: str, size: str) -> int:
               "attach to. Run this target without the nested env.", file=sys.stderr)
         return 1
 
+    # A server killed with SIGKILL, or one that crashed, leaves /tmp/.XN-lock
+    # behind and every later start fails with "Server is already active for
+    # display N" — reported here only as a 15 s timeout, which hides the cause.
+    # For an unattended soak that is fatal: one crash and no session starts
+    # again. Remove the lock only when no live Xwayland owns the display, so a
+    # genuinely running server is never disturbed.
+    lock = f"/tmp/.X{display.lstrip(':')}-lock"
+    if os.path.exists(lock):
+        try:
+            from wingman.game_shutdown import find_nested_display_pids
+            owners = find_nested_display_pids(display)
+        except Exception:
+            owners = []
+        if owners:
+            print(f"ERROR: {display} is owned by pid(s) {owners} but does not "
+                  f"answer — not removing {lock}", file=sys.stderr)
+            return 1
+        try:
+            os.unlink(lock)
+            print(f"removed stale {lock} (no server owns {display})")
+        except OSError as e:
+            print(f"ERROR: cannot remove stale {lock}: {e}", file=sys.stderr)
+            return 1
+
     log = open(SERVER_LOG, "ab", buffering=0)
     try:
         subprocess.Popen(

@@ -642,3 +642,91 @@ class TestDiveRecoveryRespawnGuard:
         cond(make_snap(is_respawning=True, altitude=None, altitude_rate=None))
         assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is False, \
             "guard did not re-arm on the second respawn"
+
+
+# --- ADR 028 revision 4: the Regroup leaf ------------------------------------
+#
+# The revision-4 change was first wired inside _actuate_engage only, which is
+# reachable solely when the Engage leaf is selected — and Engage requires
+# contacts. So regroup, whose entire purpose is the no-contact case, sat behind
+# a condition demanding contacts, and fired 5 times in a 2-hour session. The
+# leaf is what makes it reachable.
+
+from wingman.behavior_tree import (TACTIC_REGROUP, TACTIC_ENGAGE,
+                                   TACTIC_ATTACK_SUPPORT, has_friendlies)
+
+
+def _battle_snap(**kw):
+    base = dict(health=100, missiles=4, flares=4, ring_short=0, ring_mid=0,
+                ring_long=0, enemy_absent_seconds=0.0, altitude=5000.0,
+                is_respawning=False, incoming_detected=False,
+                mission_running=True, game_state=GameState.GAME_BATTLE)
+    base.update(kw)
+    return AnalyzerSnapshot(**base)
+
+
+def _select(snap):
+    tree = build_tree({}, regroup_enabled=True)
+    writer = make_snapshot_writer()
+    writer.set("snapshot", snap)
+    tree.tick()
+    return selected_tactic(tree)
+
+
+def test_regroup_is_selected_when_only_friendlies_are_visible():
+    assert _select(_battle_snap(friendly_contacts=3)) == TACTIC_REGROUP
+
+
+def test_an_enemy_contact_outranks_regroup():
+    assert _select(_battle_snap(ring_long=1, friendly_contacts=3)) == TACTIC_ENGAGE
+
+
+def test_regroup_yields_to_attack_support_when_nothing_is_visible():
+    assert _select(_battle_snap()) == TACTIC_ATTACK_SUPPORT
+
+
+def test_regroup_sits_above_attack_support_in_the_selector():
+    """AttackSupport is `always`, so anything below it is unreachable."""
+    tree = build_tree({}, regroup_enabled=True)
+    names = [c.name for c in tree.root.children]
+    assert names.index(TACTIC_REGROUP) < names.index(TACTIC_ATTACK_SUPPORT)
+    assert names.index(TACTIC_ENGAGE) < names.index(TACTIC_REGROUP)
+
+
+def test_has_friendlies_excludes_the_enemy_case_explicitly():
+    assert has_friendlies(_battle_snap(friendly_contacts=2)) is True
+    assert has_friendlies(_battle_snap(ring_mid=1, friendly_contacts=2)) is False
+    assert has_friendlies(_battle_snap()) is False
+
+
+def test_friendly_contacts_defaults_to_zero_for_existing_callers():
+    assert _battle_snap().friendly_contacts == 0
+
+
+def test_climb_stays_above_engage_when_leaves_are_added():
+    """Regression for a positional insert. Climb was placed at
+    `len(children) - 2`, which meant "above Engage" only while exactly two
+    leaves followed. Adding Regroup silently inverted the ADR 073 priority and
+    broke two climb tests — the ordering must hold by name, not by count."""
+    tree = build_tree({"climb": {"enabled": True}}, regroup_enabled=True)
+    names = [c.name for c in tree.root.children]
+    if TACTIC_CLIMB in names:
+        assert names.index(TACTIC_CLIMB) < names.index(TACTIC_ENGAGE)
+        assert names.index(TACTIC_ENGAGE) < names.index(TACTIC_REGROUP)
+
+
+def test_the_flag_disables_the_whole_feature_not_half_of_it():
+    """Live 2026-08-30: `regroup_enabled: false` still produced 21 Regroup
+    selections in nine minutes, because the flag gated only the navigator mode
+    while the leaf was added unconditionally. A flag that half-disables a
+    feature silently invalidates any A/B run against it."""
+    off = [c.name for c in build_tree({}, regroup_enabled=False).root.children]
+    on = [c.name for c in build_tree({}, regroup_enabled=True).root.children]
+    assert TACTIC_REGROUP not in off
+    assert TACTIC_REGROUP in on
+
+
+def test_disabling_regroup_leaves_the_rest_of_the_selector_intact():
+    off = [c.name for c in build_tree({}, regroup_enabled=False).root.children]
+    assert TACTIC_ENGAGE in off and TACTIC_ATTACK_SUPPORT in off
+    assert off.index(TACTIC_ENGAGE) < off.index(TACTIC_ATTACK_SUPPORT)

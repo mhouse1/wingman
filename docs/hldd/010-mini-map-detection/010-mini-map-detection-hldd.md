@@ -49,10 +49,13 @@ outward, since the navigator has no term opposing them. And "battle is typically
 central" is a statement about the common case, while ejection is a tail event; a
 guard exists for the tail.
 
-There is no boundary signal anywhere in the codebase today — no crop, no
-detector, no tactic. `grep` for `RETURN TO BATTLE` returns nothing. No tactic in
-the selector takes horizontal position as an input at all: Climb (ADR 073) keys
-on altitude alone, and Engage keys on contacts.
+When this was written there was no boundary signal anywhere in the codebase —
+no crop, no detector, no tactic; `grep` for `RETURN TO BATTLE` returned nothing.
+The detectors described under *Implementation status* below have since been
+added, but they only **measure**: no tactic in the selector takes horizontal
+position as an input, so nothing yet steers on the boundary. Climb (ADR 073)
+keys on altitude alone, Engage on enemy contacts, and Regroup (ADR 028 rev 4) on
+friendly icons — a proxy for the battle's location, not for the map edge.
 
 ### The sequence
 
@@ -196,6 +199,94 @@ flowchart TB
   ahead -->|no| clear["Clear. Yield to the normal tactics"]
 ```
 
+## Implementation status
+
+The **instrumentation is built and running**; the guard is not. Nothing steers
+on the boundary yet. This split was deliberate: the question "did the ADR 028
+change reduce boundary crossings?" was unanswerable at any soak length because
+nothing counted them, so counting came first.
+
+| Component | State | Cost |
+|-----------|-------|------|
+| `analyzer.detect_map_boundary` | Built | 0.24 ms per tick |
+| `analyzer.detect_return_to_battle` | Built, colour trigger | 0.07 ms per tick |
+| `analyzer.confirm_return_to_battle_async` | Built, OCR arbiter | 63 ms, once per crossing, off-thread |
+| Pre-crossing trace buffer | Built, 20 ticks | negligible |
+| Boundary **guard** (steering) | **Not built** | — |
+
+Reproduced on the four frames exactly as measured above, including `EJECTED`
+correctly not matching the banner.
+
+### Why the banner is colour-triggered and OCR-arbitrated
+
+The obvious alternative — OCR the banner every tick, sharing the `incoming`
+crop — was measured and rejected. The regions do not overlap: `incoming` is
+`x 0.4521-0.5486, y 0.2667-0.2967`, the banner is `x 0.36-0.64, y 0.32-0.378`,
+about 28 px apart at 1200p with the banner three times wider.
+
+Merging them is possible but costly, and narrowing the merge to make it cheap
+breaks the detection that keeps the aircraft alive:
+
+| Crop | Size | OCR | INCOMING detected |
+|------|------|----:|-------------------|
+| `incoming` alone | 185x36 | 41 ms | yes |
+| merged at incoming width | 185x133 | 131 ms | yes |
+| merged, narrowed to 115 px | 115x133 | 106 ms | **no** |
+
+"INCOMING" is wider than 115 px, so the narrow merge clips it. Preserving it
+costs 41 to 131 ms **on every tick, permanently**, on the missile-to-flare path,
+to catch an event that happens about once per mission. Over a 200-tick mission
+that is ~18 s of extra OCR on the critical path against ~0.4 s for the colour
+trigger plus one confirmation.
+
+So: colour decides in 0.07 ms and drives the counting; OCR confirms once per
+crossing and **arbitrates the count**, retracting a crossing it cannot confirm.
+
+### Partial tokens are required, not an optimisation
+
+The confirmation reads a narrower slice than the colour test (63 ms against
+123 ms for the full banner). Narrowing degrades edge characters — measured
+reads include `ETURNTOBATTLE:` and, at 153 px, `JRNTOBATTE`. Full-string
+matching would reject banners that are plainly present, so the tokens are
+partial, as the `incoming` crop already does with `MING` / `ARNING`.
+
+A 115 px slice reads `RNTOBAT` in 36 ms and is **not** adopted: the countdown
+digit shifts the centring and there is one banner frame to validate against.
+
+### What the instrumentation caught immediately
+
+The first live crossing was a **false positive**, and the trace buffer diagnosed
+it in one read:
+
+```
+t=199.9  Climb   alt 5430  alt_rate -450.9
+t=201.4  Eject   alt 4030  alt_rate -716.0
+t=202.9  Idle    outside: true   <- "crossing"
+```
+
+The aircraft had ejected with no missiles, and the colour test fired one tick
+later on the **fireball** — bright red, centre screen, exactly where the banner
+sits. `EJECTED`'s dark plate does not match; an explosion does.
+
+Two fixes followed. Detection is gated on actually flying (`GAME_BATTLE`, not
+`Eject` or `RespawnWait`, not respawning) rather than chasing a red-fraction
+threshold a fireball would eventually beat. And the OCR arbitrates the count, so
+an unconfirmed crossing is retracted instead of inflating the figure the tuning
+depends on.
+
+Without the trace this would have been a silent `+1` in the baseline.
+
+### Known gap: misses are invisible
+
+The OCR only runs **when colour has already fired**, so it catches
+over-counting and cannot catch under-counting. If a real banner ever renders
+below the red-fraction threshold — a different countdown state, a variant
+plate, heavy overlay — nothing reports it. The threshold is calibrated on a
+single banner frame.
+
+Closing it needs either more banner samples or a low-rate periodic OCR sweep
+while in battle, which costs one read every N seconds rather than every tick.
+
 ## Design
 
 A `BoundaryGuard`, mirroring `engage_nav.py`: pure decision logic, no threads, no
@@ -279,12 +370,20 @@ No tuning values in this document — they belong in `config.yaml`.
 - **V4** Unit: hysteresis — a reading oscillating around the threshold produces
   one arm and one disarm, not a stream.
 - **V5** Live: a session that previously ejected on boundary crossings completes
-  with zero `RETURN TO BATTLE` banners observed.
+  with zero `RETURN TO BATTLE` banners observed. **Blocked on a baseline** —
+  the only crossing counted so far was the eject false positive, so there is
+  no trustworthy before-figure yet.
 - **V6** Live: no regression in engage behaviour — contacts are still pursued
   when the boundary is not close.
 - **V7** Telemetry: log every arm and disarm with distance, speed and computed
   time-to-edge, so the thresholds can be tuned from real sessions rather than
-  from these four frames.
+  from these four frames. **Done** for approaches and crossings, including a
+  20-tick pre-crossing trace; the guard's own arm/disarm awaits the guard.
+- **V8** The count is trustworthy: every crossing is OCR-confirmed, and an
+  unconfirmed one is retracted and counted separately as a false positive.
+  **Done, 2026-08-30.**
+- **V9** Detection does not fire during eject, respawn, or outside
+  `GAME_BATTLE`. **Done, 2026-08-30** — the fireball case above.
 
 ## Open questions
 
@@ -305,10 +404,16 @@ No tuning values in this document — they belong in `config.yaml`.
    exists. Cheap to settle — climb until the banner appears, or confirm it
    does not.
 6. **How much does a working ADR 028 cover?** The navigator and this guard are
-   complementary, not alternatives: fixing the navigator removes edge
-   approaches while contacts are visible, and the guard covers the
-   no-contact blind spot the frames land in. Worth measuring the split from
-   live telemetry so the guard's trigger can be tuned rather than guessed.
+   complementary, not alternatives. ADR 028 revision 4 gave the no-contact
+   ticks a command via Regroup, which is now reachable and selected in
+   production. What remains unmeasured is whether that is *sufficient* — the
+   crossings-per-mission figure with Regroup on versus off. The instrumentation
+   above exists to answer exactly that, and until it has run, building the
+   guard would be building against an unmeasured need.
+7. **Does Regroup help when it is most needed?** Step2 — already outside — had
+   **4 enemy icons and 0 friendly**. Regroup would have had no signal there.
+   The guard's blind spot and Regroup's are not the same shape, which is the
+   argument for eventually having both.
 
 ## References
 

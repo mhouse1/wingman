@@ -95,6 +95,7 @@ from .keybindings import (                                          # noqa: F401
     AFTERBURNER_KEY,
     AIRBRAKE_KEY,
     ALT_FLIGHT_KEYS,
+    MANUAL_TAKEOVER_KEY,
     AUTO_MISSION_KEY,
     CANCEL_MISSION_KEY,
     CAPTURE_SCREEN_SHOT,
@@ -117,6 +118,25 @@ from .keybindings import (                                          # noqa: F401
     WINGSWEEP_KEY,
     YAW_LEFT,
     _WATCHED_MANEUVER_KEYS,
+)
+
+# SAF-001: the manual-takeover keys. These must always reach the hotkey handler,
+# including on the injection display where wingman presses them itself —
+# SAF-001.1's echo discrimination, not a display filter, decides whether a press
+# was wingman's own.
+TAKEOVER_KEYS = ((MANUAL_TAKEOVER_KEY, NOSE_UP_KEY, NOSE_DOWN_KEY,
+                  ROLL_LEFT_KEY, ROLL_RIGHT_KEY) + tuple(ALT_FLIGHT_KEYS))
+
+# SAF-007: every key wingman injects anywhere must be in this list, or it is
+# left pressed when the process dies. ADR 099 gives it a second job — these are
+# the keys the hotkey listener must IGNORE on the injection display, because
+# there they are wingman's own keystrokes rather than the operator's.
+INJECTABLE_KEYS = (
+    NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+    YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
+    DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
+    PADLOCK_CAMERA, SPECIAL_ABILITY, MISSION_J20_KEY,
+    'escape',
 )
 
 # Region name constants — used as log labels in click_grid_region and elsewhere.
@@ -717,6 +737,25 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
 
+    def _release_manual_if_active(self) -> bool:
+        """Operator hands the aircraft back (SAF-001). True if it was in manual.
+
+        Manual now persists through respawn, so there has to be a deliberate way
+        out or the session is stuck in manual until the round ends. The
+        auto-mission key is that way out: it already means "wingman, take it".
+        """
+        try:
+            if not self._manual_takeover_active():
+                return False
+            logger.info("\033[93mController: auto-mission key — returning control "
+                        "to wingman (leaving GAME_BATTLE_MANUAL)\033[0m")
+            self._analyzer.trigger_event("manual_release")
+            self.set_auto_respawn_restart(True)
+            return True
+        except Exception:
+            logger.exception("Controller: manual release failed")
+            return False
+
     def _on_auto_mission_hotkey(self, _e=None):
         """AUTO_MISSION_KEY handler: force GAME_LOBBY, then click PLAY/READY.
 
@@ -735,6 +774,13 @@ class Controller:
         if self._analyzer is None:
             return
         current_state = self._analyzer.game_state
+        # SAF-001: in manual this key means "wingman, take it back" — a single
+        # press, because the operator is deliberately flying and asking. The
+        # double-press guard below exists for the OTHER battle states, where 'm'
+        # can be an accidental game binding mid-flight.
+        if current_state == GameState.GAME_BATTLE_MANUAL:
+            self._release_manual_if_active()
+            return
         if current_state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL,
                              GameState.GAME_BATTLE_EJECT):
             if now - self._auto_mission_force_armed_ts > 2.0:
@@ -810,7 +856,10 @@ class Controller:
         # are never injected, so skipping this check for them lets the user trigger manual
         # takeover during continuous key holds (afterburner, roll) without needing to find
         # a gap between mission key presses.
-        if key_name not in ALT_FLIGHT_KEYS:
+        # Arrow keys and the dedicated takeover key are never injected, so the
+        # echo guard has nothing to protect against — and running them through
+        # it would let a stale count swallow a deliberate takeover.
+        if key_name not in ALT_FLIGHT_KEYS and key_name != MANUAL_TAKEOVER_KEY:
             with self._programmatic_key_lock:
                 if self._programmatic_key_counts.get(key_name, 0) > 0:
                     return False
@@ -931,6 +980,21 @@ class Controller:
             action_name: optional label for logging
         """
         label = action_name or key
+
+        # SAF-001: in GAME_BATTLE_MANUAL the operator owns the aircraft. Flares
+        # are the sole exception — they are a defensive reflex the operator
+        # cannot reasonably win, and they command no flight axis.
+        #
+        # Enforced HERE rather than at each caller because the callers are many
+        # (mission threads, tactic holds, weapon and padlock loops, recovery
+        # paths) and a missed one leaves wingman holding a control surface.
+        # Observed 2026-08-30: after takeover the aircraft climbed 550 m to
+        # 7655 m on its own with 'e', 'p' and 'k' still held down, because the
+        # transition stopped the SELECTION but not the presses already in
+        # flight. The operator could not fly.
+        if key != DEPLOY_FLARES_KEY and self._manual_takeover_active():
+            logger.debug("Controller: %s suppressed — GAME_BATTLE_MANUAL", label)
+            return
 
         # Add color coding for specific actions
         color_start = ""
@@ -3096,6 +3160,48 @@ class Controller:
             except Exception:
                 logger.exception("Controller: keyboard unhook failed")
 
+    def _manual_takeover_active(self) -> bool:
+        """True while the operator holds the aircraft (SAF-001). Never raises —
+        it gates every key press, so a failure here must not stop flares."""
+        try:
+            return (self._analyzer is not None
+                    and self._analyzer.game_state == GameState.GAME_BATTLE_MANUAL)
+        except Exception:
+            return False
+
+    def release_for_manual_takeover(self) -> None:
+        """Hand the aircraft to the operator: stop every writer, release every
+        key (SAF-001).
+
+        The FSM transition alone is not enough. Tactic holds and loops run in
+        their own threads with their own budgets, and a key already pressed
+        stays pressed — the X server holds key state, not this process. Called
+        from the GAME_BATTLE_MANUAL entry hook so it runs however takeover was
+        reached.
+        """
+        self._eject_stop_reason = "manual takeover"
+        self._eject_stop.set()
+        self._me_stop.set()
+        self._climb_stop.set()
+        self._sg_stop.set()
+        try:
+            self.cancel_mission()
+        except Exception:
+            logger.exception("Controller: cancel_mission failed during takeover")
+        for stop in (self.stop_search_and_destroy_loop,):
+            try:
+                stop()
+            except Exception:
+                logger.exception("Controller: loop stop failed during takeover")
+        if keyboard_module and not self._simulate_os_input:
+            for _key in INJECTABLE_KEYS:
+                try:
+                    keyboard_module.release(_key)
+                except Exception:
+                    logger.error("Controller: takeover release of %r failed — %s",
+                                 _key, _LATCH_NOTE)
+            logger.info("Controller: manual takeover — all injectable keys released")
+
     def operator_stop_requested(self) -> bool:
         """True when the operator stopped the session with Backspace (ADR 099).
 
@@ -3401,11 +3507,7 @@ class Controller:
             # game_starting loop's press_and_release) were missing until the
             # 2026-08-14 audit — a key is stuck if the process dies inside
             # even a press_and_release call.
-            for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
-                         YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
-                         DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
-                         PADLOCK_CAMERA, SPECIAL_ABILITY, MISSION_J20_KEY,
-                         'escape'):
+            for _key in INJECTABLE_KEYS:
                 try:
                     keyboard_module.release(_key)
                 except Exception:

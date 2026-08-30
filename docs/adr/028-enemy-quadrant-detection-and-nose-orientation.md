@@ -4,7 +4,7 @@
 |----------|------------|-----------------|
 | Draft    | 2026-08-08 | 1.7.1           |
 
-> **Revision note:** third in-place revision of this Draft (permitted: never
+> **Revision note:** fourth in-place revision of this Draft (permitted: never
 > `Accepted`; the filename keeps its original slug). Revision 1 specified a
 > 3×3 quadrant split of `ENEMY_CLOSE_BY` (never implemented). Revision 2
 > replaced it with a single `MINIMAP` crop and an overhead-attack phase
@@ -18,6 +18,15 @@
 > together with this ADR.
 
 ## Context
+
+> **On minimap rotation (revision 4).** The minimap is *heading-up*: the
+> own-ship icon is fixed at the centre pointing up and the compass letters
+> rotate around the rim. `_scan_minimap_components` already measures
+> `bearing_deg` from the up-axis, so what it returns is the bearing relative to
+> the nose. Rotation is not an error source for this policy — it is what makes
+> the bearing directly usable. A suspicion that rotation was breaking
+> orientation detection prompted revision 4's investigation; the measurement did
+> not support it, and the real gap was the row-4 silence above.
 
 The revision-2 tactic — climb to `attack_altitude`, then position directly
 above the enemy cluster — was implemented and flown. Its sensor pipeline
@@ -74,7 +83,8 @@ Evaluated every battle tick from per-ring red-icon counts:
 | 1        | short-ring count at or above `short_ring_min_count` | **Orbit**: open-loop periodic roll (fixed direction) |
 | 2        | mid ring occupied                                | **Engage mid**: steer toward the mid-ring centroid |
 | 3        | long ring occupied                               | **Engage long**: steer toward the long-ring centroid |
-| 4        | no enemies detected                              | Idle — no command                      |
+| 4        | no enemies, friendly or objective icons present  | **Regroup**: steer toward the aggregate friendly centroid |
+| 5        | nothing detected at all                          | Idle — no command                      |
 
 Mid beats long because it is reachable soonest; short beats both because the
 fight is already here (nearest-first doctrine — `short_ring_min_count` is a
@@ -83,6 +93,92 @@ aggression). Orbit replaces the overhead hold: it needs no precise station,
 tolerates the own-ship marker occluding icons at map centre, and constant
 turning is itself a defensive posture (a measurable hypothesis, like the
 original AOA claim).
+
+### 2a. Regroup — the silence this policy used to leave (revision 4)
+
+Rows 1–3 only fire while something red is on the minimap. Row 4 previously
+issued **no command at all**, and the aircraft simply held its heading. Measured
+over an 11,383-tick session:
+
+| Ring state | ticks | share |
+|------------|------:|------:|
+| `rings=0/0/0` — nothing to steer by | 6,582 | **57%** |
+| any ring occupied | 4,801 | 43% |
+
+So the navigator was silent for the majority of battle. That is not a defect in
+its logic — it is the scope of rows 1–3 — but it is how the aircraft reaches the
+map edge, because nothing else in the behavior tree takes horizontal position as
+an input either.
+
+The premise of this ADR is that steering at enemies keeps the aircraft in the
+arena because *enemies only render inside it*. The same is true of friendlies
+and objectives, and they are visible when enemies are not. Measured on the
+Design 010 frames, the two are cleanly complementary:
+
+| Frame | enemy icons | friendly icons | friendly centroid |
+|-------|------------:|---------------:|-------------------|
+| Step0, flying away from the edge | 0 | 5 | **+4.6°** — dead ahead |
+| Step1, about to cross the edge | 0 | 2 | **+179.8°** — dead astern |
+| Step2, already outside | 4 | 0 | n/a |
+
+Step1 is the frame that mattered, and the friendly centroid points exactly the
+way the aircraft needed to turn. Regroup therefore steers toward the
+**aggregate** friendly centroid — all icons, area-weighted, not ring-selected:
+the icons are a proxy for where the battle is, not targets to intercept.
+
+Three properties carry over deliberately:
+
+- **Rear-sector commitment applies.** Step1's centroid is at 179.8°, precisely
+  the unstable-sign case that commitment exists for. Regroup shares that code
+  rather than reimplementing it.
+- **Its own EMA.** Sharing the enemy EMA would blend an enemy bearing with a
+  friendly one across a mode change and steer at neither.
+- **No hue wrap.** Red straddles the hue origin and the enemy scan takes the
+  170–180 band; folding that into the friendly scan would count enemies as
+  friendlies and steer the aircraft at the thing it is meant to avoid.
+
+Any enemy contact still outranks Regroup — it fills the silence, it does not
+compete.
+
+#### It needs a behavior-tree leaf, not just a navigator mode
+
+The first implementation put Regroup inside the navigator alone. That was
+unreachable, and the live data said so: **5 selections in a two-hour session.**
+
+The navigator only runs from `_actuate_engage`, which the tick handler calls
+when the tree selects **Engage** — and Engage's condition is `has_contacts`.
+So a mode whose entire purpose is the no-contact case sat behind a condition
+requiring contacts. The 5 firings were the narrow window where the tree saw a
+contact but the navigator's own ring binning did not.
+
+Regroup is therefore a leaf in the selector, between Engage and AttackSupport:
+
+| Position | Why |
+|----------|-----|
+| Below Engage | A real target always outranks regrouping |
+| Above AttackSupport | That leaf is `always` and flies the mission script with nothing steering toward the battle — the state the aircraft drifts out of the map in |
+
+Its condition, `has_friendlies`, requires friendly icons **and** no enemies.
+The enemy half is redundant given the ordering and is stated anyway, so the
+condition stays true to its name if the order is ever changed.
+
+Measured after the leaf: **6 Regroup selections against 2 Engage** in a
+six-minute window, against 5 in two hours before. Reachable.
+
+#### The insert that broke Climb
+
+Adding the leaf silently inverted ADR 073's priority. Climb was placed with:
+
+```python
+children.insert(len(children) - 2, climb_leaf)   # above Engage
+```
+
+The comment was true only while exactly two leaves followed it. A third pushed
+Climb *below* Engage, and two ADR 073 tests failed. The insert is now by name,
+with a regression test asserting the ordering survives further additions.
+
+A positional index into a list whose length is a design variable is a latent
+defect regardless of this change; it happened to be this change that found it.
 
 ### 3. Per-ring bearing, smoothed within a selection
 

@@ -218,6 +218,19 @@ Stopping a session:
 Guard-triggered exits leave both up, because they mean "restart wingman". Set
 `finish_round_then_exit.close_game: false` to stop wingman only.
 
+**Manual takeover:** press **Enter** at the game window to take the aircraft —
+wingman stops instantly, releases every key, and from then on only deploys
+flares. Press **`u`** to hand it back. Arrow keys also take over, and
+`ctrl+alt+i/j/k/l` works from your own display. Bare `i/j/k/l` at the game
+window are wingman's own roll commands and are ignored there. Takeover persists
+through respawns until you hand back.
+
+**Hotkeys need `ctrl+alt` while the nested lane is on** — `ctrl+alt+z`,
+`ctrl+alt+backspace`, and so on. Without the game holding your keyboard, bare
+single letters would fire from ordinary typing: the letter `z` in a text editor
+would close the game. Bare keys still work when the nested game window itself
+has focus.
+
 See ADR 099 and `docs/hldd/009-nested-display-isolation-hldd.md` for the design.
 
 ---
@@ -243,6 +256,9 @@ Run `make tp` before proposing a release; `make tp-full` for the complete pre-re
 
 Wingman is normally fully unattended — hotkeys exist for supervision, testing, and manual takeover.
 
+With the nested display lane enabled (the default), these require **`ctrl+alt`** when pressed
+on your own display, and work bare when the nested game window has focus. See ADR 099 D4a.
+
 | Key | Action |
 |-----|--------|
 | `m` | Activate unattended mode (also auto-enabled from config) |
@@ -254,6 +270,8 @@ Wingman is normally fully unattended — hotkeys exist for supervision, testing,
 | `p` | Manual padlock cooldown trigger |
 | `v` | Save debug screenshot with crop overlays |
 | `b` | Inject simulated respawn OCR result (testing) |
+| `enter` | Manual takeover — wingman releases the controls, flares only |
+| `u` | Hand control back to wingman |
 | `backspace` | Stop wingman, leaving MetalStorm up for manual flight; press again to close everything |
 | `z` | Finish the round, then exit and close MetalStorm |
 

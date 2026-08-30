@@ -130,6 +130,14 @@ SCHEMA = Section(
             },
         ),
         "enemy_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
+        # Design 010 instrumentation
+        "return_to_battle": Section(children={
+            # x1, y1, x2, y2 as screen fractions
+            "region": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "min_red_frac": FRACTION,
+            "ocr_region": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "text": Leaf(types=(list,), item_types=(str,)),
+        }),
         "crops": MapOf(_CROP),
 
         # ADR 084
@@ -198,6 +206,8 @@ SCHEMA = Section(
         }),
 
         "mission": Section(children={
+            # SAF-001
+            "manual_takeover": Section(children={"persist_through_respawn": BOOL}),
             "weapon_loop_interval": SECONDS,
             "no_missiles_consecutive_required": _int(1),
             "no_missiles_abort_grace_s": SECONDS,
@@ -311,6 +321,15 @@ SCHEMA = Section(
             "max_blob_px": _int(0),
             "ema_alpha": FRACTION,
             "ema_reset_after_s": SECONDS,
+            # ADR 028 revision 4
+            "regroup_enabled": BOOL,
+            "friendly_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
+            # Design 010 instrumentation
+            "boundary_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
+            "boundary_min_px": _int(0),
+            "boundary_min_span_frac": FRACTION,
+            "boundary_near_frac": FRACTION,
+            "boundary_trace_ticks": _int(1),
         }),
 
         "tracking": Section(children={

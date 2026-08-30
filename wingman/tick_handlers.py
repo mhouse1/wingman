@@ -18,6 +18,8 @@ interaction goes through an explicit argument, a return value, or a
 `GameEvent` — never a variable both can write (ADR 060 Phase 2 rule 2).
 """
 
+import collections
+import json
 import logging
 import threading
 import time
@@ -28,6 +30,9 @@ from .behavior_tree import (
     TACTIC_DISENGAGE,
     TACTIC_EJECT,
     TACTIC_ENGAGE,
+    TACTIC_REGROUP,
+    TACTIC_EJECT,
+    TACTIC_RESPAWN_WAIT,
     TACTIC_MISSILE_EVADE,
     AnalyzerSnapshot,
     build_tree,
@@ -208,6 +213,10 @@ class RespawnHandler:
         self._RespawnState = respawn_state_enum
         self._cooldown_s = cooldown_s
         self._clear_stability_s = float(mission_cfg.get("respawn_clear_stability_s", 1.5))
+        # SAF-001: a respawn does not revoke the operator's takeover.
+        self._manual_persists_through_respawn = bool(
+            (mission_cfg.get("manual_takeover", {}) or {}).get(
+                "persist_through_respawn", True))
 
         self._state = respawn_state_enum.IDLE
         self._cooldown_until = 0.0
@@ -389,8 +398,32 @@ class RespawnHandler:
                         self._live_capture.on_event("respawn_detected", _cap_now)
                         self._live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
                         self._live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
-                    analyzer.trigger_event("respawn_reset")
-                ctrl.set_auto_respawn_restart(True)  # always restart after respawn
+                    # SAF-001 / ADR 059: whether a respawn returns the
+                    # aircraft to wingman is the operator's call, not the
+                    # game's. Persisting is the default: taking over and then
+                    # losing the aircraft 15 s later to the next death is not
+                    # manual control in any useful sense (measured 2026-08-30 —
+                    # both takeover windows ended on respawn detection, at 15 s
+                    # and 85 s).
+                    #
+                    # The 2026-07-31 07:42 failure this replaced was NOT the
+                    # persistence itself but a restart promised and never
+                    # fired: the scheduler was GAME_BATTLE-gated while the FSM
+                    # sat in manual. Here nothing is scheduled while manual, and
+                    # the operator hands back explicitly with the auto-mission
+                    # key, so no unfireable promise is made.
+                    if self._manual_persists_through_respawn:
+                        logger.info(
+                            "SAF-001: respawn while in manual — staying in "
+                            "GAME_BATTLE_MANUAL. Press the auto-mission key to "
+                            "return control to wingman.")
+                    else:
+                        analyzer.trigger_event("respawn_reset")
+                # Only promise an auto restart when wingman will actually own
+                # the aircraft; in manual the operator does.
+                if not (self._manual_persists_through_respawn
+                        and analyzer.game_state == GameState.GAME_BATTLE_MANUAL):
+                    ctrl.set_auto_respawn_restart(True)  # always restart after respawn
                 # ADR 076 d1: death is latched — hold nose-up through the
                 # respawn screen so the new life's first frames are already
                 # pitching up (spawn-into-terrain anomaly). Inert while the
@@ -730,6 +763,20 @@ class BehaviorTreeHandler:
         self._ctrl = ctrl
         self._mode = str(bt_cfg.get("mode", "off")).lower()
         self._enemy_last_seen_ts = 0.0
+        # ADR 028 revision 4 / Design 010 instrumentation.
+        self._friendly_components = None
+        self._rtb_active = False
+        self._boundary_crossings = 0
+        self._boundary_approaches = 0
+        self._boundary_near_since = 0.0
+        self._rtb_false_positives = 0
+        self._boundary_near_frac = float(
+            (minimap_cfg or {}).get("boundary_near_frac", 0.25))
+        # ~30 s of lead-up at a 1.5 s tick. Bounded: a session must not grow a
+        # trace buffer, and only the approach matters, not the whole mission.
+        self._boundary_trace = collections.deque(
+            maxlen=int((minimap_cfg or {}).get("boundary_trace_ticks", 20)))
+        self._session_start = time.time()
         self._last_selection = "none"
         self._ammo_events = ammo_events
         # ADR 070: the evade entry event is emitted from the actuator wrapper —
@@ -797,7 +844,9 @@ class BehaviorTreeHandler:
             # in-tree selection-only variant to wire.
             if self.active and bool(climb_cfg.get("enabled", False)):
                 actuators[TACTIC_CLIMB] = (self._start_climb, ctrl.is_climbing)
-            self._tree = build_tree(bt_cfg, actuators=actuators or None)
+            self._tree = build_tree(
+                bt_cfg, actuators=actuators or None,
+                regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
             self._writer = make_snapshot_writer()
 
     def _start_climb(self) -> None:
@@ -866,6 +915,10 @@ class BehaviorTreeHandler:
             return False
         now = time.time()
         components = self._analyzer.detect_enemy_map_components(frame)
+        # ADR 028 revision 4: scanned every tick but consumed only when no enemy
+        # is on the minimap, so it costs one extra mask over an already-decoded
+        # crop and never competes with an enemy contact.
+        self._friendly_components = self._analyzer.detect_friendly_map_components(frame)
         rings = bin_rings(components or [])
         if (rings[RING_SHORT].count or rings[RING_MID].count or rings[RING_LONG].count):
             self._enemy_last_seen_ts = now
@@ -901,6 +954,7 @@ class BehaviorTreeHandler:
             missiles_empty_confirmed=missiles_empty_confirmed,
             fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
             altitude_rate=altitude_rate,
+            friendly_contacts=len(self._friendly_components or []),
         )
         self._writer.set("snapshot", snap)
         self._tree.tick()
@@ -941,15 +995,152 @@ class BehaviorTreeHandler:
                         "BT[shadow-climb]: would_select=False alt=%s held=%.0fs",
                         altitude, now - self._climb_shadow_since)
                 self._climb_shadow_active = would
-        if (self.active and selection == TACTIC_ENGAGE
-                and snap.mission_running):
+        # After the selection, so each buffered record carries the tactic that
+        # was actually chosen on that tick — the question a crossing trace has
+        # to answer is what wingman was doing on the way out.
+        self._instrument_boundary(frame, now, snap, selection)
+        # SAF-001: never command flight outside GAME_BATTLE. In
+        # GAME_BATTLE_MANUAL the selector already yields Idle, but the gate is
+        # stated here too so a future leaf cannot reintroduce commanded flight
+        # while the operator has taken over.
+        _may_fly = (self.active and snap.mission_running
+                    and snap.game_state == GameState.GAME_BATTLE)
+        if _may_fly and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):
+            # Regroup: enemy components are empty by the condition that selected
+            # the leaf, so the navigator falls through to the friendly centroid.
             self._actuate_engage(components, altitude, now)
+        elif _may_fly and selection == TACTIC_CLIMB:
+            # ADR 028 revision 5. Climb owns the PITCH axis (ADR 073); the
+            # navigator commands only roll (ADR 028: "this policy only commands
+            # the roll axis"). The selector's one-tactic-at-a-time model forced
+            # an either/or the axes do not require, and Climb takes ~43% of
+            # battle ticks — so for nearly half of every battle nothing steered
+            # horizontally at all.
+            #
+            # Measured 2026-08-30: a confirmed boundary crossing ran entirely
+            # under Climb with friendly icons visible the whole way (4, 3, 3, 1)
+            # and the boundary closing 0.29R to 0.02R. Regroup had a signal and
+            # was outranked by a tactic that was not using the roll axis.
+            #
+            # Orbit is suppressed here: it is a sustained roll hold, and holding
+            # roll through a climb is a different manoeuvre from correcting
+            # heading during one.
+            self._actuate_engage(components, altitude, now, steer_only=True)
         return False
 
-    def _actuate_engage(self, components, altitude, now):
+    def _instrument_boundary(self, frame, now, snap=None, selection=None):
+        """Count map-boundary approaches and crossings. Design 010.
+
+        INSTRUMENTATION ONLY — nothing steers on this. It exists because the
+        question "did the navigator change reduce boundary crossings?" is
+        currently unanswerable: there is no detector, so no soak of any length
+        can measure the outcome. Counting them is the prerequisite for tuning
+        anything, including whether a guard is needed at all.
+        """
+        try:
+            # The banner only means anything while the aircraft is flying.
+            # Live 2026-08-30 06:20: the colour test fired one tick after an
+            # eject, on the fireball — bright red, centre screen, exactly where
+            # the banner sits. EJECTED's dark plate does not match, but the
+            # explosion does. Gate on actually being in battle and not ejecting
+            # rather than chase a threshold the fireball would eventually beat.
+            flying = (snap is not None
+                      and snap.game_state == GameState.GAME_BATTLE
+                      and selection not in (TACTIC_EJECT, TACTIC_RESPAWN_WAIT)
+                      and not snap.is_respawning)
+            crossed = self._analyzer.detect_return_to_battle(frame) if flying else False
+            reading = self._analyzer.detect_map_boundary(frame)
+
+            # Every tick goes into the buffer, crossing or not. The buffer is
+            # the point: a crossing logged on its own says it happened, not why.
+            self._boundary_trace.append({
+                "t": round(now - self._session_start, 1),
+                "dist": None if reading is None else round(reading[0], 3),
+                "fwd": None if reading is None else round(reading[1], 3),
+                "tactic": selection,
+                "rings": None if snap is None else
+                         [snap.ring_short, snap.ring_mid, snap.ring_long],
+                "friendly": None if snap is None else snap.friendly_contacts,
+                "alt": None if snap is None or snap.altitude is None
+                       else round(snap.altitude),
+                "alt_rate": None if snap is None or snap.altitude_rate is None
+                            else round(snap.altitude_rate, 1),
+                "outside": crossed,
+            })
+
+            if crossed and not self._rtb_active:
+                self._boundary_crossings += 1
+                logger.warning(
+                    "\033[93m🗺  MAP BOUNDARY: crossed — RETURN TO BATTLE "
+                    "(crossing %d this session)\033[0m", self._boundary_crossings)
+                # The trace is dumped only once OCR CONFIRMS the crossing.
+                # Measured 2026-08-30: 26 colour triggers in 26 minutes, all 26
+                # retracted, and the false positives reach red_frac 0.773 —
+                # REDDER than the real banner at 0.390 — so no threshold
+                # separates them. Explosions simply fill the region. Dumping 20
+                # records per trigger would put ~180 unnecessary multi-KB
+                # WARNING lines into a three-hour soak.
+                pending = list(self._boundary_trace)
+                self._analyzer.confirm_return_to_battle_async(
+                    frame,
+                    lambda ok, text: self._on_rtb_confirmed(ok, text, pending))
+            elif not crossed and self._rtb_active:
+                logger.info("🗺  MAP BOUNDARY: back inside")
+            self._rtb_active = crossed
+
+            if reading is None:
+                self._boundary_near_since = 0.0
+                logger.debug("BOUNDARY: no reading")
+                return
+            dist, forward = reading
+            # Per-tick at DEBUG so the thresholds can be calibrated from the
+            # distribution rather than only from the ticks that happen to
+            # precede a crossing.
+            logger.debug("BOUNDARY: dist=%.3f fwd=%+.3f", dist, forward)
+            near = forward > 0 and dist <= self._boundary_near_frac
+            if near and not self._boundary_near_since:
+                self._boundary_near_since = now
+                self._boundary_approaches += 1
+                logger.info(
+                    "🗺  MAP BOUNDARY: ahead at %.2fR (approach %d this session)",
+                    dist, self._boundary_approaches)
+            elif not near:
+                self._boundary_near_since = 0.0
+        except Exception as e:
+            logger.debug("Boundary instrumentation failed: %s", e)
+
+    def _on_rtb_confirmed(self, detected, text, trace=None):
+        """OCR verdict on the banner. The colour test is the cheap trigger; this
+        is the arbiter of the COUNT, so a false positive does not silently
+        inflate the crossings figure the tuning depends on.
+
+        Never raises — it runs on an OCR pool thread, where an exception would
+        be swallowed anyway.
+        """
+        try:
+            if detected:
+                logger.warning("🗺  MAP BOUNDARY: OCR confirms banner (%r)", text)
+                if trace:
+                    logger.warning(
+                        "🗺  MAP BOUNDARY trace (last %d ticks before the "
+                        "crossing): %s", len(trace), json.dumps(trace))
+                return
+            self._boundary_crossings = max(0, self._boundary_crossings - 1)
+            self._rtb_false_positives += 1
+            logger.warning(
+                "🗺  MAP BOUNDARY: OCR did not confirm (read %r) — retracted, "
+                "%d confirmed crossing(s), %d false positive(s) this session",
+                text, self._boundary_crossings, self._rtb_false_positives)
+        except Exception:
+            pass
+
+    def _actuate_engage(self, components, altitude, now, steer_only: bool = False):
         """3.1a: the Engage selection drives ring-engage geometry (ported from
         the retired EngageNavHandler; log labels kept for parser continuity)."""
-        intent = self._nav.update(components, altitude, now)
+        intent = self._nav.update(
+            components, altitude, now,
+            friendly_components=getattr(self, "_friendly_components", None),
+        )
         if intent.mode != self._last_nav_mode:
             logger.info(
                 "EngageNav: mode %s → %s (%s)",
@@ -971,6 +1162,11 @@ class BehaviorTreeHandler:
                 if cmd is not None:
                     logger.debug("EngageNav: roll_%s err=%.2f", cmd, intent.error_norm)
         elif intent.kind == "orbit":
+            if steer_only:
+                # Concurrent with a climb: correcting heading is compatible with
+                # a pitch manoeuvre, holding a roll through one is not.
+                logger.debug("EngageNav: orbit suppressed during climb")
+                return
             if now - self._last_orbit_roll_ts >= self._orbit_interval_s:
                 self._last_orbit_roll_ts = now
                 if self._dry_run:

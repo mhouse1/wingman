@@ -78,6 +78,49 @@ Capture takes an explicit display (`mss(display=...)`) and injection an explicit
 override. Native-Wayland windows (e.g. VS Code) remain invisible to every X11
 listener — a pre-existing limitation this does not change.
 
+**D4a. Hotkeys are filtered per display.** Observing both displays (D4) creates
+two problems that a single listener never had, and both were live defects:
+
+| Display | Filter | Why |
+|---|---|---|
+| Nested | Ignore keys wingman injects | There they are wingman's own keystrokes. Filtering by display is race-free; counting presses and debiting them on observation is not, because XRecord delivery is asynchronous — the maneuver path needs a post-release grace window for exactly that reason |
+| Operator | Require `ctrl+alt` | A bare keypress there is ordinary typing |
+
+The second is the one that bit. Before the lane, the game held focus on the
+operator's display, so bare single-letter hotkeys were unreachable by ordinary
+typing — the keys went to the game. Moving the game to its own display freed the
+operator's keyboard, which is the entire point, and in the same stroke made
+every hotkey fire from ordinary typing.
+
+Observed 2026-08-30 08:27: stray `m` presses forced `GAME_LOBBY` three times,
+cancelling matchmaking, and the session never reached battle in five minutes.
+`z` would have closed MetalStorm outright, and `backspace` stopped it. A lane
+built so the operator can use their machine had made the machine unusable.
+
+Bare keys still work on the nested display: typing there requires focusing the
+game window, which is an explicit act. **With no nested lane both filters are
+inert**, so the on-screen lane is unchanged.
+
+Verified live 2026-08-30 09:06: bare `v` on the operator display produced no
+screenshot, `ctrl+alt+v` produced one, bare `v` on the nested display produced
+one, and seven `u` injections by wingman fired no hotkey at all.
+
+**D4b. Manual takeover on the nested display is by arrow key.** SAF-001 names
+arrow keys alongside `i/j/k/l`, and wingman never injects them, so on the
+injection display they carry no ambiguity.
+
+`i/j/k/l` cannot serve there. SAF-001.1's echo discrimination assumes an
+injected key echoes back promptly, which held while injection and observation
+shared one display. Under the nested lane with 13 OCR workers, echoes were
+measured arriving **1.67 to 9.74 s after release** against a 1.0 s grace window
+— four spurious takeovers in 23 minutes on 2026-08-30, each dropping the
+aircraft out of automation mid-round.
+
+Widening the grace is not a fix: it would suppress the *operator's* presses for
+the same seconds, against SAF-001's 2.0 s cessation bound. The `i/j/k/l` path
+is not lost — it moves to the operator's display, where wingman injects nothing
+and `ctrl+alt` separates it from typing.
+
 **D5. The switch is `nested.enabled` in config, not a parallel make target.**
 A single environment variable cannot express D4 — it sets one display for all
 three consumers, which is why the first implementation silently broke hotkeys.
@@ -435,6 +478,8 @@ Each of these fails in a way that does not look like the cause:
 - V9. Unit: config drives the lane, `NESTED=0/1` overrides it, and a missing or malformed config fails closed (lane off). **Done, 2026-08-29** — a half-applied lane would capture the nested display while injecting into the operator's, which is the ADR 098 corruption reintroduced.
 - V10. Live: a plain `make rd` activates the lane from config, with the process environment still on the operator's display. **Done, 2026-08-29.**
 - V14. Live: the FIRST Backspace ends the session and leaves MetalStorm and the nested display up, with wingman idle in standby; the SECOND closes both and exits. **Done, 2026-08-29** — standby measured 0% CPU and 778 MB after malloc_trim released 1288 MB.
+- V16. Live: no spurious takeover across a full session — wingman's own roll injections never enter GAME_BATTLE_MANUAL.
+- V15. Live: on the operator's display a bare hotkey is inert and `ctrl+alt` fires it; on the nested display bare keys fire; wingman's own injections fire nothing. **Done, 2026-08-30.**
 - V13. Live: Backspace closes the game and then the nested server. **Done, 2026-08-29** — Xwayland `:3` pid 1153947 before the press, `GONE` after, with the operator's `:0` untouched.
 - V12. Live: the finish-round exit closes the game and then the nested server, leaving no window behind, with the operator's own `:0` untouched. **Done, 2026-08-29** — recorded Xwayland `:3` pid 1117382 before the press, `GONE` after; `Nested display: :3 closed`.
 - V11. Unit + live: the focus guard follows the injection display, an explicit `focus_guard.display` still wins, and the on-screen lane is untouched. **Done, 2026-08-29** — `tests/test_focus_guard.py`; live `make r1` showed 0 suppressions against 10 before.

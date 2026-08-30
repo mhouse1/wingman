@@ -13,15 +13,47 @@ rationale and evidence. Tuning values live in wingman/config.yaml, never here.
 
 **UID**: SAF-001
 
-**Statement**: When the operator physically presses a flight-control key (NOSE_UP i,
-NOSE_DOWN k, ROLL_LEFT j, ROLL_RIGHT l, or an arrow key) while wingman is
+**Statement**: When the operator physically presses a takeover key — the dedicated
+MANUAL_TAKEOVER_KEY, an arrow key, or a flight-control key (NOSE_UP i,
+NOSE_DOWN k, ROLL_LEFT j, ROLL_RIGHT l) on a display wingman does not inject
+into — while wingman is
 commanding flight — a mission thread holds the mission lock, an eject
 sequence is active, or a tactic hold (climb, missile evade) is active —
 wingman shall cease all commanded flight input, including the tactic hold
 threads, within 2.0 s and transition to GAME_BATTLE_MANUAL, and shall not
 re-command flight until health evidence indicates a death and respawn.
 
-**Rationale**: The manual-takeover guarantee. The 2.0 s cessation bound is enforced by
+**Rationale**:
+
+**Amended 2026-08-30 — the takeover keys the operator must use depend on where
+they press them.** On the ADR 099 nested display lane wingman injects into the
+same X display it observes, so its own i/j/k/l presses and the operator's are
+indistinguishable in content. Telling them apart by ARRIVAL time was measured
+failing: under 13 OCR workers echoes arrived 1.67-9.74 s after release against a
+1.0 s grace window, producing four spurious takeovers in 23 minutes, each
+dropping the aircraft out of automation mid-round. Widening the grace is not
+available — it would suppress the operator's own presses for the same seconds,
+against the 2.0 s bound below.
+
+Takeover at the game window is therefore by keys wingman NEVER injects: the
+dedicated MANUAL_TAKEOVER_KEY (Enter, chosen for size — a control reached for
+in a hurry should be found without looking) and the arrow keys. i/j/k/l retain
+their meaning on the operator's own display, where wingman injects nothing,
+with the ctrl+alt modifier that keeps ordinary typing from flying the aircraft.
+
+Control returns on the operator's explicit request, with MISSION_J20_KEY ('u')
+— the key already used for this in GAME_BATTLE. It is one wingman injects
+itself, so it is delivered on the injection display only while the takeover is
+active, where wingman injects nothing but flares and there is nothing it could
+be confused with.
+
+The cost is honest: a reflexive grab of i/j/k/l at the game window no longer
+yields control on its own. A server-timestamp discriminator would restore that
+— X key events carry the server's own timestamp, immune to delivery latency —
+but it needs a clock calibration that fails silently back to the spurious
+takeovers, which is a worse failure than an extra keypress.
+
+The manual-takeover guarantee. The 2.0 s cessation bound is enforced by
 tests/test_mission_cancel.py::test_cancel_releases_lock_within_two_seconds.
 Requested 2026-08-07; behaviour shipped in wingman/controller.py
 (_handle_maneuver_key_press). ADR 059 governs the post-death return to auto.
@@ -282,3 +314,34 @@ tactic took selection, and the burner was cut 1.7 seconds later while a
 missile was tracking. The zero-fuel exception is physical rather than
 policy-based and is why this is stated as an override of specific policies
 rather than as an unconditional hold.
+
+## Exactly one wingman instance commands the aircraft
+
+**UID**: SAF-014
+
+**Statement**: At most one wingman process shall command the aircraft at a time. A wingman
+process that starts while another is already running shall command nothing —
+no key injection, no mouse injection — and shall report the refusal.
+
+**Rationale**:
+
+This is a PRECONDITION for the guarantees the other safety requirements make,
+not an independent property. Every one of them is written about "wingman" as a
+single agent: SAF-001 says commanded flight ceases within 2.0 s of an operator
+input, SAF-006/007/009/010 bound a hold, SAF-008 releases every injected key on
+exit. A second instance is outside the first instance's stop events, mission
+lock, tactic holds and cleanup, so each of those guarantees is silently void
+while two are running — instance A ceases and instance B does not.
+
+Observed 2026-08-30: two instances ran concurrently for over an hour, both
+injecting into the same nested display. A manual takeover in one left the other
+still commanding the aircraft, which the operator experienced as inputs
+fighting their own. Nothing in either log indicated a fault, because each
+instance was behaving correctly in isolation — the failure exists only between
+them, and neither is positioned to detect it.
+
+Enforced by an abstract Unix socket claimed in main() before the injection
+display, capture or controller are set up. Abstract rather than a PID file
+because the kernel releases the name however the process dies, so a SIGKILLed
+instance leaves no stale lock — the case that would otherwise prevent wingman
+starting at all, which is the more dangerous failure of the two.

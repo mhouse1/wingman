@@ -146,6 +146,36 @@ def _alive_transition_disposition(state, alive_after_observed_death: bool) -> st
     return "consume_other"
 
 
+def _claim_single_instance(name: str = "wingman-main") -> "socket.socket | None":
+    """Refuse to start when another wingman is already flying.
+
+    Two instances inject into the same display and fight each other AND the
+    operator. Observed 2026-08-30: two instances ran for over an hour, so a
+    manual takeover in one left the other still commanding the aircraft — the
+    operator reported "alternate inputs overriding my own", and no log said
+    anything, because each instance was behaving correctly on its own.
+
+    An abstract Unix socket rather than a PID file: the kernel releases the name
+    when the process dies, however it dies, so there is no stale lock to clean
+    up after a SIGKILL — which is exactly the case that would otherwise leave
+    wingman unable to start.
+
+    Returns the bound socket, which must be kept alive for the process lifetime.
+    `name` is parameterised so tests claim their own name: keying on the
+    production one would make the suite fail whenever a real session is running,
+    which is exactly when soaks and development overlap.
+
+    @relation(SAF-014, scope=function)
+    """
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.bind("\0" + name)
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
 def _rss_mb() -> float:
     """Resident set size in MB, or 0.0 if unavailable. Never raises."""
     try:
@@ -245,6 +275,15 @@ def main():
     # with Jenkins and Redmine down — worth stating loudly at the top of the
     # log rather than leaving it to be inferred from the machine afterwards.
     host_mode = log_host_mode()
+    # Before anything touches the game: two instances would fight each other.
+    _instance_lock = _claim_single_instance()
+    if _instance_lock is None:
+        logger.error(
+            "Another wingman instance is already running — refusing to start. "
+            "Two instances inject into the same display and fight each other "
+            "and the operator. Stop the other one first.")
+        return 1
+
     # ADR 099: the nested display lane. The game runs on its own X server, where
     # it is the only client and so always focused. ONLY capture and injection
     # move there - hotkey observation stays on the operator's DISPLAY, because
@@ -260,8 +299,22 @@ def main():
     nested_display = None
     if _nested_on and sys.platform != "win32":
         nested_display = str(_nested.get("display") or ":3").strip()
-        from .input_linux import set_injection_display
+        from .input_linux import (set_injection_display, set_injected_keys,
+                                  set_takeover_keys, set_handback_keys)
+        from .keybindings import MISSION_J20_KEY, AUTO_MISSION_KEY
+        from .controller import INJECTABLE_KEYS, TAKEOVER_KEYS
         set_injection_display(nested_display)
+        # ADR 099: on the nested display these are wingman's own keystrokes;
+        # on the operator's, hotkeys additionally require ctrl+alt so ordinary
+        # typing cannot fly the aircraft.
+        set_injected_keys(INJECTABLE_KEYS)
+        set_takeover_keys(TAKEOVER_KEYS)
+        # SAF-001: 'u' hands the aircraft back — the key the operator already
+        # used for this in GAME_BATTLE. It is injected by wingman, so it is
+        # delivered only while manual is active.
+        set_handback_keys(
+            (MISSION_J20_KEY, AUTO_MISSION_KEY),
+            manual_state_fn=lambda: analyzer.game_state == GameState.GAME_BATTLE_MANUAL)
         from .input_linux import _observe_display_names
         logger.info("ADR 099: nested lane ACTIVE - capture and injection on %s, "
                     "hotkeys observed on %s", nested_display,
@@ -470,6 +523,9 @@ def main():
             live_capture.evaluate(frame, "GAME_LOBBY", _now)
             live_capture.evaluate(frame, "GAME_LOBBY", _now + 1e-6)
     analyzer.subscribe(GameEvent.LOBBY_PLAY_CLICK, _on_lobby_play_click_cb, name="controller")
+    # SAF-001: hand the aircraft over the moment the FSM says the operator has it.
+    analyzer.subscribe(GameEvent.MANUAL_TAKEOVER, ctrl.release_for_manual_takeover,
+                       name="controller")
     # ADR 094: with an exit pending, no automatic path may start another round.
     # Without this the quick-scan clicks PLAY within a second or two of reaching
     # the lobby, so a press made IN the lobby lost the race and cost the
