@@ -22,7 +22,7 @@ import logging
 import threading
 import time
 
-from .analyzer import GameState
+from .analyzer import GameState, BATTLE_STATES
 from .behavior_tree import (
     TACTIC_CLIMB,
     TACTIC_DISENGAGE,
@@ -93,11 +93,8 @@ def update_waiting_fallback(
     return new_score, new_consecutive, should_trigger, diff
 
 
-_BATTLE_STATES = frozenset({
-    GameState.GAME_BATTLE,
-    GameState.GAME_BATTLE_MANUAL,
-    GameState.GAME_BATTLE_EJECT,
-})
+# Single definition lives in analyzer; aliased to keep the local name.
+_BATTLE_STATES = BATTLE_STATES
 
 
 

@@ -184,11 +184,22 @@ crops:
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
-# ADR 094: the FINISH_ROUND_THEN_EXIT hotkey ('z'). Finishes the round, exits
-# wingman at the next lobby, then closes MetalStorm. Guard-triggered exits are
-# unaffected — they mean "restart wingman", so the client stays up.
+# ADR 094: the FINISH_ROUND_THEN_EXIT hotkey ('z'). Stops as soon as no round is
+# in progress, then closes MetalStorm.
+#
+# ADR 099: `close_game` governs BOTH operator-initiated stops and also tears
+# down the nested display, which exists only to host the game and would
+# otherwise be left as an empty black window.
+#   'z'       — closes immediately once no round is in progress.
+#   Backspace — two-stage. The first press ends the session but LEAVES
+#               MetalStorm running so the operator can keep flying by hand,
+#               even mid-battle; wingman waits in standby. A second press
+#               closes everything. Ctrl-C during standby leaves it all up.
+# Guard-triggered exits and the startup-stall exit are unaffected: they mean
+# "restart wingman" or "come and look", so the client and its display stay up.
+# close_game: false disables standby too — nothing would be left to close.
 finish_round_then_exit:
-  close_game: true            # false stops wingman only
+  close_game: true            # false stops wingman only, leaving game + display
   game_term_grace_s: 5.0      # SIGTERM to SIGKILL, matching launch-game's settle
 # ADR 092: leak gate thresholds. `make leak-check` measures post-warm-up growth
 # from the archived RESOURCE lines. INSUFFICIENT is never a pass — short

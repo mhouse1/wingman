@@ -312,3 +312,50 @@ def test_injection_display_can_be_cleared():
     il.set_injection_display(None)
     with mock.patch.dict("os.environ", {"DISPLAY": ":0"}):
         assert il._inject_display_name() == ":0"
+
+
+# --- ADR 099 regression: hotkeys died in the nested lane ---------------------
+
+def test_observation_covers_the_operator_display():
+    from wingman import input_linux as il
+    il.set_injection_display(None)
+    with mock.patch.dict("os.environ", {"DISPLAY": ":0"}):
+        assert il._observe_display_names() == [":0"]
+
+
+def test_observation_also_covers_the_injection_display():
+    """The 2026-08-29 regression. Keeping the listener on the operator's DISPLAY
+    was necessary but not sufficient: on Wayland that DISPLAY is a rootless
+    Xwayland which only sees keys while an X11 client has focus. Moving the game
+    to its own display removed the only such client, so every hotkey went dead —
+    backspace and the SAF-001 manual takeover included. The operator's keys are
+    then only visible on the display they are looking at."""
+    from wingman import input_linux as il
+    try:
+        with mock.patch.dict("os.environ", {"DISPLAY": ":0"}):
+            il.set_injection_display(":3")
+            assert il._observe_display_names() == [":0", ":3"]
+    finally:
+        il.set_injection_display(None)
+
+
+def test_the_same_display_is_not_observed_twice():
+    """On the on-screen lane both roles are one display; two listeners on it
+    would double-deliver every key to the takeover logic."""
+    from wingman import input_linux as il
+    try:
+        with mock.patch.dict("os.environ", {"DISPLAY": ":0"}):
+            il.set_injection_display(":0")
+            assert il._observe_display_names() == [":0"]
+    finally:
+        il.set_injection_display(None)
+
+
+def test_listener_loop_takes_its_display_rather_than_reading_the_environment():
+    """Each listener must be pinned to its own display. Reading DISPLAY inside
+    the loop would collapse every listener onto the operator's display and
+    silently restore the bug."""
+    sig = inspect.signature(input_linux._LinuxXTestKeyboard._listener_loop)
+    assert "display_name" in sig.parameters
+    src = inspect.getsource(input_linux._LinuxXTestKeyboard._listener_loop)
+    assert 'os.environ.get("DISPLAY"' not in src

@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 from mss import mss
 
-from .analyzer import GameState
+from .analyzer import GameState, BATTLE_STATES
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre, draw_crops
 from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
@@ -185,6 +185,15 @@ class Controller:
         # read by the main loop at its safe point. An Event rather than a bool
         # because the hotkey toggles it from the listener thread.
         self._finish_round_event = threading.Event()
+        # ADR 099: set only by the Backspace hotkey. exit_requested cannot stand
+        # in for this — SIGTERM and the startup-stall exit set that too, and the
+        # stall path deliberately leaves the game up for inspection.
+        self._operator_stop_event = threading.Event()
+        # ADR 099: second Backspace, pressed during standby, closes MetalStorm
+        # and the nested display. Separate from the stop event so the first
+        # press cannot be mistaken for the second.
+        self._close_all_event = threading.Event()
+        self._last_exit_press = 0.0
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
@@ -453,7 +462,23 @@ class Controller:
         if keyboard_module and not self._disable_hotkeys:
             try:
                 def exit_script_hotkey(_e):
-                    logger.info("Controller: Backspace key pressed - exiting script")
+                    # Debounced: X auto-repeats a held key at ~25 Hz, and an
+                    # undebounced handler would read one long press as both
+                    # stages and close the game the operator meant to keep.
+                    now = time.time()
+                    if now - self._last_exit_press < 0.5:
+                        return
+                    self._last_exit_press = now
+                    if self._operator_stop_event.is_set():
+                        # Second press, during standby.
+                        self._close_all_event.set()
+                        logger.info("\033[93mController: Backspace again — closing "
+                                    "MetalStorm and the nested display\033[0m")
+                        return
+                    self._operator_stop_event.set()
+                    logger.info("\033[93mController: Backspace — ending wingman; "
+                                "MetalStorm stays up for manual control. Press "
+                                "Backspace again to close everything.\033[0m")
                     if self._exit_event:
                         self._exit_event.set()
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
@@ -586,10 +611,22 @@ class Controller:
                                     "session continues\033[0m")
                         return
                     self._finish_round_event.set()
-                    logger.info("\033[93m🏁 FINISH ROUND: requested — wingman will "
-                                "stop at the next lobby, then close MetalStorm "
-                                "(ADR 094). Press '%s' again to cancel.\033[0m",
-                                FINISH_ROUND_THEN_EXIT)
+                    # Pressed in the lobby the stop is immediate: the main loop's
+                    # safe point is already true, and the quick-scan is now barred
+                    # from starting another round. Say which one is happening -
+                    # "at the next lobby" while sitting IN the lobby reads as a
+                    # long wait and invites a second press that cancels it.
+                    _st = self._analyzer.game_state if self._analyzer is not None else None
+                    if _st is not None and _st not in BATTLE_STATES:
+                        logger.info("\033[93m🏁 FINISH ROUND: requested in %s — no "
+                                    "round in progress, stopping now and closing "
+                                    "MetalStorm (ADR 094). Press '%s' again to "
+                                    "cancel.\033[0m", _st.name, FINISH_ROUND_THEN_EXIT)
+                    else:
+                        logger.info("\033[93m🏁 FINISH ROUND: requested — wingman will "
+                                    "stop at the next lobby, then close MetalStorm "
+                                    "(ADR 094). Press '%s' again to cancel.\033[0m",
+                                    FINISH_ROUND_THEN_EXIT)
                 keyboard_module.on_press_key(FINISH_ROUND_THEN_EXIT,
                                              finish_round_then_exit, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to finish the round "
@@ -3039,6 +3076,34 @@ class Controller:
         self._mission_cancel.set()
         self.stop_weapon_loop()
 
+    def close_all_requested(self) -> bool:
+        """True once the operator's SECOND Backspace has arrived (ADR 099)."""
+        return self._close_all_event.is_set()
+
+    def wait_for_close_all(self, timeout=None) -> bool:
+        """Block until the second Backspace, or `timeout`. True if it arrived."""
+        return self._close_all_event.wait(timeout=timeout)
+
+    def release_hotkeys(self) -> None:
+        """Deregister keyboard hooks. Split out of cleanup() so standby can keep
+        listening for the second Backspace after the session has ended."""
+        if keyboard_module:
+            try:
+                keyboard_module.unhook_all()
+                logger.info("Controller: all keyboard hooks deregistered")
+            except ImportError as exc:
+                logger.warning("Controller: keyboard unhook skipped — %s", exc)
+            except Exception:
+                logger.exception("Controller: keyboard unhook failed")
+
+    def operator_stop_requested(self) -> bool:
+        """True when the operator stopped the session with Backspace (ADR 099).
+
+        Distinct from `exit_requested`, which SIGTERM and the startup-stall exit
+        also set. Only a deliberate operator stop tears the session down.
+        """
+        return self._operator_stop_event.is_set()
+
     def finish_round_requested(self) -> bool:
         """True while a deferred finish-round-then-exit is pending (ADR 094)."""
         return self._finish_round_event.is_set()
@@ -3293,8 +3358,13 @@ class Controller:
         threading.Thread(target=self.mission_j20, daemon=True).start()
         return True
 
-    def cleanup(self):
+    def cleanup(self, keep_hotkeys: bool = False):
         """Stop injection activity, release held keys, deregister hooks.
+
+        `keep_hotkeys=True` skips the deregistration so the process can stay in
+        standby watching for a second Backspace (ADR 099). Everything else still
+        runs: the writers stop and every injectable key is released, so nothing
+        wingman was holding survives into the operator's manual flight.
 
         Order matters: XTest-injected key state lives in the X SERVER, not this
         client, so it survives process exit — and daemon threads die without
@@ -3345,7 +3415,10 @@ class Controller:
             logger.info("Controller: all injectable keys released")
 
         # 3. Deregister hooks last so the guards above stay active meanwhile.
-        if keyboard_module:
+        if keep_hotkeys:
+            logger.info("Controller: keyboard hooks kept for standby — press "
+                        "Backspace again to close MetalStorm")
+        elif keyboard_module:
             try:
                 keyboard_module.unhook_all()
                 logger.info("Controller: all keyboard hooks deregistered")

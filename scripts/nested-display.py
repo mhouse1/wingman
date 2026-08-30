@@ -161,7 +161,11 @@ def focus(display: str, timeout: float) -> int:
         print(f"ERROR: {display} is not running", file=sys.stderr)
         return 1
 
-    d = xdisplay.Display(display)
+    try:
+        d = xdisplay.Display(display)
+    except Exception as e:
+        print(f"ERROR: cannot connect to {display}: {e}", file=sys.stderr)
+        return 1
     deadline = time.monotonic() + timeout
     while True:
         session = game_session_pids()
@@ -191,7 +195,13 @@ def status(display: str) -> int:
         print(f"nested display {display}: DOWN")
         return 1
     from Xlib import display as xdisplay
-    d = xdisplay.Display(display)
+    try:
+        d = xdisplay.Display(display)
+    except Exception as e:
+        # The server can die between the probe above and this connect. Report
+        # it as DOWN rather than spilling an Xlib traceback at the operator.
+        print(f"nested display {display}: DOWN ({type(e).__name__})")
+        return 1
     session = game_session_pids()
     wins = _game_windows(d, session) if session else []
     try:
@@ -207,11 +217,21 @@ def status(display: str) -> int:
 
 
 def stop(display: str) -> int:
-    """Kill the Xwayland serving `display`."""
-    n = display.lstrip(":")
-    rc = subprocess.run(["pkill", "-f", f"Xwayland :{n}"]).returncode
-    print(f"nested display {display}: {'stopped' if rc == 0 else 'not running'}")
-    return 0
+    """Kill the Xwayland serving `display`.
+
+    Delegates to wingman so the teardown has ONE definition and one matching
+    rule. This previously ran `pkill -f "Xwayland :N"`, a substring match over
+    the whole command line — which would also have matched the operator's own
+    `Xwayland :0` session, and `:3` matches inside `:30`.
+    """
+    from wingman.game_shutdown import close_nested_display
+    result = close_nested_display(display)
+    if not result["found"]:
+        print(f"nested display {display}: not running")
+    else:
+        print(f"nested display {display}: "
+              f"{'stopped' if result['ok'] else 'FAILED to stop cleanly'}")
+    return 0 if result["ok"] else 1
 
 
 def cmd_env(nc: dict) -> int:

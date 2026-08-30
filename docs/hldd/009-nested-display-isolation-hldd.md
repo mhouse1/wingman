@@ -92,13 +92,41 @@ raising an error:
 |---|---|---|
 | Frame capture | Nested | Perception reads the operator's desktop. OCR classifies nothing, or worse, classifies the operator's screen |
 | Key and mouse injection | Nested | Keystrokes land in the operator's application. The original corruption |
-| Operator hotkey observation | **Human** | Stop, pause and manual-takeover keys are dead exactly when the operator is working elsewhere |
+| Operator hotkey observation | **Human AND target** — see below | Stop, pause and manual-takeover keys are dead, silently |
 | Focus/safety guard | Nested | Guard finds no target window, concludes "not the target", and suppresses all injection. The safety mechanism silently disables the system it protects |
 
-Note the third row inverts. It is easy to reason "the automation now lives on the
-nested display" and move everything. Hotkey observation must stay with the
-human, because it exists to watch the human's keyboard. Treating this as a
-uniform switch is the single most likely implementation error.
+Note the third row inverts, and then refuses to be a single answer at all.
+
+It is easy to reason "the automation now lives on the nested display" and move
+everything; hotkey observation exists to watch the human's keyboard, so moving
+it kills every hotkey. That much is the obvious half. **The non-obvious half is
+that pinning it to the human's display can kill them too.**
+
+Where a display server is *rootless* — its windows are surfaces owned by a host
+compositor rather than a framebuffer it owns — it only receives input while one
+of its own clients holds focus. The target application was very often that
+client. Move the target to its own server and the human's server may have no
+focused client left at all, so it observes nothing. Both choices produce the
+same silent, total loss of operator control.
+
+The rule that survives contact:
+
+> **Observe every display the operator's keys can reach**, which includes the
+> display the target runs on — because when the operator looks at the target,
+> their keys go there and are visible nowhere else.
+
+Run one listener per display. This means the automation observes its own
+injected input on the target's display, which must be discounted explicitly:
+count outgoing synthetic presses per-key and debit them on observation, with a
+grace window for auto-repeat. Do not rely on a "synthetic event" flag — on X11
+the `send_event` bit is not set by `XTest`, so injected keys are
+indistinguishable from human ones by that route.
+
+**This is the error to expect.** In this implementation observation was got
+wrong twice in succession — first by moving it with the target, then by pinning
+it to the human — and neither failure logged anything. A startup banner naming
+the chosen display is not evidence: verify by pressing a key and observing the
+effect.
 
 Note also the fourth row. A guard that gates injection on "does the target have
 focus?" must evaluate that question **on the display injection actually
@@ -154,7 +182,7 @@ flowchart TB
   res --> cap["Capture takes explicit display"]
   res --> inj["Injection reads override"]
   res --> grd["Focus guard follows injection"]
-  res -.->|"deliberately not routed"| obs["Hotkey observer on human display"]
+  res --> obs["Hotkey observers, one per display"]
   sup["Server lifecycle commands"]
   cfg --> sup
   sup --> srv["Nested server"]
@@ -191,7 +219,7 @@ sequenceDiagram
   L->>A: start
   A->>A: resolve lane from config
   A->>S: capture and inject here
-  A->>A: observe hotkeys on human display
+  A->>A: observe hotkeys on both displays
 ```
 
 Two ordering constraints are easy to violate:
@@ -255,8 +283,11 @@ A checklist, ordered so that the cheapest disqualifying question comes first.
 6. **Resolve the lane before constructing any display consumer.**
 7. **Assert focus by process ownership after the target window exists.**
 8. **Point the safety guard at the injection display.**
-9. **Leave operator observation on the human display** and test it explicitly —
-   this is a safety property and its failure is silent.
+9. **Observe every display the operator's keys can reach** — the human's *and*
+   the target's — and discount the automation's own injected input per-key.
+   Then **test it by pressing a key**, not by reading a startup banner. This is
+   a safety property, its failure is silent, and it is the step most likely to
+   be got wrong: both single-display answers are wrong for different reasons.
 
 ### Mapping to other platforms
 
@@ -300,7 +331,7 @@ Reusable evidence for any port of this design:
 | Target renders on the nested display | Application's own frame counter, or frame-to-frame difference | Frames differ over time |
 | Capture reads the target | Sample the pixel statistics of a grab | Non-blank, plausible distribution |
 | Injection reaches the target | Drive a state change only the target can produce | Observed state transition |
-| Observation stays with the human | Inspect the automation process environment and the observer's display | Observer on the human display |
+| Operator control survives | Press each operator hotkey with the target focused, and again with a human window focused | The automation acts on the press |
 | Guard does not suppress | Count suppression events over a session | Zero |
 | No throughput regression | Compare perception timings against the on-screen lane | Within existing budget |
 

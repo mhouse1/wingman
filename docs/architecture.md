@@ -346,15 +346,28 @@ wrong at some point during implementation, each failing in a different way:
 |---|---|---|---|
 | Capture | `capture.py` `_MssBackend` | nested | OCR reads the operator's desktop |
 | Key and mouse injection | `input_linux.py` `_inject_display_name` | nested | Keystrokes land in the editor |
-| Hotkey observation (XRecord) | `input_linux.py` `_listener_loop` | **operator** | Backspace and takeover keys dead |
+| Hotkey observation (XRecord) | `input_linux.py` `_observe_display_names` | **operator AND nested** | Backspace and takeover keys dead |
 | Focus guard | `focus_guard.py` `config_for_display` | nested | Every key and click suppressed |
 
 Capture takes an explicit display (`mss(display=...)`), injection reads a
 module-level override set by `set_injection_display()`, and the focus guard is
-handed the injection display via `config_for_display()`. Only the XRecord
-listener still reads `os.environ["DISPLAY"]` — deliberately, because it must
-watch the keyboard where the operator's hands actually are. Manual takeover is a
-safety property, not a convenience.
+handed the injection display via `config_for_display()`.
+
+Observation is the awkward one: it is **not a single display**. `:0` is a
+rootless Xwayland and receives key events only while an X11 client holds focus —
+and the nested lane removed the only X client that was ever focused. Pinning the
+listener to the operator's display therefore killed every hotkey just as
+thoroughly as moving it to the nested one. One listener thread runs per display
+in `_observe_display_names()`, so keys are caught whether the operator is
+looking at an X11 window or at the nested game.
+
+Observing the nested display means wingman also sees its own injected keys. That
+is the pre-nested topology, and `_programmatic_key_counts` already discounts
+them per-key; `is_injected` alone is unreliable and was never the guard. Manual
+takeover is a safety property, not a convenience.
+
+Native-Wayland windows (e.g. VS Code) are invisible to every X11 listener — a
+pre-existing limitation, not something the lane introduced.
 
 The lane is switched by `nested.enabled` in `config.yaml`, not by a separate run
 target, so the Makefile and wingman cannot disagree about which lane is active.

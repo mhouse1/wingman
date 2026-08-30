@@ -54,6 +54,99 @@ def find_game_pids(process_name: str = "Metalstorm.exe") -> "list[int]":
     return pids
 
 
+def find_nested_display_pids(display: str) -> "list[int]":
+    """PIDs of the Xwayland server backing `display`. Never raises.
+
+    ADR 099. The match is deliberately EXACT on argv[1], not a substring of the
+    command line: the operator's own session is served by `Xwayland :0 ...`, and
+    a loose match that caught it would take their entire desktop down. `:3` is
+    also a substring of `:30`, so even a display-number match must be whole.
+    """
+    pids = []
+    if not display:
+        return pids
+    try:
+        entries = os.listdir(_PROC)
+    except OSError as e:
+        logger.warning("Nested display: cannot read %s: %s", _PROC, e)
+        return pids
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"{_PROC}/{entry}/comm", "r", encoding="utf-8") as fh:
+                if fh.read().strip() != "Xwayland":
+                    continue
+            with open(f"{_PROC}/{entry}/cmdline", "rb") as fh:
+                argv = fh.read().split(b"\0")
+        except OSError:
+            continue          # exited between listdir and open
+        if len(argv) >= 2 and argv[1].decode("utf-8", "replace") == display:
+            pids.append(int(entry))
+    return pids
+
+
+def close_nested_display(display: str,
+                         grace_s: float = _DEFAULT_GRACE_S,
+                         clock=time.monotonic, sleep=time.sleep) -> dict:
+    """Tear down the nested Xwayland serving `display` (ADR 099).
+
+    Called only after the game itself is closed. The server exists solely to
+    host the game, so leaving it behind strands an empty black "Xwayland on :N"
+    window on the operator's desktop — the visible residue of a session that
+    otherwise ended cleanly.
+
+    Never raises: a stop path must never fail to stop.
+    """
+    result = {"found": 0, "terminated": [], "killed": [], "failed": [], "ok": True}
+    try:
+        pids = find_nested_display_pids(display)
+        result["found"] = len(pids)
+        if not pids:
+            logger.info("Nested display: no Xwayland found for %s — nothing to close",
+                        display)
+            return result
+        logger.info("Nested display: closing Xwayland for %s (pid(s): %s)",
+                    display, ", ".join(str(p) for p in pids))
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                result["terminated"].append(pid)
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                logger.warning("Nested display: SIGTERM to %d failed: %s", pid, e)
+                result["failed"].append(pid)
+                result["ok"] = False
+        deadline = clock() + max(0.0, grace_s)
+        while clock() < deadline:
+            if not any(_alive(p) for p in pids):
+                break
+            sleep(0.25)
+        for pid in pids:
+            if not _alive(pid):
+                continue
+            logger.warning("Nested display: %d survived %.1fs — SIGKILL", pid, grace_s)
+            try:
+                os.kill(pid, signal.SIGKILL)
+                result["killed"].append(pid)
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                logger.warning("Nested display: SIGKILL to %d failed: %s", pid, e)
+                result["failed"].append(pid)
+                result["ok"] = False
+        if [p for p in pids if _alive(p)]:
+            result["ok"] = False
+        else:
+            logger.info("Nested display: %s closed", display)
+    except Exception as e:
+        logger.warning("Nested display: close failed (%s: %s) — exiting anyway",
+                       type(e).__name__, e)
+        result["ok"] = False
+    return result
+
+
 def _alive(pid: int) -> bool:
     return os.path.isdir(f"{_PROC}/{pid}")
 

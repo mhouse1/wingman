@@ -194,8 +194,10 @@ On Windows, launch MetalStorm manually before running `make r`.
 By default (`nested.enabled: true` in `wingman/config.yaml`) the game runs on its
 own nested X display. Wingman captures and injects there, so its keystrokes
 cannot reach whatever you are typing in — you can use the machine normally while
-a session runs. Your hotkeys still work, because hotkey observation deliberately
-stays on your own display.
+a session runs. Your hotkeys still work: wingman watches for them on both your
+display and the nested one, so they register whether you are looking at the game
+or at an X11 window of your own. (Native-Wayland windows such as VS Code cannot
+be observed by any X11 listener — a pre-existing limitation.)
 
 ```bash
 make rd              # honours nested.enabled
@@ -203,6 +205,18 @@ make rd NESTED=0     # force the on-screen lane for one run
 make nested-status   # is the lane up, and what holds focus
 make nested-stop     # tear the nested server down
 ```
+
+Stopping a session:
+
+- **`z`** — finish the round, then close MetalStorm and the nested display.
+- **Backspace** — two-stage. The first press stops wingman and **leaves
+  MetalStorm running**, so you can take over and keep flying by hand, even
+  mid-battle; wingman waits in standby. Press Backspace again, whenever you are
+  done, to close MetalStorm and the nested display and exit. Ctrl-C during
+  standby leaves everything up.
+
+Guard-triggered exits leave both up, because they mean "restart wingman". Set
+`finish_round_then_exit.close_game: false` to stop wingman only.
 
 See ADR 099 and `docs/hldd/009-nested-display-isolation-hldd.md` for the design.
 
@@ -240,7 +254,8 @@ Wingman is normally fully unattended — hotkeys exist for supervision, testing,
 | `p` | Manual padlock cooldown trigger |
 | `v` | Save debug screenshot with crop overlays |
 | `b` | Inject simulated respawn OCR result (testing) |
-| `backspace` | Exit script (runtime mode) |
+| `backspace` | Stop wingman, leaving MetalStorm up for manual flight; press again to close everything |
+| `z` | Finish the round, then exit and close MetalStorm |
 
 Hotkeys work on Linux without root or `input` group membership — key injection uses XTest and hotkey listening uses the X11 RECORD extension (see ADR 053).
 

@@ -188,14 +188,41 @@ def set_injection_display(display_name) -> None:
     global _injection_display
     _injection_display = display_name.strip() if display_name else None
     if _injection_display:
-        logger.info("ADR 099: injection routed to display %r (hotkeys still "
-                    "observed on %r)", _injection_display,
-                    os.environ.get("DISPLAY", ":0").strip())
+        logger.info("ADR 099: injection routed to display %r; hotkeys observed "
+                    "on %s", _injection_display,
+                    ", ".join(repr(n) for n in _observe_display_names()))
 
 
 def _inject_display_name() -> str:
     """Display for XTest injection: the override if set, else DISPLAY."""
     return _injection_display or os.environ.get("DISPLAY", ":0").strip()
+
+
+def _observe_display_names() -> "list[str]":
+    """Displays the hotkey listener must watch. ADR 099.
+
+    Keeping observation on the operator's DISPLAY is necessary but NOT
+    sufficient. On a Wayland session that DISPLAY is a *rootless* Xwayland,
+    which only receives key events while an X11 client holds focus. Before the
+    nested lane the game was that client, so the operator's keys reached
+    Xwayland and XRecord saw them. Moving the game to its own display removed
+    the only X client that was ever focused, and every hotkey went dead —
+    backspace and the SAF-001 manual takeover included.
+
+    So the injection display is observed too. When the operator is looking at
+    the nested window, their keys are delivered into that server and are only
+    visible there. Observing it also means wingman sees its OWN injected keys,
+    which is exactly the pre-nested topology that `_programmatic_key_counts`
+    already exists to handle.
+
+    Native-Wayland windows (e.g. VS Code) remain invisible to both — a
+    pre-existing X11 limitation this does not change.
+    """
+    names = [os.environ.get("DISPLAY", ":0").strip()]
+    inject = _inject_display_name()
+    if inject and inject not in names:
+        names.append(inject)
+    return names
 
 
 # --- Shared XTest display (ADR 091) -----------------------------------------
@@ -308,9 +335,11 @@ class _LinuxXTestKeyboard:
         self._grabbed: dict[int, tuple] = {}          # keycode -> (key_name, callback)
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._ctrl_display = None   # used by unhook_all to disable the record context
-        self._record_ctx = None
+
+        # ADR 099: one listener per observed display, so the maps are keyed by
+        # display name. Used by unhook_all to disable every record context.
+        self._contexts: dict = {}   # display name -> (d_ctrl, ctx)
+        self._threads: dict = {}    # display name -> Thread
 
     # --- Key injection (transient Display, no shared state) ---
 
@@ -340,10 +369,10 @@ class _LinuxXTestKeyboard:
 
     def unhook_all(self) -> None:
         self._stop.set()
-        if self._ctrl_display is not None and self._record_ctx is not None:
+        for _disp, (_ctrl, _ctx) in list(self._contexts.items()):
             try:
-                self._ctrl_display.record_disable_context(self._record_ctx)
-                self._ctrl_display.flush()
+                _ctrl.record_disable_context(_ctx)
+                _ctrl.flush()
             except Exception as e:
                 # Shutdown path: the listener thread is a daemon and exits with
                 # the process either way, so this is benign — but it is the only
@@ -353,15 +382,24 @@ class _LinuxXTestKeyboard:
     # --- Listener thread ---
 
     def _ensure_listener(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        names = _observe_display_names()
+        if all(t is not None and t.is_alive()
+               for t in (self._threads.get(n) for n in names)):
             return
         self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._listener_loop, daemon=True, name="XKeyListener"
-        )
-        self._thread.start()
+        for name in names:
+            t = self._threads.get(name)
+            if t is not None and t.is_alive():
+                continue
+            t = threading.Thread(
+                target=self._listener_loop, args=(name,), daemon=True,
+                name=f"XKeyListener{name}",
+            )
+            self._threads[name] = t
+            t.start()
+            logger.info("XKey: observing hotkeys on display %r", name)
 
-    def _listener_loop(self) -> None:
+    def _listener_loop(self, display_name: str) -> None:
         """Observe keyboard events via XRecord without consuming them.
 
         XGrabKey was ruled out because it prevents grabbed keys from reaching the
@@ -386,7 +424,9 @@ class _LinuxXTestKeyboard:
                 from Xlib.ext import record as _record
                 from Xlib.protocol import rq as _rq
 
-                display_name = os.environ.get("DISPLAY", ":0").strip()
+                # display_name is this listener's own display, passed in by
+                # _ensure_listener - NOT read from the environment, which would
+                # collapse every listener onto the operator's display.
 
                 # Resolve keycodes for pending registrations. On reconnect, _pending is
                 # empty but _grabbed still holds previously resolved keycodes, which are
@@ -430,8 +470,7 @@ class _LinuxXTestKeyboard:
                     }],
                 )
 
-                self._ctrl_display = d_ctrl
-                self._record_ctx = ctx
+                self._contexts[display_name] = (d_ctrl, ctx)
 
                 # Watcher: unblocks record_enable_context when _stop is set (e.g. on
                 # abnormal exit where cleanup() never runs), or exits without acting
@@ -511,8 +550,7 @@ class _LinuxXTestKeyboard:
                 d_rec.record_free_context(ctx)
                 d_rec.close()
                 d_ctrl.close()
-                self._ctrl_display = None
-                self._record_ctx = None
+                self._contexts.pop(display_name, None)
                 break  # clean exit: _stop was set via unhook_all
             except Exception as e:
                 logger.error("XKey listener thread died: %s", e)
@@ -527,8 +565,7 @@ class _LinuxXTestKeyboard:
                         d_ctrl.close()
                     except Exception as close_err:
                         logger.debug("XKey: d_ctrl.close() failed during reconnect: %s", close_err)
-                self._ctrl_display = None
-                self._record_ctx = None
+                self._contexts.pop(display_name, None)
                 if not self._stop.is_set():
                     reconnect_attempts += 1
                     logger.info("XKey: reconnecting display in 3s (attempt %d)", reconnect_attempts)

@@ -45,15 +45,37 @@ stop at the next lobby, then close MetalStorm.
 The name is ordering, not decoration. Three things happen, in this order:
 
 1. **Finish the round** — the press defers; nothing stops immediately.
-2. **Then exit wingman** — `break` at the first tick where `_safe` holds, through
-   the existing shutdown path.
+2. **Then exit wingman** — `break` at the first tick where no round is in
+   progress, through the existing shutdown path.
 3. **Then close MetalStorm** — after wingman's own artifacts are written.
 
 ### Deferral semantics
 
-- Pressing `z` sets a flag. It does not stop anything immediately.
-- The session ends at the first tick where `_safe` holds — the identical
-  condition ADR 090 and ADR 093 use. No special case if already at the lobby.
+- Pressing `z` sets a flag. It does not stop anything immediately *if a round is
+  in progress*.
+- The session ends at the first tick where **no round is in progress** — that is,
+  the state is not one of `GAME_BATTLE`, `GAME_BATTLE_MANUAL` or
+  `GAME_BATTLE_EJECT` (`analyzer.BATTLE_STATES`).
+
+  **Amended 2026-08-29.** This originally reused the guards' `_safe`
+  (`GAME_LOBBY` and no mission lock). That was wrong, and wrong in the state the
+  hotkey is most often pressed from: wingman starts in `GAME_UNKNOWN` and stays
+  there until the first classification, so `z` pressed at startup did nothing
+  at all. It was equally dead in `GAME_WAITING`, `GAME_STARTING` and
+  `GAME_END_B` — none of which have an aircraft in flight to protect.
+
+  The guards and the hotkey were conflated because they share a `break`, but
+  they mean different things. A guard exit means "restart wingman at a clean
+  moment" and should still wait for a real lobby. `z` means "stop unless that
+  would abandon an aircraft in flight". The guards keep `_safe` unchanged.
+- **No automatic path may start a new round while the exit is pending.** The
+  lobby quick-scan clicks PLAY within a second or two of reaching the lobby, so
+  a press made *in* the lobby lost the race and cost the operator a further full
+  round. The gate sits at the analyzer's click site rather than in the
+  `LOBBY_PLAY_CLICK` subscriber, because that site also fires
+  `_trigger("play_clicked")` — a subscriber that declined to click would still
+  leave the FSM in `GAME_WAITING`. Invite-accept and stall-recovery PLAY clicks
+  are gated on the same rule.
 - Pressing `z` again **cancels** the pending exit. A deferred action that cannot
   be recalled is a trap: the operator gets no feedback for minutes and no way
   back except killing the process, which is the thing being avoided.
@@ -177,8 +199,15 @@ number, and Backspace already covers it.
 
 - **V1 — deferred, not immediate.** Pressing `z` during `GAME_BATTLE` does not
   end the session; the mission completes.
-- **V2 — ends at the safe point.** The session ends on the first tick where the
-  state is `GAME_LOBBY` and no mission holds the lock.
+- **V2 — ends as soon as no round is in progress.** *(Amended 2026-08-29;
+  originally "at the safe point", meaning `GAME_LOBBY` and no mission lock.)*
+  The session ends on the first tick where the state is not in `BATTLE_STATES`,
+  including `GAME_UNKNOWN` at startup.
+- **V10 — a press in the lobby does not start another round.** The quick-scan
+  declines to click PLAY while the exit is pending, so the state stays
+  `GAME_LOBBY` and the exit fires on the next tick.
+- **V11 — the guards are unchanged.** `_safe` still gates the ADR 090 and
+  ADR 093 exits.
 - **V3 — cancel works.** A second press clears the pending exit; the session
   continues past the next lobby.
 - **V4 — clean shutdown.** The exit writes the session summary, performance

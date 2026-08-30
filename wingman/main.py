@@ -25,7 +25,8 @@ from .config_schema import assert_valid_config
 from .controller_config import ControllerConfig
 from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON,
                          set_focus_guard)
-from .analyzer import GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES
+from .analyzer import (GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES,
+                       BATTLE_STATES)
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -34,7 +35,7 @@ from .heap_census import HeapCensus
 from .liveness_guard import LivenessGuard
 from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
-from .game_shutdown import close_game
+from .game_shutdown import close_game, close_nested_display
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -145,6 +146,18 @@ def _alive_transition_disposition(state, alive_after_observed_death: bool) -> st
     return "consume_other"
 
 
+def _rss_mb() -> float:
+    """Resident set size in MB, or 0.0 if unavailable. Never raises."""
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return 0.0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="wingman/config.yaml")
@@ -249,9 +262,10 @@ def main():
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import set_injection_display
         set_injection_display(nested_display)
+        from .input_linux import _observe_display_names
         logger.info("ADR 099: nested lane ACTIVE - capture and injection on %s, "
                     "hotkeys observed on %s", nested_display,
-                    os.environ.get("DISPLAY", ":0"))
+                    ", ".join(_observe_display_names()))
 
     # ADR 098: gate injection on the game having focus. Installed process-wide
     # because the injection sites are module-level in controller.
@@ -456,6 +470,11 @@ def main():
             live_capture.evaluate(frame, "GAME_LOBBY", _now)
             live_capture.evaluate(frame, "GAME_LOBBY", _now + 1e-6)
     analyzer.subscribe(GameEvent.LOBBY_PLAY_CLICK, _on_lobby_play_click_cb, name="controller")
+    # ADR 094: with an exit pending, no automatic path may start another round.
+    # Without this the quick-scan clicks PLAY within a second or two of reaching
+    # the lobby, so a press made IN the lobby lost the race and cost the
+    # operator a further full round.
+    analyzer.set_round_start_suppressor(ctrl.finish_round_requested)
 
     if live_capture is not None:
         def _on_good_luck_frame(gl_frame):
@@ -549,7 +568,10 @@ def main():
                     logger.warning("INVITED: frame capture returned None")
                     return
                 ready = analyzer.scan_region_for_play_button(new_frame)
-                if ready:
+                if ready and ctrl.finish_round_requested():
+                    logger.info("🏁 FINISH ROUND: INVITED accepted but exit is "
+                                "pending — not clicking %s", ready)
+                elif ready:
                     logger.info("\033[92m📋 INVITED accepted — clicking %s\033[0m", ready)
                     ctrl.click_crop(analyzer.crops[ready], block=False, count=1, region_name=ready)
             threading.Thread(target=_click_ready_after_invite, daemon=True).start()
@@ -648,6 +670,10 @@ def main():
                 ready = analyzer.scan_region_for_play_button(new_frame)
                 if ready is None:
                     logger.warning("STALL_MULTI_PLAYER: no PLAY/READY after leaving squad")
+                    return
+                if ctrl.finish_round_requested():
+                    logger.info("🏁 FINISH ROUND: squad exited but exit is pending "
+                                "— not clicking '%s'", ready)
                     return
                 logger.info("\033[92m🔧 Stall recovery: clicking '%s' after squad exit\033[0m", ready)
                 ctrl.click_crop(analyzer.crops[ready], block=False, count=1, region_name=ready)
@@ -822,13 +848,22 @@ def main():
             # mid-mission abandons an aircraft in flight.
             _safe = (analyzer.game_state == GameState.GAME_LOBBY
                      and not ctrl.is_mission_running())
-            # ADR 094: the operator's deferred stop, at the same safe point the
-            # guards use. Checked first only because it is the deliberate one —
-            # the outcome is the same single break either way.
-            if ctrl.finish_round_requested() and _safe:
+            # ADR 094: the operator's deferred stop. Deliberately BROADER than
+            # the guards' safe point above. The guards mean "restart wingman at
+            # a clean moment" and should wait for a real lobby; 'z' means "stop
+            # unless that would abandon an aircraft in flight".
+            #
+            # Requiring GAME_LOBBY made the hotkey dead at startup, which is
+            # when it is most likely to be pressed: the FSM begins in
+            # GAME_UNKNOWN and stays there until the first classification, so
+            # the safe point was never true and the press did nothing visible.
+            # It was also dead in GAME_WAITING, GAME_STARTING and GAME_END_B —
+            # none of which have a round in progress to protect.
+            _in_round = analyzer.game_state in BATTLE_STATES
+            if ctrl.finish_round_requested() and not _in_round:
                 logger.warning(
-                    "\033[93m🏁 FINISH ROUND: stopping at lobby — round complete "
-                    "(ADR 094)\033[0m")
+                    "\033[93m🏁 FINISH ROUND: stopping in %s — no round in progress "
+                    "(ADR 094)\033[0m", analyzer.game_state.name)
                 finish_round_exit = True
                 break
             if liveness.should_stop() and _safe:
@@ -1223,9 +1258,21 @@ def main():
         # emit-before-cleanup rule as the shadow summary above.
         dropout_summary = analyzer.health_dropout_summary()
         logger.info("Health dropout histogram (ADR 080): %s", json.dumps(dropout_summary))
+        # ADR 099: a first Backspace ends the session but leaves MetalStorm up so
+        # the operator can keep flying by hand. The hotkey hooks must therefore
+        # survive cleanup(), or the second press has nothing listening for it.
+        # Everything else in cleanup() still runs: the writers stop and every
+        # injectable key is released, so nothing wingman was holding carries
+        # into manual flight.
+        _fr_cfg = cfg.get("finish_round_then_exit", {}) or {}
+        _close_enabled = bool(_fr_cfg.get("close_game", True))
+        _grace = float(_fr_cfg.get("game_term_grace_s", 5.0))
+        standby_armed = (ctrl.operator_stop_requested()
+                         and not finish_round_exit
+                         and _close_enabled)
         if hasattr(cap, "cleanup"):
             cap.cleanup()
-        ctrl.cleanup()
+        ctrl.cleanup(keep_hotkeys=standby_armed)
         # ADR 095: the run file is written from inside analyzer.cleanup(), via
         # on_session_end() once the OCR pool has joined. load_end has to be taken
         # BEFORE that call or it misses the file entirely — the 2026-08-26 14:37
@@ -1256,20 +1303,76 @@ def main():
         heap_census.stop()
         # ADR 094: close MetalStorm LAST — after the session summary, the
         # performance artifacts and the mission stats are on disk, so a hung or
-        # failed close cannot cost the session's data. Only the operator's
-        # deliberate finish-round stop does this: a guard exit means "restart
-        # wingman", and the operator wants the client still up for that.
-        if finish_round_exit:
-            _fr_cfg = cfg.get("finish_round_then_exit", {}) or {}
-            if _fr_cfg.get("close_game", True):
-                close_game(
-                    process_name=(cfg.get("resource_monitor", {}) or {}).get(
-                        "game_process_name", "Metalstorm.exe"),
-                    grace_s=float(_fr_cfg.get("game_term_grace_s", 5.0)),
-                )
-            else:
-                logger.info("FINISH ROUND: close_game disabled — leaving "
-                            "MetalStorm running")
+        # failed close cannot cost the session's data.
+        #
+        # Only an OPERATOR-INITIATED stop tears the session down: the deferred
+        # finish-round exit ('z') or Backspace. A guard exit means "restart
+        # wingman", and the startup-stall exit says in as many words that the
+        # game is left up for inspection — so neither closes anything. Both of
+        # those also set exit_requested, which is why Backspace needs its own
+        # flag rather than being inferred from it.
+        #
+        # ADR 099: Backspace closing the GAME is a change of meaning — it used
+        # to stop wingman and leave the client running. On the nested lane that
+        # is not separable: the black "Xwayland on :3" window the operator wants
+        # gone IS the game's display, so the window cannot be closed while the
+        # game still needs it. Closing the game first, cleanly, beats yanking
+        # the display out from under it. `close_game: false` still opts out of
+        # both.
+        def _close_session():
+            """Close the game, then the nested display that exists to host it.
+
+            Ordered deliberately: tearing the display down first yanks the
+            game's display out from under it mid-shutdown. Gated on the same
+            close_game flag, since killing the server while the game is
+            deliberately left running would close the game anyway.
+            """
+            close_game(
+                process_name=(cfg.get("resource_monitor", {}) or {}).get(
+                    "game_process_name", "Metalstorm.exe"),
+                grace_s=_grace,
+            )
+            if nested_display:
+                close_nested_display(nested_display, grace_s=_grace)
+
+        if not _close_enabled:
+            logger.info("Operator stop: close_game disabled — leaving "
+                        "MetalStorm and the nested display running")
+        elif finish_round_exit:
+            # 'z' means "I am done" — close immediately.
+            _close_session()
+        elif standby_armed:
+            # Standby parks the process for as long as the operator flies, so
+            # hand freed arenas back to the OS first. glibc keeps them by
+            # default (the reason for MALLOC_ARENA_MAX=2, ADR 090), and the
+            # OCR pool has just been joined, so there is a lot to return.
+            # Best-effort: a failure here costs memory, not correctness.
+            try:
+                import ctypes
+                _rss_before = _rss_mb()
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+                logger.info("STANDBY: malloc_trim released %.0f MB (rss %.0f -> %.0f MB)",
+                            max(0.0, _rss_before - _rss_mb()), _rss_before, _rss_mb())
+            except Exception as e:
+                logger.debug("STANDBY: malloc_trim unavailable: %s", e)
+            # ADR 099: first Backspace. The session is over and every artifact
+            # is on disk; the game keeps running so the operator can fly it by
+            # hand, uninterrupted, including mid-battle. Wingman stays alive
+            # doing nothing but watching for a second Backspace.
+            logger.warning(
+                "\033[93m🖐  STANDBY: wingman has stopped — MetalStorm is still "
+                "running and is yours to fly. Press Backspace again to close "
+                "MetalStorm%s and exit. Ctrl-C leaves everything up.\033[0m",
+                " and the nested display" if nested_display else "")
+            try:
+                while not ctrl.wait_for_close_all(timeout=1.0):
+                    pass
+                logger.info("STANDBY: second Backspace — closing down")
+                _close_session()
+            except KeyboardInterrupt:
+                logger.info("STANDBY: interrupted — leaving MetalStorm running")
+            finally:
+                ctrl.release_hotkeys()
 
 
 if __name__ == "__main__":

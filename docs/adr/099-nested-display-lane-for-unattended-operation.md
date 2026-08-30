@@ -47,15 +47,36 @@ preference; Xephyr cannot run the game at all. See the experiment below.
 `input_linux.py:114`, `input_linux.py:227`, `focus_guard.py` and all three
 capture backends. Nothing in the injection path changes.
 
-**D4. `DISPLAY` is split: injection moves, observation does not.** `DISPLAY`
-does three jobs in this codebase — capture, injection, and the XRecord hotkey
-listener that watches the operator's real keypresses. The first two must follow
-the game onto the nested display. The third must NOT: point it at the nested
-display and `backspace`, `end` and the `i/j/k/l` takeover keys are only seen
-while the nested window has focus, which is exactly when the operator is not
-working elsewhere. Manual takeover is a safety property, so capture takes an
-explicit display (`mss(display=...)`) and injection an explicit override, while
-the listener keeps reading `os.environ["DISPLAY"]`.
+**D4. `DISPLAY` is split: capture and injection move; observation spans BOTH
+displays.** `DISPLAY` does three jobs here — capture, injection, and the XRecord
+hotkey listener that watches the operator's real keypresses. The first two
+follow the game onto the nested display. The third is not a single display at
+all.
+
+*Amended 2026-08-29.* This first read "observation does not move", and that was
+wrong in a way that killed every hotkey. `:0` is a **rootless** Xwayland: it
+receives key events only while an X11 client holds focus. Before the lane the
+game was that client, so the operator's keys reached `:0` and XRecord saw them.
+Moving the game to `:3` removed the only X client that was ever focused, and
+`:0` went silent — backspace, `z` and the SAF-001 manual takeover all dead, with
+no error anywhere. The operator's next stop was Ctrl-C.
+
+Keeping the listener on the operator's display was **necessary but not
+sufficient**. The correct rule is: **observe every display the operator's keys
+can reach**, which includes the injection display, because when the operator
+looks at the nested window their keys are delivered into that server and are
+visible only there. One listener thread per display
+(`input_linux._observe_display_names`).
+
+Observing the injection display means wingman also sees its own injected keys.
+That is not new — it is the pre-nested topology, where injection and observation
+shared one display, and `_programmatic_key_counts` already exists to discount
+those presses per-key with a post-release grace window for XTest auto-repeat.
+`is_injected` alone is unreliable and was never the guard.
+
+Capture takes an explicit display (`mss(display=...)`) and injection an explicit
+override. Native-Wayland windows (e.g. VS Code) remain invisible to every X11
+listener — a pre-existing limitation this does not change.
 
 **D5. The switch is `nested.enabled` in config, not a parallel make target.**
 A single environment variable cannot express D4 — it sets one display for all
@@ -65,13 +86,58 @@ the Makefile and wingman cannot disagree about the lane. `NESTED=0` / `NESTED=1`
 overrides one run, which matters because a single global flag would otherwise
 force two simultaneous accounts into the same lane.
 
-**D6. ADR 098's guard follows the injection display.** Keeping the guard is not
+**D6. The nested server is torn down with the game, on any operator-initiated
+stop.** The server exists only to host it, so closing one without the other
+strands an empty black "Xwayland on :N" window on the operator's desktop — the
+visible residue of a session that otherwise ended cleanly. Ordered after the
+game close (tearing the display down first yanks the game's display out from
+under it), and gated on the same `close_game` flag, since killing the server
+while the game is deliberately left running would close the game anyway.
+
+"Operator-initiated" means the deferred finish-round exit (`z`) **or Backspace**
+— not a guard exit, and not the startup-stall exit, which says in as many words
+that the game is left up for inspection. All three set `exit_requested`, so
+Backspace carries its own flag rather than being inferred from it; keying the
+teardown off `exit_requested` would silently contradict the stall path.
+
+**Backspace is two-stage, and the first stage keeps the game.** The window the
+operator wants gone *is* the game's display, so the two cannot be closed
+separately — but closing the game on the first press would end a battle the
+operator may want to keep flying by hand.
+
+- **First press** ends the session: automation stops, every injectable key is
+  released, and the summary, performance artifacts and mission stats are
+  written. MetalStorm and the nested display stay up. Wingman does NOT exit —
+  it drops into **standby**, holding nothing but its hotkey listeners, because
+  once the process is gone nothing is left to observe a second press. This is
+  what lets a session be ended mid-battle without interrupting manual control.
+- **Second press**, any time later, closes MetalStorm and then the nested
+  display, and exits.
+- **Ctrl-C during standby** leaves everything up.
+
+The handler is debounced at 0.5 s: X auto-repeats a held key at roughly 25 Hz,
+and an undebounced handler reads one long press as both stages, closing the game
+the operator meant to keep. `close_game: false` opts out of standby entirely —
+there would be nothing for the second press to do.
+
+Standby costs a parked process. `analyzer.cleanup()` joins the OCR pool before
+it starts, and a `malloc_trim(0)` hands the freed arenas back to the OS —
+measured at **2065 MB to 778 MB**, since glibc otherwise retains them (the
+reason for `MALLOC_ARENA_MAX=2`, ADR 090). The residue is torch and the EasyOCR
+models, which stay mapped; 62 threads remain but the process measures 0% CPU.
+
+The process match is **exact on argv[1]**, never a substring of the command
+line: the operator's own session is served by `Xwayland :0`, and a loose match
+that caught it would take their entire desktop down. `:3` is also a substring of
+`:30`.
+
+**D7. ADR 098's guard follows the injection display.** Keeping the guard is not
 enough — it resolves its own display from `focus_guard.display` or `DISPLAY`, so
 under D4 it interrogates the operator's screen while injection targets the
 nested one. It then finds no game window, concludes "not the game", and
 suppresses everything. An explicit `focus_guard.display` still wins.
 
-**D7. Keep ADR 098's guard.** It is unnecessary on the nested lane, since the
+**D8. Keep ADR 098's guard.** It is unnecessary on the nested lane, since the
 game always holds focus there, but it remains the protection for the on-screen
 lane and costs one query per tick.
 
@@ -152,19 +218,33 @@ process. Capture worked, injection worked, the FSM ran clean, zero ERROR lines
 XRecord listener's display from the same variable. Nothing in the logs said so.
 
 The config-driven form is not a tidier spelling of the same thing; it is what
-makes the correct behaviour expressible at all. Confirmed on 2026-08-29 with
-the lane active under a plain `make rd`:
+makes the correct behaviour expressible at all.
+
+**The first fix was itself wrong.** Pinning the listener to `:0` was declared
+working on the strength of the startup banner and the process environment —
+never on a keypress. It was not working. `:0` is a rootless Xwayland and sees
+keys only while an X11 client holds focus; the lane had just removed the only
+such client. Every hotkey stayed dead for two more rounds of changes, and the
+operator's report was "key presses are not working now in wingman". The proof
+was already in their log: `Exiting` comes from `except KeyboardInterrupt`, so
+the session had been stopped with Ctrl-C, and no `FINISH ROUND` line appeared
+at all.
+
+Verified on 2026-08-29 by injecting the hotkey into the nested server and
+watching wingman act on it — the first time this was tested rather than
+asserted:
 
 ```
-ADR 099: injection routed to display ':3' (hotkeys still observed on ':0')
-ADR 099: nested lane ACTIVE - capture and injection on :3, hotkeys observed on :0
-wingman pid 405505  env DISPLAY=:0
-📋 Clicking PLAY at (1638, 1093) [game offset 0,0] x1
-🎮 Game state: GAME_LOBBY → GAME_WAITING
+XKey: observing hotkeys on display ':0'
+XKey: observing hotkeys on display ':3'
+injected z on :3
+🏁 FINISH ROUND: requested in GAME_WAITING — no round in progress, stopping now
+🏁 FINISH ROUND: stopping in GAME_WAITING — no round in progress (ADR 094)
+Stats saved to: docs/performance/current/run_20260829_105443_acct1_stats.json
 ```
 
-The process environment says `:0`, so the listener watches the operator's
-keyboard, while capture and the PLAY click land on `:3`.
+Wingman exited and closed MetalStorm. A banner is not evidence that a key
+works; only a key working is.
 
 ### The guard then suppressed everything
 
@@ -197,9 +277,12 @@ ADR 099: focus guard follows injection to display :3
 
 Zero suppressions, and matchmaking confirmed in 17.0 s against 154.2 s.
 
-The pattern across both failures is the same: **every consumer of `DISPLAY` has
-to be asked which display it means.** Capture, injection, hotkey observation and
-now the focus guard were four, and three of them were wrong at some point.
+The pattern across all three failures is the same: **every consumer of
+`DISPLAY` has to be asked which display it means — and the answer may be more
+than one.** Capture, injection, hotkey observation and the focus guard were
+four, and three of the four were wrong at some point. Observation was wrong
+twice: once by moving with the game, then again by being pinned to the operator
+when it needed both.
 
 ### The full loop runs on it
 
@@ -323,9 +406,11 @@ a game that restarts *on its own* mid-session still drops focus, which is V6.
 
 Each of these fails in a way that does not look like the cause:
 
-1. **`DISPLAY` serves three consumers that do not want the same value** —
-   capture, injection, and the XRecord hotkey listener. Moving all three is the
-   bug D4 exists to prevent, and it is invisible in the logs. This is why the
+1. **`DISPLAY` serves four consumers that do not want the same value** —
+   capture, injection, the XRecord hotkey listener, and the focus guard. Moving
+   them all is the bug D4 exists to prevent, and it is invisible in the logs.
+   Observation is not even a single display: a rootless Xwayland sees keys only
+   while an X11 client has focus, so it must watch the nested display too. This is why the
    backend is now selected from config (`Capture(display=...)`) rather than
    inferred from `XDG_SESSION_TYPE`, which was the earlier lever.
 2. **`make r` and `make rd` kill and relaunch the game** via
@@ -349,6 +434,9 @@ Each of these fails in a way that does not look like the cause:
 - V8. Unit: injection follows the configured display while observation keeps reading `DISPLAY`, and the override clears. **Done, 2026-08-29** — `tests/test_input_linux.py`.
 - V9. Unit: config drives the lane, `NESTED=0/1` overrides it, and a missing or malformed config fails closed (lane off). **Done, 2026-08-29** — a half-applied lane would capture the nested display while injecting into the operator's, which is the ADR 098 corruption reintroduced.
 - V10. Live: a plain `make rd` activates the lane from config, with the process environment still on the operator's display. **Done, 2026-08-29.**
+- V14. Live: the FIRST Backspace ends the session and leaves MetalStorm and the nested display up, with wingman idle in standby; the SECOND closes both and exits. **Done, 2026-08-29** — standby measured 0% CPU and 778 MB after malloc_trim released 1288 MB.
+- V13. Live: Backspace closes the game and then the nested server. **Done, 2026-08-29** — Xwayland `:3` pid 1153947 before the press, `GONE` after, with the operator's `:0` untouched.
+- V12. Live: the finish-round exit closes the game and then the nested server, leaving no window behind, with the operator's own `:0` untouched. **Done, 2026-08-29** — recorded Xwayland `:3` pid 1117382 before the press, `GONE` after; `Nested display: :3 closed`.
 - V11. Unit + live: the focus guard follows the injection display, an explicit `focus_guard.display` still wins, and the on-screen lane is untouched. **Done, 2026-08-29** — `tests/test_focus_guard.py`; live `make r1` showed 0 suppressions against 10 before.
 
 `make test` passes 999 tests, 2 skipped.

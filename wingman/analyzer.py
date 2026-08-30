@@ -41,6 +41,16 @@ class GameState(Enum):
 POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
                         GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
+# States where a round is genuinely under way and stopping would abandon an
+# aircraft in flight. ADR 094's deferred exit waits these out; everything else
+# — including GAME_UNKNOWN before the first classification, and GAME_END_B once
+# the round is scored — is a safe moment to stop.
+BATTLE_STATES = frozenset({
+    GameState.GAME_BATTLE,
+    GameState.GAME_BATTLE_MANUAL,
+    GameState.GAME_BATTLE_EJECT,
+})
+
 # ADR 084: states where the FSM has lost the screen and a recovery action is
 # warranted. Deliberately EXCLUDES GAME_LOBBY / GAME_WAITING — unlike the popup
 # crops, these actions leave squads and close modals next to an "Exit" button,
@@ -1010,6 +1020,13 @@ class GameStateAnalyzer:
         self._stall_scan_interval_s = float(_stall_cfg.get("scan_interval_s", 5.0))
         self._unready_since = 0.0
         self._stall_state_since = 0.0
+        # ADR 094: predicate that suppresses automatic round-starting clicks.
+        # Set by main() to the controller's pending finish-round exit. It must be
+        # consulted HERE rather than in the LOBBY_PLAY_CLICK subscriber, because
+        # this site also fires _trigger("play_clicked") — a subscriber that
+        # declined to click would still leave the FSM in GAME_WAITING, stranding
+        # the operator's exit until a whole further round completed.
+        self._suppress_round_start = None
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
@@ -2880,6 +2897,26 @@ class GameStateAnalyzer:
                     return
                 logger.warning("Analyzer: click_to OCR failed: %s", e)
 
+    def set_round_start_suppressor(self, predicate) -> None:
+        """Install a predicate that, when true, blocks automatic round starts.
+
+        Used by the FINISH_ROUND_THEN_EXIT hotkey (ADR 094) so that pressing it
+        in the lobby stops there instead of racing the quick-scan into another
+        round. Never raises: a failing predicate must not take perception down,
+        so it is treated as "do not suppress" — the pre-existing behaviour.
+        """
+        self._suppress_round_start = predicate
+
+    def _round_start_suppressed(self) -> bool:
+        """True when an automatic PLAY/READY click must not fire."""
+        if self._suppress_round_start is None:
+            return False
+        try:
+            return bool(self._suppress_round_start())
+        except Exception:
+            logger.exception("Analyzer: round-start suppressor raised — not suppressing")
+            return False
+
     def _ensure_lobby_quick_scan_thread(self):
         """Start (or restart) the popup quick-scan thread.
 
@@ -3169,6 +3206,15 @@ class GameStateAnalyzer:
                             logger.debug(
                                 "Lobby quick-scan: %s visible but state is now GAME_STARTING — skipping click",
                                 crop,
+                            )
+                            handled = True
+                        elif self._round_start_suppressed():
+                            # ADR 094: the operator asked to stop. Staying in
+                            # GAME_LOBBY keeps the main loop's safe point true,
+                            # so the deferred exit fires on the next tick.
+                            logger.info(
+                                "\033[93m🏁 FINISH ROUND: %s visible but exit is pending — "
+                                "not starting another round\033[0m", crop,
                             )
                             handled = True
                         else:

@@ -228,6 +228,12 @@ make nested-stop     # tear it down
 make rd NESTED=0     # run on your own screen instead, for one run
 ```
 
+Stopping with `z` closes the game and the nested display together. Backspace is
+two-stage: the first press stops wingman and leaves MetalStorm up so you can fly
+it manually (wingman waits in standby, idle); a second press closes everything.
+Ctrl-C during standby leaves it all running. A guard exit or the startup-stall
+exit leaves both up on purpose — those mean "restart wingman" or "come and look".
+
 Two things about the nested lane that are not obvious:
 
 - **The nested server needs your Wayland session.** Xwayland is itself a Wayland
@@ -277,7 +283,7 @@ values win over the defaults):
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | Every click and key suppressed, `FocusGuard: game does not have focus (None)` | ADR 098's guard is querying the wrong display — the game is on the nested one | Ensure `focus_guard.display` is unset in config so it follows the injection display automatically (ADR 099 D6) |
-| Hotkeys (backspace, `end`, `i/j/k/l`) do nothing | Hotkey observation moved off your display | XRecord must stay on the operator's `DISPLAY`; only capture and injection move (ADR 099 D4) |
+| Hotkeys (backspace, `z`, `i/j/k/l`) do nothing | Only one display is being observed. `:0` is a rootless Xwayland and sees keys only while an X11 client has focus — the nested lane removes the only one there was | Confirm startup logs `XKey: observing hotkeys on display` for BOTH displays (ADR 099 D4). Keys typed into native-Wayland windows are invisible to X11 either way |
 | Game exits at launch with `vulkan: No DRI3 support detected` | The nested server is Xephyr, which has no DRI3, so DXVK cannot present | Use rootful Xwayland — `scripts/nested-display.py` does. Xephyr cannot run the game at all |
 | `umu-shim: No such file or directory` | Launched Heroic from VS Code snap terminal | Open GNOME Terminal (not VS Code) and launch Heroic from there |
 | `PROTONPATH '...GE-Proton-latest' is not valid, toolmanifest.vdf not found` | `PROTON_ROOT` default doesn't match what's actually installed | `ls .../tools/proton/` (Step 4) and override `PROTON_ROOT` (Step 9) |
