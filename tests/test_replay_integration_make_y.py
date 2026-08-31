@@ -45,6 +45,35 @@ class FakeController:
     def record_popup_click(self, _popup):
         pass
 
+    # --- interface main() wires up ------------------------------------------
+    # Kept complete deliberately: main() reads these at startup, so a fake that
+    # tracks them only by accident fails at wiring time, before the replay runs,
+    # with an AttributeError that says nothing about the path under test.
+    def release_for_manual_takeover(self):
+        """SAF-001 hand-over; subscribed to MANUAL_TAKEOVER by main()."""
+        self.cancel_mission()
+
+    def finish_round_requested(self):
+        return False
+
+    def operator_stop_requested(self):
+        return False
+
+    def wait_for_close_all(self, timeout=None):
+        return False
+
+    def release_hotkeys(self):
+        pass
+
+    def press_escape(self, hold_seconds=0.05, block=False):
+        pass
+
+    def set_on_good_luck_frame(self, _cb):
+        pass
+
+    def set_on_manual_takeover_frame(self, _cb):
+        pass
+
     def cancel_mission(self):
         pass
 
@@ -90,7 +119,7 @@ class FakeController:
     def disengage_roll_right(self):
         self._intents.append({"action_type": "disengage_roll_right"})
 
-    def cleanup(self):
+    def cleanup(self, keep_hotkeys=False):
         pass
 
     def get_action_intents(self):
@@ -98,6 +127,36 @@ class FakeController:
 
 
 class FakeAnalyzer:
+    # --- interface main() wires up ------------------------------------------
+    # main() subscribes events and installs predicates at startup, so anything
+    # it touches must exist here or wiring raises before the replay begins.
+    def subscribe(self, _event, _cb, name=None, replace=False):
+        pass
+
+    def set_round_start_suppressor(self, _predicate):
+        pass
+
+    def shadow_respawn_summary(self):
+        return None
+
+    def health_dropout_summary(self):
+        return {}
+
+    def ocr_queue_depth(self):
+        return 0
+
+    def lobby_blackout_active(self):
+        return False
+
+    def lobby_blackout_age_s(self):
+        return 0.0
+
+    def blackout_esc_suppressed(self):
+        return False
+
+    def exit_dialog_visible(self):
+        return False
+
     def __init__(self, _cfg, tracker=None):
         self._tracker = tracker
         self._game_state = wingman_main.GameState.GAME_LOBBY

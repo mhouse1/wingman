@@ -147,11 +147,11 @@ def test_the_filter_survives_a_catch_warnings_block():
         warnings.filterwarnings(
             "ignore", message=r".*pin_memory.*no accelerator is found.*",
             category=UserWarning)
-        warnings.warn(msg, UserWarning)
+        warnings.warn(msg, UserWarning, stacklevel=2)
         with warnings.catch_warnings():
             pass                      # the thing that reset the dedupe
-        warnings.warn(msg, UserWarning)
-        warnings.warn("an unrelated torch warning", UserWarning)
+        warnings.warn(msg, UserWarning, stacklevel=2)
+        warnings.warn("an unrelated torch warning", UserWarning, stacklevel=2)
     texts = [str(w.message) for w in rec]
     assert not any("pin_memory" in t for t in texts), texts
     assert any("an unrelated torch warning" in t for t in texts), texts

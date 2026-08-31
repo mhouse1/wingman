@@ -369,6 +369,35 @@ class FakeController:
     def start_game_starting_loop(self) -> None:
         pass
 
+    # --- interface main() wires up ------------------------------------------
+    # Kept complete deliberately: main() reads these at startup, so a fake that
+    # tracks them only by accident fails at wiring time, before the replay runs,
+    # with an AttributeError that says nothing about the path under test.
+    def release_for_manual_takeover(self) -> None:
+        """SAF-001 hand-over; subscribed to MANUAL_TAKEOVER by main()."""
+        self.cancel_mission()
+
+    def finish_round_requested(self) -> bool:
+        return False
+
+    def operator_stop_requested(self) -> bool:
+        return False
+
+    def wait_for_close_all(self, timeout=None) -> bool:
+        return False
+
+    def release_hotkeys(self) -> None:
+        pass
+
+    def press_escape(self, hold_seconds: float = 0.05, block: bool = False) -> None:
+        pass
+
+    def set_on_good_luck_frame(self, _cb) -> None:
+        pass
+
+    def set_on_manual_takeover_frame(self, _cb) -> None:
+        pass
+
     def cancel_mission(self) -> None:
         self._intents.append({"action_type": "cancel_mission"})
         self._fire_eject_complete()
@@ -388,7 +417,7 @@ class FakeController:
     def record_popup_click(self, _popup) -> None:
         pass
 
-    def cleanup(self) -> None:
+    def cleanup(self, keep_hotkeys: bool = False) -> None:
         pass
 
     def get_action_intents(self) -> list[dict]:

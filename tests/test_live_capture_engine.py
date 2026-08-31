@@ -553,3 +553,21 @@ def test_oo_stale_state_does_not_satisfy_trigger_step(capture_dir: Path):
     assert not (capture_dir / "stale.png").exists(), (
         "a 30s-stale state sighting satisfied the both-fields rule"
     )
+
+
+def test_the_nested_lane_is_disabled_for_lanes_that_drive_the_real_screen():
+    """ADR 099 / ADR 045. The replay and live-capture lanes present on the
+    operator's display and never start a nested server, so inheriting
+    nested.enabled from config routed injection to a display that does not
+    exist: 51 "Can't connect to display :3" errors and a red ADR 045 gate on
+    2026-08-30.
+
+    Derived from args rather than the replay_mode/capture_mode locals because
+    this must settle before the focus guard and Capture are constructed."""
+    import pathlib
+    src = pathlib.Path("wingman/main.py").read_text()
+    assert "_lane_drives_real_screen = bool(args.replay_config or args.capture_path_config)" in src
+    guard = src.index("_lane_drives_real_screen")
+    for later in ("set_injection_display(nested_display)", "config_for_display(",
+                  "cap = Capture("):
+        assert src.index(later) > guard, f"{later} must come after the lane check"

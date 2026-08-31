@@ -126,13 +126,16 @@ def start(display: str, size: str) -> int:
             print(f"ERROR: cannot remove stale {lock}: {e}", file=sys.stderr)
             return 1
 
-    log = open(SERVER_LOG, "ab", buffering=0)
+    # The handle only has to live until Popen dups the fd into the child, so a
+    # context manager is safe: the detached server keeps writing through its own
+    # copy after this closes.
     try:
-        subprocess.Popen(
-            ["Xwayland", display, "-geometry", size, "-decorate"],
-            stdout=log, stderr=log,
-            start_new_session=True,   # outlive the make recipe that spawned us
-        )
+        with open(SERVER_LOG, "ab", buffering=0) as log:
+            subprocess.Popen(
+                ["Xwayland", display, "-geometry", size, "-decorate"],
+                stdout=log, stderr=log,
+                start_new_session=True,   # outlive the make recipe that spawned us
+            )
     except FileNotFoundError:
         print("ERROR: Xwayland not found on PATH", file=sys.stderr)
         return 1

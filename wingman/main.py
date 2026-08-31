@@ -313,6 +313,20 @@ def main():
     # note in input_linux.set_injection_display.
     _nested = cfg.get("nested", {}) or {}
     _nested_on = bool(_nested.get("enabled", False))
+    # The ADR 037/045 replay and live-capture lanes drive the REAL screen: the
+    # live lane presents screenshots on the operator's display and never starts
+    # a nested server. Routing injection to a display that does not exist made
+    # every keypress fail — 51 "Can't connect to display :3" errors, and the
+    # ADR 045 gate red, because the lane inherited nested.enabled from config.
+    # Derived from args here rather than the replay_mode/capture_mode locals,
+    # which are computed further down — this has to settle before the focus
+    # guard and Capture are built.
+    _lane_drives_real_screen = bool(args.replay_config or args.capture_path_config)
+    if _nested_on and _lane_drives_real_screen:
+        logger.info("ADR 099: nested lane disabled for the %s lane — it drives "
+                    "the real display",
+                    "replay" if args.replay_config else "capture")
+        _nested_on = False
     _nested_override = os.environ.get("WINGMAN_NESTED", "").strip().lower()
     if _nested_override in ("0", "false", "no"):
         _nested_on = False
