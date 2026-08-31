@@ -159,11 +159,11 @@ def test_the_exit_still_never_fires_mid_round():
     """The one guarantee that must survive the broadening: no exit while an
     aircraft is in flight, which is what ADR 094 exists to protect."""
     from wingman.analyzer import BATTLE_STATES, GameState
-    assert BATTLE_STATES == {
+    assert {
         GameState.GAME_BATTLE,
         GameState.GAME_BATTLE_MANUAL,
         GameState.GAME_BATTLE_EJECT,
-    }
+    } == BATTLE_STATES
 
 
 def test_states_that_must_now_permit_an_immediate_exit():

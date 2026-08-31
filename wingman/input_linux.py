@@ -403,7 +403,7 @@ def _linux_key_event(key: str, event_type) -> None:
     not die with this client).
     """
     _ensure_xauthority()
-    from Xlib import X as _X, XK as _XK
+    from Xlib import XK as _XK
     from Xlib.ext import xtest as _xtest
     xk_name = _XKEY_ALIASES.get(key.lower(), key.lower())
     keysym = _XK.string_to_keysym(xk_name)

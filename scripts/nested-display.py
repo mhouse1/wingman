@@ -149,7 +149,7 @@ def start(display: str, size: str) -> int:
 
 def _game_windows(d, session: "set[int]") -> list:
     """Top-level windows on `d` owned by a process in the game's Wine session."""
-    from Xlib import X, Xatom
+    from Xlib import Xatom
     net_wm_pid = d.intern_atom("_NET_WM_PID")
     found = []
     try:

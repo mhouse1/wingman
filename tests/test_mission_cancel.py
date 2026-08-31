@@ -491,10 +491,14 @@ def test_release_covers_every_injectable_key():
 # and 85 s. Taking control and losing the aircraft to the next death is not
 # manual control in any useful sense.
 
-def test_respawn_no_longer_revokes_manual_by_default():
-    import pathlib, yaml
+def test_respawn_returns_control_to_wingman_by_default():
+    """ADR 059. The operator took the aircraft to fly the life they were in;
+    once it is over there is nothing left to hold, and needing a keypress after
+    every death makes an unattended session need attending."""
+    import pathlib
+    import yaml
     cfg = yaml.safe_load(pathlib.Path("wingman/config.yaml").read_text())
-    assert cfg["mission"]["manual_takeover"]["persist_through_respawn"] is True
+    assert cfg["mission"]["manual_takeover"]["persist_through_respawn"] is False
 
 
 def test_the_respawn_reset_is_gated_on_the_flag():
@@ -502,7 +506,17 @@ def test_the_respawn_reset_is_gated_on_the_flag():
     src = pathlib.Path("wingman/tick_handlers.py").read_text()
     blk = src[src.index("if self._manual_persists_through_respawn:"):]
     assert 'analyzer.trigger_event("respawn_reset")' in blk[:900], \
-        "the reset must still be reachable when the flag is off"
+        "the reset must fire on the default path"
+
+
+def test_the_resumed_mission_is_the_last_one_flown():
+    """Resuming into the wrong mission would be worse than not resuming — the
+    operator picked loiter or j20 for a reason."""
+    import pathlib
+    src = pathlib.Path("wingman/controller.py").read_text()
+    assert "def restart_last_mission" in src
+    fn = src[src.index("def restart_last_mission"):]
+    assert "self._last_mission" in fn[:900]
 
 
 def test_no_auto_restart_is_promised_while_manual():

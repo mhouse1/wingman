@@ -652,8 +652,7 @@ class TestDiveRecoveryRespawnGuard:
 # a condition demanding contacts, and fired 5 times in a 2-hour session. The
 # leaf is what makes it reachable.
 
-from wingman.behavior_tree import (TACTIC_REGROUP, TACTIC_ENGAGE,
-                                   TACTIC_ATTACK_SUPPORT, has_friendlies)
+from wingman.behavior_tree import (TACTIC_REGROUP, has_friendlies)
 
 
 def _battle_snap(**kw):

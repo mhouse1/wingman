@@ -28,7 +28,6 @@ from .analyzer import GameState, BATTLE_STATES
 from .behavior_tree import (
     TACTIC_CLIMB,
     TACTIC_DISENGAGE,
-    TACTIC_EJECT,
     TACTIC_ENGAGE,
     TACTIC_REGROUP,
     TACTIC_EJECT,
@@ -216,7 +215,7 @@ class RespawnHandler:
         # SAF-001: a respawn does not revoke the operator's takeover.
         self._manual_persists_through_respawn = bool(
             (mission_cfg.get("manual_takeover", {}) or {}).get(
-                "persist_through_respawn", True))
+                "persist_through_respawn", False))
 
         self._state = respawn_state_enum.IDLE
         self._cooldown_until = 0.0
@@ -398,20 +397,16 @@ class RespawnHandler:
                         self._live_capture.on_event("respawn_detected", _cap_now)
                         self._live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now)
                         self._live_capture.evaluate(frame, "GAME_BATTLE_MANUAL", _cap_now + 1e-6)
-                    # SAF-001 / ADR 059: whether a respawn returns the
-                    # aircraft to wingman is the operator's call, not the
-                    # game's. Persisting is the default: taking over and then
-                    # losing the aircraft 15 s later to the next death is not
-                    # manual control in any useful sense (measured 2026-08-30 —
-                    # both takeover windows ended on respawn detection, at 15 s
-                    # and 85 s).
+                    # SAF-001 / ADR 059: a respawn ends the takeover and the
+                    # last mission resumes. The operator took the aircraft to
+                    # fly the life they were in; once that life is over there is
+                    # nothing left to hold, and requiring a keypress after every
+                    # death makes an unattended session need attending.
                     #
-                    # The 2026-07-31 07:42 failure this replaced was NOT the
-                    # persistence itself but a restart promised and never
-                    # fired: the scheduler was GAME_BATTLE-gated while the FSM
-                    # sat in manual. Here nothing is scheduled while manual, and
-                    # the operator hands back explicitly with the auto-mission
-                    # key, so no unfireable promise is made.
+                    # Persisting is available (persist_through_respawn) but is
+                    # not the default: shipped that way on 2026-08-30 and the
+                    # operator hit two deaths in one takeover, each needing 'u'
+                    # before wingman would fly again.
                     if self._manual_persists_through_respawn:
                         logger.info(
                             "SAF-001: respawn while in manual — staying in "

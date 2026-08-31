@@ -10,7 +10,6 @@ import threading
 import time
 import unittest.mock as mock
 
-from wingman.analyzer import GameState
 
 
 class _Snap:
@@ -109,3 +108,50 @@ def test_flares_are_not_on_a_timer():
     body = body[:body.index("\n    def ", 100)]
     assert "deploy_flares" not in body, \
         "flares belong to the incoming detector, which knows when one is inbound"
+
+
+# --- the pin_memory warning is silenced, and only that one ------------------
+
+def test_the_pin_memory_warning_is_filtered_by_message():
+    """EasyOCR sets pin_memory=True unconditionally and torch warns on a
+    CPU-only host — correct, and unactionable, since CPU-only is the design
+    (ADR 020).
+
+    It repeated because heap_census uses warnings.catch_warnings(), and leaving
+    that block bumps the global filters version, invalidating every module's
+    __warningregistry__ and defeating the once-per-location dedupe.
+
+    Filtered by MESSAGE rather than by muting UserWarning or the torch module,
+    so an unrelated warning from the same place still reaches the operator."""
+    import pathlib
+    src = pathlib.Path("wingman/main.py").read_text()
+    i = src.index("warnings.filterwarnings(")
+    call = src[i:i + 240]
+    assert "pin_memory" in call
+    assert "category=UserWarning" in call
+    assert 'module=' not in call, "muting the whole module would hide real warnings"
+
+
+def test_the_filter_survives_a_catch_warnings_block():
+    """The dedupe reset is what made this warning repeat, so the fix has to
+    hold across one. Warnings are recorded rather than read off stderr: pytest
+    installs its own capture, so redirecting stderr sees nothing."""
+    import warnings
+    msg = ("'pin_memory' argument is set as true but no accelerator is found, "
+           "then device pinned memory won't be used.")
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.resetwarnings()
+        # First match wins and filterwarnings PREPENDS, so the catch-all is
+        # registered first and the ignore second, leaving the ignore in front.
+        warnings.filterwarnings("always")
+        warnings.filterwarnings(
+            "ignore", message=r".*pin_memory.*no accelerator is found.*",
+            category=UserWarning)
+        warnings.warn(msg, UserWarning)
+        with warnings.catch_warnings():
+            pass                      # the thing that reset the dedupe
+        warnings.warn(msg, UserWarning)
+        warnings.warn("an unrelated torch warning", UserWarning)
+    texts = [str(w.message) for w in rec]
+    assert not any("pin_memory" in t for t in texts), texts
+    assert any("an unrelated torch warning" in t for t in texts), texts

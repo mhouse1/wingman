@@ -3,6 +3,7 @@ import json
 import sys
 import yaml
 import time
+import warnings
 import logging
 import threading
 import socket
@@ -265,6 +266,27 @@ def main():
 
     root_level = logging.DEBUG if args.log_file else console_level
     logging.basicConfig(level=root_level, handlers=handlers)
+
+    # EasyOCR builds its DataLoader with pin_memory=True unconditionally
+    # (easyocr/recognition.py:203), which torch warns about on a CPU-only host —
+    # and this host is CPU-only by design (ADR 020). The warning is correct and
+    # says nothing actionable.
+    #
+    # It repeats because Python's once-per-location dedupe is defeated:
+    # heap_census.py uses warnings.catch_warnings(), and LEAVING that block
+    # bumps the global filters version, invalidating every module's
+    # __warningregistry__. So the next OCR read warns again, indefinitely.
+    # Verified 2026-08-30: same call site warns once; warns again after a
+    # catch_warnings block.
+    #
+    # Silenced by message rather than by muting UserWarning or the torch module,
+    # so an unrelated warning from the same place still reaches the log. Warnings
+    # go to stderr, not through logging, which is why it interleaves unformatted.
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*pin_memory.*no accelerator is found.*",
+        category=UserWarning,
+    )
     logger = logging.getLogger("wingman")
 
     cfg = load_config(args.config)

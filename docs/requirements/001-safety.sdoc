@@ -43,11 +43,18 @@ in a hurry should be found without looking) and the arrow keys. i/j/k/l retain
 their meaning on the operator's own display, where wingman injects nothing,
 with the ctrl+alt modifier that keeps ordinary typing from flying the aircraft.
 
-Control returns on the operator's explicit request, with MISSION_J20_KEY ('u')
-— the key already used for this in GAME_BATTLE. It is one wingman injects
-itself, so it is delivered on the injection display only while the takeover is
-active, where wingman injects nothing but flares and there is nothing it could
-be confused with.
+Control returns to wingman on a respawn, resuming the last mission flown, and
+on the operator's explicit request with MISSION_J20_KEY ('u') — the key already
+used for this in GAME_BATTLE. 'u' is a key wingman injects itself, so it is
+delivered on the injection display only while the takeover is active, where
+wingman injects nothing but flares and there is nothing it could be confused
+with.
+
+Persisting the takeover across deaths was tried on 2026-08-30 and reverted the
+same day: the operator hit two deaths inside one takeover, each needing a
+keypress before wingman would fly again, which makes an unattended session need
+attending. The behaviour remains available as
+`mission.manual_takeover.persist_through_respawn`.
 
 The cost is honest: a reflexive grab of i/j/k/l at the game window no longer
 yields control on its own. A server-timestamp discriminator would restore that

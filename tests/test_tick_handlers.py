@@ -623,24 +623,23 @@ class TestRespawnDetection:
         assert c.cancels == 1
         assert not a.health_respawn_event.is_set()   # consumed
 
-    def test_manual_survives_death_by_default(self):
-        """SAF-001, superseding ADR 059's "death ends manual takeover".
+    def test_manual_death_returns_to_auto(self):
+        """ADR 059: death ends manual takeover and the last mission resumes.
 
-        Measured 2026-08-30: both takeover windows ended on respawn detection,
-        at 15 s and 85 s. Taking control and losing the aircraft to the next
-        death is not manual control in any useful sense, so the operator hands
-        back explicitly instead."""
+        Briefly shipped the other way on 2026-08-30 — the operator then hit two
+        deaths inside one takeover, each needing 'u' before wingman would fly
+        again, which makes an unattended session need attending."""
         h, a, c = _respawn(_RespawnAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL))
-        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE_MANUAL)
-        assert "respawn_reset" not in a.triggers
-
-    def test_death_still_ends_manual_when_persistence_is_disabled(self):
-        """The old behaviour remains reachable — the change is a default, not a
-        removal."""
-        h, a, c = _respawn(_RespawnAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL))
-        h._manual_persists_through_respawn = False
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE_MANUAL)
         assert "respawn_reset" in a.triggers
+
+    def test_manual_can_be_made_to_survive_death(self):
+        """The persisting behaviour stays reachable — it is a default, not a
+        removal."""
+        h, a, c = _respawn(_RespawnAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL))
+        h._manual_persists_through_respawn = True
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE_MANUAL)
+        assert "respawn_reset" not in a.triggers
 
     def test_latch_dedupes_while_screen_persists(self):
         h, a, c = _respawn()

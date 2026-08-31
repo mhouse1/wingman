@@ -374,7 +374,7 @@ def test_ema_reset_clears_state():
 # The enemy scan returns nothing in both, which is why the navigator issued no
 # command and the aircraft flew out of the map.
 
-from wingman.engage_nav import MODE_REGROUP, MODE_IDLE, aggregate_bearing
+from wingman.engage_nav import MODE_REGROUP, aggregate_bearing
 
 
 def _nav_regroup(**minimap):
@@ -457,7 +457,8 @@ def test_regroup_smoothing_does_not_share_the_enemy_ema():
 
 def _minimap_with(shapes, size=200):
     """Synthetic minimap: amber `shapes` drawn on a neutral disc."""
-    import numpy as np, cv2
+    import numpy as np
+    import cv2
     img = np.full((size, size, 3), 90, dtype=np.uint8)
     for (x1, y1, x2, y2) in shapes:
         cv2.line(img, (x1, y1), (x2, y2), (20, 150, 230), 2)   # BGR amber

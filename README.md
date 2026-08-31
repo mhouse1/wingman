@@ -222,8 +222,10 @@ Guard-triggered exits leave both up, because they mean "restart wingman". Set
 wingman stops instantly, releases every key, and from then on only deploys
 flares. Press **`u`** to hand it back. Arrow keys also take over, and
 `ctrl+alt+i/j/k/l` works from your own display. Bare `i/j/k/l` at the game
-window are wingman's own roll commands and are ignored there. Takeover persists
-through respawns until you hand back.
+window are wingman's own roll commands and are ignored there. A respawn ends the
+takeover and the last mission resumes automatically — set
+`mission.manual_takeover.persist_through_respawn: true` to keep flying across
+deaths instead.
 
 **Hotkeys need `ctrl+alt` while the nested lane is on** — `ctrl+alt+z`,
 `ctrl+alt+backspace`, and so on. Without the game holding your keyboard, bare
