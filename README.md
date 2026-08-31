@@ -189,6 +189,11 @@ On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not 
 
 On Windows, launch MetalStorm manually before running `make r`.
 
+**Only one wingman runs at a time.** A second instance is refused at startup
+(SAF-014): two of them inject into the same display and fight each other and the
+operator, and neither can detect the other — each behaves correctly in
+isolation, so nothing shows up in either log.
+
 ### Using the computer while Wingman runs
 
 By default (`nested.enabled: true` in `wingman/config.yaml`) the game runs on its
@@ -263,19 +268,30 @@ on your own display, and work bare when the nested game window has focus. See AD
 
 | Key | Action |
 |-----|--------|
+| `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
+| `u` | Start the J20 mission — and, while in manual, hand control back to wingman |
+| `y` | Start the loiter mission — climb to the hold altitude and orbit to stay alive |
 | `m` | Activate unattended mode (also auto-enabled from config) |
-| `u` | Start J20 mission |
-| `y` | Start loiter mission |
 | `end` | Cancel active mission |
-| `i` / `j` / `k` / `l` | Manual maneuver takeover |
+| `i` / `j` / `k` / `l` | Manual takeover **from your own display** (needs `ctrl+alt` on the nested lane) — see below |
+| arrow keys | Manual takeover, at the game window or your own display |
 | `x` | Toggle weapon loop |
 | `p` | Manual padlock cooldown trigger |
 | `v` | Save debug screenshot with crop overlays |
 | `b` | Inject simulated respawn OCR result (testing) |
-| `enter` | Manual takeover — wingman releases the controls, flares only |
-| `u` | Hand control back to wingman |
 | `backspace` | Stop wingman, leaving MetalStorm up for manual flight; press again to close everything |
 | `z` | Finish the round, then exit and close MetalStorm |
+
+**Missions.** `u` flies the J20 mission — engage contacts, manage weapons and
+altitude. `y` flies the loiter mission, whose only objective is staying alive:
+climb to the hold altitude and orbit there, deciding from live telemetry rather
+than running a fixed sequence. Flares stay with the incoming-missile detector in
+both, so they fire when something is actually inbound.
+
+`i/j/k/l` are wingman's own roll and pitch commands, so at the **game window** they
+are indistinguishable from its presses and are ignored there. `enter` and the
+arrow keys are never injected by wingman, which is why they work bare. A respawn
+ends the takeover and the last mission resumes automatically.
 
 Hotkeys work on Linux without root or `input` group membership — key injection uses XTest and hotkey listening uses the X11 RECORD extension (see ADR 053).
 
