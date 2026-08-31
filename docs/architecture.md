@@ -2,7 +2,7 @@
 
 | Status | Date | Wingman Version |
 |---|---|---|
-| Active | 2026-08-14 | 1.8.0 |
+| Active | 2026-08-31 | 1.8.7 |
 
 ## Overview
 
@@ -122,6 +122,26 @@ nose_up (2s)
 release _mission_lock (in finally, guarded with if locked(): release())
 ```
 
+**Mission execution** (`mission_loiter`) — survival hold, ADR 028-style closed
+loop rather than a script:
+
+```
+acquire _mission_lock
+loop until cancelled:
+    read telemetry altitude
+    stale or missing  → command nothing (a climb ordered blind is still blind)
+    below hold band   → climb_mode()  (ADR 073 owns pitch, fuel floor, duration cap)
+    inside hold band  → periodic roll pulses to hold the turn
+release _mission_lock (in finally)
+```
+
+Altitude buys reaction time and a continuous turn denies a firing solution;
+nothing else contributes to staying alive, so nothing else is in the loop.
+Flares are deliberately absent — they belong to the incoming-missile detector,
+which knows when one is actually inbound. The previous implementation was
+thirteen scripted manoeuvres run once with no feedback, ending after roughly
+ninety seconds wherever the script had left the aircraft.
+
 **Eject and dive** (`eject_and_dive`, ADR 069):
 
 Runs as a daemon thread on confirmed missiles-empty (the FSM enters `GAME_BATTLE_EJECT`). Descent control is closed-loop against telemetry: bounded NOSE_DOWN **impulse rotations** with mandatory observation gaps (continuous pitch input mushes the airframe — ADR 069 d2), a raw-altitude-rate dive criterion, then a hands-off **ballistic phase** with the afterburner gated on descending flight. Ends on respawn detection, the over-rotation guard, the pulse budget, or a 120 s safety timeout. Programmatic key presses are bracketed (`_programmatic_key_counts` + a release-grace window scaled to measured X-server latency) so wingman's own XTest auto-repeats are never mistaken for a manual takeover.
@@ -157,6 +177,9 @@ Any registered maneuver key pressed during `GAME_BATTLE` (outside the 2s entry g
 
 The main loop runs at `loop_interval_sec` (default 1.5 s). Per-concern logic lives in **handler objects** (`tick_handlers.py`, ADR 060) constructed once at startup and dispatched each tick; FSM entry-hooks are wired through a typed event registry (named subscribers, duplicate names raise at wiring time). Each iteration:
 
+0. Claim the single-instance lock — a second wingman is refused before anything
+   touches the game (SAF-014). Two instances inject into the same display and
+   fight each other and the operator, and neither can detect the other
 1. Capture frame — skip the cycle if `None`
 2. `analyzer.analyze_frame()` — returns cached state immediately
 3. FSM transition detection → `on_state_change` fan-out to every handler
@@ -180,8 +203,14 @@ flowchart LR
     D --> E[Evade]
     E --> F[Disengage]
     F --> G[Engage]
-    G --> H[AttackSupport]
+    G --> R[Regroup]
+    R --> H[AttackSupport]
 ```
+
+Climb (ADR 073) is inserted above Engage when enabled. It is inserted **by
+name**, not by list offset: the original `len(children) - 2` meant "above
+Engage" only while exactly two leaves followed, and adding Regroup silently
+pushed Climb below Engage until it was fixed.
 
 | Leaf | Condition | Actuation |
 |---|---|---|
@@ -192,7 +221,15 @@ flowchart LR
 | Evade | health threshold — unset, selection-only | none (uncalibrated) |
 | Disengage | all rings empty 30 s (MinimumHold) | `disengage_roll_right` |
 | Engage | any minimap ring occupied | ring-engage geometry (`engage_nav.py`) |
+| Regroup | friendly icons visible and no enemy (ADR 028 rev 4) | steer to the aggregate friendly centroid |
 | AttackSupport | always | fallback |
+
+**Why Regroup exists.** The enemy rings are empty for ~57% of battle ticks, and
+the navigator issued no command on those — the aircraft held its heading until
+it left the arena. Friendly and objective icons mark where the battle is when no
+enemy renders, and the two signals are complementary in practice. It sits below
+Engage (a real target always wins) and above AttackSupport (which is `always`,
+so anything below it is unreachable).
 
 Actuating tactics self-terminate in their own Controller threads (clear timers, budgets, caps) — `ConditionTactic.terminate` is deliberately a no-op so selector churn cannot abort a manoeuvre mid-flight. Tactics that share keys (eject and evade both own AFTERBURNER) are excluded both by selector priority **and** a runtime yield check (ADR 070 d11), because priority orders selections, not thread lifetimes.
 
@@ -310,6 +347,75 @@ flowchart LR
 
 ---
 
+## Display Topology (ADR 098 / ADR 099)
+
+Wingman is positional by nature: it injects at the X server's **focus** and
+captures the **screen**. Both follow whatever the operator is looking at, so a
+naive single-display setup types into their editor the moment they alt-tab.
+
+The nested display lane removes the shared channel rather than policing it. The
+game runs on its own rootful Xwayland, where it is the only client and therefore
+always focused, and whose root window is a real framebuffer `XGetImage` can read.
+
+```mermaid
+flowchart TB
+  subgraph op["Operator display"]
+    ed["Editor and terminal"]
+    kb["Physical keyboard"]
+  end
+  subgraph nest["Nested display"]
+    wd["Wine Desktop at origin"]
+    fb["Root framebuffer"]
+  end
+  wg["Wingman process"]
+  wd --> fb
+  wg -->|"XTest keys and clicks"| fb
+  fb -->|"mss XGetImage"| wg
+  kb -->|"XRecord hotkeys"| wg
+  wg -.->|"cannot reach"| ed
+```
+
+**`DISPLAY` has four consumers and they do not all want the same value.** This is
+the single most important fact about this subsystem — three of the four were
+wrong at some point during implementation, each failing in a different way:
+
+| Consumer | Code | Display | Wrong value looks like |
+|---|---|---|---|
+| Capture | `capture.py` `_MssBackend` | nested | OCR reads the operator's desktop |
+| Key and mouse injection | `input_linux.py` `_inject_display_name` | nested | Keystrokes land in the editor |
+| Hotkey observation (XRecord) | `input_linux.py` `_observe_display_names` | **operator AND nested** | Backspace and takeover keys dead |
+| Focus guard | `focus_guard.py` `config_for_display` | nested | Every key and click suppressed |
+
+Capture takes an explicit display (`mss(display=...)`), injection reads a
+module-level override set by `set_injection_display()`, and the focus guard is
+handed the injection display via `config_for_display()`.
+
+Observation is the awkward one: it is **not a single display**. `:0` is a
+rootless Xwayland and receives key events only while an X11 client holds focus —
+and the nested lane removed the only X client that was ever focused. Pinning the
+listener to the operator's display therefore killed every hotkey just as
+thoroughly as moving it to the nested one. One listener thread runs per display
+in `_observe_display_names()`, so keys are caught whether the operator is
+looking at an X11 window or at the nested game.
+
+Observing the nested display means wingman also sees its own injected keys. That
+is the pre-nested topology, and `_programmatic_key_counts` already discounts
+them per-key; `is_injected` alone is unreliable and was never the guard. Manual
+takeover is a safety property, not a convenience.
+
+Native-Wayland windows (e.g. VS Code) are invisible to every X11 listener — a
+pre-existing limitation, not something the lane introduced.
+
+The lane is switched by `nested.enabled` in `config.yaml`, not by a separate run
+target, so the Makefile and wingman cannot disagree about which lane is active.
+A single environment variable cannot express the table above.
+
+With the game alone on its own display, ADR 098's focus guard becomes a
+tautology there (the game always has focus) and remains the protection for the
+on-screen lane.
+
+---
+
 ## Configuration
 
 All tunable values live in `wingman/config.yaml`. Key bindings are module-level constants in `controller.py`.
@@ -326,6 +432,12 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `behavior_tree` | Selector mode (off / shadow / active), disengage/evade holds, `missile_evade` block (ADR 024/070) |
 | `j20_mission` / `minimap` | Ring-engage geometry, orbit cadence, blob band (Design 003) |
 | `telemetry` | Plausibility bounds, smoothing, `eject_closed_loop` thresholds (ADR 038/067/069) |
+| `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make rd NESTED=0` |
+| `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
+| `loiter_mission` | Survival hold: `target_alt`, hysteresis, orbit cadence and hold |
+| `mission.manual_takeover` | `persist_through_respawn` — off by default, so a respawn resumes the last mission |
+| `return_to_battle` | Design 010 instrumentation: colour trigger `region`, narrower `ocr_region` for the once-per-crossing confirmation, and partial `text` tokens |
+| `focus_guard` | Suppress injection when the game lacks focus (ADR 098); follows the nested display automatically |
 | `performance` | Regression gate thresholds and histogram output |
 
 ---
@@ -401,15 +513,33 @@ Incoming template match (>= 0.82, debounced 500 ms)
 ### Manual Takeover
 
 ```
-Player presses NOSE_UP / NOSE_DOWN / ROLL_LEFT / ROLL_RIGHT during GAME_BATTLE
-  (outside 2s grace period, not injected by bot)
-  → maneuver_key_pressed handler fires manual_takeover trigger
+Player presses ENTER at the game window, or an arrow key, or ctrl-alt plus a
+flight key on their own display, during GAME_BATTLE
+  (outside the 2s grace period, and not a press wingman injected)
+  → maneuver_key_pressed handler fires the manual_takeover trigger
   → FSM: GAME_BATTLE → GAME_BATTLE_MANUAL
-  → on_enter_GAME_BATTLE_MANUAL: cancel_mission(); suppress auto-restart
+  → on_enter_GAME_BATTLE_MANUAL emits MANUAL_TAKEOVER
+  → Controller.release_for_manual_takeover(): stop every writer (eject,
+    missile evade, climb, spawn guard, loops), cancel the mission, and RELEASE
+    every injectable key
+  → from here the only automation is flare deployment; every other key press is
+    refused at the single choke point in _execute_key_press
   → OCR continues (health, ammo, incoming all still monitored)
-  → player presses End → cancel_mission(); _auto_respawn_restart = False
-  → click_to_detected or continue_clicked returns to GAME_LOBBY
+  → a respawn ends the takeover and restart_last_mission() resumes what was
+    flying, or 'u' hands control back on request
 ```
+
+**Why ENTER and not the flight keys.** Wingman injects `i/j/k/l` itself, so on
+the nested display its own presses and the operator's are identical in content.
+Discriminating by echo timing was measured failing — echoes arrived 1.67 to
+9.74 s after release against a 1.0 s grace window, causing four spurious
+takeovers in 23 minutes. `enter` and the arrow keys are never injected, so there
+is nothing to discriminate (SAF-001, ADR 099 D4b).
+
+**Releasing the keys is not optional.** The FSM transition alone changes the
+selection, not the presses already in flight: X holds key state, not this
+process. Before the release existed, a takeover left the aircraft climbing on a
+held afterburner and pitch key, and the operator could not fly.
 
 ---
 
@@ -489,3 +619,9 @@ Player presses NOSE_UP / NOSE_DOWN / ROLL_LEFT / ROLL_RIGHT during GAME_BATTLE
 | [070](adr/070-missile-evade-tactic.md) | MISSILE_EVADE_MODE behavior tactic |
 | [071](adr/071-single-gate-corpus-screenshot-set.md) | Single gate-corpus screenshot set |
 | [072](adr/072-calibration-screenshot-consolidation.md) | Calibration screenshots consolidated onto the gate corpus |
+| [098](adr/098-focus-guard-for-key-injection.md) | Focus guard for key injection |
+| [099](adr/099-nested-display-lane-for-unattended-operation.md) | Nested display lane for unattended operation |
+| [028 rev 4](adr/028-enemy-quadrant-detection-and-nose-orientation.md) | Regroup: steer to friendlies when no enemy is on the minimap |
+| [Design 010](hldd/010-mini-map-detection/010-mini-map-detection-hldd.md) | Map-boundary instrumentation (measurement only; no guard) |
+
+*(This index is incomplete: ADRs 073-097 are not yet listed.)*

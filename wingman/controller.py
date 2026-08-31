@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 from mss import mss
 
-from .analyzer import GameState
+from .analyzer import GameState, BATTLE_STATES
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre, draw_crops
 from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
@@ -34,6 +34,49 @@ logger = logging.getLogger(__name__)
 # Module-level so tests can monkeypatch `controller.keyboard_module` in one place.
 keyboard_module = maybe_install_linux_keyboard(keyboard_module)
 
+# ADR 098: the focus guard. Set by Controller.__init__ from config; None means
+# no guard (every injection allowed), which is also the default.
+focus_guard = None
+
+
+def set_focus_guard(guard) -> None:
+    """Install the process-wide focus guard (ADR 098)."""
+    global focus_guard
+    focus_guard = guard
+
+
+def _press_key(key) -> bool:
+    """Inject a key press unless the focus guard forbids it (ADR 098).
+
+    Returns True if the key was actually pressed. Callers keep their hold loop,
+    their release, and their finally blocks either way: gating the control flow
+    instead collapses a two-second hold into zero and, at the disengage-roll
+    site, skipped the stop_search_and_destroy_loop() cleanup that a started loop
+    depends on. Releasing a key that was never pressed is a harmless no-op.
+    """
+    if not _may_inject("key"):
+        return False
+    keyboard_module.press(key)
+    return True
+
+
+def _may_inject(what: str = "key") -> bool:
+    """Gate for every injection call site. Never raises.
+
+    Gating happens HERE rather than at the 17 individual press sites: one place
+    cannot be forgotten when a new tactic adds a keypress. Observation paths
+    (on_press_key, add_hotkey, XRecord) are deliberately NOT gated — they read
+    the operator's own keys and must keep working while focus is elsewhere,
+    which is exactly when the operator is most likely to want the exit hotkey.
+    """
+    guard = focus_guard
+    if guard is None:
+        return True
+    try:
+        return guard.may_inject(what)
+    except Exception:                        # noqa: BLE001 - never break the loop
+        return True
+
 # A failed key RELEASE is the start of a stuck-key incident, and the key does not
 # come back when this process dies: on Linux XTest key state lives in the X
 # SERVER and survives for the whole session; on Windows the injected key stays
@@ -52,6 +95,7 @@ from .keybindings import (                                          # noqa: F401
     AFTERBURNER_KEY,
     AIRBRAKE_KEY,
     ALT_FLIGHT_KEYS,
+    MANUAL_TAKEOVER_KEY,
     AUTO_MISSION_KEY,
     CANCEL_MISSION_KEY,
     CAPTURE_SCREEN_SHOT,
@@ -74,6 +118,25 @@ from .keybindings import (                                          # noqa: F401
     WINGSWEEP_KEY,
     YAW_LEFT,
     _WATCHED_MANEUVER_KEYS,
+)
+
+# SAF-001: the manual-takeover keys. These must always reach the hotkey handler,
+# including on the injection display where wingman presses them itself —
+# SAF-001.1's echo discrimination, not a display filter, decides whether a press
+# was wingman's own.
+TAKEOVER_KEYS = ((MANUAL_TAKEOVER_KEY, NOSE_UP_KEY, NOSE_DOWN_KEY,
+                  ROLL_LEFT_KEY, ROLL_RIGHT_KEY) + tuple(ALT_FLIGHT_KEYS))
+
+# SAF-007: every key wingman injects anywhere must be in this list, or it is
+# left pressed when the process dies. ADR 099 gives it a second job — these are
+# the keys the hotkey listener must IGNORE on the injection display, because
+# there they are wingman's own keystrokes rather than the operator's.
+INJECTABLE_KEYS = (
+    NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+    YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
+    DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
+    PADLOCK_CAMERA, SPECIAL_ABILITY, MISSION_J20_KEY,
+    'escape',
 )
 
 # Region name constants — used as log labels in click_grid_region and elsewhere.
@@ -138,6 +201,19 @@ class Controller:
         self._mission_complete = threading.Event()
         self._mission_cancel = threading.Event()
         self._exit_event = exit_event  # Event to signal program exit
+        # ADR 094: deferred exit. Set by the FINISH_ROUND_THEN_EXIT hotkey and
+        # read by the main loop at its safe point. An Event rather than a bool
+        # because the hotkey toggles it from the listener thread.
+        self._finish_round_event = threading.Event()
+        # ADR 099: set only by the Backspace hotkey. exit_requested cannot stand
+        # in for this — SIGTERM and the startup-stall exit set that too, and the
+        # stall path deliberately leaves the game up for inspection.
+        self._operator_stop_event = threading.Event()
+        # ADR 099: second Backspace, pressed during standby, closes MetalStorm
+        # and the nested display. Separate from the stop event so the first
+        # press cannot be mistaken for the second.
+        self._close_all_event = threading.Event()
+        self._last_exit_press = 0.0
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
@@ -308,6 +384,15 @@ class Controller:
         # and re-applied only when the telemetry climb RATE decays — the
         # eject dive controller's pattern, inverted. AFTERBURNER stays held.
         self._climb_pulse_s = float(_cl_cfg.get("pitch_pulse_s", 1.5))
+        # mission_loiter: survival hold. Altitude buys reaction time and the
+        # turn denies a firing solution, so those are the only two things it does.
+        _lo = (config.get("loiter_mission", {}) or {}) if isinstance(config, dict) else {}
+        self._loiter_target_alt = float(_lo.get("target_alt", 7000))
+        self._loiter_hysteresis_m = float(_lo.get("hysteresis_m", 500))
+        self._loiter_orbit_direction = str(_lo.get("orbit_direction", "right"))
+        self._loiter_orbit_interval_s = float(_lo.get("orbit_roll_interval_s", 3.0))
+        self._loiter_orbit_hold_s = float(_lo.get("orbit_roll_hold_s", 0.6))
+        self._loiter_tick_s = float(_lo.get("tick_s", 1.0))
         self._climb_observe_s = float(_cl_cfg.get("pulse_observe_s", 2.5))
         self._climb_min_rate = float(_cl_cfg.get("min_climb_rate", 30.0))
         # ADR 076 d3: over-rotation ceiling. The spawn guard can hand the
@@ -406,7 +491,23 @@ class Controller:
         if keyboard_module and not self._disable_hotkeys:
             try:
                 def exit_script_hotkey(_e):
-                    logger.info("Controller: Backspace key pressed - exiting script")
+                    # Debounced: X auto-repeats a held key at ~25 Hz, and an
+                    # undebounced handler would read one long press as both
+                    # stages and close the game the operator meant to keep.
+                    now = time.time()
+                    if now - self._last_exit_press < 0.5:
+                        return
+                    self._last_exit_press = now
+                    if self._operator_stop_event.is_set():
+                        # Second press, during standby.
+                        self._close_all_event.set()
+                        logger.info("\033[93mController: Backspace again — closing "
+                                    "MetalStorm and the nested display\033[0m")
+                        return
+                    self._operator_stop_event.set()
+                    logger.info("\033[93mController: Backspace — ending wingman; "
+                                "MetalStorm stays up for manual control. Press "
+                                "Backspace again to close everything.\033[0m")
                     if self._exit_event:
                         self._exit_event.set()
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
@@ -522,6 +623,46 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register loiter mission hotkey")
 
+            # ADR 094: finish the round, then exit. Deferred, and reversible.
+            try:
+                self._last_finish_round_press = 0.0
+                def finish_round_then_exit(_e):
+                    now = time.time()
+                    if now - self._last_finish_round_press < 0.5:
+                        return                      # debounce key-repeat
+                    self._last_finish_round_press = now
+                    if self._finish_round_event.is_set():
+                        # A deferred action that cannot be recalled is a trap:
+                        # the operator waits minutes with no way back except
+                        # killing the process (ADR 094).
+                        self._finish_round_event.clear()
+                        logger.info("\033[93m🏁 FINISH ROUND: cancelled — the "
+                                    "session continues\033[0m")
+                        return
+                    self._finish_round_event.set()
+                    # Pressed in the lobby the stop is immediate: the main loop's
+                    # safe point is already true, and the quick-scan is now barred
+                    # from starting another round. Say which one is happening -
+                    # "at the next lobby" while sitting IN the lobby reads as a
+                    # long wait and invites a second press that cancels it.
+                    _st = self._analyzer.game_state if self._analyzer is not None else None
+                    if _st is not None and _st not in BATTLE_STATES:
+                        logger.info("\033[93m🏁 FINISH ROUND: requested in %s — no "
+                                    "round in progress, stopping now and closing "
+                                    "MetalStorm (ADR 094). Press '%s' again to "
+                                    "cancel.\033[0m", _st.name, FINISH_ROUND_THEN_EXIT)
+                    else:
+                        logger.info("\033[93m🏁 FINISH ROUND: requested — wingman will "
+                                    "stop at the next lobby, then close MetalStorm "
+                                    "(ADR 094). Press '%s' again to cancel.\033[0m",
+                                    FINISH_ROUND_THEN_EXIT)
+                keyboard_module.on_press_key(FINISH_ROUND_THEN_EXIT,
+                                             finish_round_then_exit, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to finish the round "
+                            "then exit", FINISH_ROUND_THEN_EXIT)
+            except Exception:
+                logger.exception("Controller: failed to register finish-round hotkey")
+
             # Register hotkey for simulating respawn detected (for testing)
             try:
                 self._simulate_respawn_flag = threading.Event()
@@ -605,6 +746,25 @@ class Controller:
             except Exception:
                 logger.exception("Controller: failed to register auto mission hotkey")
 
+    def _release_manual_if_active(self) -> bool:
+        """Operator hands the aircraft back (SAF-001). True if it was in manual.
+
+        Manual now persists through respawn, so there has to be a deliberate way
+        out or the session is stuck in manual until the round ends. The
+        auto-mission key is that way out: it already means "wingman, take it".
+        """
+        try:
+            if not self._manual_takeover_active():
+                return False
+            logger.info("\033[93mController: auto-mission key — returning control "
+                        "to wingman (leaving GAME_BATTLE_MANUAL)\033[0m")
+            self._analyzer.trigger_event("manual_release")
+            self.set_auto_respawn_restart(True)
+            return True
+        except Exception:
+            logger.exception("Controller: manual release failed")
+            return False
+
     def _on_auto_mission_hotkey(self, _e=None):
         """AUTO_MISSION_KEY handler: force GAME_LOBBY, then click PLAY/READY.
 
@@ -623,6 +783,13 @@ class Controller:
         if self._analyzer is None:
             return
         current_state = self._analyzer.game_state
+        # SAF-001: in manual this key means "wingman, take it back" — a single
+        # press, because the operator is deliberately flying and asking. The
+        # double-press guard below exists for the OTHER battle states, where 'm'
+        # can be an accidental game binding mid-flight.
+        if current_state == GameState.GAME_BATTLE_MANUAL:
+            self._release_manual_if_active()
+            return
         if current_state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL,
                              GameState.GAME_BATTLE_EJECT):
             if now - self._auto_mission_force_armed_ts > 2.0:
@@ -698,7 +865,10 @@ class Controller:
         # are never injected, so skipping this check for them lets the user trigger manual
         # takeover during continuous key holds (afterburner, roll) without needing to find
         # a gap between mission key presses.
-        if key_name not in ALT_FLIGHT_KEYS:
+        # Arrow keys and the dedicated takeover key are never injected, so the
+        # echo guard has nothing to protect against — and running them through
+        # it would let a stale count swallow a deliberate takeover.
+        if key_name not in ALT_FLIGHT_KEYS and key_name != MANUAL_TAKEOVER_KEY:
             with self._programmatic_key_lock:
                 if self._programmatic_key_counts.get(key_name, 0) > 0:
                     return False
@@ -820,6 +990,21 @@ class Controller:
         """
         label = action_name or key
 
+        # SAF-001: in GAME_BATTLE_MANUAL the operator owns the aircraft. Flares
+        # are the sole exception — they are a defensive reflex the operator
+        # cannot reasonably win, and they command no flight axis.
+        #
+        # Enforced HERE rather than at each caller because the callers are many
+        # (mission threads, tactic holds, weapon and padlock loops, recovery
+        # paths) and a missed one leaves wingman holding a control surface.
+        # Observed 2026-08-30: after takeover the aircraft climbed 550 m to
+        # 7655 m on its own with 'e', 'p' and 'k' still held down, because the
+        # transition stopped the SELECTION but not the presses already in
+        # flight. The operator could not fly.
+        if key != DEPLOY_FLARES_KEY and self._manual_takeover_active():
+            logger.debug("Controller: %s suppressed — GAME_BATTLE_MANUAL", label)
+            return
+
         # Add color coding for specific actions
         color_start = ""
         color_end = ""
@@ -863,7 +1048,7 @@ class Controller:
                 self._inc_programmatic_key(key)
                 release_span = 0.0  # measured below; finally must not NameError
                 try:
-                    keyboard_module.press(key)
+                    _press_key(key)
                     start = time.time()
                     while (time.time() - start) < hold_seconds:
                         if not ignore_cancel:
@@ -1049,7 +1234,7 @@ class Controller:
             self._eject_held_keys.add(key)
             self._inc_programmatic_key(key)
             try:
-                keyboard_module.press(key)
+                _press_key(key)
             except Exception:
                 logger.error("Controller: press of %r failed during %s", key, note)
             return
@@ -1624,7 +1809,7 @@ class Controller:
             # immediately self-cancelled into manual takeover.
             self._inc_programmatic_key(ROLL_RIGHT_KEY)
             try:
-                keyboard_module.press(ROLL_RIGHT_KEY)
+                _press_key(ROLL_RIGHT_KEY)
                 # NOT _interruptible_sleep: cancel_mission() above set
                 # _mission_cancel, which would abort the roll after
                 # milliseconds and leave the aircraft flying straight out of
@@ -1799,7 +1984,7 @@ class Controller:
                     self._record_action_intent("key_press", key=_key, action="missile_evade")
                 else:
                     try:
-                        keyboard_module.press(_key)
+                        _press_key(_key)
                     except Exception:
                         logger.exception("Controller: missile_evade press failed for '%s'", _key)
 
@@ -2605,84 +2790,112 @@ class Controller:
         return True
 
     def mission_loiter(self):
-        """This mission sequence performs a predefined set of maneuvers for the Aaarvark, it flies up and tries to stay up
-        Compatible Jets: F111, F-14, Mig-23, J20
+        """Stay alive: climb to a holding altitude and orbit there.
+
+        Behaviour-driven, not a fixed sequence. The previous implementation was
+        thirteen scripted manoeuvres — nose_up, wingsweep, three afterburner
+        holds, five rolls, two flare drops — executed once with no feedback. It
+        could not tell whether it had actually gained any altitude, it dropped
+        flares at moments unrelated to any threat, and after roughly ninety
+        seconds it simply ended, leaving the aircraft wherever the script had
+        put it.
+
+        The objective here is survival, and survival has exactly two
+        requirements: be high, and keep turning. So the loop reads altitude and
+        decides:
+
+          below the hold band   -> climb
+          inside the hold band  -> orbit with roll pulses
+          telemetry unavailable -> command nothing
+
+        Climbing delegates to ``climb_mode`` (ADR 073) rather than pulsing pitch
+        here: that already owns the pitch axis and carries the fuel floor, the
+        duration cap and the fresh-read confirmation. Reimplementing it would
+        mean a second, untested climb with none of those bounds.
+
+        Flares are deliberately absent. They are driven by incoming-missile
+        detection on the tick loop, which knows when one is inbound; dropping
+        them on a timer wastes the countermeasure and leaves none for the moment
+        it matters.
+
+        Runs until cancelled. Never commands on stale telemetry: an altitude
+        read that has aged out says nothing about where the aircraft is, and a
+        climb ordered on a stale reading is a climb ordered blind.
+
+        @relation(SAF-001, scope=function)
         """
-        # Check if mission is already running
         acquired = self._mission_lock.acquire(blocking=False)
         if not acquired:
             logger.debug("Controller: mission already in progress, skipping")
             return
 
-        logger.info("\033[92mController: mission_loiter - starting mission sequence\033[0m")
+        logger.info("\033[92mController: mission_loiter - holding to stay alive "
+                    "(target %.0f m)\033[0m", self._loiter_target_alt)
         self._mission_complete.clear()
         self._mission_cancel.clear()
 
         def _mission_runner():
+            last_orbit_ts = 0.0
+            last_state = None
+            no_telemetry_since = 0.0
             try:
-                # Execute mission maneuvers (maneuvers log their own activity)
-                self.nose_up(2.0)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after nose_up")
-                    return
-                self.wingsweep()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after wingsweep")
-                    return
-                self.afterburner(10.0)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after afterburner")
-                    return
-                self.afterburner(10.0)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after afterburner")
-                    return
-                self.wingsweep()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after wingsweep")
-                    return
-                self.roll_right(4)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_right")
-                    return
-                self.afterburner(10)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after afterburner")
-                    return
-                self.deploy_flares()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after deploy_flares")
-                    return
-                self.roll_left(10)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_left")
-                    return
-                self.deploy_flares()
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after deploy_flares")
-                    return
-                self.roll_right(30)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled after roll_right")
-                    return
-                self.roll_left(30)
-                if self._mission_cancel.is_set():
-                    logger.info("Controller: mission cancelled")
-                    return
-                #self.nose_down(4.0)
-                #time.sleep(10.0)  # additional wait time to stabilize
-                logger.info("\033[91mController: mission_loiter - sequence complete\033[0m")
+                while not self._mission_cancel.is_set():
+                    if self._exit_event and self._exit_event.is_set():
+                        break
+
+                    snap = (self._analyzer.get_telemetry()
+                            if self._analyzer is not None else None)
+                    now = time.time()
+                    fresh = snap is not None and snap.altitude_fresh
+                    alt = snap.altitude.stable if fresh else None
+
+                    if alt is None:
+                        # Hold whatever attitude the aircraft has. Commanding on
+                        # a stale read is commanding blind.
+                        if not no_telemetry_since:
+                            no_telemetry_since = now
+                            logger.info("Controller: mission_loiter - no fresh "
+                                        "altitude, holding attitude")
+                        self._mission_cancel.wait(timeout=self._loiter_tick_s)
+                        continue
+                    no_telemetry_since = 0.0
+
+                    if alt < self._loiter_target_alt - self._loiter_hysteresis_m:
+                        if last_state != "climb":
+                            logger.info("Controller: mission_loiter - climbing "
+                                        "(%.0f m below %.0f m hold)",
+                                        self._loiter_target_alt - alt,
+                                        self._loiter_target_alt)
+                            last_state = "climb"
+                        # Idempotent while its thread is alive (ADR 070 d8).
+                        self.climb_mode(target_alt=self._loiter_target_alt)
+                    else:
+                        if last_state != "orbit":
+                            logger.info("Controller: mission_loiter - holding at "
+                                        "%.0f m, orbiting %s", alt,
+                                        self._loiter_orbit_direction)
+                            last_state = "orbit"
+                        if now - last_orbit_ts >= self._loiter_orbit_interval_s:
+                            last_orbit_ts = now
+                            roll = (self.roll_right
+                                    if self._loiter_orbit_direction == "right"
+                                    else self.roll_left)
+                            roll(hold_seconds=self._loiter_orbit_hold_s, block=False)
+
+                    self._mission_cancel.wait(timeout=self._loiter_tick_s)
+                logger.info("\033[91mController: mission_loiter - ended\033[0m")
             except Exception:
                 logger.exception("Controller: mission_loiter failed")
             finally:
+                # The loop may have left a roll or a climb running.
+                self._climb_stop.set()
                 self._mission_complete.set()
                 if self._mission_lock.locked():
                     self._mission_lock.release()
 
-        mission_a = threading.Thread(target=_mission_runner, daemon=True)
-        mission_a.start()
+        threading.Thread(target=_mission_runner, daemon=True,
+                         name="MissionLoiter").start()
 
-        # Wait for mission to complete or exit requested
         while not self._mission_complete.wait(timeout=0.05):
             if self._exit_event and self._exit_event.is_set():
                 logger.info("Controller: exit requested, aborting mission wait")
@@ -2801,7 +3014,8 @@ class Controller:
                     abs_y = int(game_oy + (row_idx + 0.5) * cell_h)
                     logger.info("\033[93m📋 Clicking %s at (%d, %d) [game offset %d,%d] x%d\033[0m",
                                 label, abs_x, abs_y, game_ox, game_oy, count)
-                    _linux_click(abs_x, abs_y, count)
+                    if _may_inject("click"):
+                        _linux_click(abs_x, abs_y, count)
                     if count > 1 and self._ready_button_region:
                         rbn = self._ready_button_region
                         row_rb = (rbn - 1) // grid_cols
@@ -2914,7 +3128,8 @@ class Controller:
                     abs_x, abs_y = crop_centre(coords, cap_w, cap_h, game_ox, game_oy)
                     logger.info("\033[93m📋 Clicking %s at (%d, %d) [game offset %d,%d] x%d\033[0m",
                                 label, abs_x, abs_y, game_ox, game_oy, count)
-                    _linux_click(abs_x, abs_y, count)
+                    if _may_inject("click"):
+                        _linux_click(abs_x, abs_y, count)
                     return
 
                 # Windows: use win32api
@@ -2961,6 +3176,84 @@ class Controller:
         logger.info("\033[91mController: cancel_mission called\033[0m")
         self._mission_cancel.set()
         self.stop_weapon_loop()
+
+    def close_all_requested(self) -> bool:
+        """True once the operator's SECOND Backspace has arrived (ADR 099)."""
+        return self._close_all_event.is_set()
+
+    def wait_for_close_all(self, timeout=None) -> bool:
+        """Block until the second Backspace, or `timeout`. True if it arrived."""
+        return self._close_all_event.wait(timeout=timeout)
+
+    def release_hotkeys(self) -> None:
+        """Deregister keyboard hooks. Split out of cleanup() so standby can keep
+        listening for the second Backspace after the session has ended."""
+        if keyboard_module:
+            try:
+                keyboard_module.unhook_all()
+                logger.info("Controller: all keyboard hooks deregistered")
+            except ImportError as exc:
+                logger.warning("Controller: keyboard unhook skipped — %s", exc)
+            except Exception:
+                logger.exception("Controller: keyboard unhook failed")
+
+    def _manual_takeover_active(self) -> bool:
+        """True while the operator holds the aircraft (SAF-001). Never raises —
+        it gates every key press, so a failure here must not stop flares."""
+        try:
+            return (self._analyzer is not None
+                    and self._analyzer.game_state == GameState.GAME_BATTLE_MANUAL)
+        except Exception:
+            return False
+
+    def release_for_manual_takeover(self) -> None:
+        """Hand the aircraft to the operator: stop every writer, release every
+        key (SAF-001).
+
+        The FSM transition alone is not enough. Tactic holds and loops run in
+        their own threads with their own budgets, and a key already pressed
+        stays pressed — the X server holds key state, not this process. Called
+        from the GAME_BATTLE_MANUAL entry hook so it runs however takeover was
+        reached.
+        """
+        self._eject_stop_reason = "manual takeover"
+        self._eject_stop.set()
+        self._me_stop.set()
+        self._climb_stop.set()
+        self._sg_stop.set()
+        try:
+            self.cancel_mission()
+        except Exception:
+            logger.exception("Controller: cancel_mission failed during takeover")
+        for stop in (self.stop_search_and_destroy_loop,):
+            try:
+                stop()
+            except Exception:
+                logger.exception("Controller: loop stop failed during takeover")
+        if keyboard_module and not self._simulate_os_input:
+            for _key in INJECTABLE_KEYS:
+                try:
+                    keyboard_module.release(_key)
+                except Exception:
+                    logger.error("Controller: takeover release of %r failed — %s",
+                                 _key, _LATCH_NOTE)
+            logger.info("Controller: manual takeover — all injectable keys released")
+
+    def operator_stop_requested(self) -> bool:
+        """True when the operator stopped the session with Backspace (ADR 099).
+
+        Distinct from `exit_requested`, which SIGTERM and the startup-stall exit
+        also set. Only a deliberate operator stop tears the session down.
+        """
+        return self._operator_stop_event.is_set()
+
+    def finish_round_requested(self) -> bool:
+        """True while a deferred finish-round-then-exit is pending (ADR 094)."""
+        return self._finish_round_event.is_set()
+
+    def request_finish_round(self, requested: bool = True) -> None:
+        """Set or clear the deferred exit. Exposed for tests and future callers."""
+        self._finish_round_event.set() if requested else self._finish_round_event.clear()
 
     def is_mission_running(self) -> bool:
         """Return True when a mission thread currently holds the mission lock."""
@@ -3208,8 +3501,13 @@ class Controller:
         threading.Thread(target=self.mission_j20, daemon=True).start()
         return True
 
-    def cleanup(self):
+    def cleanup(self, keep_hotkeys: bool = False):
         """Stop injection activity, release held keys, deregister hooks.
+
+        `keep_hotkeys=True` skips the deregistration so the process can stay in
+        standby watching for a second Backspace (ADR 099). Everything else still
+        runs: the writers stop and every injectable key is released, so nothing
+        wingman was holding survives into the operator's manual flight.
 
         Order matters: XTest-injected key state lives in the X SERVER, not this
         client, so it survives process exit — and daemon threads die without
@@ -3246,11 +3544,7 @@ class Controller:
             # game_starting loop's press_and_release) were missing until the
             # 2026-08-14 audit — a key is stuck if the process dies inside
             # even a press_and_release call.
-            for _key in (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
-                         YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
-                         DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
-                         PADLOCK_CAMERA, SPECIAL_ABILITY, MISSION_J20_KEY,
-                         'escape'):
+            for _key in INJECTABLE_KEYS:
                 try:
                     keyboard_module.release(_key)
                 except Exception:
@@ -3260,7 +3554,10 @@ class Controller:
             logger.info("Controller: all injectable keys released")
 
         # 3. Deregister hooks last so the guards above stay active meanwhile.
-        if keyboard_module:
+        if keep_hotkeys:
+            logger.info("Controller: keyboard hooks kept for standby — press "
+                        "Backspace again to close MetalStorm")
+        elif keyboard_module:
             try:
                 keyboard_module.unhook_all()
                 logger.info("Controller: all keyboard hooks deregistered")

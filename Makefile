@@ -26,6 +26,10 @@
 #   make g           -> launch MetalStorm only, without starting Wingman (Linux only)
 #   make r           -> run wingman (Linux: auto-launches game; Windows: game must be running)
 #   make rd          -> run wingman with DEBUG log to wingman.log (same auto-launch on Linux)
+#   ADR 099: the nested display lane is switched in wingman/config.yaml
+#            (nested.enabled). Every run target honours it; override one run
+#            with "make rd NESTED=0" / "NESTED=1".
+#   make nested-status / nested-stop -> inspect or tear down the nested display
 #   make rg          -> alias for r (backwards compat)
 #   make launch-game -> launch MetalStorm via umu-run in background (kills stale instance first)
 #   make wait-game   -> poll until Metalstorm.exe process is alive, wait for lobby
@@ -53,7 +57,31 @@ PYTHON_RUN := $(if $(filter 1,$(HAS_UV)),uv run --active python,$(PYTHON))
 # everything above it was arena fragmentation, not live data. Must be set
 # before the process starts — glibc reads it at first malloc.
 WINGMAN_ENV := MALLOC_ARENA_MAX=2
+# Run the live loop below the desktop's priority. 13 OCR workers plus the
+# game saturated a 20-core box (load 20.5 on 2026-08-28), which starved the
+# GNOME compositor and produced "not responding" dialogs for VS Code. The
+# tick has slack (1.5s tick, detect p50 0.25s per ADR 096), so wingman can
+# afford to yield. Override with "make rd WINGMAN_NICE=" to run unniced.
+WINGMAN_NICE ?= nice -n 10
 CAPTURE_PATH ?= PATH1
+
+# ADR 099: the nested display lane. The game runs on its own rootful Xwayland,
+# where it is the only client and so always focused, and whose root window is a
+# real framebuffer XGetImage can read.
+#
+# The switch lives in wingman/config.yaml (nested.enabled), NOT here, so that
+# the Makefile and wingman cannot disagree about the lane. `r`, `rd`, `r1` and
+# `r2` therefore need no nested variant - they read the same config.
+#
+# Override for a single run without editing config:
+#     make rd NESTED=0      # force the on-screen lane
+#     make rd NESTED=1      # force the nested lane
+NESTED      ?=
+NESTED_FLAG  = $(if $(NESTED),--nested $(NESTED),)
+# Recursively (lazily) expanded: only recipes that actually reference it pay the
+# config read, so `make test` and friends are not slowed by it.
+NESTED_ENV   = $(shell $(PYTHON_RUN) scripts/nested-display.py env $(NESTED_FLAG) 2>/dev/null)
+WINGMAN_NESTED_ENV = $(if $(NESTED),WINGMAN_NESTED=$(NESTED),)
 # Real-game capture (make p1/p2/p3) must outlast a full mission cycle
 # (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
 # replay pacing the out-of-order deadline is derived from. The ADR 045
@@ -116,7 +144,7 @@ reqs: reqs-gate
 
 # Generate HTML report for automated levels test
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_heap_census.py tests/test_performance_aggregate.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py tests/test_ocr_reader_reuse.py tests/test_lobby_popup_coverage.py tests/test_stall_profile_recovery.py tests/test_liveness_guard.py tests/test_leak_gate.py tests/test_handle_construction_sites.py tests/test_keybindings.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_heap_census.py tests/test_performance_aggregate.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py tests/test_ocr_reader_reuse.py tests/test_lobby_popup_coverage.py tests/test_stall_profile_recovery.py tests/test_liveness_guard.py tests/test_leak_gate.py tests/test_handle_construction_sites.py tests/test_keybindings.py tests/test_finish_round_then_exit.py tests/test_reaction_segments.py tests/test_host_mode.py tests/test_host_context.py tests/test_altitude_gate_adr097.py tests/test_focus_probe.py tests/test_focus_guard.py tests/test_sendevent_probe.py tests/test_nested_display.py tests/test_mission_loiter.py --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -327,7 +355,7 @@ q:
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
 
 ifeq ($(UNAME_S),Linux)
-GAME_LAUNCH_DEPS := launch-game wait-game
+GAME_LAUNCH_DEPS := nested-setup launch-game wait-game nested-focus
 else
 GAME_LAUNCH_DEPS :=
 endif
@@ -336,10 +364,10 @@ endif
 g: $(GAME_LAUNCH_DEPS)
 
 r: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main
+	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main
 
 rd: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main --log-file wingman.log
+	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log
 
 # ---------------------------------------------------------------------------
 # Per-account run targets (Research 005)
@@ -390,6 +418,29 @@ sync-settings-2:
 	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
 	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT2_PREFIX)" $(DRY)
 
+# Does an X11 focus guard work on this Wayland session? Run this, then alt-tab
+# between the game and another window for the duration. See scripts/focus-probe.py.
+focus-probe:
+	$(PYTHON_RUN) scripts/focus-probe.py --seconds $(or $(SECONDS),120) --out focus-probe.log
+
+# Same probe, armed alongside a live run: it waits for the game to appear, then
+# samples while r1 holds the foreground. One terminal, not two.
+r1-probe:
+	@nohup $(PYTHON_RUN) scripts/focus-probe.py --wait-for-game 300 \
+	  --seconds $(or $(SECONDS),120) --out focus-probe.log > focus-probe.out 2>&1 &
+	@echo "focus probe armed — sampling starts when the game window appears."
+	@echo "ALT-TAB between the game and another window while it runs."
+	@echo "Results: focus-probe.log"
+	@$(MAKE) r1
+
+# Can wingman deliver keys to the game while another window has focus? ADR 098
+# only suppresses injection on alt-tab; this asks whether XSendEvent can address
+# the game window directly so the behaviour tree keeps flying instead. Start the
+# game first, then alt-tab away when the probe tells you to and WATCH THE GAME.
+sendevent-probe:
+	$(PYTHON_RUN) scripts/sendevent-probe.py --wait-for-game $(or $(WAIT),60) \
+	  --key $(or $(KEY),p) --dwell $(or $(DWELL),4) --out sendevent-probe.log
+
 ensure-virtual-desktop:
 	@$(PYTHON_RUN) scripts/ensure-virtual-desktop.py \
 	  "$(WINE_PREFIX)" "$(VIRTUAL_DESKTOP_SIZE)"
@@ -406,7 +457,28 @@ r2: WINE_PREFIX := $(ACCT2_PREFIX)
 r2: WINGMAN_ENV += WINGMAN_ACCOUNT=acct2
 r2: ensure-virtual-desktop rd
 
-.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2
+# --- ADR 099 nested display lane --------------------------------------------
+# nested-setup and nested-focus are unconditional prerequisites of every run
+# target and are NO-OPS when nested.enabled is false, so the on-screen lane is
+# unaffected.
+#
+# They deliberately run WITHOUT $(NESTED_ENV): Xwayland is itself a Wayland
+# client and needs the operator's WAYLAND_DISPLAY to attach its root window to.
+# Stripping it is correct for the game (it stops Wine choosing winewayland.drv
+# and bypassing the nested display) and fatal here.
+nested-setup:
+	@$(PYTHON_RUN) scripts/nested-display.py setup $(NESTED_FLAG)
+
+nested-focus:
+	@$(PYTHON_RUN) scripts/nested-display.py focus $(NESTED_FLAG)
+
+nested-status:
+	@$(PYTHON_RUN) scripts/nested-display.py status
+
+nested-stop:
+	@$(PYTHON_RUN) scripts/nested-display.py stop
+
+.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2 nested-setup nested-focus nested-status nested-stop
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.
@@ -427,7 +499,7 @@ launch-game:
 	   sleep 5; \
 	 fi
 	@rm -f /tmp/wingman-game-prerunning
-	@GAMEID=umu-0 PROTONPATH="$(PROTON_ROOT)" WINEPREFIX="$(WINE_PREFIX)" \
+	@$(NESTED_ENV) GAMEID=umu-0 PROTONPATH="$(PROTON_ROOT)" WINEPREFIX="$(WINE_PREFIX)" \
 	  "$(UMU_RUN)" "$(GAME_EXE)" $(GAME_ARGS) > /tmp/wingman-game-launch.log 2>&1 & \
 	echo "MetalStorm launching via umu-run (log: /tmp/wingman-game-launch.log)"
 
@@ -442,7 +514,7 @@ wait-game:
 	  || { echo "ERROR: Metalstorm.exe not found after $(GAME_WAIT_TIMEOUT_S) s"; exit 1; }
 	@echo "Metalstorm.exe detected — waiting $(GAME_LOBBY_WAIT_S) s for game window to appear…"
 	@sleep $(GAME_LOBBY_WAIT_S)
-	@$(MAKE) undecorate-game-window
+	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)"
 
 # Capture one native-resolution frame via PipeWire and save to /tmp/wingman_native.png.
 # Run with the game on screen to verify the window capture region.
@@ -466,7 +538,7 @@ move-game-window:
 # grab — eliminates the interactive-drag freeze vector at the source. Run
 # automatically by wait-game on every `make r` / `make rd`. See ADR 054.
 undecorate-game-window:
-	@$(PYTHON_RUN) -m wingman.move_game_window --undecorate || true
+	@$(NESTED_ENV) $(PYTHON_RUN) -m wingman.move_game_window --undecorate || true
 
 # Capture a frame with MetalStorm on screen and overlay a coordinate grid.
 # Open /tmp/wingman_grid.png to find the game window's top-left (x,y) offset,

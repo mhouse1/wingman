@@ -1,0 +1,10 @@
+probing :0 for 240s — alt-tab between the game and other windows
+samples: 231
+  signals agree:        231/231 (100 pct)
+  ewmh saw the game:    219
+  xfocus saw the game:  219
+  either saw another:   12
+  xfocus saw nothing:   0
+  VERDICT: ewmh DID observe focus leaving the game — a guard can read it.
+
+wrote focus-probe.log

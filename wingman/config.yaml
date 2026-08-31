@@ -1,3 +1,18 @@
+# ADR 099: run the game on its own nested X display, where it is the only
+# client and therefore always focused, and whose root window is a real
+# framebuffer XGetImage can read. Wingman then cannot type into the operator's
+# editor because they no longer share a display.
+#
+# Only capture and injection move to `display`. Hotkey observation deliberately
+# stays on the operator's DISPLAY, so backspace / end / i-j-k-l keep working
+# from wherever they are actually typed.
+#
+# Override per run without editing this file: make rd NESTED=0
+nested:
+  enabled: true
+  display: ":3"
+  size: "1920x1200"
+
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
 # Default false — accepting drops the aircraft into someone else's squad
@@ -169,6 +184,23 @@ crops:
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
+# ADR 094: the FINISH_ROUND_THEN_EXIT hotkey ('z'). Stops as soon as no round is
+# in progress, then closes MetalStorm.
+#
+# ADR 099: `close_game` governs BOTH operator-initiated stops and also tears
+# down the nested display, which exists only to host the game and would
+# otherwise be left as an empty black window.
+#   'z'       — closes immediately once no round is in progress.
+#   Backspace — two-stage. The first press ends the session but LEAVES
+#               MetalStorm running so the operator can keep flying by hand,
+#               even mid-battle; wingman waits in standby. A second press
+#               closes everything. Ctrl-C during standby leaves it all up.
+# Guard-triggered exits and the startup-stall exit are unaffected: they mean
+# "restart wingman" or "come and look", so the client and its display stay up.
+# close_game: false disables standby too — nothing would be left to close.
+finish_round_then_exit:
+  close_game: true            # false stops wingman only, leaving game + display
+  game_term_grace_s: 5.0      # SIGTERM to SIGKILL, matching launch-game's settle
 # ADR 092: leak gate thresholds. `make leak-check` measures post-warm-up growth
 # from the archived RESOURCE lines. INSUFFICIENT is never a pass — short
 # sessions underread an accumulating defect roughly tenfold.
@@ -223,6 +255,10 @@ health:
   dropout_capture: {enabled: true, capture_after_s: 5.0, recapture_interval_s: 60.0,
     max_per_session: 12}
 fuel: {stale_after_s: 6.0, rearm_margin_pct: 5}
+# ADR 098: suppress injection when the game does not have focus. Off until a
+# full session confirms it never suppresses legitimate presses (ADR 098 D6).
+# on_unknown: "inject" (default) or "suppress" — see ADR 098 D4.
+focus_guard: {enabled: true, ttl_s: 1.0, session_ttl_s: 5.0, on_unknown: inject}
 incoming_detection:
   incoming_template_matching_enabled: true
   incoming_template_threshold: 0.82
@@ -234,12 +270,26 @@ incoming_detection:
   incoming_debounce_ms: 500
   incoming_template_scales: [1.0]
   incoming_template_sources: [test_screenshots/INCOMING.png]
-mission: {weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
+# SAF-001 / ADR 059: a respawn ENDS manual takeover and the last mission resumes
+# automatically. The operator took the aircraft to fly the life they were in;
+# once it is over there is nothing left to hold, and requiring a keypress after
+# every death makes an unattended session need attending. Set true to keep the
+# takeover across deaths — then 'u' is the only way back to auto.
+mission: {manual_takeover: {persist_through_respawn: false},
+  weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 3.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 150.0,
   startup_stall_exit_after_s: 600.0, good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true,
   starting_health_probe_interval_s: 0.4, capture_stale_inject_s: 10.0}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
+# mission_loiter ('y'): the survival hold. Two behaviours only — climb to the
+# hold band, then orbit inside it. Altitude buys reaction time and a continuous
+# turn denies a firing solution; nothing else contributes to staying alive, so
+# nothing else is in the loop. Flares stay with the incoming-missile detector,
+# which knows when one is actually inbound.
+loiter_mission: {target_alt: 7000, hysteresis_m: 500, orbit_direction: right,
+  orbit_roll_interval_s: 3.0, orbit_roll_hold_s: 0.6, tick_s: 1.0}
+
 j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_altitude: 500,
   bearing_deadzone_deg: 12, short_ring_min_count: 1, ring_debounce_ticks: 2, ema_reseed_angle_deg: 60,
   rear_commit_deg: 150, rear_release_deg: 90, orbit_direction: right, orbit_roll_hold_s: 0.3,
@@ -279,8 +329,30 @@ behavior_tree:
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}
     sustain: {enabled: true, enter_below_alt: 4000, exit_above_alt: 5000, max_climb_s: 90.0}
+# ADR 028 revision 4: `regroup_enabled` gives the navigator a command on the
+# ticks where no enemy is on the minimap — 57% of battle ticks measured over an
+# 11,383-tick session, during which it previously issued nothing and the
+# aircraft held its heading until it left the map. Friendly and objective icons
+# mark where the battle is; `friendly_hsv` are their bounds, measured on the
+# Design 010 frames and deliberately not hue-wrapped, so red enemies cannot
+# leak into the friendly centroid.
 minimap: {mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
-  ema_reset_after_s: 5.0}
+  ema_reset_after_s: 5.0, regroup_enabled: true,
+  friendly_hsv: {lower: [40, 90, 90], upper: [85, 255, 255]},
+  boundary_hsv: {lower: [8, 120, 120], upper: [28, 255, 255]},
+  boundary_min_px: 20, boundary_min_span_frac: 0.5,
+  boundary_near_frac: 0.35, boundary_trace_ticks: 20}
+# Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
+# acted on — it appears only after the crossing, so it measures the
+# outcome rather than preventing it.
+# `region` is the colour trigger (whole plate, stable red fraction, 0.07 ms).
+# `ocr_region` is the confirmation read: a narrower middle slice, 63 ms against
+# 123 ms for the full banner. `text` are PARTIAL tokens because the narrowed
+# crop degrades edge characters - measured reads include 'ETURNTOBATTLE:' and
+# 'JRNTOBATTE', which full-string matching would reject.
+return_to_battle: {region: [0.36, 0.32, 0.64, 0.378], min_red_frac: 0.10,
+  ocr_region: [0.44, 0.32, 0.56, 0.378],
+  text: [RETURNTO, TOBATTLE, NTOBAT, RNTOBAT, TOBAT]}
 tracking:
   enabled: false
   acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
@@ -312,6 +384,10 @@ telemetry:
   plausibility_margin: 1.5
   max_gate_dt_s: 1.5
   reseed_after_rejections: 3
+  max_alt_rate_mps: 1000       # ADR 097 D2: absolute vertical-rate ceiling.
+                               # Calibrated on 2026-08-27: plausible dives top
+                               # out at 919 m/s, artefacts start at 1036 m/s.
+  reseed_agreement_m: 150      # ADR 097 D3: agreeing rejects mean a poisoned anchor
   smoothing_window: 3
   stale_after_s: 6.0
   trend_min_alt_rate_fps: 20.0

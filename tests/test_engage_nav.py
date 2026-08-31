@@ -364,3 +364,144 @@ def test_ema_reset_clears_state():
     bearing, radius = ema.update(90.0, 0.6, 1.5)
     assert abs(bearing - 90.0) < 1e-9
     assert abs(radius - 0.6) < 1e-9
+
+
+# --- ADR 028 revision 4: regroup when no enemy is on the minimap -------------
+#
+# Bearings below are measured from the Design 010 frames, not invented:
+#   Step0 (safe, flying away from the edge): friendly centroid +4.6 deg, 0.46R
+#   Step1 (at the boundary, about to cross): friendly centroid +179.8 deg, 0.75R
+# The enemy scan returns nothing in both, which is why the navigator issued no
+# command and the aircraft flew out of the map.
+
+from wingman.engage_nav import MODE_REGROUP, aggregate_bearing
+
+
+def _nav_regroup(**minimap):
+    cfg = {"regroup_enabled": True}
+    cfg.update(minimap)
+    return EngageNavigator({}, cfg)
+
+
+def test_regroup_turns_around_when_the_battle_is_astern():
+    """Step1, the frame that mattered. Friendlies dead astern means the fight
+    is behind and the aircraft is pointed out of the map: command the turn."""
+    nav = _nav_regroup()
+    intent = nav.update([], 5000.0, 0.0, friendly_components=[(179.8, 0.75, 30)])
+    assert intent.mode == MODE_REGROUP
+    assert intent.kind == "steer"
+    assert intent.reason == "steering-rear-commit"
+
+
+def test_regroup_is_quiet_when_already_pointed_at_the_battle():
+    """Step0. Friendlies ahead — do not manufacture a command."""
+    nav = _nav_regroup()
+    intent = nav.update([], 5000.0, 0.0, friendly_components=[(4.6, 0.46, 30)])
+    assert intent.mode == MODE_REGROUP
+    assert intent.kind == "none"
+    assert intent.reason == "on-course"
+
+
+def test_regroup_is_off_unless_configured():
+    """House pattern: a change to what the aircraft does on 57% of ticks does
+    not arrive silently through a code default."""
+    nav = EngageNavigator({}, {})
+    intent = nav.update([], 5000.0, 0.0, friendly_components=[(179.8, 0.75, 30)])
+    assert intent.mode == MODE_IDLE
+    assert intent.kind == "none"
+
+
+def test_an_enemy_contact_always_outranks_regroup():
+    """Regroup fills the silence; it must never displace a real target."""
+    nav = _nav_regroup()
+    intent = nav.update([(30.0, 0.5, 20)], 5000.0, 0.0,
+                        friendly_components=[(179.8, 0.75, 30)])
+    assert intent.mode != MODE_REGROUP
+
+
+def test_no_friendlies_leaves_the_old_idle_behaviour():
+    nav = _nav_regroup()
+    intent = nav.update([], 5000.0, 0.0, friendly_components=[])
+    assert intent.mode == MODE_IDLE
+    assert intent.reason == "idle"
+
+
+def test_regroup_respects_the_safety_floors():
+    nav = _nav_regroup()
+    f = [(179.8, 0.75, 30)]
+    assert nav.update([], None, 0.0, friendly_components=f).reason == "no-telemetry"
+    assert nav.update([], 10.0, 0.0, friendly_components=f).reason == "below-safe-floor"
+
+
+def test_aggregate_bearing_is_area_weighted():
+    """A large icon cluster should dominate a single stray marker."""
+    got = aggregate_bearing([(0.0, 0.5, 100), (180.0, 0.5, 1)])
+    assert got is not None and abs(got[0]) < 5.0
+
+
+def test_aggregate_bearing_handles_no_area():
+    assert aggregate_bearing([]) is None
+
+
+def test_regroup_smoothing_does_not_share_the_enemy_ema():
+    """Blending an enemy bearing with a friendly one across a mode change would
+    steer at neither."""
+    nav = _nav_regroup()
+    nav.update([(0.0, 0.5, 20)], 5000.0, 0.0)          # enemy dead ahead
+    intent = nav.update([], 5000.0, 1.0, friendly_components=[(179.8, 0.75, 30)])
+    assert intent.mode == MODE_REGROUP
+    assert intent.kind == "steer", "friendly bearing must not be dragged forward by enemy state"
+
+
+# --- Design 010: the boundary must be a LINE, not amber terrain --------------
+
+def _minimap_with(shapes, size=200):
+    """Synthetic minimap: amber `shapes` drawn on a neutral disc."""
+    import numpy as np
+    import cv2
+    img = np.full((size, size, 3), 90, dtype=np.uint8)
+    for (x1, y1, x2, y2) in shapes:
+        cv2.line(img, (x1, y1), (x2, y2), (20, 150, 230), 2)   # BGR amber
+    return img
+
+
+def _boundary_analyzer():
+    import numpy as np
+    from wingman.analyzer import GameStateAnalyzer
+    a = GameStateAnalyzer.__new__(GameStateAnalyzer)
+    a.crops = {"MINIMAP": (0.0, 0.0, 1.0, 1.0)}
+    a._minimap_circle_cache = None
+    a._minimap_mask_radius_frac = 0.93
+    a._boundary_hsv_lower = np.array([8, 120, 120], np.uint8)
+    a._boundary_hsv_upper = np.array([28, 255, 255], np.uint8)
+    a._boundary_min_px = 20
+    a._boundary_min_span_frac = 0.5
+    return a
+
+
+def test_a_long_line_is_read_as_the_boundary():
+    a = _boundary_analyzer()
+    assert a.detect_map_boundary(_minimap_with([(10, 60, 190, 60)])) is not None
+
+
+def test_scattered_amber_terrain_is_not_a_boundary():
+    """Live 2026-08-30: a count-only mask read a median 0.23R with 'ahead' on a
+    52% coin flip — amber-hued terrain, not a map edge. Speckle must not
+    produce a reading at all."""
+    speckle = [(x, y, x + 3, y + 3) for x in range(20, 180, 12)
+               for y in range(20, 180, 12)]
+    assert _boundary_analyzer().detect_map_boundary(_minimap_with(speckle)) is None
+
+
+def test_a_short_amber_streak_is_rejected():
+    a = _boundary_analyzer()
+    assert a.detect_map_boundary(_minimap_with([(95, 95, 115, 95)])) is None
+
+
+def test_the_span_threshold_is_configurable():
+    a = _boundary_analyzer()
+    short = _minimap_with([(60, 100, 140, 100)])    # 80px of a 200px disc
+    a._boundary_min_span_frac = 0.9
+    assert a.detect_map_boundary(short) is None
+    a._boundary_min_span_frac = 0.2
+    assert a.detect_map_boundary(short) is not None

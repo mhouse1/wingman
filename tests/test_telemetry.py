@@ -106,16 +106,18 @@ class TestPlausibilityFilter:
         assert snap.speed.value == 1355
         assert snap.altitude.value == 2768
 
-    def test_stale_speed_falls_back_to_envelope_bound(self):
-        # With no speed signal at all, the altitude gate uses max_speed_mph —
-        # conservative but still tight enough to reject huge jumps.
-        p = _proc(max_speed_mph=2000.0, plausibility_margin=1.0)
+    def test_missing_speed_does_not_change_the_altitude_gate(self):
+        # ADR 097 D1 replaced the speed-derived altitude bound with an absolute
+        # vertical-rate ceiling, so there is no longer an envelope to fall back
+        # to: a missing speed signal cannot affect the altitude gate at all.
+        # This previously asserted the max_speed_mph fallback.
+        p = _proc(max_alt_rate_mps=1000.0, plausibility_margin=1.0)
         p.update(None, 5000, now_s=0.0)
-        # 2000 MPH ≈ 2933 ft/s → 4400 ft allowed per 1.5 s tick.
-        p.update(None, 5000 + 4000, now_s=1.5)   # within envelope bound
-        assert p.snapshot(1.5).altitude.value == 9000
-        p.update(None, 40000, now_s=3.0)          # far beyond envelope bound
-        assert p.snapshot(3.0).altitude.value == 9000
+        # 1000 m/s ceiling → 1500 m allowed per 1.5 s tick.
+        p.update(None, 5000 + 1400, now_s=1.5)   # inside the ceiling
+        assert p.snapshot(1.5).altitude.value == 6400
+        p.update(None, 40000, now_s=3.0)          # far beyond it
+        assert p.snapshot(3.0).altitude.value == 6400
 
     def test_throttled_cadence_does_not_widen_the_speed_gate(self):
         """Slowing the sampler must not relax the filter.

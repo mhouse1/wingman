@@ -15,4 +15,6 @@ FUTURE/
 wingman.log
 wingman_live.log
 *.log
-test_screenshots/*
+test_screenshots/*focus-probe.log
+test_screenshots/health_dropouts/*
+test_screenshots/unknown_anomalies/*

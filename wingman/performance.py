@@ -208,6 +208,8 @@ class PerformanceTracker:
         self._round_crops: dict   = {c: [] for c in _CROPS}
         self._round_reaction: list = []
 
+        self._reaction_segments: list = []   # ADR 096
+        self._host: dict = {}                # ADR 095: conditions this ran under
         # Session-level buffers — accumulate until on_session_end()
         self._session_crops: dict   = {c: [] for c in _CROPS}
         self._session_reaction: list = []
@@ -243,6 +245,44 @@ class PerformanceTracker:
                 for c in _CROPS
             }
         return window, marks
+
+    def set_host_context(self, **fields) -> None:
+        """Merge host conditions into the session record (ADR 095).
+
+        Recorded so a session can be compared against the archive honestly —
+        ADR 092's leak gate and the regression baseline both judge a session
+        against prior ones and today assume conditions were equivalent. Nothing
+        alarms on these values; see the ADR for why no threshold is invented.
+        """
+        try:
+            self._host.update({k: v for k, v in fields.items() if v is not None})
+        except Exception as e:
+            logger.debug("PerformanceTracker: set_host_context failed: %s", e)
+
+    def record_reaction_segments(self, capture_to_pass: float, detect: float,
+                                dispatch: float) -> None:
+        """Record the ADR 096 split of one reaction.
+
+        `reaction` bundles detection duration with the wait for tick pickup, so
+        a large value is consistent with a slow detector *or* a slow dispatch.
+        These three separate them:
+
+            capture_to_pass — frame captured to background pass starting
+            detect          — the detector itself
+            dispatch        — result cached to the tick handler acting on it
+
+        Never raises: this is diagnostic and must not break the flare path.
+        """
+        if not self._enabled:
+            return
+        if not self._lock.acquire(timeout=0.1):
+            logger.warning("PerformanceTracker: lock timeout in record_reaction_segments")
+            return
+        try:
+            self._reaction_segments.append(
+                (float(capture_to_pass), float(detect), float(dispatch)))
+        finally:
+            self._lock.release()
 
     def record_reaction(self, seconds: float) -> None:
         """Record one incoming→flare reaction latency. Called from main thread."""
@@ -353,6 +393,18 @@ class PerformanceTracker:
             "n": 0, "mean": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0,
         }
 
+        # ADR 096: the reaction split, so the tick-latency premise is
+        # attributable from the archived record rather than only live.
+        seg_out = None
+        if self._reaction_segments:
+            cols = list(zip(*self._reaction_segments, strict=True))
+            names = ("capture_to_pass", "detect", "dispatch")
+            seg_out = {"n": len(self._reaction_segments)}
+            for name, values in zip(names, cols, strict=True):
+                s = _compute_stats(list(values))
+                if s:
+                    seg_out[name] = {k: v for k, v in s.items() if k != "max"}
+
         data = {
             "version":   self._version,
             "run_id":    run_id,
@@ -362,6 +414,8 @@ class PerformanceTracker:
             "rounds":    rounds,
             "ocr_crops": ocr_out,
             "reaction":  reaction_out,
+            "reaction_segments": seg_out,
+            "host": self._host or None,
         }
 
         out_path = out_dir / f"run_{run_id}.json"

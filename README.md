@@ -2,7 +2,7 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.8.3 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04).
+Current version: v1.8.7 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04), on **CPU only**, from a low-end laptop to a desktop workstation.
 
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
 ![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
@@ -103,7 +103,49 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 
 ---
 
+## Hardware Target — CPU Only, Deliberately
+
+Wingman runs entirely on the **CPU**. `respawn_detection.use_gpu` exists and is
+set to `false`, and every calibration, performance baseline and regression
+threshold in the project was measured that way.
+
+That is a design decision, not an oversight. The target range is **a low-end
+laptop through to a desktop workstation**, with no GPU requirement, because:
+
+- The GPU is already busy running MetalStorm. A wingman that costs the game
+  frames has made the aircraft harder to fly, not easier.
+- One hardware profile means one set of baselines. The 725-session release
+  baseline, the ADR 092 leak gate thresholds and the ADR 090 memory-guard limits
+  are all calibrated against CPU behaviour, and a second profile would silently
+  split every one of them.
+- GPU inference is not bit-identical to CPU, and the ADR 044 replay gate and
+  ADR 037 real-OCR lane both assert on OCR output.
+
+The foundation comes first. A high-performance GPU profile — batched GPU OCR, a
+per-frame fast path for missile detection, and reaction latency bounded by frame
+rate rather than by the 1.5 s tick — is designed in
+[`docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md`](docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md).
+It is a design, not a plan; nothing there is scheduled, and the CPU path would
+remain the default.
+
+---
+
 ## Runtime Performance
+
+Measured across the release baseline — **725 sessions, 604,263 OCR samples**:
+
+| crop | mean | p95 |
+|------|------|-----|
+| incoming | 0.460 s | 0.373 s |
+| respawn | 0.423 s | 0.228 s |
+| health | 0.432 s | 0.380 s |
+| ammo_flares | 0.375 s | 0.207 s |
+| ammo_missiles | 0.384 s | 0.195 s |
+| telemetry | 0.666 s | 0.374 s |
+| **incoming to flare** | **0.486 s** | — |
+
+Sampling is on a fixed **1.5 s tick**, with 13 thread-local EasyOCR readers
+across 33 calibrated crops.
 
 Every session writes per-crop OCR timings and incoming→flare reaction latency to `docs/performance/current/`, which `make wrelease` promotes into `docs/performance/release/` as the comparison baseline. `PerformanceTracker` fails the run if the current session regresses against that baseline beyond the thresholds in `config.yaml`.
 
@@ -130,7 +172,7 @@ uv sync --all-groups
 
 1. Install MetalStorm via Heroic Games Launcher (Flatpak) with Proton-GE.
 2. Install `umu-run` standalone — Makefile variables `UMU_RUN`, `PROTON_ROOT`, `WINE_PREFIX`, `GAME_EXE` point to your install.
-3. Run `make r` once to trigger the one-time PipeWire screen-share dialog; subsequent runs skip it automatically.
+3. Run `make r` once to trigger the one-time PipeWire screen-share dialog; subsequent runs skip it automatically. (Not needed while the nested display lane is enabled — it captures its own X server directly and never uses the portal.)
 4. Set MetalStorm's Controls mode to **Controller / Joystick** in-game settings (required for pitch input under Wine — see ADR 051).
 5. Configure in-game keybindings as described in `docs/job-aids/011-wingman-keybindings.md`.
 
@@ -146,6 +188,57 @@ make rd    # run with DEBUG logs written to wingman.log
 On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not already running, waits for the lobby to appear, then starts Wingman. No manual game launch step is needed.
 
 On Windows, launch MetalStorm manually before running `make r`.
+
+**Only one wingman runs at a time.** A second instance is refused at startup
+(SAF-014): two of them inject into the same display and fight each other and the
+operator, and neither can detect the other — each behaves correctly in
+isolation, so nothing shows up in either log.
+
+### Using the computer while Wingman runs
+
+By default (`nested.enabled: true` in `wingman/config.yaml`) the game runs on its
+own nested X display. Wingman captures and injects there, so its keystrokes
+cannot reach whatever you are typing in — you can use the machine normally while
+a session runs. Your hotkeys still work: wingman watches for them on both your
+display and the nested one, so they register whether you are looking at the game
+or at an X11 window of your own. (Native-Wayland windows such as VS Code cannot
+be observed by any X11 listener — a pre-existing limitation.)
+
+```bash
+make rd              # honours nested.enabled
+make rd NESTED=0     # force the on-screen lane for one run
+make nested-status   # is the lane up, and what holds focus
+make nested-stop     # tear the nested server down
+```
+
+Stopping a session:
+
+- **`z`** — finish the round, then close MetalStorm and the nested display.
+- **Backspace** — two-stage. The first press stops wingman and **leaves
+  MetalStorm running**, so you can take over and keep flying by hand, even
+  mid-battle; wingman waits in standby. Press Backspace again, whenever you are
+  done, to close MetalStorm and the nested display and exit. Ctrl-C during
+  standby leaves everything up.
+
+Guard-triggered exits leave both up, because they mean "restart wingman". Set
+`finish_round_then_exit.close_game: false` to stop wingman only.
+
+**Manual takeover:** press **Enter** at the game window to take the aircraft —
+wingman stops instantly, releases every key, and from then on only deploys
+flares. Press **`u`** to hand it back. Arrow keys also take over, and
+`ctrl+alt+i/j/k/l` works from your own display. Bare `i/j/k/l` at the game
+window are wingman's own roll commands and are ignored there. A respawn ends the
+takeover and the last mission resumes automatically — set
+`mission.manual_takeover.persist_through_respawn: true` to keep flying across
+deaths instead.
+
+**Hotkeys need `ctrl+alt` while the nested lane is on** — `ctrl+alt+z`,
+`ctrl+alt+backspace`, and so on. Without the game holding your keyboard, bare
+single letters would fire from ordinary typing: the letter `z` in a text editor
+would close the game. Bare keys still work when the nested game window itself
+has focus.
+
+See ADR 099 and `docs/hldd/009-nested-display-isolation-hldd.md` for the design.
 
 ---
 
@@ -170,18 +263,35 @@ Run `make tp` before proposing a release; `make tp-full` for the complete pre-re
 
 Wingman is normally fully unattended — hotkeys exist for supervision, testing, and manual takeover.
 
+With the nested display lane enabled (the default), these require **`ctrl+alt`** when pressed
+on your own display, and work bare when the nested game window has focus. See ADR 099 D4a.
+
 | Key | Action |
 |-----|--------|
+| `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
+| `u` | Start the J20 mission — and, while in manual, hand control back to wingman |
+| `y` | Start the loiter mission — climb to the hold altitude and orbit to stay alive |
 | `m` | Activate unattended mode (also auto-enabled from config) |
-| `u` | Start J20 mission |
-| `y` | Start loiter mission |
 | `end` | Cancel active mission |
-| `i` / `j` / `k` / `l` | Manual maneuver takeover |
+| `i` / `j` / `k` / `l` | Manual takeover **from your own display** (needs `ctrl+alt` on the nested lane) — see below |
+| arrow keys | Manual takeover, at the game window or your own display |
 | `x` | Toggle weapon loop |
 | `p` | Manual padlock cooldown trigger |
 | `v` | Save debug screenshot with crop overlays |
 | `b` | Inject simulated respawn OCR result (testing) |
-| `backspace` | Exit script (runtime mode) |
+| `backspace` | Stop wingman, leaving MetalStorm up for manual flight; press again to close everything |
+| `z` | Finish the round, then exit and close MetalStorm |
+
+**Missions.** `u` flies the J20 mission — engage contacts, manage weapons and
+altitude. `y` flies the loiter mission, whose only objective is staying alive:
+climb to the hold altitude and orbit there, deciding from live telemetry rather
+than running a fixed sequence. Flares stay with the incoming-missile detector in
+both, so they fire when something is actually inbound.
+
+`i/j/k/l` are wingman's own roll and pitch commands, so at the **game window** they
+are indistinguishable from its presses and are ignored there. `enter` and the
+arrow keys are never injected by wingman, which is why they work bare. A respawn
+ends the takeover and the last mission resumes automatically.
 
 Hotkeys work on Linux without root or `input` group membership — key injection uses XTest and hotkey listening uses the X11 RECORD extension (see ADR 053).
 
@@ -227,6 +337,12 @@ Roadmap: `docs/PROJECT_AI_ROADMAP.md` · Architecture: `docs/architecture.md` ·
 | `docs/adr/056-game-battle-eject-fsm-state.md` | Eject as a first-class FSM state |
 | `docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md` | Eject descent: impulse rotation + ballistic phase |
 | `docs/adr/059-health-gated-immediate-mission-restart.md` | One restart path: mission restarts when health returns |
+
+### Design documents (HLDD)
+
+| Document | Description |
+|---|---|
+| `docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md` | **A GPU-accelerated real-time profile** — batched GPU OCR, per-frame missile detection, and what must not regress. Design only; the CPU path stays the default |
 
 ### Perception and detection
 

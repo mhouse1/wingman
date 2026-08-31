@@ -111,7 +111,7 @@ def _linux_click(x: int, y: int, count: int = 1) -> None:
     try:
         from Xlib import display as _xdisplay, X as _X
         from Xlib.ext import xtest as _xtest
-        display_name = os.environ.get("DISPLAY", ":0").strip()
+        display_name = _inject_display_name()
         d = _xdisplay.Display(display_name)
         _xtest.fake_input(d, _X.MotionNotify, x=x, y=y)
         d.sync()
@@ -161,6 +161,192 @@ _XKEY_ALIASES = {
     "=": "equal",
     "`": "grave",
 }
+
+
+# --- Injection vs observation display (ADR 099) ------------------------------
+#
+# DISPLAY does three jobs in this module and they do NOT want the same value
+# once the game runs on a nested display:
+#
+#   capture + injection  ->  the nested display, where the game lives
+#   hotkey observation   ->  the OPERATOR's display, where their hands are
+#
+# XRecord in `_listener_loop` observes real keypresses so the operator can hit
+# backspace to exit or i/j/k/l to take over. Point that at the nested display
+# and those keys are only seen while the nested window has focus - i.e. exactly
+# when the operator is NOT working elsewhere, which is the entire point of the
+# lane. Manual takeover is a safety property, so the two displays are split:
+# injection reads this override, observation keeps reading os.environ.
+_injection_display = None
+_injected_keys = frozenset()
+# SAF-001: flight-control and arrow keys must ALWAYS reach the handler, even on
+# the injection display where wingman presses them itself. Discriminating
+# wingman's own echoes from the operator's hand is SAF-001.1's job and belongs
+# to `_programmatic_key_counts` plus its post-release grace window, which is the
+# mechanism that ran for a year before the nested lane existed — injection and
+# observation shared one display then, so every injected maneuver key echoed
+# back and was correctly ignored.
+#
+# Filtering them here instead silently removed manual takeover: with the game on
+# its own display, pressing i/j/k/l at the game window did nothing at all.
+_takeover_keys = frozenset()
+# SAF-001: keys the operator uses to hand the aircraft BACK. Delivered on the
+# injection display too, but only while the takeover is active — wingman
+# injects nothing during manual except flares, so there is nothing they could
+# be confused with. Outside manual they stay filtered, because wingman does
+# press them itself ('u' starts the J20 mission).
+_handback_keys = frozenset()
+_manual_state_fn = None
+
+
+def set_handback_keys(keys, manual_state_fn=None) -> None:
+    """Declare the hand-back keys and how to ask whether manual is active."""
+    global _handback_keys, _manual_state_fn
+    _handback_keys = {str(k).lower() for k in (keys or ())}
+    if manual_state_fn is not None:
+        _manual_state_fn = manual_state_fn
+
+
+def _manual_active() -> bool:
+    try:
+        return bool(_manual_state_fn and _manual_state_fn())
+    except Exception:
+        return False
+
+# ADR 099: X modifier mask required for hotkeys observed on the OPERATOR's
+# display while the nested lane is active. ControlMask (1<<2) | Mod1Mask (1<<3).
+#
+# Before the nested lane the game held focus on the operator's display, so bare
+# single-letter hotkeys were unreachable by ordinary typing — the keys went to
+# the game. Moving the game to its own display freed the operator's keyboard,
+# which is the point, and simultaneously made every hotkey fire from ordinary
+# typing: observed 2026-08-30, stray 'm' presses forced GAME_LOBBY three times
+# and cancelled matchmaking so the session never reached battle. 'z' would have
+# closed the game outright.
+#
+# On the NESTED display bare keys still work: the only way to type there is to
+# focus the game window, which is an explicit act.
+_OPERATOR_MOD_MASK = (1 << 2) | (1 << 3)
+
+
+def set_injection_display(display_name) -> None:
+    """Route key/mouse injection to `display_name` (None restores DISPLAY).
+
+    Observation is deliberately unaffected - see the note above.
+    """
+    global _injection_display
+    _injection_display = display_name.strip() if display_name else None
+    if _injection_display:
+        logger.info("ADR 099: injection routed to display %r; hotkeys observed "
+                    "on %s", _injection_display,
+                    ", ".join(repr(n) for n in _observe_display_names()))
+
+
+def _inject_display_name() -> str:
+    """Display for XTest injection: the override if set, else DISPLAY."""
+    return _injection_display or os.environ.get("DISPLAY", ":0").strip()
+
+
+def set_takeover_keys(keys) -> None:
+    """Declare the keys that must never be filtered (SAF-001)."""
+    global _takeover_keys
+    _takeover_keys = {str(k).lower() for k in (keys or ())}
+
+
+def set_injected_keys(keys) -> None:
+    """Declare the keys wingman itself injects (ADR 099).
+
+    On the INJECTION display these are wingman's own keystrokes, never the
+    operator's, and must not fire operator hotkeys. Before the nested lane this
+    could not happen — injection went to one display and observation to another —
+    so adding the second listener introduced it.
+
+    Observed 2026-08-30 08:27: wingman's own 'u', 'p' and 'm' injections fired
+    the J20-mission, padlock and force-lobby hotkeys, which drove the FSM into a
+    GAME_STARTING/GAME_LOBBY oscillation that never reached battle.
+
+    Filtering by display is race-free, unlike counting presses and debiting them
+    on observation: XRecord delivery is asynchronous, so a count can already
+    have been decremented by the time its own event arrives. The maneuver path
+    needs a post-release grace window for exactly that reason.
+    """
+    global _injected_keys
+    _injected_keys = {str(k).lower() for k in (keys or ())}
+
+
+def should_deliver_hotkey(display_name: str, key_name: str, state: int) -> bool:
+    """Should an observed keypress fire its operator hotkey? ADR 099.
+
+    Two filters, and they apply to different displays:
+
+    - On the INJECTION display, a key wingman injects is wingman's own. Filtering
+      by display is race-free, unlike counting presses and debiting them on
+      observation, because XRecord delivery is asynchronous.
+    - On the OPERATOR's display, while the game lives elsewhere, a bare keypress
+      is ordinary typing and must not drive the aircraft.
+
+    With no nested lane there is one display, the game holds focus on it, and
+    both filters are inert — the on-screen lane behaves exactly as before.
+    """
+    if _injection_display is None:
+        return True
+    if display_name == _injection_display:
+        # SAF-001: the hand-back key gets through while the operator holds the
+        # aircraft. Wingman injects nothing during manual but flares, so this
+        # cannot be one of its own presses; outside manual it stays filtered
+        # because wingman does press it itself.
+        if _manual_active() and key_name.lower() in _handback_keys:
+            return True
+        # SAF-001: takeover on this display uses only keys wingman NEVER injects
+        # — ENTER and the arrow keys. On a shared display wingman's own presses
+        # and the operator's are indistinguishable in content, and telling them
+        # apart by timing was measured failing: echoes arrived 1.67-9.74 s after
+        # release against a 1.0 s grace, producing four spurious takeovers in
+        # 23 minutes on 2026-08-30. A key wingman never presses has nothing to
+        # discriminate.
+        # — the arrow keys, which the requirement names explicitly alongside
+        # i/j/k/l. For i/j/k/l here the two sources are indistinguishable:
+        #
+        # Echo discrimination (SAF-001.1) assumes an injected key echoes back
+        # promptly, and it did while injection and observation shared one
+        # display. On the nested lane, under 13 OCR workers, echoes were
+        # measured arriving 1.67-9.74 s after release against a 1.0 s grace
+        # window — four spurious takeovers in 23 minutes on 2026-08-30, each
+        # dropping the aircraft out of automation mid-round.
+        #
+        # Widening the grace is not a fix: it would suppress the operator's own
+        # presses for the same seconds, against SAF-001's 2.0 s cessation bound.
+        # Arrow keys carry no such ambiguity, so takeover on the injection
+        # display is unconditional and race-free through them.
+        return key_name.lower() not in _injected_keys
+    return (state & _OPERATOR_MOD_MASK) == _OPERATOR_MOD_MASK
+
+
+def _observe_display_names() -> "list[str]":
+    """Displays the hotkey listener must watch. ADR 099.
+
+    Keeping observation on the operator's DISPLAY is necessary but NOT
+    sufficient. On a Wayland session that DISPLAY is a *rootless* Xwayland,
+    which only receives key events while an X11 client holds focus. Before the
+    nested lane the game was that client, so the operator's keys reached
+    Xwayland and XRecord saw them. Moving the game to its own display removed
+    the only X client that was ever focused, and every hotkey went dead —
+    backspace and the SAF-001 manual takeover included.
+
+    So the injection display is observed too. When the operator is looking at
+    the nested window, their keys are delivered into that server and are only
+    visible there. Observing it also means wingman sees its OWN injected keys,
+    which is exactly the pre-nested topology that `_programmatic_key_counts`
+    already exists to handle.
+
+    Native-Wayland windows (e.g. VS Code) remain invisible to both — a
+    pre-existing X11 limitation this does not change.
+    """
+    names = [os.environ.get("DISPLAY", ":0").strip()]
+    inject = _inject_display_name()
+    if inject and inject not in names:
+        names.append(inject)
+    return names
 
 
 # --- Shared XTest display (ADR 091) -----------------------------------------
@@ -224,7 +410,7 @@ def _linux_key_event(key: str, event_type) -> None:
     if keysym == 0:
         logger.warning("Linux key: unknown keysym for %r", key)
         return
-    display_name = os.environ.get("DISPLAY", ":0").strip()
+    display_name = _inject_display_name()
     last_err = None
     with _display_lock:
         for attempt in (1, 2):
@@ -273,9 +459,11 @@ class _LinuxXTestKeyboard:
         self._grabbed: dict[int, tuple] = {}          # keycode -> (key_name, callback)
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._ctrl_display = None   # used by unhook_all to disable the record context
-        self._record_ctx = None
+
+        # ADR 099: one listener per observed display, so the maps are keyed by
+        # display name. Used by unhook_all to disable every record context.
+        self._contexts: dict = {}   # display name -> (d_ctrl, ctx)
+        self._threads: dict = {}    # display name -> Thread
 
     # --- Key injection (transient Display, no shared state) ---
 
@@ -305,10 +493,10 @@ class _LinuxXTestKeyboard:
 
     def unhook_all(self) -> None:
         self._stop.set()
-        if self._ctrl_display is not None and self._record_ctx is not None:
+        for _disp, (_ctrl, _ctx) in list(self._contexts.items()):
             try:
-                self._ctrl_display.record_disable_context(self._record_ctx)
-                self._ctrl_display.flush()
+                _ctrl.record_disable_context(_ctx)
+                _ctrl.flush()
             except Exception as e:
                 # Shutdown path: the listener thread is a daemon and exits with
                 # the process either way, so this is benign — but it is the only
@@ -318,15 +506,24 @@ class _LinuxXTestKeyboard:
     # --- Listener thread ---
 
     def _ensure_listener(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        names = _observe_display_names()
+        if all(t is not None and t.is_alive()
+               for t in (self._threads.get(n) for n in names)):
             return
         self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._listener_loop, daemon=True, name="XKeyListener"
-        )
-        self._thread.start()
+        for name in names:
+            t = self._threads.get(name)
+            if t is not None and t.is_alive():
+                continue
+            t = threading.Thread(
+                target=self._listener_loop, args=(name,), daemon=True,
+                name=f"XKeyListener{name}",
+            )
+            self._threads[name] = t
+            t.start()
+            logger.info("XKey: observing hotkeys on display %r", name)
 
-    def _listener_loop(self) -> None:
+    def _listener_loop(self, display_name: str) -> None:
         """Observe keyboard events via XRecord without consuming them.
 
         XGrabKey was ruled out because it prevents grabbed keys from reaching the
@@ -351,7 +548,9 @@ class _LinuxXTestKeyboard:
                 from Xlib.ext import record as _record
                 from Xlib.protocol import rq as _rq
 
-                display_name = os.environ.get("DISPLAY", ":0").strip()
+                # display_name is this listener's own display, passed in by
+                # _ensure_listener - NOT read from the environment, which would
+                # collapse every listener onto the operator's display.
 
                 # Resolve keycodes for pending registrations. On reconnect, _pending is
                 # empty but _grabbed still holds previously resolved keycodes, which are
@@ -395,8 +594,7 @@ class _LinuxXTestKeyboard:
                     }],
                 )
 
-                self._ctrl_display = d_ctrl
-                self._record_ctx = ctx
+                self._contexts[display_name] = (d_ctrl, ctx)
 
                 # Watcher: unblocks record_enable_context when _stop is set (e.g. on
                 # abnormal exit where cleanup() never runs), or exits without acting
@@ -460,6 +658,10 @@ class _LinuxXTestKeyboard:
                         if not entry:
                             continue
                         key_name, cb = entry
+                        if not should_deliver_hotkey(
+                                display_name, key_name,
+                                getattr(event, "state", 0)):
+                            continue
                         ev_obj = _XKeyEvent(name=key_name,
                                             is_injected=bool(event.send_event))
                         try:
@@ -476,8 +678,7 @@ class _LinuxXTestKeyboard:
                 d_rec.record_free_context(ctx)
                 d_rec.close()
                 d_ctrl.close()
-                self._ctrl_display = None
-                self._record_ctx = None
+                self._contexts.pop(display_name, None)
                 break  # clean exit: _stop was set via unhook_all
             except Exception as e:
                 logger.error("XKey listener thread died: %s", e)
@@ -492,8 +693,7 @@ class _LinuxXTestKeyboard:
                         d_ctrl.close()
                     except Exception as close_err:
                         logger.debug("XKey: d_ctrl.close() failed during reconnect: %s", close_err)
-                self._ctrl_display = None
-                self._record_ctx = None
+                self._contexts.pop(display_name, None)
                 if not self._stop.is_set():
                     reconnect_attempts += 1
                     logger.info("XKey: reconnecting display in 3s (attempt %d)", reconnect_attempts)

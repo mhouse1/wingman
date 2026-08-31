@@ -129,7 +129,24 @@ SCHEMA = Section(
                 "y": Leaf(types=(int,), allow_none=True),
             },
         ),
+        # mission_loiter: the survival hold
+        "loiter_mission": Section(children={
+            "target_alt": _num(0),
+            "hysteresis_m": _num(0),
+            "orbit_direction": STR,
+            "orbit_roll_interval_s": SECONDS,
+            "orbit_roll_hold_s": SECONDS,
+            "tick_s": SECONDS,
+        }),
         "enemy_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
+        # Design 010 instrumentation
+        "return_to_battle": Section(children={
+            # x1, y1, x2, y2 as screen fractions
+            "region": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "min_red_frac": FRACTION,
+            "ocr_region": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "text": Leaf(types=(list,), item_types=(str,)),
+        }),
         "crops": MapOf(_CROP),
 
         # ADR 084
@@ -198,6 +215,8 @@ SCHEMA = Section(
         }),
 
         "mission": Section(children={
+            # SAF-001
+            "manual_takeover": Section(children={"persist_through_respawn": BOOL}),
             "weapon_loop_interval": SECONDS,
             "no_missiles_consecutive_required": _int(1),
             "no_missiles_abort_grace_s": SECONDS,
@@ -311,6 +330,15 @@ SCHEMA = Section(
             "max_blob_px": _int(0),
             "ema_alpha": FRACTION,
             "ema_reset_after_s": SECONDS,
+            # ADR 028 revision 4
+            "regroup_enabled": BOOL,
+            "friendly_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
+            # Design 010 instrumentation
+            "boundary_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
+            "boundary_min_px": _int(0),
+            "boundary_min_span_frac": FRACTION,
+            "boundary_near_frac": FRACTION,
+            "boundary_trace_ticks": _int(1),
         }),
 
         "tracking": Section(children={
@@ -346,6 +374,23 @@ SCHEMA = Section(
             "interval_sec": SECONDS,
         }),
 
+        # ADR 099: nested display lane
+        "nested": Section(children={
+            "enabled": BOOL,
+            "display": STR,
+            "size": STR,
+        }),
+
+        # ADR 098: focus guard for key injection
+        "focus_guard": Section(children={
+            "enabled": BOOL,
+            "ttl_s": SECONDS,
+            "session_ttl_s": SECONDS,
+            "on_unknown": STR,
+            "display": STR,
+            "process_name": STR,
+        }),
+
         # ADR 038 / 067 / 069
         "telemetry": Section(children={
             "max_speed_mph": _num(0),
@@ -355,6 +400,10 @@ SCHEMA = Section(
             "plausibility_margin": _num(0),
             "max_gate_dt_s": SECONDS,
             "reseed_after_rejections": _int(1),
+            # ADR 097: the altitude gate is an absolute vertical-rate ceiling
+            # (D2) plus agreement-based anchor reseeding (D3).
+            "max_alt_rate_mps": _num(0),
+            "reseed_agreement_m": _num(0),
             "smoothing_window": _int(1),
             "stale_after_s": SECONDS,
             "trend_min_alt_rate_fps": _num(0),
@@ -386,6 +435,11 @@ SCHEMA = Section(
         "soft_limit_mb": _int(1),
         "hard_limit_mb": _int(1),
     }),
+        # ADR 094 — finish-round-then-exit hotkey.
+        "finish_round_then_exit": Section(children={
+            "close_game": BOOL,
+            "game_term_grace_s": SECONDS,
+        }),
         # ADR 092 — leak gate thresholds.
         "leak_gate": Section(children={
             "log_dir": STR,

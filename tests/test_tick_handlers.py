@@ -624,10 +624,22 @@ class TestRespawnDetection:
         assert not a.health_respawn_event.is_set()   # consumed
 
     def test_manual_death_returns_to_auto(self):
-        """ADR 059: death ends manual takeover."""
+        """ADR 059: death ends manual takeover and the last mission resumes.
+
+        Briefly shipped the other way on 2026-08-30 — the operator then hit two
+        deaths inside one takeover, each needing 'u' before wingman would fly
+        again, which makes an unattended session need attending."""
         h, a, c = _respawn(_RespawnAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL))
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE_MANUAL)
         assert "respawn_reset" in a.triggers
+
+    def test_manual_can_be_made_to_survive_death(self):
+        """The persisting behaviour stays reachable — it is a default, not a
+        removal."""
+        h, a, c = _respawn(_RespawnAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL))
+        h._manual_persists_through_respawn = True
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE_MANUAL)
+        assert "respawn_reset" not in a.triggers
 
     def test_latch_dedupes_while_screen_persists(self):
         h, a, c = _respawn()
@@ -1080,3 +1092,177 @@ class TestHealthDropoutRecorder:
         r = self._recorder(tmp_path, a, self._clock(), enabled=False)
         assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
         assert list(tmp_path.iterdir()) == []
+
+
+# --- Design 010: the pre-crossing trace buffer -------------------------------
+
+class _FakeBoundaryAnalyzer:
+    """Analyzer stub exposing only what _instrument_boundary touches."""
+
+    def __init__(self, crossed_seq, reading=(0.5, -0.5)):
+        self._crossed = list(crossed_seq)
+        self._reading = reading
+        self.ocr_calls = 0
+
+    def detect_return_to_battle(self, _frame):
+        return self._crossed.pop(0) if self._crossed else False
+
+    def detect_map_boundary(self, _frame):
+        return self._reading
+
+    def confirm_return_to_battle_async(self, _frame, _cb):
+        self.ocr_calls += 1
+
+
+def _boundary_handler(analyzer):
+    import collections
+    from wingman.tick_handlers import BehaviorTreeHandler
+    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    h._analyzer = analyzer
+    h._rtb_false_positives = 0
+    h._rtb_active = False
+    h._boundary_crossings = 0
+    h._boundary_approaches = 0
+    h._boundary_near_since = 0.0
+    h._boundary_near_frac = 0.25
+    h._boundary_trace = collections.deque(maxlen=20)
+    h._session_start = 0.0
+    return h
+
+
+def test_the_trace_records_every_tick_not_only_crossings():
+    """A crossing logged alone says it happened, not why."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([False, False, False]))
+    for i in range(3):
+        h._instrument_boundary(None, float(i))
+    assert len(h._boundary_trace) == 3
+
+
+def test_the_trace_is_bounded():
+    """A session must not grow a trace buffer without limit."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([False] * 50))
+    for i in range(50):
+        h._instrument_boundary(None, float(i))
+    assert len(h._boundary_trace) == 20
+
+
+def _flying(**kw):
+    from wingman.behavior_tree import AnalyzerSnapshot
+    base = dict(health=100, missiles=4, flares=4, ring_short=0, ring_mid=0,
+                ring_long=0, enemy_absent_seconds=0.0, altitude=5000.0,
+                is_respawning=False, incoming_detected=False,
+                mission_running=True, game_state=GameState.GAME_BATTLE)
+    base.update(kw)
+    return AnalyzerSnapshot(**base)
+
+
+def test_a_crossing_counts_once_per_edge_not_per_tick():
+    """The banner stays up for seconds; counting per tick would inflate it."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True, True, True, False, True]))
+    for i in range(5):
+        h._instrument_boundary(None, float(i), snap=_flying(), selection="Engage")
+    assert h._boundary_crossings == 2
+
+
+def test_the_banner_is_ignored_while_ejecting():
+    """Live 2026-08-30: the colour test fired on the eject fireball one tick
+    after an eject — bright red, centre screen, where the banner sits."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True, True]))
+    h._instrument_boundary(None, 0.0, snap=_flying(), selection="Eject")
+    h._instrument_boundary(None, 1.0, snap=_flying(is_respawning=True),
+                           selection="Idle")
+    assert h._boundary_crossings == 0
+
+
+def test_the_banner_is_ignored_outside_battle():
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
+    h._instrument_boundary(None, 0.0,
+                           snap=_flying(game_state=GameState.GAME_LOBBY),
+                           selection="Idle")
+    assert h._boundary_crossings == 0
+
+
+def test_an_unconfirmed_crossing_is_retracted_from_the_count():
+    """OCR arbitrates the count, so a false positive cannot inflate the figure
+    the tuning depends on."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
+    h._instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    assert h._boundary_crossings == 1
+    h._on_rtb_confirmed(False, None)
+    assert h._boundary_crossings == 0
+    assert h._rtb_false_positives == 1
+
+
+def test_a_confirmed_crossing_is_kept():
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
+    h._instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE:5")
+    assert h._boundary_crossings == 1
+    assert h._rtb_false_positives == 0
+
+
+def test_ocr_confirmation_is_one_shot_per_crossing():
+    """A read costs ~340 ms; per-tick confirmation would swamp the budget."""
+    analyzer = _FakeBoundaryAnalyzer([True, True, True])
+    h = _boundary_handler(analyzer)
+    for i in range(3):
+        h._instrument_boundary(None, float(i), snap=_flying(), selection="Engage")
+    assert analyzer.ocr_calls == 1
+
+
+def test_the_trace_carries_the_selected_tactic():
+    """What wingman was doing on the way out is the question being asked."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([False]))
+    h._instrument_boundary(None, 0.0, snap=None, selection="Climb")
+    assert h._boundary_trace[-1]["tactic"] == "Climb"
+
+
+def test_instrumentation_never_raises_into_the_tick():
+    class _Boom:
+        def detect_return_to_battle(self, _f):
+            raise RuntimeError("detector exploded")
+    h = _boundary_handler(_Boom())
+    h._instrument_boundary(None, 0.0)   # must not propagate
+
+
+def test_the_trace_is_dumped_only_for_confirmed_crossings():
+    """Measured 2026-08-30: 26 colour triggers in 26 minutes, all retracted,
+    with false positives reaching red_frac 0.773 — redder than the real banner
+    at 0.390, so no threshold separates them. Dumping 20 records per trigger
+    would add ~180 multi-KB WARNING lines to a three-hour soak."""
+    import wingman.tick_handlers as th
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
+    h._instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    dumped = []
+    real_warning = th.logger.warning
+    th.logger.warning = lambda fmt, *a: dumped.append(fmt % a if a else fmt)
+    try:
+        h._on_rtb_confirmed(False, None, trace=[{"t": 1}])
+        assert not any("trace" in d for d in dumped), "retracted must not dump"
+        h._on_rtb_confirmed(True, "RETURNTOBATTLE", trace=[{"t": 1}])
+        assert any("trace" in d for d in dumped), "confirmed must dump"
+    finally:
+        th.logger.warning = real_warning
+
+
+# --- SAF-001 + ADR 028 rev 5: who may command flight, and on which axis ------
+
+def test_the_navigator_never_runs_outside_game_battle():
+    """SAF-001. GAME_BATTLE_MANUAL means the operator has the aircraft; the
+    selector already yields Idle there, and the dispatch states it too so a
+    future leaf cannot reintroduce commanded flight during a takeover."""
+    import pathlib
+    src = pathlib.Path("wingman/tick_handlers.py").read_text()
+    assert "snap.game_state == GameState.GAME_BATTLE" in src
+    gate = src[src.index("_may_fly = ("):src.index("return False", src.index("_may_fly = ("))]
+    assert "TACTIC_ENGAGE" in gate and "TACTIC_REGROUP" in gate and "TACTIC_CLIMB" in gate
+
+
+def test_climb_steers_concurrently_but_without_orbit():
+    """Climb owns pitch, the navigator owns roll — the selector's either/or was
+    costing horizontal steering on ~43% of battle ticks."""
+    import pathlib
+    src = pathlib.Path("wingman/tick_handlers.py").read_text()
+    branch = src[src.index("elif _may_fly and selection == TACTIC_CLIMB:"):
+                 src.index("return False", src.index("elif _may_fly and selection == TACTIC_CLIMB:"))]
+    assert "steer_only=True" in branch

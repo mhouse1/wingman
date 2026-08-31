@@ -16,10 +16,26 @@ logger = logging.getLogger(__name__)
 class _MssBackend:
     """Screen capture via mss — Windows and Linux X11."""
 
-    def __init__(self, region, monitor_index=1):
+    def __init__(self, region, monitor_index=1, game_window_offset=None, display=None):
         self.region = region
         self.monitor_index = monitor_index
-        self._sct = mss()
+        # ADR 099: grab from an explicit display rather than DISPLAY. The env var
+        # stays pointed at the operator's screen so the XRecord hotkey listener
+        # still sees their keys; only capture and injection move.
+        self._display = display
+        # Linux click paths resolve absolute coords via Capture.game_screen_offset,
+        # which only ever consulted the PipeWire backend — so on an X11 session
+        # every click failed with "offset not known yet". For mss the answer is
+        # not a guess: frames come from get_monitor_rect(), so that rect's origin
+        # IS the offset. An explicit config value still wins.
+        self._configured_offset = game_window_offset
+        self._sct = mss(display=display) if display else mss()
+
+    @property
+    def _game_offset(self):
+        """Origin of the captured rect in absolute screen coords."""
+        rect = self.get_monitor_rect()
+        return (rect["left"], rect["top"])
 
     def get_monitor_rect(self):
         monitors = self._sct.monitors
@@ -46,7 +62,7 @@ class _MssBackend:
     def grab_from_thread(self):
         """Create a fresh mss context per call (mss uses thread-local storage)."""
         try:
-            with mss() as sct:
+            with (mss(display=self._display) if self._display else mss()) as sct:
                 return np.array(sct.grab(self.get_monitor_rect()))[:, :, :3]
         except Exception:
             return None
@@ -561,14 +577,23 @@ class Capture:
     Windows / Linux X11: _MssBackend (mss + XGetImage).
     """
 
-    def __init__(self, region, monitor_index=1, game_window_offset=None):
+    def __init__(self, region, monitor_index=1, game_window_offset=None, display=None):
         self.region = region
         self.monitor_index = monitor_index
         self._last_frame_ts = None
-        if _is_wayland():
+        # ADR 099: an explicit display means the nested lane, where the game is
+        # an ordinary X client on a server we own. That is an X11 grab whatever
+        # the host session type says, so it selects the backend outright rather
+        # than consulting _is_wayland().
+        if display:
+            self._backend = _MssBackend(region, monitor_index,
+                                        game_window_offset=game_window_offset,
+                                        display=display)
+        elif _is_wayland():
             self._backend = _PipeWireBackend(region, game_window_offset=game_window_offset)
         else:
-            self._backend = _MssBackend(region, monitor_index)
+            self._backend = _MssBackend(region, monitor_index,
+                                        game_window_offset=game_window_offset)
 
     def get_monitor_rect(self):
         """Returns monitor rect dict for mss callers; None on Wayland/GStreamer backend."""

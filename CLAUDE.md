@@ -28,7 +28,15 @@ Use `uv` for dependency management (`uv sync --all-groups`). Always prefer `make
 ```bash
 make r          # INFO console only
 make rd         # DEBUG log to wingman.log
+make rd NESTED=0  # force the on-screen lane for one run
 ```
+
+By default the game runs on a nested X display (`nested.enabled` in
+`wingman/config.yaml`, ADR 099) so the operator can use the machine while a
+session runs. There are no nested-specific run targets — every run target reads
+the config. `DISPLAY` has four consumers and they do not all want the same
+value; see `docs/hldd/009-nested-display-isolation-hldd.md` before changing
+anything in the capture or injection path.
 
 **Tests:**
 ```bash

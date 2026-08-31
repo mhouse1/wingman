@@ -19,6 +19,7 @@ MODE_IDLE = "idle"
 MODE_ORBIT = "orbit"
 MODE_ENGAGE_MID = "engage-mid"
 MODE_ENGAGE_LONG = "engage-long"
+MODE_REGROUP = "regroup"
 
 # Equal radial widths, deliberately not equal areas: travel distance to the
 # contact is the quantity of interest (ADR 028 revision 3).
@@ -152,6 +153,28 @@ def bin_rings(components) -> "dict[str, RingSummary]":
     return rings
 
 
+def aggregate_bearing(components) -> "tuple[float, float] | None":
+    """Area-weighted centroid of ALL components, as (bearing_deg, radius_frac).
+
+    ADR 028 revision 4. Ring binning answers "which contact do I chase?"; this
+    answers "where is the activity, as a whole?", which is the right question
+    for regrouping — the friendly icons are a proxy for where the battle is,
+    not targets to intercept.
+    """
+    total_area = 0.0
+    sum_x = sum_y = 0.0
+    for bearing_deg, radius_frac, area in components:
+        theta = math.radians(bearing_deg)
+        total_area += area
+        sum_x += area * radius_frac * math.sin(theta)
+        sum_y += area * radius_frac * math.cos(theta)
+    if total_area <= 0:
+        return None
+    x = sum_x / total_area
+    y = sum_y / total_area
+    return math.degrees(math.atan2(x, y)), math.hypot(x, y)
+
+
 class EngageNavigator:
     """Ring policy: orbit the short ring, else engage mid before long.
 
@@ -185,12 +208,26 @@ class EngageNavigator:
         self.rear_release_deg = float(j20_cfg.get("rear_release_deg", 90.0))
         self.orbit_direction = str(j20_cfg.get("orbit_direction", "right"))
         self._ema = MinimapEma(minimap_cfg or {})
+        # ADR 028 revision 4. Off unless config turns it on, following the
+        # house shadow-first pattern: this changes what the aircraft does on
+        # the 57% of ticks that previously issued no command.
+        self._minimap_cfg = minimap_cfg or {}
+        self._friendly_ema = None
+        self.regroup_enabled = bool(self._minimap_cfg.get("regroup_enabled", False))
         self.mode = MODE_IDLE
         self.last_rings: "dict[str, RingSummary] | None" = None
         self._candidate = self.mode
         self._candidate_streak = 0
         self._engaged_ring: "str | None" = None
         self._committed_sign: "float | None" = None
+
+    # ADR 028 revision 4: regroup smoothing is a SEPARATE EMA. Sharing the
+    # enemy EMA would blend an enemy bearing with a friendly one across a mode
+    # change and steer at neither.
+    def _ensure_friendly_ema(self, minimap_cfg):
+        if getattr(self, "_friendly_ema", None) is None:
+            self._friendly_ema = MinimapEma(minimap_cfg or {})
+        return self._friendly_ema
 
     @property
     def deadband_norm(self) -> float:
@@ -241,6 +278,7 @@ class EngageNavigator:
         components: "list | None",
         altitude: "float | None",
         now: float,
+        friendly_components: "list | None" = None,
     ) -> Intent:
         """One tick: components from the minimap scan → navigation intent.
 
@@ -258,6 +296,22 @@ class EngageNavigator:
         rings = bin_rings(components)
         self.last_rings = rings
         self._advance_mode(self._classify(rings))
+
+        # ADR 028 revision 4. The enemy modes only steer while something red is
+        # on the minimap, which measured 43% of battle ticks over an 11,383-tick
+        # session; the other 57% issued no command and the aircraft held its
+        # heading, which is how it reaches the map edge. Friendly and objective
+        # icons mark where the battle is when no enemy renders, so regroup
+        # gives those ticks a command instead of none.
+        if (self.mode == MODE_IDLE and self.regroup_enabled
+                and friendly_components):
+            agg = aggregate_bearing(friendly_components)
+            if agg is not None:
+                f_bearing, f_radius = agg
+                ema = self._ensure_friendly_ema(self._minimap_cfg)
+                bearing, _r = ema.update(f_bearing, f_radius, now)
+                self._engaged_ring = None
+                return self._steer_intent(MODE_REGROUP, bearing)
 
         if self.mode == MODE_ORBIT:
             self._engaged_ring = None
@@ -292,17 +346,29 @@ class EngageNavigator:
         # each sample restarts the turn and never brings the target forward.
         # Commit to one direction while the target is deep astern; release once
         # it swings forward of rear_release_deg.
+        return self._steer_intent(self.mode, bearing)
+
+    def _steer_intent(self, mode: str, bearing: float) -> Intent:
+        """Bearing to roll command, with rear-sector turn commitment.
+
+        Shared by the enemy modes and by regroup. The commitment is not an
+        optimisation: a target near +/-180 has an unstable bearing SIGN, and
+        flipping the roll each sample restarts the turn and never brings the
+        target forward (live finding 2026-08-08 15:01). Regroup needs it more
+        than the enemy modes do — the frames that motivated it have the
+        friendly centroid at 179.8 degrees, which is exactly that case.
+        """
         abs_bearing = abs(bearing)
         if self._committed_sign is not None:
             if abs_bearing < self.rear_release_deg:
                 self._committed_sign = None
             else:
-                return Intent(self.mode, "steer", self._committed_sign, None, "steering-rear-commit")
+                return Intent(mode, "steer", self._committed_sign, None, "steering-rear-commit")
         if abs_bearing >= self.rear_commit_deg:
             self._committed_sign = 1.0 if bearing >= 0 else -1.0
-            return Intent(self.mode, "steer", self._committed_sign, None, "steering-rear-commit")
+            return Intent(mode, "steer", self._committed_sign, None, "steering-rear-commit")
 
         if abs_bearing <= self.bearing_deadzone_deg:
-            return Intent(self.mode, "none", None, None, "on-course")
+            return Intent(mode, "none", None, None, "on-course")
         error = max(-1.0, min(1.0, bearing / 90.0))
-        return Intent(self.mode, "steer", error, None, "steering")
+        return Intent(mode, "steer", error, None, "steering")
