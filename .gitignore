@@ -18,3 +18,8 @@ wingman_live.log
 test_screenshots/*focus-probe.log
 test_screenshots/health_dropouts/*
 test_screenshots/unknown_anomalies/*
+# ADR 100 D1: generated runtime trend charts. 4.6 MB each, rebuilt wholesale on
+# every release, so consecutive versions barely delta — 77 blobs / 357 MB of
+# history for two paths. Regenerate with `make runtime-perf-release`.
+docs/performance/runtime-performance-trends.html
+docs/performance/runtime-performance-trends.preview.html

@@ -44,8 +44,17 @@ somewhere else entirely.
 `runtime-performance-trends.html` and `runtime-performance-trends.preview.html`
 are derived artifacts, rebuilt from the CSVs and run JSONs by
 `tests/runtime_performance_tracking.py` in seconds. They are gitignored and
-regenerated locally on demand. `make wrelease` continues to regenerate them; it
-stops staging them.
+regenerated locally on demand.
+
+Note which target actually committed them: `make wrelease` never staged them —
+it regenerates the charts *after* its own commit, leaving them modified in the
+working tree. The stager was the next `make p`, whose `git add .` swept them up.
+So gitignoring is the whole fix; no release-path change is needed. Because both
+paths are already tracked, `.gitignore` alone has no effect on them, and they
+must be untracked once with `git rm --cached`.
+
+A test asserts neither path is tracked, so a later `git add -f` cannot quietly
+reintroduce the growth.
 
 This removes the dominant source of future growth. Nothing is lost that cannot
 be rebuilt from data that remains in the repository.
