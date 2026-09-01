@@ -1,5 +1,330 @@
 {
-  "timestamp": "2026-08-31T08:10:24.427397",
+  "timestamp": "2026-09-01T04:08:32.648297",
   "version": "1.8.8",
-  "tests": {}
+  "tests": {
+    "test_absent_game_is_not_an_error": {
+      "duration": 5.2880001021549106e-05,
+      "runs": 1,
+      "min": 5.2880001021549106e-05,
+      "max": 5.2880001021549106e-05
+    },
+    "test_sigterm_is_enough_when_the_game_exits": {
+      "duration": 4.7790999815333635e-05,
+      "runs": 1,
+      "min": 4.7790999815333635e-05,
+      "max": 4.7790999815333635e-05
+    },
+    "test_sigkill_escalates_for_a_survivor": {
+      "duration": 0.00010942800145130605,
+      "runs": 1,
+      "min": 0.00010942800145130605,
+      "max": 0.00010942800145130605
+    },
+    "test_a_failing_signal_never_raises": {
+      "duration": 7.629800165886991e-05,
+      "runs": 1,
+      "min": 7.629800165886991e-05,
+      "max": 7.629800165886991e-05
+    },
+    "test_already_gone_between_scan_and_signal_is_success": {
+      "duration": 4.002100104116835e-05,
+      "runs": 1,
+      "min": 4.002100104116835e-05,
+      "max": 4.002100104116835e-05
+    },
+    "test_find_game_pids_never_raises_on_a_broken_proc": {
+      "duration": 6.398200275725685e-05,
+      "runs": 1,
+      "min": 6.398200275725685e-05,
+      "max": 6.398200275725685e-05
+    },
+    "test_find_game_pids_ignores_non_pid_entries": {
+      "duration": 0.000114614002086455,
+      "runs": 1,
+      "min": 0.000114614002086455,
+      "max": 0.000114614002086455
+    },
+    "test_find_game_pids_does_not_match_wingman_itself": {
+      "duration": 8.944299770519137e-05,
+      "runs": 1,
+      "min": 8.944299770519137e-05,
+      "max": 8.944299770519137e-05
+    },
+    "test_request_and_cancel_toggle": {
+      "duration": 4.655900193029083e-05,
+      "runs": 1,
+      "min": 4.655900193029083e-05,
+      "max": 4.655900193029083e-05
+    },
+    "test_the_deferred_exit_is_broader_than_the_guards_safe_point": {
+      "duration": 8.108200199785642e-05,
+      "runs": 1,
+      "min": 8.108200199785642e-05,
+      "max": 8.108200199785642e-05
+    },
+    "test_the_exit_still_never_fires_mid_round": {
+      "duration": 3.540800025803037e-05,
+      "runs": 1,
+      "min": 3.540800025803037e-05,
+      "max": 3.540800025803037e-05
+    },
+    "test_states_that_must_now_permit_an_immediate_exit": {
+      "duration": 3.4602002415340394e-05,
+      "runs": 1,
+      "min": 3.4602002415340394e-05,
+      "max": 3.4602002415340394e-05
+    },
+    "test_the_end_of_round_screen_defers_the_exit": {
+      "duration": 4.7075998736545444e-05,
+      "runs": 1,
+      "min": 4.7075998736545444e-05,
+      "max": 4.7075998736545444e-05
+    },
+    "test_the_settle_is_timed_from_the_click_not_the_state_change": {
+      "duration": 5.255900032352656e-05,
+      "runs": 1,
+      "min": 5.255900032352656e-05,
+      "max": 5.255900032352656e-05
+    },
+    "test_the_deferred_exit_cannot_wait_forever": {
+      "duration": 5.6622997362865135e-05,
+      "runs": 1,
+      "min": 5.6622997362865135e-05,
+      "max": 5.6622997362865135e-05
+    },
+    "test_battle_states_has_a_single_definition": {
+      "duration": 3.1617000786354765e-05,
+      "runs": 1,
+      "min": 3.1617000786354765e-05,
+      "max": 3.1617000786354765e-05
+    },
+    "test_game_close_happens_after_the_artifacts": {
+      "duration": 0.00011713799904100597,
+      "runs": 1,
+      "min": 0.00011713799904100597,
+      "max": 0.00011713799904100597
+    },
+    "test_only_the_deliberate_stop_closes_the_game": {
+      "duration": 0.00014661500244983472,
+      "runs": 1,
+      "min": 0.00014661500244983472,
+      "max": 0.00014661500244983472
+    },
+    "test_hotkey_is_not_a_maneuver_key": {
+      "duration": 3.375700180185959e-05,
+      "runs": 1,
+      "min": 3.375700180185959e-05,
+      "max": 3.375700180185959e-05
+    },
+    "test_close_game_can_be_disabled": {
+      "duration": 0.011105134002718842,
+      "runs": 1,
+      "min": 0.011105134002718842,
+      "max": 0.011105134002718842
+    },
+    "test_no_suppressor_installed_permits_the_click": {
+      "duration": 4.280100256437436e-05,
+      "runs": 1,
+      "min": 4.280100256437436e-05,
+      "max": 4.280100256437436e-05
+    },
+    "test_pending_exit_suppresses_the_round_start": {
+      "duration": 3.679099972941913e-05,
+      "runs": 1,
+      "min": 3.679099972941913e-05,
+      "max": 3.679099972941913e-05
+    },
+    "test_no_pending_exit_permits_the_round_start": {
+      "duration": 3.505999848130159e-05,
+      "runs": 1,
+      "min": 3.505999848130159e-05,
+      "max": 3.505999848130159e-05
+    },
+    "test_a_raising_suppressor_does_not_take_perception_down": {
+      "duration": 0.0002637429970491212,
+      "runs": 1,
+      "min": 0.0002637429970491212,
+      "max": 0.0002637429970491212
+    },
+    "test_main_wires_the_suppressor_to_the_pending_exit": {
+      "duration": 3.8595000660279766e-05,
+      "runs": 1,
+      "min": 3.8595000660279766e-05,
+      "max": 3.8595000660279766e-05
+    },
+    "test_the_guard_precedes_the_play_clicked_trigger": {
+      "duration": 0.0004924900022160728,
+      "runs": 1,
+      "min": 0.0004924900022160728,
+      "max": 0.0004924900022160728
+    },
+    "test_the_other_automatic_round_starts_are_gated": {
+      "duration": 5.538799814530648e-05,
+      "runs": 1,
+      "min": 5.538799814530648e-05,
+      "max": 5.538799814530648e-05
+    },
+    "test_the_nested_server_is_found_by_exact_display": {
+      "duration": 0.00018053899839287624,
+      "runs": 1,
+      "min": 0.00018053899839287624,
+      "max": 0.00018053899839287624
+    },
+    "test_the_operators_own_xwayland_is_never_a_candidate": {
+      "duration": 0.00011725100193871185,
+      "runs": 1,
+      "min": 0.00011725100193871185,
+      "max": 0.00011725100193871185
+    },
+    "test_a_display_number_is_matched_whole": {
+      "duration": 0.00011752800128306262,
+      "runs": 1,
+      "min": 0.00011752800128306262,
+      "max": 0.00011752800128306262
+    },
+    "test_non_xwayland_processes_are_ignored": {
+      "duration": 0.00010700100028770976,
+      "runs": 1,
+      "min": 0.00010700100028770976,
+      "max": 0.00010700100028770976
+    },
+    "test_closing_an_absent_nested_display_is_not_an_error": {
+      "duration": 3.877899871440604e-05,
+      "runs": 1,
+      "min": 3.877899871440604e-05,
+      "max": 3.877899871440604e-05
+    },
+    "test_closing_the_nested_display_never_raises": {
+      "duration": 6.874700193293393e-05,
+      "runs": 1,
+      "min": 6.874700193293393e-05,
+      "max": 6.874700193293393e-05
+    },
+    "test_an_empty_display_matches_nothing": {
+      "duration": 3.2568997994530946e-05,
+      "runs": 1,
+      "min": 3.2568997994530946e-05,
+      "max": 3.2568997994530946e-05
+    },
+    "test_the_display_is_torn_down_after_the_game_not_before": {
+      "duration": 7.175000064307824e-05,
+      "runs": 1,
+      "min": 7.175000064307824e-05,
+      "max": 7.175000064307824e-05
+    },
+    "test_the_teardown_is_gated_on_close_game": {
+      "duration": 0.00011734899817383848,
+      "runs": 1,
+      "min": 0.00011734899817383848,
+      "max": 0.00011734899817383848
+    },
+    "test_backspace_sets_a_flag_distinct_from_exit_requested": {
+      "duration": 5.7789999118540436e-05,
+      "runs": 1,
+      "min": 5.7789999118540436e-05,
+      "max": 5.7789999118540436e-05
+    },
+    "test_the_backspace_handler_sets_the_operator_stop_flag": {
+      "duration": 0.00015550800162600353,
+      "runs": 1,
+      "min": 0.00015550800162600353,
+      "max": 0.00015550800162600353
+    },
+    "test_teardown_covers_both_operator_stops": {
+      "duration": 0.00011028299923054874,
+      "runs": 1,
+      "min": 0.00011028299923054874,
+      "max": 0.00011028299923054874
+    },
+    "test_guard_and_stall_exits_still_leave_the_session_up": {
+      "duration": 8.165400140569545e-05,
+      "runs": 1,
+      "min": 8.165400140569545e-05,
+      "max": 8.165400140569545e-05
+    },
+    "test_first_backspace_stops_but_does_not_close": {
+      "duration": 4.1148003219859675e-05,
+      "runs": 1,
+      "min": 4.1148003219859675e-05,
+      "max": 4.1148003219859675e-05
+    },
+    "test_second_backspace_requests_the_close": {
+      "duration": 3.7717996747232974e-05,
+      "runs": 1,
+      "min": 3.7717996747232974e-05,
+      "max": 3.7717996747232974e-05
+    },
+    "test_the_handler_is_debounced_against_auto_repeat": {
+      "duration": 0.00012021599832223728,
+      "runs": 1,
+      "min": 0.00012021599832223728,
+      "max": 0.00012021599832223728
+    },
+    "test_the_second_press_is_distinguished_by_the_first_flag": {
+      "duration": 0.0001136030005000066,
+      "runs": 1,
+      "min": 0.0001136030005000066,
+      "max": 0.0001136030005000066
+    },
+    "test_standby_keeps_the_hotkey_hooks_alive": {
+      "duration": 0.0001964190014405176,
+      "runs": 1,
+      "min": 0.0001964190014405176,
+      "max": 0.0001964190014405176
+    },
+    "test_standby_still_releases_every_injected_key": {
+      "duration": 0.00013767400014330633,
+      "runs": 1,
+      "min": 0.00013767400014330633,
+      "max": 0.00013767400014330633
+    },
+    "test_z_still_closes_immediately_without_standby": {
+      "duration": 8.138600242091343e-05,
+      "runs": 1,
+      "min": 8.138600242091343e-05,
+      "max": 8.138600242091343e-05
+    },
+    "test_standby_is_not_armed_when_close_game_is_disabled": {
+      "duration": 5.3746000048704445e-05,
+      "runs": 1,
+      "min": 5.3746000048704445e-05,
+      "max": 5.3746000048704445e-05
+    },
+    "test_standby_is_not_armed_for_the_finish_round_exit": {
+      "duration": 5.2594998123822734e-05,
+      "runs": 1,
+      "min": 5.2594998123822734e-05,
+      "max": 5.2594998123822734e-05
+    },
+    "test_click_through_game_end_transitions_to_lobby": {
+      "duration": 4.493199958233163e-05,
+      "runs": 1,
+      "min": 4.493199958233163e-05,
+      "max": 4.493199958233163e-05
+    },
+    "test_startup_stall_never_shuts_down_the_host": {
+      "duration": 0.0004684550003730692,
+      "runs": 1,
+      "min": 0.0004684550003730692,
+      "max": 0.0004684550003730692
+    },
+    "test_on_complete_fires_after_the_final_click": {
+      "duration": 3.842899968731217e-05,
+      "runs": 1,
+      "min": 3.842899968731217e-05,
+      "max": 3.842899968731217e-05
+    },
+    "test_on_complete_does_not_fire_when_there_was_no_final_click": {
+      "duration": 6.252099774428643e-05,
+      "runs": 1,
+      "min": 6.252099774428643e-05,
+      "max": 6.252099774428643e-05
+    },
+    "test_a_raising_on_complete_does_not_lose_the_lobby_transition": {
+      "duration": 0.00018206099775852636,
+      "runs": 1,
+      "min": 0.00018206099775852636,
+      "max": 0.00018206099775852636
+    }
+  }
 }

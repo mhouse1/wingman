@@ -81,12 +81,26 @@ def load_config(path, *, validate: bool = True):
     return cfg
 
 
-def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8, sleep_fn=time.sleep):
+# ADR 094 revision: hold this long after the final continue click before a
+# deferred 'z' exit actually leaves. Exiting the instant the click landed left
+# MetalStorm on the end-of-round screen, so the next session started outside the
+# lobby and had to recover before it could play.
+FINISH_ROUND_SETTLE_S = 3.0
+
+
+def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
+                            sleep_fn=time.sleep, on_complete=None):
     """Click through GAME_END prompt and force transition to GAME_LOBBY.
 
     Clicks the center prompt repeatedly, then clicks the lower-right continue
     button. After the final click, explicitly flips state flags so the analyzer
     exits GAME_END_B even if OCR polling is currently skipping in that state.
+
+    `on_complete` fires only once the final click has actually gone out, so a
+    caller waiting to exit at the lobby can time its settle from the click
+    rather than from the state change. It is deliberately NOT called on the
+    missing-PLAY-crop path below: no click happened there, and a settle timed
+    from a click that never occurred would be a lie.
     """
     ctrl.click_crop(
         analyzer.crops["click_to"],
@@ -106,6 +120,11 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
         region_name=REGION_PLAY_BUTTON,
     )
     analyzer.trigger_event("continue_clicked")
+    if on_complete is not None:
+        try:
+            on_complete()
+        except Exception:
+            logger.exception("_click_through_game_end: on_complete failed")
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
 
 
@@ -835,6 +854,13 @@ def main():
     last_click_to_alert_ts = 0.0
     last_game_state = None
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
+    # ADR 094: when the final continue click landed. Written by the click-through
+    # daemon thread, read by the deferred-exit check. A one-element list because
+    # the writer is a thread and a bare rebind would not be visible here.
+    final_continue_ts = [0.0]
+
+    def _note_final_continue():
+        final_continue_ts[0] = time.time()
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
@@ -952,7 +978,21 @@ def main():
             # It was also dead in GAME_WAITING, GAME_STARTING and GAME_END_B —
             # none of which have a round in progress to protect.
             _in_round = analyzer.game_state in BATTLE_STATES
-            if ctrl.finish_round_requested() and not _in_round:
+            # GAME_END_B is not a round to protect, but it is not a clean stop
+            # either: leaving from the end-of-round screen strands MetalStorm
+            # there, and the next session opens outside the lobby and has to
+            # recover before it can play. So stay in the loop while the normal
+            # click-through runs, then hold FINISH_ROUND_SETTLE_S after the
+            # final click so the lobby is actually up before the process goes.
+            #
+            # Neither wait is unbounded: the GAME_END_B stall guard below forces
+            # GAME_LOBBY after 30s if the click-to OCR is stuck, and the settle
+            # is a fixed window measured from a click that demonstrably landed.
+            _ending_round = analyzer.game_state == GameState.GAME_END_B
+            _settling = (final_continue_ts[0] > 0.0
+                         and time.time() - final_continue_ts[0] < FINISH_ROUND_SETTLE_S)
+            if ctrl.finish_round_requested() and not (_in_round or _ending_round
+                                                      or _settling):
                 logger.warning(
                     "\033[93m🏁 FINISH ROUND: stopping in %s — no round in progress "
                     "(ADR 094)\033[0m", analyzer.game_state.name)
@@ -1251,6 +1291,7 @@ def main():
                 threading.Thread(
                     target=_click_through_game_end,
                     args=(ctrl, analyzer, logger),
+                    kwargs={"on_complete": _note_final_continue},
                     daemon=True,
                 ).start()
 
