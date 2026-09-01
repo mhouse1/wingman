@@ -193,10 +193,38 @@ _takeover_keys = frozenset()
 # SAF-001: keys the operator uses to hand the aircraft BACK. Delivered on the
 # injection display too, but only while the takeover is active — wingman
 # injects nothing during manual except flares, so there is nothing they could
-# be confused with. Outside manual they stay filtered, because wingman does
-# press them itself ('u' starts the J20 mission).
+# be confused with. Outside manual they stay filtered by default (see
+# _echo_safe_keys below for the one exception).
 _handback_keys = frozenset()
 _manual_state_fn = None
+
+# Keys that must ALWAYS reach the handler on the injection display, in every
+# state — not just the _handback_keys carve-out, which only applies during
+# manual takeover. 'u' (MISSION_J20_KEY) is both an operator hotkey AND a key
+# wingman injects itself (game_starting_loop presses it every 5s while
+# waiting for Good Luck), so the blanket `key not in _injected_keys` filter
+# below silently dropped every genuine press outside GAME_BATTLE_MANUAL —
+# including the one case this key exists for: forcing GAME_BATTLE out of a
+# wedged lobby (observed 2026-09-01: operator's 'u' press while stuck in a
+# GAME_LOBBY blackout did nothing at all, no log line, escape loop kept
+# firing on its own 45s cycle because the FSM never actually moved).
+#
+# Echo discrimination for these keys is the caller's job (controller.py's
+# `_programmatic_key_counts` bracket + `_prog_release_grace_until` grace
+# window around its own presses) — the same mechanism SAF-001.1 already
+# validated for maneuver keys, just applied here to the one non-maneuver key
+# that shares the same "wingman also presses this" property.
+_echo_safe_keys = frozenset()
+
+
+def set_echo_safe_keys(keys) -> None:
+    """Declare keys that bypass the injection-display echo filter entirely.
+
+    Unlike _handback_keys, these are delivered regardless of FSM state — the
+    caller is responsible for its own echo discrimination.
+    """
+    global _echo_safe_keys
+    _echo_safe_keys = {str(k).lower() for k in (keys or ())}
 
 
 def set_handback_keys(keys, manual_state_fn=None) -> None:
@@ -291,6 +319,12 @@ def should_deliver_hotkey(display_name: str, key_name: str, state: int) -> bool:
     if _injection_display is None:
         return True
     if display_name == _injection_display:
+        # Keys with their own robust echo discrimination (see _echo_safe_keys
+        # above) bypass the blanket _injected_keys filter entirely, in every
+        # state — checked first since it is unconditional, unlike the
+        # handback carve-out below.
+        if key_name.lower() in _echo_safe_keys:
+            return True
         # SAF-001: the hand-back key gets through while the operator holds the
         # aircraft. Wingman injects nothing during manual but flares, so this
         # cannot be one of its own presses; outside manual it stays filtered

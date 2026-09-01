@@ -355,7 +355,8 @@ def main():
     if _nested_on and sys.platform != "win32":
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import (set_injection_display, set_injected_keys,
-                                  set_takeover_keys, set_handback_keys)
+                                  set_takeover_keys, set_handback_keys,
+                                  set_echo_safe_keys)
         from .keybindings import MISSION_J20_KEY, AUTO_MISSION_KEY
         from .controller import INJECTABLE_KEYS, TAKEOVER_KEYS
         set_injection_display(nested_display)
@@ -370,6 +371,13 @@ def main():
         set_handback_keys(
             (MISSION_J20_KEY, AUTO_MISSION_KEY),
             manual_state_fn=lambda: analyzer.game_state == GameState.GAME_BATTLE_MANUAL)
+        # 'u' must ALSO work outside manual takeover — it is the operator's
+        # safety valve for forcing GAME_BATTLE out of any wedged state (e.g. a
+        # stuck GAME_LOBBY blackout), not just the handback case above.
+        # controller.py's own programmatic-key bracket + grace window already
+        # discriminates wingman's periodic game_starting_loop presses from a
+        # genuine operator press, so it is safe to always deliver.
+        set_echo_safe_keys((MISSION_J20_KEY,))
         from .input_linux import _observe_display_names
         logger.info("ADR 099: nested lane ACTIVE - capture and injection on %s, "
                     "hotkeys observed on %s", nested_display,
