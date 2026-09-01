@@ -15,6 +15,8 @@ from wingman.controller import (
     AFTERBURNER_KEY,
     Controller,
     NOSE_UP_KEY,
+    ROLL_LEFT_KEY,
+    ROLL_RIGHT_KEY,
 )
 
 CLIMB_KEYS = {NOSE_UP_KEY, AFTERBURNER_KEY}
@@ -916,4 +918,102 @@ def test_incoming_does_not_force_burner_on_an_empty_tank(monkeypatch):
         "burner pressed with an empty tank despite ADR 075"
 
     ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 101: roll away from the map boundary WITHOUT leaving the climb
+# ---------------------------------------------------------------------------
+
+def _wait_for(pred, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_the_climb_rolls_while_the_boundary_is_ahead(monkeypatch):
+    """V1. The 2026-09-01 crossing had Climb holding the aircraft for 28s while
+    it flew through the edge. The turn has to happen without touching pitch or
+    thrust — SAF-010 is why the climb must not simply be released."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=10.0))
+
+    ctrl.climb_mode()
+    assert ctrl.is_climbing()
+    # Baseline AFTER the climb's own initial nose-up, or this races it and
+    # blames the turn for a press the climb always makes.
+    assert _wait_for(lambda: _presses(kb, NOSE_UP_KEY)), "climb never pitched up"
+    nose_before = len(_presses(kb, NOSE_UP_KEY))
+
+    ctrl.set_boundary_turn(True, ttl_s=5.0)
+    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY)), "never rolled"
+
+    ctrl.set_boundary_turn(False)
+    assert _wait_for(lambda: _releases(kb, ROLL_RIGHT_KEY)), "never released the roll"
+
+    # The climb itself is untouched: still climbing, no extra nose-up, no
+    # afterburner release triggered by the turn.
+    assert ctrl.is_climbing()
+    assert len(_presses(kb, NOSE_UP_KEY)) == nose_before
+    assert not _releases(kb, NOSE_UP_KEY)
+    ctrl._climb_stop.set()
+    _wait_done(ctrl)
+
+
+def test_the_turn_intent_expires_on_its_own(monkeypatch):
+    """V5. The intent carries a deadline so a caller that stops updating — a
+    stalled tick, a raising instrumentation path — cannot strand a held roll
+    key. That failure would be worse than the crossing it prevents."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.set_boundary_turn(True, ttl_s=0.05)
+    assert ctrl._boundary_turn_wanted()
+    time.sleep(0.1)
+    assert not ctrl._boundary_turn_wanted(), "a stale intent must not persist"
+
+
+def test_a_climb_ending_mid_turn_balances_the_bracket(monkeypatch):
+    """V8. The roll is bracketed as a programmatic press so wingman's own key
+    does not echo back as an operator takeover. If a climb ends while the roll
+    is still held, an unbalanced count would leave every later operator press
+    of 'l' mistaken for wingman's own — manual takeover dead on that key."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=10.0))
+
+    ctrl.climb_mode()
+    ctrl.set_boundary_turn(True, ttl_s=5.0)
+    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY)), "never rolled"
+
+    ctrl._climb_stop.set()                      # end the climb mid-turn
+    assert _wait_done(ctrl)
+    assert _releases(kb, ROLL_RIGHT_KEY), "roll key left held after the climb"
+    assert ctrl._programmatic_key_counts.get(ROLL_RIGHT_KEY, 0) == 0
+
+
+def test_takeover_still_works_on_a_free_key_during_a_boundary_turn(monkeypatch):
+    """The turn's accepted cost is that 'l' reads as wingman's own echo while
+    the roll is held. That is only tolerable because other takeover keys stay
+    live.
+
+    Note which ones actually do. A climb ALREADY brackets 'i' and 'k' — they
+    are the keys it holds — so those were never live takeover keys during a
+    climb, before this ADR or after. What ADR 101 costs is 'l', leaving 'j',
+    Enter and the arrow keys."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=10.0))
+
+    ctrl.climb_mode()
+    ctrl.set_boundary_turn(True, ttl_s=5.0)
+    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY)), "never rolled"
+
+    assert ctrl._handle_maneuver_key_press(ROLL_LEFT_KEY), \
+        "the opposite roll must survive a boundary turn"
     assert _wait_done(ctrl)

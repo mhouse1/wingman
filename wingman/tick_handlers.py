@@ -761,12 +761,26 @@ class BehaviorTreeHandler:
         # ADR 028 revision 4 / Design 010 instrumentation.
         self._friendly_components = None
         self._rtb_active = False
+        # True only once OCR has confirmed the CURRENT colour trigger, so
+        # 'back inside' is not announced for a crossing never announced.
+        self._rtb_confirmed = False
         self._boundary_crossings = 0
         self._boundary_approaches = 0
         self._boundary_near_since = 0.0
         self._rtb_false_positives = 0
         self._boundary_near_frac = float(
             (minimap_cfg or {}).get("boundary_near_frac", 0.25))
+        # ADR 101. Deliberately EARLIER than near_frac: the 2026-09-01 crossing
+        # was 4.5 s after 0.32R and still 0.55R twenty seconds out, so the
+        # approach threshold leaves no room to turn. 0 disables the turn.
+        self._boundary_turn_frac = float(
+            (minimap_cfg or {}).get("boundary_turn_frac", 0.0))
+        self._boundary_turn_max_s = float(
+            (minimap_cfg or {}).get("boundary_turn_max_s", 8.0))
+        self._boundary_reading_max_age_s = float(
+            (minimap_cfg or {}).get("boundary_reading_max_age_s", 4.0))
+        self._boundary_turn_since = None
+        self._boundary_turn_blocked = False
         # ~30 s of lead-up at a 1.5 s tick. Bounded: a session must not grow a
         # trace buffer, and only the approach matters, not the whole mission.
         self._boundary_trace = collections.deque(
@@ -1064,10 +1078,14 @@ class BehaviorTreeHandler:
             })
 
             if crossed and not self._rtb_active:
-                self._boundary_crossings += 1
-                logger.warning(
-                    "\033[93m🗺  MAP BOUNDARY: crossed — RETURN TO BATTLE "
-                    "(crossing %d this session)\033[0m", self._boundary_crossings)
+                # Announce NOTHING yet. The colour test is a trigger, not a
+                # verdict: measured 2026-09-01, 6 triggers in 84 minutes and only
+                # 1 survived OCR. Counting and warning here produced five
+                # WARNING/retraction pairs that each read as a real excursion,
+                # and — because the count was decremented back — every one of
+                # them announced itself as "crossing 1 this session". The count
+                # and the warning now live where the arbiter is.
+                logger.debug("BOUNDARY: colour trigger — awaiting OCR verdict")
                 # The trace is dumped only once OCR CONFIRMS the crossing.
                 # Measured 2026-08-30: 26 colour triggers in 26 minutes, all 26
                 # retracted, and the false positives reach red_frac 0.773 —
@@ -1080,11 +1098,20 @@ class BehaviorTreeHandler:
                     frame,
                     lambda ok, text: self._on_rtb_confirmed(ok, text, pending))
             elif not crossed and self._rtb_active:
-                logger.info("🗺  MAP BOUNDARY: back inside")
+                if self._rtb_confirmed:
+                    logger.info("🗺  MAP BOUNDARY: back inside")
+                else:
+                    logger.debug("BOUNDARY: colour trigger cleared (unconfirmed)")
+                self._rtb_confirmed = False
             self._rtb_active = crossed
 
             if reading is None:
                 self._boundary_near_since = 0.0
+                # No reading is not "no boundary" — it is blindness, and the
+                # freeze policy used everywhere else would hold a roll key on
+                # stale evidence. Stop asking; the intent expires on its own.
+                self._boundary_turn_since = None
+                self._boundary_turn_blocked = False
                 logger.debug("BOUNDARY: no reading")
                 return
             dist, forward = reading
@@ -1101,8 +1128,62 @@ class BehaviorTreeHandler:
                     dist, self._boundary_approaches)
             elif not near:
                 self._boundary_near_since = 0.0
+            self._drive_boundary_turn(dist, forward, now)
         except Exception as e:
             logger.debug("Boundary instrumentation failed: %s", e)
+
+    def _drive_boundary_turn(self, dist, forward, now):
+        """ADR 101: ask a running climb to roll away while the edge is ahead.
+
+        Closed on the MEASURED forward component rather than on a heading
+        target: the minimap reading is (distance, forward) with no lateral
+        term, so which way to roll cannot be derived from it. Any consistent
+        roll drives the boundary off the nose, and this releases as soon as it
+        has — so picking the wrong direction costs seconds, not the aircraft.
+
+        Only the climb honours this. Engage and AttackSupport already write
+        steering of their own, and a second writer on the same axis would fight
+        them.
+        """
+        if self._boundary_turn_frac <= 0.0:
+            return
+        near = forward > 0 and dist <= self._boundary_turn_frac
+
+        if not near:
+            # Clear of the edge: release, and re-arm the budget. The re-arm has
+            # to happen HERE rather than on the next approach, or one exhausted
+            # budget would disable the turn for the rest of the session.
+            if self._boundary_turn_since is not None:
+                logger.info("🗺  MAP BOUNDARY: turn released at %.2fR (fwd %+.2f)",
+                            dist, forward)
+            self._boundary_turn_since = None
+            self._boundary_turn_blocked = False
+            want = False
+        elif self._boundary_turn_blocked:
+            want = False
+        elif self._boundary_turn_since is None:
+            self._boundary_turn_since = now
+            logger.info("🗺  MAP BOUNDARY: turn requested at %.2fR (fwd %+.2f)",
+                        dist, forward)
+            want = True
+        elif now - self._boundary_turn_since > self._boundary_turn_max_s:
+            # Budget spent. Either the roll is not taking effect or the
+            # aircraft is pinned against the edge; holding the key indefinitely
+            # fixes neither and hides the failure.
+            logger.warning(
+                "🗺  MAP BOUNDARY: turn budget spent after %.0fs, still %.2fR "
+                "with fwd %+.2f — releasing",
+                self._boundary_turn_max_s, dist, forward)
+            self._boundary_turn_blocked = True
+            want = False
+        else:
+            want = True
+
+        try:
+            self._ctrl.set_boundary_turn(
+                want, ttl_s=self._boundary_reading_max_age_s)
+        except Exception:
+            logger.debug("Boundary turn request failed", exc_info=True)
 
     def _on_rtb_confirmed(self, detected, text, trace=None):
         """OCR verdict on the banner. The colour test is the cheap trigger; this
@@ -1114,17 +1195,22 @@ class BehaviorTreeHandler:
         """
         try:
             if detected:
-                logger.warning("🗺  MAP BOUNDARY: OCR confirms banner (%r)", text)
+                self._boundary_crossings += 1
+                self._rtb_confirmed = True
+                logger.warning(
+                    "\033[93m🗺  MAP BOUNDARY: crossed — RETURN TO BATTLE "
+                    "(confirmed crossing %d this session, banner %r)\033[0m",
+                    self._boundary_crossings, text)
                 if trace:
                     logger.warning(
                         "🗺  MAP BOUNDARY trace (last %d ticks before the "
                         "crossing): %s", len(trace), json.dumps(trace))
                 return
-            self._boundary_crossings = max(0, self._boundary_crossings - 1)
+            # Nothing to retract any more — the count was never incremented.
             self._rtb_false_positives += 1
-            logger.warning(
-                "🗺  MAP BOUNDARY: OCR did not confirm (read %r) — retracted, "
-                "%d confirmed crossing(s), %d false positive(s) this session",
+            logger.info(
+                "🗺  MAP BOUNDARY: colour trigger not confirmed (read %r) — "
+                "%d confirmed crossing(s), %d unconfirmed trigger(s) this session",
                 text, self._boundary_crossings, self._rtb_false_positives)
         except Exception:
             pass

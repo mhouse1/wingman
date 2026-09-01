@@ -419,6 +419,13 @@ class Controller:
         self._climb_exit_pitch_deg = _cl_cfg.get("exit_pitch_deg")
         self._climb_exit_pulse_s = float(_cl_cfg.get("exit_push_pulse_s", 1.0))
         self._climb_exit_max_pulses = int(_cl_cfg.get("exit_push_max_pulses", 3))
+        # ADR 101: the climb owns pitch and thrust but never roll, so it can
+        # turn away from the map boundary without releasing the climb — which
+        # matters, because SAF-010 exists precisely because a badly released
+        # climb goes ballistic. Set by the boundary instrumentation as a
+        # short-lived intent: if that stops updating, the turn expires on its
+        # own rather than leaving a roll key held.
+        self._boundary_turn_until = 0.0
         self._climbing = threading.Event()
         self._climb_thread: "threading.Thread | None" = None
         self._climb_stop = threading.Event()
@@ -2175,6 +2182,22 @@ class Controller:
         self._climb_thread = threading.Thread(target=_run, daemon=True)
         self._climb_thread.start()
 
+    def set_boundary_turn(self, active: bool, ttl_s: float = 4.0) -> None:
+        """Ask a running climb to roll away from the map boundary (ADR 101).
+
+        An intent with an expiry, not a latch. The caller re-asserts it every
+        tick while the boundary is ahead; one missed update ends the turn. A
+        plain boolean would strand a held roll key if the instrumentation threw
+        or the tick stalled, which is a worse failure than crossing the edge.
+
+        Thresholds live with the caller, which already reads the minimap config.
+        This side only honours the intent.
+        """
+        self._boundary_turn_until = (time.time() + max(0.0, ttl_s)) if active else 0.0
+
+    def _boundary_turn_wanted(self) -> bool:
+        return time.time() < self._boundary_turn_until
+
     def _climb_key(self, key: str, press: bool, action: str = "climb"):
         """Press/release one climb-family key, honoring simulate mode."""
         if self._simulate_os_input:
@@ -2418,6 +2441,7 @@ class Controller:
                              if k in _WATCHED_MANEUVER_KEYS)
         for _key in guarded_keys:
             self._inc_programmatic_key(_key)
+        roll_held = False
         try:
             fuel = self._read_fuel_pct()
             if fuel is None or fuel > fuel_floor_pct:
@@ -2431,6 +2455,33 @@ class Controller:
             while not self._climb_stop.wait(timeout=0.25):
                 if self._exit_event is not None and self._exit_event.is_set():
                     break
+                # ADR 101: hold a roll while the boundary is ahead. Pitch and
+                # thrust are untouched — the climb keeps its altitude mandate
+                # and only the heading moves underneath it. The caller closes
+                # the loop on the measured forward component, so a turn in the
+                # wrong direction still resolves: any consistent roll drives
+                # the boundary off the nose.
+                _want_turn = self._boundary_turn_wanted()
+                if _want_turn != roll_held:
+                    # The bracket spans only the press, never the whole climb.
+                    # ROLL_RIGHT is a watched maneuver key: bracketing it for
+                    # the climb's full duration made an OPERATOR press of 'l'
+                    # read as wingman's own echo and silently killed manual
+                    # takeover on that key (SAF-001). Held for at most the turn
+                    # budget, and the other four takeover keys stay live
+                    # throughout.
+                    if _want_turn:
+                        self._inc_programmatic_key(ROLL_RIGHT_KEY)
+                    self._climb_key(ROLL_RIGHT_KEY, press=_want_turn,
+                                    action="climb-boundary")
+                    if not _want_turn:
+                        self._arm_release_grace(ROLL_RIGHT_KEY)
+                        self._dec_programmatic_key(ROLL_RIGHT_KEY)
+                    roll_held = _want_turn
+                    logger.info(
+                        "Controller: climb — map boundary ahead, rolling away"
+                        if _want_turn else
+                        "Controller: climb — boundary turn released")
                 # ADR 075 burner gate: release at the floor (a held key at 0%
                 # blocks recharge; the sustain floor keeps the evade reserve),
                 # re-press only after the rearm margin refills.
@@ -2597,6 +2648,17 @@ class Controller:
                     confirm_streak = 0
         finally:
             _release_started = time.time()
+            # Roll first: the SAF-010 exit push below is a pitch manoeuvre, and
+            # flying it while still rolling is not the flyable handback ADR 086
+            # specifies. Balance the bracket only if this loop actually took it,
+            # or the programmatic count goes negative and every later operator
+            # press of 'l' is mistaken for an echo.
+            if roll_held:
+                self._climb_key(ROLL_RIGHT_KEY, press=False, action="climb-boundary")
+                self._arm_release_grace(ROLL_RIGHT_KEY)
+                self._dec_programmatic_key(ROLL_RIGHT_KEY)
+                roll_held = False
+            self._boundary_turn_until = 0.0
             self._climb_key(NOSE_UP_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
             # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE

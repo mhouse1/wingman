@@ -624,5 +624,6 @@ held afterburner and pitch key, and the operator could not fly.
 | [028 rev 4](adr/028-enemy-quadrant-detection-and-nose-orientation.md) | Regroup: steer to friendlies when no enemy is on the minimap |
 | [Design 010](hldd/010-mini-map-detection/010-mini-map-detection-hldd.md) | Map-boundary instrumentation (measurement only; no guard) |
 | [100](adr/100-repository-growth-and-generated-artifacts.md) | Repository growth: generated artifacts stay out of git |
+| [101](adr/101-boundary-aware-climb.md) | Boundary-aware climb: roll away from the map edge without leaving the climb |
 
 *(This index is incomplete: ADRs 073-097 are not yet listed.)*

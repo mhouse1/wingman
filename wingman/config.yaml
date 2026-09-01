@@ -341,7 +341,13 @@ minimap: {mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0
   friendly_hsv: {lower: [40, 90, 90], upper: [85, 255, 255]},
   boundary_hsv: {lower: [8, 120, 120], upper: [28, 255, 255]},
   boundary_min_px: 20, boundary_min_span_frac: 0.5,
-  boundary_near_frac: 0.35, boundary_trace_ticks: 20}
+  boundary_near_frac: 0.35, boundary_trace_ticks: 20,
+  # ADR 101: roll away from the boundary during a climb. Deliberately
+  # EARLIER than boundary_near_frac — the 2026-09-01 trace crossed 4.5s
+  # after 0.32R, which is no time to turn, and was still at 0.55R twenty
+  # seconds out. Set turn_frac to 0 to disable the turn entirely.
+  boundary_turn_frac: 0.50, boundary_turn_max_s: 8.0,
+  boundary_reading_max_age_s: 4.0}
 # Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
 # acted on — it appears only after the crossing, so it measures the
 # outcome rather than preventing it.

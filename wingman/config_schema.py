@@ -339,6 +339,9 @@ SCHEMA = Section(
             "boundary_min_span_frac": FRACTION,
             "boundary_near_frac": FRACTION,
             "boundary_trace_ticks": _int(1),
+            "boundary_turn_frac": FRACTION,
+            "boundary_turn_max_s": _num(0),
+            "boundary_reading_max_age_s": _num(0),
         }),
 
         "tracking": Section(children={

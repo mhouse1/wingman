@@ -1127,7 +1127,29 @@ def _boundary_handler(analyzer):
     h._boundary_near_frac = 0.25
     h._boundary_trace = collections.deque(maxlen=20)
     h._session_start = 0.0
+    h._rtb_confirmed = False
+    # ADR 101 turn state
+    h._boundary_turn_frac = 0.50
+    h._boundary_turn_max_s = 8.0
+    h._boundary_reading_max_age_s = 4.0
+    h._boundary_turn_since = None
+    h._boundary_turn_blocked = False
+    h._ctrl = _TurnRecorder()
     return h
+
+
+class _TurnRecorder:
+    """Stands in for the Controller: records every turn intent it is asked for."""
+
+    def __init__(self):
+        self.requests = []
+
+    def set_boundary_turn(self, active, ttl_s=4.0):
+        self.requests.append((active, ttl_s))
+
+    @property
+    def wanted(self):
+        return [a for a, _ttl in self.requests]
 
 
 def test_the_trace_records_every_tick_not_only_crossings():
@@ -1157,10 +1179,17 @@ def _flying(**kw):
 
 
 def test_a_crossing_counts_once_per_edge_not_per_tick():
-    """The banner stays up for seconds; counting per tick would inflate it."""
+    """The banner stays up for seconds; counting per tick would inflate it.
+
+    The edge is still detected per-edge, but the COUNT now lands only when OCR
+    confirms — so two edges plus two confirmations make two crossings, and the
+    ticks in between add nothing."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([True, True, True, False, True]))
     for i in range(5):
         h._instrument_boundary(None, float(i), snap=_flying(), selection="Engage")
+    assert h._boundary_crossings == 0, "nothing counts before the OCR verdict"
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE")
     assert h._boundary_crossings == 2
 
 
@@ -1182,12 +1211,17 @@ def test_the_banner_is_ignored_outside_battle():
     assert h._boundary_crossings == 0
 
 
-def test_an_unconfirmed_crossing_is_retracted_from_the_count():
-    """OCR arbitrates the count, so a false positive cannot inflate the figure
-    the tuning depends on."""
+def test_an_unconfirmed_crossing_never_enters_the_count():
+    """Supersedes the retraction: the count is not incremented on the colour
+    trigger at all, so there is nothing to take back.
+
+    Live 2026-09-01: 6 triggers in 84 minutes, 1 confirmed. Incrementing first
+    logged five WARNING/retraction pairs that each read as a real excursion —
+    and because the count was decremented back to zero every time, all five
+    announced themselves as "crossing 1 this session"."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
     h._instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
-    assert h._boundary_crossings == 1
+    assert h._boundary_crossings == 0
     h._on_rtb_confirmed(False, None)
     assert h._boundary_crossings == 0
     assert h._rtb_false_positives == 1
@@ -1266,3 +1300,65 @@ def test_climb_steers_concurrently_but_without_orbit():
     branch = src[src.index("elif _may_fly and selection == TACTIC_CLIMB:"):
                  src.index("return False", src.index("elif _may_fly and selection == TACTIC_CLIMB:"))]
     assert "steer_only=True" in branch
+
+
+# --- ADR 101: roll away from the map boundary during a climb ------------------
+
+def _turn(h, dist, forward, now):
+    h._drive_boundary_turn(dist, forward, now)
+    return h._ctrl.requests[-1][0]
+
+
+def test_the_turn_fires_earlier_than_the_approach_log():
+    """The 2026-09-01 crossing was 4.5s after 0.32R and still 0.55R twenty
+    seconds out. Reusing boundary_near_frac (0.35) would ask for a turn with no
+    time left to make it."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
+    assert h._boundary_turn_frac > h._boundary_near_frac
+    assert _turn(h, 0.45, 0.40, 0.0) is True, "0.45R is inside the turn band"
+
+
+def test_a_boundary_behind_the_nose_is_not_a_turn():
+    """Flying AWAY from the edge is the common case near a corner. A distance
+    test alone would roll the aircraft for no reason."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
+    assert _turn(h, 0.10, -0.40, 0.0) is False
+
+
+def test_the_turn_releases_once_the_edge_is_off_the_nose():
+    """Closed on the measured forward component: this is what makes an
+    arbitrary roll direction safe. The reading says when it worked."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
+    assert _turn(h, 0.40, 0.35, 0.0) is True
+    assert _turn(h, 0.38, -0.05, 3.0) is False
+
+
+def test_the_turn_is_bounded_and_re_arms_after_clearing():
+    """A roll that is not working must not be held for the rest of the session
+    — and the budget must come back, or one pinned approach would disable the
+    turn permanently."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
+    assert _turn(h, 0.30, 0.30, 0.0) is True
+    assert _turn(h, 0.30, 0.30, 5.0) is True
+    assert _turn(h, 0.30, 0.30, 9.0) is False, "budget spent"
+    assert _turn(h, 0.30, 0.30, 12.0) is False, "stays released while still near"
+    assert _turn(h, 0.90, -0.10, 15.0) is False        # clear of the edge
+    assert _turn(h, 0.30, 0.30, 20.0) is True, "budget re-armed after clearing"
+
+
+def test_blindness_stops_asking_rather_than_holding():
+    """A None reading is not 'no boundary'. Holding the roll on stale evidence
+    is the failure mode the intent's TTL exists to bound."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
+    h._analyzer.boundary = None
+    _turn(h, 0.30, 0.30, 0.0)
+    h._instrument_boundary(None, 1.0, snap=_flying(), selection="Climb")
+    assert h._boundary_turn_since is None
+
+
+def test_the_turn_is_disabled_by_a_zero_threshold():
+    """The config kill switch must not merely widen the band."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
+    h._boundary_turn_frac = 0.0
+    h._drive_boundary_turn(0.01, 0.99, 0.0)
+    assert h._ctrl.requests == []
