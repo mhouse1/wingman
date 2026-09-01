@@ -749,9 +749,12 @@ class Controller:
     def _release_manual_if_active(self) -> bool:
         """Operator hands the aircraft back (SAF-001). True if it was in manual.
 
-        Manual now persists through respawn, so there has to be a deliberate way
-        out or the session is stuck in manual until the round ends. The
-        auto-mission key is that way out: it already means "wingman, take it".
+        Manual is exited by respawn under the default config
+        (mission.manual_takeover.persist_through_respawn: false), but the
+        operator still needs a way out that does not require dying first. The
+        auto-mission key is that way: it already means "wingman, take it", and
+        it is registered as a handback key alongside 'u' so it is delivered
+        while manual is active rather than suppressed as an injected key.
         """
         try:
             if not self._manual_takeover_active():

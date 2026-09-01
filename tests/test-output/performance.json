@@ -1,18 +1,5 @@
 {
-  "timestamp": "2026-08-31T06:15:22.038924",
+  "timestamp": "2026-08-31T08:10:24.427397",
   "version": "1.8.8",
-  "tests": {
-    "test_generated_trend_chart_is_not_tracked": {
-      "duration": 0.0011883224942721426,
-      "runs": 2,
-      "min": 0.0011322469799779356,
-      "max": 0.0012443980085663497
-    },
-    "test_generated_trend_chart_is_ignored": {
-      "duration": 0.0009032280067913234,
-      "runs": 2,
-      "min": 0.0008160010038409382,
-      "max": 0.0009904550097417086
-    }
-  }
+  "tests": {}
 }
