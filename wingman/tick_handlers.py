@@ -779,8 +779,14 @@ class BehaviorTreeHandler:
             (minimap_cfg or {}).get("boundary_turn_max_s", 8.0))
         self._boundary_reading_max_age_s = float(
             (minimap_cfg or {}).get("boundary_reading_max_age_s", 4.0))
+        # How far dist must rise above the turn's closest approach before the
+        # aircraft counts as receding. Tick-to-tick noise on dist ran about
+        # 0.02-0.05R in the 2026-09-01 traces, so this sits just above it.
+        self._boundary_turn_recede_frac = float(
+            (minimap_cfg or {}).get("boundary_turn_recede_frac", 0.06))
         self._boundary_turn_since = None
         self._boundary_turn_blocked = False
+        self._boundary_turn_min_dist = 1.0
         # ~30 s of lead-up at a 1.5 s tick. Bounded: a session must not grow a
         # trace buffer, and only the approach matters, not the whole mission.
         self._boundary_trace = collections.deque(
@@ -1135,11 +1141,22 @@ class BehaviorTreeHandler:
     def _drive_boundary_turn(self, dist, forward, now):
         """ADR 101: ask a running climb to roll away while the edge is ahead.
 
-        Closed on the MEASURED forward component rather than on a heading
-        target: the minimap reading is (distance, forward) with no lateral
-        term, so which way to roll cannot be derived from it. Any consistent
-        roll drives the boundary off the nose, and this releases as soon as it
-        has — so picking the wrong direction costs seconds, not the aircraft.
+        ENTRY is on the forward component; the HOLD is not. Measured over the
+        2026-09-01 night session (32 crossing traces, 450 tick pairs): the sign
+        of `forward` flipped between adjacent ticks 27% of the time, and on
+        ticks where the aircraft was demonstrably closing on the edge it read
+        <= 0 on 51% of them. The nearest boundary point sits almost ON the nose
+        axis, so its lateral component is near zero and noise decides the sign.
+
+        Releasing on that sign — the original design — pressed and released the
+        roll on alternate ticks, so the heading never moved. 25 of 32 crossings
+        that session were under Climb, the case this exists to prevent, with 19
+        turns exhausting their budget still pointed at the edge.
+
+        `dist` is the trustworthy channel: it fell monotonically 0.58R to 0.04R
+        across the same trace. So the turn holds until the aircraft is actually
+        RECEDING — dist risen by a margin above the closest approach of this
+        turn — or leaves the band, or spends its budget.
 
         Only the climb honours this. Engage and AttackSupport already write
         steering of their own, and a second writer on the same axis would fight
@@ -1147,34 +1164,60 @@ class BehaviorTreeHandler:
         """
         if self._boundary_turn_frac <= 0.0:
             return
-        near = forward > 0 and dist <= self._boundary_turn_frac
+        in_band = dist <= self._boundary_turn_frac
+        turning = self._boundary_turn_since is not None
 
-        if not near:
-            # Clear of the edge: release, and re-arm the budget. The re-arm has
-            # to happen HERE rather than on the next approach, or one exhausted
-            # budget would disable the turn for the rest of the session.
-            if self._boundary_turn_since is not None:
-                logger.info("🗺  MAP BOUNDARY: turn released at %.2fR (fwd %+.2f)",
-                            dist, forward)
+        if turning:
+            # Track the closest approach so recession is measured from the
+            # bottom of the arc, not from wherever the turn happened to start.
+            self._boundary_turn_min_dist = min(
+                self._boundary_turn_min_dist, dist)
+            receding = dist >= (self._boundary_turn_min_dist
+                                + self._boundary_turn_recede_frac)
+        else:
+            receding = False
+
+        if turning and not (in_band and not receding):
+            logger.info(
+                "🗺  MAP BOUNDARY: turn released at %.2fR (closest %.2fR, "
+                "fwd %+.2f, %s)", dist, self._boundary_turn_min_dist, forward,
+                "receding" if receding else "clear of the band")
             self._boundary_turn_since = None
+            self._boundary_turn_blocked = False
+            want = False
+        elif not turning and not in_band:
+            # Out of the band and not turning: nothing to do, and the budget
+            # re-arms here so one exhausted turn cannot disable the rest of the
+            # session.
             self._boundary_turn_blocked = False
             want = False
         elif self._boundary_turn_blocked:
             want = False
-        elif self._boundary_turn_since is None:
-            self._boundary_turn_since = now
-            logger.info("🗺  MAP BOUNDARY: turn requested at %.2fR (fwd %+.2f)",
-                        dist, forward)
-            want = True
+        elif not turning:
+            # Entry still needs a positive indication that the edge is AHEAD,
+            # or any pass within the band would roll the aircraft. One good
+            # read is enough: the sign is right roughly half the time while
+            # closing, so entry costs a tick or two, and the hold above no
+            # longer depends on it.
+            if forward <= 0:
+                want = False
+            else:
+                self._boundary_turn_since = now
+                self._boundary_turn_min_dist = dist
+                logger.info("🗺  MAP BOUNDARY: turn requested at %.2fR (fwd %+.2f)",
+                            dist, forward)
+                want = True
         elif now - self._boundary_turn_since > self._boundary_turn_max_s:
             # Budget spent. Either the roll is not taking effect or the
             # aircraft is pinned against the edge; holding the key indefinitely
             # fixes neither and hides the failure.
             logger.warning(
                 "🗺  MAP BOUNDARY: turn budget spent after %.0fs, still %.2fR "
-                "with fwd %+.2f — releasing",
-                self._boundary_turn_max_s, dist, forward)
+                "(closest %.2fR) with fwd %+.2f — releasing",
+                self._boundary_turn_max_s, dist,
+                self._boundary_turn_min_dist, forward)
             self._boundary_turn_blocked = True
+            self._boundary_turn_since = None
             want = False
         else:
             want = True

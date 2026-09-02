@@ -41,6 +41,19 @@ class GameState(Enum):
 POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
                         GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
+# ADR 102: states where the quick-scan re-checks whether the LOBBY is in fact
+# still on screen. Separate from the popup set on purpose — this permits ONE
+# lobby crop to be read, not popup dismissal. 2026-09-01: PLAY was clicked, the
+# FSM went LOBBY to WAITING to STARTING on a CANCEL read, and the match never
+# began; the game sat at the lobby with PLAY visible for 150 s while wingman
+# pressed 'u' and probed health, until the starting timeout fired.
+LOBBY_RECHECK_STATES = (GameState.GAME_STARTING,)
+# Consecutive agreeing reads before the state is walked back. The quick-scan
+# runs at roughly a 1 s cadence, so this is ~3 s of PLAY being continuously
+# visible — enough that a single stray read cannot abort a match that really is
+# starting, and still 50x faster than the 150 s timeout it replaces.
+STARTING_PLAY_CONFIRM_READS = 3
+
 # States where a round is genuinely under way and stopping would abandon an
 # aircraft in flight. ADR 094's deferred exit waits these out; everything else
 # — including GAME_UNKNOWN before the first classification, and GAME_END_B once
@@ -650,12 +663,31 @@ def _apply_health_ceiling_filter(
     return (last_accepted, ceiling)
 
 
+def _crop_for_ocr(frame, crop_coords):
+    """A detached copy of one crop, safe to hand to a queued OCR task.
+
+    ADR 103. get_crop returns a numpy VIEW whose .base is the whole frame, so a
+    queued task holding a view pins all 6.9 MB of it (1920x1200x3). The copy is
+    the point of this function: a lobby crop is tens of KB, so a backlog costs
+    megabytes instead of gigabytes.
+
+    Cancelling the future is not an alternative. CPython leaves the _WorkItem —
+    and its arguments — in the executor queue until a worker pops it, which is
+    exactly what a stalled pool never does.
+    """
+    return np.ascontiguousarray(get_crop(frame, *crop_coords))
+
+
 def _process_crop_region(frame, crop_coords, text_tokens):
     """Extract crop and run text detection entirely inside a worker thread.
 
-    Wrapping get_crop() here ensures it is covered by future.result(timeout=N)
-    in the lobby quick-scan thread; a synchronous call in the submission loop
-    would have no timeout protection and can block indefinitely.
+    Wrapping get_crop() here puts it under the caller's future.result(timeout=N).
+
+    ADR 103: the quick-scan no longer submits through this, because passing the
+    whole frame means a queued task pins it. The timeout argument does not
+    survive scrutiny anyway — get_crop is a bounded numpy slice and copy, not
+    something that can block indefinitely. Retained for the callers that still
+    crop a frame they are about to discard.
     """
     return _process_text_region(get_crop(frame, *crop_coords), text_tokens)
 
@@ -759,6 +791,8 @@ _FSM_TRANSITIONS = [
     {"trigger": "waiting_timeout",    "source": "GAME_WAITING",          "dest": "GAME_LOBBY"},
     {"trigger": "good_luck_detected", "source": "GAME_STARTING",         "dest": "GAME_BATTLE"},
     {"trigger": "starting_timeout",   "source": "GAME_STARTING",         "dest": "GAME_STARTING_STALLED"},
+    # ADR 102: the match never began — PLAY is still on screen.
+    {"trigger": "starting_play_visible", "source": "GAME_STARTING",      "dest": "GAME_LOBBY"},
     {"trigger": "starting_stalled_reclassify", "source": "GAME_STARTING_STALLED", "dest": "GAME_UNKNOWN"},
     {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
     {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
@@ -1060,6 +1094,10 @@ class GameStateAnalyzer:
         # declined to click would still leave the FSM in GAME_WAITING, stranding
         # the operator's exit until a whole further round completed.
         self._suppress_round_start = None
+        # ADR 102: consecutive PLAY reads while the FSM believes the match is
+        # starting. Reset on leaving GAME_STARTING so a streak cannot span two
+        # separate stalls.
+        self._starting_play_streak = 0
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
@@ -3134,19 +3172,26 @@ class GameStateAnalyzer:
             # lobby crops stay excluded there: classification owns marker
             # detection in GAME_UNKNOWN, and clicking PLAY/CANCEL from an
             # unclassified state would be wrong.
-            if state not in POPUP_DISMISS_STATES:
+            if state not in POPUP_DISMISS_STATES and state not in LOBBY_RECHECK_STATES:
                 continue
 
             executor = self.ocr_executor
             if executor is None:
                 continue
 
+            # Bound to the whole try/finally below: the cleanup cancels whatever
+            # is left in these, and must never raise NameError over the real
+            # exception when a cycle fails before they are populated.
+            lobby_futures = {}
+            popup_futures = {}
             try:
                 # --- CANCEL / UNREADY / PLAY / READY ---
                 # GAME_LOBBY: scan all lobby crops.
                 # GAME_WAITING: scan CANCEL only — provides 1-second detection cadence
                 # instead of relying solely on the 3-second main-loop poll, which can
                 # miss a brief CANCEL window (e.g. squad-READY → match-found flow).
+                if state not in LOBBY_RECHECK_STATES and self._starting_play_streak:
+                    self._starting_play_streak = 0
                 lobby_futures = {}
                 lobby_scan_start = None
                 handled = False
@@ -3156,6 +3201,12 @@ class GameStateAnalyzer:
                     crops_to_scan = lobby_crops
                 elif state == GameState.GAME_WAITING:
                     crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
+                elif state in LOBBY_RECHECK_STATES:
+                    # ADR 102: PLAY only. Nothing is clicked from here — the
+                    # detection walks the state back and the ordinary lobby
+                    # path does the clicking, so this cannot click PLAY into a
+                    # match that is genuinely starting.
+                    crops_to_scan = [c for c in ("PLAY",) if c in self.crops]
                 else:
                     # GAME_UNKNOWN / GAME_STARTING_STALLED: popup batch only
                     # (ADR 074) — no lobby-crop clicking from those states.
@@ -3175,10 +3226,11 @@ class GameStateAnalyzer:
                         else:
                             lobby_scan_start = time.time()
                             for crop in crops_to_scan:
+                                # ADR 103: crop-and-copy HERE, so a queued task
+                                # holds tens of KB instead of the 6.9 MB frame.
                                 lobby_futures[crop] = executor.submit(
-                                    _process_crop_region,
-                                    frame,
-                                    self.crops[crop][:4],
+                                    _process_text_region,
+                                    _crop_for_ocr(frame, self.crops[crop][:4]),
                                     self.crops[crop].text or [],
                                 )
 
@@ -3222,6 +3274,44 @@ class GameStateAnalyzer:
                         handled = True
                     else:
                         logger.debug("Lobby quick-scan: CANCEL not found in GAME_WAITING")
+
+                if not handled and state in LOBBY_RECHECK_STATES:
+                    detected = False
+                    if "PLAY" in lobby_futures:
+                        try:
+                            detected, _, text = lobby_futures["PLAY"].result(timeout=20)
+                        except Exception as e:
+                            logger.warning(
+                                "Lobby quick-scan: PLAY result failed in %s: %s",
+                                state.name, e)
+                            detected = False
+                    if detected:
+                        self._starting_play_streak += 1
+                        if self._starting_play_streak >= STARTING_PLAY_CONFIRM_READS:
+                            logger.warning(
+                                "\033[93m📋 Lobby quick-scan: PLAY still visible after "
+                                "%d reads in %s — the match never started, "
+                                "returning to GAME_LOBBY (ADR 102)\033[0m",
+                                self._starting_play_streak, state.name)
+                            # The suppression exists to stop a second click on a
+                            # PLAY that worked. This is the proof it did not, so
+                            # clearing it is the point — otherwise the lobby is
+                            # re-entered and then sits for the rest of the 60 s
+                            # window without clicking.
+                            self._last_lobby_play_click_ts = 0.0
+                            self._starting_play_streak = 0
+                            self._trigger("starting_play_visible")
+                        else:
+                            logger.info(
+                                "Lobby quick-scan: PLAY visible in %s (%d/%d reads)",
+                                state.name, self._starting_play_streak,
+                                STARTING_PLAY_CONFIRM_READS)
+                    elif self._starting_play_streak:
+                        logger.debug(
+                            "Lobby quick-scan: PLAY no longer visible in %s — "
+                            "streak reset", state.name)
+                        self._starting_play_streak = 0
+                    handled = True
 
                 if not handled and state == GameState.GAME_LOBBY:
                     for crop in ("PLAY", "READY"):
@@ -3331,10 +3421,9 @@ class GameStateAnalyzer:
                             last_popup_scan_ts = time.time()
                             popup_scan_start = time.time()
                             for crop in popup_crops:
-                                popup_futures[crop] = executor.submit(
-                                    _process_crop_region,
-                                    popup_frame,
-                                    self.crops[crop][:4],
+                                popup_futures[crop] = executor.submit(     # ADR 103
+                                    _process_text_region,
+                                    _crop_for_ocr(popup_frame, self.crops[crop][:4]),
                                     self.crops[crop].text or [],
                                 )
 
@@ -3398,9 +3487,9 @@ class GameStateAnalyzer:
                         last_stall_scan_ts = time.time()
                         for crop in stall_targets:
                             try:
-                                detected, _, text = executor.submit(
-                                    _process_crop_region, stall_frame,
-                                    self.crops[crop][:4],
+                                detected, _, text = executor.submit(   # ADR 103
+                                    _process_text_region,
+                                    _crop_for_ocr(stall_frame, self.crops[crop][:4]),
                                     self.crops[crop].text or [],
                                 ).result(timeout=20)
                             except Exception as e:
@@ -3435,6 +3524,21 @@ class GameStateAnalyzer:
                 return  # executor shut down
             except Exception as e:
                 logger.warning("Lobby quick-scan: scan failed: %s: %s", type(e).__name__, e)
+            finally:
+                # ADR 103: drop work this cycle never read. A cycle submits every
+                # lobby crop but the handlers break on the first hit, so up to
+                # three futures per cycle go unconsumed.
+                #
+                # This is NOT the memory fix and must not be mistaken for one:
+                # cancel() leaves the _WorkItem in the executor queue until a
+                # worker pops it, so a stalled pool releases nothing. The frames
+                # are kept out of the queue by _crop_for_ocr at the submission
+                # sites instead. What this buys is not running OCR that nobody
+                # will read once the pool drains.
+                # cancel() takes a lock, checks state and returns a bool; it does
+                # not raise, so it needs no guard.
+                for _fut in list(lobby_futures.values()) + list(popup_futures.values()):
+                    _fut.cancel()
 
     def _empty_state(self):
         """Return empty game state for error cases."""

@@ -54,12 +54,38 @@ untouched: the climb keeps its altitude mandate and only the heading moves
 underneath it. No tactic priority changes, and the SAF-010 exit path is not
 involved.
 
-**D2. Close the loop on the measured forward component.** The reading is
+**D2. Enter on the forward component; hold on distance.** The reading is
 `(distance, forward)` with no lateral term, so which way to roll cannot be
-derived from it. Any consistent roll drives the boundary off the nose, and the
-turn releases as soon as `forward` goes negative — so choosing the wrong
-direction costs seconds, not the aircraft. This is why an arbitrary fixed
-direction is acceptable rather than a limitation to be fixed later.
+derived from it. Any consistent roll drives the boundary off the nose — so
+choosing the wrong direction costs seconds, not the aircraft.
+
+**Revised 2026-09-02.** As first written, D2 also *released* on `forward` going
+negative. That was wrong, and the night session of 2026-09-01 measured how
+wrong. Across 32 crossing traces and 450 tick pairs:
+
+| | |
+|---|---:|
+| `forward` sign flipped between adjacent ticks | 27% |
+| ticks demonstrably closing on the edge | 283 |
+| …of those, `forward` read <= 0 | **51%** |
+
+The nearest boundary point sits almost ON the nose axis, so its lateral
+component is near zero and measurement noise decides the sign. Releasing on it
+pressed and released the roll on alternate ticks and the heading never moved:
+**25 of 32 crossings that session were under Climb** — the case this ADR exists
+to prevent — with 19 turns exhausting their budget still pointed at the edge.
+
+`dist` is the trustworthy channel; it fell monotonically 0.58R to 0.04R across
+the same trace whose sign flipped seven times. The turn now holds until the
+aircraft is RECEDING — `dist` risen by `boundary_turn_recede_frac` (0.06R) above
+the closest approach *of that turn* — or leaves the band, or spends its budget.
+Measuring from the closest approach rather than from the entry distance means an
+arc that dips and then opens out is recognised as working.
+
+Entry still requires a positive `forward`, or any pass within the band would
+roll the aircraft. One good read is enough: the sign is right roughly half the
+time while closing, so entry costs a tick or two, and the hold no longer depends
+on it.
 
 **D3. Turn earlier than the approach log.** `boundary_turn_frac` is 0.50,
 deliberately larger than `boundary_near_frac` (0.35). The measured crossing was
@@ -149,7 +175,10 @@ the budget.
 
 - **V1.** A climb with the boundary ahead inside `boundary_turn_frac` holds
   `ROLL_RIGHT`, and pitch and afterburner handling are unchanged.
-- **V2.** The turn releases within one tick of `forward` going negative.
+- **V2.** *(Revised 2026-09-02.)* A negative `forward` read does not drop the
+  turn; it releases when the aircraft recedes, leaves the band, or spends its
+  budget. The 2026-09-01 crossing trace is replayed as a regression test and the
+  turn stays engaged across all seven sign flips.
 - **V3.** A boundary behind the nose never requests a turn, at any distance.
 - **V4.** The turn releases at the budget, and re-arms after the aircraft
   clears the band.
@@ -162,9 +191,11 @@ the budget.
   including one that ends mid-turn.
 - **V9.** An unconfirmed colour trigger produces no WARNING and leaves the
   crossing count untouched.
-- **V10 — live.** A session with a confirmed approach shows the turn requested,
-  `forward` going negative, and no crossing. Not yet observed; this ADR is
-  Draft until it is.
+- **V10 — live.** A session with a confirmed approach shows the turn requested
+  and no crossing. Partially observed: 2026-09-01 (day) ran 36 turns with 0
+  budget exhausted and no crossing under Climb, but the night session then
+  showed 25 of 32 crossings under Climb and exposed the D2 defect above. Not met;
+  this ADR stays Draft until a session shows the revised hold working.
 
 ## References
 

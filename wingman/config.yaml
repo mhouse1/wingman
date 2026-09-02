@@ -347,7 +347,12 @@ minimap: {mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0
   # after 0.32R, which is no time to turn, and was still at 0.55R twenty
   # seconds out. Set turn_frac to 0 to disable the turn entirely.
   boundary_turn_frac: 0.50, boundary_turn_max_s: 8.0,
-  boundary_reading_max_age_s: 4.0}
+  boundary_reading_max_age_s: 4.0,
+  # ADR 101 rev 2: the turn holds until dist rises this far above its
+  # closest approach. The forward sign is too noisy to release on —
+  # measured 27% tick-to-tick sign flips, and <=0 on 51% of ticks that
+  # were demonstrably closing on the edge.
+  boundary_turn_recede_frac: 0.06}
 # Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
 # acted on — it appears only after the crossing, so it measures the
 # outcome rather than preventing it.
