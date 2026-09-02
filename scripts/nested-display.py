@@ -132,7 +132,22 @@ def start(display: str, size: str) -> int:
     try:
         with open(SERVER_LOG, "ab", buffering=0) as log:
             subprocess.Popen(
-                ["Xwayland", display, "-geometry", size, "-decorate"],
+                # -fullscreen asks the host compositor to place this window
+                # fullscreen instead of leaving it a floating toplevel with no
+                # placement request at all — on VEDA's external KVM monitor a
+                # freshly-opened window happened to read as filling the
+                # screen, but on Impulse's laptop panel the same un-requested
+                # placement left it windowed and visibly cut off (observed
+                # 2026-09-01). -geometry still sets the SERVER's own internal
+                # framebuffer size, independent of how the compositor displays
+                # it, so captured pixels and calibrated crops are unaffected
+                # regardless of the physical panel's actual resolution.
+                #
+                # -decorate is NOT compatible with -fullscreen — Xwayland
+                # refuses to start at all ("cannot use the decorate option
+                # when running fullscreen") — and is moot anyway: a fullscreen
+                # window has no decorations to draw.
+                ["Xwayland", display, "-geometry", size, "-fullscreen"],
                 stdout=log, stderr=log,
                 start_new_session=True,   # outlive the make recipe that spawned us
             )
