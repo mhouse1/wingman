@@ -31,7 +31,9 @@ safe as a Makefile prerequisite on every run.
 from __future__ import annotations
 
 import argparse
+import glob
 import os
+import re
 import subprocess
 import sys
 import time
@@ -74,6 +76,66 @@ def load_nested_config(override=None) -> dict:
         "display": str(cfg.get("display") or DEFAULT_DISPLAY).strip(),
         "size": str(cfg.get("size") or DEFAULT_SIZE).strip(),
     }
+
+
+def host_output_size() -> "tuple[int, int] | None":
+    """Largest connected output's mode, read from sysfs. None if unreadable.
+
+    ADR 104 rev 2. Read from /sys/class/drm rather than by asking X, because
+    this runs from a make recipe where the operator's X display needs an
+    XAUTHORITY the recipe does not have — the direct query fails with
+    "Authorization required, but no authorization protocol specified". sysfs
+    needs no auth and does not care whether the session is X or Wayland.
+
+    Largest output, not primary: on a docked laptop the question is whether ANY
+    screen has room for a window, and the external monitor is the one that does.
+
+    The first line of `modes` is the preferred mode, which is the active one on
+    every normal setup but not guaranteed if the resolution was changed by hand.
+    A wrong answer here costs window placement, never capture — `-geometry`
+    fixes the framebuffer independently.
+    """
+    best = None
+    for modes_path in glob.glob("/sys/class/drm/card*-*/modes"):
+        status_path = os.path.join(os.path.dirname(modes_path), "status")
+        try:
+            with open(status_path) as fh:
+                if fh.read().strip() != "connected":
+                    continue
+            with open(modes_path) as fh:
+                first = fh.readline().strip()
+        except OSError:
+            continue
+        m = re.match(r"^(\d+)x(\d+)", first)
+        if not m:
+            continue
+        w, h = int(m.group(1)), int(m.group(2))
+        if best is None or w * h > best[0] * best[1]:
+            best = (w, h)
+    return best
+
+
+def should_fullscreen(size: str, host: "tuple[int, int] | None") -> bool:
+    """True when the nested geometry is at least as large as the host output.
+
+    The question is not "how big is the monitor" but "is there room to put this
+    window beside the operator's work". A laptop panel the same size as the
+    nested framebuffer has none, and the un-fullscreened window there floats and
+    is visibly cut off (Impulse, 2026-09-01). A 3840x1600 desktop has plenty,
+    and going fullscreen would cover the screen the operator is using — which is
+    the whole thing ADR 099 exists to avoid.
+
+    Unknown host means windowed. The costs are not symmetric: a missed
+    fullscreen is a mispositioned window on a machine nobody is watching, while
+    a wrong fullscreen takes over the screen of someone who is working.
+    """
+    if host is None:
+        return False
+    m = re.match(r"^(\d+)x(\d+)$", size.strip())
+    if not m:
+        return False
+    geom_w, geom_h = int(m.group(1)), int(m.group(2))
+    return host[0] <= geom_w and host[1] <= geom_h
 
 
 def display_is_up(display: str) -> bool:
@@ -129,6 +191,13 @@ def start(display: str, size: str) -> int:
     # The handle only has to live until Popen dups the fd into the child, so a
     # context manager is safe: the detached server keeps writing through its own
     # copy after this closes.
+    # ADR 104 rev 2: choose placement from the host, not from a hardcoded flag.
+    host = host_output_size()
+    placement = "-fullscreen" if should_fullscreen(size, host) else "-decorate"
+    print(f"nested display {display}: host output "
+          f"{'unknown' if host is None else f'{host[0]}x{host[1]}'}, "
+          f"geometry {size} — starting {placement.lstrip('-')}")
+
     try:
         with open(SERVER_LOG, "ab", buffering=0) as log:
             subprocess.Popen(
@@ -147,7 +216,7 @@ def start(display: str, size: str) -> int:
                 # refuses to start at all ("cannot use the decorate option
                 # when running fullscreen") — and is moot anyway: a fullscreen
                 # window has no decorations to draw.
-                ["Xwayland", display, "-geometry", size, "-fullscreen"],
+                ["Xwayland", display, "-geometry", size, placement],
                 stdout=log, stderr=log,
                 start_new_session=True,   # outlive the make recipe that spawned us
             )

@@ -523,7 +523,11 @@ wait-game:
 	@echo "Waiting for Metalstorm.exe process (timeout $(GAME_WAIT_TIMEOUT_S) s)…"
 	@timeout $(GAME_WAIT_TIMEOUT_S) bash -c \
 	  'until pgrep -f Metalstorm.exe > /dev/null 2>&1; do sleep 2; done' \
-	  || { echo "ERROR: Metalstorm.exe not found after $(GAME_WAIT_TIMEOUT_S) s"; exit 1; }
+	  || { echo "ERROR: Metalstorm.exe not found after $(GAME_WAIT_TIMEOUT_S) s"; \
+	       echo "       launch log: /tmp/wingman-game-launch.log"; \
+	       echo "Closing the nested display it would have been hosted on (ADR 105)…"; \
+	       $(PYTHON_RUN) scripts/nested-display.py stop || true; \
+	       exit 1; }
 	@echo "Metalstorm.exe detected — waiting $(GAME_LOBBY_WAIT_S) s for game window to appear…"
 	@sleep $(GAME_LOBBY_WAIT_S)
 	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)"
@@ -663,6 +667,14 @@ rr-live-path1-gate:
 #   make newpaths CAPTURE_PATH=PATH1
 #   make newpaths CAPTURE_PATH=PATH2
 #   make newpaths CAPTURE_PATH=PATH3
+# The capture lane drives the REAL display: wingman.main disables the nested lane
+# for --capture-path-config (ADR 099, main.py) and grabs the monitor through
+# PipeWire. Launching the game into :3 while wingman looks at :0 is why this
+# failed with "game window not found in 3840x1600 frame" for a whole run
+# (2026-09-02). NESTED=0 makes all four launch deps agree with it: nested-setup
+# and nested-focus become no-ops and NESTED_ENV comes back empty, so the game
+# opens on the display wingman is actually watching.
+newpaths: NESTED := 0
 newpaths: $(GAME_LAUNCH_DEPS)
 	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \

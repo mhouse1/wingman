@@ -196,3 +196,110 @@ def test_setup_is_a_no_op_when_the_lane_is_off():
     with mock.patch.object(nd, "start") as start:
         assert nd.cmd_setup({"enabled": False, "display": ":3", "size": "x"}) == 0
     start.assert_not_called()
+
+
+# --- ADR 104 rev 2: placement is chosen from the host, not hardcoded ----------
+
+def test_a_desktop_larger_than_the_framebuffer_stays_windowed():
+    """VEDA: a 3840x1600 desktop has room to put the nested window beside the
+    operator's work. Going fullscreen there covers the screen they are using,
+    which is the thing ADR 099 exists to prevent."""
+    assert nd.should_fullscreen("1920x1200", (3840, 1600)) is False
+
+
+def test_a_panel_no_bigger_than_the_framebuffer_goes_fullscreen():
+    """Impulse: a 1920x1080 laptop panel has no room. Left to the compositor's
+    default placement the window floated and was visibly cut off (2026-09-01)."""
+    assert nd.should_fullscreen("1920x1200", (1920, 1080)) is True
+
+
+def test_an_exact_match_goes_fullscreen():
+    assert nd.should_fullscreen("1920x1200", (1920, 1200)) is True
+
+
+def test_a_host_wider_but_shorter_is_not_fullscreen():
+    """Both axes must fit. An ultrawide that is shorter than the framebuffer
+    still has horizontal room for a window."""
+    assert nd.should_fullscreen("1920x1200", (3440, 1080)) is False
+
+
+def test_an_unknown_host_never_goes_fullscreen():
+    """The costs are asymmetric: a missed fullscreen is a mispositioned window
+    on a machine nobody is watching; a wrong fullscreen takes over the screen of
+    someone who is working."""
+    assert nd.should_fullscreen("1920x1200", None) is False
+
+
+def test_an_unparseable_geometry_never_goes_fullscreen():
+    for size in ("", "banana", "1920", "1920x", "1920X1200"):
+        assert nd.should_fullscreen(size, (800, 600)) is False, size
+
+
+def test_the_host_size_comes_from_a_connected_output(tmp_path):
+    """sysfs rather than X: this runs from a make recipe that has no XAUTHORITY,
+    where querying the operator's display fails outright."""
+    for name, status, modes in (("card1-DP-1", "connected", "3840x1600\n2560x1440\n"),
+                                ("card1-HDMI-A-1", "disconnected", "1920x1080\n")):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "status").write_text(status)
+        (d / "modes").write_text(modes)
+    with mock.patch.object(nd, "glob") as g:
+        g.glob.return_value = [str(tmp_path / "card1-DP-1" / "modes"),
+                               str(tmp_path / "card1-HDMI-A-1" / "modes")]
+        assert nd.host_output_size() == (3840, 1600)
+
+
+def test_the_largest_connected_output_wins(tmp_path):
+    """A docked laptop: the question is whether ANY screen has room, and the
+    external monitor is the one that does."""
+    for name, modes in (("card1-eDP-1", "1920x1080\n"), ("card1-DP-1", "3840x2160\n")):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "status").write_text("connected")
+        (d / "modes").write_text(modes)
+    with mock.patch.object(nd, "glob") as g:
+        g.glob.return_value = [str(tmp_path / n / "modes")
+                               for n in ("card1-eDP-1", "card1-DP-1")]
+        assert nd.host_output_size() == (3840, 2160)
+
+
+def test_unreadable_sysfs_reports_unknown_rather_than_raising():
+    with mock.patch.object(nd, "glob") as g:
+        g.glob.return_value = ["/nonexistent/card9-DP-9/modes"]
+        assert nd.host_output_size() is None
+
+
+# --- the capture lane must launch the game where it is watching ---------------
+
+def _makefile():
+    from pathlib import Path
+    return Path(__file__).parent.parent.joinpath("Makefile").read_text()
+
+
+def test_the_capture_lane_launches_the_game_on_the_real_display():
+    """wingman.main disables the nested lane for --capture-path-config, because
+    that lane grabs the monitor through PipeWire. The Makefile has to agree:
+    launching the game into :3 while wingman looks at :0 produced
+
+        PipeWireBackend: game window not found in 3840x1600 frame
+
+    on every cycle of a whole run (2026-09-02), with all nine PATH1 screenshots
+    left uncaptured. NESTED=0 makes nested-setup and nested-focus no-ops and
+    empties NESTED_ENV, so all four launch deps agree with wingman."""
+    mk = _makefile()
+    assert "newpaths: NESTED := 0" in mk, \
+        "the capture lane must pin the game to the real display"
+    body = mk.split("newpaths: NESTED := 0")[1]
+    assert body.lstrip().startswith("newpaths: $(GAME_LAUNCH_DEPS)"), \
+        "the override must sit immediately before the target it applies to"
+
+
+def test_the_nested_lane_is_still_the_default_for_ordinary_runs():
+    """Only the real-screen lane opts out. `make r` / `make rd` keep the ADR 099
+    default, which is what lets the operator use the machine."""
+    mk = _makefile()
+    for target in ("r:", "rd:", "g:"):
+        line = next(ln for ln in mk.splitlines() if ln.startswith(target))
+        assert "GAME_LAUNCH_DEPS" in line
+    assert "r: NESTED" not in mk and "rd: NESTED" not in mk

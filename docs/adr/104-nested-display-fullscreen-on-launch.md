@@ -1,8 +1,12 @@
-# ADR 104 — Nested Display: Fullscreen on Launch
+# ADR 104 — Nested Display: Placement on Launch
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
 | Draft    | 2026-09-02 | 1.8.8           |
+
+> **Revised 2026-09-02.** The first version hardcoded `-fullscreen`, which is
+> right on Impulse and wrong on VEDA. Placement is now derived from the host
+> output. See *Decision — revised*.
 
 ## Context
 
@@ -43,17 +47,51 @@ before answering on the display, rather than assuming from the man page alone.
 in this codebase relies on the outer window showing a title bar, so dropping
 it costs nothing — a fullscreen window has no decorations to draw regardless.
 
-## Decision
+## Decision — revised
 
-Launch the nested Xwayland server with `-fullscreen` in place of `-decorate`:
+Hardcoding `-fullscreen` traded one machine's problem for another's. VEDA runs a
+3840x1600 desktop and is where the operator works; a fullscreen nested window
+covers the screen they are using, which is precisely what ADR 099 and HLDD 009
+exist to prevent. Impulse's laptop panel is no larger than the framebuffer and
+has nowhere to put a window, so the default placement left it floating and cut
+off.
+
+**Choose the placement from the host output, not from a flag.**
 
 ```
-Xwayland :3 -geometry 1920x1200 -fullscreen
+fullscreen  iff  host_output fits within the requested -geometry
 ```
 
-`-geometry` is unchanged — the server's internal framebuffer size, and
-therefore capture resolution and crop calibration, are unaffected by how the
-compositor visually presents the window.
+- **VEDA** — host 3840x1600, geometry 1920x1200 → `-decorate` (windowed). There
+  is room beside the operator's work.
+- **Impulse** — host 1920x1080, geometry 1920x1200 → `-fullscreen`. There is not.
+- **Host unknown** → `-decorate`.
+
+The rule is not "how big is the monitor" but "is there room to put this window
+beside the operator's work", which is the question that actually differs between
+the two machines. Both axes must fit, so an ultrawide that is shorter than the
+framebuffer still counts as having room.
+
+**Unknown host means windowed, deliberately.** The costs are not symmetric: a
+missed fullscreen is a mispositioned window on a machine nobody is watching,
+while a wrong fullscreen takes over the screen of someone who is working.
+
+**The host size is read from `/sys/class/drm`, not from X.** `start()` runs from
+a make recipe with no `XAUTHORITY`, where querying the operator's display fails
+outright with *"Authorization required, but no authorization protocol
+specified"* — confirmed on VEDA rather than assumed. sysfs needs no auth and is
+indifferent to whether the session is X or Wayland. The largest connected output
+wins: on a docked laptop the question is whether ANY screen has room, and the
+external monitor is the one that does.
+
+`-geometry` is unchanged — the server's internal framebuffer size, and therefore
+capture resolution and crop calibration, are unaffected by how the compositor
+visually presents the window. A wrong placement decision costs window placement,
+never captured pixels.
+
+`-decorate` and `-fullscreen` remain mutually exclusive: Xwayland exits with
+"cannot use the decorate option when running fullscreen" and never answers on
+the display. The two are selected as alternatives, never combined.
 
 ## Consequences
 
@@ -68,11 +106,16 @@ compositor visually presents the window.
   still passes (no test pinned the exact argument list).
 
 **Negative / open questions:**
-- Not visually confirmed end-to-end. The environment this fix was authored in
-  has no screenshot tool or `wmctrl`/`xdotool` available, so verification
-  stopped at "the server starts and Xwayland's own documentation says
-  `-fullscreen` does this" rather than a screenshot showing the game actually
-  filling Impulse's panel. Needs a human check on next live run.
+- The *decision* is verified against real hardware — VEDA reports 3840x1600 from
+  sysfs and resolves to windowed, and the laptop case resolves to fullscreen —
+  but the *result* is still not visually confirmed. Nothing here has watched
+  Impulse's panel actually fill. Needs a human check on the next live run there.
+- `modes` line one is the preferred mode, which is the active one on every
+  normal setup but not guaranteed if the resolution was changed by hand.
+- Multi-monitor VEDA-like setups are decided by the largest output. A machine
+  whose largest screen is big but whose game window opens on a small secondary
+  would be windowed when fullscreen might suit it better. Not observed; no
+  machine in use has that shape.
 - If the host compositor ever declines the fullscreen request for some
   reason, there is no fallback placement logic — the window would be left
   wherever the compositor defaults to, same as before this change, just
@@ -82,7 +125,8 @@ compositor visually presents the window.
 
 | File | Change |
 |---|---|
-| `scripts/nested-display.py` | `start()`: `-decorate` to `-fullscreen` in the `Xwayland` launch args |
+| `scripts/nested-display.py` | `host_output_size()`, `should_fullscreen()`; `start()` selects `-fullscreen` or `-decorate` from the host output |
+| `tests/test_nested_display.py` | 9 tests: both machines' geometries, exact match, ultrawide, unknown host, unparseable geometry, sysfs parsing, largest-output, unreadable sysfs |
 
 ## References
 

@@ -36,7 +36,8 @@ from .heap_census import HeapCensus
 from .liveness_guard import LivenessGuard
 from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
-from .game_shutdown import close_game, close_nested_display
+from .game_shutdown import (GamePresenceWatch, close_game,
+                            close_nested_display)
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -936,6 +937,10 @@ def main():
     startup_time = time.time()
     battle_ever_reached = False
     finish_round_exit = False        # ADR 094: set when the operator's deferred stop fires
+    game_gone_exit = False           # ADR 105: the game exited on its own
+    game_watch = GamePresenceWatch(
+        process_name=(cfg.get("resource_monitor", {}) or {}).get(
+            "game_process_name", "Metalstorm.exe"))
 
     def _stop_lobby_escape_loop():
         nonlocal lobby_escape_stop, lobby_escape_thread
@@ -1005,6 +1010,17 @@ def main():
                     "\033[93m🏁 FINISH ROUND: stopping in %s — no round in progress "
                     "(ADR 094)\033[0m", analyzer.game_state.name)
                 finish_round_exit = True
+                break
+            # ADR 105: the game left without us. Everything downstream — OCR,
+            # the FSM, the tactics — is reading an empty display, and on the
+            # nested lane the leftover is a black window with nothing behind
+            # it. Unlike the guards this needs no safe point: there is no
+            # aircraft in flight to abandon when there is no game.
+            if game_watch.game_has_gone():
+                logger.warning(
+                    "\033[93m🎮 GAME GONE: MetalStorm is no longer running — "
+                    "ending the session (ADR 105)\033[0m")
+                game_gone_exit = True
                 break
             if liveness.should_stop() and _safe:
                 logger.warning(
@@ -1476,7 +1492,16 @@ def main():
             if nested_display:
                 close_nested_display(nested_display, grace_s=_grace)
 
-        if not _close_enabled:
+        if game_gone_exit:
+            # ADR 105: there is no game to close, and the nested display exists
+            # only to host one — an empty server is the black window the
+            # operator reported. Deliberately NOT gated on close_game: that flag
+            # protects a RUNNING game from being killed, and there isn't one.
+            if nested_display:
+                logger.info("Game gone: closing the nested display it was "
+                            "hosted on")
+                close_nested_display(nested_display, grace_s=_grace)
+        elif not _close_enabled:
             logger.info("Operator stop: close_game disabled — leaving "
                         "MetalStorm and the nested display running")
         elif finish_round_exit:

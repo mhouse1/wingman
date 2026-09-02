@@ -213,3 +213,65 @@ def close_game(process_name: str = "Metalstorm.exe",
                        type(e).__name__, e)
         result["ok"] = False
     return result
+
+
+class GamePresenceWatch:
+    """Notice when the game process goes away on its own (ADR 105).
+
+    The teardown in main only runs for an OPERATOR stop — 'z' or Backspace. A
+    game that exits by itself is neither, so nothing reacted to it: on
+    2026-09-01 the servers went into maintenance, MetalStorm exited at ~22:22,
+    and wingman ran for a further 4h51m capturing an empty display before the
+    liveness guard ended the session. On the nested lane the leftover is
+    visible — a black "Xwayland on :3" window with nothing behind it.
+
+    Armed only after the game has actually been seen, so a session that starts
+    before the client finishes launching does not stop itself immediately.
+
+    `absent_reads` guards against the gap between a crash and a relaunch, and
+    against a /proc scan that races process teardown. Two agreeing reads at the
+    poll interval is a few seconds — short next to the 4h51m it replaces, long
+    enough not to fire on a blink.
+    """
+
+    def __init__(self, process_name: str = "Metalstorm.exe",
+                 poll_interval_s: float = 5.0, absent_reads: int = 2,
+                 clock=time.time, finder=None):
+        self._process_name = process_name
+        self._poll_interval_s = float(poll_interval_s)
+        self._absent_reads = int(absent_reads)
+        self._clock = clock
+        self._finder = finder or find_game_pids
+        self._seen = False
+        self._absent_streak = 0
+        self._last_poll = 0.0
+
+    @property
+    def armed(self) -> bool:
+        """True once the game has been seen at least once."""
+        return self._seen
+
+    def game_has_gone(self) -> bool:
+        """True when the game was running and is now reliably absent.
+
+        Rate-limited internally, so the caller can invoke this every tick: a
+        /proc scan per 1.5 s tick is wasted work when the answer changes on the
+        scale of a session.
+        """
+        now = self._clock()
+        if now - self._last_poll < self._poll_interval_s:
+            return False
+        self._last_poll = now
+        try:
+            present = bool(self._finder(self._process_name))
+        except Exception:           # never take the main loop down over a scan
+            logger.debug("GamePresenceWatch: scan failed", exc_info=True)
+            return False
+        if present:
+            self._seen = True
+            self._absent_streak = 0
+            return False
+        if not self._seen:
+            return False            # never started: not our business to stop
+        self._absent_streak += 1
+        return self._absent_streak >= self._absent_reads

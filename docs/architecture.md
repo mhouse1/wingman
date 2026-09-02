@@ -627,5 +627,6 @@ held afterburner and pitch key, and the operator could not fly.
 | [101](adr/101-boundary-aware-climb.md) | Boundary-aware climb: roll away from the map edge without leaving the climb |
 | [102](adr/102-lobby-recheck-from-game-starting.md) | Lobby recheck from GAME_STARTING: PLAY still visible means the match never started |
 | [103](adr/103-ocr-queue-frame-retention.md) | OCR queue frame retention: submit detached crops, not whole frames |
+| [105](adr/105-close-the-nested-display-when-the-game-exits.md) | Close the nested display when the game exits on its own |
 
 *(This index is incomplete: ADRs 073-097 are not yet listed.)*
