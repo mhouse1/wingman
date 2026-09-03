@@ -288,6 +288,11 @@ SCHEMA = Section(
                 "max_hold_s": SECONDS,
                 "pitch_down": BOOL,
             }),
+            "boundary": Section(children={
+                "turn_frac": FRACTION,
+                "recede_frac": FRACTION,
+                "hold_s": _num(0),
+            }),
             "climb": Section(children={
                 "enabled": BOOL,
                 "enter_below_alt": _num(0),
@@ -306,6 +311,7 @@ SCHEMA = Section(
                 "exit_pitch_deg": Leaf(types=NUMBER, allow_none=True),
                 "exit_push_pulse_s": SECONDS,
                 "exit_push_max_pulses": _int(1),
+                "boundary_turn_max_s": _num(0),
                 "exit_lead_s": SECONDS,
                 "fuel_reserve_pct": _num(0, 100),
                 "spawn_guard": Section(children={
@@ -339,10 +345,6 @@ SCHEMA = Section(
             "boundary_min_span_frac": FRACTION,
             "boundary_near_frac": FRACTION,
             "boundary_trace_ticks": _int(1),
-            "boundary_turn_frac": FRACTION,
-            "boundary_turn_max_s": _num(0),
-            "boundary_reading_max_age_s": _num(0),
-            "boundary_turn_recede_frac": FRACTION,
             "boundary_capture_dir": STR,
             "boundary_capture_max": _int(0),
         }),

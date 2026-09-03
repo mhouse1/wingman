@@ -4,6 +4,8 @@
 |--------|------------|-----------------|
 | Draft  | 2026-09-03 | 1.8.8           |
 
+> Implemented 2026-09-03. V1-V7 covered by tests; V8-V10 need a live session.
+
 ## Context
 
 ADR 101 made a running climb roll away from the arena edge. Two sessions of
@@ -167,6 +169,17 @@ ADR 106 exists to reduce.
   achieved. Not yet observed.
 - **V10 — the metric.** ADR 106's crossings-per-mission falls below 0.05 and
   holds across five sessions. That table spans this change deliberately.
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `wingman/behavior_tree.py` | `TACTIC_BOUNDARY_TURN`; `boundary_dist` / `boundary_forward` on the snapshot; `make_boundary_condition`; the leaf, inserted by name above Evade; `emergency_active` published on the climb closure for D4 |
+| `wingman/controller.py` | `boundary_turn_mode` / `is_boundary_turning`; stop on manual takeover and cleanup; ADR 101's `set_boundary_turn` and the roll-during-climb removed (D8) |
+| `wingman/tick_handlers.py` | boundary read moved ahead of the snapshot and cached; actuator registered; ADR 101's `_drive_boundary_turn` removed (D8) |
+| `wingman/config.yaml`, `config_schema.py` | `behavior_tree.boundary`, `climb.boundary_turn_max_s`; ADR 101's `minimap.boundary_turn_*` retired |
+| `tests/test_behavior_tree.py` | 11 tests: entry, hold through sign flips, recession, band exit, freeze on blindness, D4 yield, priority above Climb/Engage and below Eject/RespawnWait |
+| `tests/test_climb_mode.py` | 4 tests: banks AND pulls, SAF-010 handback, idempotence, manual takeover |
 
 ## References
 

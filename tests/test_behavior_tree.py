@@ -12,6 +12,7 @@ from wingman.behavior_tree import (
     AnalyzerSnapshot,
     MinimumHold,
     TACTIC_ATTACK_SUPPORT,
+    TACTIC_BOUNDARY_TURN,
     TACTIC_CLIMB,
     TACTIC_DISENGAGE,
     TACTIC_EJECT,
@@ -21,6 +22,7 @@ from wingman.behavior_tree import (
     TACTIC_MISSILE_EVADE,
     TACTIC_RESPAWN_WAIT,
     build_tree,
+    make_boundary_condition,
     make_climb_condition,
     make_snapshot_writer,
     selected_tactic,
@@ -729,3 +731,102 @@ def test_disabling_regroup_leaves_the_rest_of_the_selector_intact():
     off = [c.name for c in build_tree({}, regroup_enabled=False).root.children]
     assert TACTIC_ENGAGE in off and TACTIC_ATTACK_SUPPORT in off
     assert off.index(TACTIC_ENGAGE) < off.index(TACTIC_ATTACK_SUPPORT)
+
+
+# --- ADR 107: BoundaryTurn ----------------------------------------------------
+
+def _bsnap(dist, fwd, **kw):
+    return make_snap(boundary_dist=dist, boundary_forward=fwd, **kw)
+
+
+def _bcond(turn_frac=0.50, recede=0.06, **kw):
+    return make_boundary_condition(turn_frac, recede, **kw)
+
+
+def test_entry_needs_the_edge_ahead():
+    """Without it, any pass within the band would roll the aircraft."""
+    c = _bcond()
+    assert c(_bsnap(0.40, -0.30)) is False
+    assert c(_bsnap(0.40, +0.30)) is True
+
+
+def test_a_negative_forward_read_does_not_drop_the_turn():
+    """Measured over 32 crossing traces on 2026-09-01: the sign of `forward`
+    flipped between adjacent ticks 27% of the time and read <= 0 on 51% of the
+    ticks where the aircraft was demonstrably closing. Releasing on it made the
+    turn chatter and the heading never moved."""
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(0.40, -0.35)) is True
+    assert c(_bsnap(0.30, -0.25)) is True
+
+
+def test_the_turn_releases_once_the_aircraft_recedes():
+    """Recession is measured from the CLOSEST approach of this turn, so an arc
+    that dips and then opens out is recognised as working."""
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(0.30, +0.20)) is True
+    assert c(_bsnap(0.34, -0.10)) is True, "inside the 0.06 margin"
+    assert c(_bsnap(0.37, -0.10)) is False, "0.30 + 0.06 exceeded"
+
+
+def test_leaving_the_band_releases_the_turn():
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(0.80, +0.70)) is False
+
+
+def test_a_dropped_reading_freezes_rather_than_releasing():
+    """A gap in perception is not evidence the aircraft is clear."""
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(None, None)) is True
+    assert c(_bsnap(None, +0.4)) is True
+
+
+def test_blindness_never_starts_a_turn():
+    assert _bcond()(_bsnap(None, None)) is False
+
+
+def test_a_zero_threshold_disables_the_leaf():
+    assert _bcond(turn_frac=0.0)(_bsnap(0.01, +0.99)) is False
+
+
+def test_it_yields_to_the_climb_emergency_band():
+    """ADR 107 D4: hitting the ground is certain, the boundary is a countdown."""
+    emergency = {"on": False}
+    c = _bcond(yields_to_fn=lambda: emergency["on"])
+    assert c(_bsnap(0.40, +0.30)) is True
+    emergency["on"] = True
+    assert c(_bsnap(0.40, +0.30)) is False
+
+
+def test_selection_beats_climb_engage_and_regroup(clock):
+    cfg = dict(BT_CFG, boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0},
+               climb={"enabled": True, "enter_below_alt": 1000, "exit_above_alt": 2000})
+    tree = build_tree(cfg, clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(boundary_dist=0.30, boundary_forward=0.25,
+                     ring_long=5, altitude=500.0, friendly_contacts=4)
+    writer.set("snapshot", snap)
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_BOUNDARY_TURN
+
+
+def test_it_yields_to_the_defensive_tactics(clock):
+    cfg = dict(BT_CFG, boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0})
+    tree = build_tree(cfg, clock=clock)
+    writer = make_snapshot_writer()
+    for field, expected in (("is_respawning", TACTIC_RESPAWN_WAIT),
+                            ("missiles", TACTIC_EJECT)):
+        kw = {field: True if field == "is_respawning" else 0}
+        writer.set("snapshot", make_snap(boundary_dist=0.10,
+                                         boundary_forward=0.09, **kw))
+        tree.tick()
+        assert selected_tactic(tree) == expected, field
+
+
+def test_the_leaf_is_absent_when_unconfigured(clock):
+    tree = build_tree(dict(BT_CFG), clock=clock)
+    assert TACTIC_BOUNDARY_TURN not in [c.name for c in tree.root.children]

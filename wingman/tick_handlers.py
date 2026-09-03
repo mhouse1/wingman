@@ -37,6 +37,7 @@ from .behavior_tree import (
     build_tree,
     make_climb_condition,
     make_snapshot_writer,
+    TACTIC_BOUNDARY_TURN,
     selected_tactic,
 )
 from .engage_nav import RING_LONG, RING_MID, RING_SHORT, EngageNavigator, bin_rings
@@ -777,24 +778,9 @@ class BehaviorTreeHandler:
         self._rtb_capture_max = int(
             (minimap_cfg or {}).get("boundary_capture_max", 20))
         self._rtb_captures = 0
+        self._boundary_reading = None
         self._boundary_near_frac = float(
             (minimap_cfg or {}).get("boundary_near_frac", 0.25))
-        # ADR 101. Deliberately EARLIER than near_frac: the 2026-09-01 crossing
-        # was 4.5 s after 0.32R and still 0.55R twenty seconds out, so the
-        # approach threshold leaves no room to turn. 0 disables the turn.
-        self._boundary_turn_frac = float(
-            (minimap_cfg or {}).get("boundary_turn_frac", 0.0))
-        self._boundary_turn_max_s = float(
-            (minimap_cfg or {}).get("boundary_turn_max_s", 8.0))
-        self._boundary_reading_max_age_s = float(
-            (minimap_cfg or {}).get("boundary_reading_max_age_s", 4.0))
-        # How far dist must rise above the turn's closest approach before the
-        # aircraft counts as receding. Tick-to-tick noise on dist ran about
-        # 0.02-0.05R in the 2026-09-01 traces, so this sits just above it.
-        self._boundary_turn_recede_frac = float(
-            (minimap_cfg or {}).get("boundary_turn_recede_frac", 0.06))
-        self._boundary_turn_since = None
-        self._boundary_turn_blocked = False
         self._boundary_turn_min_dist = 1.0
         # ~30 s of lead-up at a 1.5 s tick. Bounded: a session must not grow a
         # trace buffer, and only the approach matters, not the whole mission.
@@ -868,6 +854,12 @@ class BehaviorTreeHandler:
             # in-tree selection-only variant to wire.
             if self.active and bool(climb_cfg.get("enabled", False)):
                 actuators[TACTIC_CLIMB] = (self._start_climb, ctrl.is_climbing)
+            # ADR 107: BoundaryTurn actuates when active and configured. Like
+            # Climb the leaf is only built when configured, so there is no
+            # selection-only variant to wire.
+            if self.active and (bt_cfg.get("boundary", {}) or {}).get("turn_frac"):
+                actuators[TACTIC_BOUNDARY_TURN] = (ctrl.boundary_turn_mode,
+                                                   ctrl.is_boundary_turning)
             self._tree = build_tree(
                 bt_cfg, actuators=actuators or None,
                 regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
@@ -962,6 +954,17 @@ class BehaviorTreeHandler:
         if self.active and self._ammo_events is not None:
             missiles_empty_confirmed = (
                 self._ammo_events.consume_missiles_empty_confirmed())
+        # ADR 107: read the boundary BEFORE the snapshot, so the tree acts on
+        # THIS frame rather than the previous tick's. The reading is cached for
+        # _instrument_boundary below, which would otherwise pay for a second
+        # detection on the same pixels.
+        try:
+            self._boundary_reading = self._analyzer.detect_map_boundary(frame)
+        except Exception:
+            logger.debug("Boundary read failed", exc_info=True)
+            self._boundary_reading = None
+        _b_dist, _b_fwd = (self._boundary_reading
+                           if self._boundary_reading else (None, None))
         snap = AnalyzerSnapshot(
             health=game_state.get("health"),
             missiles=self._analyzer.get_ammo_missiles(),
@@ -979,6 +982,8 @@ class BehaviorTreeHandler:
             fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
             altitude_rate=altitude_rate,
             friendly_contacts=len(self._friendly_components or []),
+            boundary_dist=_b_dist,
+            boundary_forward=_b_fwd,
         )
         self._writer.set("snapshot", snap)
         self._tree.tick()
@@ -1073,7 +1078,10 @@ class BehaviorTreeHandler:
                       and selection not in (TACTIC_EJECT, TACTIC_RESPAWN_WAIT)
                       and not snap.is_respawning)
             crossed = self._analyzer.detect_return_to_battle(frame) if flying else False
-            reading = self._analyzer.detect_map_boundary(frame)
+            # ADR 107: already read for the snapshot this tick.
+            reading = getattr(self, "_boundary_reading", None)
+            if reading is None and snap is None:
+                reading = self._analyzer.detect_map_boundary(frame)
 
             # Every tick goes into the buffer, crossing or not. The buffer is
             # the point: a crossing logged on its own says it happened, not why.
@@ -1125,11 +1133,6 @@ class BehaviorTreeHandler:
 
             if reading is None:
                 self._boundary_near_since = 0.0
-                # No reading is not "no boundary" — it is blindness, and the
-                # freeze policy used everywhere else would hold a roll key on
-                # stale evidence. Stop asking; the intent expires on its own.
-                self._boundary_turn_since = None
-                self._boundary_turn_blocked = False
                 logger.debug("BOUNDARY: no reading")
                 return
             dist, forward = reading
@@ -1146,99 +1149,8 @@ class BehaviorTreeHandler:
                     dist, self._boundary_approaches)
             elif not near:
                 self._boundary_near_since = 0.0
-            self._drive_boundary_turn(dist, forward, now)
         except Exception as e:
             logger.debug("Boundary instrumentation failed: %s", e)
-
-    def _drive_boundary_turn(self, dist, forward, now):
-        """ADR 101: ask a running climb to roll away while the edge is ahead.
-
-        ENTRY is on the forward component; the HOLD is not. Measured over the
-        2026-09-01 night session (32 crossing traces, 450 tick pairs): the sign
-        of `forward` flipped between adjacent ticks 27% of the time, and on
-        ticks where the aircraft was demonstrably closing on the edge it read
-        <= 0 on 51% of them. The nearest boundary point sits almost ON the nose
-        axis, so its lateral component is near zero and noise decides the sign.
-
-        Releasing on that sign — the original design — pressed and released the
-        roll on alternate ticks, so the heading never moved. 25 of 32 crossings
-        that session were under Climb, the case this exists to prevent, with 19
-        turns exhausting their budget still pointed at the edge.
-
-        `dist` is the trustworthy channel: it fell monotonically 0.58R to 0.04R
-        across the same trace. So the turn holds until the aircraft is actually
-        RECEDING — dist risen by a margin above the closest approach of this
-        turn — or leaves the band, or spends its budget.
-
-        Only the climb honours this. Engage and AttackSupport already write
-        steering of their own, and a second writer on the same axis would fight
-        them.
-        """
-        if self._boundary_turn_frac <= 0.0:
-            return
-        in_band = dist <= self._boundary_turn_frac
-        turning = self._boundary_turn_since is not None
-
-        if turning:
-            # Track the closest approach so recession is measured from the
-            # bottom of the arc, not from wherever the turn happened to start.
-            self._boundary_turn_min_dist = min(
-                self._boundary_turn_min_dist, dist)
-            receding = dist >= (self._boundary_turn_min_dist
-                                + self._boundary_turn_recede_frac)
-        else:
-            receding = False
-
-        if turning and not (in_band and not receding):
-            logger.info(
-                "🗺  MAP BOUNDARY: turn released at %.2fR (closest %.2fR, "
-                "fwd %+.2f, %s)", dist, self._boundary_turn_min_dist, forward,
-                "receding" if receding else "clear of the band")
-            self._boundary_turn_since = None
-            self._boundary_turn_blocked = False
-            want = False
-        elif not turning and not in_band:
-            # Out of the band and not turning: nothing to do, and the budget
-            # re-arms here so one exhausted turn cannot disable the rest of the
-            # session.
-            self._boundary_turn_blocked = False
-            want = False
-        elif self._boundary_turn_blocked:
-            want = False
-        elif not turning:
-            # Entry still needs a positive indication that the edge is AHEAD,
-            # or any pass within the band would roll the aircraft. One good
-            # read is enough: the sign is right roughly half the time while
-            # closing, so entry costs a tick or two, and the hold above no
-            # longer depends on it.
-            if forward <= 0:
-                want = False
-            else:
-                self._boundary_turn_since = now
-                self._boundary_turn_min_dist = dist
-                logger.info("🗺  MAP BOUNDARY: turn requested at %.2fR (fwd %+.2f)",
-                            dist, forward)
-                want = True
-        elif now - self._boundary_turn_since > self._boundary_turn_max_s:
-            # Budget spent. Either the roll is not taking effect or the
-            # aircraft is pinned against the edge; holding the key indefinitely
-            # fixes neither and hides the failure.
-            logger.warning(
-                "🗺  MAP BOUNDARY: turn budget spent after %.0fs, still %.2fR "
-                "(closest %.2fR) with fwd %+.2f — releasing",
-                self._boundary_turn_max_s, dist,
-                self._boundary_turn_min_dist, forward)
-            self._boundary_turn_blocked = True
-            self._boundary_turn_since = None
-            want = False
-        else:
-            want = True
-
-        try:
-            self._ctrl.set_boundary_turn(
-                want, ttl_s=self._boundary_reading_max_age_s)
-        except Exception:
-            logger.debug("Boundary turn request failed", exc_info=True)
 
     def _capture_rtb_frame(self, frame) -> None:
         """Save the frame behind a CONFIRMED crossing (ADR 106).
@@ -1248,7 +1160,7 @@ class BehaviorTreeHandler:
         terrain and the scoreboard — not from a 320 px minimap disc.
 
         Confirmed only. The colour trigger runs at 94% false positives, so
-        capturing on the trigger would bury the eight frames that matter under a
+        capturing on the trigger would bury the frames that matter under a
         hundred that do not.
 
         Never raises: this runs on an OCR pool thread where an exception is

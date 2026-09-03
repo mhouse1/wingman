@@ -15,7 +15,6 @@ from wingman.controller import (
     AFTERBURNER_KEY,
     Controller,
     NOSE_UP_KEY,
-    ROLL_LEFT_KEY,
     ROLL_RIGHT_KEY,
 )
 
@@ -922,7 +921,7 @@ def test_incoming_does_not_force_burner_on_an_empty_tank(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# ADR 101: roll away from the map boundary WITHOUT leaving the climb
+# ADR 107: BoundaryTurn owns roll AND pitch
 # ---------------------------------------------------------------------------
 
 def _wait_for(pred, timeout=2.0):
@@ -934,86 +933,66 @@ def _wait_for(pred, timeout=2.0):
     return False
 
 
-def test_the_climb_rolls_while_the_boundary_is_ahead(monkeypatch):
-    """V1. The 2026-09-01 crossing had Climb holding the aircraft for 28s while
-    it flew through the edge. The turn has to happen without touching pitch or
-    thrust — SAF-010 is why the climb must not simply be released."""
-    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
-    kb = _FakeKeyboard()
-    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=10.0))
-
-    ctrl.climb_mode()
-    assert ctrl.is_climbing()
-    # Baseline AFTER the climb's own initial nose-up, or this races it and
-    # blames the turn for a press the climb always makes.
-    assert _wait_for(lambda: _presses(kb, NOSE_UP_KEY)), "climb never pitched up"
-    nose_before = len(_presses(kb, NOSE_UP_KEY))
-
-    ctrl.set_boundary_turn(True, ttl_s=5.0)
-    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY)), "never rolled"
-
-    ctrl.set_boundary_turn(False)
-    assert _wait_for(lambda: _releases(kb, ROLL_RIGHT_KEY)), "never released the roll"
-
-    # The climb itself is untouched: still climbing, no extra nose-up, no
-    # afterburner release triggered by the turn.
-    assert ctrl.is_climbing()
-    assert len(_presses(kb, NOSE_UP_KEY)) == nose_before
-    assert not _releases(kb, NOSE_UP_KEY)
-    ctrl._climb_stop.set()
-    _wait_done(ctrl)
-
-
-def test_the_turn_intent_expires_on_its_own(monkeypatch):
-    """V5. The intent carries a deadline so a caller that stops updating — a
-    stalled tick, a raising instrumentation path — cannot strand a held roll
-    key. That failure would be worse than the crossing it prevents."""
+def test_the_boundary_turn_banks_and_pulls(monkeypatch):
+    """ADR 101 held roll alone and it was measured inert — 8 s of rolling on
+    2026-09-03 left the aircraft at its closest approach, because Climb owned
+    pitch and a bank without a pull does not turn the flight path. Owning both
+    axes is the whole reason this became a tactic."""
     analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
     kb = _FakeKeyboard()
     ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
 
-    ctrl.set_boundary_turn(True, ttl_s=0.05)
-    assert ctrl._boundary_turn_wanted()
-    time.sleep(0.1)
-    assert not ctrl._boundary_turn_wanted(), "a stale intent must not persist"
+    ctrl.boundary_turn_mode(max_s=10.0)
+    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY)), "never banked"
+    assert _presses(kb, NOSE_UP_KEY), "banked without pulling — the ADR 101 defect"
+    assert ctrl.is_boundary_turning()
+    ctrl._boundary_turn_stop.set()
+    assert _wait_for(lambda: not ctrl.is_boundary_turning()), "turn never ended"
 
 
-def test_a_climb_ending_mid_turn_balances_the_bracket(monkeypatch):
-    """V8. The roll is bracketed as a programmatic press so wingman's own key
-    does not echo back as an operator takeover. If a climb ends while the roll
-    is still held, an unbalanced count would leave every later operator press
-    of 'l' mistaken for wingman's own — manual takeover dead on that key."""
+def test_the_turn_hands_the_airframe_back_flyable(monkeypatch):
+    """SAF-010. This tactic holds NOSE_UP, so it owes the same exit push the
+    climb does: ADR 086 exists because a climb released at +73 degrees coasted
+    1500 m, stalled at 24 KPH and hit the ground."""
     analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
     kb = _FakeKeyboard()
-    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=10.0))
+    # exit_pitch_deg is what ARMS the push; unset it is the documented
+    # pre-ADR-086 behaviour, so the test must configure it to assert on it.
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, exit_pitch_deg=10))
 
-    ctrl.climb_mode()
-    ctrl.set_boundary_turn(True, ttl_s=5.0)
-    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY)), "never rolled"
-
-    ctrl._climb_stop.set()                      # end the climb mid-turn
-    assert _wait_done(ctrl)
-    assert _releases(kb, ROLL_RIGHT_KEY), "roll key left held after the climb"
-    assert ctrl._programmatic_key_counts.get(ROLL_RIGHT_KEY, 0) == 0
+    ctrl.boundary_turn_mode(max_s=0.3)
+    assert _wait_for(lambda: not ctrl.is_boundary_turning(), timeout=4.0)
+    assert _releases(kb, ROLL_RIGHT_KEY), "roll left held"
+    assert _releases(kb, NOSE_UP_KEY), "nose-up left held"
+    assert _presses(kb, NOSE_DOWN_KEY), "no SAF-010 exit push"
 
 
-def test_takeover_still_works_on_a_free_key_during_a_boundary_turn(monkeypatch):
-    """The turn's accepted cost is that 'l' reads as wingman's own echo while
-    the roll is held. That is only tolerable because other takeover keys stay
-    live.
-
-    Note which ones actually do. A climb ALREADY brackets 'i' and 'k' — they
-    are the keys it holds — so those were never live takeover keys during a
-    climb, before this ADR or after. What ADR 101 costs is 'l', leaving 'j',
-    Enter and the arrow keys."""
+def test_the_turn_is_idempotent_while_running(monkeypatch):
+    """The ADR 070 d8 pattern: a second selection must not start a second
+    thread onto the same two flight axes."""
     analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
     kb = _FakeKeyboard()
-    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, max_climb_s=10.0))
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
 
-    ctrl.climb_mode()
-    ctrl.set_boundary_turn(True, ttl_s=5.0)
-    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY)), "never rolled"
+    ctrl.boundary_turn_mode(max_s=10.0)
+    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY))
+    before = len(_presses(kb, ROLL_RIGHT_KEY))
+    ctrl.boundary_turn_mode(max_s=10.0)
+    time.sleep(0.3)
+    assert len(_presses(kb, ROLL_RIGHT_KEY)) == before
+    ctrl._boundary_turn_stop.set()
+    _wait_for(lambda: not ctrl.is_boundary_turning())
 
-    assert ctrl._handle_maneuver_key_press(ROLL_LEFT_KEY), \
-        "the opposite roll must survive a boundary turn"
-    assert _wait_done(ctrl)
+
+def test_manual_takeover_stops_the_turn(monkeypatch):
+    """SAF-001. It holds two flight axes, so it must let go the instant the
+    operator asks for the aircraft."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.boundary_turn_mode(max_s=30.0)
+    assert _wait_for(lambda: ctrl.is_boundary_turning())
+    ctrl.release_for_manual_takeover()
+    assert _wait_for(lambda: not ctrl.is_boundary_turning(), timeout=4.0)
+    assert _releases(kb, ROLL_RIGHT_KEY) and _releases(kb, NOSE_UP_KEY)

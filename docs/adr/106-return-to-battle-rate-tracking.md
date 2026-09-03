@@ -40,6 +40,7 @@ grep -c 'RETURN TO BATTLE (confirmed crossing' wingman.log   # crossings
 grep -c 'colour trigger not confirmed'          wingman.log   # unconfirmed triggers
 grep -c 'MAP BOUNDARY: turn requested'          wingman.log   # ADR 101 turns
 grep -c 'turn budget spent'                     wingman.log   # turns that gave up
+grep -c 'map boundary ahead, rolling away'     wingman.log   # turns that ACTUATED
 grep -A6 'Wingman Session Summary'              wingman.log   # missions started
 ```
 
@@ -75,15 +76,30 @@ thread, where an exception is swallowed, so it never raises.
 Crossings per mission is the column that matters; the rest are there to explain
 its movement.
 
-| Date | Dur | Missions | Crossings | **per mission** | Turns | Budget spent | Unconf. triggers | Code state | Game UI |
-|------|----:|---------:|----------:|----------------:|------:|-------------:|-----------------:|------------|---------|
-| 2026-09-01 (day) | 4h30m | 40 | 4 | **0.10** | 36 | 0 | 91 | ADR 101 rev 1 | pre-update |
-| 2026-09-01 (night) | 9h42m | 95 | 32 | **0.34** | 201 | 19 | 262 | ADR 101 rev 1 | pre-update |
-| 2026-09-02 | 7h21m | 77 | 8 | **0.10** | 58 | 11 | 125 | ADR 101 rev 2 | **post-update** |
+| Date | Dur | Missions | Crossings | **per mission** | Turns | Actuated | Budget spent | Unconf. | Code state | Game UI |
+|------|----:|---------:|----------:|----------------:|------:|---------:|-------------:|--------:|------------|---------|
+| 2026-09-01 (day) | 4h30m | 40 | 4 | **0.10** | 36 | 18 | 0 | 91 | ADR 101 rev 1 | pre-update |
+| 2026-09-01 (night) | 9h42m | 95 | 32 | **0.34** | 201 | — | 19 | 262 | ADR 101 rev 1 | pre-update |
+| 2026-09-02 | 7h21m | 77 | 8 | **0.10** | 58 | — | 11 | 125 | ADR 101 rev 2 | **post-update** |
+| 2026-09-03 | 43m | 7 | 1 | **0.14** | 14 | **4** | 3 | 59 | ADR 101 rev 2 | post-update |
+
+**Actuated** counts turns that reached the aircraft — `grep -c 'map boundary
+ahead, rolling away'`. Added 2026-09-03, when the gap became visible: 14 requests
+produced 4 rolls, because ADR 101 D7 scoped the turn to a *running climb* and no
+climb was running for the other ten. That is the column ADR 107 exists to close,
+and it is measured on wingman's own behaviour rather than on an outcome the game
+shares.
 
 *Provenance: the two 2026-09-01 rows were measured live at the time. Those logs
 have since been overwritten and the figures cannot be re-derived — which is what
-D4 exists to prevent.*
+D4 exists to prevent. Their **Actuated** cells are blank for the same reason: the
+count was not taken while the log existed.*
+
+**The 2026-09-03 row is 7 missions and one crossing.** At that size the rate is
+one event divided by a small number, and it belongs in the table as the last
+pre-ADR-107 reading rather than as evidence of anything. It is listed because a
+row not written before the next run is a row lost, not because 0.14 means
+something.
 
 **D5. Record the game UI version too.** MetalStorm shipped a minimap change
 shortly before the 2026-09-02 session — `test_screenshots/AMMO_MISSILE.png` and
@@ -171,6 +187,23 @@ small manual cost, and it is the price of the log being destroyed on each run.
 The series will read poorly for a while. Three points cannot separate a 3x
 change from ordinary variance, and pretending otherwise is how a tuning change
 gets adopted on noise.
+
+### After ADR 107
+
+The rows above are the pre-107 baseline. ADR 107 replaces the roll-during-climb
+with a first-class tactic that owns pitch and roll, so two columns should move
+together if it works:
+
+- **Actuated** should approach **Turns**. A tactic is selected on its own
+  condition, so the ten requests that reached no aircraft on 2026-09-03 have no
+  equivalent — that is the mechanical claim, and it is the one to check first.
+- **Crossings per mission** should fall. That is the outcome claim, and it needs
+  the five sessions the target below asks for, because the observed spread under
+  fixed code was already 3.4x.
+
+If Actuated tracks Turns and the crossing rate does not move, the tactic is
+firing and not working — which would point at the turn geometry rather than at
+when it fires, and is worth knowing separately.
 
 ### The map question
 

@@ -416,16 +416,21 @@ class Controller:
         self._climb_pitch_lead_s = float(_cl_cfg.get("pitch_lead_s", 3.0))
         # ADR 088: abort a dive whose premise (empty rack) has expired.
         self._eject_abort_on_rearm = bool(_ecl.get("abort_on_rearm", True))
+        # ADR 107: duration cap for the boundary turn. Bounded for the same
+        # reason the climb is — an unbounded hold on two flight axes is a
+        # failure nobody can interrupt.
+        self._boundary_turn_max_s = float(
+            (_cl_cfg.get("boundary_turn_max_s") or 12.0))
         self._climb_exit_pitch_deg = _cl_cfg.get("exit_pitch_deg")
         self._climb_exit_pulse_s = float(_cl_cfg.get("exit_push_pulse_s", 1.0))
         self._climb_exit_max_pulses = int(_cl_cfg.get("exit_push_max_pulses", 3))
-        # ADR 101: the climb owns pitch and thrust but never roll, so it can
-        # turn away from the map boundary without releasing the climb — which
-        # matters, because SAF-010 exists precisely because a badly released
-        # climb goes ballistic. Set by the boundary instrumentation as a
-        # short-lived intent: if that stops updating, the turn expires on its
-        # own rather than leaving a roll key held.
-        self._boundary_turn_until = 0.0
+        # ADR 107: BoundaryTurn owns roll AND pitch. ADR 101's roll-only turn
+        # measured zero distance gain over a full 8 s budget (2026-09-03,
+        # closest == final), because Climb held the nose up and banking without
+        # pulling does not change the flight path.
+        self._boundary_turning = threading.Event()
+        self._boundary_turn_thread: "threading.Thread | None" = None
+        self._boundary_turn_stop = threading.Event()
         self._climbing = threading.Event()
         self._climb_thread: "threading.Thread | None" = None
         self._climb_stop = threading.Event()
@@ -2126,6 +2131,90 @@ class Controller:
         (ADR 070 — the MissileEvade leaf's is_running_fn)."""
         return self._missile_evading.is_set()
 
+    def is_boundary_turning(self) -> bool:
+        """True while the ADR 107 turn owns the airframe."""
+        return self._boundary_turning.is_set()
+
+    def boundary_turn_mode(self, max_s: "float | None" = None):
+        """Bank and pull away from the arena edge (ADR 107).
+
+        Holds ROLL_RIGHT and NOSE_UP together. Roll alone was ADR 101, and it
+        was measured inert: on 2026-09-03 a full 8 s of held roll left the
+        aircraft at its closest approach, because Climb owned pitch and a bank
+        without a pull does not turn the flight path.
+
+        Direction is arbitrary and that is safe, for the same reason it was in
+        ADR 101: the condition closes on the MEASURED range, so a turn the wrong
+        way releases as soon as the aircraft starts receding. Picking wrong
+        costs seconds, not the aircraft.
+
+        Non-blocking and idempotent while the thread is alive (the ADR 070 d8
+        pattern). Suppressed while an eject or missile evade owns the airframe —
+        selection priority prevents most overlaps, this covers the same instant
+        from the Controller side.
+        """
+        if self._boundary_turning.is_set():
+            logger.debug("Controller: boundary turn already in progress")
+            return
+        if self._ejecting.is_set():
+            logger.info("Controller: boundary turn suppressed — eject in progress")
+            return
+        if self._missile_evading.is_set():
+            logger.info("Controller: boundary turn suppressed — missile evade")
+            return
+        cap_s = float(max_s) if max_s is not None else self._boundary_turn_max_s
+        self._boundary_turning.set()
+        self._boundary_turn_stop.clear()
+        logger.info("\033[93m🗺  BOUNDARY TURN — banking and pulling away from "
+                    "the edge (cap %.0fs)\033[0m", cap_s)
+
+        def _run():
+            guarded = tuple(k for k in (ROLL_RIGHT_KEY, NOSE_UP_KEY)
+                            if k in _WATCHED_MANEUVER_KEYS)
+            for _k in guarded:
+                self._inc_programmatic_key(_k)
+            started = time.time()
+            try:
+                # Stopping the climb first: two writers on pitch with different
+                # targets is the interaction ADR 107 D8 refuses to ship.
+                self._climb_stop.set()
+                self._climb_key(ROLL_RIGHT_KEY, press=True, action="boundary")
+                self._climb_key(NOSE_UP_KEY, press=True, action="boundary")
+                while not self._boundary_turn_stop.wait(timeout=0.25):
+                    if self._exit_event is not None and self._exit_event.is_set():
+                        break
+                    if self._ejecting.is_set() or self._missile_evading.is_set():
+                        logger.info("Controller: boundary turn yielding — "
+                                    "defensive tactic took the airframe")
+                        break
+                    if time.time() - started >= cap_s:
+                        logger.info("Controller: boundary turn — %.0fs cap reached",
+                                    cap_s)
+                        break
+            except Exception:
+                logger.exception("Controller: boundary turn failed")
+            finally:
+                _release_started = time.time()
+                self._climb_key(ROLL_RIGHT_KEY, press=False, action="boundary")
+                self._climb_key(NOSE_UP_KEY, press=False, action="boundary")
+                # ADR 086 d1 / SAF-010: the same flyable handback the climb
+                # owes. Releasing a nose-up hold and going neutral leaves the
+                # airframe ballistic at the exit attitude — a climb that ended
+                # at +73 deg coasted 1500 m, stalled at 24 KPH and hit the
+                # ground. This tactic holds nose-up too, so it owes the push.
+                self._climb_exit_push()
+                self._climb_key(NOSE_DOWN_KEY, press=False, action="boundary")
+                _span = time.time() - _release_started
+                for _k in guarded:
+                    self._arm_release_grace(_k, span_s=_span)
+                    self._dec_programmatic_key(_k)
+                self._boundary_turning.clear()
+                logger.info("Controller: boundary turn complete (%.1fs)",
+                            time.time() - started)
+
+        self._boundary_turn_thread = threading.Thread(target=_run, daemon=True)
+        self._boundary_turn_thread.start()
+
     def climb_mode(self, target_alt: "float | None" = None,
                    max_s: "float | None" = None,
                    fuel_floor_pct: float = 0.0,
@@ -2181,22 +2270,6 @@ class Controller:
 
         self._climb_thread = threading.Thread(target=_run, daemon=True)
         self._climb_thread.start()
-
-    def set_boundary_turn(self, active: bool, ttl_s: float = 4.0) -> None:
-        """Ask a running climb to roll away from the map boundary (ADR 101).
-
-        An intent with an expiry, not a latch. The caller re-asserts it every
-        tick while the boundary is ahead; one missed update ends the turn. A
-        plain boolean would strand a held roll key if the instrumentation threw
-        or the tick stalled, which is a worse failure than crossing the edge.
-
-        Thresholds live with the caller, which already reads the minimap config.
-        This side only honours the intent.
-        """
-        self._boundary_turn_until = (time.time() + max(0.0, ttl_s)) if active else 0.0
-
-    def _boundary_turn_wanted(self) -> bool:
-        return time.time() < self._boundary_turn_until
 
     def _climb_key(self, key: str, press: bool, action: str = "climb"):
         """Press/release one climb-family key, honoring simulate mode."""
@@ -2441,7 +2514,6 @@ class Controller:
                              if k in _WATCHED_MANEUVER_KEYS)
         for _key in guarded_keys:
             self._inc_programmatic_key(_key)
-        roll_held = False
         try:
             fuel = self._read_fuel_pct()
             if fuel is None or fuel > fuel_floor_pct:
@@ -2455,33 +2527,6 @@ class Controller:
             while not self._climb_stop.wait(timeout=0.25):
                 if self._exit_event is not None and self._exit_event.is_set():
                     break
-                # ADR 101: hold a roll while the boundary is ahead. Pitch and
-                # thrust are untouched — the climb keeps its altitude mandate
-                # and only the heading moves underneath it. The caller closes
-                # the loop on the measured forward component, so a turn in the
-                # wrong direction still resolves: any consistent roll drives
-                # the boundary off the nose.
-                _want_turn = self._boundary_turn_wanted()
-                if _want_turn != roll_held:
-                    # The bracket spans only the press, never the whole climb.
-                    # ROLL_RIGHT is a watched maneuver key: bracketing it for
-                    # the climb's full duration made an OPERATOR press of 'l'
-                    # read as wingman's own echo and silently killed manual
-                    # takeover on that key (SAF-001). Held for at most the turn
-                    # budget, and the other four takeover keys stay live
-                    # throughout.
-                    if _want_turn:
-                        self._inc_programmatic_key(ROLL_RIGHT_KEY)
-                    self._climb_key(ROLL_RIGHT_KEY, press=_want_turn,
-                                    action="climb-boundary")
-                    if not _want_turn:
-                        self._arm_release_grace(ROLL_RIGHT_KEY)
-                        self._dec_programmatic_key(ROLL_RIGHT_KEY)
-                    roll_held = _want_turn
-                    logger.info(
-                        "Controller: climb — map boundary ahead, rolling away"
-                        if _want_turn else
-                        "Controller: climb — boundary turn released")
                 # ADR 075 burner gate: release at the floor (a held key at 0%
                 # blocks recharge; the sustain floor keeps the evade reserve),
                 # re-press only after the rearm margin refills.
@@ -2653,12 +2698,6 @@ class Controller:
             # specifies. Balance the bracket only if this loop actually took it,
             # or the programmatic count goes negative and every later operator
             # press of 'l' is mistaken for an echo.
-            if roll_held:
-                self._climb_key(ROLL_RIGHT_KEY, press=False, action="climb-boundary")
-                self._arm_release_grace(ROLL_RIGHT_KEY)
-                self._dec_programmatic_key(ROLL_RIGHT_KEY)
-                roll_held = False
-            self._boundary_turn_until = 0.0
             self._climb_key(NOSE_UP_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
             # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE
@@ -3285,6 +3324,7 @@ class Controller:
         self._eject_stop.set()
         self._me_stop.set()
         self._climb_stop.set()
+        self._boundary_turn_stop.set()   # ADR 107: it holds two flight axes
         self._sg_stop.set()
         try:
             self.cancel_mission()
@@ -3597,7 +3637,11 @@ class Controller:
             eject_thread.join(timeout=1.5)  # let its finally release keys cleanly
         self._me_stop.set()  # ADR 070: end any evade hold via its own finally
         self._climb_stop.set()  # ADR 073 3.2b: end any climb hold via its own finally
+        self._boundary_turn_stop.set()  # ADR 107: end any boundary turn likewise
         self._sg_stop.set()  # ADR 076: end any spawn guard via its own finally
+        bt_thread = self._boundary_turn_thread
+        if bt_thread is not None and bt_thread.is_alive():
+            bt_thread.join(timeout=1.5)   # its finally does the SAF-010 push
         me_thread = self._me_thread
         if me_thread is not None and me_thread.is_alive():
             me_thread.join(timeout=1.5)

@@ -1128,30 +1128,10 @@ def _boundary_handler(analyzer):
     h._boundary_trace = collections.deque(maxlen=20)
     h._session_start = 0.0
     h._rtb_confirmed = False
-    # ADR 101 turn state
-    h._boundary_turn_frac = 0.50
-    h._boundary_turn_max_s = 8.0
-    h._boundary_reading_max_age_s = 4.0
-    h._boundary_turn_since = None
-    h._boundary_turn_blocked = False
+    h._boundary_reading = None
     h._boundary_turn_min_dist = 1.0
-    h._boundary_turn_recede_frac = 0.06
-    h._ctrl = _TurnRecorder()
     return h
 
-
-class _TurnRecorder:
-    """Stands in for the Controller: records every turn intent it is asked for."""
-
-    def __init__(self):
-        self.requests = []
-
-    def set_boundary_turn(self, active, ttl_s=4.0):
-        self.requests.append((active, ttl_s))
-
-    @property
-    def wanted(self):
-        return [a for a, _ttl in self.requests]
 
 
 def test_the_trace_records_every_tick_not_only_crossings():
@@ -1302,120 +1282,6 @@ def test_climb_steers_concurrently_but_without_orbit():
     branch = src[src.index("elif _may_fly and selection == TACTIC_CLIMB:"):
                  src.index("return False", src.index("elif _may_fly and selection == TACTIC_CLIMB:"))]
     assert "steer_only=True" in branch
-
-
-# --- ADR 101: roll away from the map boundary during a climb ------------------
-
-def _turn(h, dist, forward, now):
-    h._drive_boundary_turn(dist, forward, now)
-    return h._ctrl.requests[-1][0]
-
-
-def test_the_turn_fires_earlier_than_the_approach_log():
-    """The 2026-09-01 crossing was 4.5s after 0.32R and still 0.55R twenty
-    seconds out. Reusing boundary_near_frac (0.35) would ask for a turn with no
-    time left to make it."""
-    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
-    assert h._boundary_turn_frac > h._boundary_near_frac
-    assert _turn(h, 0.45, 0.40, 0.0) is True, "0.45R is inside the turn band"
-
-
-def test_a_boundary_behind_the_nose_is_not_a_turn():
-    """Flying AWAY from the edge is the common case near a corner. A distance
-    test alone would roll the aircraft for no reason."""
-    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
-    assert _turn(h, 0.10, -0.40, 0.0) is False
-
-
-def test_a_negative_forward_read_does_not_drop_the_turn():
-    """Supersedes the original release-on-forward rule, which was wrong.
-
-    Measured 2026-09-01 over 32 crossing traces and 450 tick pairs: the sign of
-    `forward` flipped between adjacent ticks 27% of the time, and read <= 0 on
-    51% of the ticks where the aircraft was demonstrably closing on the edge.
-    Releasing on it pressed and released the roll on alternate ticks, so the
-    heading never moved — 25 of 32 crossings that session were under Climb,
-    the case the turn exists to prevent."""
-    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
-    assert _turn(h, 0.40, 0.35, 0.0) is True
-    assert _turn(h, 0.38, -0.05, 1.5) is True, "a noisy sign must not drop it"
-    assert _turn(h, 0.36, -0.40, 3.0) is True
-    assert _turn(h, 0.30, 0.28, 4.5) is True
-
-
-def test_the_turn_releases_once_the_aircraft_is_receding():
-    """`dist` is the trustworthy channel — it fell monotonically 0.58R to 0.04R
-    across the same trace where the sign was flipping. Recession is measured
-    from the CLOSEST approach, not from where the turn started, so an arc that
-    dips and then opens out is recognised."""
-    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
-    assert _turn(h, 0.40, 0.35, 0.0) is True
-    assert _turn(h, 0.30, 0.28, 1.5) is True      # still closing
-    assert _turn(h, 0.33, -0.10, 3.0) is True     # rising, but inside the margin
-    assert _turn(h, 0.37, -0.10, 4.5) is False, "0.30 + 0.06 exceeded — receding"
-
-
-def test_the_turn_is_bounded_and_re_arms_after_clearing():
-    """A roll that is not working must not be held for the rest of the session
-    — and the budget must come back, or one pinned approach would disable the
-    turn permanently."""
-    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
-    assert _turn(h, 0.30, 0.30, 0.0) is True
-    assert _turn(h, 0.30, 0.30, 5.0) is True
-    assert _turn(h, 0.30, 0.30, 9.0) is False, "budget spent"
-    assert _turn(h, 0.30, 0.30, 12.0) is False, "stays released while still near"
-    assert _turn(h, 0.90, -0.10, 15.0) is False        # clear of the band
-    assert _turn(h, 0.30, 0.30, 20.0) is True, "budget re-armed after clearing"
-
-
-def test_blindness_stops_asking_rather_than_holding():
-    """A None reading is not 'no boundary'. Holding the roll on stale evidence
-    is the failure mode the intent's TTL exists to bound."""
-    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
-    h._analyzer.boundary = None
-    _turn(h, 0.30, 0.30, 0.0)
-    h._instrument_boundary(None, 1.0, snap=_flying(), selection="Climb")
-    assert h._boundary_turn_since is None
-
-
-def test_the_turn_is_disabled_by_a_zero_threshold():
-    """The config kill switch must not merely widen the band."""
-    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
-    h._boundary_turn_frac = 0.0
-    h._drive_boundary_turn(0.01, 0.99, 0.0)
-    assert h._ctrl.requests == []
-
-
-def test_the_real_2026_09_01_crossing_trace_keeps_the_turn_engaged():
-    """Regression on measured data, not a constructed case.
-
-    These are the (dist, fwd) pairs from a Climb crossing on 2026-09-01, the
-    session where 25 of 32 crossings happened under Climb. dist falls
-    monotonically 0.58R to 0.04R — the aircraft is flying straight at the edge
-    the whole time — while the forward sign flips seven times.
-
-    Under the original release-on-forward rule the roll was dropped on every
-    negative tick and the heading never moved. The turn must stay engaged for
-    the whole approach."""
-    trace = [
-        (0.582, 0.416), (0.566, 0.505), (0.546, 0.492), (0.523, -0.328),
-        (0.520, -0.372), (0.509, 0.454), (0.490, 0.442), (0.463, -0.397),
-        (0.437, -0.379), (0.400, -0.347), (0.363, -0.315), (0.320, 0.290),
-        (0.261, 0.233), (0.196, 0.177), (0.120, 0.107), (0.041, 0.038),
-    ]
-    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
-    h._boundary_turn_max_s = 1e6          # isolate the hold from the budget
-    wanted = [_turn(h, d, f, i * 1.5) for i, (d, f) in enumerate(trace)]
-
-    # The first ticks sit outside the 0.50R band, so no turn is due there.
-    first = next(i for i, (d, _f) in enumerate(trace)
-                 if d <= h._boundary_turn_frac)
-    assert not any(wanted[:first]), "turned before entering the band"
-    assert all(wanted[first:]), (
-        "turn dropped mid-approach at tick(s) "
-        f"{[i for i, w in enumerate(wanted) if not w and i >= first]}")
-    # Four of those held ticks read a NEGATIVE forward while still closing.
-    assert sum(1 for d, f in trace[first:] if f <= 0) >= 4
 
 
 # --- ADR 106: capture the frame behind a confirmed crossing -------------------

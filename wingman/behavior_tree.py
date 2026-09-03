@@ -38,6 +38,7 @@ TACTIC_RESPAWN_WAIT = "RespawnWait"
 TACTIC_EJECT = "Eject"
 TACTIC_MISSILE_EVADE = "MissileEvade"
 TACTIC_EVADE = "Evade"
+TACTIC_BOUNDARY_TURN = "BoundaryTurn"
 TACTIC_DISENGAGE = "Disengage"
 TACTIC_CLIMB = "Climb"
 TACTIC_ENGAGE = "Engage"
@@ -80,6 +81,12 @@ class AnalyzerSnapshot:
     # measured 2026-08-30 — and where the tree previously flew the mission
     # script with nothing steering toward the battle.
     friendly_contacts: int = 0
+    # ADR 107: nearest map-boundary range and its forward component, both in
+    # minimap radii, or None when the boundary is not readable. Before this the
+    # tree had no boundary input at all, which is why nothing in it could act
+    # on an aircraft flying out of the arena.
+    boundary_dist: "float | None" = None
+    boundary_forward: "float | None" = None
 
     @property
     def contacts(self) -> int:
@@ -210,6 +217,68 @@ def make_disengage_condition(absent_after_s: float):
 _SETTLED = 2
 
 
+def make_boundary_condition(turn_frac: "float | None",
+                            recede_frac: float = 0.06,
+                            yields_to_fn=None,
+                            is_running_fn=None):
+    """ADR 107: true while the arena edge is ahead and not yet receding.
+
+    ENTRY needs a positive ``boundary_forward`` — otherwise any pass within the
+    band would turn the aircraft. The HOLD does not, and that distinction is
+    measured rather than assumed: over 32 crossing traces on 2026-09-01 the sign
+    of ``forward`` flipped between adjacent ticks 27% of the time and read <= 0
+    on 51% of the ticks where the aircraft was demonstrably closing. Releasing on
+    it made the turn chatter and the heading never moved.
+
+    ``dist`` is the trustworthy channel, so the turn holds until the aircraft is
+    RECEDING — range risen ``recede_frac`` above the closest approach OF THIS
+    TURN, not above where it started, so an arc that dips and then opens out is
+    recognised as working.
+
+    ``yields_to_fn`` lets a higher-priority condition win without reordering the
+    selector: ADR 107 D4 uses it for Climb's emergency altitude band, because
+    hitting the ground is certain while the boundary is a countdown.
+
+    A ``turn_frac`` of None or 0 disables the leaf (the Evade precedent), and a
+    missing reading never selects — blindness is not an emergency.
+    """
+    state = {"active": False, "min_dist": None}
+
+    def _condition(snapshot) -> bool:
+        if not turn_frac:
+            return False
+        if is_running_fn is not None and is_running_fn():
+            return True          # sticky while the actuated turn owns the axes
+        if yields_to_fn is not None and yields_to_fn():
+            state["active"] = False
+            state["min_dist"] = None
+            return False
+        dist = getattr(snapshot, "boundary_dist", None)
+        forward = getattr(snapshot, "boundary_forward", None)
+        if dist is None or forward is None:
+            # Freeze rather than release: a dropped reading mid-turn is a gap in
+            # perception, not evidence the aircraft is clear.
+            return state["active"]
+        if dist > turn_frac:
+            state["active"] = False
+            state["min_dist"] = None
+            return False
+        if not state["active"]:
+            if forward <= 0:
+                return False
+            state["active"] = True
+            state["min_dist"] = dist
+            return True
+        state["min_dist"] = min(state["min_dist"], dist)
+        if dist >= state["min_dist"] + recede_frac:
+            state["active"] = False
+            state["min_dist"] = None
+            return False
+        return True
+
+    return _condition
+
+
 def make_climb_condition(enter_below_alt: "float | None",
                          exit_above_alt: "float | None",
                          is_running_fn=None,
@@ -310,6 +379,12 @@ def make_climb_condition(enter_below_alt: "float | None",
             state["ttg_streak"] = 0
 
         alt = snapshot.altitude
+        # ADR 107 D4: BoundaryTurn outranks the ordinary altitude-recovery climb
+        # but not this. Published on the closure rather than reordering the
+        # selector, because the emergency is a MODE of the climb condition, not
+        # a separate leaf — splitting it would duplicate the hysteresis state
+        # that decides it.
+        climb.emergency_active = bool(emergency)
         if emergency:
             # The band must not release a recovery it did not start: in this
             # dive the altitude was far ABOVE exit_above_alt the whole way
@@ -329,6 +404,7 @@ def make_climb_condition(enter_below_alt: "float | None",
             else:
                 state["streak"] = 0
         return state["active"] or (is_running_fn is not None and is_running_fn())
+    climb.emergency_active = False
     return climb
 
 
@@ -406,6 +482,7 @@ def build_tree(bt_cfg: dict, clock=time.time,
     disengage_fns = actuators.get(TACTIC_DISENGAGE)
     missile_evade_fns = actuators.get(TACTIC_MISSILE_EVADE)
     climb_fns = actuators.get(TACTIC_CLIMB)
+    boundary_fns = actuators.get(TACTIC_BOUNDARY_TURN)
 
     if eject_fns is not None:
         eject_leaf = ConditionTactic(TACTIC_EJECT, is_eject_confirmed,
@@ -459,6 +536,7 @@ def build_tree(bt_cfg: dict, clock=time.time,
     # pre-empt Engage actuation and silently pause geometry at low altitude.
     # While disabled, BehaviorTreeHandler logs would-select from an
     # independent condition instance instead.
+    _climb_emergency_fn = None
     if bool(climb_cfg.get("enabled", False)):
         climb_kwargs = {}
         if climb_fns is not None:
@@ -500,6 +578,35 @@ def build_tree(bt_cfg: dict, clock=time.time,
         _engage_at = next(i for i, c in enumerate(children)
                           if c.name == TACTIC_ENGAGE)
         children.insert(_engage_at, climb_leaf)
+        # ADR 107 D4. The flag is published by the closure each tick; read it
+        # lazily so the boundary leaf sees the CURRENT tick's verdict.
+        def _climb_emergency_fn(_e=emergency):
+            return bool(getattr(_e, "emergency_active", False))
+
+    # ADR 107: BoundaryTurn. Added after the climb block so it can yield to the
+    # emergency band, and placed by NAME rather than offset — the ADR 073
+    # lesson, where `len(children) - 2` silently inverted a priority the moment
+    # another leaf was added.
+    boundary_cfg = bt_cfg.get("boundary", {}) or {}
+    if boundary_cfg.get("turn_frac"):
+        boundary_kwargs = {}
+        if boundary_fns is not None:
+            boundary_kwargs = {"start_fn": boundary_fns[0],
+                               "is_running_fn": boundary_fns[1]}
+        boundary_leaf = MinimumHold(
+            TACTIC_BOUNDARY_TURN,
+            ConditionTactic(
+                f"{TACTIC_BOUNDARY_TURN}Condition",
+                make_boundary_condition(
+                    float(boundary_cfg["turn_frac"]),
+                    float(boundary_cfg.get("recede_frac", 0.06)),
+                    yields_to_fn=_climb_emergency_fn,
+                    is_running_fn=boundary_kwargs.get("is_running_fn")),
+                **boundary_kwargs),
+            hold_s=float(boundary_cfg.get("hold_s", 3.0)), clock=clock)
+        _evade_at = next(i for i, c in enumerate(children)
+                         if c.name == TACTIC_EVADE)
+        children.insert(_evade_at, boundary_leaf)
 
     # ADR 028 revision 4. The leaf is added only when regroup is enabled, so
     # `minimap.regroup_enabled: false` disables the FEATURE rather than half of
