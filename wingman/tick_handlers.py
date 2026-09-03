@@ -768,6 +768,15 @@ class BehaviorTreeHandler:
         self._boundary_approaches = 0
         self._boundary_near_since = 0.0
         self._rtb_false_positives = 0
+        # ADR 106: evidence for the map-clustering question. Capped per session
+        # — the folder is gitignored, but a bad night should not write hundreds
+        # of 2 MB frames to the operator's disk.
+        self._rtb_capture_dir = str(
+            (minimap_cfg or {}).get("boundary_capture_dir",
+                                    "test_screenshots/unknown_anomalies"))
+        self._rtb_capture_max = int(
+            (minimap_cfg or {}).get("boundary_capture_max", 20))
+        self._rtb_captures = 0
         self._boundary_near_frac = float(
             (minimap_cfg or {}).get("boundary_near_frac", 0.25))
         # ADR 101. Deliberately EARLIER than near_frac: the 2026-09-01 crossing
@@ -1102,7 +1111,10 @@ class BehaviorTreeHandler:
                 pending = list(self._boundary_trace)
                 self._analyzer.confirm_return_to_battle_async(
                     frame,
-                    lambda ok, text: self._on_rtb_confirmed(ok, text, pending))
+                    # _f binds THIS frame rather than whatever the name refers
+                    # to when the pool thread eventually runs the callback.
+                    lambda ok, text, _f=frame:
+                        self._on_rtb_confirmed(ok, text, pending, _f))
             elif not crossed and self._rtb_active:
                 if self._rtb_confirmed:
                     logger.info("🗺  MAP BOUNDARY: back inside")
@@ -1228,7 +1240,44 @@ class BehaviorTreeHandler:
         except Exception:
             logger.debug("Boundary turn request failed", exc_info=True)
 
-    def _on_rtb_confirmed(self, detected, text, trace=None):
+    def _capture_rtb_frame(self, frame) -> None:
+        """Save the frame behind a CONFIRMED crossing (ADR 106).
+
+        The WHOLE frame, not the minimap crop: the open question is whether
+        crossings cluster on particular maps, and a map is identifiable from its
+        terrain and the scoreboard — not from a 320 px minimap disc.
+
+        Confirmed only. The colour trigger runs at 94% false positives, so
+        capturing on the trigger would bury the eight frames that matter under a
+        hundred that do not.
+
+        Never raises: this runs on an OCR pool thread where an exception is
+        swallowed, and losing evidence must not also lose the crossing count.
+        """
+        if frame is None or self._rtb_capture_max <= 0:
+            return
+        if self._rtb_captures >= self._rtb_capture_max:
+            logger.debug("MAP BOUNDARY: capture cap (%d) reached this session",
+                         self._rtb_capture_max)
+            return
+        try:
+            import cv2
+            from datetime import datetime
+            from pathlib import Path
+            out_dir = Path(self._rtb_capture_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = out_dir / f"rtb_{stamp}_crossing{self._boundary_crossings}.png"
+            if not cv2.imwrite(str(path), frame):
+                logger.warning("MAP BOUNDARY: screenshot write failed: %s", path)
+                return
+            self._rtb_captures += 1
+            logger.info("🗺  MAP BOUNDARY: crossing frame saved to %s", path)
+        except Exception as e:
+            logger.warning("MAP BOUNDARY: screenshot capture failed: %s: %s",
+                           type(e).__name__, e)
+
+    def _on_rtb_confirmed(self, detected, text, trace=None, frame=None):
         """OCR verdict on the banner. The colour test is the cheap trigger; this
         is the arbiter of the COUNT, so a false positive does not silently
         inflate the crossings figure the tuning depends on.
@@ -1248,6 +1297,7 @@ class BehaviorTreeHandler:
                     logger.warning(
                         "🗺  MAP BOUNDARY trace (last %d ticks before the "
                         "crossing): %s", len(trace), json.dumps(trace))
+                self._capture_rtb_frame(frame)
                 return
             # Nothing to retract any more — the count was never incremented.
             self._rtb_false_positives += 1

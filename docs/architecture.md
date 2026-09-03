@@ -628,5 +628,7 @@ held afterburner and pitch key, and the operator could not fly.
 | [102](adr/102-lobby-recheck-from-game-starting.md) | Lobby recheck from GAME_STARTING: PLAY still visible means the match never started |
 | [103](adr/103-ocr-queue-frame-retention.md) | OCR queue frame retention: submit detached crops, not whole frames |
 | [105](adr/105-close-the-nested-display-when-the-game-exits.md) | Close the nested display when the game exits on its own |
+| [106](adr/106-return-to-battle-rate-tracking.md) | RETURN TO BATTLE rate tracking: the series ADR 101 is judged by |
+| [107](adr/107-boundary-turn-tactic.md) | Boundary turn tactic: a first-class leaf that owns pitch and roll |
 
 *(This index is incomplete: ADRs 073-097 are not yet listed.)*

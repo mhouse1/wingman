@@ -343,6 +343,8 @@ SCHEMA = Section(
             "boundary_turn_max_s": _num(0),
             "boundary_reading_max_age_s": _num(0),
             "boundary_turn_recede_frac": FRACTION,
+            "boundary_capture_dir": STR,
+            "boundary_capture_max": _int(0),
         }),
 
         "tracking": Section(children={

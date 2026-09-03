@@ -1416,3 +1416,69 @@ def test_the_real_2026_09_01_crossing_trace_keeps_the_turn_engaged():
         f"{[i for i, w in enumerate(wanted) if not w and i >= first]}")
     # Four of those held ticks read a NEGATIVE forward while still closing.
     assert sum(1 for d, f in trace[first:] if f <= 0) >= 4
+
+
+# --- ADR 106: capture the frame behind a confirmed crossing -------------------
+
+def _capture_handler(tmp_path, **kw):
+    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
+    h._rtb_capture_dir = str(tmp_path)
+    h._rtb_capture_max = kw.get("max", 20)
+    h._rtb_captures = 0
+    return h
+
+
+def _frame():
+    import numpy as np
+    return np.zeros((32, 48, 3), dtype=np.uint8)
+
+
+def test_a_confirmed_crossing_saves_the_frame(tmp_path):
+    """The map-clustering question needs the WHOLE frame — a map is identifiable
+    from its terrain and scoreboard, not from a 320px minimap disc."""
+    h = _capture_handler(tmp_path)
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    saved = list(tmp_path.glob("rtb_*.png"))
+    assert len(saved) == 1
+    assert "crossing1" in saved[0].name, saved[0].name
+
+
+def test_an_unconfirmed_trigger_saves_nothing(tmp_path):
+    """The colour trigger runs at 94% false positives. Capturing on it would
+    bury the frames that matter under a hundred that do not."""
+    h = _capture_handler(tmp_path)
+    h._on_rtb_confirmed(False, None, None, _frame())
+    assert list(tmp_path.glob("*.png")) == []
+
+
+def test_the_capture_is_capped_per_session(tmp_path):
+    """The folder is gitignored, but a bad night should not write hundreds of
+    2 MB frames to the operator's disk."""
+    h = _capture_handler(tmp_path, max=2)
+    for _ in range(5):
+        h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    assert len(list(tmp_path.glob("rtb_*.png"))) == 2
+    assert h._boundary_crossings == 5, "the cap must not suppress the COUNT"
+
+
+def test_a_capture_of_zero_disables_it(tmp_path):
+    h = _capture_handler(tmp_path, max=0)
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    assert list(tmp_path.glob("*.png")) == []
+
+
+def test_a_missing_frame_does_not_lose_the_crossing(tmp_path):
+    """Evidence is a bonus; the count is the metric ADR 106 tracks."""
+    h = _capture_handler(tmp_path)
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, None)
+    assert h._boundary_crossings == 1
+    assert list(tmp_path.glob("*.png")) == []
+
+
+def test_an_unwritable_directory_never_raises(tmp_path):
+    """This runs on an OCR pool thread, where an exception is swallowed —
+    losing the evidence must not also lose the count."""
+    h = _capture_handler(tmp_path)
+    h._rtb_capture_dir = "/proc/nonexistent/cannot-create"
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    assert h._boundary_crossings == 1
