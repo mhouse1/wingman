@@ -336,3 +336,92 @@ def test_components_method_matches_pure_function(analyzer):
 def test_components_method_empty_on_black_frame(analyzer):
     frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
     assert analyzer.detect_enemy_map_components(frame) == []
+
+
+# --- ADR 108: the post-2026-09-02 minimap -------------------------------------
+
+RTB_FRAMES = sorted((ROOT / "test_screenshots" / "unknown_anomalies").glob("rtb_*.png")) \
+    if (ROOT / "test_screenshots" / "unknown_anomalies").exists() else []
+
+
+@pytest.mark.skipif(len(RTB_FRAMES) < 5, reason="crossing corpus not present")
+def test_the_boundary_is_found_at_the_centre_on_crossing_frames(analyzer):
+    """Every one of these frames was captured with RETURN TO BATTLE on screen,
+    so the line is at the aircraft. Before ADR 108 the detector read NOTHING on
+    81% of ticks — five of eight crossings that session had no reading at all in
+    the 30 s before they happened, because the thin antialiased line arrived as
+    20 to 174 fragments and the span filter rejected all of them."""
+    seen = []
+    for f in RTB_FRAMES:
+        r = analyzer.detect_map_boundary(cv2.imread(str(f)))
+        if r is not None:
+            seen.append((f.name, r[0]))
+    # A RATE, not an exact count. The corpus grows every session that captures
+    # a crossing, so an equality calibrated on nine frames fails the moment the
+    # tenth arrives — which is the corpus doing its job, not a regression.
+    # Detection was 18.8% of ticks before ADR 108; the bar here is that a frame
+    # WITH the banner up almost always yields a reading.
+    assert len(seen) >= 0.9 * len(RTB_FRAMES), \
+        f"only {len(seen)}/{len(RTB_FRAMES)} frames produced a reading"
+    # KNOWN LIMITATION, one frame of nine (rtb_...105821_crossing5). Where the
+    # line crosses bright tan terrain it merges with it locally, the thickness
+    # gate rejects that stretch, and only a distant fragment of the same arc
+    # survives — so the range is measured to the wrong part of the line. The
+    # frame reads 0.44R with the aircraft sitting ON the boundary. Asserted as a
+    # majority rather than hidden: tightening this to 9/9 would mean loosening
+    # the gate that keeps desert terrain out, which is the worse trade.
+    near = [d for _n, d in seen if d < 0.30]
+    assert len(near) >= 0.85 * len(seen), \
+        f"only {len(near)}/{len(seen)} readings were at the boundary: {seen}"
+
+
+@pytest.mark.skipif(not (ROOT / "test_screenshots" / "AMMO_MISSILE.png").exists(),
+                    reason="AMMO_MISSILE not archived")
+def test_island_terrain_is_not_read_as_a_boundary(analyzer):
+    """The new minimap renders tan terrain in the boundary's own hue family. The
+    old rule took the LARGEST component and reported 0.78-0.80R from islands on
+    these two frames; the shape gate rejects them, because an arc fills 0.03-0.23
+    of its bounding box and a landmass fills 0.48-0.79."""
+    for name in ("AMMO_MISSILE.png", "AMMO_MISSILE_1.png"):
+        f = ROOT / "test_screenshots" / name
+        if not f.exists():
+            continue
+        assert analyzer.detect_map_boundary(cv2.imread(str(f))) is None, \
+            f"{name}: terrain read as a boundary"
+
+
+# Enumerated, NOT globbed. The first version matched every approach_*.png, so
+# the next live session dropped frames from other maps into the corpus and the
+# test failed on them — correctly, since those frames may legitimately show a
+# boundary inside 0.20R. A curated negative corpus has to name its members.
+_DESERT_NAMES = (
+    "approach_20260903_164202_17.png",
+    "approach_20260903_164218_18.png",
+    "approach_20260903_164224_19.png",
+    "approach_20260903_164235_20.png",
+)
+DESERT_FRAMES = [p for p in
+                 (ROOT / "test_screenshots" / "unknown_anomalies" / n
+                  for n in _DESERT_NAMES) if p.exists()]
+
+
+@pytest.mark.skipif(len(DESERT_FRAMES) < 3, reason="desert negative corpus not present")
+def test_desert_terrain_is_not_read_as_a_NEAR_boundary(analyzer):
+    """The four frames kept from the 2026-09-03 false-positive session, on a
+    desert map whose tan landmass sits in the boundary's own hue family.
+
+    Before ADR 108's local-thickness gate these read 0.016-0.065R — the mask
+    covering an entire landmass, reported as an edge at the aircraft — and drove
+    32 turns in 12 minutes, one at round start. A reading is allowed here (the
+    real line IS somewhere on the minimap); reading it AT the aircraft is the
+    regression.
+
+    Kept in the gitignored anomalies folder rather than committed: four full
+    frames are 8 MB, and ADR 100 exists because this repository grew on exactly
+    that kind of artifact. The test skips when they are absent."""
+    for f in DESERT_FRAMES:
+        r = analyzer.detect_map_boundary(cv2.imread(str(f)))
+        if r is None:
+            continue
+        assert r[0] >= 0.20, \
+            f"{f.name} read {r[0]:.3f}R — terrain masquerading as a near edge"

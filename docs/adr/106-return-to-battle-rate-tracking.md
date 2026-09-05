@@ -73,6 +73,15 @@ thread, where an exception is swallowed, so it never raises.
 
 ## The series
 
+> **2026-09-04: the metric is input-limited.** In `GAME_BATTLE` the detector
+> produced a reading on 385 of 682 ticks — **56%**. (An earlier note here said
+> 23%; that averaged in lobby and loading ticks, where there is no minimap to
+> read and None is correct. See ADR 117.) Every row below measures a tactic that is
+> blind on nearly half its battle ticks, so differences between rows are influenced by
+> when the detector happened to see something. ADR 117 captures the failure
+> case; until those frames are read, no row here should be attributed to a
+> tactic or detector change.
+
 Crossings per mission is the column that matters; the rest are there to explain
 its movement.
 
@@ -82,6 +91,13 @@ its movement.
 | 2026-09-01 (night) | 9h42m | 95 | 32 | **0.34** | 201 | — | 19 | 262 | ADR 101 rev 1 | pre-update |
 | 2026-09-02 | 7h21m | 77 | 8 | **0.10** | 58 | — | 11 | 125 | ADR 101 rev 2 | **post-update** |
 | 2026-09-03 | 43m | 7 | 1 | **0.14** | 14 | **4** | 3 | 59 | ADR 101 rev 2 | post-update |
+| 2026-09-03 (pm) | 7h10m | 74 | 8 | **0.11** | 65 | **65** | — | 232 | **ADR 107** | post-update |
+| 2026-09-03 (eve) | 1h29m | 15 | 0 | **0.00** | 38 | 38 | — | — | ADR 107 + **108** | post-update |
+| 2026-09-03 (night) | 4h22m | 46 | 12 | **0.26** | 150 | 150 | — | — | ADR 107 + 108 | post-update |
+| 2026-09-04 | 4h26m | 44 | 6 | **0.14** | 129 | 129 | — | 92 | ADR 107 + 108 rev 2 | post-update |
+| 2026-09-04 (eve) | 56m | 9 | 2 | **0.22** | 19 | 19 | — | — | ADR 111 + **112** | post-update |
+| 2026-09-04 (late) | 49m | 10 | 1 | **0.10** | — | — | — | — | ADR **113** + 114-116 | post-update |
+| 2026-09-04 (night) | 2h21m | 21 | 2 | **0.10** | 83 | 83 | — | — | ADR 113-117 | post-update |
 
 **Actuated** counts turns that reached the aircraft — `grep -c 'map boundary
 ahead, rolling away'`. Added 2026-09-03, when the gap became visible: 14 requests
@@ -187,6 +203,92 @@ small manual cost, and it is the price of the log being destroyed on each run.
 The series will read poorly for a while. Three points cannot separate a 3x
 change from ordinary variance, and pretending otherwise is how a tuning change
 gets adopted on noise.
+
+### ADR 107, first full session
+
+The two claims came apart exactly as the section below anticipated.
+
+**The mechanical claim held.** 65 turns engaged, 65 actuated — 100%, against 29%
+and 50% on the rows above. The 10-of-14 delivery gap ADR 107 was written to close
+is closed.
+
+**The outcome claim did not.** 0.11 crossings per mission against a 0.10
+baseline: no movement at all.
+
+So the tactic now fires every time and does not work. Two measurements say why
+it is the geometry and not the timing:
+
+- **46% of turns still ran to the 12 s cap** — the aircraft does not recede.
+- Where a turn was running, range went **0.45R to 0.06R** and **0.27R to 0.03R**.
+  Bank *and* pull, and it closed anyway. ADR 107 D2 argued adding pitch was what
+  would make the turn effective; on this evidence it is not.
+
+A second and separate gap: only **3 of 8** crossings had a BoundaryTurn anywhere
+in the preceding 20 ticks. Five had no turn at all in the last ~30 seconds —
+crossed too fast to catch, no reading, or suppressed by the D4 emergency yield.
+That is a different question from why a running turn fails, and worth keeping
+apart from it.
+
+### ADR 108, and why the 0.00 row means nothing
+
+The 1h29m row read **zero crossings in 15 missions** and was tempting. The 4h22m
+row that followed, on identical code, read **0.26** — inside the pre-existing
+0.10-0.34 band.
+
+At a 0.10 baseline, 15 missions expects about 1.5 crossings, so zero is well
+within chance. This is the third time the table has shown a small sample
+flattering a change, and it is why the target below asks for five sessions
+rather than one good one.
+
+What the larger session did establish is where the remaining failure is. Nine of
+its twelve crossings happened with **BoundaryTurn actively running**, and all
+twelve had a turn in the preceding 20 ticks — so the tactic is present and
+firing. The release rule was the defect: over 105 turns the median release was
+0.34R, 40% released inside 0.30R and 27% inside 0.20R, one of them at 0.06R.
+Recession alone was letting go of aircraft still on the edge. ADR 107 D5 now
+carries a hysteresis band.
+
+Detection itself is healthy after ADR 108 — 31% readable with a median reading
+of 0.42R, against 19% and a median of 0.07R when the detector was reading desert
+terrain.
+
+### 2026-09-04 — the tactic is break-even, on 61 measured turns
+
+0.14 crossings per mission, inside the 0.10-0.34 band the metric has occupied
+since before ADR 107 existed. Six sessions of work on this tactic have not moved
+it out of that band.
+
+With the sampler corrected, the turn could finally be measured. Pairing the
+controller's attitude summary with the handler's range line — adjacent in the
+log, no new instrumentation needed — over 61 turns:
+
+| | |
+|---|---:|
+| median swing | 27 deg |
+| median range gained | **+0.00R** |
+| turns gaining 0.10R or more | 13 |
+| turns losing 0.10R or more | 15 |
+
+Near-symmetric. The aircraft rotates hard and the range does not respond. See
+ADR 107's negative-result section, including two readings retracted there.
+
+**Crossings clustered rather than arriving steadily:**
+
+```
+02:13  02:30  02:52  02:58  ·········(2h13m)·········  05:11  05:36
+```
+
+Four in 45 minutes, then two hours clean, then two in 25. That shape argues the
+rate is driven by circumstance — map, opponents, where the fighting happens —
+more than by per-tick tactics, and it is the strongest support yet for the map
+question below.
+
+**The evidence needed to test it was not captured.** All six crossings were
+suppressed by the shared capture cap, which had already filled with approach
+frames: 18 approach frames saved, 0 crossing frames, 125 suppressed. ADR 108 D4
+named this risk and then implemented a single FIFO counter, which gives the
+frequent event priority — the opposite of what it argued for. Fixed by giving
+crossings a reserved budget.
 
 ### After ADR 107
 

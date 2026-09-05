@@ -287,8 +287,32 @@ debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, ca
 # turn denies a firing solution; nothing else contributes to staying alive, so
 # nothing else is in the loop. Flares stay with the incoming-missile detector,
 # which knows when one is actually inbound.
-loiter_mission: {target_alt: 7000, hysteresis_m: 500, orbit_direction: right,
-  orbit_roll_interval_s: 3.0, orbit_roll_hold_s: 0.6, tick_s: 1.0}
+# ADR 115: hold at 5000 m, not 7000 m. Measured 2026-09-04 21:31-21:34, median
+# speed by altitude: 4-5 km 1154 KPH, 5-6 km 876, 6-7 km 369 (min 84), 7-8 km
+# 576. The old band (6500-7500) sat in the aircraft's worst-performing region,
+# so the climb plateaued below it and the orbit had no energy to hold a turn.
+loiter_mission: {target_alt: 5000, hysteresis_m: 500, orbit_direction: right,
+  orbit_roll_interval_s: 3.0, orbit_roll_hold_s: 0.6, tick_s: 1.0,
+  # ADR 112: pitch is a CLOSED LOOP on altitude, not a nudge on every roll.
+  # Roll alone descends — 6709 m to 6385 m in 18 s on 2026-09-04. Holding
+  # nose-up unconditionally is the same error mirrored: 6634 m to 10189 m in
+  # the 18:47 hold, 3200 m above target, speed 1782 to 528 KPH. So pitch
+  # corrects toward target and does nothing within orbit_deadband_m of it.
+  orbit_pitch_hold_s: 0.35, orbit_deadband_m: 150, lock_timeout_s: 5.0,
+  # ADR 114: level the nose before circling. The climb exits on ALTITUDE and
+  # says nothing about attitude — measured handover at 7113 m with the nose at
+  # +82 deg, which zoomed to 8401 m, bled 962 to 207 KPH, stalled and departed.
+  level_band_deg: 20, recover_hold_s: 0.8,
+  # ADR 111: reverse the orbit when circling is carrying it toward the edge.
+  # Band is wider than BoundaryTurn's — reversing a circle is cheap, so
+  # starting early costs nothing. Cooldown stops a noisy reading spinning
+  # the aircraft back and forth instead of turning.
+  boundary_avoid_frac: 0.60, boundary_max_age_s: 4.0,
+  # Compared across ORBITS, not samples: in a circle the range naturally
+  # oscillates, so a per-sample rule reverses about half the time and the
+  # aircraft weaves instead of turning (measured 2026-09-04, six reversals
+  # in thirty seconds). One window is about one orbit.
+  orbit_window_s: 15.0, closing_margin: 0.05}
 
 j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_altitude: 500,
   bearing_deadzone_deg: 12, short_ring_min_count: 1, ring_debounce_ticks: 2, ema_reseed_angle_deg: 60,
@@ -304,7 +328,20 @@ behavior_tree:
   # not built, so there is no selection-only variant. recede_frac is the margin
   # dist must rise above the turn's CLOSEST approach before the aircraft counts
   # as escaping; sized just above the 0.02-0.05R tick noise measured 2026-09-01.
-  boundary: {turn_frac: 0.50, recede_frac: 0.06, hold_s: 3.0}
+  # release_frac / min_clear_frac are the hysteresis: enter at turn_frac,
+  # let go only once genuinely clear. Recession alone released at a median
+  # 0.34R on 2026-09-03, 27% of turns inside 0.20R, handing back aircraft
+  # still on the edge — 9 of 12 crossings that session had a turn running.
+  boundary: {turn_frac: 0.50, recede_frac: 0.06, hold_s: 3.0,
+    release_frac: 0.60, min_clear_frac: 0.35,
+    # Consecutive blind ticks before a held turn lets go. The detector is
+    # blind on ~70% of ticks, so an UNBOUNDED freeze is a latch — one held
+    # through a respawn on 2026-09-04 and re-selected a second after it.
+    blind_ticks: 3,
+    # Minimum forward/dist to ENTER a turn — the cosine of the bearing to
+    # the nearest edge point. Genuine approaches run a median 0.82 (p10
+    # 0.24) over 184 pre-crossing ticks; a boundary abeam reads near 0.
+    entry_ratio: 0.25}
   missile_evade: {enabled: true, clear_seconds: 3.0, min_clear_samples: 2, max_manoeuvre_s: 6.0,
     max_hold_s: 15.0, pitch_down: false}
   climb:
@@ -343,18 +380,46 @@ behavior_tree:
 # mark where the battle is; `friendly_hsv` are their bounds, measured on the
 # Design 010 frames and deliberately not hue-wrapped, so red enemies cannot
 # leak into the friendly centroid.
-minimap: {mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
+# ADR 113: readings are median-filtered over the last 3 within
+# boundary_median_age_s. 16% of raw consecutive ticks moved more than 0.15R and
+# 3% more than 0.40R, which no aircraft speed explains; the filter cuts those
+# to 6% and 1%.
+# ADR 117: the detector read on 23% of ticks. Capture what the OTHER 77% looks
+# like — every frame in the corpus so far is one where detection succeeded.
+minimap: {blind_capture_max: 40, blind_capture_interval_s: 45.0,
+  boundary_median_age_s: 5.0, mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
   ema_reset_after_s: 5.0, regroup_enabled: true,
   friendly_hsv: {lower: [40, 90, 90], upper: [85, 255, 255]},
-  boundary_hsv: {lower: [8, 120, 120], upper: [28, 255, 255]},
+  # ADR 108: saturation floor lowered from 120. The line is thin and
+  # antialiased on the post-2026-09-02 minimap, so its edge pixels sit
+  # well below 120 — at 120 the detector read nothing on 81% of ticks.
+  boundary_hsv: {lower: [8, 60, 120], upper: [28, 255, 255]},
+  # ONE closing pass, not two. Two bridges a 12 px speckle grid into a lattice
+  # whose thinness (0.019) is indistinguishable from the real line's (0.018) —
+  # the 2026-08-30 terrain false positive, reintroduced. One pass reconnects
+  # every one of the nine live crossing frames and bridges no speckle at all.
+  # Reconnect the fragmented line, then keep only components that are LOCALLY
+  # thin — largest distance-to-background inside them, as a fraction of the
+  # minimap radius. Measured: the line runs 1.4-9.2 px, desert terrain 34.5-50.2.
+  # Aggregate ratios were tried first and let a ragged landmass straight through.
+  boundary_close_iters: 1, boundary_max_thickness_frac: 0.10,
   boundary_min_px: 20, boundary_min_span_frac: 0.5,
   boundary_near_frac: 0.35, boundary_trace_ticks: 20,
   # ADR 106: save the whole frame on a CONFIRMED crossing, to test whether
   # crossings cluster on particular maps. Confirmed only — the colour
   # trigger is 94% false positives. Capped per session; the folder is
   # gitignored but the frames are ~2 MB each.
+  # Seconds after a respawn before boundary readings are trusted. The
+  # overlay outlives the FSM's respawn flag: one tick after respawn=False
+  # cleared, a well-formed 0.073R reading appeared with the banner colour
+  # trigger firing on the same frame. Nothing respawns 0.07R from an edge.
+  boundary_respawn_settle_s: 5.0,
   boundary_capture_dir: test_screenshots/unknown_anomalies,
-  boundary_capture_max: 20}
+  boundary_capture_max: 20,
+  # Approaches get their OWN budget. A single shared counter gave priority
+  # to whichever event arrived first — the frequent one — and cost every
+  # crossing frame of the 2026-09-04 session.
+  boundary_approach_capture_max: 10}
 # Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
 # acted on — it appears only after the crossing, so it measures the
 # outcome rather than preventing it.

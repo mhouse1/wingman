@@ -996,3 +996,39 @@ def test_manual_takeover_stops_the_turn(monkeypatch):
     ctrl.release_for_manual_takeover()
     assert _wait_for(lambda: not ctrl.is_boundary_turning(), timeout=4.0)
     assert _releases(kb, ROLL_RIGHT_KEY) and _releases(kb, NOSE_UP_KEY)
+
+
+def test_the_turn_reports_what_the_airframe_did(monkeypatch):
+    """ADR 107 V9. Two sessions say a commanded turn does not move the aircraft
+    away from the edge, and nothing recorded whether the AIRFRAME responded —
+    only whether the range did. Without this, "the turn does not work" cannot be
+    split into keys-not-arriving, aircraft-not-rotating, and
+    rotated-but-range-did-not-follow."""
+    from wingman.controller import _summarise_turn
+    assert "n/a" in _summarise_turn([])
+    assert "n/a" in _summarise_turn([(None, None, None)])
+    line = _summarise_turn([(10.0, 900.0, 4000.0), (-40.0, 1500.0, 3000.0)])
+    assert "swing 50" in line, line
+    assert "speed 900..1500" in line
+    assert "n=2" in line
+
+
+def test_the_summary_reports_range_not_endpoints():
+    """A turn that swings the nose through 90 degrees and back reads as no
+    change on endpoints alone — the exact ambiguity V9 needs resolved."""
+    from wingman.controller import _summarise_turn
+    line = _summarise_turn([(0.0, None, None), (90.0, None, None), (0.0, None, None)])
+    assert "swing 90" in line, line
+
+
+def test_the_turn_sampler_keys_on_the_reading_not_the_call():
+    """2026-09-04: a 3.0 s turn reported "swing 0, n=11" — eleven samples of ONE
+    reading. get_telemetry() stamps `taken_at_s` with time.time() on every call,
+    so deduplicating on it never dedupes. The signals carry their own accept
+    timestamps; those are what change when a new reading lands."""
+    import inspect
+    from wingman.controller import Controller
+    src = inspect.getsource(Controller.boundary_turn_mode)
+    assert 'getattr(_snap.speed, "ts", None)' in src
+    assert "taken_at_s" not in src.split("_last_ts[0]")[0].split("_ts = ")[-1], \
+        "taken_at_s changes every call and cannot deduplicate"

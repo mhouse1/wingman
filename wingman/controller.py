@@ -151,6 +151,33 @@ REGION_TAP_HERE          = "TAP_HERE_TO_CONTINUE"
 REGION_UNLOCK_CLOSE      = "UNLOCK_CLOSE"
 REGION_FINAL_CONTINUE    = "FINAL_CONTINUE"
 
+def _summarise_turn(samples) -> str:
+    """One line describing what the airframe did during a boundary turn.
+
+    Reports the RANGE of each channel rather than its start and end: a turn that
+    swung the nose through 90 degrees and came back reads as no change on
+    endpoints alone, and that is precisely the ambiguity ADR 107 V9 needs
+    resolved.
+    """
+    usable = [s for s in samples if s[0] is not None]
+    if not usable:
+        return "attitude n/a (no fresh telemetry during the turn)"
+    pitch = [s[0] for s in usable]
+    spd = [s[1] for s in usable if s[1] is not None]
+    alt = [s[2] for s in usable if s[2] is not None]
+    parts = [f"nose {min(pitch):+.0f}..{max(pitch):+.0f}deg "
+             f"(swing {max(pitch) - min(pitch):.0f})"]
+    if spd:
+        parts.append(f"speed {min(spd):.0f}..{max(spd):.0f}")
+    if alt:
+        parts.append(f"alt {min(alt):.0f}..{max(alt):.0f}")
+    # n is DISTINCT telemetry readings, not loop ticks — a turn shorter than the
+    # ~3 s telemetry cadence can only ever produce one, and "swing 0, n=1" means
+    # "not measured", not "did not rotate".
+    parts.append(f"n={len(usable)}")
+    return ", ".join(parts)
+
+
 class Controller:
     def __init__(
         self,
@@ -252,6 +279,12 @@ class Controller:
 
         # Search-and-destroy loop state (padlock + weapon fire; used during disengage)
         self._sdl_stop: threading.Event | None = None
+        # ADR 118: start and stop of the search-and-destroy loops must not
+        # interleave. The start assigns both Thread objects and only then
+        # starts them, so a concurrent stop could join a thread that had never
+        # been started.
+        self._sdl_lifecycle_lock = threading.Lock()
+        self._sdl_lifecycle_timeout_s = 2.0
         self._sdl_padlock_thread: threading.Thread | None = None
         self._sdl_weapon_thread: threading.Thread | None = None
         self._target_painting_mode = target_painting_mode
@@ -386,12 +419,43 @@ class Controller:
         self._climb_pulse_s = float(_cl_cfg.get("pitch_pulse_s", 1.5))
         # mission_loiter: survival hold. Altitude buys reaction time and the
         # turn denies a firing solution, so those are the only two things it does.
-        _lo = (config.get("loiter_mission", {}) or {}) if isinstance(config, dict) else {}
+        # ADR 116: from the ControllerConfig block, NOT from `config` as a
+        # dict. `config` is a ControllerConfig dataclass, so the previous
+        # `isinstance(config, dict)` guard was always False and every value
+        # below silently used its default — config.yaml's loiter_mission
+        # section had never been read.
+        _lo = getattr(config, "loiter", None) or {}
         self._loiter_target_alt = float(_lo.get("target_alt", 7000))
         self._loiter_hysteresis_m = float(_lo.get("hysteresis_m", 500))
         self._loiter_orbit_direction = str(_lo.get("orbit_direction", "right"))
         self._loiter_orbit_interval_s = float(_lo.get("orbit_roll_interval_s", 3.0))
         self._loiter_orbit_hold_s = float(_lo.get("orbit_roll_hold_s", 0.6))
+        # ADR 110: back-pressure that goes with the roll, so the orbit is a
+        # LEVEL turn. Short — the climb owns real altitude gain.
+        self._loiter_orbit_pitch_s = float(_lo.get("orbit_pitch_hold_s", 0.35))
+        # Deadband around the hold target. Inside it the orbit commands no
+        # pitch at all — correcting every tick is what drove the aircraft out of
+        # the band in both directions.
+        self._loiter_orbit_deadband_m = float(_lo.get("orbit_deadband_m", 150.0))
+        # ADR 114: the hold levels the aircraft before it circles. Nose beyond
+        # this band means the climb handed over mid-zoom (or the aircraft has
+        # departed), and neither is a state the orbit can control.
+        self._loiter_level_band_deg = float(_lo.get("level_band_deg", 20.0))
+        self._loiter_recover_hold_s = float(_lo.get("recover_hold_s", 0.8))
+        # ADR 111: how long to wait for an outgoing mission to release the lock
+        # before refusing the hold. Two missions on one airframe is worse than
+        # none.
+        self._loiter_lock_timeout_s = float(_lo.get("lock_timeout_s", 5.0))
+        # ADR 111: reverse the orbit when it is carrying the aircraft toward the
+        # edge. The band is wider than BoundaryTurn's, because reversing a
+        # circle is cheap and starting it early costs nothing.
+        self._loiter_avoid_frac = float(_lo.get("boundary_avoid_frac", 0.60))
+        # One window is about one orbit: long enough that a circle's natural
+        # range variation averages out, so only a DRIFT toward the edge shows.
+        self._loiter_orbit_window_s = float(_lo.get("orbit_window_s", 15.0))
+        self._loiter_closing_margin = float(_lo.get("closing_margin", 0.05))
+        self._loiter_boundary_max_age_s = float(
+            _lo.get("boundary_max_age_s", 4.0))
         self._loiter_tick_s = float(_lo.get("tick_s", 1.0))
         self._climb_observe_s = float(_cl_cfg.get("pulse_observe_s", 2.5))
         self._climb_min_rate = float(_cl_cfg.get("min_climb_rate", 30.0))
@@ -431,6 +495,11 @@ class Controller:
         self._boundary_turning = threading.Event()
         self._boundary_turn_thread: "threading.Thread | None" = None
         self._boundary_turn_stop = threading.Event()
+        self._loitering = threading.Event()   # ADR 109: survival hold active
+        self._loiter_boundary = None          # ADR 111: (dist, fwd, ts)
+        self._loiter_window_min = None
+        self._loiter_prev_window_min = None
+        self._loiter_window_started = 0.0
         self._climbing = threading.Event()
         self._climb_thread: "threading.Thread | None" = None
         self._climb_stop = threading.Event()
@@ -1732,6 +1801,21 @@ class Controller:
         Loops stop when either _sdl_stop is set (explicit stop) or
         _mission_cancel is set (any cancellation signal), whichever comes first.
         """
+        # ADR 118: serialised against stop_search_and_destroy_loop. Timeout
+        # rather than a bare `with`, per the main-loop lock rule — this is
+        # called from mission threads and from the tick path.
+        if not self._sdl_lifecycle_lock.acquire(timeout=self._sdl_lifecycle_timeout_s):
+            logger.warning("Controller: search_and_destroy_loop start — lifecycle "
+                           "lock busy, skipping start")
+            return
+        try:
+            self._start_search_and_destroy_locked()
+        finally:
+            if self._sdl_lifecycle_lock.locked():
+                self._sdl_lifecycle_lock.release()
+
+    def _start_search_and_destroy_locked(self):
+        """The body of the start, with the lifecycle lock already held."""
         padlock_alive = (self._sdl_padlock_thread is not None
                          and self._sdl_padlock_thread.is_alive())
         weapon_alive = (self._sdl_weapon_thread is not None
@@ -1789,18 +1873,35 @@ class Controller:
         logger.info("Controller: search_and_destroy_loop started")
 
     def stop_search_and_destroy_loop(self):
-        """Stop the search-and-destroy padlock + weapon-fire loops."""
-        if self._sdl_stop is None or self._sdl_stop.is_set():
-            logger.debug("Controller: search_and_destroy_loop not running")
+        """Stop the search-and-destroy padlock + weapon-fire loops.
+
+        ADR 118: serialised against the start, and each join is guarded by
+        `is_alive()`. Measured 2026-09-05 01:05:11 — a stop landed between the
+        start's thread ASSIGNMENT and its `.start()`, so the join raised
+        `RuntimeError: cannot join thread before it is started` and took
+        mission_j20 down with it.
+        """
+        if not self._sdl_lifecycle_lock.acquire(timeout=self._sdl_lifecycle_timeout_s):
+            logger.warning("Controller: search_and_destroy_loop stop — lifecycle "
+                           "lock busy, leaving the loops running")
             return
-        self._sdl_stop.set()
-        if self._sdl_padlock_thread:
-            self._sdl_padlock_thread.join(timeout=1.0)
-            self._sdl_padlock_thread = None
-        if self._sdl_weapon_thread:
-            self._sdl_weapon_thread.join(timeout=1.0)
-            self._sdl_weapon_thread = None
-        logger.info("Controller: search_and_destroy_loop stopped")
+        try:
+            if self._sdl_stop is None or self._sdl_stop.is_set():
+                logger.debug("Controller: search_and_destroy_loop not running")
+                return
+            self._sdl_stop.set()
+            for name in ("_sdl_padlock_thread", "_sdl_weapon_thread"):
+                t = getattr(self, name)
+                # is_alive() is False both for a finished thread and for one
+                # that was never started, and join() is only valid for the
+                # former — so ask before joining rather than after.
+                if t is not None and t.is_alive():
+                    t.join(timeout=1.0)
+                setattr(self, name, None)
+            logger.info("Controller: search_and_destroy_loop stopped")
+        finally:
+            if self._sdl_lifecycle_lock.locked():
+                self._sdl_lifecycle_lock.release()
 
     def disengage_roll_right(self, duration: float = 10.0):
         """Cancel mission maneuvers then hold ROLL_RIGHT_KEY for `duration` seconds.
@@ -2135,6 +2236,14 @@ class Controller:
         """True while the ADR 107 turn owns the airframe."""
         return self._boundary_turning.is_set()
 
+    def stop_boundary_turn(self) -> None:
+        """End a running boundary turn (ADR 107).
+
+        Called when the leaf is no longer selected. The thread's own finally
+        does the key release and the SAF-010 handback, so this only has to ask.
+        """
+        self._boundary_turn_stop.set()
+
     def boundary_turn_mode(self, max_s: "float | None" = None):
         """Bank and pull away from the arena edge (ADR 107).
 
@@ -2174,6 +2283,14 @@ class Controller:
             for _k in guarded:
                 self._inc_programmatic_key(_k)
             started = time.time()
+            # ADR 107 V9: two sessions say a commanded turn does not move the
+            # aircraft away from the edge, and nothing records whether the
+            # AIRFRAME responded at all — only whether the range did. Sample the
+            # attitude so "the turn does not work" can be separated into "the
+            # keys did not arrive", "the aircraft did not rotate" and "it
+            # rotated and the range did not follow".
+            samples = []
+            _last_ts = [None]
             try:
                 # Stopping the climb first: two writers on pitch with different
                 # targets is the interaction ADR 107 D8 refuses to ship.
@@ -2187,6 +2304,29 @@ class Controller:
                         logger.info("Controller: boundary turn yielding — "
                                     "defensive tactic took the airframe")
                         break
+                    try:
+                        _snap = self._analyzer.get_telemetry()
+                        # Sample on a NEW telemetry reading, not on the loop
+                        # tick. Telemetry lands every ~3 s and this loop runs at
+                        # 0.25 s, so a timer-driven sampler records the same
+                        # reading a dozen times: on 2026-09-04 a 7.5 s turn
+                        # reported "swing 0, n=12" from ONE reading, which reads
+                        # as "the aircraft did not rotate" and is not what it
+                        # measured.
+                        # Key on when the READING was accepted, not on
+                        # taken_at_s: get_telemetry() stamps that with
+                        # time.time() on every call, so it changes every tick
+                        # and can never deduplicate. Measured 2026-09-04 — a
+                        # 3.0 s turn still reported n=11 identical samples.
+                        _ts = (getattr(_snap.speed, "ts", None),
+                               getattr(_snap.altitude, "ts", None))
+                        if _ts != _last_ts[0]:
+                            _last_ts[0] = _ts
+                            samples.append((_snap.pitch_angle_deg(),
+                                            getattr(_snap.speed, "value", None),
+                                            _snap.altitude.stable_value))
+                    except Exception:
+                        pass          # instrumentation never ends a manoeuvre
                     if time.time() - started >= cap_s:
                         logger.info("Controller: boundary turn — %.0fs cap reached",
                                     cap_s)
@@ -2209,8 +2349,8 @@ class Controller:
                     self._arm_release_grace(_k, span_s=_span)
                     self._dec_programmatic_key(_k)
                 self._boundary_turning.clear()
-                logger.info("Controller: boundary turn complete (%.1fs)",
-                            time.time() - started)
+                logger.info("Controller: boundary turn complete (%.1fs) — %s",
+                            time.time() - started, _summarise_turn(samples))
 
         self._boundary_turn_thread = threading.Thread(target=_run, daemon=True)
         self._boundary_turn_thread.start()
@@ -2893,6 +3033,86 @@ class Controller:
             remaining -= interval
         return True
 
+    def _loiter_pick_orbit_direction(self, now: float) -> None:
+        """Reverse the orbit when the CIRCLE is walking into the edge.
+
+        ADR 111. `detect_map_boundary` returns range and a forward component
+        with no lateral term, so the direction cannot be read off one sample —
+        the ADR 107 D2 limitation. The orbit is already turning, so it closes
+        the loop on the measured range instead.
+
+        Compared ACROSS ORBITS, not across samples. The first version reversed
+        whenever the range stopped improving, which in a circle is true about
+        half the time by construction: you approach the edge on one half and
+        recede on the other. Measured 2026-09-04 18:19 — six reversals in
+        thirty seconds, alternating every cooldown, with the range simply
+        oscillating 0.46 / 0.51 / 0.36 / 0.48 / 0.43 / 0.48. The aircraft wove
+        instead of circling, and a weave never completes a turn.
+
+        So each window of ``orbit_window_s`` (about one orbit) keeps its closest
+        approach, and the direction flips only when consecutive windows are
+        getting closer by a margin — a circle drifting toward the edge, rather
+        than a circle whose range naturally varies.
+        """
+        b = self._loiter_boundary
+        if b is None or b[0] is None:
+            return
+        dist, _fwd, ts = b
+        if now - ts > self._loiter_boundary_max_age_s:
+            return                    # a stale reading says nothing about now
+        if dist > self._loiter_avoid_frac:
+            # Clear of the edge: forget the history rather than compare across
+            # an excursion that has nothing to do with the current geometry.
+            self._loiter_window_min = None
+            self._loiter_prev_window_min = None
+            self._loiter_window_started = 0.0
+            return
+
+        if not self._loiter_window_started or self._loiter_window_min is None:
+            self._loiter_window_started = self._loiter_window_started or now
+            self._loiter_window_min = dist
+            return
+        self._loiter_window_min = min(self._loiter_window_min, dist)
+        if now - self._loiter_window_started < self._loiter_orbit_window_s:
+            return
+
+        prev, cur = self._loiter_prev_window_min, self._loiter_window_min
+        self._loiter_prev_window_min = cur
+        # Seed the next window with THIS sample, not None — the next tick calls
+        # min() on it and a None there is a crash, not an empty window.
+        self._loiter_window_min = dist
+        self._loiter_window_started = now
+        if prev is None:
+            return                    # need two orbits to see a trend
+        if cur > prev - self._loiter_closing_margin:
+            return                    # holding station, or opening out
+        self._loiter_orbit_direction = (
+            "left" if self._loiter_orbit_direction == "right" else "right")
+        logger.info("\033[93mController: mission_loiter - circle closing on the "
+                    "edge (%.2fR after %.2fR), orbiting %s instead\033[0m",
+                    cur, prev, self._loiter_orbit_direction)
+
+    def note_boundary(self, dist, forward) -> None:
+        """Latest map-boundary reading, for the loiter orbit (ADR 111).
+
+        Instrumentation only in the sense that nothing here steers on it
+        directly — the orbit uses it to decide WHICH WAY to circle, which is the
+        one boundary decision loiter can make for itself.
+        """
+        self._loiter_boundary = (dist, forward, time.time())
+
+    def is_survival_hold(self) -> bool:
+        """True while mission_loiter owns the aircraft.
+
+        Loiter's whole objective is staying alive, so tactics that trade the
+        airframe for a tactical outcome must not pre-empt it — Eject above all.
+        Measured 2026-09-04 09:58:45: with the rack empty, Eject dove the
+        aircraft at -71 degrees and -660 m/s, suppressed loiter's climb for four
+        seconds ("climb suppressed — eject in progress"), and killed it. A
+        survival hold that ejects is not a survival hold.
+        """
+        return self._loitering.is_set()
+
     def mission_loiter(self):
         """Stay alive: climb to a holding altitude and orbit there.
 
@@ -2928,18 +3148,46 @@ class Controller:
 
         @relation(SAF-001, scope=function)
         """
-        acquired = self._mission_lock.acquire(blocking=False)
+        # ADR 111: 'y' is an OPERATOR command, so it takes the aircraft rather
+        # than queuing behind whatever is running. GAME_BATTLE starts
+        # mission_j20 automatically; a survival hold asked for by hand outranks
+        # a mission started by a state transition, and the old
+        # acquire(blocking=False) made the keypress a silent no-op whenever j20
+        # held the lock — the operator pressed 'y' and nothing happened.
+        if self._mission_lock.locked():
+            logger.info("\033[93mController: mission_loiter - cancelling the "
+                        "running mission to take the hold\033[0m")
+            self.cancel_mission()
+        acquired = self._mission_lock.acquire(
+            timeout=self._loiter_lock_timeout_s)
         if not acquired:
-            logger.debug("Controller: mission already in progress, skipping")
+            # The outgoing mission's teardown is stuck. Refusing is the safe
+            # outcome: two missions on one airframe is worse than none.
+            logger.warning("\033[91mController: mission_loiter - mission lock "
+                           "not released within 5s, hold not started\033[0m")
             return
 
         logger.info("\033[92mController: mission_loiter - holding to stay alive "
                     "(target %.0f m)\033[0m", self._loiter_target_alt)
+        self._loitering.set()          # ADR 109: Eject must yield to this
+        # ADR 111: and STOP one already running. ADR 109 keeps Eject from being
+        # SELECTED during a hold; it does nothing about a dive already in
+        # progress when the hold begins. Measured 2026-09-04 15:40:55 — 'y'
+        # pressed six seconds into an eject, loiter started, and the dive kept
+        # pulsing (nose -58 deg) for another eleven seconds until the aircraft
+        # hit the ground. The operator asked to stay alive; a manoeuvre whose
+        # purpose is to end the aircraft cannot outrank that.
+        if self._ejecting.is_set():
+            logger.info("\033[93mController: mission_loiter - cancelling the "
+                        "eject in progress\033[0m")
+            self._eject_stop_reason = "survival_hold"
+            self._eject_stop.set()
         self._mission_complete.clear()
         self._mission_cancel.clear()
 
         def _mission_runner():
             last_orbit_ts = 0.0
+            last_pitch = ""
             last_state = None
             no_telemetry_since = 0.0
             try:
@@ -2950,8 +3198,12 @@ class Controller:
                     snap = (self._analyzer.get_telemetry()
                             if self._analyzer is not None else None)
                     now = time.time()
-                    fresh = snap is not None and snap.altitude_fresh
-                    alt = snap.altitude.stable if fresh else None
+                    # altitude_fresh is a METHOD; without the call it is a
+                    # bound method and always truthy, so `fresh` was never
+                    # False and the stale-read guard below never ran. Every
+                    # other call site in this file calls it.
+                    fresh = snap is not None and snap.altitude_fresh()
+                    alt = snap.altitude.stable_value if fresh else None
 
                     if alt is None:
                         # Hold whatever attitude the aircraft has. Commanding on
@@ -2963,6 +3215,13 @@ class Controller:
                         self._mission_cancel.wait(timeout=self._loiter_tick_s)
                         continue
                     no_telemetry_since = 0.0
+                    # ADR 114: attitude, not just altitude. Derived from the
+                    # altitude rate against speed, so it is None until the
+                    # telemetry has two reads to work with.
+                    try:
+                        _pitch_deg = snap.pitch_angle_deg()
+                    except Exception:
+                        _pitch_deg = None
 
                     if alt < self._loiter_target_alt - self._loiter_hysteresis_m:
                         if last_state != "climb":
@@ -2973,6 +3232,37 @@ class Controller:
                             last_state = "climb"
                         # Idempotent while its thread is alive (ADR 070 d8).
                         self.climb_mode(target_alt=self._loiter_target_alt)
+                    elif (_pitch_deg is not None
+                          and abs(_pitch_deg) > self._loiter_level_band_deg):
+                        # ADR 114: RECOVER before circling.
+                        #
+                        # The climb exits on ALTITUDE and says nothing about
+                        # attitude, so the hold inherits whatever the climb left
+                        # behind. Measured 2026-09-04 21:20:54, handover at
+                        # 7113 m with the nose at +82 deg and 962 KPH: the
+                        # aircraft zoomed on to 8401 m, bled to 207 KPH, fell
+                        # through the stall and departed to -69 deg, and was
+                        # descending through 6208 m 30 s later.
+                        #
+                        # A 0.35 s orbit pulse cannot argue with that. Rolling
+                        # makes it worse — banking an aircraft with no energy
+                        # is how the departure happens. So level the nose
+                        # first, with a sustained input and no roll, and orbit
+                        # only once the aircraft is flyable.
+                        if last_state != "recover":
+                            logger.info("Controller: mission_loiter - recovering "
+                                        "(nose %+.0f deg at %.0f m) — levelling "
+                                        "before the orbit", _pitch_deg, alt)
+                            last_state = "recover"
+                            last_pitch = ""
+                        if _pitch_deg > 0:
+                            self.nose_down(
+                                hold_seconds=self._loiter_recover_hold_s,
+                                block=False)
+                        else:
+                            self.nose_up(
+                                hold_seconds=self._loiter_recover_hold_s,
+                                block=False)
                     else:
                         if last_state != "orbit":
                             logger.info("Controller: mission_loiter - holding at "
@@ -2981,16 +3271,61 @@ class Controller:
                             last_state = "orbit"
                         if now - last_orbit_ts >= self._loiter_orbit_interval_s:
                             last_orbit_ts = now
+                            # Roll is the circle and is unconditional. PITCH is
+                            # a closed loop on altitude, not a nudge on every
+                            # tick.
+                            #
+                            # Roll alone DESCENDS — a banked turn with no
+                            # back-pressure sank 6709 m to 6385 m in 18 s, which
+                            # re-triggered the climb and stalled the aircraft.
+                            # But holding nose-up unconditionally is the same
+                            # error mirrored: measured 2026-09-04 18:47, the
+                            # orbit climbed 6634 m to 10189 m — 3200 m ABOVE
+                            # target — with speed decaying 1782 to 528 KPH, on
+                            # its way to the same stall from the other side.
+                            #
+                            # So pitch corrects toward the target and does
+                            # nothing inside a deadband, which is what "circle
+                            # at altitude" means. The climb still owns real
+                            # altitude gain, with its own fuel floor and cap.
+                            self._loiter_pick_orbit_direction(now)
                             roll = (self.roll_right
                                     if self._loiter_orbit_direction == "right"
                                     else self.roll_left)
                             roll(hold_seconds=self._loiter_orbit_hold_s, block=False)
+                            _err = alt - self._loiter_target_alt
+                            if _err < -self._loiter_orbit_deadband_m:
+                                _pitch = "up"
+                                self.nose_up(
+                                    hold_seconds=self._loiter_orbit_pitch_s,
+                                    block=False)
+                            elif _err > self._loiter_orbit_deadband_m:
+                                _pitch = "down"
+                                self.nose_down(
+                                    hold_seconds=self._loiter_orbit_pitch_s,
+                                    block=False)
+                            else:
+                                _pitch = "hold"
+                            # ADR 112 V4 needs the BRANCH, not just the
+                            # altitude. "6800 m and sinking" and "6800 m with
+                            # no pitch authority" are the same altitude trace
+                            # and different bugs. Logged on change only.
+                            if _pitch != last_pitch:
+                                logger.info(
+                                    "Controller: mission_loiter - orbit pitch "
+                                    "%s (%.0f m, %+.0f m from hold)",
+                                    _pitch, alt, _err)
+                                last_pitch = _pitch
 
                     self._mission_cancel.wait(timeout=self._loiter_tick_s)
                 logger.info("\033[91mController: mission_loiter - ended\033[0m")
             except Exception:
                 logger.exception("Controller: mission_loiter failed")
             finally:
+                # ADR 109: clear the hold HERE, not at the end of the loop body.
+                # Every exit path — cancel, exception, respawn — must drop it, or
+                # Eject stays suppressed for an aircraft loiter no longer owns.
+                self._loitering.clear()
                 # The loop may have left a roll or a climb running.
                 self._climb_stop.set()
                 self._mission_complete.set()

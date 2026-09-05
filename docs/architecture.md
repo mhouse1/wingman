@@ -630,5 +630,8 @@ held afterburner and pitch key, and the operator could not fly.
 | [105](adr/105-close-the-nested-display-when-the-game-exits.md) | Close the nested display when the game exits on its own |
 | [106](adr/106-return-to-battle-rate-tracking.md) | RETURN TO BATTLE rate tracking: the series ADR 101 is judged by |
 | [107](adr/107-boundary-turn-tactic.md) | Boundary turn tactic: a first-class leaf that owns pitch and roll |
+| [108](adr/108-boundary-detection-for-the-new-minimap.md) | Boundary detection for the new minimap: reconnect the line, pick by shape |
+| [109](adr/109-eject-yields-to-the-survival-hold.md) | Eject yields to the survival hold: loiter's objective outranks the empty-rack trade |
+| [110](adr/110-the-survival-hold-owns-the-flight-path.md) | The survival hold owns the flight path: the combat branch yields, the orbit holds altitude |
 
 *(This index is incomplete: ADRs 073-097 are not yet listed.)*

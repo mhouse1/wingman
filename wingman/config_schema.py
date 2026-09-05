@@ -136,6 +136,15 @@ SCHEMA = Section(
             "orbit_direction": STR,
             "orbit_roll_interval_s": SECONDS,
             "orbit_roll_hold_s": SECONDS,
+            "orbit_pitch_hold_s": _num(0),
+            "orbit_deadband_m": _num(0),   # ADR 112
+            "level_band_deg": _num(0),     # ADR 114
+            "recover_hold_s": _num(0),
+                "lock_timeout_s": _num(0),
+                "boundary_avoid_frac": FRACTION,
+                "orbit_window_s": _num(0),
+                "closing_margin": FRACTION,
+                "boundary_max_age_s": _num(0),
             "tick_s": SECONDS,
         }),
         "enemy_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
@@ -292,6 +301,10 @@ SCHEMA = Section(
                 "turn_frac": FRACTION,
                 "recede_frac": FRACTION,
                 "hold_s": _num(0),
+                "release_frac": FRACTION,
+                "min_clear_frac": FRACTION,
+                "blind_ticks": _int(0),
+                "entry_ratio": FRACTION,
             }),
             "climb": Section(children={
                 "enabled": BOOL,
@@ -331,6 +344,9 @@ SCHEMA = Section(
         }),
 
         "minimap": Section(children={
+            "boundary_median_age_s": _num(0),   # ADR 113
+            "blind_capture_max": _int(0),       # ADR 117
+            "blind_capture_interval_s": _num(0),
             "mask_radius_frac": FRACTION,
             "min_blob_px": _int(0),
             "max_blob_px": _int(0),
@@ -343,10 +359,14 @@ SCHEMA = Section(
             "boundary_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
             "boundary_min_px": _int(0),
             "boundary_min_span_frac": FRACTION,
+            "boundary_close_iters": _int(0),
+            "boundary_max_thickness_frac": FRACTION,
             "boundary_near_frac": FRACTION,
             "boundary_trace_ticks": _int(1),
+            "boundary_respawn_settle_s": _num(0),
             "boundary_capture_dir": STR,
             "boundary_capture_max": _int(0),
+            "boundary_approach_capture_max": _int(0),
         }),
 
         "tracking": Section(children={

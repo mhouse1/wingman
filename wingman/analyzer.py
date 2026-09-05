@@ -982,6 +982,13 @@ class GameStateAnalyzer:
         self._boundary_hsv_lower = np.array(_b_cfg.get("lower", [8, 120, 120]), dtype=np.uint8)
         self._boundary_hsv_upper = np.array(_b_cfg.get("upper", [28, 255, 255]), dtype=np.uint8)
         self._boundary_min_px = int(minimap_cfg.get("boundary_min_px", 20))
+        # ADR 108: reconnection kernel and the line-vs-terrain shape gate.
+        self._boundary_close_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (5, 5))
+        self._boundary_close_iters = int(
+            (minimap_cfg or {}).get("boundary_close_iters", 1))
+        self._boundary_max_thickness_frac = float(
+            (minimap_cfg or {}).get("boundary_max_thickness_frac", 0.10))
         self._boundary_min_span_frac = float(
             minimap_cfg.get("boundary_min_span_frac", 0.5))
         _rtb = config.get("return_to_battle", {}) or {}
@@ -3720,23 +3727,55 @@ class GameStateAnalyzer:
                 cache = (width, height, _minimap_circle_mask(width, height, r_px))
                 self._minimap_circle_cache = cache
             mask &= cache[2]
-            # The boundary is a LINE. Requiring spatial coherence is not
-            # polish: live 2026-08-30, a pixel-count-only mask read a median
-            # 0.23R with the boundary "ahead" on a 52% coin flip, which is
-            # terrain in the amber hue band (sand, sunlit rock), not a map
-            # edge. Measured on the Design 010 frames the real line spans
-            # 0.85-1.62 R while the noise components span 0.01 R, so the
-            # separation is close to two orders of magnitude.
+            # ADR 108: reconnect the line before measuring it. The mask finds
+            # the boundary — 550 to 1400 px of it on the nine 2026-09-03
+            # crossing frames — but MetalStorm's minimap update left it thin and
+            # antialiased, so it arrives as 20 to 174 fragments. The span filter
+            # below then rejects every one of them, and the detector read
+            # NOTHING on 81% of ticks: five of eight crossings that session had
+            # no boundary reading in the 30 s before they happened.
+            mask = cv2.morphologyEx(
+                (mask > 0).astype(np.uint8) * 255, cv2.MORPH_CLOSE,
+                self._boundary_close_kernel,
+                iterations=self._boundary_close_iters)
             n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
                 (mask > 0).astype(np.uint8), connectivity=8)
+            # Pick the most line-LIKE component, not the largest. Spatial
+            # coherence alone is satisfied by a big terrain blob, and on the new
+            # minimap that is what the largest component often is.
+            #
+            # The test is the component's LOCAL thickness — the largest
+            # distance-to-background inside it. The boundary is a stroke of
+            # fixed width, so this stays ~1.4 px however long or curved it runs;
+            # a landmass is thick in the middle whatever its outline does.
+            #
+            # Two weaker tests were tried first and both failed on real data.
+            # Bounding-box FILL rejects a straight line, which fills its own
+            # thin box completely — caught by the synthetic tests. Aggregate
+            # thinness (area / span^2) passes a large irregular blob, because a
+            # ragged outline inflates the span: on 2026-09-03 desert terrain
+            # read 0.334 against a 0.5 gate and produced 32 turns in 12 minutes,
+            # one at round start with the aircraft nowhere near an edge.
+            #
+            # Measured on the live corpus: the real line runs 1.4-9.2 px and
+            # terrain 34.5-50.2 px. Expressed as a fraction of the minimap
+            # radius so it does not depend on capture resolution.
             min_span = self._boundary_min_span_frac * radius
-            keep = [i for i in range(1, n_labels)
-                    if max(stats[i, cv2.CC_STAT_WIDTH],
-                           stats[i, cv2.CC_STAT_HEIGHT]) >= min_span]
-            if not keep:
+            max_thick_px = self._boundary_max_thickness_frac * radius
+            best = None
+            for i in range(1, n_labels):
+                span = max(stats[i, cv2.CC_STAT_WIDTH],
+                           stats[i, cv2.CC_STAT_HEIGHT])
+                if span < min_span or span <= 0:
+                    continue
+                comp = (labels == i).astype(np.uint8)
+                if cv2.distanceTransform(comp, cv2.DIST_L2, 3).max() > max_thick_px:
+                    continue
+                if best is None or span > best[0]:
+                    best = (span, i)
+            if best is None:
                 return None
-            mask = np.isin(labels, keep)
-            ys, xs = np.nonzero(mask)
+            ys, xs = np.nonzero(labels == best[1])
             if len(xs) < self._boundary_min_px:
                 return None
             cx = (width - 1) / 2.0

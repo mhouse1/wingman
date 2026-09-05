@@ -777,8 +777,27 @@ class BehaviorTreeHandler:
                                     "test_screenshots/unknown_anomalies"))
         self._rtb_capture_max = int(
             (minimap_cfg or {}).get("boundary_capture_max", 20))
-        self._rtb_captures = 0
+        self._captures: "dict[str, int]" = {}
+        self._approach_capture_max = int(
+            (minimap_cfg or {}).get("boundary_approach_capture_max", 10))
         self._boundary_reading = None
+        self._turn_dists = []
+        self._respawn_settle_until = 0.0
+        self._boundary_respawn_settle_s = float(
+            (minimap_cfg or {}).get("boundary_respawn_settle_s", 5.0))
+        # ADR 113: the last few readings, for the median filter. Bounded by
+        # both length and age — a reading either side of a 30 s blind gap tells
+        # you nothing about the same approach.
+        self._boundary_recent = collections.deque(maxlen=3)
+        self._boundary_median_age_s = float(
+            (minimap_cfg or {}).get("boundary_median_age_s", 5.0))
+        # ADR 117: blind-frame evidence. Off by default in the sense that a cap
+        # of 0 disables it — it is a diagnostic, not a permanent cost.
+        self._blind_capture_max = int(
+            (minimap_cfg or {}).get("blind_capture_max", 40))
+        self._blind_capture_interval_s = float(
+            (minimap_cfg or {}).get("blind_capture_interval_s", 45.0))
+        self._blind_capture_next_ts = 0.0
         self._boundary_near_frac = float(
             (minimap_cfg or {}).get("boundary_near_frac", 0.25))
         self._boundary_turn_min_dist = 1.0
@@ -891,7 +910,16 @@ class BehaviorTreeHandler:
     def _start_disengage(self) -> None:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence
         clock — the legacy handler's fire-once-and-reset semantics, so the
-        next disengage requires a fresh full absence window."""
+        next disengage requires a fresh full absence window.
+
+        ADR 110: never during a survival hold. ``disengage_roll_right`` opens
+        with ``cancel_mission()``, and the condition is 30 s without an enemy —
+        which is precisely the state a survival hold produces. Loiter was built
+        to eventually cancel itself.
+        """
+        if self._ctrl.is_survival_hold():
+            logger.debug("Disengage suppressed — survival hold owns the aircraft")
+            return
         self._ctrl.disengage_roll_right()
         self._enemy_last_seen_ts = time.time()
 
@@ -963,8 +991,67 @@ class BehaviorTreeHandler:
         except Exception:
             logger.debug("Boundary read failed", exc_info=True)
             self._boundary_reading = None
+        # ADR 117: the RAW verdict, before the respawn settle and the median
+        # filter. Only a raw None is detector blindness; a reading that exists
+        # and is then suppressed is a decision we already understand, and
+        # capturing it as "blind" pollutes the corpus with frames whose answer
+        # is already known.
+        _boundary_raw = self._boundary_reading
+        # A respawn SETTLE, not just a respawn gate. The overlay is still on
+        # screen after the FSM clears is_respawning — measured 2026-09-04
+        # 01:33:29, one tick after respawn=False went away: dist=0.073 fwd=+0.032
+        # (bearing 0.44, so the entry gate passed it) with the banner colour
+        # trigger firing on the same frame. An aircraft does not respawn 0.07R
+        # from the edge, so the reading is false however well-formed it looks.
+        if is_respawning:
+            self._respawn_settle_until = now + self._boundary_respawn_settle_s
+        if self._boundary_reading is not None and (
+                is_respawning or now < self._respawn_settle_until):
+            # DURING the respawn as well as after it. The first version only
+            # suppressed in the elif — it armed the deadline while respawning
+            # and let that tick's reading straight through, which is backwards:
+            # the respawn screen is the least trustworthy frame there is.
+            # Measured 2026-09-04 02:13:26, respawn=True with dist=0.093 on the
+            # same tick.
+            logger.debug("BOUNDARY: reading suppressed — %s",
+                         "respawning" if is_respawning
+                         else f"{self._respawn_settle_until - now:.1f}s of settle left")
+            self._boundary_reading = None
+        self._boundary_reading = self._median_boundary(
+            self._boundary_reading, now)
+        # ADR 117: capture what BLINDNESS looks like.
+        #
+        # Measured 2026-09-04: the detector produced a reading on 514 of 2204
+        # ticks — 23%. The crossing at 22:39:10 had its last reading 14 s
+        # earlier. Every frame the corpus holds is one where detection
+        # SUCCEEDED, because approach frames are written on a reading, so the
+        # failure case has never been looked at.
+        #
+        # Rate-limited and capped: blindness is the common case, so an
+        # unthrottled capture would write thousands of frames and crowd out the
+        # evidence that already works.
+        # IN BATTLE ONLY. The first 20 frames captured were 11 lobby, loading
+        # and post-match screens to 1 usable minimap: outside battle there is no
+        # minimap to read, so None is not blindness and the frame is not
+        # evidence. Measured on the same session, readability is 56% in
+        # GAME_BATTLE against 24% outside it — the 23% figure that motivated
+        # this capture was an average across screens with no minimap on them.
+        _in_battle = getattr(self._analyzer, "game_state", None) == GameState.GAME_BATTLE
+        if (_boundary_raw is None
+                and _in_battle
+                and not is_respawning
+                and now >= self._blind_capture_next_ts):
+            self._blind_capture_next_ts = now + self._blind_capture_interval_s
+            self._capture_boundary_frame(
+                frame, "blind", f"{self._captures.get('blind', 0) + 1}")
         _b_dist, _b_fwd = (self._boundary_reading
                            if self._boundary_reading else (None, None))
+        # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
+        # control loop, so it needs the reading rather than the tactic.
+        try:
+            self._ctrl.note_boundary(_b_dist, _b_fwd)
+        except Exception:
+            logger.debug("note_boundary failed", exc_info=True)
         snap = AnalyzerSnapshot(
             health=game_state.get("health"),
             missiles=self._analyzer.get_ammo_missiles(),
@@ -977,6 +1064,7 @@ class BehaviorTreeHandler:
             is_respawning=bool(is_respawning),
             incoming_detected=bool(incoming),
             mission_running=self._ctrl.is_mission_running(),
+            survival_hold=self._ctrl.is_survival_hold(),
             game_state=current_game_state,
             missiles_empty_confirmed=missiles_empty_confirmed,
             fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
@@ -1034,7 +1122,43 @@ class BehaviorTreeHandler:
         # while the operator has taken over.
         _may_fly = (self.active and snap.mission_running
                     and snap.game_state == GameState.GAME_BATTLE)
-        if _may_fly and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):
+        # ADR 107: the condition is the closed loop, so the actuation must end
+        # when the selection does. Without this the thread runs to its own cap
+        # regardless — measured 2026-09-03, every turn burning the full 12 s and
+        # restarting, four back to back on one approach.
+        if selection == TACTIC_BOUNDARY_TURN:
+            if _b_dist is not None:
+                self._turn_dists.append(_b_dist)
+        elif self._turn_dists:
+            # ADR 107 V9: the RANGE half of the same question the controller's
+            # attitude summary answers. Logged on every turn, not only on the
+            # crossings — the ~60 turns a session that do NOT end in a crossing
+            # are where the evidence is, and until now none of them left a trace.
+            _d = self._turn_dists
+            logger.info(
+                "🗺  BOUNDARY TURN range: %.2fR → %.2fR (closest %.2fR, "
+                "%d ticks, %s)", _d[0], _d[-1], min(_d), len(_d),
+                "receded" if _d[-1] > min(_d) + 1e-9 else "never receded")
+            self._turn_dists = []
+        if (selection != TACTIC_BOUNDARY_TURN
+                and self._ctrl.is_boundary_turning()):
+            self._ctrl.stop_boundary_turn()
+        # ADR 110: during a survival hold the MISSION owns the flight path, and
+        # the combat branch must not steer. Measured 2026-09-04: a five-minute
+        # loiter took 203 EngageNav commands, so the navigator was flying at the
+        # enemy throughout a hold whose objective is to stay away from it — and
+        # the long-ring contacts it chased sit at the arena edge.
+        #
+        # Gated at the ACTUATION, not in the conditions: the tree still reports
+        # what it would have chosen, which is the shadow pattern used elsewhere
+        # here and keeps the log readable.
+        #
+        # Regroup is gated too. It steers to rejoin the fight, which is the one
+        # thing a hold exists to avoid, and it would be a second writer on the
+        # roll axis the orbit is using. Staying in bounds is BoundaryTurn's job
+        # and BoundaryTurn stays live.
+        _combat_ok = _may_fly and not snap.survival_hold
+        if _combat_ok and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):
             # Regroup: enemy components are empty by the condition that selected
             # the leaf, so the navigator falls through to the friendly centroid.
             self._actuate_engage(components, altitude, now)
@@ -1054,8 +1178,52 @@ class BehaviorTreeHandler:
             # Orbit is suppressed here: it is a sustained roll hold, and holding
             # roll through a climb is a different manoeuvre from correcting
             # heading during one.
-            self._actuate_engage(components, altitude, now, steer_only=True)
+            #
+            # ADR 110: and not during a survival hold. This is the SECOND caller
+            # of _actuate_engage — the ADR 028 rev 5 path where Climb owns pitch
+            # and the navigator still commands roll. Gating only the Engage /
+            # Regroup selection missed it, and 9 EngageNav commands reached a
+            # loitering aircraft on 2026-09-04 15:31 because loiter climbs, so
+            # Climb is the selection for most of a hold.
+            if not snap.survival_hold:
+                self._actuate_engage(components, altitude, now, steer_only=True)
         return False
+
+    def _median_boundary(self, reading, now):
+        """Median-of-3 over recent boundary readings. ADR 113.
+
+        A single tick is not evidence. Measured over 636 readings on
+        2026-09-04: 16% of consecutive ticks moved more than 0.15R and 3% moved
+        more than 0.40R. At the 1179-1455 KPH in those traces a 0.40R step is
+        not reachable at any plausible minimap scale, so that tail is the
+        detector changing its mind, not the aircraft moving. BoundaryTurn
+        consumed those raw, which is how its release logged
+        "0.50R -> 0.57R (closest 0.05R, receded)" ten seconds before a
+        confirmed crossing.
+
+        Takes the median of the last three by DISTANCE and returns that
+        reading's own pair, so dist and fwd stay consistent — averaging them
+        independently would synthesise a bearing no frame reported. On the same
+        data this cuts jumps over 0.15R from 16% to 6% and over 0.40R from 3%
+        to 1%, while the median tick-to-tick move drops 0.042R to 0.015R.
+
+        With fewer than three fresh readings it returns the raw one rather than
+        going blind. That is the pre-ADR-113 behaviour, so this is never worse
+        than it was; it just is not better for the 23% of ticks after a gap.
+        """
+        if reading is not None:
+            self._boundary_recent.append((now, reading))
+        while (self._boundary_recent
+               and now - self._boundary_recent[0][0] > self._boundary_median_age_s):
+            self._boundary_recent.popleft()
+        if reading is None or len(self._boundary_recent) < 3:
+            return reading
+        last3 = [r for _, r in self._boundary_recent]
+        filtered = sorted(last3, key=lambda r: r[0])[1]
+        if filtered is not reading:
+            logger.debug("BOUNDARY: median-of-3 %.3f -> %.3f",
+                         reading[0], filtered[0])
+        return filtered
 
     def _instrument_boundary(self, frame, now, snap=None, selection=None):
         """Count map-boundary approaches and crossings. Design 010.
@@ -1147,30 +1315,45 @@ class BehaviorTreeHandler:
                 logger.info(
                     "🗺  MAP BOUNDARY: ahead at %.2fR (approach %d this session)",
                     dist, self._boundary_approaches)
+                # ADR 108: capture the APPROACH, not only the crossing. Every
+                # frame in the corpus so far was taken at the moment of a
+                # crossing, so all of them show the line at the centre — which
+                # says nothing about whether it is tracked at the 0.3-0.5R range
+                # where a turn would have to act. One frame per approach, capped
+                # with the crossing captures, named so the two are separable.
+                self._capture_boundary_frame(
+                    frame, "approach", str(self._boundary_approaches))
             elif not near:
                 self._boundary_near_since = 0.0
         except Exception as e:
             logger.debug("Boundary instrumentation failed: %s", e)
 
-    def _capture_rtb_frame(self, frame) -> None:
-        """Save the frame behind a CONFIRMED crossing (ADR 106).
+    def _capture_boundary_frame(self, frame, kind: str, seq: str) -> None:
+        """Write one boundary frame (ADR 106 crossings, ADR 108 approaches).
 
-        The WHOLE frame, not the minimap crop: the open question is whether
-        crossings cluster on particular maps, and a map is identifiable from its
-        terrain and the scoreboard — not from a 320 px minimap disc.
+        Shares the cap with the crossing captures deliberately: the disk budget
+        is for boundary evidence as a whole, and approaches outnumber crossings
+        roughly eight to one, so an uncapped approach stream would crowd out the
+        rarer and more valuable frames.
 
-        Confirmed only. The colour trigger runs at 94% false positives, so
-        capturing on the trigger would bury the frames that matter under a
-        hundred that do not.
-
-        Never raises: this runs on an OCR pool thread where an exception is
-        swallowed, and losing evidence must not also lose the crossing count.
+        Never raises: it runs on the tick path and on an OCR pool thread, and
+        losing evidence must not cost anything else.
         """
-        if frame is None or self._rtb_capture_max <= 0:
+        # SEPARATE budgets per kind, not one shared counter. ADR 108 D4 argued
+        # for a shared cap "because approaches outnumber crossings roughly eight
+        # to one and would otherwise crowd out the rarer frames" — and then used
+        # a single FIFO counter, which hands priority to whichever event arrives
+        # first, i.e. the frequent one. Measured 2026-09-04: 18 approach frames
+        # saved, 0 crossing frames, 125 suppressed, across a session with six
+        # confirmed crossings. Not one of the frames the map question needs.
+        cap = (self._rtb_capture_max if kind == "rtb"
+               else self._blind_capture_max if kind == "blind"
+               else self._approach_capture_max)
+        if frame is None or cap <= 0:
             return
-        if self._rtb_captures >= self._rtb_capture_max:
-            logger.debug("MAP BOUNDARY: capture cap (%d) reached this session",
-                         self._rtb_capture_max)
+        if self._captures.get(kind, 0) >= cap:
+            logger.debug("MAP BOUNDARY: %s capture cap (%d) reached this session",
+                         kind, cap)
             return
         try:
             import cv2
@@ -1179,15 +1362,28 @@ class BehaviorTreeHandler:
             out_dir = Path(self._rtb_capture_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = out_dir / f"rtb_{stamp}_crossing{self._boundary_crossings}.png"
+            path = out_dir / f"{kind}_{stamp}_{seq}.png"
             if not cv2.imwrite(str(path), frame):
                 logger.warning("MAP BOUNDARY: screenshot write failed: %s", path)
                 return
-            self._rtb_captures += 1
-            logger.info("🗺  MAP BOUNDARY: crossing frame saved to %s", path)
+            self._captures[kind] = self._captures.get(kind, 0) + 1
+            logger.info("🗺  MAP BOUNDARY: %s frame saved to %s", kind, path)
         except Exception as e:
             logger.warning("MAP BOUNDARY: screenshot capture failed: %s: %s",
                            type(e).__name__, e)
+
+    def _capture_rtb_frame(self, frame) -> None:
+        """Save the frame behind a CONFIRMED crossing (ADR 106).
+
+        The WHOLE frame, not the minimap crop: the question is whether crossings
+        cluster on particular maps, and a map is identifiable from its terrain
+        and the scoreboard, not from a 320 px disc.
+
+        Confirmed only — the colour trigger runs at 94% false positives, so
+        capturing on it would bury the frames that matter.
+        """
+        self._capture_boundary_frame(frame, "rtb",
+                                     f"crossing{self._boundary_crossings}")
 
     def _on_rtb_confirmed(self, detected, text, trace=None, frame=None):
         """OCR verdict on the banner. The colour test is the cheap trigger; this

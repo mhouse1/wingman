@@ -98,10 +98,53 @@ rewrites every commit SHA and obliges every clone to be re-made. That is
 disruptive enough to be its own decision, and it is not urgent: the repository
 is large but functional.
 
-**D5. PNG images (288 MB) are the next target, and out of scope here.** Several
-are 5 MB full-resolution screenshots. Whether they can be downsampled, deduped,
-or moved depends on which are still referenced by the calibration and gate
-corpora (ADR 071/072) — a question this ADR does not answer.
+**D5. PNG images are the next target.** *(Question answered 2026-09-04.)*
+Measured across the 160 MB of tracked PNGs in the working tree:
+
+| directory | tracked | referenced by |
+|---|---:|---|
+| `test_screenshots/` (root) | 54.0 MB | calibration and detector tests |
+| `test_screenshots/health_dropouts/` | **48.7 MB** | **nothing** |
+| `test_screenshots/telemetry/` | 32.2 MB | `test_telemetry_corpus.py` (ADR 038) |
+| `test_screenshots/integration_test/` | 16.7 MB | the ADR 037 PATH1/PATH2 lane |
+| `docs/hldd/010-mini-map-detection/` | 7.2 MB | Design 010 evidence |
+
+**`health_dropouts` is 24 files, 48.7 MB, and nothing reads them.** No test, no
+Makefile target, no code path — the only matches are the `"health_dropouts"` key
+in stats JSON and the writer in `tick_handlers.py`. They are already covered by
+`.gitignore` line 19, so the intent was always local-only; they were committed
+before the ignore was added, and `.gitignore` has no effect on tracked files.
+
+That is D1's situation exactly, and D6's policy exactly. They should be
+untracked:
+
+```bash
+git rm --cached -r test_screenshots/health_dropouts
+```
+
+The files stay on disk. This does not shrink the existing history — that is D4,
+still deferred — but it stops the directory being extended.
+
+The remaining corpora are all referenced and stay. Downsampling them is a
+separate question this ADR still does not answer, and a smaller one now: the
+unreferenced half is the half worth removing.
+
+**D6. Live-capture corpora stay on the capturing machine.** *(Added
+2026-09-04.)* The boundary evidence under
+`test_screenshots/unknown_anomalies/` — crossing frames, and the desert frames
+kept as a false-positive corpus — is gitignored and lives only on VEDA. Four
+full frames are about 8 MB and the folder reached 250 MB in a single night, so
+committing it would rebuild the problem this ADR exists to stop, in a new
+directory.
+
+Tests that use those frames skip when they are absent, the pattern the
+`rtb_*` tests already follow. The cost is accepted deliberately: a fresh clone
+does not run them, and the evidence is one disk failure from gone.
+
+If a corpus ever has to travel, the way to do it without the bytes is to store
+minimap CROPS rather than full frames — a few hundred KB — which needs
+`detect_map_boundary` to accept a pre-cropped image. That is a code change, not
+a file move, and nothing currently needs it.
 
 ## Consequences
 

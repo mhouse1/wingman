@@ -476,6 +476,11 @@ def _boundary_analyzer():
     a._boundary_hsv_upper = np.array([28, 255, 255], np.uint8)
     a._boundary_min_px = 20
     a._boundary_min_span_frac = 0.5
+    # ADR 108: reconnection and the stroke-shape gate.
+    import cv2 as _cv2
+    a._boundary_close_kernel = _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (5, 5))
+    a._boundary_close_iters = 1
+    a._boundary_max_thickness_frac = 0.10
     return a
 
 
