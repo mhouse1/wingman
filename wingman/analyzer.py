@@ -41,6 +41,19 @@ class GameState(Enum):
 POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
                         GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
+# ADR 102: states where the quick-scan re-checks whether the LOBBY is in fact
+# still on screen. Separate from the popup set on purpose — this permits ONE
+# lobby crop to be read, not popup dismissal. 2026-09-01: PLAY was clicked, the
+# FSM went LOBBY to WAITING to STARTING on a CANCEL read, and the match never
+# began; the game sat at the lobby with PLAY visible for 150 s while wingman
+# pressed 'u' and probed health, until the starting timeout fired.
+LOBBY_RECHECK_STATES = (GameState.GAME_STARTING,)
+# Consecutive agreeing reads before the state is walked back. The quick-scan
+# runs at roughly a 1 s cadence, so this is ~3 s of PLAY being continuously
+# visible — enough that a single stray read cannot abort a match that really is
+# starting, and still 50x faster than the 150 s timeout it replaces.
+STARTING_PLAY_CONFIRM_READS = 3
+
 # States where a round is genuinely under way and stopping would abandon an
 # aircraft in flight. ADR 094's deferred exit waits these out; everything else
 # — including GAME_UNKNOWN before the first classification, and GAME_END_B once
@@ -650,12 +663,31 @@ def _apply_health_ceiling_filter(
     return (last_accepted, ceiling)
 
 
+def _crop_for_ocr(frame, crop_coords):
+    """A detached copy of one crop, safe to hand to a queued OCR task.
+
+    ADR 103. get_crop returns a numpy VIEW whose .base is the whole frame, so a
+    queued task holding a view pins all 6.9 MB of it (1920x1200x3). The copy is
+    the point of this function: a lobby crop is tens of KB, so a backlog costs
+    megabytes instead of gigabytes.
+
+    Cancelling the future is not an alternative. CPython leaves the _WorkItem —
+    and its arguments — in the executor queue until a worker pops it, which is
+    exactly what a stalled pool never does.
+    """
+    return np.ascontiguousarray(get_crop(frame, *crop_coords))
+
+
 def _process_crop_region(frame, crop_coords, text_tokens):
     """Extract crop and run text detection entirely inside a worker thread.
 
-    Wrapping get_crop() here ensures it is covered by future.result(timeout=N)
-    in the lobby quick-scan thread; a synchronous call in the submission loop
-    would have no timeout protection and can block indefinitely.
+    Wrapping get_crop() here puts it under the caller's future.result(timeout=N).
+
+    ADR 103: the quick-scan no longer submits through this, because passing the
+    whole frame means a queued task pins it. The timeout argument does not
+    survive scrutiny anyway — get_crop is a bounded numpy slice and copy, not
+    something that can block indefinitely. Retained for the callers that still
+    crop a frame they are about to discard.
     """
     return _process_text_region(get_crop(frame, *crop_coords), text_tokens)
 
@@ -759,6 +791,8 @@ _FSM_TRANSITIONS = [
     {"trigger": "waiting_timeout",    "source": "GAME_WAITING",          "dest": "GAME_LOBBY"},
     {"trigger": "good_luck_detected", "source": "GAME_STARTING",         "dest": "GAME_BATTLE"},
     {"trigger": "starting_timeout",   "source": "GAME_STARTING",         "dest": "GAME_STARTING_STALLED"},
+    # ADR 102: the match never began — PLAY is still on screen.
+    {"trigger": "starting_play_visible", "source": "GAME_STARTING",      "dest": "GAME_LOBBY"},
     {"trigger": "starting_stalled_reclassify", "source": "GAME_STARTING_STALLED", "dest": "GAME_UNKNOWN"},
     {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
     {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
@@ -888,6 +922,15 @@ def _scan_minimap_red(
 # ============================================================================
 
 
+# --- ADR 123: nose direction ------------------------------------------------
+# A continuously maintained answer to "is the nose up or down", derived from the
+# altitude rate. Kept as STATE rather than recomputed on demand because the
+# consumer needs it at an instant the telemetry may not have refreshed on.
+NOSE_UP = "up"
+NOSE_DOWN = "down"
+NOSE_UNKNOWN = "unknown"
+
+
 class GameStateAnalyzer:
     """Analyzes game screenshots to determine current game state."""
 
@@ -948,6 +991,18 @@ class GameStateAnalyzer:
         self._boundary_hsv_lower = np.array(_b_cfg.get("lower", [8, 120, 120]), dtype=np.uint8)
         self._boundary_hsv_upper = np.array(_b_cfg.get("upper", [28, 255, 255]), dtype=np.uint8)
         self._boundary_min_px = int(minimap_cfg.get("boundary_min_px", 20))
+        # ADR 117: floor for "a minimap is drawn at all". Measured separation on
+        # the 2026-09-05 blind corpus: no-minimap frames 0-5 px, real minimaps
+        # 558+. 50 sits in the gap, far from both.
+        self._minimap_present_min_px = int(
+            minimap_cfg.get("minimap_present_min_px", 50))
+        # ADR 108: reconnection kernel and the line-vs-terrain shape gate.
+        self._boundary_close_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (5, 5))
+        self._boundary_close_iters = int(
+            (minimap_cfg or {}).get("boundary_close_iters", 1))
+        self._boundary_max_thickness_frac = float(
+            (minimap_cfg or {}).get("boundary_max_thickness_frac", 0.10))
         self._boundary_min_span_frac = float(
             minimap_cfg.get("boundary_min_span_frac", 0.5))
         _rtb = config.get("return_to_battle", {}) or {}
@@ -959,6 +1014,11 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
+        # ADR 123: nose direction, maintained from every telemetry update.
+        self._nose_direction = NOSE_UNKNOWN
+        self._nose_direction_deadband_mps = float(
+            (config.get("telemetry", {}) or {}).get(
+                "nose_direction_deadband_mps", 5.0))
 
         # OCR result caching for performance (avoid running OCR every frame)
         self._ocr_cache = {
@@ -1060,6 +1120,10 @@ class GameStateAnalyzer:
         # declined to click would still leave the FSM in GAME_WAITING, stranding
         # the operator's exit until a whole further round completed.
         self._suppress_round_start = None
+        # ADR 102: consecutive PLAY reads while the FSM believes the match is
+        # starting. Reset on leaving GAME_STARTING so a streak cannot span two
+        # separate stalls.
+        self._starting_play_streak = 0
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
@@ -1538,7 +1602,32 @@ class GameStateAnalyzer:
                 nose = "n/a"
             logger.info("Altitude: %s | Speed: %s | Nose: %s",
                         altitude_value, speed_value, nose)
+            self._update_nose_direction(snap)
         return telemetry_ocr_time
+
+    def _update_nose_direction(self, snap) -> None:
+        """Track NOSE_UP / NOSE_DOWN from the altitude rate. ADR 123.
+
+        A DEADBAND, and the last known value is held inside it. Level flight
+        has an altitude rate that jitters around zero, and a direction that
+        flips every tick is not a direction — the consumer acts on it once, at
+        an instant it did not choose.
+        """
+        try:
+            rate = snap.altitude.rate if snap.altitude_fresh() else None
+        except Exception:
+            rate = None
+        if rate is None:
+            return
+        if rate > self._nose_direction_deadband_mps:
+            self._nose_direction = NOSE_UP
+        elif rate < -self._nose_direction_deadband_mps:
+            self._nose_direction = NOSE_DOWN
+        # Inside the deadband the previous direction stands.
+
+    def nose_direction(self) -> str:
+        """NOSE_UP, NOSE_DOWN or NOSE_UNKNOWN. ADR 123."""
+        return self._nose_direction
 
     def get_telemetry(self):
         """Return one atomic TelemetrySnapshot (speed + altitude + rates).
@@ -3134,19 +3223,26 @@ class GameStateAnalyzer:
             # lobby crops stay excluded there: classification owns marker
             # detection in GAME_UNKNOWN, and clicking PLAY/CANCEL from an
             # unclassified state would be wrong.
-            if state not in POPUP_DISMISS_STATES:
+            if state not in POPUP_DISMISS_STATES and state not in LOBBY_RECHECK_STATES:
                 continue
 
             executor = self.ocr_executor
             if executor is None:
                 continue
 
+            # Bound to the whole try/finally below: the cleanup cancels whatever
+            # is left in these, and must never raise NameError over the real
+            # exception when a cycle fails before they are populated.
+            lobby_futures = {}
+            popup_futures = {}
             try:
                 # --- CANCEL / UNREADY / PLAY / READY ---
                 # GAME_LOBBY: scan all lobby crops.
                 # GAME_WAITING: scan CANCEL only — provides 1-second detection cadence
                 # instead of relying solely on the 3-second main-loop poll, which can
                 # miss a brief CANCEL window (e.g. squad-READY → match-found flow).
+                if state not in LOBBY_RECHECK_STATES and self._starting_play_streak:
+                    self._starting_play_streak = 0
                 lobby_futures = {}
                 lobby_scan_start = None
                 handled = False
@@ -3156,6 +3252,12 @@ class GameStateAnalyzer:
                     crops_to_scan = lobby_crops
                 elif state == GameState.GAME_WAITING:
                     crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
+                elif state in LOBBY_RECHECK_STATES:
+                    # ADR 102: PLAY only. Nothing is clicked from here — the
+                    # detection walks the state back and the ordinary lobby
+                    # path does the clicking, so this cannot click PLAY into a
+                    # match that is genuinely starting.
+                    crops_to_scan = [c for c in ("PLAY",) if c in self.crops]
                 else:
                     # GAME_UNKNOWN / GAME_STARTING_STALLED: popup batch only
                     # (ADR 074) — no lobby-crop clicking from those states.
@@ -3175,10 +3277,11 @@ class GameStateAnalyzer:
                         else:
                             lobby_scan_start = time.time()
                             for crop in crops_to_scan:
+                                # ADR 103: crop-and-copy HERE, so a queued task
+                                # holds tens of KB instead of the 6.9 MB frame.
                                 lobby_futures[crop] = executor.submit(
-                                    _process_crop_region,
-                                    frame,
-                                    self.crops[crop][:4],
+                                    _process_text_region,
+                                    _crop_for_ocr(frame, self.crops[crop][:4]),
                                     self.crops[crop].text or [],
                                 )
 
@@ -3222,6 +3325,44 @@ class GameStateAnalyzer:
                         handled = True
                     else:
                         logger.debug("Lobby quick-scan: CANCEL not found in GAME_WAITING")
+
+                if not handled and state in LOBBY_RECHECK_STATES:
+                    detected = False
+                    if "PLAY" in lobby_futures:
+                        try:
+                            detected, _, text = lobby_futures["PLAY"].result(timeout=20)
+                        except Exception as e:
+                            logger.warning(
+                                "Lobby quick-scan: PLAY result failed in %s: %s",
+                                state.name, e)
+                            detected = False
+                    if detected:
+                        self._starting_play_streak += 1
+                        if self._starting_play_streak >= STARTING_PLAY_CONFIRM_READS:
+                            logger.warning(
+                                "\033[93m📋 Lobby quick-scan: PLAY still visible after "
+                                "%d reads in %s — the match never started, "
+                                "returning to GAME_LOBBY (ADR 102)\033[0m",
+                                self._starting_play_streak, state.name)
+                            # The suppression exists to stop a second click on a
+                            # PLAY that worked. This is the proof it did not, so
+                            # clearing it is the point — otherwise the lobby is
+                            # re-entered and then sits for the rest of the 60 s
+                            # window without clicking.
+                            self._last_lobby_play_click_ts = 0.0
+                            self._starting_play_streak = 0
+                            self._trigger("starting_play_visible")
+                        else:
+                            logger.info(
+                                "Lobby quick-scan: PLAY visible in %s (%d/%d reads)",
+                                state.name, self._starting_play_streak,
+                                STARTING_PLAY_CONFIRM_READS)
+                    elif self._starting_play_streak:
+                        logger.debug(
+                            "Lobby quick-scan: PLAY no longer visible in %s — "
+                            "streak reset", state.name)
+                        self._starting_play_streak = 0
+                    handled = True
 
                 if not handled and state == GameState.GAME_LOBBY:
                     for crop in ("PLAY", "READY"):
@@ -3331,10 +3472,9 @@ class GameStateAnalyzer:
                             last_popup_scan_ts = time.time()
                             popup_scan_start = time.time()
                             for crop in popup_crops:
-                                popup_futures[crop] = executor.submit(
-                                    _process_crop_region,
-                                    popup_frame,
-                                    self.crops[crop][:4],
+                                popup_futures[crop] = executor.submit(     # ADR 103
+                                    _process_text_region,
+                                    _crop_for_ocr(popup_frame, self.crops[crop][:4]),
                                     self.crops[crop].text or [],
                                 )
 
@@ -3398,9 +3538,9 @@ class GameStateAnalyzer:
                         last_stall_scan_ts = time.time()
                         for crop in stall_targets:
                             try:
-                                detected, _, text = executor.submit(
-                                    _process_crop_region, stall_frame,
-                                    self.crops[crop][:4],
+                                detected, _, text = executor.submit(   # ADR 103
+                                    _process_text_region,
+                                    _crop_for_ocr(stall_frame, self.crops[crop][:4]),
                                     self.crops[crop].text or [],
                                 ).result(timeout=20)
                             except Exception as e:
@@ -3435,6 +3575,21 @@ class GameStateAnalyzer:
                 return  # executor shut down
             except Exception as e:
                 logger.warning("Lobby quick-scan: scan failed: %s: %s", type(e).__name__, e)
+            finally:
+                # ADR 103: drop work this cycle never read. A cycle submits every
+                # lobby crop but the handlers break on the first hit, so up to
+                # three futures per cycle go unconsumed.
+                #
+                # This is NOT the memory fix and must not be mistaken for one:
+                # cancel() leaves the _WorkItem in the executor queue until a
+                # worker pops it, so a stalled pool releases nothing. The frames
+                # are kept out of the queue by _crop_for_ocr at the submission
+                # sites instead. What this buys is not running OCR that nobody
+                # will read once the pool drains.
+                # cancel() takes a lock, checks state and returns a bool; it does
+                # not raise, so it needs no guard.
+                for _fut in list(lobby_futures.values()) + list(popup_futures.values()):
+                    _fut.cancel()
 
     def _empty_state(self):
         """Return empty game state for error cases."""
@@ -3585,13 +3740,51 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: detect_enemy_map_bearing failed: %s", e)
             return empty
 
+    def minimap_present(self, frame) -> bool:
+        """Is a minimap actually drawn on this frame? (ADR 117)
+
+        GAME_BATTLE is not sufficient. Killcam, transition and cinematic frames
+        are all in battle with no HUD, and 11 of the 40 blind frames captured on
+        2026-09-05 were exactly that — 27.5% of a diagnostic budget spent on
+        frames that cannot answer the question it was opened for.
+
+        The test is the boundary-hue mask inside the minimap disc. It separates
+        with an enormous margin and needs no new calibration: on that session's
+        frames, every no-minimap frame held **5 or fewer** matching pixels and
+        every real minimap held **558 or more**. The threshold sits in the gap
+        and is nowhere near either edge.
+
+        Deliberately NOT a check for the boundary itself — a minimap showing no
+        boundary at all is precisely the evidence this capture wants.
+        """
+        if self.crops is None or "MINIMAP" not in self.crops:
+            return False
+        try:
+            crop = get_crop(frame, *self.crops["MINIMAP"][:4])
+            height, width = crop.shape[:2]
+            radius = min(width, height) / 2.0
+            if radius <= 0:
+                return False
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, self._boundary_hsv_lower, self._boundary_hsv_upper)
+            mask &= _minimap_circle_mask(width, height,
+                                         self._minimap_mask_radius_frac * radius)
+            return int((mask > 0).sum()) > self._minimap_present_min_px
+        except Exception as e:                # noqa: BLE001 - diagnostic only
+            # Fail OPEN: a frame we cannot classify is still worth capturing.
+            # The alternative silently stops the capture that exists to explain
+            # a detector nobody can otherwise see failing.
+            logger.debug("Analyzer: minimap_present failed: %s", e)
+            return True
+
     def detect_map_boundary(self, frame) -> "tuple | None":
         """Nearest map-boundary point on the minimap, or None.
 
         Design 010, INSTRUMENTATION ONLY — nothing steers on this yet. Returns
-        ``(nearest_dist_frac, forward_offset_frac)`` in units of the minimap
-        radius, with forward measured along the nose (up). Positive forward
-        offset means the boundary lies ahead.
+        ``(nearest_dist_frac, forward_offset_frac, lateral_offset_frac)`` in
+        units of the minimap radius, measured from the aircraft at the centre.
+        Forward is along the nose (up): positive means the boundary lies ahead.
+        Lateral is across it: positive means the nearest point is to the RIGHT.
 
         Measured on the Design 010 frames, across three different maps
         including a night one: Step0 (flying away) 0.59 / -0.59, Step1 (about
@@ -3616,23 +3809,55 @@ class GameStateAnalyzer:
                 cache = (width, height, _minimap_circle_mask(width, height, r_px))
                 self._minimap_circle_cache = cache
             mask &= cache[2]
-            # The boundary is a LINE. Requiring spatial coherence is not
-            # polish: live 2026-08-30, a pixel-count-only mask read a median
-            # 0.23R with the boundary "ahead" on a 52% coin flip, which is
-            # terrain in the amber hue band (sand, sunlit rock), not a map
-            # edge. Measured on the Design 010 frames the real line spans
-            # 0.85-1.62 R while the noise components span 0.01 R, so the
-            # separation is close to two orders of magnitude.
+            # ADR 108: reconnect the line before measuring it. The mask finds
+            # the boundary — 550 to 1400 px of it on the nine 2026-09-03
+            # crossing frames — but MetalStorm's minimap update left it thin and
+            # antialiased, so it arrives as 20 to 174 fragments. The span filter
+            # below then rejects every one of them, and the detector read
+            # NOTHING on 81% of ticks: five of eight crossings that session had
+            # no boundary reading in the 30 s before they happened.
+            mask = cv2.morphologyEx(
+                (mask > 0).astype(np.uint8) * 255, cv2.MORPH_CLOSE,
+                self._boundary_close_kernel,
+                iterations=self._boundary_close_iters)
             n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
                 (mask > 0).astype(np.uint8), connectivity=8)
+            # Pick the most line-LIKE component, not the largest. Spatial
+            # coherence alone is satisfied by a big terrain blob, and on the new
+            # minimap that is what the largest component often is.
+            #
+            # The test is the component's LOCAL thickness — the largest
+            # distance-to-background inside it. The boundary is a stroke of
+            # fixed width, so this stays ~1.4 px however long or curved it runs;
+            # a landmass is thick in the middle whatever its outline does.
+            #
+            # Two weaker tests were tried first and both failed on real data.
+            # Bounding-box FILL rejects a straight line, which fills its own
+            # thin box completely — caught by the synthetic tests. Aggregate
+            # thinness (area / span^2) passes a large irregular blob, because a
+            # ragged outline inflates the span: on 2026-09-03 desert terrain
+            # read 0.334 against a 0.5 gate and produced 32 turns in 12 minutes,
+            # one at round start with the aircraft nowhere near an edge.
+            #
+            # Measured on the live corpus: the real line runs 1.4-9.2 px and
+            # terrain 34.5-50.2 px. Expressed as a fraction of the minimap
+            # radius so it does not depend on capture resolution.
             min_span = self._boundary_min_span_frac * radius
-            keep = [i for i in range(1, n_labels)
-                    if max(stats[i, cv2.CC_STAT_WIDTH],
-                           stats[i, cv2.CC_STAT_HEIGHT]) >= min_span]
-            if not keep:
+            max_thick_px = self._boundary_max_thickness_frac * radius
+            best = None
+            for i in range(1, n_labels):
+                span = max(stats[i, cv2.CC_STAT_WIDTH],
+                           stats[i, cv2.CC_STAT_HEIGHT])
+                if span < min_span or span <= 0:
+                    continue
+                comp = (labels == i).astype(np.uint8)
+                if cv2.distanceTransform(comp, cv2.DIST_L2, 3).max() > max_thick_px:
+                    continue
+                if best is None or span > best[0]:
+                    best = (span, i)
+            if best is None:
                 return None
-            mask = np.isin(labels, keep)
-            ys, xs = np.nonzero(mask)
+            ys, xs = np.nonzero(labels == best[1])
             if len(xs) < self._boundary_min_px:
                 return None
             cx = (width - 1) / 2.0
@@ -3641,7 +3866,12 @@ class GameStateAnalyzer:
             dy = ys - cy
             dist = np.hypot(dx, dy)
             i = int(np.argmin(dist))
-            return (float(dist[i] / radius), float(-dy[i] / radius))
+            # ADR 122: the LATERAL component too, positive to the right of the
+            # nose. It was computed here and thrown away, which left the turn
+            # with no way to know which side the edge was on — so it always
+            # rolled right, and half of those rolls turned INTO the boundary.
+            return (float(dist[i] / radius), float(-dy[i] / radius),
+                    float(dx[i] / radius))
         except Exception as e:
             logger.warning("Analyzer: detect_map_boundary failed: %s", e)
             return None

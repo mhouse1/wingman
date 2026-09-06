@@ -1127,7 +1127,11 @@ def _boundary_handler(analyzer):
     h._boundary_near_frac = 0.25
     h._boundary_trace = collections.deque(maxlen=20)
     h._session_start = 0.0
+    h._rtb_confirmed = False
+    h._boundary_reading = None
+    h._boundary_turn_min_dist = 1.0
     return h
+
 
 
 def test_the_trace_records_every_tick_not_only_crossings():
@@ -1157,10 +1161,17 @@ def _flying(**kw):
 
 
 def test_a_crossing_counts_once_per_edge_not_per_tick():
-    """The banner stays up for seconds; counting per tick would inflate it."""
+    """The banner stays up for seconds; counting per tick would inflate it.
+
+    The edge is still detected per-edge, but the COUNT now lands only when OCR
+    confirms — so two edges plus two confirmations make two crossings, and the
+    ticks in between add nothing."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([True, True, True, False, True]))
     for i in range(5):
         h._instrument_boundary(None, float(i), snap=_flying(), selection="Engage")
+    assert h._boundary_crossings == 0, "nothing counts before the OCR verdict"
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE")
     assert h._boundary_crossings == 2
 
 
@@ -1182,12 +1193,17 @@ def test_the_banner_is_ignored_outside_battle():
     assert h._boundary_crossings == 0
 
 
-def test_an_unconfirmed_crossing_is_retracted_from_the_count():
-    """OCR arbitrates the count, so a false positive cannot inflate the figure
-    the tuning depends on."""
+def test_an_unconfirmed_crossing_never_enters_the_count():
+    """Supersedes the retraction: the count is not incremented on the colour
+    trigger at all, so there is nothing to take back.
+
+    Live 2026-09-01: 6 triggers in 84 minutes, 1 confirmed. Incrementing first
+    logged five WARNING/retraction pairs that each read as a real excursion —
+    and because the count was decremented back to zero every time, all five
+    announced themselves as "crossing 1 this session"."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
     h._instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
-    assert h._boundary_crossings == 1
+    assert h._boundary_crossings == 0
     h._on_rtb_confirmed(False, None)
     assert h._boundary_crossings == 0
     assert h._rtb_false_positives == 1
@@ -1266,3 +1282,441 @@ def test_climb_steers_concurrently_but_without_orbit():
     branch = src[src.index("elif _may_fly and selection == TACTIC_CLIMB:"):
                  src.index("return False", src.index("elif _may_fly and selection == TACTIC_CLIMB:"))]
     assert "steer_only=True" in branch
+
+
+# --- ADR 106: capture the frame behind a confirmed crossing -------------------
+
+def _capture_handler(tmp_path, **kw):
+    h = _boundary_handler(_FakeBoundaryAnalyzer([]))
+    h._rtb_capture_dir = str(tmp_path)
+    h._rtb_capture_max = kw.get("max", 20)
+    h._approach_capture_max = kw.get("approach_max", 10)
+    h._captures = {}
+    return h
+
+
+def _frame():
+    import numpy as np
+    return np.zeros((32, 48, 3), dtype=np.uint8)
+
+
+def test_a_confirmed_crossing_saves_the_frame(tmp_path):
+    """The map-clustering question needs the WHOLE frame — a map is identifiable
+    from its terrain and scoreboard, not from a 320px minimap disc."""
+    h = _capture_handler(tmp_path)
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    saved = list(tmp_path.glob("rtb_*.png"))
+    assert len(saved) == 1
+    assert "crossing1" in saved[0].name, saved[0].name
+
+
+def test_an_unconfirmed_trigger_saves_nothing(tmp_path):
+    """The colour trigger runs at 94% false positives. Capturing on it would
+    bury the frames that matter under a hundred that do not."""
+    h = _capture_handler(tmp_path)
+    h._on_rtb_confirmed(False, None, None, _frame())
+    assert list(tmp_path.glob("*.png")) == []
+
+
+def test_the_capture_is_capped_per_session(tmp_path):
+    """The folder is gitignored, but a bad night should not write hundreds of
+    2 MB frames to the operator's disk."""
+    h = _capture_handler(tmp_path, max=2)
+    for _ in range(5):
+        h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    assert len(list(tmp_path.glob("rtb_*.png"))) == 2
+    assert h._boundary_crossings == 5, "the cap must not suppress the COUNT"
+
+
+def test_a_capture_of_zero_disables_it(tmp_path):
+    h = _capture_handler(tmp_path, max=0)
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    assert list(tmp_path.glob("*.png")) == []
+
+
+def test_a_missing_frame_does_not_lose_the_crossing(tmp_path):
+    """Evidence is a bonus; the count is the metric ADR 106 tracks."""
+    h = _capture_handler(tmp_path)
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, None)
+    assert h._boundary_crossings == 1
+    assert list(tmp_path.glob("*.png")) == []
+
+
+def test_an_unwritable_directory_never_raises(tmp_path):
+    """This runs on an OCR pool thread, where an exception is swallowed —
+    losing the evidence must not also lose the count."""
+    h = _capture_handler(tmp_path)
+    h._rtb_capture_dir = "/proc/nonexistent/cannot-create"
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    assert h._boundary_crossings == 1
+
+
+def test_boundary_readings_are_suppressed_after_a_respawn():
+    """2026-09-04, twice in 40 seconds: one tick after the FSM cleared
+    respawn=False, a well-formed reading appeared — dist=0.073 fwd=+0.032, a
+    0.44 bearing that passed the entry gate — with the RETURN TO BATTLE colour
+    trigger firing on the same frame. The respawn overlay outlives the flag.
+
+    An aircraft never respawns 0.07R from an edge, so the reading is false
+    however well-formed it looks. Gating on the flag alone is not enough; the
+    screen needs time to settle."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "_respawn_settle_until" in src
+    # Suppression must clear the READING, so the instrumentation and the tactic
+    # see the same thing — a false approach must not reach the stats either.
+    # Suppression must clear the READING itself, so the instrumentation and the
+    # tactic see the same thing — a false approach must not reach the stats.
+    guard = src.split("if self._boundary_reading is not None and (")[1]
+    assert "self._boundary_reading = None" in guard.split("def ")[0]
+    # DURING the respawn too, not only after it. The first version armed the
+    # deadline in an if and suppressed in the elif, so the respawn tick itself —
+    # the least trustworthy frame there is — passed straight through. Measured
+    # 2026-09-04 02:13:26: respawn=True with dist=0.093 on the same tick.
+    assert "is_respawning or now < self._respawn_settle_until" in src
+
+
+def test_approach_captures_cannot_crowd_out_crossings(tmp_path):
+    """2026-09-04: a session with six confirmed crossings saved 18 approach
+    frames, 0 crossing frames, and suppressed 125. One shared FIFO counter hands
+    priority to whichever event arrives first — the frequent one — which is the
+    exact crowding-out ADR 108 D4 said it was preventing.
+
+    Crossings are the rarer and more valuable frame, so they get a budget
+    approaches cannot spend."""
+    h = _capture_handler(tmp_path, approach_max=2)
+    for i in range(6):
+        h._capture_boundary_frame(_frame(), "approach", str(i))
+    assert len(list(tmp_path.glob("approach_*.png"))) == 2, "approach cap holds"
+
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    assert list(tmp_path.glob("rtb_*.png")), \
+        "a crossing must still be captured after approaches exhaust their own cap"
+
+
+def test_each_kind_counts_against_its_own_budget(tmp_path):
+    h = _capture_handler(tmp_path, max=1, approach_max=1)
+    h._capture_boundary_frame(_frame(), "approach", "1")
+    h._capture_boundary_frame(_frame(), "approach", "2")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", None, _frame())
+    assert len(list(tmp_path.glob("approach_*.png"))) == 1
+    assert len(list(tmp_path.glob("rtb_*.png"))) == 1
+
+
+# --- ADR 110: the combat branch yields to a survival hold ---------------------
+
+def test_the_combat_branch_is_gated_at_the_actuation():
+    """2026-09-04: a five-minute loiter took 203 EngageNav commands. `_may_fly`
+    only asks whether a mission is running, and loiter IS one — so the navigator
+    steered at the enemy throughout a hold whose objective is to stay away from
+    it, toward long-ring contacts sitting at the arena edge.
+
+    Gated at the actuation rather than in the conditions, so the tree still
+    reports what it would have chosen."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "_combat_ok = _may_fly and not snap.survival_hold" in src
+    assert "if _combat_ok and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):" in src
+    # BOTH callers of _actuate_engage. The ADR 028 rev 5 path steers roll while
+    # Climb owns pitch, and loiter climbs — so Climb is the selection for most
+    # of a hold. Gating only the Engage/Regroup branch let 9 EngageNav commands
+    # through on 2026-09-04 15:31.
+    assert src.count("self._actuate_engage(") == 2, "a third caller needs gating too"
+    assert "if not snap.survival_hold:\n                self._actuate_engage(" in src
+
+
+def test_disengage_cannot_cancel_a_survival_hold():
+    """`disengage_roll_right` opens with cancel_mission(), and the condition is
+    30 s without an enemy — exactly the state a survival hold produces. Without
+    this gate loiter is built to eventually cancel itself."""
+    from wingman.tick_handlers import BehaviorTreeHandler
+    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    calls = []
+    h._ctrl = type("C", (), {
+        "is_survival_hold": staticmethod(lambda: True),
+        "disengage_roll_right": staticmethod(lambda: calls.append("fired")),
+    })()
+    h._enemy_last_seen_ts = 0.0
+    h._start_disengage()
+    assert calls == [], "Disengage cancelled the mission during a survival hold"
+
+    h._ctrl = type("C", (), {
+        "is_survival_hold": staticmethod(lambda: False),
+        "disengage_roll_right": staticmethod(lambda: calls.append("fired")),
+    })()
+    h._start_disengage()
+    assert calls == ["fired"], "Disengage must still work outside a hold"
+
+
+def test_boundary_turn_stays_live_during_a_hold():
+    """Staying in bounds is the one steering job the hold does NOT take over —
+    it is why gating Regroup costs nothing."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    turn = src.split("if selection == TACTIC_BOUNDARY_TURN:")[1][:300]
+    assert "survival_hold" not in turn
+
+
+class TestBoundaryMedianFilter:
+    """ADR 113. A single tick is not evidence.
+
+    Measured over 636 readings on 2026-09-04: 16% of consecutive ticks moved
+    more than 0.15R, 3% more than 0.40R. At 1179-1455 KPH a 0.40R step is not
+    reachable at any plausible minimap scale — that tail is the detector
+    changing its mind. BoundaryTurn consumed it raw, and logged
+    "0.50R -> 0.57R (closest 0.05R, receded)" ten seconds before a crossing.
+    """
+
+    @staticmethod
+    def _h():
+        import collections
+        from wingman.tick_handlers import BehaviorTreeHandler
+        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        h._boundary_recent = collections.deque(maxlen=3)
+        h._boundary_median_age_s = 5.0
+        return h
+
+    def test_a_single_outlier_is_rejected(self):
+        """The failure this exists for: 0.50 -> 0.07 -> 0.09 in three ticks."""
+        h = self._h()
+        h._median_boundary((0.50, -0.30), 100.0)
+        h._median_boundary((0.09, -0.05), 101.5)
+        out = h._median_boundary((0.07, -0.04), 103.0)
+        assert out == (0.09, -0.05), "the spike was passed through"
+
+    def test_a_real_approach_survives_the_filter(self):
+        """A genuine approach is monotonic over many ticks, so the median
+        tracks it with one tick of lag rather than suppressing it."""
+        h = self._h()
+        h._median_boundary((0.36, 0.35), 100.0)
+        h._median_boundary((0.27, 0.26), 101.5)
+        out = h._median_boundary((0.18, 0.17), 103.0)
+        assert out == (0.27, 0.26)
+        out = h._median_boundary((0.10, 0.09), 104.5)
+        assert out == (0.18, 0.17), "a closing boundary must keep closing"
+
+    def test_the_pair_stays_consistent(self):
+        """dist and fwd come from ONE frame. Averaging them independently
+        would synthesise a bearing no frame reported."""
+        h = self._h()
+        for i, r in enumerate([(0.50, -0.49), (0.10, +0.09), (0.30, -0.02)]):
+            out = h._median_boundary(r, 100.0 + 1.5 * i)
+        assert out == (0.30, -0.02), "returned a pair that was never observed"
+
+    def test_fewer_than_three_readings_passes_the_raw_value(self):
+        """Never worse than the pre-ADR-113 behaviour: after a blind gap the
+        raw reading is used rather than going blind for three more ticks."""
+        h = self._h()
+        assert h._median_boundary((0.42, 0.40), 100.0) == (0.42, 0.40)
+        assert h._median_boundary((0.31, 0.30), 101.5) == (0.31, 0.30)
+
+    def test_stale_readings_are_dropped(self):
+        """A reading either side of a 30 s blind gap says nothing about the
+        same approach."""
+        h = self._h()
+        h._median_boundary((0.50, -0.49), 100.0)
+        h._median_boundary((0.48, -0.47), 101.5)
+        out = h._median_boundary((0.12, +0.11), 140.0)
+        assert out == (0.12, +0.11), "filtered against readings 40s old"
+        assert len(h._boundary_recent) == 1
+
+    def test_no_reading_does_not_disturb_the_window(self):
+        h = self._h()
+        h._median_boundary((0.50, -0.49), 100.0)
+        assert h._median_boundary(None, 101.5) is None
+        assert len(h._boundary_recent) == 1
+
+
+class TestBlindFrameCapture:
+    """ADR 117. Every boundary frame in the corpus is one where detection
+    SUCCEEDED — approach frames are written on a reading. The detector read on
+    23% of ticks (514 of 2204), and the 22:39:10 crossing had its last reading
+    14 s earlier, so the failure case has never been looked at."""
+
+    @staticmethod
+    def _h(cap=40, interval=45.0):
+        import collections
+        from wingman.tick_handlers import BehaviorTreeHandler
+        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        h._boundary_recent = collections.deque(maxlen=3)
+        h._boundary_median_age_s = 5.0
+        h._blind_capture_max = cap
+        h._blind_capture_interval_s = interval
+        h._blind_capture_next_ts = 0.0
+        h._rtb_capture_max = 5
+        h._approach_capture_max = 5
+        h._captures = {}
+        h._rtb_capture_dir = "/nonexistent-on-purpose"
+        return h
+
+    def test_the_blind_kind_has_its_own_budget(self):
+        """Not shared with rtb or approach. A shared counter hands priority to
+        whichever event is most frequent, and blindness is the common case —
+        the exact mistake ADR 108 D4 made in the other direction."""
+        h = self._h(cap=40)
+        h._captures["approach"] = 5
+        h._captures["rtb"] = 5
+        assert h._blind_capture_max == 40
+        assert h._captures.get("blind", 0) == 0
+
+    def test_a_zero_cap_disables_capture_entirely(self):
+        """It is a diagnostic, not a permanent disk cost."""
+        h = self._h(cap=0)
+        h._capture_boundary_frame(object(), "blind", "1")
+        assert h._captures.get("blind", 0) == 0
+
+    def test_capture_stops_at_the_cap(self):
+        h = self._h(cap=2)
+        h._captures["blind"] = 2
+        h._capture_boundary_frame(object(), "blind", "3")
+        assert h._captures["blind"] == 2, "wrote past the cap"
+
+    def test_capture_never_raises_on_a_bad_frame(self):
+        """It runs on the tick path; losing evidence must not cost anything."""
+        h = self._h()
+        h._capture_boundary_frame(object(), "blind", "1")  # not an image
+        h._capture_boundary_frame(None, "blind", "1")
+
+
+class TestTurnBearingTracking:
+    """ADR 125. A turn's job is to change HEADING, and nothing measured it.
+
+    The attitude sampler reports pitch (derived from altitude rate); the range
+    summary says where the aircraft ended up. Neither answers "did the aircraft
+    rotate", and two hypotheses for the turn's ineffectiveness have already been
+    disproved for want of it — a stall theory (contradicted: steeper pulls did
+    better) and a minimum-speed theory (evaporated at n=440: turns that failed
+    were FASTER, 660 vs 537 KPH median).
+    """
+
+    @staticmethod
+    def _bearings(seq):
+        """Net and path bearing change, the way the handler computes them."""
+        net = 0.0
+        path = 0.0
+        for a, b in zip(seq, seq[1:], strict=False):
+            d = (b - a + 180.0) % 360.0 - 180.0
+            net += d
+            path += abs(d)
+        return net, path
+
+    def test_a_steady_turn_accumulates_bearing(self):
+        net, path = self._bearings([0.0, 20.0, 40.0, 60.0])
+        assert net == 60.0
+        assert path == 60.0
+
+    def test_the_wrap_seam_is_not_read_as_a_reverse_turn(self):
+        """Crossing +/-180 must not register as a 350-degree swing the other
+        way — the aircraft turned 20 degrees, not most of a circle."""
+        net, path = self._bearings([170.0, -170.0])
+        assert net == 20.0, f"seam misread as {net}"
+        assert path == 20.0
+
+    def test_an_oscillation_shows_a_large_path_and_a_small_net(self):
+        """The distinction that matters: an aircraft rocking between two
+        headings has turned nowhere, and net alone would say so while path
+        reveals the effort spent."""
+        net, path = self._bearings([0.0, 30.0, 0.0, 30.0, 0.0])
+        assert net == 0.0
+        assert path == 120.0
+
+    def test_a_single_sample_yields_no_bearing(self):
+        net, path = self._bearings([45.0])
+        assert net == 0.0 and path == 0.0
+
+
+def _battle_snap():
+    """A REAL AnalyzerSnapshot in battle, not a stub with the two fields the
+    caller happens to read — the fixture trap this project keeps hitting."""
+    from wingman.analyzer import GameState
+    from wingman.behavior_tree import AnalyzerSnapshot
+    return AnalyzerSnapshot(
+        health=100, missiles=4, flares=4,
+        ring_short=0, ring_mid=0, ring_long=0,
+        enemy_absent_seconds=0.0,
+        altitude=3000.0,
+        incoming_detected=False, mission_running=True,
+        is_respawning=False, game_state=GameState.GAME_BATTLE)
+
+
+class TestBoundaryInstrumentationSurvivesReadingWidth:
+    """ADR 127. ADR 122 widened the boundary reading from (dist, forward) to
+    (dist, forward, lateral). `_instrument_boundary` kept destructuring two, so
+    every READABLE tick raised ValueError into a broad handler that logged at
+    DEBUG — 1880 times in one session.
+
+    Approach counting, approach frames and the boundary trace were dead for
+    8.5 hours of soak, and the only symptom was a DEBUG line that stopped
+    appearing. Crossing counts were unaffected: they are computed before the
+    unpack, which is why ADR 106's rows survived.
+    """
+
+    @staticmethod
+    def _h():
+        import collections
+        import unittest.mock as _m
+        from wingman.tick_handlers import BehaviorTreeHandler
+        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        h._analyzer = _m.MagicMock()
+        h._analyzer.detect_return_to_battle.return_value = False
+        h._boundary_trace = collections.deque(maxlen=20)
+        h._session_start = 0.0
+        h._rtb_active = False
+        h._rtb_confirmed = False
+        h._boundary_near_since = 0.0
+        h._boundary_approaches = 0
+        h._boundary_near_frac = 0.35
+        h._rtb_capture_max = 0
+        h._approach_capture_max = 0
+        h._blind_capture_max = 0
+        h._captures = {}
+        h._rtb_capture_dir = "/nonexistent-on-purpose"
+        return h
+
+    def _run(self, h, reading, caplog):
+        import logging
+        h._boundary_reading = reading
+        snap = _battle_snap()
+        with caplog.at_level(logging.DEBUG):
+            h._instrument_boundary(object(), 100.0, snap, "Engage")
+        return caplog.text
+
+    def test_a_three_tuple_reading_does_not_break_instrumentation(self, caplog):
+        """The live failure. A widened reading must flow through, not raise."""
+        text = self._run(self._h(), (0.30, 0.20, 0.10), caplog)
+        assert "too many values to unpack" not in text
+        assert "INSTRUMENTATION FAILED" not in text
+
+    def test_a_three_tuple_reading_still_counts_approaches(self, caplog):
+        """What the outage actually cost: 40 approaches in the session before
+        ADR 122, zero in the two after it."""
+        h = self._h()
+        self._run(h, (0.10, 0.09, 0.02), caplog)   # near, ahead
+        assert h._boundary_approaches == 1, "approach was not counted"
+
+    def test_a_two_tuple_reading_still_works(self, caplog):
+        """Back-compatibility: anything still emitting the old width must not
+        start failing because of the fix."""
+        text = self._run(self._h(), (0.30, 0.20), caplog)
+        assert "INSTRUMENTATION FAILED" not in text
+
+    def test_the_first_failure_is_loud_and_repeats_are_not(self, caplog):
+        """A per-tick path that swallows at DEBUG turns a total outage into
+        silence. The first one has to be impossible to miss; the rest must not
+        flood the log."""
+        import logging
+        h = self._h()
+        h._analyzer.detect_return_to_battle.side_effect = RuntimeError("boom")
+        h._boundary_reading = (0.3, 0.2, 0.1)
+        snap = _battle_snap()
+        with caplog.at_level(logging.DEBUG):
+            h._instrument_boundary(object(), 100.0, snap, "Engage")
+            first_errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+            h._instrument_boundary(object(), 101.0, snap, "Engage")
+            all_errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(first_errors) == 1, "first failure was not reported at ERROR"
+        assert len(all_errors) == 1, "repeat failures must not flood at ERROR"

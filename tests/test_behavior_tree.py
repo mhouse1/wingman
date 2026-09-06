@@ -12,6 +12,7 @@ from wingman.behavior_tree import (
     AnalyzerSnapshot,
     MinimumHold,
     TACTIC_ATTACK_SUPPORT,
+    TACTIC_BOUNDARY_TURN,
     TACTIC_CLIMB,
     TACTIC_DISENGAGE,
     TACTIC_EJECT,
@@ -21,6 +22,7 @@ from wingman.behavior_tree import (
     TACTIC_MISSILE_EVADE,
     TACTIC_RESPAWN_WAIT,
     build_tree,
+    make_boundary_condition,
     make_climb_condition,
     make_snapshot_writer,
     selected_tactic,
@@ -729,3 +731,321 @@ def test_disabling_regroup_leaves_the_rest_of_the_selector_intact():
     off = [c.name for c in build_tree({}, regroup_enabled=False).root.children]
     assert TACTIC_ENGAGE in off and TACTIC_ATTACK_SUPPORT in off
     assert off.index(TACTIC_ENGAGE) < off.index(TACTIC_ATTACK_SUPPORT)
+
+
+# --- ADR 107: BoundaryTurn ----------------------------------------------------
+
+def _bsnap(dist, fwd, **kw):
+    return make_snap(boundary_dist=dist, boundary_forward=fwd, **kw)
+
+
+def _bcond(turn_frac=0.50, recede=0.06, **kw):
+    kw.setdefault("min_clear_frac", 0.0)   # older tests predate the clearance rule
+    return make_boundary_condition(turn_frac, recede, **kw)
+
+
+def test_entry_needs_the_edge_ahead():
+    """Without it, any pass within the band would roll the aircraft."""
+    c = _bcond()
+    assert c(_bsnap(0.40, -0.30)) is False
+    assert c(_bsnap(0.40, +0.30)) is True
+
+
+def test_a_negative_forward_read_does_not_drop_the_turn():
+    """Measured over 32 crossing traces on 2026-09-01: the sign of `forward`
+    flipped between adjacent ticks 27% of the time and read <= 0 on 51% of the
+    ticks where the aircraft was demonstrably closing. Releasing on it made the
+    turn chatter and the heading never moved."""
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(0.40, -0.35)) is True
+    assert c(_bsnap(0.30, -0.25)) is True
+
+
+def test_the_turn_releases_once_the_aircraft_recedes():
+    """Recession is measured from the CLOSEST approach of this turn, so an arc
+    that dips and then opens out is recognised as working."""
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(0.30, +0.20)) is True
+    assert c(_bsnap(0.34, -0.10)) is True, "inside the 0.06 margin"
+    assert c(_bsnap(0.37, -0.10)) is False, "0.30 + 0.06 exceeded"
+
+
+def test_leaving_the_band_releases_the_turn():
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(0.80, +0.70)) is False
+
+
+def test_a_dropped_reading_freezes_rather_than_releasing():
+    """A gap in perception is not evidence the aircraft is clear."""
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(None, None)) is True
+    assert c(_bsnap(None, +0.4)) is True
+
+
+def test_blindness_never_starts_a_turn():
+    assert _bcond()(_bsnap(None, None)) is False
+
+
+def test_a_zero_threshold_disables_the_leaf():
+    assert _bcond(turn_frac=0.0)(_bsnap(0.01, +0.99)) is False
+
+
+def test_it_yields_to_the_climb_emergency_band():
+    """ADR 107 D4: hitting the ground is certain, the boundary is a countdown."""
+    emergency = {"on": False}
+    c = _bcond(yields_to_fn=lambda: emergency["on"])
+    assert c(_bsnap(0.40, +0.30)) is True
+    emergency["on"] = True
+    assert c(_bsnap(0.40, +0.30)) is False
+
+
+def test_selection_beats_climb_engage_and_regroup(clock):
+    cfg = dict(BT_CFG, boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0},
+               climb={"enabled": True, "enter_below_alt": 1000, "exit_above_alt": 2000})
+    tree = build_tree(cfg, clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(boundary_dist=0.30, boundary_forward=0.25,
+                     ring_long=5, altitude=500.0, friendly_contacts=4)
+    writer.set("snapshot", snap)
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_BOUNDARY_TURN
+
+
+def test_it_yields_to_the_defensive_tactics(clock):
+    cfg = dict(BT_CFG, boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0})
+    tree = build_tree(cfg, clock=clock)
+    writer = make_snapshot_writer()
+    for field, expected in (("is_respawning", TACTIC_RESPAWN_WAIT),
+                            ("missiles", TACTIC_EJECT)):
+        kw = {field: True if field == "is_respawning" else 0}
+        writer.set("snapshot", make_snap(boundary_dist=0.10,
+                                         boundary_forward=0.09, **kw))
+        tree.tick()
+        assert selected_tactic(tree) == expected, field
+
+
+def test_the_leaf_is_absent_when_unconfigured(clock):
+    tree = build_tree(dict(BT_CFG), clock=clock)
+    assert TACTIC_BOUNDARY_TURN not in [c.name for c in tree.root.children]
+
+
+def test_the_condition_is_not_sticky_while_the_turn_runs():
+    """Regression on 2026-09-03. The condition IS the closed loop, so it must
+    stay free to open it.
+
+    Shipped sticky, every one of the nine turns that session burned the full
+    12 s cap — four back to back on a single approach — while the range
+    oscillated 0.216R to 0.514R, clearing the release margin repeatedly and
+    never being allowed to act on it. MissileEvade and Climb are sticky because
+    they run to a goal of their own; this tactic has no goal but the reading."""
+    import inspect
+    src = inspect.getsource(make_boundary_condition)
+    assert "is_running_fn" not in src, \
+        "a running actuation must not force the condition true"
+
+    c = _bcond()
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(0.30, +0.20)) is True
+    # Receding: releases on the reading alone, with no reference to whether the
+    # controller thread happens to still be mid-manoeuvre.
+    assert c(_bsnap(0.37, -0.10)) is False
+
+
+def test_deselection_stops_the_actuation():
+    """The other half of the same fix: nothing else ends the thread early, so
+    the handler has to ask when the leaf stops being selected."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "stop_boundary_turn()" in src
+    assert "selection != TACTIC_BOUNDARY_TURN" in src
+
+
+def test_recession_does_not_release_while_still_on_the_edge():
+    """Regression on 2026-09-03, 105 turns. Recession answers "is the turn
+    working"; the first version wrongly used it to answer "are we safe now".
+    Median release was 0.34R, 27% inside 0.20R — one logged 0.02R to 0.06R,
+    which clears a 0.06 margin while handing back an aircraft still on the edge.
+    Nine of that session's twelve crossings had the turn running."""
+    c = _bcond(release_frac=0.60, min_clear_frac=0.35)
+    assert c(_bsnap(0.10, +0.09)) is True
+    # Receded by well over the margin, but 0.16R is still the boundary.
+    assert c(_bsnap(0.16, -0.05)) is True
+    assert c(_bsnap(0.30, -0.05)) is True, "0.30R is inside min_clear_frac"
+    assert c(_bsnap(0.42, -0.05)) is False, "clear of 0.35R and receding"
+
+
+def test_the_release_threshold_is_wider_than_the_entry():
+    """Enter at turn_frac, leave at release_frac — the band-exit backstop for a
+    turn that never satisfies the recession rule. Equal thresholds would flap on
+    the entry boundary, which is why Climb's altitude band has two.
+
+    recede_frac is set high here to isolate the backstop: with the production
+    0.06 the recession rule almost always fires first, and this branch only
+    matters when it does not."""
+    c = _bcond(recede=0.50, release_frac=0.60, min_clear_frac=0.35)
+    assert c(_bsnap(0.48, +0.45)) is True
+    assert c(_bsnap(0.55, +0.10)) is True, "between the two thresholds — hold"
+    assert c(_bsnap(0.62, +0.10)) is False
+
+
+def test_the_hysteresis_is_wired_from_config():
+    import inspect
+    from wingman.behavior_tree import build_tree
+    src = inspect.getsource(build_tree)
+    assert "release_frac=boundary_cfg.get(\"release_frac\")" in src
+    assert "min_clear_frac" in src
+
+
+def test_a_respawn_clears_a_held_turn():
+    """2026-09-04: a turn held through a respawn and re-selected one second
+    after it, with the aircraft freshly spawned. An aircraft never spawns
+    pointing at the boundary, so a turn straight after a respawn is a reliable
+    indicator that something upstream has latched."""
+    c = _bcond(min_clear_frac=0.0)
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(None, None, is_respawning=True)) is False
+    # And the latch is gone, not merely masked for that tick.
+    assert c(_bsnap(None, None)) is False
+
+
+def test_the_freeze_on_blindness_is_bounded():
+    """The freeze is right for a dropped tick and wrong as a latch. The detector
+    is blind on ~70% of ticks, so "hold until a reading disagrees" means "hold
+    indefinitely" — which is what carried a turn through the respawn above."""
+    c = _bcond(min_clear_frac=0.0, blind_ticks=3)
+    assert c(_bsnap(0.20, +0.18)) is True
+    for _ in range(3):
+        assert c(_bsnap(None, None)) is True, "a short gap must not release"
+    assert c(_bsnap(None, None)) is False, "sustained blindness must release"
+
+
+def test_a_reading_resets_the_blind_counter():
+    c = _bcond(min_clear_frac=0.0, blind_ticks=2)
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(None, None)) is True
+    assert c(_bsnap(0.18, +0.15)) is True
+    for _ in range(2):
+        assert c(_bsnap(None, None)) is True
+    assert c(_bsnap(None, None)) is False
+
+
+def test_outside_battle_clears_the_turn():
+    from wingman.analyzer import GameState
+    c = _bcond(min_clear_frac=0.0)
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(0.20, +0.18, game_state=GameState.GAME_LOBBY)) is False
+
+
+def test_a_boundary_abeam_does_not_start_a_turn():
+    """2026-09-04, one second after a respawn: dist=0.281 fwd=+0.006. The
+    forward component is 2% of the range, so the edge is essentially
+    perpendicular — the aircraft is flying ALONG it, not at it. `forward > 0`
+    alone called that "ahead" and turned a freshly spawned aircraft.
+
+    Measured over 184 ticks preceding confirmed crossings, genuine approaches
+    run a median forward/dist of 0.82 with a 10th percentile of 0.24."""
+    c = _bcond(min_clear_frac=0.0, entry_ratio=0.25)
+    assert c(_bsnap(0.281, +0.006)) is False, "abeam is not ahead"
+    assert c(_bsnap(0.281, +0.060)) is False, "0.21 ratio is still abeam"
+    assert c(_bsnap(0.281, +0.230)) is True, "0.82 is a genuine approach"
+
+
+def test_the_bearing_gate_applies_only_to_entry():
+    """The hold keys on range, not bearing — that is ADR 107 D5, measured. A
+    turn already running must not be dropped because the bearing swings, which
+    is exactly what it is trying to make happen."""
+    c = _bcond(min_clear_frac=0.0, entry_ratio=0.25)
+    assert c(_bsnap(0.30, +0.28)) is True
+    assert c(_bsnap(0.28, +0.001)) is True, "bearing swung, but hold on range"
+
+
+# --- ADR 109: Eject yields to a survival hold ---------------------------------
+
+def test_eject_does_not_fire_during_a_survival_hold(harness):
+    """2026-09-04 09:58:45. With the rack empty during mission_loiter, Eject dove
+    the aircraft at -71 degrees and -660 m/s, logged "climb suppressed — eject in
+    progress" for four seconds while loiter tried to climb, and killed it.
+
+    Loiter's entire objective is staying alive; an empty rack is irrelevant to
+    that. Eject exists to trade a spent aircraft for a rearmed one, which is the
+    opposite trade."""
+    assert tick(harness, make_snap(missiles=0)) == TACTIC_EJECT
+    assert tick(harness, make_snap(missiles=0, survival_hold=True)) != TACTIC_EJECT
+
+
+def test_the_confirmed_eject_path_yields_too():
+    """The debounced condition is what runs once the leaf actuates, so gating
+    only the raw read would leave the live path unchanged."""
+    from wingman.behavior_tree import is_eject_confirmed, is_missiles_empty
+    assert is_missiles_empty(make_snap(missiles=0)) is True
+    assert is_missiles_empty(make_snap(missiles=0, survival_hold=True)) is False
+    assert is_eject_confirmed(make_snap(missiles_empty_confirmed=True)) is True
+    assert is_eject_confirmed(
+        make_snap(missiles_empty_confirmed=True, survival_hold=True)) is False
+
+
+def test_a_survival_hold_does_not_disarm_the_defensive_tactics(harness):
+    """Yielding is specific to Eject. RespawnWait and MissileEvade protect the
+    aircraft rather than spend it, so they still outrank the hold."""
+    assert tick(harness, make_snap(is_respawning=True,
+                                   survival_hold=True)) == TACTIC_RESPAWN_WAIT
+
+
+# --- ADR 120: release on the nearest reading, enter on the filtered one -------
+
+def test_the_turn_does_not_release_on_a_filtered_reading_while_a_near_one_stands():
+    """ADR 120. The live failure path.
+
+    A single reading at or above `release_frac` releases the turn outright.
+    Measured 2026-09-05: the median filter reported 0.10R or more for 44% of
+    RAW readings inside 0.10R, including 0.019 -> 0.516 — so the release read a
+    comfortable range while the aircraft sat on the edge.
+    """
+    c = _bcond(turn_frac=0.30, release_frac=0.45)
+    assert c(_bsnap(0.20, +0.19)) is True                     # turn starts
+    # Filtered says clear; the nearest recent reading says otherwise.
+    assert c(make_snap(boundary_dist=0.52, boundary_forward=+0.40,
+                       boundary_near=0.02)) is True, \
+        "released the turn with a 0.02R reading still in the window"
+
+
+def test_the_turn_still_releases_when_the_aircraft_is_genuinely_clear():
+    """The guard must not become a latch — if every recent reading is far, the
+    turn has to end or it never stops."""
+    c = _bcond(turn_frac=0.30, release_frac=0.45)
+    assert c(_bsnap(0.20, +0.19)) is True
+    assert c(make_snap(boundary_dist=0.52, boundary_forward=+0.40,
+                       boundary_near=0.50)) is False
+
+
+def test_entry_still_uses_the_filtered_reading():
+    """Entry keeps the noise rejection: a spurious near value must not start a
+    turn, because entry is where a false positive is cheap and common."""
+    c = _bcond(turn_frac=0.30, release_frac=0.45)
+    # Filtered says far (no turn) even though a near value sits in the window.
+    assert c(make_snap(boundary_dist=0.60, boundary_forward=+0.55,
+                       boundary_near=0.01)) is False
+
+
+def test_recession_is_judged_on_the_nearest_reading_too():
+    """Recession is a clearance claim. Judged on the filtered value it can
+    manufacture a recession the aircraft never flew."""
+    c = _bcond(turn_frac=0.30, recede=0.06, min_clear_frac=0.35,
+               release_frac=0.90)
+    assert c(_bsnap(0.20, +0.19)) is True
+    assert c(make_snap(boundary_dist=0.80, boundary_forward=+0.70,
+                       boundary_near=0.05)) is True, \
+        "recession declared while the nearest reading was 0.05R"
+
+
+def test_a_snapshot_without_the_near_field_behaves_as_before():
+    """Back-compatibility: `boundary_near` absent falls back to `boundary_dist`,
+    so nothing that does not supply it changes behaviour."""
+    c = _bcond(turn_frac=0.30, release_frac=0.45)
+    assert c(_bsnap(0.20, +0.19)) is True
+    assert c(_bsnap(0.52, +0.40)) is False

@@ -193,10 +193,38 @@ _takeover_keys = frozenset()
 # SAF-001: keys the operator uses to hand the aircraft BACK. Delivered on the
 # injection display too, but only while the takeover is active — wingman
 # injects nothing during manual except flares, so there is nothing they could
-# be confused with. Outside manual they stay filtered, because wingman does
-# press them itself ('u' starts the J20 mission).
+# be confused with. Outside manual they stay filtered by default (see
+# _echo_safe_keys below for the one exception).
 _handback_keys = frozenset()
 _manual_state_fn = None
+
+# Keys that must ALWAYS reach the handler on the injection display, in every
+# state — not just the _handback_keys carve-out, which only applies during
+# manual takeover. 'u' (MISSION_J20_KEY) is both an operator hotkey AND a key
+# wingman injects itself (game_starting_loop presses it every 5s while
+# waiting for Good Luck), so the blanket `key not in _injected_keys` filter
+# below silently dropped every genuine press outside GAME_BATTLE_MANUAL —
+# including the one case this key exists for: forcing GAME_BATTLE out of a
+# wedged lobby (observed 2026-09-01: operator's 'u' press while stuck in a
+# GAME_LOBBY blackout did nothing at all, no log line, escape loop kept
+# firing on its own 45s cycle because the FSM never actually moved).
+#
+# Echo discrimination for these keys is the caller's job (controller.py's
+# `_programmatic_key_counts` bracket + `_prog_release_grace_until` grace
+# window around its own presses) — the same mechanism SAF-001.1 already
+# validated for maneuver keys, just applied here to the one non-maneuver key
+# that shares the same "wingman also presses this" property.
+_echo_safe_keys = frozenset()
+
+
+def set_echo_safe_keys(keys) -> None:
+    """Declare keys that bypass the injection-display echo filter entirely.
+
+    Unlike _handback_keys, these are delivered regardless of FSM state — the
+    caller is responsible for its own echo discrimination.
+    """
+    global _echo_safe_keys
+    _echo_safe_keys = {str(k).lower() for k in (keys or ())}
 
 
 def set_handback_keys(keys, manual_state_fn=None) -> None:
@@ -291,6 +319,12 @@ def should_deliver_hotkey(display_name: str, key_name: str, state: int) -> bool:
     if _injection_display is None:
         return True
     if display_name == _injection_display:
+        # Keys with their own robust echo discrimination (see _echo_safe_keys
+        # above) bypass the blanket _injected_keys filter entirely, in every
+        # state — checked first since it is unconditional, unlike the
+        # handback carve-out below.
+        if key_name.lower() in _echo_safe_keys:
+            return True
         # SAF-001: the hand-back key gets through while the operator holds the
         # aircraft. Wingman injects nothing during manual but flares, so this
         # cannot be one of its own presses; outside manual it stays filtered
@@ -320,6 +354,76 @@ def should_deliver_hotkey(display_name: str, key_name: str, state: int) -> bool:
         # display is unconditional and race-free through them.
         return key_name.lower() not in _injected_keys
     return (state & _OPERATOR_MOD_MASK) == _OPERATOR_MOD_MASK
+
+
+# --- deliberate display teardown (ADR 121) ----------------------------------
+# Closing the nested display kills the XRecord connection the hotkey listener is
+# blocked on, and the listener cannot tell that from a crash. Measured on every
+# session that tears :3 down — 2026-09-05 22:35, 2026-09-06 04:28 and 05:13 — the
+# listener logged ERROR one millisecond after wingman's own "closing Xwayland"
+# line, then scheduled a reconnect to the display it had just destroyed:
+#
+#   04:28:13,803 Nested display: closing Xwayland for :3
+#   04:28:13,804 [ERROR] XKey listener thread died: Display connection closed by server
+#   04:28:13,804 XKey: reconnecting display in 3s (attempt 1)
+#
+# Harmless — the process exits before the timer fires — but it puts an ERROR in
+# every clean shutdown, and an ERROR that always fires cannot be used to notice
+# the listener dying for a reason that matters.
+#
+# Per DISPLAY, deliberately, rather than one global "shutting down" flag: the
+# operator's :0 listener dying during shutdown is still a real failure, and a
+# blanket flag would hide exactly the case worth keeping.
+_expected_close_lock = threading.Lock()
+_expected_close: set = set()
+
+
+def expect_display_close(display_name) -> None:
+    """Declare that `display_name` is about to be torn down on purpose."""
+    if not display_name:
+        return
+    with _expected_close_lock:
+        _expected_close.add(str(display_name).strip())
+
+
+def close_is_expected(display_name) -> bool:
+    """Was this display's disconnection asked for? Never raises."""
+    if not display_name:
+        return False
+    with _expected_close_lock:
+        return str(display_name).strip() in _expected_close
+
+
+def _reset_expected_closes() -> None:
+    """Test seam: forget every declared teardown."""
+    with _expected_close_lock:
+        _expected_close.clear()
+
+
+def describe_key_source(display: "str | None", state: int = 0) -> str:
+    """Human-readable origin of an observed keypress, for the takeover log.
+
+    Names the display AND what it means, because the display alone is not
+    self-explanatory in a log read weeks later: ':3' is where the operator has
+    deliberately focused the game window, ':0' is their ordinary desktop where a
+    hotkey additionally needs ctrl+alt. Which of those a takeover came from is
+    the difference between "the operator took the aircraft" and "a stray key
+    did", and the two were indistinguishable before this.
+    """
+    if not display:
+        return "source=unknown"
+    if _injection_display and display == _injection_display:
+        role = "nested, game focused"
+    elif display == os.environ.get("DISPLAY", ":0").strip():
+        role = "operator desktop"
+    else:
+        role = "unrecognised"
+    mods = []
+    if state & (1 << 2):
+        mods.append("ctrl")
+    if state & (1 << 3):
+        mods.append("alt")
+    return f"source={display!r} ({role}) mods={'+'.join(mods) if mods else 'none'}"
 
 
 def _observe_display_names() -> "list[str]":
@@ -432,13 +536,29 @@ def _linux_key_event(key: str, event_type) -> None:
 
 
 class _XKeyEvent:
-    """Minimal keyboard event passed to hotkey callbacks, mirroring keyboard.KeyboardEvent."""
-    __slots__ = ("name", "is_injected", "event_type")
+    """Minimal keyboard event passed to hotkey callbacks, mirroring keyboard.KeyboardEvent.
 
-    def __init__(self, name: str, is_injected: bool) -> None:
+    `display` and `state` are wingman's own additions, not part of the
+    `keyboard` module's shape. They exist because a delivered hotkey was
+    otherwise unattributable: `should_deliver_hotkey` decides from
+    (display, key, modifier state) and recorded none of it, so a takeover
+    arriving from the nested display (the operator focused the game and pressed
+    ENTER) and one arriving from the operator's display (ctrl+alt held) produced
+    byte-identical log lines. Two sessions on 2026-09-05 logged ENTER takeovers
+    mid-eject that could not be attributed to either source afterwards.
+
+    Callers must read them with getattr(): the Windows `keyboard` fallback
+    delivers real KeyboardEvents, which carry neither.
+    """
+    __slots__ = ("name", "is_injected", "event_type", "display", "state")
+
+    def __init__(self, name: str, is_injected: bool,
+                 display: "str | None" = None, state: int = 0) -> None:
         self.name = name
         self.is_injected = is_injected
         self.event_type = "down"
+        self.display = display
+        self.state = state
 
 
 class _LinuxXTestKeyboard:
@@ -663,7 +783,9 @@ class _LinuxXTestKeyboard:
                                 getattr(event, "state", 0)):
                             continue
                         ev_obj = _XKeyEvent(name=key_name,
-                                            is_injected=bool(event.send_event))
+                                            is_injected=bool(event.send_event),
+                                            display=display_name,
+                                            state=getattr(event, "state", 0))
                         try:
                             cb(ev_obj)
                         except Exception as exc:
@@ -681,7 +803,14 @@ class _LinuxXTestKeyboard:
                 self._contexts.pop(display_name, None)
                 break  # clean exit: _stop was set via unhook_all
             except Exception as e:
-                logger.error("XKey listener thread died: %s", e)
+                # A teardown we asked for is not a failure. See the note by
+                # expect_display_close above.
+                _expected = close_is_expected(display_name)
+                if _expected:
+                    logger.info("XKey: %s closed as expected — listener stopping",
+                                display_name)
+                else:
+                    logger.error("XKey listener thread died: %s", e)
                 iter_done.set()  # let this iteration's _stop_watcher exit instead of leaking
                 if d_rec is not None:
                     try:
@@ -694,6 +823,8 @@ class _LinuxXTestKeyboard:
                     except Exception as close_err:
                         logger.debug("XKey: d_ctrl.close() failed during reconnect: %s", close_err)
                 self._contexts.pop(display_name, None)
+                if _expected:
+                    break       # the display is gone because we closed it
                 if not self._stop.is_set():
                     reconnect_attempts += 1
                     logger.info("XKey: reconnecting display in 3s (attempt %d)", reconnect_attempts)

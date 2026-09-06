@@ -55,6 +55,11 @@ class ControllerConfig:
     missile_evade: dict = field(default_factory=dict)
     climb: dict = field(default_factory=dict)
     fuel: dict = field(default_factory=dict)
+    # ADR 116: mission_loiter's block. It was read with
+    # `config.get("loiter_mission")` guarded by `isinstance(config, dict)`,
+    # and `config` is this dataclass — so the guard was always False and the
+    # whole section of config.yaml was dead.
+    loiter: dict = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, cfg: dict | None, **overrides) -> "ControllerConfig":
@@ -83,6 +88,7 @@ class ControllerConfig:
             missile_evade=bt.get("missile_evade", {}) or {},
             climb=bt.get("climb", {}) or {},
             fuel=cfg.get("fuel", {}) or {},
+            loiter=cfg.get("loiter_mission", {}) or {},
         )
         if not overrides:
             return base

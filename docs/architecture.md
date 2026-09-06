@@ -623,5 +623,15 @@ held afterburner and pitch key, and the operator could not fly.
 | [099](adr/099-nested-display-lane-for-unattended-operation.md) | Nested display lane for unattended operation |
 | [028 rev 4](adr/028-enemy-quadrant-detection-and-nose-orientation.md) | Regroup: steer to friendlies when no enemy is on the minimap |
 | [Design 010](hldd/010-mini-map-detection/010-mini-map-detection-hldd.md) | Map-boundary instrumentation (measurement only; no guard) |
+| [100](adr/100-repository-growth-and-generated-artifacts.md) | Repository growth: generated artifacts stay out of git |
+| [101](adr/101-boundary-aware-climb.md) | Boundary-aware climb: roll away from the map edge without leaving the climb |
+| [102](adr/102-lobby-recheck-from-game-starting.md) | Lobby recheck from GAME_STARTING: PLAY still visible means the match never started |
+| [103](adr/103-ocr-queue-frame-retention.md) | OCR queue frame retention: submit detached crops, not whole frames |
+| [105](adr/105-close-the-nested-display-when-the-game-exits.md) | Close the nested display when the game exits on its own |
+| [106](adr/106-return-to-battle-rate-tracking.md) | RETURN TO BATTLE rate tracking: the series ADR 101 is judged by |
+| [107](adr/107-boundary-turn-tactic.md) | Boundary turn tactic: a first-class leaf that owns pitch and roll |
+| [108](adr/108-boundary-detection-for-the-new-minimap.md) | Boundary detection for the new minimap: reconnect the line, pick by shape |
+| [109](adr/109-eject-yields-to-the-survival-hold.md) | Eject yields to the survival hold: loiter's objective outranks the empty-rack trade |
+| [110](adr/110-the-survival-hold-owns-the-flight-path.md) | The survival hold owns the flight path: the combat branch yields, the orbit holds altitude |
 
 *(This index is incomplete: ADRs 073-097 are not yet listed.)*

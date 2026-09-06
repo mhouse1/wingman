@@ -143,8 +143,20 @@ reqs: reqs-gate
 	@echo "docs/requirements markdown export refreshed"
 
 # Generate HTML report for automated levels test
+# ADR 100 follow-up: collect tests/ as a directory instead of naming every file.
+# The hand-maintained list had drifted — 8 of 57 test files were unlisted, three
+# of them red, including a guard added the same week it was written. Exclusions
+# are the lanes that need a game, a real display, or real OCR and so have their
+# own targets; a new test file is now picked up by default and has to be opted
+# OUT deliberately rather than opted in and forgotten.
+TEST_EXCLUDED_FILES := \
+	tests/test_replay_integration_make_y.py \
+	tests/test_replay_integration_path1_path2.py \
+	tests/test_stall_crops_ocr.py \
+	tests/test_telemetry_corpus.py
+
 test:
-	$(PYTEST_RUN) tests/test_automated_levels.py tests/test_main_game_end.py tests/test_analyzer.py tests/test_analyzer_lifecycle.py tests/test_mission_cancel.py tests/test_mission_stats.py tests/test_controller_no_keyboard.py tests/test_telemetry.py tests/test_eject_closed_loop.py tests/test_disengage_roll.py tests/test_missile_evade.py tests/test_resource_monitor.py tests/test_heap_census.py tests/test_performance_aggregate.py tests/test_climb_mode.py tests/test_live_capture_engine.py tests/test_replay.py tests/test_target_tracking.py tests/test_waiting_fallback.py tests/test_health_respawn.py tests/test_event_registry.py tests/test_stall_recovery.py tests/test_tick_handlers.py tests/test_engage_nav.py tests/test_minimap_bearing.py tests/test_behavior_tree.py tests/test_config_schema.py tests/test_controller_config.py tests/test_calibrate_config_writer.py tests/test_input_linux.py tests/test_invite_policy.py tests/test_account_tag.py tests/test_ocr_reader_reuse.py tests/test_lobby_popup_coverage.py tests/test_stall_profile_recovery.py tests/test_liveness_guard.py tests/test_leak_gate.py tests/test_handle_construction_sites.py tests/test_keybindings.py tests/test_finish_round_then_exit.py tests/test_reaction_segments.py tests/test_host_mode.py tests/test_host_context.py tests/test_altitude_gate_adr097.py tests/test_focus_probe.py tests/test_focus_guard.py tests/test_sendevent_probe.py tests/test_nested_display.py tests/test_mission_loiter.py --html=tests/test-output/report.html --self-contained-html
+	$(PYTEST_RUN) tests/ $(addprefix --ignore=,$(TEST_EXCLUDED_FILES)) --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
 test1:
@@ -511,7 +523,11 @@ wait-game:
 	@echo "Waiting for Metalstorm.exe process (timeout $(GAME_WAIT_TIMEOUT_S) s)…"
 	@timeout $(GAME_WAIT_TIMEOUT_S) bash -c \
 	  'until pgrep -f Metalstorm.exe > /dev/null 2>&1; do sleep 2; done' \
-	  || { echo "ERROR: Metalstorm.exe not found after $(GAME_WAIT_TIMEOUT_S) s"; exit 1; }
+	  || { echo "ERROR: Metalstorm.exe not found after $(GAME_WAIT_TIMEOUT_S) s"; \
+	       echo "       launch log: /tmp/wingman-game-launch.log"; \
+	       echo "Closing the nested display it would have been hosted on (ADR 105)…"; \
+	       $(PYTHON_RUN) scripts/nested-display.py stop || true; \
+	       exit 1; }
 	@echo "Metalstorm.exe detected — waiting $(GAME_LOBBY_WAIT_S) s for game window to appear…"
 	@sleep $(GAME_LOBBY_WAIT_S)
 	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)"
@@ -651,6 +667,14 @@ rr-live-path1-gate:
 #   make newpaths CAPTURE_PATH=PATH1
 #   make newpaths CAPTURE_PATH=PATH2
 #   make newpaths CAPTURE_PATH=PATH3
+# The capture lane drives the REAL display: wingman.main disables the nested lane
+# for --capture-path-config (ADR 099, main.py) and grabs the monitor through
+# PipeWire. Launching the game into :3 while wingman looks at :0 is why this
+# failed with "game window not found in 3840x1600 frame" for a whole run
+# (2026-09-02). NESTED=0 makes all four launch deps agree with it: nested-setup
+# and nested-focus become no-ops and NESTED_ENV comes back empty, so the game
+# opens on the display wingman is actually watching.
+newpaths: NESTED := 0
 newpaths: $(GAME_LAUNCH_DEPS)
 	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \

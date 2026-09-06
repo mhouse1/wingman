@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-08-25 | 1.8.6           |
+| Draft  | 2026-09-01 | 1.8.8           |
 
 ## Context
 
@@ -68,6 +68,42 @@ The name is ordering, not decoration. Three things happen, in this order:
   they mean different things. A guard exit means "restart wingman at a clean
   moment" and should still wait for a real lobby. `z` means "stop unless that
   would abandon an aircraft in flight". The guards keep `_safe` unchanged.
+
+  **Amended 2026-09-01 — `GAME_END_B` defers.** The 2026-08-29 amendment listed
+  `GAME_END_B` among the states with nothing to protect. That is true of the
+  aircraft and false of the screen. On 2026-09-01 a press landed one second
+  after the state was entered:
+
+  ```
+  03:56:09,317  Finished processing state GAME_END_B enter callbacks.
+  03:56:10,431  FINISH ROUND: stopping in GAME_END_B — no round in progress
+  ```
+
+  Wingman exited with MetalStorm still on the end-of-round screen. The next
+  session therefore opened outside the lobby and had to recover before it could
+  play — the deferred exit produced exactly the unclean start it exists to
+  avoid.
+
+  `GAME_END_B` is now a **third deferral case**, alongside a round in progress
+  and the settle below. The loop stays up so the existing click-through runs,
+  and the session ends once the lobby has actually been reached.
+- **The exit holds `FINISH_ROUND_SETTLE_S` (3.0 s) after the final continue
+  click**, and the window is timed from the *click*, not from the state change.
+
+  Waiting on `GAME_LOBBY` alone would race: the analyzer can report the lobby
+  before the game has finished settling into it, which is the same
+  one-second-early exit in a different disguise. `_click_through_game_end` gained
+  an `on_complete` callback that fires after the PLAY click has gone out, and the
+  settle runs from that timestamp.
+
+  The callback deliberately does **not** fire on the missing-PLAY-crop path,
+  which returns without clicking. A settle timed from a click that never
+  happened would restore the original bug silently.
+
+  Neither new wait is unbounded. The `GAME_END_B` stall guard forces
+  `GAME_LOBBY` after 30 s if the click-to OCR sticks, and the settle is a fixed
+  window measured from a click that demonstrably landed. An open-ended hold
+  would defeat the hotkey.
 - **No automatic path may start a new round while the exit is pending.** The
   lobby quick-scan clicks PLAY within a second or two of reaching the lobby, so
   a press made *in* the lobby lost the race and cost the operator a further full
@@ -200,9 +236,18 @@ number, and Backspace already covers it.
 - **V1 — deferred, not immediate.** Pressing `z` during `GAME_BATTLE` does not
   end the session; the mission completes.
 - **V2 — ends as soon as no round is in progress.** *(Amended 2026-08-29;
-  originally "at the safe point", meaning `GAME_LOBBY` and no mission lock.)*
-  The session ends on the first tick where the state is not in `BATTLE_STATES`,
-  including `GAME_UNKNOWN` at startup.
+  originally "at the safe point", meaning `GAME_LOBBY` and no mission lock.
+  Amended again 2026-09-01 to exclude `GAME_END_B`.)* The session ends on the
+  first tick where the state is not in `BATTLE_STATES`, is not `GAME_END_B`, and
+  no settle is running — including `GAME_UNKNOWN` at startup.
+- **V12 — the end-of-round screen is clicked through before the exit.** A press
+  during a round leaves MetalStorm in the lobby, not on the end screen, and the
+  next session starts without recovery.
+- **V13 — the settle runs from the click.** The exit is at least
+  `FINISH_ROUND_SETTLE_S` after the final continue click, and no settle is
+  started when no click went out.
+- **V14 — neither wait can hang the session.** With click-to OCR stuck in
+  `GAME_END_B`, the 30 s stall guard forces `GAME_LOBBY` and the exit proceeds.
 - **V10 — a press in the lobby does not start another round.** The quick-scan
   declines to click PLAY while the exit is pending, so the state stays
   `GAME_LOBBY` and the exit fires on the next tick.

@@ -4,6 +4,8 @@ import sys
 import yaml
 import time
 import warnings
+import contextlib
+import faulthandler
 import logging
 import threading
 import socket
@@ -18,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.7"
-WINGMAN_VERSION_DETAILS = "Map Detection"
+WINGMAN_VERSION = "1.8.8"
+WINGMAN_VERSION_DETAILS = "TBD"
 
 from .capture import Capture
 from .config_schema import assert_valid_config
@@ -36,7 +38,8 @@ from .heap_census import HeapCensus
 from .liveness_guard import LivenessGuard
 from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
-from .game_shutdown import close_game, close_nested_display
+from .game_shutdown import (GamePresenceWatch, close_game,
+                            close_nested_display)
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -81,12 +84,26 @@ def load_config(path, *, validate: bool = True):
     return cfg
 
 
-def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8, sleep_fn=time.sleep):
+# ADR 094 revision: hold this long after the final continue click before a
+# deferred 'z' exit actually leaves. Exiting the instant the click landed left
+# MetalStorm on the end-of-round screen, so the next session started outside the
+# lobby and had to recover before it could play.
+FINISH_ROUND_SETTLE_S = 3.0
+
+
+def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
+                            sleep_fn=time.sleep, on_complete=None):
     """Click through GAME_END prompt and force transition to GAME_LOBBY.
 
     Clicks the center prompt repeatedly, then clicks the lower-right continue
     button. After the final click, explicitly flips state flags so the analyzer
     exits GAME_END_B even if OCR polling is currently skipping in that state.
+
+    `on_complete` fires only once the final click has actually gone out, so a
+    caller waiting to exit at the lobby can time its settle from the click
+    rather than from the state change. It is deliberately NOT called on the
+    missing-PLAY-crop path below: no click happened there, and a settle timed
+    from a click that never occurred would be a lie.
     """
     ctrl.click_crop(
         analyzer.crops["click_to"],
@@ -106,6 +123,11 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
         region_name=REGION_PLAY_BUTTON,
     )
     analyzer.trigger_event("continue_clicked")
+    if on_complete is not None:
+        try:
+            on_complete()
+        except Exception:
+            logger.exception("_click_through_game_end: on_complete failed")
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
 
 
@@ -187,6 +209,70 @@ def _rss_mb() -> float:
     except Exception:
         pass
     return 0.0
+
+
+SHUTDOWN_WATCHDOG_S = 90.0
+
+
+def _arm_shutdown_watchdog(timeout_s: float = SHUTDOWN_WATCHDOG_S) -> None:
+    """Force an exit if cleanup stalls, dumping every thread first. ADR 121.
+
+    Observed 2026-09-05 08:02:03: wingman took SIGTERM, stopped logging on the
+    same second, never wrote "Exit requested, shutting down", and was still
+    alive five minutes later. It had to be SIGKILLed, so no session summary and
+    no stats JSON were written — and the next start rotated its log away. The
+    overnight 01:10 session left exactly that signature: no archive, no stats.
+
+    A hung shutdown is worse than a crash. A crash leaves a traceback; this
+    leaves nothing at all, and silently destroys the soak data ADR 106 needs.
+
+    Not reproducible on demand — a fresh session SIGTERMs cleanly in about 3 s
+    — so this captures evidence rather than guessing at a cause. The daemon
+    timer does not hold up a healthy exit.
+    """
+    def _bark():
+        _log = logging.getLogger(__name__)
+        try:
+            _log.error(
+                "SHUTDOWN WATCHDOG: cleanup still running after %.0fs — dumping "
+                "all thread stacks and forcing exit", timeout_s)
+            for h in list(_log.handlers) + list(logging.getLogger().handlers):
+                with contextlib.suppress(Exception):
+                    h.flush()
+            # To the log FILE, not just stderr: an unattended soak has no
+            # terminal, and this dump is the only record of where it stuck.
+            for h in logging.getLogger().handlers:
+                stream = getattr(h, "stream", None)
+                if stream is not None and not stream.closed:
+                    with contextlib.suppress(Exception):
+                        faulthandler.dump_traceback(file=stream, all_threads=True)
+                        stream.flush()
+        finally:
+            # os._exit, not sys.exit: the point is that normal shutdown is
+            # already stuck, so anything that runs atexit handlers or joins
+            # threads would stick in the same place.
+            os._exit(2)
+
+    _cancel_shutdown_watchdog()
+    t = threading.Timer(timeout_s, _bark)
+    t.daemon = True
+    t.start()
+    globals()["_SHUTDOWN_WATCHDOG_TIMER"] = t
+
+
+def _cancel_shutdown_watchdog() -> None:
+    """Disarm the watchdog. ADR 124.
+
+    STANDBY parks the process for as long as the operator wants to fly, so it
+    is an unbounded wait BY DESIGN — not a stalled cleanup. The watchdog was
+    armed at the top of the same `finally` block and killed a live standby
+    after 90 s on 2026-09-05 10:45:17, taking the SAF-010 handback with it.
+    """
+    t = globals().get("_SHUTDOWN_WATCHDOG_TIMER")
+    if t is not None:
+        with contextlib.suppress(Exception):
+            t.cancel()
+        globals()["_SHUTDOWN_WATCHDOG_TIMER"] = None
 
 
 def main():
@@ -336,7 +422,8 @@ def main():
     if _nested_on and sys.platform != "win32":
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import (set_injection_display, set_injected_keys,
-                                  set_takeover_keys, set_handback_keys)
+                                  set_takeover_keys, set_handback_keys,
+                                  set_echo_safe_keys)
         from .keybindings import MISSION_J20_KEY, AUTO_MISSION_KEY
         from .controller import INJECTABLE_KEYS, TAKEOVER_KEYS
         set_injection_display(nested_display)
@@ -351,6 +438,13 @@ def main():
         set_handback_keys(
             (MISSION_J20_KEY, AUTO_MISSION_KEY),
             manual_state_fn=lambda: analyzer.game_state == GameState.GAME_BATTLE_MANUAL)
+        # 'u' must ALSO work outside manual takeover — it is the operator's
+        # safety valve for forcing GAME_BATTLE out of any wedged state (e.g. a
+        # stuck GAME_LOBBY blackout), not just the handback case above.
+        # controller.py's own programmatic-key bracket + grace window already
+        # discriminates wingman's periodic game_starting_loop presses from a
+        # genuine operator press, so it is safe to always deliver.
+        set_echo_safe_keys((MISSION_J20_KEY,))
         from .input_linux import _observe_display_names
         logger.info("ADR 099: nested lane ACTIVE - capture and injection on %s, "
                     "hotkeys observed on %s", nested_display,
@@ -835,6 +929,13 @@ def main():
     last_click_to_alert_ts = 0.0
     last_game_state = None
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
+    # ADR 094: when the final continue click landed. Written by the click-through
+    # daemon thread, read by the deferred-exit check. A one-element list because
+    # the writer is a thread and a bare rebind would not be visible here.
+    final_continue_ts = [0.0]
+
+    def _note_final_continue():
+        final_continue_ts[0] = time.time()
     game_starting_stalled_since = 0.0  # timestamp of GAME_STARTING_STALLED entry; used by reclassify watchdog
     lobby_escape_stop: "threading.Event | None" = None
     lobby_escape_thread: "threading.Thread | None" = None
@@ -902,6 +1003,10 @@ def main():
     startup_time = time.time()
     battle_ever_reached = False
     finish_round_exit = False        # ADR 094: set when the operator's deferred stop fires
+    game_gone_exit = False           # ADR 105: the game exited on its own
+    game_watch = GamePresenceWatch(
+        process_name=(cfg.get("resource_monitor", {}) or {}).get(
+            "game_process_name", "Metalstorm.exe"))
 
     def _stop_lobby_escape_loop():
         nonlocal lobby_escape_stop, lobby_escape_thread
@@ -952,11 +1057,36 @@ def main():
             # It was also dead in GAME_WAITING, GAME_STARTING and GAME_END_B —
             # none of which have a round in progress to protect.
             _in_round = analyzer.game_state in BATTLE_STATES
-            if ctrl.finish_round_requested() and not _in_round:
+            # GAME_END_B is not a round to protect, but it is not a clean stop
+            # either: leaving from the end-of-round screen strands MetalStorm
+            # there, and the next session opens outside the lobby and has to
+            # recover before it can play. So stay in the loop while the normal
+            # click-through runs, then hold FINISH_ROUND_SETTLE_S after the
+            # final click so the lobby is actually up before the process goes.
+            #
+            # Neither wait is unbounded: the GAME_END_B stall guard below forces
+            # GAME_LOBBY after 30s if the click-to OCR is stuck, and the settle
+            # is a fixed window measured from a click that demonstrably landed.
+            _ending_round = analyzer.game_state == GameState.GAME_END_B
+            _settling = (final_continue_ts[0] > 0.0
+                         and time.time() - final_continue_ts[0] < FINISH_ROUND_SETTLE_S)
+            if ctrl.finish_round_requested() and not (_in_round or _ending_round
+                                                      or _settling):
                 logger.warning(
                     "\033[93m🏁 FINISH ROUND: stopping in %s — no round in progress "
                     "(ADR 094)\033[0m", analyzer.game_state.name)
                 finish_round_exit = True
+                break
+            # ADR 105: the game left without us. Everything downstream — OCR,
+            # the FSM, the tactics — is reading an empty display, and on the
+            # nested lane the leftover is a black window with nothing behind
+            # it. Unlike the guards this needs no safe point: there is no
+            # aircraft in flight to abandon when there is no game.
+            if game_watch.game_has_gone():
+                logger.warning(
+                    "\033[93m🎮 GAME GONE: MetalStorm is no longer running — "
+                    "ending the session (ADR 105)\033[0m")
+                game_gone_exit = True
                 break
             if liveness.should_stop() and _safe:
                 logger.warning(
@@ -1251,6 +1381,7 @@ def main():
                 threading.Thread(
                     target=_click_through_game_end,
                     args=(ctrl, analyzer, logger),
+                    kwargs={"on_complete": _note_final_continue},
                     daemon=True,
                 ).start()
 
@@ -1281,6 +1412,7 @@ def main():
     except Exception:
         logger.exception("Unhandled exception in main loop")
     finally:
+        _arm_shutdown_watchdog()
         if replay_mode:
             intents_output = Path(args.replay_intents_output)
             intents_output.parent.mkdir(parents=True, exist_ok=True)
@@ -1427,7 +1559,16 @@ def main():
             if nested_display:
                 close_nested_display(nested_display, grace_s=_grace)
 
-        if not _close_enabled:
+        if game_gone_exit:
+            # ADR 105: there is no game to close, and the nested display exists
+            # only to host one — an empty server is the black window the
+            # operator reported. Deliberately NOT gated on close_game: that flag
+            # protects a RUNNING game from being killed, and there isn't one.
+            if nested_display:
+                logger.info("Game gone: closing the nested display it was "
+                            "hosted on")
+                close_nested_display(nested_display, grace_s=_grace)
+        elif not _close_enabled:
             logger.info("Operator stop: close_game disabled — leaving "
                         "MetalStorm and the nested display running")
         elif finish_round_exit:
@@ -1456,10 +1597,16 @@ def main():
                 "running and is yours to fly. Press Backspace again to close "
                 "MetalStorm%s and exit. Ctrl-C leaves everything up.\033[0m",
                 " and the nested display" if nested_display else "")
+            # ADR 124: standby is an unbounded wait by DESIGN. The shutdown
+            # watchdog exists to bound a STALL, and it cannot tell the two
+            # apart from inside — so it is disarmed here and re-armed for the
+            # close that follows the second Backspace, which is bounded.
+            _cancel_shutdown_watchdog()
             try:
                 while not ctrl.wait_for_close_all(timeout=1.0):
                     pass
                 logger.info("STANDBY: second Backspace — closing down")
+                _arm_shutdown_watchdog()
                 _close_session()
             except KeyboardInterrupt:
                 logger.info("STANDBY: interrupted — leaving MetalStorm running")

@@ -336,3 +336,222 @@ def test_components_method_matches_pure_function(analyzer):
 def test_components_method_empty_on_black_frame(analyzer):
     frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
     assert analyzer.detect_enemy_map_components(frame) == []
+
+
+# --- ADR 108: the post-2026-09-02 minimap -------------------------------------
+
+RTB_FRAMES = sorted((ROOT / "test_screenshots" / "unknown_anomalies").glob("rtb_*.png")) \
+    if (ROOT / "test_screenshots" / "unknown_anomalies").exists() else []
+
+
+@pytest.mark.skipif(len(RTB_FRAMES) < 5, reason="crossing corpus not present")
+def test_the_boundary_is_found_at_the_centre_on_crossing_frames(analyzer):
+    """Every one of these frames was captured with RETURN TO BATTLE on screen,
+    so the line is at the aircraft. Before ADR 108 the detector read NOTHING on
+    81% of ticks — five of eight crossings that session had no reading at all in
+    the 30 s before they happened, because the thin antialiased line arrived as
+    20 to 174 fragments and the span filter rejected all of them."""
+    seen = []
+    for f in RTB_FRAMES:
+        r = analyzer.detect_map_boundary(cv2.imread(str(f)))
+        if r is not None:
+            seen.append((f.name, r[0]))
+    # A RATE, not an exact count. The corpus grows every session that captures
+    # a crossing, so an equality calibrated on nine frames fails the moment the
+    # tenth arrives — which is the corpus doing its job, not a regression.
+    # Detection was 18.8% of ticks before ADR 108; the bar here is that a frame
+    # WITH the banner up almost always yields a reading.
+    assert len(seen) >= 0.9 * len(RTB_FRAMES), \
+        f"only {len(seen)}/{len(RTB_FRAMES)} frames produced a reading"
+    # KNOWN LIMITATION, one frame of nine (rtb_...105821_crossing5). Where the
+    # line crosses bright tan terrain it merges with it locally, the thickness
+    # gate rejects that stretch, and only a distant fragment of the same arc
+    # survives — so the range is measured to the wrong part of the line. The
+    # frame reads 0.44R with the aircraft sitting ON the boundary. Asserted as a
+    # majority rather than hidden: tightening this to 9/9 would mean loosening
+    # the gate that keeps desert terrain out, which is the worse trade.
+    near = [d for _n, d in seen if d < 0.30]
+    assert len(near) >= 0.85 * len(seen), \
+        f"only {len(near)}/{len(seen)} readings were at the boundary: {seen}"
+
+
+@pytest.mark.skipif(not (ROOT / "test_screenshots" / "AMMO_MISSILE.png").exists(),
+                    reason="AMMO_MISSILE not archived")
+def test_island_terrain_is_not_read_as_a_boundary(analyzer):
+    """The new minimap renders tan terrain in the boundary's own hue family. The
+    old rule took the LARGEST component and reported 0.78-0.80R from islands on
+    these two frames; the shape gate rejects them, because an arc fills 0.03-0.23
+    of its bounding box and a landmass fills 0.48-0.79."""
+    for name in ("AMMO_MISSILE.png", "AMMO_MISSILE_1.png"):
+        f = ROOT / "test_screenshots" / name
+        if not f.exists():
+            continue
+        assert analyzer.detect_map_boundary(cv2.imread(str(f))) is None, \
+            f"{name}: terrain read as a boundary"
+
+
+# Enumerated, NOT globbed. The first version matched every approach_*.png, so
+# the next live session dropped frames from other maps into the corpus and the
+# test failed on them — correctly, since those frames may legitimately show a
+# boundary inside 0.20R. A curated negative corpus has to name its members.
+_DESERT_NAMES = (
+    "approach_20260903_164202_17.png",
+    "approach_20260903_164218_18.png",
+    "approach_20260903_164224_19.png",
+    "approach_20260903_164235_20.png",
+)
+DESERT_FRAMES = [p for p in
+                 (ROOT / "test_screenshots" / "unknown_anomalies" / n
+                  for n in _DESERT_NAMES) if p.exists()]
+
+
+@pytest.mark.skipif(len(DESERT_FRAMES) < 3, reason="desert negative corpus not present")
+def test_desert_terrain_is_not_read_as_a_NEAR_boundary(analyzer):
+    """The four frames kept from the 2026-09-03 false-positive session, on a
+    desert map whose tan landmass sits in the boundary's own hue family.
+
+    Before ADR 108's local-thickness gate these read 0.016-0.065R — the mask
+    covering an entire landmass, reported as an edge at the aircraft — and drove
+    32 turns in 12 minutes, one at round start. A reading is allowed here (the
+    real line IS somewhere on the minimap); reading it AT the aircraft is the
+    regression.
+
+    Kept in the gitignored anomalies folder rather than committed: four full
+    frames are 8 MB, and ADR 100 exists because this repository grew on exactly
+    that kind of artifact. The test skips when they are absent."""
+    for f in DESERT_FRAMES:
+        r = analyzer.detect_map_boundary(cv2.imread(str(f)))
+        if r is None:
+            continue
+        assert r[0] >= 0.20, \
+            f"{f.name} read {r[0]:.3f}R — terrain masquerading as a near edge"
+
+
+# --- ADR 122: the lateral component, and turning away from the edge ----------
+
+def test_the_detector_reports_which_side_the_boundary_is_on():
+    """ADR 122. `dx` was computed and discarded, so the turn had no way to know
+    which way to roll. A vertical line to the RIGHT of centre must read
+    positive lateral; the same line to the left, negative."""
+    import numpy as np
+    import cv2
+    from wingman.analyzer import GameStateAnalyzer
+    from wingman.crop_region import CropCoords
+
+    def _reading(line_x):
+        img = np.zeros((200, 200, 3), dtype=np.uint8)
+        # The boundary hue (~17) at full saturation, drawn as a thin line.
+        colour = cv2.cvtColor(
+            np.uint8([[[17, 200, 220]]]), cv2.COLOR_HSV2BGR)[0][0].tolist()
+        cv2.line(img, (line_x, 20), (line_x, 180), colour, 2)
+        a = GameStateAnalyzer.__new__(GameStateAnalyzer)
+        a.crops = {"MINIMAP": CropCoords(0.0, 0.0, 1.0, 1.0)}
+        a._boundary_hsv_lower = np.array([8, 60, 120], dtype=np.uint8)
+        a._boundary_hsv_upper = np.array([28, 255, 255], dtype=np.uint8)
+        a._boundary_close_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (3, 3))
+        a._boundary_close_iters = 1
+        a._boundary_min_span_frac = 0.5
+        a._boundary_max_thickness_frac = 0.1
+        a._boundary_min_px = 20
+        a._mask_radius_frac = 0.93
+        a._minimap_mask_radius_frac = 0.93
+        a._minimap_circle_cache = None
+        return a.detect_map_boundary(img)
+
+    right = _reading(150)
+    left = _reading(50)
+    assert right is not None and left is not None, "detector found no line"
+    assert len(right) == 3, "reading no longer carries the lateral component"
+    assert right[2] > 0, f"line on the right read lateral {right[2]:+.3f}"
+    assert left[2] < 0, f"line on the left read lateral {left[2]:+.3f}"
+
+
+def test_the_turn_rolls_away_from_the_boundary():
+    """ADR 122. The turn always rolled RIGHT, so roughly half of them turned
+    INTO the edge — which is what ADR 107's median gain of +0.00R over 61 turns
+    looks like.
+
+    Drives the REAL `boundary_turn_mode` and reads the key it actually presses.
+    An earlier version of this test re-derived the choice from `lateral` and so
+    proved only that the test agreed with itself.
+    """
+    import threading
+    import unittest.mock as mock
+    from wingman.controller import Controller
+    from wingman.keybindings import ROLL_LEFT_KEY, ROLL_RIGHT_KEY
+
+    def _pressed_key(lateral):
+        c = Controller.__new__(Controller)
+        c._boundary_turning = threading.Event()
+        c._boundary_turn_stop = threading.Event()
+        c._ejecting = threading.Event()
+        c._missile_evading = threading.Event()
+        c._mission_cancel = threading.Event()
+        c._exit_event = threading.Event()
+        c._boundary_turn_max_s = 0.2
+        c._analyzer = None
+        c._climb_key = mock.MagicMock()
+        c._inc_programmatic_key = mock.MagicMock()
+        c._dec_programmatic_key = mock.MagicMock()
+        # The SAF-010 exit push runs when the turn ends. It is a separate
+        # mechanism with its own tuning, so it is stubbed rather than
+        # reconstructed — and stubbed at the METHOD, not attribute by
+        # attribute, so the stub cannot drift out of date. A test that passed
+        # while its own thread raised would be reading the assertions before
+        # the crash, so thread exceptions are errors here.
+        c._climb_exit_push = mock.MagicMock()
+        c._climb_stop = threading.Event()
+        # Everything else the turn thread touches, enumerated from the code
+        # rather than discovered one AttributeError at a time.
+        c._arm_release_grace = mock.MagicMock()
+        c._climbing = threading.Event()
+        c._climb_exit_alt = 0.0
+        c._climb_max_s = 1.0
+        c.boundary_turn_mode(lateral=lateral)
+        t = getattr(c, "_boundary_turn_thread", None)
+        if t is not None:
+            t.join(timeout=3.0)
+        rolls = [call.args[0] for call in c._climb_key.call_args_list
+                 if call.args and call.args[0] in (ROLL_LEFT_KEY, ROLL_RIGHT_KEY)]
+        return rolls
+
+    right_edge = _pressed_key(+0.40)
+    assert right_edge, "no roll key was pressed at all"
+    assert set(right_edge) == {ROLL_LEFT_KEY}, \
+        f"edge on the right — expected a LEFT roll, got {set(right_edge)}"
+
+    left_edge = _pressed_key(-0.40)
+    assert set(left_edge) == {ROLL_RIGHT_KEY}, \
+        f"edge on the left — expected a RIGHT roll, got {set(left_edge)}"
+
+    unknown = _pressed_key(None)
+    assert set(unknown) == {ROLL_RIGHT_KEY}, \
+        "with no lateral the turn must keep its previous fixed direction"
+
+
+
+
+def test_the_turn_cap_is_not_shortened_without_new_evidence():
+    """ADR 126, and its DISPROVED premise.
+
+    The original version of this test asserted the cap was at most 7 s, on the
+    theory that a 12 s turn completes a circle — 294 degrees of measured path
+    rotation — and so returns the aircraft to where it started.
+
+    The soak disproved it. Capping the ACTUATOR does not cap the MANOEUVRE: 167
+    actuator starts landed inside 47 selection episodes, 3.6 restarts each,
+    because the CONDITION decides how long the aircraft turns and the actuator
+    just restarts within it. Median path rotation went 294 -> 320 deg (up),
+    turns per mission 2.6 -> 6.7, and crossings per mission 0.094 -> 0.160.
+
+    The lever is the release condition, not this constant. This guards against
+    shortening it again without evidence that reaches the condition.
+    """
+    import yaml
+    with open("wingman/config.yaml") as fh:
+        cfg = yaml.safe_load(fh)
+    cap = float(cfg["behavior_tree"]["climb"]["boundary_turn_max_s"])
+    assert cap >= 10.0, (
+        f"cap {cap}s: shortening the actuator cap was MEASURED to increase "
+        "turn frequency and total rotation, because the condition restarts it")
