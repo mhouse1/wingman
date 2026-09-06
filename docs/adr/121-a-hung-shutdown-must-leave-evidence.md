@@ -125,3 +125,58 @@ frames, immediately readable, question settled in one pass.
 - ADR 119 — the same day's other unbounded wait, in the display probe
 - `wingman/main.py` — `_arm_shutdown_watchdog`
 - `tests/test_shutdown_watchdog.py` — V1-V5
+
+## An ERROR on every clean shutdown (2026-09-06)
+
+This ADR's premise is that a shutdown must leave evidence. The inverse also has to
+hold: **evidence that always appears carries none.**
+
+Measured across every session that tore the nested display down — 2026-09-05
+22:35, 2026-09-06 04:28 and 05:13 — the only `[ERROR]` in an otherwise clean log
+arrived one millisecond after wingman's own teardown line:
+
+```
+04:28:13,803 [INFO]  Nested display: closing Xwayland for :3 (pid(s): 1367144)
+04:28:13,804 [ERROR] XKey listener thread died: Display connection closed by server
+04:28:13,804 [DEBUG] XKey: d_rec.close() failed during reconnect
+04:28:13,804 [INFO]  XKey: reconnecting display in 3s (attempt 1)
+```
+
+The hotkey listener blocks on an XRecord connection to `:3`. Closing that display
+drops the connection, and the listener could not distinguish it from a crash — so
+it logged ERROR and scheduled a reconnect to the display wingman was in the middle
+of killing. The 05:06 session, which exited without closing `:3`, logged **zero**
+errors. The correlation is exact.
+
+Nothing broke: the process exits before the 3 s timer fires. The cost is that
+`XKey listener thread died` fires on every clean shutdown and therefore cannot be
+used to notice the listener dying for a reason that matters — which is precisely
+the signal this ADR exists to protect.
+
+**Decision. The teardown declares itself, per display.** `close_nested_display`
+calls `input_linux.expect_display_close(display)` **before** the SIGTERM that
+causes the disconnection; the listener then logs the exit at INFO and does not
+reconnect.
+
+Per display, deliberately, not one global "shutting down" flag: the operator's
+`:0` listener dying during shutdown is still a real failure, and a blanket flag
+would suppress exactly the case worth keeping. The declaration is also wrapped so
+that a failure to record it cannot block the shutdown it describes — instrumentation
+inside a shutdown path must never be able to hang that path.
+
+Nothing is declared when no server was found, so a display that was never torn
+down cannot have a later genuine failure excused.
+
+### Validation
+
+- V1. Unit: a declared display is expected; an undeclared one is not.
+- V2. Unit: the declaration lands **before** the SIGTERM, sampled inside a fake
+  `os.kill` — driven through the real `close_nested_display`, since the ordering
+  is the entire fix and a re-implementation would assert only itself.
+- V3. Unit: a display with no server running is not declared.
+- V4. Unit: a raising declaration does not break the shutdown.
+- V5. Live: run a session, stop it with `z`, and confirm the log carries
+  `XKey: :3 closed as expected` and no `[ERROR]`. **Outstanding.**
+
+Covered by `tests/test_expected_display_close.py` (7 tests).
+

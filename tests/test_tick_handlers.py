@@ -1627,3 +1627,96 @@ class TestTurnBearingTracking:
     def test_a_single_sample_yields_no_bearing(self):
         net, path = self._bearings([45.0])
         assert net == 0.0 and path == 0.0
+
+
+def _battle_snap():
+    """A REAL AnalyzerSnapshot in battle, not a stub with the two fields the
+    caller happens to read — the fixture trap this project keeps hitting."""
+    from wingman.analyzer import GameState
+    from wingman.behavior_tree import AnalyzerSnapshot
+    return AnalyzerSnapshot(
+        health=100, missiles=4, flares=4,
+        ring_short=0, ring_mid=0, ring_long=0,
+        enemy_absent_seconds=0.0,
+        altitude=3000.0,
+        incoming_detected=False, mission_running=True,
+        is_respawning=False, game_state=GameState.GAME_BATTLE)
+
+
+class TestBoundaryInstrumentationSurvivesReadingWidth:
+    """ADR 127. ADR 122 widened the boundary reading from (dist, forward) to
+    (dist, forward, lateral). `_instrument_boundary` kept destructuring two, so
+    every READABLE tick raised ValueError into a broad handler that logged at
+    DEBUG — 1880 times in one session.
+
+    Approach counting, approach frames and the boundary trace were dead for
+    8.5 hours of soak, and the only symptom was a DEBUG line that stopped
+    appearing. Crossing counts were unaffected: they are computed before the
+    unpack, which is why ADR 106's rows survived.
+    """
+
+    @staticmethod
+    def _h():
+        import collections
+        import unittest.mock as _m
+        from wingman.tick_handlers import BehaviorTreeHandler
+        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        h._analyzer = _m.MagicMock()
+        h._analyzer.detect_return_to_battle.return_value = False
+        h._boundary_trace = collections.deque(maxlen=20)
+        h._session_start = 0.0
+        h._rtb_active = False
+        h._rtb_confirmed = False
+        h._boundary_near_since = 0.0
+        h._boundary_approaches = 0
+        h._boundary_near_frac = 0.35
+        h._rtb_capture_max = 0
+        h._approach_capture_max = 0
+        h._blind_capture_max = 0
+        h._captures = {}
+        h._rtb_capture_dir = "/nonexistent-on-purpose"
+        return h
+
+    def _run(self, h, reading, caplog):
+        import logging
+        h._boundary_reading = reading
+        snap = _battle_snap()
+        with caplog.at_level(logging.DEBUG):
+            h._instrument_boundary(object(), 100.0, snap, "Engage")
+        return caplog.text
+
+    def test_a_three_tuple_reading_does_not_break_instrumentation(self, caplog):
+        """The live failure. A widened reading must flow through, not raise."""
+        text = self._run(self._h(), (0.30, 0.20, 0.10), caplog)
+        assert "too many values to unpack" not in text
+        assert "INSTRUMENTATION FAILED" not in text
+
+    def test_a_three_tuple_reading_still_counts_approaches(self, caplog):
+        """What the outage actually cost: 40 approaches in the session before
+        ADR 122, zero in the two after it."""
+        h = self._h()
+        self._run(h, (0.10, 0.09, 0.02), caplog)   # near, ahead
+        assert h._boundary_approaches == 1, "approach was not counted"
+
+    def test_a_two_tuple_reading_still_works(self, caplog):
+        """Back-compatibility: anything still emitting the old width must not
+        start failing because of the fix."""
+        text = self._run(self._h(), (0.30, 0.20), caplog)
+        assert "INSTRUMENTATION FAILED" not in text
+
+    def test_the_first_failure_is_loud_and_repeats_are_not(self, caplog):
+        """A per-tick path that swallows at DEBUG turns a total outage into
+        silence. The first one has to be impossible to miss; the rest must not
+        flood the log."""
+        import logging
+        h = self._h()
+        h._analyzer.detect_return_to_battle.side_effect = RuntimeError("boom")
+        h._boundary_reading = (0.3, 0.2, 0.1)
+        snap = _battle_snap()
+        with caplog.at_level(logging.DEBUG):
+            h._instrument_boundary(object(), 100.0, snap, "Engage")
+            first_errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+            h._instrument_boundary(object(), 101.0, snap, "Engage")
+            all_errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(first_errors) == 1, "first failure was not reported at ERROR"
+        assert len(all_errors) == 1, "repeat failures must not flood at ERROR"

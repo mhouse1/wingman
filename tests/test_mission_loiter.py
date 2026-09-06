@@ -51,6 +51,7 @@ def _loiter_ctrl(snaps):
     c._eject_stop = threading.Event()
     c._eject_stop_reason = ""
     c._exit_event = threading.Event()
+    c._operator_stop_event = threading.Event()
     c._analyzer = mock.MagicMock()
     c._analyzer.get_telemetry.side_effect = list(snaps) + [snaps[-1]] * 200
     c._loiter_target_alt = 7000.0

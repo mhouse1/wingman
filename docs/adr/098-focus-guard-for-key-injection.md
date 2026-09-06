@@ -102,6 +102,15 @@ refreshed less often, since they change only when the game restarts.
 run alongside a full session without suppressing legitimate injection. Turning
 it on is a one-line config change once that evidence exists.
 
+> **Amended 2026-09-05.** That evidence now exists and the guard ships enabled:
+> `wingman/config.yaml` carries `focus_guard: {enabled: true, ...}`. The
+> condition D6 set was met by the ADR 099 nested lane, where the guard follows
+> injection to `:3` and the game is the only client — so it reports the game
+> focused and has nothing to suppress. Measured over the 2026-09-05 21:58
+> session: **zero** `FocusGuard` suppressions. D6's default is kept here as the
+> decision that was made, not as a description of the shipped config; ADR 099 D7
+> and D8 govern the guard's current role.
+
 ## Consequences
 
 Injection stops when the operator alt-tabs, which is the point. The cost is one

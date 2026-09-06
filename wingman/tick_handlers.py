@@ -801,6 +801,10 @@ class BehaviorTreeHandler:
         self._blind_capture_interval_s = float(
             (minimap_cfg or {}).get("blind_capture_interval_s", 45.0))
         self._blind_capture_next_ts = 0.0
+        # ADR 117: frames declined because no minimap was drawn. Counted rather
+        # than silently dropped — if this dominates, the capture is being asked
+        # for during a screen that has no minimap and the gate above is the bug.
+        self._blind_no_minimap_skips = 0
         self._boundary_near_frac = float(
             (minimap_cfg or {}).get("boundary_near_frac", 0.25))
         self._boundary_turn_min_dist = 1.0
@@ -1054,13 +1058,15 @@ class BehaviorTreeHandler:
         # GAME_BATTLE against 24% outside it — the 23% figure that motivated
         # this capture was an average across screens with no minimap on them.
         _in_battle = getattr(self._analyzer, "game_state", None) == GameState.GAME_BATTLE
-        if (_boundary_raw is None
-                and _in_battle
-                and not is_respawning
-                and now >= self._blind_capture_next_ts):
-            self._blind_capture_next_ts = now + self._blind_capture_interval_s
-            self._capture_boundary_frame(
-                frame, "blind", f"{self._captures.get('blind', 0) + 1}")
+        #
+        # GAME_BATTLE is not enough on its own. Killcam, transition and
+        # cinematic frames are in battle with no HUD drawn, and 11 of the 40
+        # blind frames captured on 2026-09-05 were exactly that — 27.5% of the
+        # budget spent on frames that cannot answer the question. The timer is
+        # NOT advanced when a frame is skipped, so the next tick that does have
+        # a minimap is captured rather than waiting out another interval.
+        self._maybe_capture_blind(frame, now, _boundary_raw, _in_battle,
+                                  is_respawning)
         # ADR 122: readings are (dist, forward, lateral). Tolerate a 2-tuple so
         # a stub or an older recording does not crash the tick — lateral is
         # then None and the turn falls back to its fixed direction.
@@ -1079,6 +1085,14 @@ class BehaviorTreeHandler:
             _recent_min = min(r[0] for _, r in self._boundary_recent)
             if _b_near is None or _recent_min < _b_near:
                 _b_near = _recent_min
+        # ADR 128: refresh the missile-evade afterburner deadline every tick,
+        # not only on a NEW alert. The requirement is "held until incoming has
+        # not appeared for N seconds", so a detection that persists across
+        # ticks must extend the burn rather than let it lapse mid-alert.
+        try:
+            self._ctrl.note_incoming(bool(incoming), now)
+        except Exception:
+            logger.debug("note_incoming failed", exc_info=True)
         # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
         # control loop, so it needs the reading rather than the tactic.
         try:
@@ -1369,7 +1383,12 @@ class BehaviorTreeHandler:
                 self._boundary_near_since = 0.0
                 logger.debug("BOUNDARY: no reading")
                 return
-            dist, forward = reading
+            # ADR 127: index, do not unpack. ADR 122 widened the reading to
+            # (dist, forward, lateral) and this line kept destructuring two,
+            # so every readable tick raised ValueError into the broad handler
+            # below — 1880 times in one session — and the instrumentation was
+            # silently dead for 8.5 hours of soak.
+            dist, forward = reading[0], reading[1]
             # Per-tick at DEBUG so the thresholds can be calibrated from the
             # distribution rather than only from the ticks that happen to
             # precede a crossing.
@@ -1392,7 +1411,48 @@ class BehaviorTreeHandler:
             elif not near:
                 self._boundary_near_since = 0.0
         except Exception as e:
-            logger.debug("Boundary instrumentation failed: %s", e)
+            # ADR 127: the FIRST failure is loud. A per-tick path that swallows
+            # at DEBUG turns a total outage into silence: approach counting,
+            # approach frames and the boundary trace were all dead and the only
+            # symptom was that a DEBUG line stopped appearing. Repeats stay at
+            # DEBUG so a persistent fault cannot flood the log.
+            self._instrument_fail_count = getattr(
+                self, "_instrument_fail_count", 0) + 1
+            if self._instrument_fail_count == 1:
+                logger.error(
+                    "\033[91mBOUNDARY INSTRUMENTATION FAILED (first "
+                    "occurrence, further ones at DEBUG): %s: %s\033[0m",
+                    type(e).__name__, e)
+            else:
+                logger.debug("Boundary instrumentation failed: %s", e)
+
+    def _maybe_capture_blind(self, frame, now, boundary_raw,
+                             in_battle, is_respawning) -> bool:
+        """Capture a frame the detector read nothing on (ADR 117). True if saved.
+
+        Extracted from the tick body so the gate below is reachable by a test.
+        It was inline, and the no-minimap case it now handles is exactly the
+        kind of condition that inline code hides.
+        """
+        if (boundary_raw is not None
+                or not in_battle
+                or is_respawning
+                or now < self._blind_capture_next_ts):
+            return False
+        if not self._analyzer.minimap_present(frame):
+            # NOT a timer advance: a killcam frame must not spend the interval
+            # that the next real minimap needs. Counted so a run dominated by
+            # skips is visible rather than looking like a quiet session.
+            self._blind_no_minimap_skips += 1
+            if (self._blind_no_minimap_skips in (1, 10, 100)
+                    or self._blind_no_minimap_skips % 500 == 0):
+                logger.debug("MAP BOUNDARY: blind capture skipped — no minimap "
+                             "drawn (%d so far)", self._blind_no_minimap_skips)
+            return False
+        self._blind_capture_next_ts = now + self._blind_capture_interval_s
+        self._capture_boundary_frame(
+            frame, "blind", f"{self._captures.get('blind', 0) + 1}")
+        return True
 
     def _capture_boundary_frame(self, frame, kind: str, seq: str) -> None:
         """Write one boundary frame (ADR 106 crossings, ADR 108 approaches).

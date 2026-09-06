@@ -36,13 +36,28 @@ already moved the count behind the OCR arbiter for this reason.
 apart stay comparable:
 
 ```bash
-grep -c 'RETURN TO BATTLE (confirmed crossing' wingman.log   # crossings
+grep -c 'RETURN TO BATTLE (confirmed crossing'  wingman.log   # crossings
 grep -c 'colour trigger not confirmed'          wingman.log   # unconfirmed triggers
-grep -c 'MAP BOUNDARY: turn requested'          wingman.log   # ADR 101 turns
-grep -c 'turn budget spent'                     wingman.log   # turns that gave up
-grep -c 'map boundary ahead, rolling away'     wingman.log   # turns that ACTUATED
+grep -c 'BOUNDARY TURN — banking and pulling'   wingman.log   # turns (= actuated)
+grep -c 'boundary turn — 12s cap reached'       wingman.log   # turns that hit the cap
 grep -A6 'Wingman Session Summary'              wingman.log   # missions started
 ```
+
+> **Corrected 2026-09-06 — three of these commands had gone stale, and a stale
+> command reads as a zero.** Recording the 2026-09-05 (night) row with the
+> original strings gave Turns 0, Actuated 0, Budget 0 for a session that in fact
+> turned 134 times. The messages had been renamed: `MAP BOUNDARY: turn requested`
+> and `map boundary ahead, rolling away` are now the single line
+> `BOUNDARY TURN — banking and pulling away from the edge`, and `turn budget
+> spent` is now `boundary turn — 12s cap reached`.
+>
+> This is D2's own failure mode. A fixed command set keeps rows comparable only
+> while the strings still match the code, and nothing fails loudly when they stop
+> — the grep returns 0 and 0 is a plausible number. **Any row whose Turns column
+> is 0 while crossings are non-zero should be re-derived, not believed.** Turns
+> and Actuated are now necessarily equal because one message covers both; the
+> separate Actuated column is kept for the older rows and should be read as "same
+> value" from 2026-09-05 (night) onward.
 
 **D3. Record the code state with every row.** The point of the series is to
 attribute movement to a change. A row without the ADR revision that was live is
@@ -102,6 +117,8 @@ its movement.
 | 2026-09-05 (mid) | 24m | 3 | 2 | **0.67** | 17 | 17 | — | — | ADR **122** + 123 | post-update |
 | 2026-09-05 (soak) | **6h16m** | **64** | 6 | **0.094** | 169 | 169 | — | — | ADR 122-125 | post-update |
 | 2026-09-05 (pm) | 2h28m | 25 | 4 | **0.160** | 167 | 167 | — | — | ADR 126 (5s cap, **reverted**) | post-update |
+| 2026-09-05 (eve) | 1h02m | 11 | 2 | **0.182** | 59 | 59 | — | — | ADR 127 (12s cap restored) | post-update |
+| 2026-09-05 (night) | **4h36m** | **48** | 7 | **0.146** | 134 | 134 | 57 | 224 | ADR 127 + 128 | post-update |
 
 **Actuated** counts turns that reached the aircraft — `grep -c 'map boundary
 ahead, rolling away'`. Added 2026-09-03, when the gap became visible: 14 requests
@@ -322,6 +339,49 @@ anything — eight per session is not a sample.
 Two things to look for once frames accumulate: whether the same terrain recurs,
 and whether the crossings on a given map share an approach geometry (the trace
 is in the log beside each capture).
+
+### 2026-09-06 — nine sessions on, the series is flat
+
+The 09-04 entry above called the tactic break-even on 61 turns and noted that
+six sessions had not moved the metric out of its band. With three more sessions
+and the 4h36m run of 2026-09-05 (night), the series is large enough to pool:
+
+| Cohort | Missions | Crossings | Per mission |
+|--------|---------:|----------:|------------:|
+| Pre game update (09-01) | 135 | 36 | **0.267** |
+| Post game update (09-02 onward) | 472 | 64 | **0.136** |
+| — of that, 09-02 to 09-03 | 219 | 29 | 0.132 |
+| — of that, 09-04 to 09-05 | 253 | 35 | **0.138** |
+
+Read plainly: **the only halving in the whole series sits exactly on the game's
+minimap update, and nothing since then has moved.** 0.132 against 0.138 across
+472 missions is not a change; it is the same number twice. D5 exists for exactly
+this reason — the one large step in the data is the one step we did not make.
+
+This is consistent with, and explained by, the 61-turn measurement above: median
+range gained **+0.00R**, 13 turns gaining against 15 losing. A tactic that is
+break-even per turn cannot move a per-mission rate however often it fires, and
+the sessions since have fired it a great deal more.
+
+**What this does not say.** Turns per mission appears to rise sharply across the
+series (0.75 on 09-02 to 2.79 on 09-05 night), but the boundary-turn message was
+renamed on 2026-09-03 06:51 in commit `1d593ea`, and the new line merges the
+former "requested" and "actuated" messages into one. Counts either side of that
+timestamp are not the same quantity, so the apparent rise is **not** safe to read
+as "the tactic intervenes more". The crossings string never changed, so the rate
+column — the column that matters — is comparable throughout.
+
+**The metric may also be unable to show an improvement.** The banner at the top
+of this series still holds: the detector reads on 56% of battle ticks. A tactic
+blind on nearly half its ticks is being scored on outcomes it could not have
+influenced, and ADR 117 covers the failure case. Flat here is evidence that this
+tactic has not helped; it is not yet evidence that the approach cannot.
+
+**Scope.** This series tracks boundary crossings and nothing else. The same
+2026-09-05 (night) session recorded 48 of 48 missions click-to-finish, zero spawn
+crashes, and missile-engagement survival of 81% with evade against 68% without.
+Those are not in this table, and "flat" here is a statement about one tactic, not
+about the sessions.
 
 ## Target
 

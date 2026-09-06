@@ -108,6 +108,16 @@ def close_nested_display(display: str,
             return result
         logger.info("Nested display: closing Xwayland for %s (pid(s): %s)",
                     display, ", ".join(str(p) for p in pids))
+        # Tell the hotkey listener this disconnection is ours before it happens,
+        # or it logs ERROR and tries to reconnect to a display we are killing
+        # (ADR 121). Imported here, not at module scope: input_linux is the
+        # lower layer and must not gain a dependency on this one.
+        try:
+            from .input_linux import expect_display_close
+            expect_display_close(display)
+        except Exception as e:                # noqa: BLE001 - never block shutdown
+            logger.debug("Nested display: could not mark %s as expected: %s",
+                         display, e)
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGTERM)

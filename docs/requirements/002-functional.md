@@ -149,3 +149,48 @@ OCR stable-values were observed entering the band mid-flight. Yield ordering
 is the ADR 070 d11 pattern: selection priority orders selections, not thread
 lifetimes, so the climb hold also polls the higher-priority tactics' running
 state. Implemented by Controller.climb_mode (wingman/controller.py).
+
+## Afterburner held during an incoming-missile alert
+
+**UID**: FR-008
+
+**Statement**: While an incoming-missile detection is present, wingman shall hold the
+afterburner input, and shall release it only once no incoming detection has
+been observed for missile_evade.afterburner_clear_s. A detection observed
+while the hold is already active shall extend the hold rather than start a
+second one. The hold shall be bounded by an absolute duration of
+missile_evade.afterburner_max_s, after which it shall release and record
+that the alert was still present. Flare deployment on a new incoming
+detection shall be unaffected by the hold.
+
+**Rationale**: ADR 128. Flares change what the missile is tracking; speed changes whether it
+can still reach the aircraft, and the two are complementary rather than
+alternative. The release is keyed on the alert going quiet rather than on a
+fixed burn time because the alert's duration is what indicates the threat is
+still live. The hold is bounded twice — by the quiet deadline and by an
+absolute cap — because the afterburner key is not a watched maneuver key, so
+a stuck press would not surface as a manual takeover; it would simply be a
+throttle nobody could release. Implemented by
+Controller._start_afterburner_evade (wingman/controller.py).
+
+## Hotkey mission restart survives standby's own exit flag
+
+**UID**: FR-009
+
+**Statement**: After the operator's first Backspace has placed wingman into standby, a
+mission started by the J20 or loiter hotkey shall run until the operator
+cancels it, until it completes on its own, or until a genuine program exit
+occurs; it shall not be aborted by the exit-request signal that entering
+standby itself leaves set. A program exit that occurs without the operator
+having pressed Backspace — SIGTERM, or the startup-stall exit — shall still
+abort a running mission as before.
+
+**Rationale**: ADR 130. Standby exists so the operator can restart the mission by hand while
+MetalStorm stays up, but the exit-request flag that breaks the main loop into
+standby is never cleared afterward. A mission's own abort check could not tell
+"we are exiting" from "we already finished exiting, into standby" — so every
+hotkey-started mission read the stale flag on its first poll and self-cancelled
+within about 50 ms, measured directly in wingman.log across nine consecutive
+attempts. Implemented by Controller._mission_exit_requested
+(wingman/controller.py), which distinguishes the two cases using the flag
+Backspace alone sets (ADR 099).

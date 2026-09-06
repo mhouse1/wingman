@@ -289,6 +289,8 @@ SCHEMA = Section(
             "evade_hold_s": SECONDS,
             "evade_health_threshold": Leaf(types=NUMBER, allow_none=True),
             "missile_evade": Section(children={
+            "afterburner_clear_s": _num(0),   # ADR 128 / FR-008
+            "afterburner_max_s": _num(0),
                 "enabled": BOOL,
                 "clear_seconds": SECONDS,
                 "min_clear_samples": _int(1),
@@ -348,6 +350,7 @@ SCHEMA = Section(
             "boundary_median_age_s": _num(0),   # ADR 113
             "blind_capture_max": _int(0),       # ADR 117
             "blind_capture_interval_s": _num(0),
+            "minimap_present_min_px": _int(0),  # ADR 117: minimap drawn at all
             "mask_radius_frac": FRACTION,
             "min_blob_px": _int(0),
             "max_blob_px": _int(0),

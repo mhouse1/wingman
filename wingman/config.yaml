@@ -345,7 +345,11 @@ behavior_tree:
     # the nearest edge point. Genuine approaches run a median 0.82 (p10
     # 0.24) over 184 pre-crossing ticks; a boundary abeam reads near 0.
     entry_ratio: 0.25}
-  missile_evade: {enabled: true, clear_seconds: 3.0, min_clear_samples: 2, max_manoeuvre_s: 6.0,
+  # ADR 128 / FR-008: hold the afterburner while a missile is inbound, until
+  # incoming has not been seen for afterburner_clear_s. Flares change what the
+  # missile is tracking; speed changes whether it can still reach the aircraft.
+  missile_evade: {afterburner_clear_s: 4.0, afterburner_max_s: 20.0,
+    enabled: true, clear_seconds: 3.0, min_clear_samples: 2, max_manoeuvre_s: 6.0,
     max_hold_s: 15.0, pitch_down: false}
   climb:
     enabled: true
@@ -395,7 +399,15 @@ behavior_tree:
 # to 6% and 1%.
 # ADR 117: the detector read on 23% of ticks. Capture what the OTHER 77% looks
 # like — every frame in the corpus so far is one where detection succeeded.
-minimap: {blind_capture_max: 40, blind_capture_interval_s: 45.0,
+#
+# 2026-09-06: widened from max 40 at 45 s, which is THIRTY MINUTES of coverage.
+# All 40 frames of the 4h36m 2026-09-05 session landed between 22:00 and 22:51 —
+# one map, one lighting condition — while 158 later blind ticks hit the cap. D3
+# asked what blindness looks like "across maps and situations" and the budget
+# could not reach past the first map. 300 s x 120 spans a 10 h session; the cap
+# is now a disk guard rather than the thing that ends sampling.
+minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
+  minimap_present_min_px: 50,
   boundary_median_age_s: 5.0, mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
   ema_reset_after_s: 5.0, regroup_enabled: true,
   friendly_hsv: {lower: [40, 90, 90], upper: [85, 255, 255]},

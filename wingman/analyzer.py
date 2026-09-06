@@ -991,6 +991,11 @@ class GameStateAnalyzer:
         self._boundary_hsv_lower = np.array(_b_cfg.get("lower", [8, 120, 120]), dtype=np.uint8)
         self._boundary_hsv_upper = np.array(_b_cfg.get("upper", [28, 255, 255]), dtype=np.uint8)
         self._boundary_min_px = int(minimap_cfg.get("boundary_min_px", 20))
+        # ADR 117: floor for "a minimap is drawn at all". Measured separation on
+        # the 2026-09-05 blind corpus: no-minimap frames 0-5 px, real minimaps
+        # 558+. 50 sits in the gap, far from both.
+        self._minimap_present_min_px = int(
+            minimap_cfg.get("minimap_present_min_px", 50))
         # ADR 108: reconnection kernel and the line-vs-terrain shape gate.
         self._boundary_close_kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (5, 5))
@@ -3734,6 +3739,43 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.warning("Analyzer: detect_enemy_map_bearing failed: %s", e)
             return empty
+
+    def minimap_present(self, frame) -> bool:
+        """Is a minimap actually drawn on this frame? (ADR 117)
+
+        GAME_BATTLE is not sufficient. Killcam, transition and cinematic frames
+        are all in battle with no HUD, and 11 of the 40 blind frames captured on
+        2026-09-05 were exactly that — 27.5% of a diagnostic budget spent on
+        frames that cannot answer the question it was opened for.
+
+        The test is the boundary-hue mask inside the minimap disc. It separates
+        with an enormous margin and needs no new calibration: on that session's
+        frames, every no-minimap frame held **5 or fewer** matching pixels and
+        every real minimap held **558 or more**. The threshold sits in the gap
+        and is nowhere near either edge.
+
+        Deliberately NOT a check for the boundary itself — a minimap showing no
+        boundary at all is precisely the evidence this capture wants.
+        """
+        if self.crops is None or "MINIMAP" not in self.crops:
+            return False
+        try:
+            crop = get_crop(frame, *self.crops["MINIMAP"][:4])
+            height, width = crop.shape[:2]
+            radius = min(width, height) / 2.0
+            if radius <= 0:
+                return False
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, self._boundary_hsv_lower, self._boundary_hsv_upper)
+            mask &= _minimap_circle_mask(width, height,
+                                         self._minimap_mask_radius_frac * radius)
+            return int((mask > 0).sum()) > self._minimap_present_min_px
+        except Exception as e:                # noqa: BLE001 - diagnostic only
+            # Fail OPEN: a frame we cannot classify is still worth capturing.
+            # The alternative silently stops the capture that exists to explain
+            # a detector nobody can otherwise see failing.
+            logger.debug("Analyzer: minimap_present failed: %s", e)
+            return True
 
     def detect_map_boundary(self, frame) -> "tuple | None":
         """Nearest map-boundary point on the minimap, or None.

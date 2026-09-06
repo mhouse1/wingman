@@ -21,6 +21,7 @@ from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_gam
     _linux_key_event,
     _LinuxXTestKeyboard,
     _XKeyEvent,
+    describe_key_source,
     maybe_install_linux_keyboard,
 )
 
@@ -285,6 +286,14 @@ class Controller:
         # been started.
         self._sdl_lifecycle_lock = threading.Lock()
         self._sdl_lifecycle_timeout_s = 2.0
+        # ADR 128: afterburner held while a missile is inbound.
+        self._ab_evade_active = threading.Event()
+        self._ab_evade_thread = None
+        self._ab_evade_until = 0.0
+        _me = (config.get("missile_evade", {}) or {}) if isinstance(config, dict) else {}
+        _me = getattr(config, "missile_evade", None) or _me or {}
+        self._ab_evade_clear_s = float(_me.get("afterburner_clear_s", 4.0))
+        self._ab_evade_max_s = float(_me.get("afterburner_max_s", 20.0))
         self._sdl_padlock_thread: threading.Thread | None = None
         self._sdl_weapon_thread: threading.Thread | None = None
         self._target_painting_mode = target_painting_mode
@@ -628,9 +637,13 @@ class Controller:
             # Maneuver keys cancel mission when pressed during GAME_BATTLE (manual takeover)
             try:
                 def maneuver_key_pressed(e):
+                    # getattr: the Windows `keyboard` fallback delivers real
+                    # KeyboardEvents, which carry no display or modifier state.
                     self._handle_maneuver_key_press(
                         key_name=getattr(e, 'name', str(e)),
                         is_injected=getattr(e, 'is_injected', False),
+                        display=getattr(e, 'display', None),
+                        state=getattr(e, 'state', 0),
                     )
                 for _key in _WATCHED_MANEUVER_KEYS:
                     keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
@@ -932,7 +945,9 @@ class Controller:
         """Register callback fired before manual takeover FSM transition with frame payload."""
         self._on_manual_takeover_frame = callback
 
-    def _handle_maneuver_key_press(self, key_name: str, is_injected: bool = False) -> bool:
+    def _handle_maneuver_key_press(self, key_name: str, is_injected: bool = False,
+                                   display: "str | None" = None,
+                                   state: int = 0) -> bool:
         """Handle manual maneuver-key takeover logic.
 
         Returns True when the key press triggered mission cancel/manual takeover,
@@ -984,7 +999,12 @@ class Controller:
                 or self._spawn_guarding.is_set()):
             return False
 
-        logger.info("Controller: maneuver key '%s' pressed - entering GAME_BATTLE_MANUAL (manual takeover)", key_name)
+        # The source is logged with the takeover, not separately: a takeover
+        # whose origin has to be reconstructed from a nearby line is a takeover
+        # whose origin is lost as soon as the log rotates.
+        logger.info("Controller: maneuver key '%s' pressed - entering "
+                    "GAME_BATTLE_MANUAL (manual takeover) [%s]",
+                    key_name, describe_key_source(display, state))
         self._auto_respawn_restart = False
         self._eject_stop_reason = "manual_takeover"
         self._eject_stop.set()
@@ -2434,6 +2454,85 @@ class Controller:
         self._climb_thread = threading.Thread(target=_run, daemon=True)
         self._climb_thread.start()
 
+    def note_incoming(self, detected: bool, now: "float | None" = None) -> None:
+        """Refresh the missile-evade afterburner deadline. ADR 128.
+
+        Called every tick, not only on a NEW detection: the requirement is
+        "until incoming has not appeared for N seconds", so the deadline has to
+        be pushed out by each sighting, and a detection that persists across
+        several ticks must extend the burn rather than start a second one.
+        """
+        if not detected:
+            return
+        now = time.time() if now is None else now
+        self._ab_evade_until = now + self._ab_evade_clear_s
+        self._start_afterburner_evade()
+
+    def _start_afterburner_evade(self) -> None:
+        """Hold the afterburner while a missile is inbound. ADR 128.
+
+        @relation(FR-008, scope=function)
+
+        Idempotent while the thread is alive (the ADR 070 d8 pattern): a second
+        detection refreshes `_ab_evade_until` rather than starting a rival hold
+        on the same key.
+
+        The hold is BOUNDED twice — by the quiet deadline and by an absolute
+        cap — for the reason the climb is. AFTERBURNER_KEY is not a watched
+        maneuver key, so a stuck press would not surface as a takeover; it
+        would just be a throttle nobody could release.
+        """
+        if self._ab_evade_active.is_set():
+            return
+        self._ab_evade_active.set()
+
+        def _run():
+            started = time.time()
+            burned = 0.0
+            try:
+                self._climb_key(AFTERBURNER_KEY, press=True, action="evade")
+                last_press = time.time()
+                while not self._exit_event.is_set():
+                    now = time.time()
+                    burned = now - started
+                    if now >= self._ab_evade_until:
+                        break
+                    # RE-PRESS periodically. climb_mode drives the same key and
+                    # releases it on its own schedule, so a climb ending mid
+                    # evade would otherwise cut the burn silently — the feature
+                    # would be off exactly when a missile is inbound, with
+                    # nothing in the log to say so. Pressing a held key again
+                    # is harmless.
+                    if now - last_press >= 1.0:
+                        self._climb_key(AFTERBURNER_KEY, press=True,
+                                        action="evade")
+                        last_press = now
+                    if burned >= self._ab_evade_max_s:
+                        logger.warning(
+                            "Controller: afterburner evade hit its %.0fs cap "
+                            "with the alert still live", self._ab_evade_max_s)
+                        break
+                    if self._exit_event.wait(timeout=0.1):
+                        break
+            except Exception:
+                logger.exception("Controller: afterburner evade failed")
+            finally:
+                self._climb_key(AFTERBURNER_KEY, press=False, action="evade")
+                self._ab_evade_active.clear()
+                logger.info(
+                    "\033[95m🔥 Afterburner evade released after %.1fs\033[0m",
+                    burned)
+
+        logger.info("\033[95m🔥 INCOMING — afterburner held until %.0fs clear"
+                    "\033[0m", self._ab_evade_clear_s)
+        self._ab_evade_thread = threading.Thread(
+            target=_run, daemon=True, name="AfterburnerEvade")
+        self._ab_evade_thread.start()
+
+    def is_afterburner_evading(self) -> bool:
+        """True while the missile-evade afterburner hold owns the throttle."""
+        return self._ab_evade_active.is_set()
+
     def _climb_key(self, key: str, press: bool, action: str = "climb"):
         """Press/release one climb-family key, honoring simulate mode."""
         if self._simulate_os_input:
@@ -3278,7 +3377,7 @@ class Controller:
             no_telemetry_since = 0.0
             try:
                 while not self._mission_cancel.is_set():
-                    if self._exit_event and self._exit_event.is_set():
+                    if self._mission_exit_requested():
                         break
 
                     snap = (self._analyzer.get_telemetry()
@@ -3422,7 +3521,7 @@ class Controller:
                          name="MissionLoiter").start()
 
         while not self._mission_complete.wait(timeout=0.05):
-            if self._exit_event and self._exit_event.is_set():
+            if self._mission_exit_requested():
                 logger.info("Controller: exit requested, aborting mission wait")
                 self.cancel_mission()
                 break
@@ -3455,7 +3554,7 @@ class Controller:
                     "Controller: mission_j20 - adaptive mission running "
                     "(S&D loops up, behavior tree owns tactics)")
                 while not self._mission_cancel.wait(timeout=0.5):
-                    if self._exit_event is not None and self._exit_event.is_set():
+                    if self._mission_exit_requested():
                         logger.info("Controller: mission_j20 - exit requested")
                         break
                 logger.info("Controller: mission_j20 - cancelled, stopping loops")
@@ -3474,7 +3573,7 @@ class Controller:
 
         # Wait for mission to complete or exit requested
         while not self._mission_complete.wait(timeout=0.05):
-            if self._exit_event and self._exit_event.is_set():
+            if self._mission_exit_requested():
                 logger.info("Controller: exit requested, aborting mission wait")
                 self.cancel_mission()
                 break
@@ -3701,6 +3800,27 @@ class Controller:
         logger.info("\033[91mController: cancel_mission called\033[0m")
         self._mission_cancel.set()
         self.stop_weapon_loop()
+
+    def _mission_exit_requested(self) -> bool:
+        """True when a mission loop should abort for a real program exit.
+
+        @relation(FR-009, scope=function)
+
+        `_exit_event` stays set for the rest of the process once the FIRST
+        Backspace fires (ADR 099) — the main loop needs it to break out into
+        standby, and nothing ever clears it. But standby deliberately keeps
+        hotkeys alive so the operator can restart the mission by hand while
+        MetalStorm keeps running, and 'u'/'y' start a fresh mission thread
+        that immediately saw the stale flag and self-cancelled within one
+        poll tick (measured 2026-09-06 04:25-04:27: every hotkey-started
+        mission_j20 during standby logged "exit requested, aborting mission
+        wait" ~50ms after "adaptive mission running", so it never actually
+        ran). `_operator_stop_event` is the same signal `__init__` already
+        uses to tell a real exit apart from the Backspace/standby path — SIGTERM
+        and the startup-stall exit set `_exit_event` without it.
+        """
+        return bool(self._exit_event is not None and self._exit_event.is_set()
+                    and not self._operator_stop_event.is_set())
 
     def close_all_requested(self) -> bool:
         """True once the operator's SECOND Backspace has arrived (ADR 099)."""
