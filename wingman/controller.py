@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 from mss import mss
 
-from .analyzer import GameState, BATTLE_STATES
+from .analyzer import GameState, BATTLE_STATES, NOSE_DOWN
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre, draw_crops
 from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
@@ -442,6 +442,8 @@ class Controller:
         # departed), and neither is a state the orbit can control.
         self._loiter_level_band_deg = float(_lo.get("level_band_deg", 20.0))
         self._loiter_recover_hold_s = float(_lo.get("recover_hold_s", 0.8))
+        # ADR 123: held back-pressure applied at entry when the nose is down.
+        self._loiter_entry_pullup_s = float(_lo.get("entry_pullup_s", 5.0))
         # ADR 111: how long to wait for an outgoing mission to release the lock
         # before refusing the hold. Two missions on one airframe is worse than
         # none.
@@ -2244,7 +2246,8 @@ class Controller:
         """
         self._boundary_turn_stop.set()
 
-    def boundary_turn_mode(self, max_s: "float | None" = None):
+    def boundary_turn_mode(self, max_s: "float | None" = None,
+                           lateral: "float | None" = None):
         """Bank and pull away from the arena edge (ADR 107).
 
         Holds ROLL_RIGHT and NOSE_UP together. Roll alone was ADR 101, and it
@@ -2252,10 +2255,21 @@ class Controller:
         aircraft at its closest approach, because Climb owned pitch and a bank
         without a pull does not turn the flight path.
 
-        Direction is arbitrary and that is safe, for the same reason it was in
-        ADR 101: the condition closes on the MEASURED range, so a turn the wrong
-        way releases as soon as the aircraft starts receding. Picking wrong
-        costs seconds, not the aircraft.
+        ADR 122: direction is CHOSEN from `lateral`, the across-track offset of
+        the nearest boundary point — roll away from the side it is on. When
+        `lateral` is None the old fixed right roll stands.
+
+        The previous claim here was that "direction is arbitrary and that is
+        safe... a turn the wrong way releases as soon as the aircraft starts
+        receding. Picking wrong costs seconds, not the aircraft." **That
+        reasoning is wrong in its own terms.** A turn the wrong way does not
+        recede — it closes faster, so the release condition it relies on is
+        exactly the one it cannot meet, and the turn holds while flying into
+        the edge. At 600-1400 KPH those "seconds" are hundreds of metres.
+
+        It also matched the measurement: ADR 107 recorded a median range gain
+        of +0.00R over 61 turns, which is what a coin flip between "away" and
+        "into" produces.
 
         Non-blocking and idempotent while the thread is alive (the ADR 070 d8
         pattern). Suppressed while an eject or missile evade owns the airframe —
@@ -2277,8 +2291,17 @@ class Controller:
         logger.info("\033[93m🗺  BOUNDARY TURN — banking and pulling away from "
                     "the edge (cap %.0fs)\033[0m", cap_s)
 
+        # Positive lateral means the nearest boundary point is to the RIGHT, so
+        # roll LEFT to turn away from it.
+        roll_key = ROLL_RIGHT_KEY
+        if lateral is not None and lateral > 0:
+            roll_key = ROLL_LEFT_KEY
+        logger.debug("Controller: boundary turn rolling %s (lateral=%s)",
+                     "left" if roll_key == ROLL_LEFT_KEY else "right",
+                     "n/a" if lateral is None else f"{lateral:+.3f}")
+
         def _run():
-            guarded = tuple(k for k in (ROLL_RIGHT_KEY, NOSE_UP_KEY)
+            guarded = tuple(k for k in (roll_key, NOSE_UP_KEY)
                             if k in _WATCHED_MANEUVER_KEYS)
             for _k in guarded:
                 self._inc_programmatic_key(_k)
@@ -2295,7 +2318,7 @@ class Controller:
                 # Stopping the climb first: two writers on pitch with different
                 # targets is the interaction ADR 107 D8 refuses to ship.
                 self._climb_stop.set()
-                self._climb_key(ROLL_RIGHT_KEY, press=True, action="boundary")
+                self._climb_key(roll_key, press=True, action="boundary")
                 self._climb_key(NOSE_UP_KEY, press=True, action="boundary")
                 while not self._boundary_turn_stop.wait(timeout=0.25):
                     if self._exit_event is not None and self._exit_event.is_set():
@@ -2335,7 +2358,7 @@ class Controller:
                 logger.exception("Controller: boundary turn failed")
             finally:
                 _release_started = time.time()
-                self._climb_key(ROLL_RIGHT_KEY, press=False, action="boundary")
+                self._climb_key(roll_key, press=False, action="boundary")
                 self._climb_key(NOSE_UP_KEY, press=False, action="boundary")
                 # ADR 086 d1 / SAF-010: the same flyable handback the climb
                 # owes. Releasing a nose-up hold and going neutral leaves the
@@ -3113,6 +3136,49 @@ class Controller:
         """
         return self._loitering.is_set()
 
+    def _loiter_entry_pull_up(self) -> None:
+        """Pull up on entry when NOSE_DIRECTION is DOWN. ADR 123.
+
+        Reads the analyzer's tracked direction rather than deriving it here:
+        the hold starts at an instant it did not choose, and a fresh telemetry
+        pair may not exist on that tick. `nose_direction` holds the last known
+        answer across the gap, which is exactly what is needed.
+
+        NOSE_UNKNOWN does NOT pull up. With no evidence the aircraft is
+        descending, five seconds of held back-pressure is itself a way to stall
+        a healthy entry.
+        """
+        if self._analyzer is None:
+            return
+        try:
+            direction = self._analyzer.nose_direction()
+        except Exception:
+            logger.debug("mission_loiter: nose direction unavailable",
+                         exc_info=True)
+            return
+        if direction != NOSE_DOWN:
+            logger.info("Controller: mission_loiter - entry nose direction "
+                        "%s, no pull-up needed", direction)
+            return
+        logger.warning("\033[93mController: mission_loiter - entry with the "
+                       "nose DOWN — holding nose up for %.1fs before the "
+                       "hold begins\033[0m", self._loiter_entry_pullup_s)
+        # ADR 126: verify it actually held. The first version of this call was
+        # cancelled after ten milliseconds by a stale `_mission_cancel` and
+        # logged nothing to say so — the hold went into a -64 deg dive looking,
+        # in the log, exactly like a hold that had recovered. A guard that can
+        # silently not run is not a guard.
+        _t0 = time.time()
+        self.nose_up(hold_seconds=self._loiter_entry_pullup_s, block=True)
+        _held = time.time() - _t0
+        if _held < self._loiter_entry_pullup_s * 0.9:
+            logger.error("\033[91mController: mission_loiter - ENTRY PULL-UP CUT "
+                         "SHORT: held %.2fs of %.1fs. The hold is starting "
+                         "nose-down.\033[0m", _held, self._loiter_entry_pullup_s)
+        else:
+            logger.info("Controller: mission_loiter - entry pull-up held %.2fs",
+                        _held)
+
     def mission_loiter(self):
         """Stay alive: climb to a holding altitude and orbit there.
 
@@ -3182,8 +3248,28 @@ class Controller:
                         "eject in progress\033[0m")
             self._eject_stop_reason = "survival_hold"
             self._eject_stop.set()
+        # ADR 123: if the nose is already DOWN, pull up NOW — before the loop,
+        # before the tree, before anything else gets a vote.
+        #
+        # Measured 2026-09-05 21:31:41: the hold was started with the aircraft
+        # at 139 m in a -74 deg dive at 2652 KPH. It hit the ground five seconds
+        # later. The tree's own recovery (ADR 114) could not help: below the
+        # band the hold climbs, and climb_mode takes seconds to establish while
+        # the ground arrives in one.
+        #
+        # BLOCKING and unconditional. Every other pitch input in the hold is a
+        # short non-blocking pulse re-evaluated next tick, which is right for a
+        # trim correction and useless against a vertical dive. This is the one
+        # place the hold is allowed to simply hold the stick back.
         self._mission_complete.clear()
         self._mission_cancel.clear()
+        # AFTER the cancel flag is cleared, not before. Measured live
+        # 2026-09-05 10:12:59: the pull-up ran while `_mission_cancel` was
+        # still set from the pre-emption above, and `nose_up(block=True)`
+        # honoured it — "pressing 'i' for 5.0 seconds" then "nose_up cancelled"
+        # ten milliseconds later. The hold entered a -64 deg dive having done
+        # nothing at all.
+        self._loiter_entry_pull_up()
 
         def _mission_runner():
             last_orbit_ts = 0.0

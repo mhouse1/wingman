@@ -4,6 +4,8 @@ import sys
 import yaml
 import time
 import warnings
+import contextlib
+import faulthandler
 import logging
 import threading
 import socket
@@ -207,6 +209,70 @@ def _rss_mb() -> float:
     except Exception:
         pass
     return 0.0
+
+
+SHUTDOWN_WATCHDOG_S = 90.0
+
+
+def _arm_shutdown_watchdog(timeout_s: float = SHUTDOWN_WATCHDOG_S) -> None:
+    """Force an exit if cleanup stalls, dumping every thread first. ADR 121.
+
+    Observed 2026-09-05 08:02:03: wingman took SIGTERM, stopped logging on the
+    same second, never wrote "Exit requested, shutting down", and was still
+    alive five minutes later. It had to be SIGKILLed, so no session summary and
+    no stats JSON were written — and the next start rotated its log away. The
+    overnight 01:10 session left exactly that signature: no archive, no stats.
+
+    A hung shutdown is worse than a crash. A crash leaves a traceback; this
+    leaves nothing at all, and silently destroys the soak data ADR 106 needs.
+
+    Not reproducible on demand — a fresh session SIGTERMs cleanly in about 3 s
+    — so this captures evidence rather than guessing at a cause. The daemon
+    timer does not hold up a healthy exit.
+    """
+    def _bark():
+        _log = logging.getLogger(__name__)
+        try:
+            _log.error(
+                "SHUTDOWN WATCHDOG: cleanup still running after %.0fs — dumping "
+                "all thread stacks and forcing exit", timeout_s)
+            for h in list(_log.handlers) + list(logging.getLogger().handlers):
+                with contextlib.suppress(Exception):
+                    h.flush()
+            # To the log FILE, not just stderr: an unattended soak has no
+            # terminal, and this dump is the only record of where it stuck.
+            for h in logging.getLogger().handlers:
+                stream = getattr(h, "stream", None)
+                if stream is not None and not stream.closed:
+                    with contextlib.suppress(Exception):
+                        faulthandler.dump_traceback(file=stream, all_threads=True)
+                        stream.flush()
+        finally:
+            # os._exit, not sys.exit: the point is that normal shutdown is
+            # already stuck, so anything that runs atexit handlers or joins
+            # threads would stick in the same place.
+            os._exit(2)
+
+    _cancel_shutdown_watchdog()
+    t = threading.Timer(timeout_s, _bark)
+    t.daemon = True
+    t.start()
+    globals()["_SHUTDOWN_WATCHDOG_TIMER"] = t
+
+
+def _cancel_shutdown_watchdog() -> None:
+    """Disarm the watchdog. ADR 124.
+
+    STANDBY parks the process for as long as the operator wants to fly, so it
+    is an unbounded wait BY DESIGN — not a stalled cleanup. The watchdog was
+    armed at the top of the same `finally` block and killed a live standby
+    after 90 s on 2026-09-05 10:45:17, taking the SAF-010 handback with it.
+    """
+    t = globals().get("_SHUTDOWN_WATCHDOG_TIMER")
+    if t is not None:
+        with contextlib.suppress(Exception):
+            t.cancel()
+        globals()["_SHUTDOWN_WATCHDOG_TIMER"] = None
 
 
 def main():
@@ -1346,6 +1412,7 @@ def main():
     except Exception:
         logger.exception("Unhandled exception in main loop")
     finally:
+        _arm_shutdown_watchdog()
         if replay_mode:
             intents_output = Path(args.replay_intents_output)
             intents_output.parent.mkdir(parents=True, exist_ok=True)
@@ -1530,10 +1597,16 @@ def main():
                 "running and is yours to fly. Press Backspace again to close "
                 "MetalStorm%s and exit. Ctrl-C leaves everything up.\033[0m",
                 " and the nested display" if nested_display else "")
+            # ADR 124: standby is an unbounded wait by DESIGN. The shutdown
+            # watchdog exists to bound a STALL, and it cannot tell the two
+            # apart from inside — so it is disarmed here and re-armed for the
+            # close that follows the second Backspace, which is bounded.
+            _cancel_shutdown_watchdog()
             try:
                 while not ctrl.wait_for_close_all(timeout=1.0):
                     pass
                 logger.info("STANDBY: second Backspace — closing down")
+                _arm_shutdown_watchdog()
                 _close_session()
             except KeyboardInterrupt:
                 logger.info("STANDBY: interrupted — leaving MetalStorm running")

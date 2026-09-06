@@ -138,22 +138,72 @@ def should_fullscreen(size: str, host: "tuple[int, int] | None") -> bool:
     return host[0] <= geom_w and host[1] <= geom_h
 
 
+DISPLAY_PROBE_TIMEOUT_S = 5.0
+
+
+def probe_display(display: str, timeout_s: float = DISPLAY_PROBE_TIMEOUT_S) -> str:
+    """Probe `display`: "up", "down", or "wedged". ADR 119.
+
+    `Xlib.display.Display()` has NO timeout. A server that accepts the
+    connection and never completes the handshake blocks the caller forever —
+    measured 2026-09-05 07:09, where `make rd` hung with no output at all
+    because this probe never returned. The X server was alive (pid 324709, the
+    game still on it) and simply did not answer.
+
+    The connect therefore runs on a daemon thread that is allowed to leak. It
+    is stuck in a syscall and cannot be cancelled; daemon=True means it does
+    not hold up interpreter exit, and this runs in a short-lived CLI process.
+    """
+    import threading
+    result = []
+
+    def _connect():
+        try:
+            from Xlib import display as xdisplay
+            d = xdisplay.Display(display)
+            d.close()
+            result.append("up")
+        except Exception:
+            result.append("down")
+
+    t = threading.Thread(target=_connect, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if not result:
+        return "wedged"
+    return result[0]
+
+
 def display_is_up(display: str) -> bool:
-    """True when an X server answers on `display`."""
-    try:
-        from Xlib import display as xdisplay
-        d = xdisplay.Display(display)
-        d.close()
-        return True
-    except Exception:
-        return False
+    """True when an X server answers on `display`.
+
+    A wedged server is NOT up: it cannot be used, and treating it as usable is
+    what produced the hang. Callers that need to tell the two apart use
+    `probe_display` directly.
+    """
+    return probe_display(display) == "up"
 
 
 def start(display: str, size: str) -> int:
     """Bring up a rootful Xwayland on `display`. Idempotent."""
-    if display_is_up(display):
+    state = probe_display(display)
+    if state == "up":
         print(f"nested display {display} already running")
         return 0
+    if state == "wedged":
+        # Distinguished deliberately. "Down" means start a server; "wedged"
+        # means one exists and must be cleared first, and starting a second one
+        # on the same display cannot work. Fail fast and say what to do — the
+        # previous behaviour was an unbounded hang with no output.
+        try:
+            from wingman.game_shutdown import find_nested_display_pids
+            owners = find_nested_display_pids(display)
+        except Exception:
+            owners = []
+        print(f"ERROR: {display} accepted a connection but did not answer within "
+              f"{DISPLAY_PROBE_TIMEOUT_S:.0f}s (owner pid(s): {owners or 'unknown'}). "
+              f"Kill it before starting a session.", file=sys.stderr)
+        return 1
 
     if not os.environ.get("WAYLAND_DISPLAY"):
         # Xwayland is a Wayland client: it needs the operator's compositor to

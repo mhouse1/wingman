@@ -18,6 +18,7 @@ interaction goes through an explicit argument, a return value, or a
 `GameEvent` — never a variable both can write (ADR 060 Phase 2 rule 2).
 """
 
+import math
 import collections
 import json
 import logging
@@ -782,6 +783,8 @@ class BehaviorTreeHandler:
             (minimap_cfg or {}).get("boundary_approach_capture_max", 10))
         self._boundary_reading = None
         self._turn_dists = []
+        # ADR 125: bearing to the boundary during a turn, for heading change.
+        self._turn_bearings = []
         self._respawn_settle_until = 0.0
         self._boundary_respawn_settle_s = float(
             (minimap_cfg or {}).get("boundary_respawn_settle_s", 5.0))
@@ -877,12 +880,26 @@ class BehaviorTreeHandler:
             # Climb the leaf is only built when configured, so there is no
             # selection-only variant to wire.
             if self.active and (bt_cfg.get("boundary", {}) or {}).get("turn_frac"):
-                actuators[TACTIC_BOUNDARY_TURN] = (ctrl.boundary_turn_mode,
+                actuators[TACTIC_BOUNDARY_TURN] = (self._start_boundary_turn,
                                                    ctrl.is_boundary_turning)
             self._tree = build_tree(
                 bt_cfg, actuators=actuators or None,
                 regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
             self._writer = make_snapshot_writer()
+
+    def _start_boundary_turn(self) -> None:
+        """BoundaryTurn start_fn. ADR 122: tell the turn which side the edge is
+        on, so it rolls away from it rather than always right.
+
+        Reads the CURRENT tick's reading — the turn is started from the same
+        tick that selected it, so this is the reading the decision was made on.
+        A 2-tuple (older stub or recording) leaves lateral None and the turn
+        keeps its fixed direction.
+        """
+        lat = None
+        if self._boundary_reading and len(self._boundary_reading) > 2:
+            lat = self._boundary_reading[2]
+        self._ctrl.boundary_turn_mode(lateral=lat)
 
     def _start_climb(self) -> None:
         """Climb leaf start_fn (ADR 075): pick the band the selection came from.
@@ -1044,8 +1061,24 @@ class BehaviorTreeHandler:
             self._blind_capture_next_ts = now + self._blind_capture_interval_s
             self._capture_boundary_frame(
                 frame, "blind", f"{self._captures.get('blind', 0) + 1}")
-        _b_dist, _b_fwd = (self._boundary_reading
-                           if self._boundary_reading else (None, None))
+        # ADR 122: readings are (dist, forward, lateral). Tolerate a 2-tuple so
+        # a stub or an older recording does not crash the tick — lateral is
+        # then None and the turn falls back to its fixed direction.
+        if self._boundary_reading:
+            _b_dist = self._boundary_reading[0]
+            _b_fwd = self._boundary_reading[1]
+            _b_lat = (self._boundary_reading[2]
+                      if len(self._boundary_reading) > 2 else None)
+        else:
+            _b_dist = _b_fwd = _b_lat = None
+        # ADR 120: the nearest reading still in the median window. The turn's
+        # RELEASE reads this, so a filtered value cannot claim the aircraft is
+        # clear while a recent reading says it is at the edge.
+        _b_near = _b_dist
+        if self._boundary_recent:
+            _recent_min = min(r[0] for _, r in self._boundary_recent)
+            if _b_near is None or _recent_min < _b_near:
+                _b_near = _recent_min
         # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
         # control loop, so it needs the reading rather than the tactic.
         try:
@@ -1071,6 +1104,8 @@ class BehaviorTreeHandler:
             altitude_rate=altitude_rate,
             friendly_contacts=len(self._friendly_components or []),
             boundary_dist=_b_dist,
+            boundary_near=_b_near,
+            boundary_lateral=_b_lat,
             boundary_forward=_b_fwd,
         )
         self._writer.set("snapshot", snap)
@@ -1129,6 +1164,19 @@ class BehaviorTreeHandler:
         if selection == TACTIC_BOUNDARY_TURN:
             if _b_dist is not None:
                 self._turn_dists.append(_b_dist)
+                # ADR 125: the BEARING to the boundary, which is the thing a
+                # turn is supposed to change and the one thing nothing measures.
+                # The attitude sampler reports PITCH (derived from altitude
+                # rate); range says where the aircraft ended up. Neither answers
+                # "did the aircraft rotate", and two hypotheses have already
+                # been disproved for want of it.
+                #
+                # The minimap is heading-up, so the bearing to a fixed boundary
+                # point rotates with the aircraft. atan2(lateral, forward) is
+                # therefore a heading-change proxy that needs no new sensor.
+                if _b_lat is not None and _b_fwd is not None:
+                    self._turn_bearings.append(
+                        math.degrees(math.atan2(_b_lat, _b_fwd)))
         elif self._turn_dists:
             # ADR 107 V9: the RANGE half of the same question the controller's
             # attitude summary answers. Logged on every turn, not only on the
@@ -1139,7 +1187,25 @@ class BehaviorTreeHandler:
                 "🗺  BOUNDARY TURN range: %.2fR → %.2fR (closest %.2fR, "
                 "%d ticks, %s)", _d[0], _d[-1], min(_d), len(_d),
                 "receded" if _d[-1] > min(_d) + 1e-9 else "never receded")
+            _brg = self._turn_bearings
+            if len(_brg) >= 2:
+                # Unwrapped, so a turn through the +/-180 seam is not read as a
+                # 350-degree swing in the opposite direction.
+                total = 0.0
+                for a, b in zip(_brg, _brg[1:], strict=False):
+                    d = (b - a + 180.0) % 360.0 - 180.0
+                    total += d
+                logger.info(
+                    "🗺  BOUNDARY TURN bearing: %+.0f deg → %+.0f deg "
+                    "(net %+.0f deg, path %.0f deg, %d samples)",
+                    _brg[0], _brg[-1], total,
+                    sum(abs((b - a + 180.0) % 360.0 - 180.0)
+                        for a, b in zip(_brg, _brg[1:], strict=False)), len(_brg))
+            else:
+                logger.info("🗺  BOUNDARY TURN bearing: n/a (%d samples)",
+                            len(_brg))
             self._turn_dists = []
+            self._turn_bearings = []
         if (selection != TACTIC_BOUNDARY_TURN
                 and self._ctrl.is_boundary_turning()):
             self._ctrl.stop_boundary_turn()

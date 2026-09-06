@@ -303,6 +303,9 @@ loiter_mission: {target_alt: 5000, hysteresis_m: 500, orbit_direction: right,
   # says nothing about attitude — measured handover at 7113 m with the nose at
   # +82 deg, which zoomed to 8401 m, bled 962 to 207 KPH, stalled and departed.
   level_band_deg: 20, recover_hold_s: 0.8,
+  # ADR 123: entry pull-up. Measured 2026-09-05 21:31:41 — the hold started at
+  # 139 m in a -74 deg dive and the aircraft hit the ground five seconds later.
+  entry_pullup_s: 5.0,
   # ADR 111: reverse the orbit when circling is carrying it toward the edge.
   # Band is wider than BoundaryTurn's — reversing a circle is cheap, so
   # starting early costs nothing. Cooldown stops a noisy reading spinning
@@ -360,6 +363,12 @@ behavior_tree:
     exit_push_pulse_s: 1.0      # bounded impulse (ADR 069 pattern), with an equal observation gap
     exit_push_max_pulses: 3     # budget; exhausting it releases anyway and logs WARNING
     # ADR 107: cap for the BoundaryTurn hold (bank plus pull).
+    # ADR 126, REVERTED to 12 s. Cutting this to 5 s did not shorten the
+    # manoeuvre: measured 2026-09-05, 167 actuator starts across 47 selection
+    # episodes — 3.6 restarts per episode — because the CONDITION governs how
+    # long the aircraft turns and the actuator simply restarts inside it.
+    # Median path rotation went 294 -> 320 deg (up), turns per mission
+    # 2.6 -> 6.7, and crossings per mission 0.094 -> 0.160.
     boundary_turn_max_s: 12.0
     exit_lead_s: 3.0
     # ADR 086 d2/d3/d4 — dive recovery on predicted time-to-ground. 20s rather
@@ -456,6 +465,10 @@ tracking_hsv:
   min_aspect_ratio: 2.5
 hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
 telemetry:
+  # ADR 123: NOSE_DIRECTION deadband. Level flight jitters around zero altitude
+  # rate, and a direction that flips every tick is not a direction — the loiter
+  # entry check reads it once, at an instant it did not choose.
+  nose_direction_deadband_mps: 5.0
   max_speed_mph: 2000
   max_altitude_ft: 60000
   max_speed_change_mph_s: 300

@@ -62,6 +62,7 @@ def _loiter_ctrl(snaps):
     c._loiter_orbit_deadband_m = 150.0   # ADR 112: the pitch deadband
     c._loiter_level_band_deg = 20.0      # ADR 114: level before circling
     c._loiter_recover_hold_s = 0.8
+    c._loiter_entry_pullup_s = 5.0       # ADR 123: entry pull-up
     c._loiter_lock_timeout_s = 5.0
     c._loiter_boundary = None             # ADR 111: orbit direction inputs
     c._loiter_window_min = None
@@ -501,3 +502,151 @@ def test_the_shipped_config_is_what_the_controller_would_use():
         "loiter_mission is not reaching the controller"
     assert cfg.loiter["target_alt"] == 5000, \
         "ADR 115 chose 5000 m; a change here needs its own ADR and evidence"
+
+
+# --- ADR 123: NOSE_DIRECTION and the entry pull-up ---------------------------
+
+def test_a_nose_down_entry_pulls_up_before_the_hold_begins():
+    """ADR 123. Measured 2026-09-05 21:31:41: the hold was started with the
+    aircraft at 139 m in a -74 deg dive at 2652 KPH, and it hit the ground five
+    seconds later. The tree's own recovery could not help — below the band the
+    hold climbs, and climb_mode takes seconds to establish while the ground
+    arrives in one."""
+    from wingman.analyzer import NOSE_DOWN
+    c = _loiter_ctrl([_Snap(2000)])
+    c._analyzer.nose_direction.return_value = NOSE_DOWN
+    _run_briefly(c, seconds=0.3)
+    assert c.nose_up.called, "entered a hold nose-down without pulling up"
+    kw = c.nose_up.call_args_list[0].kwargs
+    assert kw["hold_seconds"] == 5.0, "pull-up was not the configured duration"
+    assert kw["block"] is True, \
+        "a non-blocking pulse is what the dive already outran"
+
+
+def test_a_nose_up_entry_does_not_pull_up():
+    from wingman.analyzer import NOSE_UP
+    c = _loiter_ctrl([_Snap(7050)])
+    c._analyzer.nose_direction.return_value = NOSE_UP
+    _run_briefly(c, seconds=0.3)
+    assert not c.nose_up.called
+
+
+def test_an_unknown_nose_direction_does_not_pull_up():
+    """No evidence of a descent is not evidence of one. Five seconds of held
+    back-pressure is itself a way to stall a healthy entry."""
+    from wingman.analyzer import NOSE_UNKNOWN
+    c = _loiter_ctrl([_Snap(7050)])
+    c._analyzer.nose_direction.return_value = NOSE_UNKNOWN
+    _run_briefly(c, seconds=0.3)
+    assert not c.nose_up.called
+
+
+def test_nose_direction_tracks_the_altitude_rate():
+    """The state itself. Rising is UP, falling is DOWN."""
+    from wingman.analyzer import (GameStateAnalyzer, NOSE_UP, NOSE_DOWN,
+                                  NOSE_UNKNOWN)
+    a = GameStateAnalyzer.__new__(GameStateAnalyzer)
+    a._nose_direction = NOSE_UNKNOWN
+    a._nose_direction_deadband_mps = 5.0
+    assert a.nose_direction() == NOSE_UNKNOWN
+    a._update_nose_direction(_Snap(5000, alt_rate=+40.0))
+    assert a.nose_direction() == NOSE_UP
+    a._update_nose_direction(_Snap(5000, alt_rate=-40.0))
+    assert a.nose_direction() == NOSE_DOWN
+
+
+def test_the_deadband_holds_the_last_direction():
+    """Level flight jitters around zero. A direction that flips every tick is
+    not a direction — the entry check reads it once, at an instant it did not
+    choose."""
+    from wingman.analyzer import GameStateAnalyzer, NOSE_UP, NOSE_UNKNOWN
+    a = GameStateAnalyzer.__new__(GameStateAnalyzer)
+    a._nose_direction = NOSE_UNKNOWN
+    a._nose_direction_deadband_mps = 5.0
+    a._update_nose_direction(_Snap(5000, alt_rate=+40.0))
+    for jitter in (+1.0, -2.0, +0.5, -4.9):
+        a._update_nose_direction(_Snap(5000, alt_rate=jitter))
+        assert a.nose_direction() == NOSE_UP, f"flipped on {jitter} m/s"
+
+
+def test_a_stale_reading_does_not_change_the_direction():
+    """A stale altitude rate describes the past. Holding the last known answer
+    is the point of tracking it as state."""
+    from wingman.analyzer import GameStateAnalyzer, NOSE_UP, NOSE_UNKNOWN
+    a = GameStateAnalyzer.__new__(GameStateAnalyzer)
+    a._nose_direction = NOSE_UNKNOWN
+    a._nose_direction_deadband_mps = 5.0
+    a._update_nose_direction(_Snap(5000, alt_rate=+40.0))
+    a._update_nose_direction(_Snap(5000, fresh=False, alt_rate=-99.0))
+    assert a.nose_direction() == NOSE_UP
+
+
+def test_the_entry_pull_up_survives_the_pre_emption_cancel():
+    """ADR 123, found live 2026-09-05 10:12:59.
+
+    `mission_loiter` calls `cancel_mission()` to pre-empt whatever is running
+    (ADR 111), which sets `_mission_cancel`. The pull-up was placed BEFORE that
+    flag is cleared, so `nose_up(block=True)` honoured it and returned after ten
+    milliseconds:
+
+        nose_up - pressing 'i' key for 5.0 seconds
+        nose_up cancelled
+
+    The hold entered a -64 deg dive having done nothing. Every hold that
+    pre-empts a mission takes this path, which is nearly all of them.
+    """
+    from wingman.analyzer import NOSE_DOWN
+    c = _loiter_ctrl([_Snap(2000)])
+    c._analyzer.nose_direction.return_value = NOSE_DOWN
+    # The state the pre-emption leaves behind, which the old fixture never had.
+    c._mission_cancel.set()
+
+    seen = {}
+
+    def _nose_up(hold_seconds=None, block=None):
+        seen["cancel_set_during_pull_up"] = c._mission_cancel.is_set()
+        seen["hold_seconds"] = hold_seconds
+
+    c.nose_up = _nose_up
+    _run_briefly(c, seconds=0.3)
+    assert "hold_seconds" in seen, "the pull-up never ran"
+    assert seen["cancel_set_during_pull_up"] is False, \
+        "pull-up ran with _mission_cancel set — nose_up will abort immediately"
+    assert seen["hold_seconds"] == 5.0
+
+
+def test_a_cut_short_entry_pull_up_is_reported_loudly(caplog):
+    """ADR 126. The 2026-09-05 10:12:59 failure was silent: `nose_up` returned
+    after ten milliseconds and the log showed only that the pull-up had been
+    requested. The hold entered a -64 deg dive looking, in the log, exactly like
+    one that had recovered.
+
+    A guard that can silently not run is not a guard.
+    """
+    import logging
+    from wingman.analyzer import NOSE_DOWN
+    c = _loiter_ctrl([_Snap(2000)])
+    c._analyzer.nose_direction.return_value = NOSE_DOWN
+    c.nose_up = mock.MagicMock()          # returns instantly, as the bug did
+    with caplog.at_level(logging.INFO):
+        _run_briefly(c, seconds=0.3)
+    text = caplog.text
+    assert "ENTRY PULL-UP CUT SHORT" in text, \
+        "a pull-up that did not hold was not reported"
+    assert any(r.levelno >= logging.ERROR for r in caplog.records), \
+        "cut-short pull-up must be an ERROR — it is a silent safety failure"
+
+
+def test_a_full_length_entry_pull_up_is_not_reported_as_cut_short(caplog):
+    """The guard must not cry wolf, or the real one will be ignored."""
+    import logging
+    import time as _time
+    from wingman.analyzer import NOSE_DOWN
+    c = _loiter_ctrl([_Snap(2000)])
+    c._analyzer.nose_direction.return_value = NOSE_DOWN
+    c._loiter_entry_pullup_s = 0.05       # keep the test quick
+    c.nose_up = lambda **kw: _time.sleep(kw.get("hold_seconds", 0))
+    with caplog.at_level(logging.INFO):
+        _run_briefly(c, seconds=0.4)
+    assert "ENTRY PULL-UP CUT SHORT" not in caplog.text
+    assert "entry pull-up held" in caplog.text

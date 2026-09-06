@@ -101,10 +101,26 @@ def test_an_unreadable_window_tree_returns_empty_rather_than_raising():
 
 def test_start_leaves_a_running_display_alone():
     """Safe as a Makefile prerequisite: a second `make rd` must not spawn a
-    second server on the same display."""
-    with mock.patch.object(nd, "display_is_up", return_value=True), \
+    second server on the same display.
+
+    ADR 119 moved the seam from `display_is_up` to `probe_display`, which
+    distinguishes a wedged server from an absent one. The guarantee is
+    unchanged; only the function that decides it moved.
+    """
+    with mock.patch.object(nd, "probe_display", return_value="up"), \
          mock.patch("subprocess.Popen") as popen:
         assert nd.start(":3", "1920x1200") == 0
+    popen.assert_not_called()
+
+
+def test_start_refuses_a_wedged_display_instead_of_starting_a_second_one():
+    """ADR 119. A server that accepts connections without answering cannot be
+    used AND cannot be replaced by starting another on the same display.
+    Measured 2026-09-05 07:09: this state hung `make rd` indefinitely with no
+    output. Fail fast and non-zero instead."""
+    with mock.patch.object(nd, "probe_display", return_value="wedged"), \
+         mock.patch("subprocess.Popen") as popen:
+        assert nd.start(":3", "1920x1200") == 1
     popen.assert_not_called()
 
 
@@ -113,7 +129,7 @@ def test_start_refuses_when_there_is_no_host_compositor():
     strips WAYLAND_DISPLAY so Wine cannot pick winewayland.drv and bypass the
     nested display — it has nothing to attach to. Better to say so than to
     spawn a server that never comes up."""
-    with mock.patch.object(nd, "display_is_up", return_value=False), \
+    with mock.patch.object(nd, "probe_display", return_value="down"), \
          mock.patch.dict("os.environ", {}, clear=True), \
          mock.patch("subprocess.Popen") as popen:
         assert nd.start(":3", "1920x1200") == 1
@@ -121,7 +137,7 @@ def test_start_refuses_when_there_is_no_host_compositor():
 
 
 def test_start_reports_failure_when_the_server_never_answers():
-    with mock.patch.object(nd, "display_is_up", return_value=False), \
+    with mock.patch.object(nd, "probe_display", return_value="down"), \
          mock.patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0"}), \
          mock.patch("subprocess.Popen"), \
          mock.patch("time.sleep"):
@@ -129,7 +145,7 @@ def test_start_reports_failure_when_the_server_never_answers():
 
 
 def test_start_survives_xwayland_missing_from_path():
-    with mock.patch.object(nd, "display_is_up", return_value=False), \
+    with mock.patch.object(nd, "probe_display", return_value="down"), \
          mock.patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0"}), \
          mock.patch("subprocess.Popen", side_effect=FileNotFoundError):
         assert nd.start(":3", "1920x1200") == 1
@@ -138,7 +154,7 @@ def test_start_survives_xwayland_missing_from_path():
 # --- focus reports rather than hangs -----------------------------------------
 
 def test_focus_fails_cleanly_when_the_display_is_down():
-    with mock.patch.object(nd, "display_is_up", return_value=False):
+    with mock.patch.object(nd, "probe_display", return_value="down"):
         assert nd.focus(":3", timeout=0.0) == 1
 
 

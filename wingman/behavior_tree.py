@@ -90,6 +90,12 @@ class AnalyzerSnapshot:
     survival_hold: bool = False
     boundary_dist: "float | None" = None
     boundary_forward: "float | None" = None
+    # ADR 120: nearest reading in the median window. The release decision uses
+    # this rather than the filtered value; entry still uses the filtered one.
+    boundary_near: "float | None" = None
+    # ADR 122: lateral offset of the nearest boundary point, positive to the
+    # RIGHT of the nose. The turn rolls away from it.
+    boundary_lateral: "float | None" = None
 
     @property
     def contacts(self) -> int:
@@ -305,6 +311,11 @@ def make_boundary_condition(turn_frac: "float | None",
             return False
         dist = getattr(snapshot, "boundary_dist", None)
         forward = getattr(snapshot, "boundary_forward", None)
+        # ADR 120: the NEAREST recent reading, for deciding "am I clear".
+        # Falls back to `dist` so a snapshot without it behaves as before.
+        near = getattr(snapshot, "boundary_near", None)
+        if near is None:
+            near = dist
         if dist is None or forward is None:
             # Freeze rather than release — a dropped reading mid-turn is a gap
             # in perception, not evidence the aircraft is clear — but BOUNDED.
@@ -318,7 +329,22 @@ def make_boundary_condition(turn_frac: "float | None",
             return state["active"]
         state["blind"] = 0
         clear_at = release_frac if release_frac else turn_frac
-        if dist >= (clear_at if state["active"] else turn_frac):
+        # ADR 120: ENTER on the filtered reading, LEAVE on the nearest one.
+        #
+        # The two errors do not cost the same. A spurious near reading buys one
+        # unnecessary turn, and turns are cheap — 83 in a session, measured
+        # break-even. A missed near reading buys a crossing, which is the metric.
+        # So noise-reject where it is cheap to be wrong (entry) and be
+        # conservative where it is not (release).
+        #
+        # Measured 2026-09-05: of 67 raw readings inside 0.10R with a fresh
+        # predecessor, 58 (87%) arrived via a physically reachable jump — real
+        # approaches — against 9 that could not be. Yet the median reported
+        # 0.10R or more for 44% of raw readings inside 0.10R, including
+        # 0.019 -> 0.516. A single reading above `clear_at` releases the turn
+        # outright, so that path released turns with the aircraft at the edge.
+        if (near if state["active"] else dist) >= (
+                clear_at if state["active"] else turn_frac):
             # Entering uses turn_frac; leaving uses the wider release_frac, so
             # the two thresholds cannot sit on top of each other and flap.
             _reset()
@@ -344,8 +370,11 @@ def make_boundary_condition(turn_frac: "float | None",
             state["active"] = True
             state["min_dist"] = dist
             return True
-        state["min_dist"] = min(state["min_dist"], dist)
-        if dist >= min_clear_frac and dist >= state["min_dist"] + recede_frac:
+        state["min_dist"] = min(state["min_dist"], near)
+        # Recession is also a clearance claim, so it reads the nearest value
+        # too — otherwise a filtered reading can manufacture a recession the
+        # aircraft never flew.
+        if near >= min_clear_frac and near >= state["min_dist"] + recede_frac:
             _reset()
             return False
         return True

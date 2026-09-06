@@ -140,6 +140,7 @@ SCHEMA = Section(
             "orbit_deadband_m": _num(0),   # ADR 112
             "level_band_deg": _num(0),     # ADR 114
             "recover_hold_s": _num(0),
+            "entry_pullup_s": _num(0),     # ADR 123
                 "lock_timeout_s": _num(0),
                 "boundary_avoid_frac": FRACTION,
                 "orbit_window_s": _num(0),
@@ -421,6 +422,7 @@ SCHEMA = Section(
 
         # ADR 038 / 067 / 069
         "telemetry": Section(children={
+            "nose_direction_deadband_mps": _num(0),   # ADR 123
             "max_speed_mph": _num(0),
             "max_altitude_ft": _num(0),
             "max_speed_change_mph_s": _num(0),

@@ -994,3 +994,58 @@ def test_a_survival_hold_does_not_disarm_the_defensive_tactics(harness):
     aircraft rather than spend it, so they still outrank the hold."""
     assert tick(harness, make_snap(is_respawning=True,
                                    survival_hold=True)) == TACTIC_RESPAWN_WAIT
+
+
+# --- ADR 120: release on the nearest reading, enter on the filtered one -------
+
+def test_the_turn_does_not_release_on_a_filtered_reading_while_a_near_one_stands():
+    """ADR 120. The live failure path.
+
+    A single reading at or above `release_frac` releases the turn outright.
+    Measured 2026-09-05: the median filter reported 0.10R or more for 44% of
+    RAW readings inside 0.10R, including 0.019 -> 0.516 — so the release read a
+    comfortable range while the aircraft sat on the edge.
+    """
+    c = _bcond(turn_frac=0.30, release_frac=0.45)
+    assert c(_bsnap(0.20, +0.19)) is True                     # turn starts
+    # Filtered says clear; the nearest recent reading says otherwise.
+    assert c(make_snap(boundary_dist=0.52, boundary_forward=+0.40,
+                       boundary_near=0.02)) is True, \
+        "released the turn with a 0.02R reading still in the window"
+
+
+def test_the_turn_still_releases_when_the_aircraft_is_genuinely_clear():
+    """The guard must not become a latch — if every recent reading is far, the
+    turn has to end or it never stops."""
+    c = _bcond(turn_frac=0.30, release_frac=0.45)
+    assert c(_bsnap(0.20, +0.19)) is True
+    assert c(make_snap(boundary_dist=0.52, boundary_forward=+0.40,
+                       boundary_near=0.50)) is False
+
+
+def test_entry_still_uses_the_filtered_reading():
+    """Entry keeps the noise rejection: a spurious near value must not start a
+    turn, because entry is where a false positive is cheap and common."""
+    c = _bcond(turn_frac=0.30, release_frac=0.45)
+    # Filtered says far (no turn) even though a near value sits in the window.
+    assert c(make_snap(boundary_dist=0.60, boundary_forward=+0.55,
+                       boundary_near=0.01)) is False
+
+
+def test_recession_is_judged_on_the_nearest_reading_too():
+    """Recession is a clearance claim. Judged on the filtered value it can
+    manufacture a recession the aircraft never flew."""
+    c = _bcond(turn_frac=0.30, recede=0.06, min_clear_frac=0.35,
+               release_frac=0.90)
+    assert c(_bsnap(0.20, +0.19)) is True
+    assert c(make_snap(boundary_dist=0.80, boundary_forward=+0.70,
+                       boundary_near=0.05)) is True, \
+        "recession declared while the nearest reading was 0.05R"
+
+
+def test_a_snapshot_without_the_near_field_behaves_as_before():
+    """Back-compatibility: `boundary_near` absent falls back to `boundary_dist`,
+    so nothing that does not supply it changes behaviour."""
+    c = _bcond(turn_frac=0.30, release_frac=0.45)
+    assert c(_bsnap(0.20, +0.19)) is True
+    assert c(_bsnap(0.52, +0.40)) is False

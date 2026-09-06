@@ -106,21 +106,72 @@ file is picked up automatically.
 
 ```bash
 make r1        # account 1; r2 for account 2. Long-running: background it.
+make rd        # attaches to a game that is already up
 ```
 
-**Verify the process state you claim.** Stopping wingman means signalling the
-*interpreter*, not the `uv run` shim that wraps it:
+### Stopping: finish the round first
+
+**Always stop with `z` (`FINISH_ROUND_THEN_EXIT`, ADR 094), not with a signal.**
+Wingman finishes the round in progress, exits at `GAME_LOBBY`, and closes
+MetalStorm. It is deferred and reversible — press `z` again to cancel a pending
+stop.
+
+The point is the state it leaves behind. **Exiting at the lobby is what lets the
+next session enter cleanly.** A signal stops wherever the aircraft happens to
+be — mid-battle, mid-respawn, mid-eject — and the next start has to recover the
+game from that state instead of clicking PLAY from a lobby it already trusts.
 
 ```bash
-pgrep -af "wingman.main"                    # expect the shim AND python3
-for p in $(pgrep -f "wingman.main"); do kill -TERM $p; done
-until ! pgrep -f "wingman.main" >/dev/null; do sleep 2; done
+# 'z' is not in INJECTABLE_KEYS, so a synthetic press on the nested display is
+# indistinguishable from the operator's and cannot be filtered as an echo.
+uv run --active python - <<'PY'
+import time
+from Xlib import display as xd, X, XK
+from Xlib.ext import xtest
+d = xd.Display(":3")
+c = d.keysym_to_keycode(XK.string_to_keysym("z"))
+xtest.fake_input(d, X.KeyPress, c); d.sync(); time.sleep(0.05)
+xtest.fake_input(d, X.KeyRelease, c); d.sync()
+PY
 ```
 
-SIGTERM routes through `exit_requested`, so cleanup runs and artifacts are
-written. It is **not** an operator stop, so the game and `:3` deliberately stay
-up (ADR 105). Never report "stopped" or "running" without a check in the same
-turn — a shim died here once and the session ran on for half an hour.
+Then wait for it to land — a round can take minutes, and the stop only fires at
+a safe point:
+
+```bash
+grep -c "FINISH ROUND" wingman.log            # request acknowledged
+until ! pgrep -f "[w]ingman.main" >/dev/null; do sleep 5; done
+```
+
+### Signals are the fallback, and they cost something
+
+Use SIGTERM only when there is no round to finish, or when wingman is
+unresponsive to the key. It routes through `exit_requested`, so cleanup normally
+runs; it is **not** an operator stop, so the game and `:3` deliberately stay up
+(ADR 105).
+
+But a mid-round SIGTERM is not free. On 2026-09-05 at 08:02 one produced a
+shutdown that hung: logging stopped on the same second, `Exit requested` was
+never written, and the process was still alive 5.5 minutes later. It had to be
+SIGKILLed, so no summary and no stats were written — and the next start rotated
+its log away. The overnight session left the same signature and cost ~6 hours of
+soak data.
+
+```bash
+pgrep -af "[w]ingman.main"                  # expect the shim AND python3
+for p in $(pgrep -f "[w]ingman.main"); do kill -TERM $p; done
+until ! pgrep -f "[w]ingman.main" >/dev/null; do sleep 2; done
+```
+
+**Verify the process state you claim.** Signal the *interpreter*, not the
+`uv run` shim that wraps it — a shim died here once and the session ran on for
+half an hour. Never report "stopped" or "running" without a check in the same
+turn.
+
+**Bracket the pattern.** `pgrep -f "wingman.main"` and `pkill -f "make rd"` also
+match the shell command line that contains them, so an unbracketed `pkill`
+kills the calling shell. Three tool calls died that way in one session, each
+reported only as an exit code. Write `[w]ingman.main`, or use `pgrep -x`.
 
 ## 6. Watch
 
@@ -149,6 +200,18 @@ looking correct.
 
 - **The metric can be the bug.** 94% of boundary colour triggers were false
   positives; counting triggers measured the detector's noise, not the aircraft.
+- **Compare like with like, and check the denominator.** Two numbers that both
+  say "threads" were `threading.active_count()` (Python threads, 24) and
+  `/proc/<pid>/task` (OS threads, 325, mostly EasyOCR's native pools) — that
+  looked like a 13x leak and was two different quantities. The same mistake gave
+  "23% readability" by dividing boundary reads over *every* tick including lobby
+  and loading screens, where there is no minimap to read; in `GAME_BATTLE` it
+  was 56%. Both were reported before being checked, and both were wrong.
+- **Reproduce with the real function, not a re-implementation.** A hand-rolled
+  copy of `detect_map_boundary` said a frame passed every gate; the real one
+  returned None. A harness missing `_minimap_circle_cache` then printed 23
+  `None` results that were exception handlers, and looked exactly like data.
+  Build the real object, and treat "no exception logged" as part of the result.
 - **A fix in the perception layer changes the tactic layer's input**, so its
   numbers are not comparable across that change.
 - **Improving one thing exposes the next.** The turn-release defect was invisible

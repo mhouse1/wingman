@@ -98,6 +98,10 @@ its movement.
 | 2026-09-04 (eve) | 56m | 9 | 2 | **0.22** | 19 | 19 | — | — | ADR 111 + **112** | post-update |
 | 2026-09-04 (late) | 49m | 10 | 1 | **0.10** | — | — | — | — | ADR **113** + 114-116 | post-update |
 | 2026-09-04 (night) | 2h21m | 21 | 2 | **0.10** | 83 | 83 | — | — | ADR 113-117 | post-update |
+| 2026-09-05 (am) | 1h55m | 18 | 3 | **0.17** | 32 | 32 | — | — | ADR 118-121 | post-update |
+| 2026-09-05 (mid) | 24m | 3 | 2 | **0.67** | 17 | 17 | — | — | ADR **122** + 123 | post-update |
+| 2026-09-05 (soak) | **6h16m** | **64** | 6 | **0.094** | 169 | 169 | — | — | ADR 122-125 | post-update |
+| 2026-09-05 (pm) | 2h28m | 25 | 4 | **0.160** | 167 | 167 | — | — | ADR 126 (5s cap, **reverted**) | post-update |
 
 **Actuated** counts turns that reached the aircraft — `grep -c 'map boundary
 ahead, rolling away'`. Added 2026-09-03, when the gap became visible: 14 requests

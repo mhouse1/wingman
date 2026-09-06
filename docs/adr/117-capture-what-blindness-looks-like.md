@@ -114,6 +114,28 @@ log shows `no reading` rather than `reading suppressed` on that tick, and there
 are two `detect_map_boundary` call sites. Until it is explained, **offline
 replay of a saved frame is not proof of what the live tick saw.**
 
+## In-battle blindness, read (2026-09-05, preliminary)
+
+The corrected capture — in `GAME_BATTLE`, on a raw `None` — produced its first
+frames. Both show the aircraft mid-arena over open water with **no boundary
+anywhere in the minimap disc**. The only orange present is the compass rim,
+which the 0.93R radial mask already excludes.
+
+So `None` was the correct answer on both. Taken with the earlier corpus (22 of
+23 frames were lobby, loading or post-match screens), the emerging picture is
+that **blindness is mostly the right answer rather than a detector defect**, and
+that 56% in-battle readability reflects how often the aircraft is near enough to
+an edge for one to be in view.
+
+**Two frames is not a conclusion.** It is consistent with the hypothesis and
+nothing more; the capture continues at one frame per 45 s of in-battle
+blindness. What would overturn it is a frame with a visible arc and no reading,
+and none has appeared yet under the corrected rules.
+
+If this holds, the consequence matters for ADR 106: the readability figure is
+not a deficit to close, and effort belongs in the tactic rather than the
+detector — which is where ADR 122 put it.
+
 ## Validation
 
 - **V1.** The blind kind has its own budget, independent of rtb and approach.

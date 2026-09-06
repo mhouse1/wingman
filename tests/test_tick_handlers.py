@@ -1580,3 +1580,50 @@ class TestBlindFrameCapture:
         h = self._h()
         h._capture_boundary_frame(object(), "blind", "1")  # not an image
         h._capture_boundary_frame(None, "blind", "1")
+
+
+class TestTurnBearingTracking:
+    """ADR 125. A turn's job is to change HEADING, and nothing measured it.
+
+    The attitude sampler reports pitch (derived from altitude rate); the range
+    summary says where the aircraft ended up. Neither answers "did the aircraft
+    rotate", and two hypotheses for the turn's ineffectiveness have already been
+    disproved for want of it — a stall theory (contradicted: steeper pulls did
+    better) and a minimum-speed theory (evaporated at n=440: turns that failed
+    were FASTER, 660 vs 537 KPH median).
+    """
+
+    @staticmethod
+    def _bearings(seq):
+        """Net and path bearing change, the way the handler computes them."""
+        net = 0.0
+        path = 0.0
+        for a, b in zip(seq, seq[1:], strict=False):
+            d = (b - a + 180.0) % 360.0 - 180.0
+            net += d
+            path += abs(d)
+        return net, path
+
+    def test_a_steady_turn_accumulates_bearing(self):
+        net, path = self._bearings([0.0, 20.0, 40.0, 60.0])
+        assert net == 60.0
+        assert path == 60.0
+
+    def test_the_wrap_seam_is_not_read_as_a_reverse_turn(self):
+        """Crossing +/-180 must not register as a 350-degree swing the other
+        way — the aircraft turned 20 degrees, not most of a circle."""
+        net, path = self._bearings([170.0, -170.0])
+        assert net == 20.0, f"seam misread as {net}"
+        assert path == 20.0
+
+    def test_an_oscillation_shows_a_large_path_and_a_small_net(self):
+        """The distinction that matters: an aircraft rocking between two
+        headings has turned nowhere, and net alone would say so while path
+        reveals the effort spent."""
+        net, path = self._bearings([0.0, 30.0, 0.0, 30.0, 0.0])
+        assert net == 0.0
+        assert path == 120.0
+
+    def test_a_single_sample_yields_no_bearing(self):
+        net, path = self._bearings([45.0])
+        assert net == 0.0 and path == 0.0

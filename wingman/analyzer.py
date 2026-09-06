@@ -922,6 +922,15 @@ def _scan_minimap_red(
 # ============================================================================
 
 
+# --- ADR 123: nose direction ------------------------------------------------
+# A continuously maintained answer to "is the nose up or down", derived from the
+# altitude rate. Kept as STATE rather than recomputed on demand because the
+# consumer needs it at an instant the telemetry may not have refreshed on.
+NOSE_UP = "up"
+NOSE_DOWN = "down"
+NOSE_UNKNOWN = "unknown"
+
+
 class GameStateAnalyzer:
     """Analyzes game screenshots to determine current game state."""
 
@@ -1000,6 +1009,11 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
+        # ADR 123: nose direction, maintained from every telemetry update.
+        self._nose_direction = NOSE_UNKNOWN
+        self._nose_direction_deadband_mps = float(
+            (config.get("telemetry", {}) or {}).get(
+                "nose_direction_deadband_mps", 5.0))
 
         # OCR result caching for performance (avoid running OCR every frame)
         self._ocr_cache = {
@@ -1583,7 +1597,32 @@ class GameStateAnalyzer:
                 nose = "n/a"
             logger.info("Altitude: %s | Speed: %s | Nose: %s",
                         altitude_value, speed_value, nose)
+            self._update_nose_direction(snap)
         return telemetry_ocr_time
+
+    def _update_nose_direction(self, snap) -> None:
+        """Track NOSE_UP / NOSE_DOWN from the altitude rate. ADR 123.
+
+        A DEADBAND, and the last known value is held inside it. Level flight
+        has an altitude rate that jitters around zero, and a direction that
+        flips every tick is not a direction — the consumer acts on it once, at
+        an instant it did not choose.
+        """
+        try:
+            rate = snap.altitude.rate if snap.altitude_fresh() else None
+        except Exception:
+            rate = None
+        if rate is None:
+            return
+        if rate > self._nose_direction_deadband_mps:
+            self._nose_direction = NOSE_UP
+        elif rate < -self._nose_direction_deadband_mps:
+            self._nose_direction = NOSE_DOWN
+        # Inside the deadband the previous direction stands.
+
+    def nose_direction(self) -> str:
+        """NOSE_UP, NOSE_DOWN or NOSE_UNKNOWN. ADR 123."""
+        return self._nose_direction
 
     def get_telemetry(self):
         """Return one atomic TelemetrySnapshot (speed + altitude + rates).
@@ -3700,9 +3739,10 @@ class GameStateAnalyzer:
         """Nearest map-boundary point on the minimap, or None.
 
         Design 010, INSTRUMENTATION ONLY — nothing steers on this yet. Returns
-        ``(nearest_dist_frac, forward_offset_frac)`` in units of the minimap
-        radius, with forward measured along the nose (up). Positive forward
-        offset means the boundary lies ahead.
+        ``(nearest_dist_frac, forward_offset_frac, lateral_offset_frac)`` in
+        units of the minimap radius, measured from the aircraft at the centre.
+        Forward is along the nose (up): positive means the boundary lies ahead.
+        Lateral is across it: positive means the nearest point is to the RIGHT.
 
         Measured on the Design 010 frames, across three different maps
         including a night one: Step0 (flying away) 0.59 / -0.59, Step1 (about
@@ -3784,7 +3824,12 @@ class GameStateAnalyzer:
             dy = ys - cy
             dist = np.hypot(dx, dy)
             i = int(np.argmin(dist))
-            return (float(dist[i] / radius), float(-dy[i] / radius))
+            # ADR 122: the LATERAL component too, positive to the right of the
+            # nose. It was computed here and thrown away, which left the turn
+            # with no way to know which side the edge was on — so it always
+            # rolled right, and half of those rolls turned INTO the boundary.
+            return (float(dist[i] / radius), float(-dy[i] / radius),
+                    float(dx[i] / radius))
         except Exception as e:
             logger.warning("Analyzer: detect_map_boundary failed: %s", e)
             return None
