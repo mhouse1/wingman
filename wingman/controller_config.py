@@ -41,6 +41,7 @@ class ControllerConfig:
     good_luck_wait_s: float = 13.0
     good_luck_bypass_on_alive: bool = True
     capture_stale_inject_s: float = 10.0
+    j20_turn_guard_s: float = 10.0      # ADR 132
 
     # --- Run-mode flags. Not pure config: replay and capture lanes override
     #     these, which is why they are `replace`-able rather than read-only
@@ -82,6 +83,7 @@ class ControllerConfig:
             good_luck_wait_s=float(mission.get("good_luck_wait_s", 13.0)),
             good_luck_bypass_on_alive=bool(mission.get("good_luck_bypass_on_alive", True)),
             capture_stale_inject_s=float(mission.get("capture_stale_inject_s", 10.0)),
+            j20_turn_guard_s=float(mission.get("j20_turn_guard_s", 10.0)),
             target_painting_mode=bool(j20.get("target_painting_mode", False)),
             capture_with_overlay=bool(debug.get("capture_with_overlay", True)),
             telemetry=cfg.get("telemetry", {}) or {},

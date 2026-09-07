@@ -490,6 +490,9 @@ def test_the_turn_rolls_away_from_the_boundary():
         c._mission_cancel = threading.Event()
         c._exit_event = threading.Event()
         c._boundary_turn_max_s = 0.2
+        # ADR 132: the turn guard gates this method. Set explicitly so the test
+        # drives the real gate rather than relying on its fail-open path.
+        c._turn_guard_until = 0.0
         c._analyzer = None
         c._climb_key = mock.MagicMock()
         c._inc_programmatic_key = mock.MagicMock()

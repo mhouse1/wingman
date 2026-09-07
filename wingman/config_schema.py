@@ -238,6 +238,7 @@ SCHEMA = Section(
             "good_luck_bypass_on_alive": BOOL,
             "starting_health_probe_interval_s": SECONDS,
             "capture_stale_inject_s": SECONDS,
+            "j20_turn_guard_s": SECONDS,   # ADR 132
             "padlock_spread_missiles": _int(0),
             # ADR 047 waiting-state fallback (read in tick_handlers.py)
             "waiting_fallback_enabled": BOOL,

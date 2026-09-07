@@ -215,6 +215,7 @@ class Controller:
         good_luck_wait_s = _c.good_luck_wait_s
         good_luck_bypass_on_alive = _c.good_luck_bypass_on_alive
         capture_stale_inject_s = _c.capture_stale_inject_s
+        j20_turn_guard_s = _c.j20_turn_guard_s
         telemetry_cfg = _c.telemetry
         missile_evade_cfg = _c.missile_evade
         climb_cfg = _c.climb
@@ -273,6 +274,11 @@ class Controller:
         # with capture stalled (display loss, KVM switch) the game may no longer
         # be on screen, so presses land in whatever window is focused.
         self._capture_stale_inject_s = float(capture_stale_inject_s)
+        # ADR 132: the post-spawn turn guard. A monotonic deadline, not an
+        # Event: the guard is a WINDOW, and a flag someone forgets to clear
+        # leaves the aircraft unable to turn for the rest of the round.
+        self._j20_turn_guard_s = float(j20_turn_guard_s)
+        self._turn_guard_until = 0.0
         # Post-"Good Luck" settle before launching the mission. Interruptible:
         # a battle-alive signal ends it early (2026-08-05).
         self._good_luck_wait_s = float(good_luck_wait_s)
@@ -1190,12 +1196,63 @@ class Controller:
         """Apply airbrake by holding the configured airbrake key."""
         self._execute_key_press(AIRBRAKE_KEY, hold_seconds=hold_seconds, block=block, action_name='airbrake')
 
+    def arm_turn_guard(self, seconds: "float | None" = None) -> None:
+        """Suppress commanded left/right turns for `seconds` (ADR 132).
+
+        Armed when mission_j20 starts — battle entry and every respawn restart
+        go through it — so the aircraft flies the heading it spawned on for the
+        first few seconds of a life. Spawn points face into the arena, so
+        straight ahead is away from the edge and toward the middle.
+
+        A DEADLINE, not a flag. The guard is a window; a boolean somebody
+        forgets to clear leaves the aircraft unable to turn for the rest of the
+        round, which is a far worse failure than the circling it prevents.
+        """
+        span = self._j20_turn_guard_s if seconds is None else float(seconds)
+        if span <= 0:
+            self._turn_guard_until = 0.0
+            return
+        self._turn_guard_until = time.monotonic() + span
+        logger.info("\033[93m⟲ TURN GUARD: left/right turns suppressed for "
+                    "%.0fs — flying the spawn heading (ADR 132)\033[0m", span)
+
+    def is_turn_guarded(self) -> bool:
+        """True while the post-spawn turn guard is active. Never raises.
+
+        Fails OPEN — an unreadable guard reports "not guarded" and the turn
+        proceeds. This runs on the tactic threads, so an exception here would
+        take BoundaryTurn down entirely, and an aircraft that cannot turn at all
+        is a far worse outcome than the few seconds of circling this prevents.
+        """
+        try:
+            return time.monotonic() < self._turn_guard_until
+        except AttributeError:          # partially built Controller
+            return False
+
+    def clear_turn_guard(self) -> None:
+        """Drop the guard early (mission cancelled, manual takeover)."""
+        self._turn_guard_until = 0.0
+
+    def _turn_blocked(self, what: str) -> bool:
+        """Gate for every COMMANDED turn. Logged, because a suppressed turn that
+        leaves no trace looks exactly like a tactic that failed to fire."""
+        if not self.is_turn_guarded():
+            return False
+        logger.info("Controller: %s suppressed — turn guard active for another "
+                    "%.1fs (ADR 132)", what,
+                    max(0.0, self._turn_guard_until - time.monotonic()))
+        return True
+
     def roll_left(self, hold_seconds: float = 0.3, block: bool = True):
         """Roll left by holding the configured roll-left key."""
+        if self._turn_blocked("roll_left"):
+            return
         self._execute_key_press(ROLL_LEFT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_left')
 
     def roll_right(self, hold_seconds: float = 0.3, block: bool = True):
         """Roll right by holding the configured roll-right key."""
+        if self._turn_blocked("roll_right"):
+            return
         self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_right')
 
     def orient_nose_to_target(
@@ -1932,6 +1989,10 @@ class Controller:
         continues tracking and firing at any enemy that comes into view.
         Called when no enemy is detected in ENEMY_CLOSE_BY for 30+ seconds.
         """
+        # ADR 132: also presses the roll key directly rather than through
+        # roll_right(), so it needs its own check.
+        if self._turn_blocked("disengage roll"):
+            return
         logger.info("\033[93m↩ No enemy for 30s — cancelling mission and rolling right for %.0fs\033[0m", duration)
         self.cancel_mission()
 
@@ -2296,6 +2357,13 @@ class Controller:
         selection priority prevents most overlaps, this covers the same instant
         from the Controller side.
         """
+        # ADR 132: the circling this guard exists to stop. On spawn the
+        # detector often reads an edge immediately, BoundaryTurn banks, and the
+        # aircraft orbits instead of flying into the arena. Checked here rather
+        # than only in roll_right() because this tactic presses the roll key
+        # through _climb_key and would bypass that gate entirely.
+        if self._turn_blocked("boundary turn"):
+            return
         if self._boundary_turning.is_set():
             logger.debug("Controller: boundary turn already in progress")
             return
@@ -3376,6 +3444,25 @@ class Controller:
             last_state = None
             no_telemetry_since = 0.0
             try:
+                # The hold fires too. Survival was never meant to mean
+                # "contribute nothing": before this, a loiter started with a
+                # full rack never pressed a weapon key, so the aircraft orbited
+                # with its missiles aboard until the round ended. Measured
+                # 2026-09-06: 'y' pressed six times in a 1h07m session, each
+                # one parking an armed aircraft.
+                #
+                # Safe to run alongside the hold because the two never contend
+                # for a control: search-and-destroy presses only PADLOCK_CAMERA
+                # and FIRE_ACTIVE_WEAPON, while the hold commands pitch, roll
+                # and afterburner. Both loops already terminate on
+                # `_mission_cancel`, which this mission sets and clears exactly
+                # as mission_j20 does.
+                #
+                # Started HERE, inside the runner, and not before the thread:
+                # ADR 123's entry pull-up is the one place the hold simply holds
+                # the stick back, and a padlock press must not interleave with
+                # it. By the time this runs, that pull-up has returned.
+                self.start_search_and_destroy_loop()
                 while not self._mission_cancel.is_set():
                     if self._mission_exit_requested():
                         break
@@ -3507,6 +3594,11 @@ class Controller:
             except Exception:
                 logger.exception("Controller: mission_loiter failed")
             finally:
+                # In the finally, not beside the cancel log as mission_j20 does
+                # it: the hold has more exit paths than j20 — cancel, exception,
+                # respawn, exit request — and a weapon loop outliving the
+                # mission that owns it keeps firing into the next one.
+                self.stop_search_and_destroy_loop()
                 # ADR 109: clear the hold HERE, not at the end of the loop body.
                 # Every exit path — cancel, exception, respawn — must drop it, or
                 # Eject stays suppressed for an aircraft loiter no longer owns.
@@ -3544,6 +3636,11 @@ class Controller:
             return
 
         logger.info("\033[92mController: mission_j20 - starting mission sequence (lock acquired)\033[0m")
+        # ADR 132: fly the spawn heading first. Battle entry and every respawn
+        # restart come through here, which is why the guard is armed at the
+        # mission rather than wired to a respawn event — one arm point covers
+        # both cases and cannot drift apart from them.
+        self.arm_turn_guard()
         self._mission_complete.clear()
         self._mission_cancel.clear()
 

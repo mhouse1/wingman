@@ -79,6 +79,11 @@ def _loiter_ctrl(snaps):
     c.nose_up = mock.MagicMock()      # ADR 112: pitch corrects toward target
     c.nose_down = mock.MagicMock()
     c.roll_left = mock.MagicMock()
+    # The hold runs the weapon loops now. Mocked here because these tests are
+    # about the FLIGHT behaviour of the hold; the real loops spawn threads that
+    # press keys, which would tell us nothing about altitude decisions.
+    c.start_search_and_destroy_loop = mock.MagicMock()
+    c.stop_search_and_destroy_loop = mock.MagicMock()
     return c
 
 
@@ -651,3 +656,63 @@ def test_a_full_length_entry_pull_up_is_not_reported_as_cut_short(caplog):
         _run_briefly(c, seconds=0.4)
     assert "ENTRY PULL-UP CUT SHORT" not in caplog.text
     assert "entry pull-up held" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The hold fires (2026-09-06)
+#
+# Survival was never meant to mean "contribute nothing". A loiter started with a
+# full rack never pressed a weapon key: mission_j20 starts the search-and-destroy
+# loops and mission_loiter did not, so the aircraft orbited with its missiles
+# aboard until the round ended. Measured that day: 'y' pressed six times in a
+# 1h07m session, each press parking an armed aircraft.
+#
+# The two are safe to run together because they never contend for a control —
+# search-and-destroy presses only PADLOCK_CAMERA and FIRE_ACTIVE_WEAPON, the
+# hold commands pitch, roll and afterburner.
+# ---------------------------------------------------------------------------
+
+def test_the_hold_starts_the_weapon_loops():
+    c = _loiter_ctrl([_Snap(7200)])
+    _run_briefly(c)
+    assert c.start_search_and_destroy_loop.called, \
+        "a hold with missiles aboard that never fires wastes the airframe"
+
+
+def test_the_hold_stops_the_weapon_loops_when_it_ends():
+    """A weapon loop outliving the mission that owns it fires into the next one."""
+    c = _loiter_ctrl([_Snap(7200)])
+    _run_briefly(c)
+    assert c.stop_search_and_destroy_loop.called
+
+
+def test_the_weapon_loops_stop_even_when_the_loop_raises():
+    """In the finally, not beside the cancel: the hold has more exit paths than
+    mission_j20 — cancel, exception, respawn, exit request."""
+    c = _loiter_ctrl([_Snap(7200)])
+    c.roll_right.side_effect = RuntimeError("boom")
+    _run_briefly(c)
+    assert c.stop_search_and_destroy_loop.called
+    assert not c._loitering.is_set(), "ADR 109: the hold flag must clear too"
+
+
+def test_the_weapon_loops_start_after_the_entry_pull_up():
+    """ADR 123: the entry pull-up is the one place the hold simply holds the
+    stick back, and it is blocking. A padlock press must not interleave with it,
+    so the loops start inside the runner — by which time it has returned."""
+    order = []
+    c = _loiter_ctrl([_Snap(7200)])
+    c._loiter_entry_pull_up = mock.MagicMock(side_effect=lambda: order.append("pullup"))
+    c.start_search_and_destroy_loop = mock.MagicMock(
+        side_effect=lambda: order.append("weapons"))
+    _run_briefly(c)
+    assert order[:2] == ["pullup", "weapons"], order
+
+
+def test_the_hold_still_flies_while_the_loops_run():
+    """The regression that matters: adding weapons must not cost the orbit."""
+    c = _loiter_ctrl([_Snap(7200)])
+    _run_briefly(c, seconds=0.3)
+    assert c.roll_right.call_count > 1
+    assert c.start_search_and_destroy_loop.called
+

@@ -32,6 +32,33 @@ positives (125 of 133 in the 2026-09-02 session), so counting triggers would
 measure the detector's noise rather than the aircraft's behaviour. ADR 103 D8
 already moved the count behind the OCR arbiter for this reason.
 
+> **Revised 2026-09-06 — a crossing with an empty rack does not count.** The
+> metric exists to score `BoundaryTurn`, and with an empty rack the tactic is
+> structurally unable to act. `is_idle` is `game_state != GAME_BATTLE` and Idle is
+> child 0 of a `memory=False` selector, so from the moment missiles run dry and
+> the FSM enters `GAME_BATTLE_EJECT`, **every** tactic below Idle — BoundaryTurn
+> included — is unreachable. `eject_and_dive` commands pitch and afterburner
+> only; it has no heading control, so the aircraft holds whatever course it had.
+>
+> That is intended: Eject exists to trade an empty airframe for a rearmed one,
+> and dying is the point. But an exit that occurred while nothing could have
+> turned is not evidence about the turn. Observed 2026-09-06 10:21: the edge
+> closed 0.814R to 0.103R over thirteen seconds, six of them inside
+> `turn_frac` 0.50 with the boundary dead ahead, and the tree read `Idle`
+> throughout.
+>
+> **The tracked metric is therefore crossings per mission with missiles
+> available.** Measured effect on rows whose logs still exist: the 2026-09-06
+> 04:28 session drops from 5 crossings to **2** (3 had an empty rack); the
+> 2026-09-05 night session is unchanged at 7 (0 had an empty rack). Rows whose
+> logs have rotated away cannot be re-derived and are left as recorded — the
+> denominator is unaffected, so they remain readable, but a row predating this
+> revision is an upper bound rather than a like-for-like figure.
+>
+> This does **not** rescue the flat series. Pooled post-update, the largest
+> cohort loses none of its crossings, so the reading in "nine sessions on, the
+> series is flat" stands.
+
 **D2. The figures come from a fixed set of commands**, so entries added months
 apart stay comparable:
 
@@ -119,6 +146,9 @@ its movement.
 | 2026-09-05 (pm) | 2h28m | 25 | 4 | **0.160** | 167 | 167 | — | — | ADR 126 (5s cap, **reverted**) | post-update |
 | 2026-09-05 (eve) | 1h02m | 11 | 2 | **0.182** | 59 | 59 | — | — | ADR 127 (12s cap restored) | post-update |
 | 2026-09-05 (night) | **4h36m** | **48** | 7 | **0.146** | 134 | 134 | 57 | 224 | ADR 127 + 128 | post-update |
+| 2026-09-06 (day) | **3h52m** | 32 | 1 | **0.031** | 64 | 64 | 36 | 32 | ADR 130 + 131 | post-update |
+| 2026-09-06 (eve) | 3h10m | 32 | 7 | **0.219** | 129 | 129 | 75 | 82 | ADR 130 + 131 | post-update |
+| 2026-09-06 (overnight) | **10h55m** | **113** | 13 | **0.115** | 332 | 332 | 162 | 476 | ADR **132** | post-update |
 
 **Actuated** counts turns that reached the aircraft — `grep -c 'map boundary
 ahead, rolling away'`. Added 2026-09-03, when the gap became visible: 14 requests
@@ -339,6 +369,67 @@ anything — eight per session is not a sample.
 Two things to look for once frames accumulate: whether the same terrain recurs,
 and whether the crossings on a given map share an approach geometry (the trace
 is in the log beside each capture).
+
+### 2026-09-06/07 overnight — the best-powered row yet, and the series still has not moved
+
+An 10h55m unattended soak, **113 missions** — the largest single sample in the
+series and the first row comfortably clear of the 40-mission floor. It is also
+the first row run with ADR 132's turn guard live.
+
+| | |
+|---|---:|
+| Crossings per mission | **0.115** |
+| Post-update pooled, excluding this row | 0.134 |
+| Post-update pooled, including it | **0.131** |
+
+**0.115 is unremarkable.** Against the seven rows with 40 or more missions —
+0.104, 0.108, 0.261, 0.136, 0.094, 0.146, 0.115 — it sits mid-pack, above the
+best figure the series has recorded (0.094 on 2026-09-05) and well inside the
+range those rows already occupy. Pooling it moves the post-update series from
+0.134 to 0.131, which is nothing.
+
+That is the correct expectation, not a disappointment: **ADR 132 is a circling
+fix, not a crossing fix.** It stops the aircraft orbiting its spawn point; it was
+never argued to reduce crossings, and it did not.
+
+The two rows either side of it are a warning about reading small samples. The
+same day produced **0.031** (32 missions) and **0.219** (32 missions) on
+essentially the same code — a sevenfold spread from sampling alone. The 0.031 row
+was written up here as "not yet believable"; the 0.219 row that followed settles
+that, and the 113-mission row lands between them near the long-run average. Any
+future row under 40 missions should be read the same way.
+
+Nine days, 649 post-update missions, and the crossing rate has not moved.
+
+### 2026-09-06 (day) — the lowest row in the series, and not yet believable
+
+0.031 crossings per mission: one crossing in 32 missions, the lowest figure the
+series has recorded and a third of the previous best (0.094). It is the first row
+scored under the revised D1, and no crossing in it had an empty rack, so the
+revision did not produce the number.
+
+**It should not be believed yet, for three reasons.**
+
+*The sample is under-powered.* 32 missions is below the 40 this ADR treats as the
+floor for a rate, and the numerator is **one**. A single crossing either way moves
+the row from 0.031 to 0.000 or 0.062 — a third of the series' whole range — so the
+row carries almost no information on its own.
+
+*Exposure fell with it.* Turns dropped 134 to 64 and unconfirmed colour triggers
+224 to 32, on a session only 44 minutes shorter. The aircraft was near an edge far
+less often, which lowers the crossing count without anything about the tactic
+having improved. Whether that is map mix or something else is not established
+here.
+
+*Nothing that shipped should have moved it.* The changes live in this session were
+diagnostic or logging only — blind-frame capture coverage, takeover attribution,
+the expected-teardown flag — plus ADR 130 and ADR 131, neither of which touches
+boundary handling. A row that improves threefold with no plausible mechanism is a
+row to be suspicious of, not one to bank. Per this ADR's own standing note, a
+session that flatters recent work deserves more scrutiny, not less.
+
+Treat it as one point. It takes another two or three sessions at this rate before
+anything can be said.
 
 ### 2026-09-06 — nine sessions on, the series is flat
 
