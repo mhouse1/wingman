@@ -323,3 +323,13 @@ so a growing corpus can reveal drift, and it has. Weakening it to green would
 discard the clearest evidence in the repository that detection is getting worse.
 It stays red until the detector is fixed.
 
+> **Resolved 2026-09-07 by ADR 133.** The detector was fixed rather than the
+> assertion relaxed. Recall on the crossing corpus went 86% to 91% and the test
+> passes on its original 90% bar. The suite is green.
+>
+> The cause was the one this ADR identified: the span gate requiring the boundary
+> to arrive as a single connected component. ADR 133 accepts a shorter fragment
+> when the out-of-bounds void — an area measure, immune to the same
+> fragmentation — corroborates it. 161 of the 509 frames catalogued here now
+> produce a reading.
+

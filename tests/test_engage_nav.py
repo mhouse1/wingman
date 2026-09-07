@@ -471,6 +471,15 @@ def _boundary_analyzer():
     a = GameStateAnalyzer.__new__(GameStateAnalyzer)
     a.crops = {"MINIMAP": (0.0, 0.0, 1.0, 1.0)}
     a._minimap_circle_cache = None
+    # ADR 133: synthetic frames carry no out-of-bounds void, so the corroborated
+    # path can never engage here — disabled explicitly so this test keeps
+    # measuring the STRICT span gate it is about.
+    a._boundary_relaxed_span_frac = 0.0
+    a._boundary_void_min_frac = 0.01
+    a._boundary_void_v_max = 62
+    a._boundary_void_s_max = 35
+    a._boundary_void_radius_frac = 0.78
+    a._minimap_void_cache = None
     a._minimap_mask_radius_frac = 0.93
     a._boundary_hsv_lower = np.array([8, 120, 120], np.uint8)
     a._boundary_hsv_upper = np.array([28, 255, 255], np.uint8)

@@ -175,8 +175,19 @@ down cannot have a later genuine failure excused.
   is the entire fix and a re-implementation would assert only itself.
 - V3. Unit: a display with no server running is not declared.
 - V4. Unit: a raising declaration does not break the shutdown.
-- V5. Live: run a session, stop it with `z`, and confirm the log carries
-  `XKey: :3 closed as expected` and no `[ERROR]`. **Outstanding.**
+- V5. Live: **satisfied 2026-09-07.** The 1h52m session ending 09:32 tore `:3`
+  down and logged the teardown at INFO with no error anywhere in the run:
+
+```
+09:32:48,545 [INFO] Nested display: closing Xwayland for :3 (pid(s): 3098978)
+09:32:48,546 [INFO] XKey: :3 closed as expected — listener stopping
+09:32:48,796 [INFO] Nested display: :3 closed
+```
+
+  Total `[ERROR]` count for the session: **0**. The same three lines previously
+  produced `[ERROR] XKey listener thread died` one millisecond after the first,
+  followed by a reconnect scheduled against the display being destroyed. ERROR is
+  a usable signal again.
 
 Covered by `tests/test_expected_display_close.py` (7 tests).
 

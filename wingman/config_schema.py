@@ -364,6 +364,11 @@ SCHEMA = Section(
             "boundary_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
             "boundary_min_px": _int(0),
             "boundary_min_span_frac": FRACTION,
+            "boundary_relaxed_span_frac": _num(0),   # ADR 133
+            "boundary_void_min_frac": _num(0),
+            "boundary_void_v_max": _int(0),
+            "boundary_void_s_max": _int(0),
+            "boundary_void_radius_frac": _num(0),
             "boundary_close_iters": _int(0),
             "boundary_max_thickness_frac": FRACTION,
             "boundary_near_frac": FRACTION,

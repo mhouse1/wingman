@@ -457,6 +457,16 @@ def test_the_detector_reports_which_side_the_boundary_is_on():
         a._mask_radius_frac = 0.93
         a._minimap_mask_radius_frac = 0.93
         a._minimap_circle_cache = None
+        # ADR 133: the corroborated-span path. Disabled here on purpose — this
+        # test drives a SYNTHETIC frame with no out-of-bounds void, so the
+        # relaxed path could never engage, and leaving it on would only add a
+        # void computation over a frame that has none.
+        a._boundary_relaxed_span_frac = 0.0
+        a._boundary_void_min_frac = 0.01
+        a._boundary_void_v_max = 62
+        a._boundary_void_s_max = 35
+        a._boundary_void_radius_frac = 0.78
+        a._minimap_void_cache = None
         return a.detect_map_boundary(img)
 
     right = _reading(150)

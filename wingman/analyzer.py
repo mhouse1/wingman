@@ -1005,6 +1005,16 @@ class GameStateAnalyzer:
             (minimap_cfg or {}).get("boundary_max_thickness_frac", 0.10))
         self._boundary_min_span_frac = float(
             minimap_cfg.get("boundary_min_span_frac", 0.5))
+        # ADR 133: the corroborated span and the void that corroborates it.
+        self._boundary_relaxed_span_frac = float(
+            minimap_cfg.get("boundary_relaxed_span_frac", 0.0))
+        self._boundary_void_min_frac = float(
+            minimap_cfg.get("boundary_void_min_frac", 0.01))
+        self._boundary_void_v_max = int(minimap_cfg.get("boundary_void_v_max", 62))
+        self._boundary_void_s_max = int(minimap_cfg.get("boundary_void_s_max", 35))
+        self._boundary_void_radius_frac = float(
+            minimap_cfg.get("boundary_void_radius_frac", 0.78))
+        self._minimap_void_cache: "tuple[int, int, np.ndarray] | None" = None
         _rtb = config.get("return_to_battle", {}) or {}
         self._rtb_region = tuple(_rtb.get("region", [0.36, 0.32, 0.64, 0.378]))
         self._rtb_min_frac = float(_rtb.get("min_red_frac", 0.10))
@@ -3740,6 +3750,36 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: detect_enemy_map_bearing failed: %s", e)
             return empty
 
+    def minimap_void_fraction(self, hsv, width: int, height: int,
+                              radius: float) -> float:
+        """Share of the minimap disc that is out-of-bounds space (ADR 133).
+
+        Outside the arena renders dark and desaturated — measured V approx 51,
+        S approx 0 on confirmed crossings, which is why an early V<45 test found
+        nothing and read as "no void anywhere".
+
+        This is an AREA measure, so unlike the span gate it does not care whether
+        the boundary line arrives whole or in two hundred fragments. That is the
+        entire reason it can corroborate a fragment the span gate would reject.
+
+        Sampled inside `boundary_void_radius_frac` (0.78) of the disc to stay
+        clear of the compass rim, whose dark ring would otherwise read as void on
+        every frame regardless of position.
+        """
+        cache = self._minimap_void_cache
+        if cache is None or cache[0] != width or cache[1] != height:
+            cache = (width, height,
+                     _minimap_circle_mask(width, height,
+                                          self._boundary_void_radius_frac * radius))
+            self._minimap_void_cache = cache
+        disc = cache[2] > 0
+        total = int(disc.sum())
+        if total <= 0:
+            return 0.0
+        void = ((hsv[..., 2] < self._boundary_void_v_max)
+                & (hsv[..., 1] < self._boundary_void_s_max) & disc)
+        return float(int(void.sum()) / total)
+
     def minimap_present(self, frame) -> bool:
         """Is a minimap actually drawn on this frame? (ADR 117)
 
@@ -3844,6 +3884,15 @@ class GameStateAnalyzer:
             # radius so it does not depend on capture resolution.
             min_span = self._boundary_min_span_frac * radius
             max_thick_px = self._boundary_max_thickness_frac * radius
+            # ADR 133: accept a SHORTER fragment when the out-of-bounds void
+            # says an edge is really there. The strict gate stands on its own —
+            # this only ever lowers the bar, never raises it, so a frame that
+            # passed before still passes.
+            if self._boundary_relaxed_span_frac > 0:
+                void_frac = self.minimap_void_fraction(hsv, width, height, radius)
+                if void_frac > self._boundary_void_min_frac:
+                    min_span = min(min_span,
+                                   self._boundary_relaxed_span_frac * radius)
             best = None
             for i in range(1, n_labels):
                 span = max(stats[i, cv2.CC_STAT_WIDTH],

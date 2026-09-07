@@ -149,6 +149,8 @@ its movement.
 | 2026-09-06 (day) | **3h52m** | 32 | 1 | **0.031** | 64 | 64 | 36 | 32 | ADR 130 + 131 | post-update |
 | 2026-09-06 (eve) | 3h10m | 32 | 7 | **0.219** | 129 | 129 | 75 | 82 | ADR 130 + 131 | post-update |
 | 2026-09-06 (overnight) | **10h55m** | **113** | 13 | **0.115** | 332 | 332 | 162 | 476 | ADR **132** | post-update |
+| 2026-09-07 (am) | 1h52m | 20 | 3 | **0.150** | 77 | 77 | 49 | 91 | ADR 132 | post-update |
+| 2026-09-07 (mid) | 45m | 7 | 0 | 0.000 | 7 | 7 | 2 | 2 | ADR **133** | post-update |
 
 **Actuated** counts turns that reached the aircraft — `grep -c 'map boundary
 ahead, rolling away'`. Added 2026-09-03, when the gap became visible: 14 requests
@@ -369,6 +371,65 @@ anything — eight per session is not a sample.
 Two things to look for once frames accumulate: whether the same terrain recurs,
 and whether the crossings on a given map share an approach geometry (the trace
 is in the log beside each capture).
+
+### The metric's resolution limit (2026-09-07)
+
+Something that should have been computed on day one. At the pooled post-update
+rate of 0.132 crossings per mission, and the observed ~10.4 missions per hour:
+
+| Missions | Hours | Expected crossings | 95% CI on the rate | Smallest drop detectable |
+|---:|---:|---:|---:|---:|
+| 40 | 3.8 | 5.3 | 0.019 - 0.245 | **85%** |
+| 113 | 10.9 | 14.9 | 0.065 - 0.199 | **51%** |
+| 250 | 24 | 33 | 0.087 - 0.177 | 34% |
+| 500 | 48 | 66 | 0.100 - 0.164 | 24% |
+| 1000 | 96 | 132 | 0.109 - 0.155 | 17% |
+
+**Even the best-powered row in this series — the 113-mission overnight soak —
+can only resolve a halving.** A 24% improvement would take about forty-eight
+hours of flying to see. The 40-mission floor this ADR sets is enough to stop a
+row being pure noise; it is nowhere near enough to attribute a change.
+
+That reframes the whole series. "Nine days and the rate has not moved" is true,
+and it has always been compatible with real improvements of up to about half the
+rate passing undetected. The series is a **regression alarm** — it would catch a
+doubling — and it is not, and never was, an instrument for judging a change.
+
+Changes to boundary handling should be judged on denser signals from the same
+flying. The turn-outcome trace gives 173 samples where this table gives 13, and
+`make turn-outcome` reports it. ADR 133's V7 was re-specified onto it for exactly
+this reason.
+
+Rows continue to be recorded here under D4 — the series still catches
+regressions, and the denominator is needed to normalise anything else.
+
+### 2026-09-07 (mid) — first row with ADR 133, and far too small to read
+
+Seven missions. The row is recorded because D4 requires it and omitting sessions
+would bias the series, **not** because 0.000 crossings per mission means anything
+at seven missions — the floor is 40, and the same code produced 0.031 and 0.219 on
+32-mission samples three days ago.
+
+Two things about it are worth writing down anyway.
+
+**The relaxed path was live, and it was verified rather than assumed.** Config and
+analyzer were last modified at 10:01-10:02 and the session began at 10:26. The
+check that settles it: the seven blind frames this session captured still return
+None when re-run through the current detector, so they are genuine misses under
+the new rule and not frames the old rule discarded.
+
+**Live readability fell, and it is not a regression.** 34% on the 09:32 session
+against 15% here. Both the code and the session differ, so the comparison is
+confounded in two directions at once; turns also fell from 2.9 per mission
+(overnight) to 1.0 here, which is what less time near an edge looks like. The
+controlled evidence for ADR 133 is the corpus measurement — 86% to 91% recall on
+88 banner-confirmed crossings, and 161 of 509 archived blind frames now reading —
+not a between-session readability figure. **inferred**, on the session-variance
+reading; **measured**, on the corpus.
+
+ADR 133's V7 is not satisfied by this session and needs a run with enough
+missions to compare turns per mission and crossings per mission against the
+series.
 
 ### 2026-09-06/07 overnight — the best-powered row yet, and the series still has not moved
 

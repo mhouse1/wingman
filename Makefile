@@ -449,6 +449,13 @@ r1-probe:
 # only suppresses injection on alt-tab; this asks whether XSendEvent can address
 # the game window directly so the behaviour tree keeps flying instead. Start the
 # game first, then alt-tab away when the probe tells you to and WATCH THE GAME.
+# Did the boundary turn actually gain range? ADR 106's crossings-per-mission is
+# too coarse to answer it — an 11h soak yields ~15 crossings against ~170 turn
+# outcomes. Judge a soak with this, not with the ADR 106 row.
+#   make turn-outcome LOG=logs/<session>.log
+turn-outcome:
+	$(PYTHON_RUN) scripts/turn-outcome.py $(or $(LOG),wingman.log)
+
 sendevent-probe:
 	$(PYTHON_RUN) scripts/sendevent-probe.py --wait-for-game $(or $(WAIT),60) \
 	  --key $(or $(KEY),p) --dwell $(or $(DWELL),4) --out sendevent-probe.log

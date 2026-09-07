@@ -429,6 +429,23 @@ minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   # Aggregate ratios were tried first and let a ragged landmass straight through.
   boundary_close_iters: 1, boundary_max_thickness_frac: 0.10,
   boundary_min_px: 20, boundary_min_span_frac: 0.5,
+  # ADR 133: the corroborated span. The strict gate above needs the boundary to
+  # arrive as ONE connected component of 0.5R, and the post-2026-09-02 minimap
+  # does not reliably draw it that way — measured on 447 blind frames, EVERY
+  # rejection was a span rejection and the thickness test never fired once.
+  #
+  # A shorter fragment is accepted when the out-of-bounds VOID corroborates it:
+  # the dark, desaturated region outside the arena, which needs no connectivity
+  # and so cannot be broken by the same fragmentation. Measured on 88
+  # banner-confirmed crossings, void > 0.01 rejects NONE of them (the lowest
+  # real crossing reads 0.019).
+  #
+  # relaxed_span_frac 0 disables the relaxed path entirely, restoring pure
+  # ADR 108 behaviour.
+  boundary_relaxed_span_frac: 0.30,
+  boundary_void_min_frac: 0.01,
+  boundary_void_v_max: 62, boundary_void_s_max: 35,
+  boundary_void_radius_frac: 0.78,
   boundary_near_frac: 0.35, boundary_trace_ticks: 20,
   # ADR 106: save the whole frame on a CONFIRMED crossing, to test whether
   # crossings cluster on particular maps. Confirmed only — the colour
