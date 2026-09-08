@@ -489,12 +489,21 @@ def main():
     # without their finally blocks, and XTest key state lives in the X SERVER —
     # a hard kill mid-eject leaves NOSE_DOWN/AFTERBURNER pressed for the whole
     # X session. Route it through exit_requested so cleanup() releases keys.
+    #
+    # SIGHUP gets the same handler. Unhandled, its default action is immediate
+    # termination — no exception, no "Exit requested" log, no session summary,
+    # no nested-display teardown (ADR 099/105 never get to run). Observed
+    # 2026-09-08 04:31: the controlling terminal closing killed wingman this
+    # way mid-session, and the orphaned Xwayland :3 outlived it. This is a
+    # SEPARATE gap from ADR 121's shutdown watchdog, which only arms once
+    # exit_requested is already set — SIGHUP previously never set it.
     try:
         import signal
         signal.signal(signal.SIGTERM, lambda _sig, _frm: exit_requested.set())
+        signal.signal(signal.SIGHUP, lambda _sig, _frm: exit_requested.set())
     except (ValueError, OSError) as e:  # non-main thread or unsupported platform
-        print(f"WARNING: SIGTERM handler not installed ({e}); "
-              "a SIGTERM may leave injected keys held", file=sys.stderr)
+        print(f"WARNING: SIGTERM/SIGHUP handler not installed ({e}); "
+              "a SIGTERM or SIGHUP may leave injected keys held", file=sys.stderr)
     replay_mode = bool(args.replay_config)
     capture_mode = bool(args.capture_path_config)
     replay_capture = None
@@ -1609,7 +1618,20 @@ def main():
                 _arm_shutdown_watchdog()
                 _close_session()
             except KeyboardInterrupt:
-                logger.info("STANDBY: interrupted — leaving MetalStorm running")
+                # A SIGINT racing the second Backspace can win the wait loop
+                # by a millisecond and land here with the close request
+                # already set (observed 2026-09-08: "STANDBY: interrupted"
+                # logged one millisecond before "Backspace again — closing").
+                # Honor the close either way, or the operator's actual
+                # request is silently dropped and the nested display outlives
+                # the game once they close it by hand.
+                if ctrl.close_all_requested():
+                    logger.info("STANDBY: interrupted, but the second Backspace "
+                                "had already arrived — closing down anyway")
+                    _arm_shutdown_watchdog()
+                    _close_session()
+                else:
+                    logger.info("STANDBY: interrupted — leaving MetalStorm running")
             finally:
                 ctrl.release_hotkeys()
 

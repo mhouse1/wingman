@@ -152,6 +152,10 @@ its movement.
 | 2026-09-07 (am) | 1h52m | 20 | 3 | **0.150** | 77 | 77 | 49 | 91 | ADR 132 | post-update |
 | 2026-09-07 (mid) | 45m | 7 | 0 | 0.000 | 7 | 7 | 2 | 2 | ADR **133** | post-update |
 | 2026-09-07 (pm) | 2h52m | 29 | 5 | 0.172 | 118 | 118 | — | — | ADR 133 | post-update |
+| 2026-09-07 (18:14) | 12m10s | 2 | 0 | 0.000 | 0 | 0 | 0 | 1 | ADR 133 + **134** D8 (WIP) | post-update |
+| 2026-09-07 (18:46) | 4m37s | 1 | 0 | 0.000 | 1 | 1 | 0 | 1 | ADR 133 + 134 D8-D9 (WIP) | post-update |
+| 2026-09-07 (19:00) | 33m07s | 6 | 0 | 0.000 | 0 | 0 | 0 | 1 | ADR 133 + 134 D8-D10 (WIP) | post-update |
+| 2026-09-07/08 (overnight) | **8h57m** | **92** | 24 | **0.261** | 394 | 394 | 170 | 209 | ADR 133 + 134 D8-D10 | post-update |
 
 **Actuated** counts turns that reached the aircraft — `grep -c 'map boundary
 ahead, rolling away'`. Added 2026-09-03, when the gap became visible: 14 requests
@@ -535,6 +539,32 @@ tactic has not helped; it is not yet evidence that the approach cannot.
 crashes, and missile-engagement survival of 81% with evade against 68% without.
 Those are not in this table, and "flat" here is a statement about one tactic, not
 about the sessions.
+
+### 2026-09-07/08 overnight — the highest post-update rate in the series, and a new confound
+
+**0.261 crossings per mission, 92 missions — the highest reading since the
+pre-update era (0.267)** and well above the post-update band this series has
+otherwise occupied (0.10-0.22). 92 missions clears the 40-mission floor, so
+this is not automatically dismissible as noise the way the smaller rows are.
+
+It is still one row. The series has already shown a 7x spread session to
+session on **identical** code (0.031 and 0.219 the same day, three days ago),
+so a single high reading — however well-powered — is not yet a trend. It
+needs corroboration the same way every other row here has.
+
+**A new confound, not present in any earlier row: ADR 134 (cruise
+afterburner) was live for a full session for the first time**, holding the
+aircraft near-continuously above ~90% or below ~40% fuel rather than at
+normal throttle. Nothing in ADR 134 touches boundary handling, but sustained
+higher speed is exactly the kind of change that could plausibly raise
+crossings independent of anything about `BoundaryTurn` itself — a faster
+aircraft covers more ground before the turn tactic can react to the same
+boundary reading. That is a hypothesis, not a finding; this table cannot
+separate "cruise made crossings worse" from "this was a high-variance night"
+on one row, the same limitation D5 already states for game-UI changes landing
+in the same gap as a code change. Worth watching specifically on the next few
+rows, since it is the first genuinely new mechanism this series has not
+already accounted for.
 
 ## Target
 

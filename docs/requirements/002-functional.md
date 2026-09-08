@@ -194,3 +194,31 @@ within about 50 ms, measured directly in wingman.log across nine consecutive
 attempts. Implemented by Controller._mission_exit_requested
 (wingman/controller.py), which distinguishes the two cases using the flag
 Backspace alone sets (ADR 099).
+
+## Nested display closes with the game
+
+**UID**: FR-010
+
+**Statement**: On an operator-initiated stop — the finish-round-then-exit hotkey, or the
+second of the two-stage Backspace sequence — wingman shall close the nested
+Xwayland display together with MetalStorm, gated on
+finish_round_then_exit.close_game. If MetalStorm exits on its own, wingman
+shall close the nested display regardless of close_game. A termination
+signal that reaches wingman shall route through this same teardown rather
+than bypass it. An operator-initiated close request that has already
+arrived by the time an unrelated interrupt is handled shall not be
+discarded by that interrupt's handling.
+
+**Rationale**: ADR 099 D6 and ADR 105 D6. The nested server exists solely to host the game;
+leaving it behind strands an empty "Xwayland on :N" window on the operator's
+desktop, invisible to the operator unless they go looking for it. Two gaps
+found live 2026-09-08 motivate the last two sentences: an unhandled SIGHUP
+(a closed controlling terminal) terminated wingman with no cleanup at all,
+skipping this teardown entirely; separately, a SIGINT racing the second
+Backspace could win the standby wait loop by about a millisecond, and the
+interrupt handler discarded the already-arrived close request unconditionally
+instead of checking for it. Both left the display orphaned after the game had
+already exited. Implemented by close_nested_display
+(wingman/game_shutdown.py); the signal routing and the interrupt/close-request
+race are in wingman/main.py (the SIGTERM/SIGHUP handlers near the top of
+main(), and the standby KeyboardInterrupt handler).

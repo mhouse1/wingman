@@ -160,10 +160,16 @@ re-pressing). Cruise re-presses every tick it may hold, so it is now the one
 most likely to win a given tick's contest for the key, not the one that backs
 off. The specific, named cost: eject's ADR 069 dive-descent control cuts the
 burner deliberately as part of managing descent rate, and cruise's re-press
-can put it back within a tick. Whether that materially interferes with a real
-eject's descent — rather than just costing a little extra fuel during it — is
-open and worth watching for specifically, since eject failures are the
-highest-consequence failure mode this codebase has (SAF-004 territory).
+can put it back within a tick. First evidence (see V-D9/D10-live): 267 eject
+sequences in one overnight soak, all terminating in an expected way
+(respawn_detected, rearmed, established, or no_telemetry — no anomalous or
+stuck outcome), 0 manual takeovers, 0 errors. That is reassuring, not
+conclusive — the descent-control code doesn't distinguish "released cleanly"
+from "released, then cruise put it back and something compensated," so a
+subtler interaction (a slightly shallower dive angle, say) would not show up
+as a distinct log line. Worth a closer look if eject behavior ever looks off,
+since eject failures are the highest-consequence failure mode this codebase
+has (SAF-004 territory) — but nothing in this soak points at one.
 
 **Whether it helps is an open question**, the same way ADR 128's does:
 whether the survivability gain from sustained speed outweighs the wider turn
@@ -217,6 +223,22 @@ eject time. Live observation decides both.
   unchanged, but still re-asserts an existing press.
 - **V9-press-every-tick.** While holding, `_climb_key(AFTERBURNER_KEY,
   press=True)` is called once per tick, not only on the engage transition.
+- **V-D9/D10-live.** Overnight soak, 2026-09-07 19:33 to 2026-09-08 04:31
+  (8h57m), 92 missions, 301 respawns, **267 eject sequences**, 0 manual
+  takeovers. Zero `[ERROR]`/`Traceback` lines. 916 cruise engages / 916
+  releases across the session — exactly balanced, no key left stuck. Sampled
+  eject windows directly: cruise both engages and correctly floor-releases
+  *during* `GAME_BATTLE_EJECT` (e.g. one eject at 19:38:34 shows fuel burning
+  100→92→83→...→30 with a correct floor release at 30%, entirely inside the
+  eject window) — confirming D10 actually fixed the gate, not just D9's
+  intent. One OCR-quality observation, not a cruise defect: fuel readings
+  during a fast dive were seen swinging implausibly (e.g. 32→45→57→70→2→96 in
+  under 6 seconds) — almost certainly OCR noise under motion blur, not real
+  fuel — and a spurious high read did trigger one re-engage on bad data. Fuel
+  OCR reliability during violent attitude changes is a pre-existing telemetry
+  concern (see the plausibility-filter precedent in ADR 069), not something
+  D8's engage-side lacking a debounce (D5) caused — flagged for awareness,
+  not treated as a fix owed here.
 - **V7 — live.** Afterburner usage rate rises from its currently-observed
   near-zero baseline during normal (non-tactic) flight, without fuel-related
   eject/evade failures increasing.

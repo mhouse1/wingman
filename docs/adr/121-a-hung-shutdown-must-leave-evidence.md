@@ -191,3 +191,114 @@ down cannot have a later genuine failure excused.
 
 Covered by `tests/test_expected_display_close.py` (7 tests).
 
+## SIGHUP was never handled (2026-09-08)
+
+This ADR's premise — a shutdown must leave evidence — assumed the process
+would at least *reach* the shutdown path. `wingman/main.py` caught `SIGTERM`
+and routed it through `exit_requested` so cleanup runs; it never caught
+`SIGHUP`. SIGHUP's default action is immediate termination: no exception, no
+`Exit requested` log line, nothing `_arm_shutdown_watchdog` could ever see,
+because the watchdog only arms once `exit_requested` is already set.
+
+**Observed 2026-09-08 04:31.** An 8h57m overnight soak — 92 missions, the
+largest single session ADR 106 has recorded — ended with `wingman.log`
+stopping mid-stream, one line after a routine periodic resource-summary
+write. No traceback, no `Exit requested`, no session-summary block, no
+`Nested display: closing Xwayland for :3` line. The process was simply gone;
+`ps` showed no `wingman.main`, and the orphaned Xwayland `:3` window it had
+been hosting outlived it by roughly 17 minutes until the operator noticed and
+asked why the auto-close (ADR 105) hadn't fired. It hadn't fired because
+nothing was left alive to fire it — a controlling-terminal hangup (the most
+common SIGHUP source) is consistent with the log's exact stop-mid-write
+signature and the absence of any OOM-kill or crash trace in the system
+journal for that window.
+
+This is a narrower, more severe sibling of the SIGTERM-hang this ADR already
+covers: a SIGTERM-hang at least leaves the watchdog's 90-second window to
+dump thread stacks; an uncaught SIGHUP leaves nothing at all, not even that.
+
+**Decision.** `SIGHUP` gets the identical handler `SIGTERM` already has —
+`signal.signal(signal.SIGHUP, lambda _sig, _frm: exit_requested.set())`,
+registered in the same `try` block right beside it (`wingman/main.py:494`).
+A hangup now takes the same graceful path SIGTERM does: `exit_requested` is
+set, cleanup runs, the ADR 121 watchdog is available if cleanup itself
+stalls, and ADR 099/105's nested-display teardown gets to run instead of
+being skipped by a process that no longer exists to run it.
+
+No new test was added — there is no existing test that exercises the
+SIGTERM handler's *registration* either (the existing SIGTERM-referencing
+tests in `tests/test_shutdown_watchdog.py` and `tests/test_expected_display_close.py`
+cover what happens once `exit_requested` is set, which is unchanged and
+already covered regardless of which signal set it); SIGHUP reuses that exact
+code path.
+
+### Validation
+
+- V1 — live, still open. The next terminal-closed / SIGHUP-source session
+  should show a normal shutdown sequence (`Exit requested`, session summary,
+  nested-display teardown) instead of the log stopping mid-write. Not yet
+  observed, since the fix landed after the incident that motivated it.
+
+## A Ctrl-C racing the second Backspace silently dropped the close (2026-09-08)
+
+A third variant, found within the hour of the SIGHUP fix above — and this one
+is not a silent death. The log is complete and clean throughout; the bug is
+in which *documented* path it took.
+
+**Observed 2026-09-08 05:02:24.** Standby's wait loop
+(`wingman/main.py:1614-1623`, `while not ctrl.wait_for_close_all(...): pass`)
+caught a `KeyboardInterrupt` one millisecond *before* the hotkey callback's
+own "second Backspace" log line landed:
+
+```
+05:02:24,060  STANDBY: interrupted — leaving MetalStorm running
+05:02:24,060  Controller: all keyboard hooks deregistered
+05:02:24,061  Controller: Backspace again — closing MetalStorm and the nested display
+05:02:24,062  XKey: stop-watcher could not disable the record context: 'NoneType' object is not subscriptable
+```
+
+The interrupt branch treats "leave everything up" as unconditional — it
+never checks whether the close request had, in fact, also arrived. Here it
+had, by the time the `except` block ran, but the code did not look. Wingman
+then exited normally (this is not a hang or a crash — it is the *documented*
+Ctrl-C behavior, "leaves everything up," working exactly as specified) having
+never called `_close_session()`. The operator closed MetalStorm by hand some
+minutes later, per the standby message's own instructions; nothing was left
+running to apply ADR 105's "the game died, close the display anyway" rule.
+The DEBUG line at 05:02:24,062 is a second-order effect of the same race —
+`release_hotkeys()` (the `finally` block) tearing down the XRecord context
+concurrently with the callback's own daemon `_stop_watcher` thread still
+running on it — not itself the cause.
+
+**Decision.** Check `ctrl.close_all_requested()` inside the `except
+KeyboardInterrupt` handler. If the second Backspace had already landed by the
+time the interrupt is handled, close down anyway rather than discarding the
+request:
+
+```python
+except KeyboardInterrupt:
+    if ctrl.close_all_requested():
+        logger.info("STANDBY: interrupted, but the second Backspace "
+                    "had already arrived — closing down anyway")
+        _arm_shutdown_watchdog()
+        _close_session()
+    else:
+        logger.info("STANDBY: interrupted — leaving MetalStorm running")
+```
+
+This does not require the two events to be ordered correctly — it only needs
+`close_all_requested()`'s answer at the moment the interrupt is handled,
+which is unambiguous regardless of which one the wait loop observed first.
+
+No new test: same reasoning as the SIGHUP fix above — this is inline in
+`main()`, not an extracted, mockable function, and no existing test exercises
+this block directly.
+
+### Validation
+
+- V1 — live, still open. The next session where a Ctrl-C and the second
+  Backspace land close together should show `"closing down anyway"` and a
+  full teardown, instead of `"leaving MetalStorm running"` with the close
+  request discarded. Not yet observed, since the fix landed after the
+  incident that motivated it.
+

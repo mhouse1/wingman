@@ -91,6 +91,8 @@ def close_nested_display(display: str,
                          clock=time.monotonic, sleep=time.sleep) -> dict:
     """Tear down the nested Xwayland serving `display` (ADR 099).
 
+    @relation(FR-010, scope=function)
+
     Called only after the game itself is closed. The server exists solely to
     host the game, so leaving it behind strands an empty black "Xwayland on :N"
     window on the operator's desktop — the visible residue of a session that
