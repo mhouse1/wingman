@@ -78,6 +78,8 @@ def _run_respawn_ocr_detection(analyzer: GameStateAnalyzer, frame, attempts: int
 
 
 def _load_image(image_path: Path):
+    if not image_path.exists():
+        pytest.skip(f"{image_path} not present (untracked test corpus, ADR 100 D7)")
     frame = cv2.imread(str(image_path))
     assert frame is not None, f"Could not load image: {image_path}"
     return frame

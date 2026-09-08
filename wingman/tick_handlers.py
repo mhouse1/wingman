@@ -1093,6 +1093,14 @@ class BehaviorTreeHandler:
             self._ctrl.note_incoming(bool(incoming), now)
         except Exception:
             logger.debug("note_incoming failed", exc_info=True)
+        # ADR 134: cruise afterburner. Tree-independent for the same reason
+        # note_incoming is — it only touches one key and would rarely tick if
+        # it had to compete with Engage/AttackSupport for tree priority.
+        try:
+            self._ctrl.note_afterburner_cruise(
+                current_game_state, self._ctrl.is_mission_running())
+        except Exception:
+            logger.debug("note_afterburner_cruise failed", exc_info=True)
         # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
         # control loop, so it needs the reading rather than the tactic.
         try:

@@ -14,15 +14,21 @@ NOT in STALL_ACTION_STATES), and that the crop reads the real captured frames.
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 from wingman import analyzer as analyzer_module
 
 CONFIG = yaml.safe_load(Path("wingman/config.yaml").read_text())
 CROPS = CONFIG["crops"]
-# The tracked reference frame, saved beside the other STALL_* crops. The
-# original anomaly captures live in a gitignored directory that gets swept, so
-# pinning the regression to them made it silently skip.
+# The reference frame, saved beside the other STALL_* crops. Originally kept
+# TRACKED specifically so the regression below could never silently skip —
+# the original anomaly captures live in a gitignored directory that gets
+# swept, and pinning the regression to those made it silently skip.
+#
+# ADR 100 D7 reverses that: test_screenshots stops being tracked in git at
+# all (it lives on veda only now), so this file drops the anti-skip
+# guarantee too and skips like every other corpus-backed test when absent.
 REFERENCE = Path("test_screenshots/STALL_PROFILE.png")
 
 
@@ -97,8 +103,10 @@ def test_absent_crop_is_simply_not_offered():
 
 
 def test_reference_frame_is_present_and_real():
-    """Tracked, so this cannot silently start skipping."""
-    assert REFERENCE.is_file(), f"{REFERENCE} missing — ADR 093 reference frame"
+    """Was tracked so this could never silently skip (ADR 093); now skips
+    when absent per ADR 100 D7, since the corpus moved off git entirely."""
+    if not REFERENCE.is_file():
+        pytest.skip(f"{REFERENCE} not present (untracked test corpus, ADR 100 D7)")
     assert REFERENCE.stat().st_size > 10_000, "reference frame looks like a placeholder"
 
 

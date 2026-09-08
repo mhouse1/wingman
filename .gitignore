@@ -15,6 +15,11 @@ FUTURE/
 wingman.log
 wingman_live.log
 *.log
+# ADR 100 D7: the whole corpus (including telemetry/, integration_test/, and
+# the loose top-level PNGs D5 originally kept tracked) lives on veda only now.
+# `git rm --cached` was needed once to untrack what this line alone cannot
+# touch — see D1's identical lesson about already-tracked paths.
+test_screenshots/*
 test_screenshots/*focus-probe.log
 test_screenshots/health_dropouts/*
 test_screenshots/unknown_anomalies/*

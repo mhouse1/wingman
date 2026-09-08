@@ -41,7 +41,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: leak-check leak-check-gate test test1 test2 test-perf tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
+.PHONY: leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -234,7 +234,21 @@ leak-check-gate:
 # variable makes that class of mistake impossible rather than comment-enforced.
 TP_GATES := lint test reqs-gate rr-path1-gate rr-live-path1-gate leak-check-gate
 
-tp: $(TP_GATES)
+# ADR 100 D7: test_screenshots is no longer tracked in git — the corpus lives
+# on veda only, and rr-path1-gate/rr-live-path1-gate/ocr read from it. Listed
+# as the FIRST prerequisite so it fails before any of $(TP_GATES) runs;
+# putting this check in tp's own recipe body would not help, since make runs
+# prerequisites before a target's recipe regardless of where a check sits in
+# that recipe.
+require-veda:
+	@if [ "$$(hostname)" != "veda" ]; then \
+		echo "ERROR: make tp/tp-full need the full test_screenshots corpus,"; \
+		echo "which lives only on veda (ADR 100 D7). Refusing to run on host"; \
+		echo "'$$(hostname)'. Use 'make test' for the portable, corpus-free gate."; \
+		exit 1; \
+	fi
+
+tp: require-veda $(TP_GATES)
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
@@ -249,7 +263,7 @@ tp: $(TP_GATES)
 	@echo ""
 
 # Full preview including ADR037 PATH1/PATH2 real-OCR integration tests.
-tp-full: $(TP_GATES) ocr
+tp-full: require-veda $(TP_GATES) ocr
 	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""

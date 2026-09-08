@@ -129,6 +129,9 @@ The remaining corpora are all referenced and stay. Downsampling them is a
 separate question this ADR still does not answer, and a smaller one now: the
 unreferenced half is the half worth removing.
 
+*(Superseded by D7, 2026-09-07: "stay" no longer holds — they move to
+veda-only too.)*
+
 **D6. Live-capture corpora stay on the capturing machine.** *(Added
 2026-09-04.)* The boundary evidence under
 `test_screenshots/unknown_anomalies/` — crossing frames, and the desert frames
@@ -146,6 +149,58 @@ minimap CROPS rather than full frames — a few hundred KB — which needs
 `detect_map_boundary` to accept a pre-cropped image. That is a code change, not
 a file move, and nothing currently needs it.
 
+**D7. The remaining referenced corpora move to veda-only too, reversing
+D5.** *(Added 2026-09-07.)* D5 kept the 31 loose top-level PNGs, `telemetry/`
+(33 MB, 17 files), and `integration_test/` (16 MB, 9 files) — ~104 MB / 57
+files — in git specifically because they were referenced and portability
+mattered: any clone could run the full suite. The operator has decided that
+trade is no longer worth it. All three move off git, onto veda only (this
+machine, confirmed by `hostname`), matching the trade D6 already made for
+`unknown_anomalies/`.
+
+```bash
+git rm --cached test_screenshots/*.png
+git rm --cached -r test_screenshots/telemetry
+git rm --cached -r test_screenshots/integration_test
+```
+
+`.gitignore` needed no new pattern — the existing `test_screenshots/*` blanket
+rule already covered these paths; it simply never applied to already-tracked
+files, the same D1 lesson. `tests/test_screenshot_corpus_untracked.py` asserts
+all three stay untracked and ignored, the D1 pattern.
+
+Every test that reads these files now skips (`pytest.skip`) rather than
+hard-fails when they're absent, following the `rtb_*`/`unknown_anomalies`
+precedent this ADR already established for D6:
+`tests/test_analyzer.py`, `tests/test_automated_levels.py`,
+`tests/test_stall_profile_recovery.py`, `tests/test_telemetry_corpus.py`.
+Two of those conversions are deliberate reversals of an earlier design intent,
+made explicitly by the operator rather than assumed:
+
+- `tests/test_stall_profile_recovery.py::test_reference_frame_is_present_and_real`
+  was written so `STALL_PROFILE.png` could **never** silently skip (ADR 093's
+  own regression guard, docstring: "Tracked, so this cannot silently start
+  skipping"). It now skips like everything else. The ADR 093 guarantee this
+  test provided no longer holds for this one file.
+- `wingman/analyzer.py:111-112` hardcodes `test_screenshots/INCOMING.png` as a
+  **production** runtime template source for incoming-missile detection, not
+  just a test fixture. It already degrades gracefully (warns, disables that
+  matcher) when the file is missing, so non-veda machines running wingman for
+  real now silently lose template-based incoming detection. Accepted as the
+  same trade as everything else in this decision, not an oversight.
+
+`make tp` and `make tp-full` — the two gates that actually need the real
+corpus to be a meaningful run, not just a passing one — refuse to run outside
+veda (`require-veda`, `Makefile`, listed as the first prerequisite so it fails
+before any of `$(TP_GATES)` executes rather than after wasting the time on
+them). `make test` is deliberately **not** gated: every test it runs must
+degrade to a skip, which is what the conversions above are for, so a non-veda
+clone still gets a green, honest, if narrower, `make test`.
+`rr-path1-gate`/`rr-live-path1-gate`/`ocr` remain independently invocable and
+are not specially guarded — run standalone on non-veda they now fail with a
+plain file-not-found rather than a gated message, which is an acceptable, if
+less friendly, edge since only `tp`/`tp-full` were asked to be restricted.
+
 ## Consequences
 
 Future releases stop adding ~9 MB of regenerated HTML each. The release output
@@ -159,6 +214,13 @@ the rendering is not.
 
 The repository stays at its current size until D4 is decided separately.
 
+**D7:** a fresh non-veda clone can `make test` but not `make tp`/`make
+tp-full` — those need the real corpus to mean anything, not just to pass, and
+now refuse to run at all rather than pass vacuously on an all-skipped suite.
+Portability across *every* machine, which D5 optimized for, is traded for a
+smaller repository; the corpus's only home is now veda, one disk failure from
+gone, the same trade D6 already accepted for `unknown_anomalies/`.
+
 ## Validation
 
 - **V1.** `docs/performance/runtime-performance-trends.html` and
@@ -170,12 +232,20 @@ The repository stays at its current size until D4 is decided separately.
   the committed run JSONs, on a machine that has never produced a session.
 - **V4.** Measure the delta: the size a release adds to the pack, before and
   after, so the claim in D1 is checked rather than assumed.
+- **V5.** `tests/test_screenshot_corpus_untracked.py` passes: the 31 loose
+  PNGs, `telemetry/`, and `integration_test/` are all untracked and ignored.
+- **V6.** With `test_screenshots/` moved aside, `make lint && make test`
+  still passes — the corpus-dependent tests skip, none error.
+- **V7.** `make tp` / `make tp-full` refuse to run with a clear message on a
+  host whose `hostname` is not `veda`, and succeed on veda.
 
 ## References
 
 - ADR 019 — performance ADRs carry actual measurements, which is why the raw
   JSONs are evidence rather than clutter
 - ADR 071 / ADR 072 — the screenshot corpora behind the 288 MB in D5
+- ADR 093 — the STALL_PROFILE.png anti-skip guarantee D7 reverses
 - `docs/job-aids/010-run-metalstorm-on-linux.md` — second-machine validation,
   which a local-only baseline would break
+- `tests/test_screenshot_corpus_untracked.py` — D7's untracked/ignored guard
 - Measurement: `git rev-list --objects --all` grouped by path, 2026-08-31

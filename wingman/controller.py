@@ -219,6 +219,7 @@ class Controller:
         telemetry_cfg = _c.telemetry
         missile_evade_cfg = _c.missile_evade
         climb_cfg = _c.climb
+        afterburner_cruise_cfg = _c.afterburner_cruise
         fuel_cfg = _c.fuel
 
         # region is (left, top, width, height)
@@ -410,6 +411,18 @@ class Controller:
         # descending break instead of the zoom climb the base triple produces.
         # Off by default — it is the unproven variant, not the shipped one.
         self._me_pitch_down = bool(_me_cfg.get("pitch_down", False))
+
+        # ADR 134: cruise afterburner — hold AB whenever fuel is above a
+        # floor and no higher-priority tactic (eject/evade/climb) needs the
+        # key. No thread and no Event: this is evaluated synchronously once
+        # per tick from note_afterburner_cruise(), so a plain bool is enough.
+        _cruise_cfg = afterburner_cruise_cfg or {}
+        self._cruise_ab_enabled = bool(_cruise_cfg.get("enabled", False))
+        self._cruise_ab_min_fuel_pct = float(_cruise_cfg.get("min_fuel_pct", 40.0))
+        self._cruise_ab_rearm_fuel_pct = float(_cruise_cfg.get("rearm_fuel_pct", 90.0))
+        self._cruise_ab_confirm_reads = max(1, int(_cruise_cfg.get("confirm_reads", 2)))
+        self._cruise_ab_active = False
+        self._cruise_ab_low_streak = 0
 
         # ADR 073 Phase 3.2b — CLIMB tactic hold (NOSE_UP + AFTERBURNER).
         # The mission-start prologue climb (3.2c) is retired: the ADR 075
@@ -2600,6 +2613,106 @@ class Controller:
     def is_afterburner_evading(self) -> bool:
         """True while the missile-evade afterburner hold owns the throttle."""
         return self._ab_evade_active.is_set()
+
+    def note_afterburner_cruise(self, game_state: "GameState", mission_running: bool) -> None:
+        """Hold afterburner in a hysteresis band between two fuel levels. ADR 134 D9.
+
+        Called every tick, not a Selector leaf — it only touches one key and
+        would rarely tick if it competed with Engage/AttackSupport for tree
+        priority, the same reasoning behind ADR 128's note_incoming().
+
+        D9: overrides climb, missile evade and eject rather than deferring to
+        them. Each of those already toggles AFTERBURNER_KEY on its own
+        schedule — climb has its own fuel floor/rearm, evade has its own fuel
+        gating, eject's dive-descent control deliberately cuts the burner —
+        and deferring to "is this tactic active" (D3's original design) meant
+        cruise sat out any of THEIR internal off-phases too, not just their
+        on-phases. Measured live 2026-09-07: fuel sat near 100% for a third of
+        one session because Climb kept re-selecting near the ground and
+        blocking cruise even while Climb itself wasn't holding the key.
+        Operator's explicit call: speed should stay up regardless of tactic
+        state, eject included — so this presses every tick it may hold, not
+        just on the press/release edge, which is what lets it win the key
+        back within one tick of any other subsystem releasing it rather than
+        waiting for that subsystem to fully deselect.
+
+        Fuel recharges while the key is up (ADR 075). D8's hysteresis: burn
+        from wherever fuel is down to min_fuel_pct, then let it recharge up
+        to rearm_fuel_pct before holding again — re-arming at just above the
+        floor (D4's original design) meant the aircraft barely left the floor
+        before diving back through it.
+
+        The only things this still yields to are SAF-001 (manual takeover)
+        and being outside GAME_BATTLE / an inactive mission — those are not
+        tactic state, they're "wingman should not be commanding flight input
+        at all right now." GAME_BATTLE_EJECT is its own FSM state, not
+        GAME_BATTLE (eject_started transitions to it), and `mission_running`
+        reads False throughout an eject — the mission thread isn't running,
+        eject is a separate procedure that was never gated on it either (see
+        `fire_eject`'s own actuator wiring). Both were live-observed
+        (2026-09-07) still silently blocking cruise after D9 removed the
+        `is_ejecting()` check specifically — the override was right, the
+        state/mission gate just needed the same exception.
+        """
+        if not self._cruise_ab_enabled:
+            return
+
+        may_hold = (
+            not self._manual_takeover_active()
+            and (
+                (mission_running and game_state == GameState.GAME_BATTLE)
+                or game_state == GameState.GAME_BATTLE_EJECT
+            )
+        )
+        if not may_hold:
+            if self._cruise_ab_active:
+                self._climb_key(AFTERBURNER_KEY, press=False, action="cruise")
+                self._cruise_ab_active = False
+                self._cruise_ab_low_streak = 0
+                logger.info(
+                    "\033[96m🔥 Cruise afterburner released — yielded control\033[0m")
+            return
+
+        fuel = self._read_fuel_pct()
+        if fuel is None:
+            # Stale/missing OCR — hold current state, don't flap on it, but
+            # still re-assert an existing hold in case another subsystem
+            # dropped the key this same tick.
+            if self._cruise_ab_active:
+                self._climb_key(AFTERBURNER_KEY, press=True, action="cruise")
+            return
+
+        if not self._cruise_ab_active:
+            if fuel >= self._cruise_ab_rearm_fuel_pct:
+                self._cruise_ab_active = True
+                self._cruise_ab_low_streak = 0
+                logger.info(
+                    "\033[96m🔥 CRUISE — afterburner held (fuel %d%% >= %.0f%%)"
+                    "\033[0m", fuel, self._cruise_ab_rearm_fuel_pct)
+        else:
+            if fuel <= self._cruise_ab_min_fuel_pct:
+                self._cruise_ab_low_streak += 1
+                if self._cruise_ab_low_streak >= self._cruise_ab_confirm_reads:
+                    self._climb_key(AFTERBURNER_KEY, press=False, action="cruise")
+                    self._cruise_ab_active = False
+                    self._cruise_ab_low_streak = 0
+                    logger.info(
+                        "\033[96m🔥 Cruise afterburner released — fuel %d%% "
+                        "at/below floor %.0f%%\033[0m", fuel,
+                        self._cruise_ab_min_fuel_pct)
+            else:
+                self._cruise_ab_low_streak = 0
+
+        if self._cruise_ab_active:
+            # Re-assert every tick, not only on the transition — a harmless
+            # repeat press when this already holds the key, and the reason
+            # climb/evade/eject dropping it behind cruise's back gets undone
+            # within one tick instead of staying dropped (D9).
+            self._climb_key(AFTERBURNER_KEY, press=True, action="cruise")
+
+    def is_afterburner_cruising(self) -> bool:
+        """True while the cruise-afterburner hold owns the throttle."""
+        return self._cruise_ab_active
 
     def _climb_key(self, key: str, press: bool, action: str = "climb"):
         """Press/release one climb-family key, honoring simulate mode."""

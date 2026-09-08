@@ -355,6 +355,16 @@ behavior_tree:
   missile_evade: {afterburner_clear_s: 4.0, afterburner_max_s: 20.0,
     enabled: true, clear_seconds: 3.0, min_clear_samples: 2, max_manoeuvre_s: 6.0,
     max_hold_s: 15.0, pitch_down: false}
+  # ADR 134 D8: a real hysteresis band, not one shared threshold. Burn from
+  # wherever fuel is down to min_fuel_pct, then let it recharge (ADR 075) up
+  # to rearm_fuel_pct before holding again — the operator's explicit design
+  # ("use afterburner until 40% remains, let it recharge to 90% then activate
+  # again") — so the aircraft spends real time either above the floor or
+  # actively burning, never idling near-full with afterburner unused. No
+  # higher-priority tactic (eject, missile evade, climb) is fought for the
+  # key — climb and evade keep their own smaller reserves for what cruise
+  # leaves behind.
+  afterburner_cruise: {enabled: true, min_fuel_pct: 40, rearm_fuel_pct: 90, confirm_reads: 2}
   climb:
     enabled: true
     enter_below_alt: 500

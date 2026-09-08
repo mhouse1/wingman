@@ -55,6 +55,7 @@ class ControllerConfig:
     telemetry: dict = field(default_factory=dict)
     missile_evade: dict = field(default_factory=dict)
     climb: dict = field(default_factory=dict)
+    afterburner_cruise: dict = field(default_factory=dict)
     fuel: dict = field(default_factory=dict)
     # ADR 116: mission_loiter's block. It was read with
     # `config.get("loiter_mission")` guarded by `isinstance(config, dict)`,
@@ -89,6 +90,7 @@ class ControllerConfig:
             telemetry=cfg.get("telemetry", {}) or {},
             missile_evade=bt.get("missile_evade", {}) or {},
             climb=bt.get("climb", {}) or {},
+            afterburner_cruise=bt.get("afterburner_cruise", {}) or {},
             fuel=cfg.get("fuel", {}) or {},
             loiter=cfg.get("loiter_mission", {}) or {},
         )

@@ -301,6 +301,14 @@ SCHEMA = Section(
                 "max_hold_s": SECONDS,
                 "pitch_down": BOOL,
             }),
+            # ADR 134: hold the afterburner whenever fuel is above the floor
+            # and nothing higher-priority (eject/evade/climb) needs the key.
+            "afterburner_cruise": Section(children={
+                "enabled": BOOL,
+                "min_fuel_pct": _num(0, 100),
+                "rearm_fuel_pct": _num(0, 100),
+                "confirm_reads": _int(1),
+            }),
             "boundary": Section(children={
                 "turn_frac": FRACTION,
                 "recede_frac": FRACTION,
