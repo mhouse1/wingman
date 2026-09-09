@@ -156,6 +156,10 @@ its movement.
 | 2026-09-07 (18:46) | 4m37s | 1 | 0 | 0.000 | 1 | 1 | 0 | 1 | ADR 133 + 134 D8-D9 (WIP) | post-update |
 | 2026-09-07 (19:00) | 33m07s | 6 | 0 | 0.000 | 0 | 0 | 0 | 1 | ADR 133 + 134 D8-D10 (WIP) | post-update |
 | 2026-09-07/08 (overnight) | **8h57m** | **92** | 24 | **0.261** | 394 | 394 | 170 | 209 | ADR 133 + 134 D8-D10 | post-update |
+| 2026-09-08 (04:53) | 2m28s | 0 | 0 | n/a | 0 | 0 | 0 | 0 | ADR 134 D8-D10 + SIGHUP fix; never reached GAME_BATTLE | post-update |
+| 2026-09-08 (05:00) | 20s | 0 | 0 | n/a | 0 | 0 | 0 | 0 | ADR 134 D8-D10 + SIGHUP fix; the standby Ctrl-C race session (ADR 121) | post-update |
+| 2026-09-08 (05:18) | 26m34s | 4 | 0 | 0.000 | 2 | 2 | 0 | 6 | ADR 134 D8-D10 + SIGHUP fix + standby Ctrl-C race fix | post-update |
+| 2026-09-08 (soak) | **13h05m** | **134** | 20 | **0.149** | 367 | 367 | 173 | 349 | ADR 134 D8-D10 + SIGHUP fix + standby Ctrl-C race fix | post-update |
 
 **Actuated** counts turns that reached the aircraft — `grep -c 'map boundary
 ahead, rolling away'`. Added 2026-09-03, when the gap became visible: 14 requests
@@ -565,6 +569,24 @@ on one row, the same limitation D5 already states for game-UI changes landing
 in the same gap as a code change. Worth watching specifically on the next few
 rows, since it is the first genuinely new mechanism this series has not
 already accounted for.
+
+### 2026-09-08 — the cruise-afterburner confound did not repeat
+
+The very next full session with cruise afterburner live (13h05m, 134
+missions — the best-powered row in the series after the 2026-09-06/07
+overnight): **0.149 crossings per mission**, squarely back inside the
+long-standing 0.10-0.22 post-update band, not near the 0.261 outlier the
+session before it produced. Cruise afterburner was live and, per that
+session's own ADR 134 soak data, doing considerably *more* of its job this
+time (fuel sitting at 100% fuel dropped from roughly a third of ticks to
+6.7%, the direct signature of the ADR 134 D9/D10 fixes actually working) —
+so this is not "cruise barely ran." One high reading followed by a normal one
+is exactly what the 7x same-code spread already on record predicts; it does
+not confirm the hypothesis, but it also gives it nothing further to stand on.
+Treat the 2026-09-07/08 row as the high-variance night it always might have
+been, not as early evidence of a real effect — the confound stays open only
+in the weak sense that one non-repeat cannot retire it, not because this row
+supports it.
 
 ## Target
 

@@ -2,13 +2,38 @@
 
 | Status | Date | Wingman Version |
 |---|---|---|
-| Active | 2026-08-31 | 1.8.7 |
+| Active | 2026-09-08 | 1.8.8 |
 
 ## Overview
 
 Wingman is a game automation assistant for MetalStorm. It captures a live screen region, runs EasyOCR-based perception to detect game events, and issues keyboard and mouse inputs to execute flight missions without human input.
 
 The design goal is a **non-blocking main loop**: perception is always asynchronous, the main thread never waits on OCR, and hotkeys remain responsive regardless of what the OCR pipeline is doing.
+
+**This document describes the system as it stands, including which pieces are
+still incomplete by design** — an uncalibrated Evade leaf, an ADR still open
+on whether a change helped, a metric still too small to trust — rather than
+presenting only the finished parts. For where the project is headed rather
+than where it is, see the phase table and vision in
+[`README.md`](../README.md) and the full plan in
+[`docs/PROJECT_AI_ROADMAP.md`](PROJECT_AI_ROADMAP.md). Concrete architectural
+work visible from this document that is still open, not yet planned in
+detail:
+
+- **Evade leaf** (Behavior Tree) has no health threshold configured and no
+  Controller tactic wired to it — selection-only until calibrated.
+- **Cruise Afterburner** (ADR 134) has proven the mechanism runs cleanly but
+  not yet whether the extra speed helps or hurts survival, and not yet
+  whether its override of eject's descent control (accepted as a known
+  trade-off) costs anything in practice.
+- **Boundary-turn tuning** (ADR 101-127) — the crossings-per-mission series in
+  ADR 106 has stayed flat across nine days of changes as of this document's
+  last major revision; the geometry, not the firing rate, is still suspected.
+- **GPU-accelerated profile** — designed, not scheduled
+  ([`docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md`](hldd/008-gpu-accelerated-realtime-wingman-hldd.md)); the CPU-only path (below) remains the default indefinitely regardless.
+- **Multi-instance squad coordination** (README Phase 3) — the behavior
+  tree's per-instance role configuration is the enabling piece; the
+  coordination layer itself has not been started.
 
 ---
 
@@ -31,16 +56,27 @@ flowchart LR
 | `crop_region.py` | `CropCoords` (fractions of the frame, 0.0–1.0) and helpers. No internal imports. |
 | `analyzer.py` | Perception: parallel EasyOCR, incoming template matching (ADR 046), FSM ownership, dual-sensor respawn detection (ADR 064), health confirmation filter (ADR 063), startup classification (ADR 042), result caches. No input. |
 | `telemetry.py` | Altitude/speed OCR signals with plausibility filtering and flight-path angle (ADR 038/067, metric units). |
-| `controller.py` | Actuation: keyboard/mouse via XTest (Linux) or `keyboard` (Windows), missions, eject descent control (ADR 069), missile evade hold (ADR 070), hotkeys, key-release guarantees (SAF-007). No perception. |
+| `controller.py` | Actuation: keyboard/mouse via XTest (Linux) or `keyboard` (Windows), missions, eject descent control (ADR 069), missile evade hold (ADR 070), cruise afterburner (ADR 134), hotkeys, key-release guarantees (SAF-007). No perception. |
+| `controller_config.py` | Typed frozen-dataclass constructor parameters for `Controller` — `from_config` is the single place mapping a `config.yaml` block to a controller setting. |
+| `config_schema.py` | Declarative schema and startup validation for `config.yaml`: rejects an unknown key, a wrong type, an out-of-range value or a missing required key before the process starts. |
+| `keybindings.py` | Canonical in-game key bindings, re-exported by `controller.py`; must mirror MetalStorm's actual Wine-registry bindings. |
+| `input_linux.py` | Linux X11 input: XTest key/click injection and XRecord hotkey observation. Split out of `controller.py` after production incidents (stuck keys, false takeovers, XTest latency). |
+| `focus_guard.py` | Suppresses injection when the game (identified by Wine session, not window title) doesn't have focus (ADR 098). |
+| `game_shutdown.py` | Game-process termination and nested-display teardown on an operator-initiated stop or the game exiting on its own (ADR 099/105, FR-010). |
+| `liveness_guard.py` | Detects a stalled session — no FSM transition and no OCR activity — and force-ends it at a safe point. |
+| `resource_monitor.py` | Periodic RSS/swap/thread/fd/OCR-timing self-sampling for long-session leak diagnosis (the `RESOURCE` log lines). |
 | `tick_handlers.py` | Per-concern tick-loop handler objects and the `BehaviorTreeHandler` (ADR 060, ADR 024). |
-| `behavior_tree.py` | py-trees tactic selector: condition leaves over a frozen `AnalyzerSnapshot`, actuator wiring (ADR 024/070). |
+| `behavior_tree.py` | py-trees tactic selector: condition leaves over a frozen `AnalyzerSnapshot`, actuator wiring (ADR 024/070/073/107). |
 | `engage_nav.py` | Minimap ring binning and engage-geometry navigation (Design 003 / ADR 028). |
 | `mission_stats.py` | Per-mission/session outcome tracking and per-engagement survival metric (ADR 055, ADR 070 V5). |
 | `performance.py` | Per-crop OCR timing, reaction latency, regression gate vs release baseline (ADR 031/034/043). |
 | `replay.py` | Replay injection, assertion engine, live path capture engine (ADR 037/041/044/045). |
 | `hud.py` / `tracker.py` | Live HUD snapshot; HSV target tracking (off by default). |
 | `portal.py` | Linux screencast portal session + restore token. |
+| `host_mode.py` | Reports whether wingman is running under R&D vs TRIAL foundry host mode (affects how co-tenant load is read). |
 | `main.py` | Orchestration: main loop, handler dispatch, unattended mode, startup stall watchdog (exits wingman only — never the host). |
+
+Debug/calibration-only utility scripts (`capture_frame_debug.py`, `find_game_window.py`, `debug_crops.py`, `heap_census.py`, `move_game_window.py`) are omitted here — each is a one-shot CLI tool invoked by a Makefile target, not part of the runtime architecture.
 
 ---
 
@@ -110,17 +146,28 @@ The actuation layer. Holds the mission lock, fires keys/clicks, manages the game
 | `_last_mission` | String (`"j20"` / `"loiter"`): used by `restart_last_mission()` |
 | `_target_painting_mode` | Bool: when True, J20 mission includes target-lock painting phase |
 
-**Mission execution** (`mission_j20`):
+**Mission execution** (`mission_j20`) — the scripted maneuver script described
+here in earlier versions of this document is retired. The behavior tree now
+owns every in-battle decision (sustained climb, engage geometry, missile
+evade, eject); the mission thread's only remaining job is holding
+mission-running state and running the search-and-destroy loops, which keep
+firing through climbs and evades:
 
 ```
 acquire _mission_lock
-nose_up (2s)
-    → start padlock loop (background daemon, every 6s)
-    → start weapon fire loop (background daemon, every 1s)
-    → afterburner cycles + roll maneuvers (loop)
-    → checks _mission_cancel at each step
-release _mission_lock (in finally, guarded with if locked(): release())
+arm_turn_guard(); clear mission_complete / mission_cancel flags
+spawn _mission_runner (daemon thread):
+    start_search_and_destroy_loop()   # padlock + weapon-fire loops
+    loop: wait on _mission_cancel (0.5s poll) until cancelled or exit-requested
+    stop_search_and_destroy_loop()
+    finally: set mission_complete; release _mission_lock (if locked())
+caller: wait on mission_complete (0.05s poll); exit-requested → cancel_mission()
+join mission thread (2s timeout), then a short settle sleep
 ```
+
+No scripted maneuver, afterburner schedule, or fixed mission window remains
+in this method — see Cruise Afterburner (ADR 134) below for where afterburner
+scheduling actually lives now, and Behavior Tree for climb/engage/evade/eject.
 
 **Mission execution** (`mission_loiter`) — survival hold, ADR 028-style closed
 loop rather than a script:
@@ -200,17 +247,22 @@ flowchart LR
     A[Idle] --> B[RespawnWait]
     B --> C[Eject]
     C --> D[MissileEvade]
-    D --> E[Evade]
+    D --> BT["BoundaryTurn (opt-in)"]
+    BT --> E[Evade]
     E --> F[Disengage]
-    F --> G[Engage]
-    G --> R[Regroup]
+    F --> CL["Climb (opt-in)"]
+    CL --> G[Engage]
+    G --> R["Regroup (opt-in)"]
     R --> H[AttackSupport]
 ```
 
-Climb (ADR 073) is inserted above Engage when enabled. It is inserted **by
-name**, not by list offset: the original `len(children) - 2` meant "above
-Engage" only while exactly two leaves followed, and adding Regroup silently
-pushed Climb below Engage until it was fixed.
+Climb (ADR 073), BoundaryTurn (ADR 107) and Regroup (ADR 028 rev 4) are each
+inserted only when their config flag is on (`behavior_tree.climb.enabled`,
+`behavior_tree.boundary.turn_frac`, `minimap.regroup_enabled`) — and each is
+inserted **by name**, not by list offset: the original `len(children) - 2`
+meant "above Engage" only while exactly two leaves followed, and adding
+Regroup silently pushed Climb below Engage until that was fixed. Climb inserts
+itself just above Engage; BoundaryTurn inserts itself just above Evade.
 
 | Leaf | Condition | Actuation |
 |---|---|---|
@@ -218,10 +270,12 @@ pushed Climb below Engage until it was fixed.
 | RespawnWait | respawn overlay detected | none |
 | Eject | debounced missiles-empty verdict | `eject_and_dive` (ADR 069) |
 | MissileEvade | incoming detected, sticky while the hold runs | `missile_evade_mode` (ADR 070) |
-| Evade | health threshold — unset, selection-only | none (uncalibrated) |
+| BoundaryTurn *(opt-in)* | aircraft approaching the map edge (hue-based boundary detector), release hysteresis on distance recovered; yields to Climb's emergency band | banked turn away from the edge (ADR 107) |
+| Evade | health threshold — unset, selection-only | none (uncalibrated; `ConditionTactic` never gets a `start_fn`) |
 | Disengage | all rings empty 30 s (MinimumHold) | `disengage_roll_right` |
+| Climb *(opt-in)* | altitude below the emergency band, or predicted time-to-ground short, or (ADR 075) armed sustain band while missiles remain | `climb_mode` (ADR 073/086/075) |
 | Engage | any minimap ring occupied | ring-engage geometry (`engage_nav.py`) |
-| Regroup | friendly icons visible and no enemy (ADR 028 rev 4) | steer to the aggregate friendly centroid |
+| Regroup *(opt-in)* | friendly icons visible and no enemy (ADR 028 rev 4) | steer to the aggregate friendly centroid |
 | AttackSupport | always | fallback |
 
 **Why Regroup exists.** The enemy rings are empty for ~57% of battle ticks, and
@@ -231,7 +285,62 @@ enemy renders, and the two signals are complementary in practice. It sits below
 Engage (a real target always wins) and above AttackSupport (which is `always`,
 so anything below it is unreachable).
 
-Actuating tactics self-terminate in their own Controller threads (clear timers, budgets, caps) — `ConditionTactic.terminate` is deliberately a no-op so selector churn cannot abort a manoeuvre mid-flight. Tactics that share keys (eject and evade both own AFTERBURNER) are excluded both by selector priority **and** a runtime yield check (ADR 070 d11), because priority orders selections, not thread lifetimes.
+**Why BoundaryTurn sits above Evade rather than at the very top.** It is
+still below Eject and MissileEvade — a missile in the air or an empty rack
+outranks a boundary the aircraft has not crossed yet — but it must preempt
+ordinary Engage/Disengage/Climb geometry, or the aircraft flies out of the
+arena mid-turn.
+
+Actuating tactics self-terminate in their own Controller threads (clear timers, budgets, caps) — `ConditionTactic.terminate` is deliberately a no-op so selector churn cannot abort a manoeuvre mid-flight. Tactics that share keys (eject and evade both own AFTERBURNER) are excluded both by selector priority **and** a runtime yield check (ADR 070 d11), because priority orders selections, not thread lifetimes. Cruise Afterburner (below) shares the same key by a deliberately opposite rule — see there for why.
+
+---
+
+### Cruise Afterburner (ADR 134, active)
+
+Tree-independent by design: `Controller.note_afterburner_cruise()` is called
+once per tick from `tick_handlers.py`, next to `note_incoming()`, rather than
+being a Selector leaf. A leaf inserted at the bottom of the priority order
+above would almost never tick — `AttackSupport` is the `always`-true fallback
+just above it — and cruise doesn't need exclusive tree control anyway, since
+it only ever touches one key.
+
+**Hysteresis, not one threshold.** Holds afterburner from wherever fuel is
+down to `min_fuel_pct` (40%), then waits for a real recharge up to
+`rearm_fuel_pct` (90%) before holding again — not "re-arm the moment fuel
+ticks back above the floor," which was tried first and produced a rapid
+shallow oscillation that barely left the floor. `confirm_reads` debounces the
+*release* against a single noisy OCR read; no debounce is needed on the
+*engage* side.
+
+**Overrides climb, missile evade and eject rather than deferring to them —
+this is the deliberately opposite rule from the rest of the tree.** Each of
+those already toggles `AFTERBURNER_KEY` on its own schedule (its own fuel
+floor, its own gating), so an earlier design that skipped cruise whenever
+`is_climbing()` / `is_ejecting()` / etc. was true left gaps where fuel sat
+near-full unused during those tactics' own non-afterburner phases — measured
+live, fuel read 100% for roughly a third of one session because Climb kept
+re-selecting near the ground and blocking cruise even while Climb itself
+wasn't holding the key. Cruise now re-asserts the press **every tick** it may
+hold (not just on the engage/release edge), which is what lets it win the key
+back within one tick of any of those subsystems releasing it — a harmless
+repeat press when the key is already down. The one deliberate, named
+trade-off: this also means cruise can now put the key back within a tick of
+eject's own dive-descent controller (ADR 069) deliberately cutting it — an
+accepted cost, not an oversight, and worth watching if eject descents ever
+look off.
+
+It only operates inside `GAME_BATTLE` or `GAME_BATTLE_EJECT` (eject is a
+genuine flight-command state, not one where wingman should stand down), while
+a mission is running, and outside manual takeover
+(`_manual_takeover_active()`, SAF-001) — none of which are tactic state; all
+of them mean "wingman is not commanding flight input right now" rather than
+"a tactic more important than cruise is running."
+
+Live-soaked 8h57m, 92 missions, 267 eject sequences: 916 engage/release
+cycles, exactly balanced, zero stuck keys. Whether the extra speed helps or
+hurts survival — the reason it was built — is still an open question, the
+same way ADR 128's afterburner-during-alert hold is; this soak validated the
+mechanism runs cleanly, not the outcome.
 
 ---
 
@@ -633,5 +742,11 @@ held afterburner and pitch key, and the operator could not fly.
 | [108](adr/108-boundary-detection-for-the-new-minimap.md) | Boundary detection for the new minimap: reconnect the line, pick by shape |
 | [109](adr/109-eject-yields-to-the-survival-hold.md) | Eject yields to the survival hold: loiter's objective outranks the empty-rack trade |
 | [110](adr/110-the-survival-hold-owns-the-flight-path.md) | The survival hold owns the flight path: the combat branch yields, the orbit holds altitude |
+| [121](adr/121-a-hung-shutdown-must-leave-evidence.md) | A hung shutdown must leave evidence: the ADR 121 watchdog, plus the SIGHUP and standby-Ctrl-C-race gaps found and closed 2026-09-08 (FR-010) |
+| [128](adr/128-afterburner-during-an-incoming-alert.md) | Afterburner held during an incoming alert — the direct precedent for ADR 134's cruise hold |
+| [134](adr/134-cruise-afterburner-above-fuel-floor.md) | Cruise afterburner above a fuel floor: tree-independent hysteresis hold, overrides climb/evade/eject |
 
-*(This index is incomplete: ADRs 073-097 are not yet listed.)*
+*(This index is incomplete: ADRs 073-097 and 111-120/122-127/129-133 are not yet
+listed. The gap is largest around the boundary-turn/loiter tuning series
+(101-127) and the takeover-attribution/standby series (129-133) — see
+`docs/adr/` directly for the full set until this index catches up.)*

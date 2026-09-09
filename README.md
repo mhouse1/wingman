@@ -2,11 +2,11 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.8.7 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04), on **CPU only**, from a low-end laptop to a desktop workstation.
+Current version: v1.8.8 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04), on **CPU only**, from a low-end laptop to a desktop workstation.
 
-![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI.png)
-![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI2.png)
-![GAME_BATTLE with crop overlays](test_screenshots/GAME_AI3.png)
+![GAME_BATTLE with crop overlays](docs/images/game-battle-crop-overlay-1.png)
+![GAME_BATTLE with crop overlays](docs/images/game-battle-crop-overlay-2.png)
+![GAME_BATTLE with crop overlays](docs/images/game-battle-crop-overlay-3.png)
 
 ---
 
@@ -82,6 +82,7 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 | Shadow-first tactic pipeline: selection-only validation before actuation (ADR 073) | ✅ |
 | Per-engagement survival metric: 10 s survival split evade vs no-evade (ADR 070 V5) | ✅ |
 | Incoming missile detection (template matching + OCR fallback) and flare response | ✅ |
+| Cruise afterburner: hysteresis-banded high-speed hold (burn to 40% fuel, re-arm at 90%) independent of tactic selection (ADR 134) | ✅ |
 | Health/ammo OCR-driven mission behavior | ✅ |
 | Dual-sensor respawn detection: overlay OCR with a health-signal fallback (ADR 064) | ✅ |
 | Health-gated immediate mission restart, including after a manual-mode death (ADR 059) | ✅ |
@@ -247,7 +248,7 @@ See ADR 099 and `docs/hldd/009-nested-display-isolation-hldd.md` for the design.
 Layered lanes from fast unit checks to runtime-realistic gates:
 
 ```bash
-make test               # core pytest suite and HTML report
+make test               # core pytest suite and HTML report — portable, runs on any clone
 make tp                 # fast preview bundle: test + ADR044/ADR045 gates + performance previews
 make tp-full            # full preview bundle: tp + ADR037 PATH1/PATH2 real-OCR lane
 make rr-path1-gate      # ADR044 deterministic runtime replay gate (full wingman.main loop + assertions)
@@ -256,6 +257,14 @@ make ocr                # ADR037 real-OCR integration tests (PATH1/PATH2)
 ```
 
 Run `make tp` before proposing a release; `make tp-full` for the complete pre-release sweep.
+
+**`make tp` and `make tp-full` are veda-only** (ADR 100 D7): the screenshot
+corpora those gates need are no longer tracked in git — they live on veda's
+disk alone, to keep the repository from growing unbounded. Both targets
+refuse to run with a clear error on any other host. `make test` stays fully
+portable: every corpus-dependent test skips gracefully instead of failing
+when the corpus is absent, so a fresh clone still gets a real, if narrower,
+green run.
 
 ---
 

@@ -275,7 +275,14 @@ def test_level3_unit_ocr():
     ],
 )
 def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
-    """Validate continue text OCR includes 'LICK TO C' in the click_to crop region."""
+    """Validate continue text OCR includes 'LICK TO' in the click_to crop region.
+
+    Tolerant substring of "CLICK TO CONTINUE" — EasyOCR's exact truncation of
+    this crop varies run to run on identical pixels (observed both "LICK TO C"
+    and "CLICK TO" against the same P1_070 frame). "LICK TO" is the substring
+    common to every truncation seen so far; narrower checks flake on real OCR
+    non-determinism rather than catching a regression.
+    """
     cfg = load_config()
     analyzer = GameStateAnalyzer(cfg)
     frame = _load_image(image_path)
@@ -293,8 +300,8 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
     extracted_text = " ".join(str(result) for result in ocr_results)
     normalized = " ".join(extracted_text.upper().split())
 
-    assert "LICK TO C" in normalized, (
-        f"Expected 'LICK TO C' in click_to crop for {image_path.name}; got: {normalized!r}"
+    assert "LICK TO" in normalized, (
+        f"Expected 'LICK TO' in click_to crop for {image_path.name}; got: {normalized!r}"
     )
 
 

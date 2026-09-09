@@ -256,11 +256,20 @@ eject time. Live observation decides both.
   that motivated D9. One clean cycle in this same log (100% to 27% to a
   correct wait-for-92%-before-re-arming) confirmed D8's hysteresis itself was
   already working; the gap was entirely D3's deferral.
-  **D9 — not yet soaked.** The override behavior above (V4-D9) is unit-tested
-  but has not yet had a live session. What to watch for: whether fuel-at-100%
-  time drops as expected now that Climb no longer blocks cruise, and whether
-  eject sequences show any descent-control anomaly from cruise's re-press
-  fighting the dive controller (see Consequences).
+  **D9 soaked, 2026-09-08, 13h05m, 134 missions, 401 respawns, 414 eject
+  sequences:** fuel-at-100% time fell to **6.7%** of all readings (2,125 of
+  31,923), against roughly a third in the pre-D9 session above — direct
+  confirmation that overriding climb/evade/eject (D9) fixed the actual
+  problem, not just the hysteresis band (D8) on its own. 1,165 engage /
+  1,165 release — exactly balanced. Zero `[ERROR]`/`Traceback` in 13 hours.
+  No descent-control anomaly observed in eject sequences (none logged any
+  unusual termination reason), though this soak — like the one before it —
+  cannot distinguish "no interference" from "interference too subtle to show
+  up as a distinct log line," the same caveat already on record. Same
+  session also produced a boundary-crossing rate of 0.149/mission (ADR 106),
+  back inside the long-standing band after the previous session's 0.261
+  outlier — tempering, not confirming, the ADR 106 hypothesis that cruise's
+  extra speed was raising crossings.
 
 ## References
 

@@ -296,9 +296,15 @@ this block directly.
 
 ### Validation
 
-- V1 — live, still open. The next session where a Ctrl-C and the second
-  Backspace land close together should show `"closing down anyway"` and a
-  full teardown, instead of `"leaving MetalStorm running"` with the close
-  request discarded. Not yet observed, since the fix landed after the
-  incident that motivated it.
+- V1 — the race itself still unexercised; the surrounding path confirmed
+  clean. The 13h05m session immediately following this fix (2026-09-08
+  06:12-19:18, 134 missions) ended via a normal, non-racing second Backspace
+  and showed the complete expected sequence with no regression:
+  `STANDBY: second Backspace — closing down` → `Game shutdown: closing
+  Metalstorm.exe` → `Nested display: closing Xwayland for :3` → `XKey: :3
+  closed as expected` → `Nested display: :3 closed`, zero `[ERROR]` lines.
+  That confirms the `except KeyboardInterrupt` change didn't disturb the
+  ordinary path. It does **not** validate the fix itself — no Ctrl-C raced
+  the Backspace in this session, so the new `close_all_requested()` branch
+  was never entered. Still open: a session where the two actually race.
 
