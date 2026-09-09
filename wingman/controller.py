@@ -323,6 +323,12 @@ class Controller:
         # Handle to the current disengage_roll_right maneuver thread
         # (ADR 024 3.1b — liveness for the Disengage leaf).
         self._disengage_thread: "threading.Thread | None" = None
+        # Stop event for the disengage roll hold — deliberately separate from
+        # _mission_cancel (the roll must outlive the cancel it issues itself,
+        # see disengage_roll_right's own comment) but must still yield to a
+        # manual takeover. Set by release_for_manual_takeover(); cleared at
+        # the start of each new disengage_roll_right() call.
+        self._disengage_stop = threading.Event()
         # ADR 070: set SYNCHRONOUSLY by missile_evade_mode() before the thread
         # spawns (d8 — the duplicate-start guard is a design property, closed
         # in the caller's thread before any concurrency exists), cleared by the
@@ -2008,10 +2014,13 @@ class Controller:
             return
         logger.info("\033[93m↩ No enemy for 30s — cancelling mission and rolling right for %.0fs\033[0m", duration)
         self.cancel_mission()
+        self._disengage_stop.clear()
 
         def _run():
             if not keyboard_module:
                 logger.error("Controller: keyboard library not available for disengage_roll_right")
+                return
+            if self._disengage_stop.is_set():
                 return
             self.start_search_and_destroy_loop()
             # ROLL_RIGHT is a watched maneuver key: without the programmatic
@@ -2022,17 +2031,29 @@ class Controller:
             self._inc_programmatic_key(ROLL_RIGHT_KEY)
             try:
                 _press_key(ROLL_RIGHT_KEY)
-                # NOT _interruptible_sleep: cancel_mission() above set
-                # _mission_cancel, which would abort the roll after
-                # milliseconds and leave the aircraft flying straight out of
-                # the arena (observed 2026-07-28 20:40:03, an 8 ms "roll").
-                # The roll must outlive the cancel it issued; only program
-                # exit interrupts it.
+                # NOT _interruptible_sleep on _mission_cancel: cancel_mission()
+                # above set it, and reacting to it here would abort the roll
+                # after milliseconds and leave the aircraft flying straight
+                # out of the arena (observed 2026-07-28 20:40:03, an 8 ms
+                # "roll"). The roll must outlive the cancel it issued.
+                #
+                # SAF-001 (2026-09-09): that guard had no manual-takeover
+                # awareness at all — this thread held ROLL_RIGHT via the raw
+                # _press_key primitive, bypassing _execute_key_press's takeover
+                # gate entirely, and start_search_and_destroy_loop() above ran
+                # unconditionally. Enter mid-roll left wingman rolling the
+                # aircraft and re-arming padlock/weapon fire for up to the
+                # full duration while the operator believed they had control.
+                # _disengage_stop is dedicated to exactly this — set only by
+                # release_for_manual_takeover(), never by a plain mission
+                # cancel — so it can interrupt the roll without reintroducing
+                # the bug above.
                 deadline = time.time() + duration
                 while time.time() < deadline:
                     if self._exit_event is not None and self._exit_event.is_set():
                         break
-                    time.sleep(0.1)
+                    if self._disengage_stop.wait(timeout=0.1):
+                        break
             finally:
                 _release_started = time.time()
                 try:
@@ -4077,6 +4098,7 @@ class Controller:
         self._climb_stop.set()
         self._boundary_turn_stop.set()   # ADR 107: it holds two flight axes
         self._sg_stop.set()
+        self._disengage_stop.set()   # SAF-001 2026-09-09: was missing entirely
         try:
             self.cancel_mission()
         except Exception:

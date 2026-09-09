@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.8"
-WINGMAN_VERSION_DETAILS = "Minimap boundary detection"
+WINGMAN_VERSION = "1.8.9"
+WINGMAN_VERSION_DETAILS = "ACS"
 
 from .capture import Capture
 from .config_schema import assert_valid_config
