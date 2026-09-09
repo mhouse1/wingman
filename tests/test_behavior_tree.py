@@ -1049,3 +1049,52 @@ def test_a_snapshot_without_the_near_field_behaves_as_before():
     c = _bcond(turn_frac=0.30, release_frac=0.45)
     assert c(_bsnap(0.20, +0.19)) is True
     assert c(_bsnap(0.52, +0.40)) is False
+
+
+# ---------------------------------------------------------------------------
+# Design 011 (ACS Mode) step 1: jet_profile -> AnalyzerSnapshot.has_padlock.
+# Config plumbing only — nothing branches on this yet, so these tests only
+# guard the resolution logic, not any tactic behaviour.
+# ---------------------------------------------------------------------------
+
+def test_snapshot_has_padlock_defaults_true():
+    """Every profile shipped today is has_padlock: true; a snapshot built
+    without the field must not silently read as boresight-only."""
+    assert make_snap().has_padlock is True
+
+
+def test_snapshot_has_padlock_can_be_overridden():
+    assert make_snap(has_padlock=False).has_padlock is False
+
+
+def _handler(jet_profile_cfg=None):
+    from wingman.tick_handlers import BehaviorTreeHandler
+    return BehaviorTreeHandler(None, None, {}, jet_profile_cfg=jet_profile_cfg)
+
+
+def test_handler_resolves_has_padlock_true_for_the_active_profile():
+    h = _handler({"active": "j20", "profiles": {"j20": {"has_padlock": True}}})
+    assert h._has_padlock is True
+
+
+def test_handler_resolves_has_padlock_false_for_the_active_profile():
+    h = _handler({"active": "generic_boresight",
+                  "profiles": {"j20": {"has_padlock": True},
+                               "generic_boresight": {"has_padlock": False}}})
+    assert h._has_padlock is False
+
+
+def test_handler_defaults_to_padlock_true_with_no_jet_profile_config():
+    """A config predating Design 011 has no jet_profile block at all — must
+    resolve to today's only real airframe behaviour, not crash or guess
+    boresight-only."""
+    assert _handler(None)._has_padlock is True
+    assert _handler({})._has_padlock is True
+
+
+def test_handler_defaults_to_padlock_true_for_an_unknown_active_profile():
+    """A typo'd or not-yet-defined active profile must not silently resolve
+    to boresight-only — the safe default matches every profile shipped
+    today."""
+    h = _handler({"active": "does_not_exist", "profiles": {}})
+    assert h._has_padlock is True

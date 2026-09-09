@@ -99,6 +99,11 @@ _CROP = Section(
 )
 
 
+# Design 011 (ACS Mode) step 1. Profile names are caller-defined (like
+# `crops:`), not fixed schema keys — MapOf, not Section, for the same reason.
+_JET_PROFILE = Section(children={"has_padlock": BOOL})
+
+
 SCHEMA = Section(
     # "Required" means the program cannot construct itself without the key, not
     # merely that a full config would normally carry it. `region` and `monitor`
@@ -110,6 +115,10 @@ SCHEMA = Section(
     children={
         "unattended_mode": BOOL,
         "accept_invite": BOOL,
+        "jet_profile": Section(children={
+            "active": STR,
+            "profiles": MapOf(_JET_PROFILE),
+        }),
         # Upper bound is a sanity guard (a tick slower than a minute is a typo);
         # no lower bound beyond non-negative — the replay lanes tick at 0.01.
         "loop_interval_sec": _num(0.0, 60.0),
@@ -389,6 +398,7 @@ SCHEMA = Section(
 
         "tracking": Section(children={
             "enabled": BOOL,
+            "actuate": BOOL,
             "acquisition_region_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
             "deadband": FRACTION,
             "kp": _num(0),

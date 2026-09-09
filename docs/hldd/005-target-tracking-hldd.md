@@ -40,7 +40,12 @@ Desired behavior:
 ## Non-Goals
 
 1. Full 3D interception guidance.
-2. Pitch/yaw control loops.
+2. Pitch/yaw control loops. Still true for *this* design — the roll
+   controller stays roll-only. Where a consumer needs pitch alongside it
+   (ADR 136's dive-and-track mode, HLDD-011's future `BoresightEngage`),
+   pitch is driven by a separate, already-existing primitive
+   (`eject_and_dive`'s `NOSE_DOWN` impulse rotation, ADR 069) called
+   alongside this tracker's roll controller, not folded into it.
 3. Multi-target tactical prioritization beyond single-target lock persistence.
 
 ---
@@ -259,15 +264,45 @@ State meanings:
 
 ## Safety and Gating Rules
 
-Tracking control is suppressed when any of the following is true:
+This section originally described one combined gate on the whole tracking
+capability. As of 2026-09-09 the implementation (already live in
+`wingman/tick_handlers.py`'s `TrackingHudHandler`, ahead of this document —
+see the note at the top of Implementation Plan) splits **sensing** from
+**actuation**, and the two are gated differently:
 
-1. game state is not `GAME_BATTLE`.
-2. game state is `GAME_BATTLE_MANUAL`.
-3. mission is not running.
-4. target not visible and lost timeout exceeded.
-5. optional altitude guard fails (if altitude source is available).
+- **Sensing** (`TargetTracker.update(frame)`, HUD rendering — no key press)
+  runs in `GAME_BATTLE` **and** `GAME_BATTLE_MANUAL`. This is deliberate:
+  sensing quality can be validated live while an operator flies manually and
+  deliberately points at targets, with zero actuation risk — exactly the
+  "Live dry-run logging mode" this document's own Validation Strategy step 2
+  already called for, now generalized to run continuously rather than only
+  during automated flight. A config flag, `tracking.actuate` (default
+  `false`), gates whether detections are ever turned into roll commands at
+  all — even in `GAME_BATTLE` — so enabling `tracking.enabled` for the first
+  time can never silently start rolling the aircraft.
+- **Actuation** (`Controller.orient_nose_to_target`) is suppressed unless
+  *all* of the following hold:
+  1. `tracking.actuate` is `true`.
+  2. game state is `GAME_BATTLE` (never `GAME_BATTLE_MANUAL`).
+  3. mission is running (`Controller.is_mission_running()`).
+  4. target visible and lost timeout not exceeded.
+  5. optional altitude guard passes (if altitude source is available).
 
-Manual takeover always wins over autonomous roll correction.
+Manual takeover always wins over autonomous roll correction — rule 2 above
+is absolute, not merely a default.
+
+**This split exists for a second consumer, not only for this document's own
+validation.** ADR 136 (`docs/adr/136-heatseeker-dive-invokable-mode.md`)
+calls `TargetTracker.update()` and `Controller.orient_nose_to_target()`
+directly from inside `eject_and_dive`'s existing closed-loop thread, gated
+by its own new flag (`eject.heatdive_enabled`, default `false`) rather than
+a separate mode or mission. That caller does **not** go through
+`tracking.enabled` / `tracking.actuate` at all — those flags gate only the
+ambient, tick-driven path described in this document. Manual-takeover
+cancellation is inherited for free: `eject_and_dive` is already covered by
+`release_for_manual_takeover()`/`cancel_mission()`, and ADR 136's addition
+shares `eject_and_dive`'s own `self._eject_stop` event as its stop signal
+rather than adding a second one.
 
 ---
 
@@ -333,6 +368,15 @@ Notes on HSV values:
 ---
 
 ## Implementation Plan
+
+**Implementation status (2026-09-09):** this plan is implemented, not
+speculative — `wingman/tracker.py`'s `TargetTracker` and
+`TrackingHudHandler` in `wingman/tick_handlers.py` exist and are wired into
+the main loop today, gated by `tracking.enabled` (sensing) and
+`tracking.actuate` (actuation, see Safety and Gating Rules above). The
+Status table above still says `Draft` because the live-validation steps
+under Validation Strategy have not been run against a real match yet —
+"implemented" and "validated" are tracked separately in this document.
 
 1. Analyzer
 - add `detect_enemy_target_x(frame)` returning centroid and error.
@@ -463,5 +507,15 @@ Suggested reward/objective components for future work:
 
 - `docs/adr/027-j20-target-painting-mode.md`
 - `docs/adr/028-enemy-quadrant-detection-and-nose-orientation.md`
+- `docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md` — the
+  `NOSE_DOWN` pitch primitive a pitch-needing consumer of this design
+  reuses (see Non-Goal 2).
+- `docs/adr/136-heatseeker-dive-invokable-mode.md` — second, direct
+  consumer of this tracker's sensing and roll controller, outside the
+  `tracking.enabled`/`tracking.actuate` ambient path (see Safety and
+  Gating Rules).
 - `docs/hldd/003-enemy-quadrant-detection-hldd.md`
+- `docs/hldd/011-acs-mode-hldd.md` — extends this design's sensing/roll
+  core with a pitch channel and a lock-confirmation state for boresight
+  engagement.
 - `docs/architecture.md`

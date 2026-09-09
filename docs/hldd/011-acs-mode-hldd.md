@@ -123,8 +123,8 @@ and what is genuinely new.
 
 | ACS capability | Existing design | Status found | Disposition |
 |---|---|---|---|
-| Screen-space target detection and centering | Design 005 (`005-target-tracking-hldd.md`) | Drafted 2026-06-26, `tracking.enabled: false` in config, never validated live | **Extend.** This is the sensing and roll-controller core of boresight engagement. Needs pitch added (Design 005 was roll-only, "Non-Goals: pitch/yaw control loops") and a lock-confirmation signal added (see below). |
-| Coarse target selection / steering toward contacts | Design 003 (`003-enemy-quadrant-detection-hldd.md`, now "ring-engage navigation") + `wingman/engage_nav.py` | Implemented, live-validated, backs FR-005 | **Reuse as coarse layer.** Keeps its role: get the nose roughly toward a contact from long range. Boresight's fine tracker (Design 005) takes over once a target is in-frame, exactly as Design 003's doc already states ("both actuate through the same `orient_nose_to_target`... the terminal loop wins"). |
+| Screen-space target detection and centering | Design 005 (`005-target-tracking-hldd.md`) | Implemented (sensing/actuation split live as of 2026-09-07), `tracking.enabled`/`tracking.actuate` both default `false`, not yet live-validated against a real match | **Extend.** This is the sensing and roll-controller core of boresight engagement. Needs pitch added (Design 005 was roll-only, "Non-Goals: pitch/yaw control loops") and a lock-confirmation signal added (see below). ADR 136 is a second, narrower direct consumer of this same sensing/roll core, run inside the eject dive rather than a tree leaf — see Refinement Backlog item 4. |
+| Coarse target selection / steering toward contacts | Design 003 (`003-enemy-quadrant-detection-hldd.md`, now "ring-engage navigation") + `wingman/engage_nav.py` | Implemented, live-validated, backs FR-005 | **Reuse as coarse layer.** Keeps its role: get the nose roughly toward a contact from long range. Boresight's fine tracker (Design 005) takes over once a target is in-frame, exactly as Design 003's doc already states: both actuate through `Controller.orient_nose_to_target`, and the shared cooldown timestamp lets the terminal loop win when both want the roll axis. |
 | Weapon employment / fire discipline | `search_and_destroy_loop`, `padlock_camera()`, `target_painting_mode` | Implemented, padlock-only | **New parallel path**, not a modification. `BoresightEngage` fires only on a confirmed lock signal; padlock jets keep their existing path unchanged. |
 | Waypoint / objective selection (air superiority, base capture) | Design 004 (`004-strike-package-bravo-hldd.md`) | Drafted 2026-05-06, never implemented, written for multi-instance squad play | **Extend, single-instance subset.** Reuse the game-type detection, base-ownership crops, and priority-of-targets logic; drop the emote-command layer (Non-Goal above). |
 | Terrain avoidance | Design 001 (`001-terrain-avoidance-hldd.md`) | Drafted 2026-05-03, never implemented | **Gap — see "Terrain Avoidance" below.** Neither adopted nor formally superseded; the codebase evolved a different mechanism instead. |
@@ -163,18 +163,30 @@ nothing new — they are correct for any airframe today and stay untouched.
 flowchart TD
     IDLE[Idle] --> RESPAWN[RespawnWait]
     RESPAWN --> EJECT[Eject]
-    EJECT --> EVADE[MissileEvade]
-    EVADE --> BOUND[BoundaryTurn]
-    BOUND --> DISENGAGE[Disengage]
-    DISENGAGE --> CLIMB[Climb]
+    EJECT --> MISSILEEVADE[MissileEvade]
+    MISSILEEVADE --> BOUND["BoundaryTurn (opt-in)"]
+    BOUND --> EVADE["Evade - selection-only, uncalibrated"]
+    EVADE --> DISENGAGE[Disengage]
+    DISENGAGE --> CLIMB["Climb (opt-in)"]
     CLIMB --> PROFILE{has_padlock}
     PROFILE -->|true| ENGAGE[Engage - padlock path, unchanged]
     PROFILE -->|false| BORESIGHT[BoresightEngage - new]
     ENGAGE --> WAYPOINT
     BORESIGHT --> WAYPOINT[WaypointObjective - new]
-    WAYPOINT --> REGROUP[Regroup]
+    WAYPOINT --> REGROUP["Regroup (opt-in)"]
     REGROUP --> SUPPORT[AttackSupport]
 ```
+
+The `Evade` leaf (distinct from `MissileEvade`) exists in the tree today but
+is selection-only — no Controller tactic is wired to it and its health
+threshold is unset until calibrated (ADR 024). It costs ACS Mode nothing and
+needs no changes here; it is included so this diagram matches the real
+current tree exactly; whoever implements this should not need to
+cross-reference `behavior_tree.py` to find a leaf this diagram silently
+dropped. `BoundaryTurn`, `Climb`, and `Regroup` are each config-gated
+opt-in insertions in the real tree (see the Behavior Tree section of
+`docs/architecture.md`), not unconditional members — marked here for the
+same reason.
 
 Priority order is otherwise the existing ADR 107/109-114 ladder, unchanged.
 `BoresightEngage` occupies the same priority slot `Engage` holds today,
@@ -266,7 +278,11 @@ flowchart TD
 
 Reused from Design 004 unchanged: game-type OCR gating, `BASE_A_STATUS` /
 `BASE_B_STATUS` / `BASE_C_STATUS` crop family, ownership-priority resolution
-(enemy-owned before contested before neutral). Dropped from Design 004:
+— Design 004's own resolution is two-tiered, not three: **(1)** enemy-owned
+base first, **(2)** contested and neutral bases grouped as the second tier
+with no ranking between them. `WaypointObjective`'s selection logic should
+be built against that actual rule rather than a three-way split. Dropped
+from Design 004:
 emote parsing and the anti-stack squad-split policy — both are meaningless
 with one instance and reintroducing them is future multi-instance work, not
 this design.
@@ -335,14 +351,29 @@ effort:
    codebase — it needs a reference-screenshot pass (same method as Design
    005's marker-color derivation) against the target boresight-only
    airframe to find whatever visual lock cue its HUD shows.
-4. **Design 005's tracker has never been enabled or live-validated.**
-   `tracking.enabled: false` in shipped config; it is roll-only (no pitch);
-   its own Open Questions are unanswered ("should tracking output feed
-   behavior-tree blackboard inputs directly?" — yes, now, via
-   `AnalyzerSnapshot`, which didn't exist in its current form when Design
-   005 was drafted). Bringing it up to a validated baseline is a
-   precondition for `BoresightEngage`, not something ACS Mode can assume
-   already works.
+4. **Design 005's tracker is implemented but not yet live-validated.**
+   `tracking.enabled`/`tracking.actuate` both default `false` in shipped
+   config; it is roll-only (no pitch); its own Open Questions are unanswered
+   ("should target-tracking output feed future behavior-tree blackboard
+   inputs directly?" — yes, now, via `AnalyzerSnapshot`, which didn't exist
+   in its current form when Design 005 was drafted). Bringing it up to a
+   validated baseline is a precondition for `BoresightEngage`, not something
+   ACS Mode can assume already works.
+
+   **ADR 136 is a narrower, earlier live-validation path for this exact
+   gap.** A config-gated addition inside `eject_and_dive` itself (not a tree
+   leaf, not a separate mission — see ADR 136) calls Design 005's tracker
+   and roll controller directly during the dive that already fires
+   automatically after primary missiles run empty, running alongside
+   `eject_and_dive`'s existing `NOSE_DOWN` pitch primitive (ADR 069)
+   unmodified, rather than adding pitch to Design 005 itself. It does not
+   implement lock confirmation (`ToneWait`/`LockConfirmed` below remain
+   unbuilt) and does not replace this backlog item — it is real flight data
+   on the sensing/roll core ahead of and separate from `BoresightEngage`,
+   gathered without needing any of items 1, 2, 3, 5, 6, or 7 resolved first,
+   since it activates automatically (no new hotkey or operator action) and
+   only touches the J20 (`has_padlock: true`, no jet-profile branching
+   involved) during a sequence already scoped to that one airframe.
 5. **No game-mode or per-jet config exists yet.** `jet_profile` and the
    air-superiority/CTF objective crops above are all new config surface,
    none calibrated. Standard calibration-tooling work
@@ -352,6 +383,14 @@ effort:
    coordinates are placeholders and require calibration by monitor/device" —
    Design 004 itself.) Never calibrated against a real Air Superiority
    match.
+7. **Neither `jet_profile` nor `acs_mode` exists in `wingman/config_schema.py`
+   yet** — checked directly, zero references to either key. This is a harder
+   gate than item 5's calibration work: this project's config loader is
+   fail-fast by design (`CLAUDE.md`: "Adding a config key means adding it
+   here in the same change") and refuses to **start the process at all** on
+   an unrecognized key, not just warn. Both new config blocks above need
+   schema entries in the same change that introduces them, before any of
+   this can boot even in shadow mode.
 
 ---
 
@@ -498,6 +537,10 @@ project's proven method for landing a new tactic without a live regression:
   nose-orientation and weapon-mode work Design 005 also cites.
 - `docs/adr/070-missile-evade-tactic.md`, `docs/adr/073-*-climb-tactic*.md` —
   rollout template this design's Rollout Plan follows.
+- `docs/adr/136-heatseeker-dive-invokable-mode.md` — config-gated addition
+  to the existing eject dive that exercises Design 005's tracker and roll
+  controller directly, ahead of and independent from `BoresightEngage`; see
+  Refinement Backlog item 4.
 - `docs/adr/107-boundary-turn-tactic.md`,
   `docs/adr/122-turn-away-from-the-edge-not-always-right.md`,
   `docs/adr/125-measure-whether-the-turn-turns.md`,

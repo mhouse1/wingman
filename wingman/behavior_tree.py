@@ -96,6 +96,12 @@ class AnalyzerSnapshot:
     # ADR 122: lateral offset of the nearest boundary point, positive to the
     # RIGHT of the nose. The turn rolls away from it.
     boundary_lateral: "float | None" = None
+    # Design 011 (ACS Mode), step 1: which weapon-employment tactic the
+    # active airframe supports, read once from jet_profile.active at startup.
+    # True today for every configured profile — nothing branches on this yet,
+    # it exists so a future BoresightEngage leaf has something to condition
+    # on without a second decision framework. See docs/hldd/011-acs-mode-hldd.md.
+    has_padlock: bool = True
 
     @property
     def contacts(self) -> int:

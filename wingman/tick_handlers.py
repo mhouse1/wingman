@@ -138,6 +138,10 @@ class TrackingHudHandler:
         self._hud = hud_renderer
         self._analyzer = analyzer
         self._ctrl = ctrl
+        # Design 005's own "Live dry-run logging mode" — off (sensing-only)
+        # by default even when tracking itself is enabled, so turning
+        # tracking on for the first time can never silently start rolling.
+        self._actuate = bool(tracking_cfg.get("actuate", False))
         self._ctl_cfg = {
             "deadband": float(tracking_cfg.get("deadband", 0.05)),
             "kp": float(tracking_cfg.get("kp", 0.30)),
@@ -152,15 +156,24 @@ class TrackingHudHandler:
             self._tracker.reset()
 
     def tick(self, frame, current_game_state, game_state) -> bool:
-        # Target tracking — only during GAME_BATTLE (not GAME_BATTLE_MANUAL) and
-        # only when a mission is running: no autonomous roll without mission control.
+        # Sensing: GAME_BATTLE and GAME_BATTLE_MANUAL alike. This never
+        # touches a key — pure detection, fed to the HUD — so it can safely
+        # run while the operator flies manually, deliberately pointing at
+        # targets to validate detection quality with zero actuation risk
+        # (Design 005's own "Live dry-run logging mode").
         tracking_obs = None
-        if (self._tracker.enabled
-                and current_game_state == GameState.GAME_BATTLE
-                and self._ctrl.is_mission_running()):
+        if self._tracker.enabled and current_game_state in (
+            GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL
+        ):
             tracking_obs = self._tracker.update(frame)
             err = tracking_obs.get("error_norm")
-            if err is not None and tracking_obs.get("visible"):
+            # Actuation: strictly GAME_BATTLE, a running mission, and the
+            # dry-run flag off — unchanged from before this split, and not
+            # widened by the sensing gate above (SAF-001).
+            if (self._actuate
+                    and err is not None and tracking_obs.get("visible")
+                    and current_game_state == GameState.GAME_BATTLE
+                    and self._ctrl.is_mission_running()):
                 cmd = self._ctrl.orient_nose_to_target(err, **self._ctl_cfg)
                 if cmd is not None:
                     logger.debug(
@@ -755,10 +768,19 @@ class BehaviorTreeHandler:
     """
 
     def __init__(self, analyzer, ctrl, bt_cfg, j20_cfg=None, minimap_cfg=None,
-                 ammo_events=None, stats_tracker=None):
+                 ammo_events=None, stats_tracker=None, jet_profile_cfg=None):
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._mode = str(bt_cfg.get("mode", "off")).lower()
+        # Design 011 (ACS Mode) step 1: read once at startup, not per tick —
+        # the airframe does not change mid-session. Unknown/missing active
+        # profile defaults to has_padlock: true, the safe default matching
+        # every profile actually shipped today.
+        _jp = jet_profile_cfg or {}
+        _active_profile = str(_jp.get("active", "j20"))
+        _profiles = _jp.get("profiles", {}) or {}
+        self._has_padlock = bool(
+            (_profiles.get(_active_profile, {}) or {}).get("has_padlock", True))
         self._enemy_last_seen_ts = 0.0
         # ADR 028 revision 4 / Design 010 instrumentation.
         self._friendly_components = None
@@ -1129,6 +1151,7 @@ class BehaviorTreeHandler:
             boundary_near=_b_near,
             boundary_lateral=_b_lat,
             boundary_forward=_b_fwd,
+            has_padlock=self._has_padlock,
         )
         self._writer.set("snapshot", snap)
         self._tree.tick()

@@ -962,6 +962,7 @@ def main():
     behavior_tree = BehaviorTreeHandler(
         analyzer, ctrl, cfg.get("behavior_tree", {}), j20_cfg, cfg.get("minimap", {}),
         ammo_events=ammo_events, stats_tracker=stats_tracker,
+        jet_profile_cfg=cfg.get("jet_profile", {}),
     )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),

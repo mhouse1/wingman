@@ -709,31 +709,50 @@ class _TrackAnalyzerStub:
         return 2
 
 
-def _tracking(tracker=None, hud=None, ctrl=None):
+def _tracking(tracker=None, hud=None, ctrl=None, tracking_cfg=None):
     from wingman.tick_handlers import TrackingHudHandler
     t = tracker or _TrackerStub()
     h = hud or _HudStub()
     c = ctrl or _TrackCtrlStub()
-    return TrackingHudHandler(t, h, _TrackAnalyzerStub(), c, {}), t, h, c
+    return TrackingHudHandler(t, h, _TrackAnalyzerStub(), c, tracking_cfg or {}), t, h, c
 
 
 class TestTrackingHud:
-    def test_tracks_and_orients_in_battle(self):
+    def test_senses_but_does_not_orient_by_default(self):
+        """`actuate` defaults to False even when the tracker itself is
+        enabled — Design 005's dry-run mode, not the pre-split behaviour.
+        Flipping `tracking.enabled` alone must never start live actuation."""
         handler, t, _, c = _tracking()
+        handler.tick(object(), GameState.GAME_BATTLE, {"health": 100})
+        assert t.updates == 1
+        assert c.orients == []
+
+    def test_tracks_and_orients_in_battle_when_actuate_is_on(self):
+        handler, t, _, c = _tracking(tracking_cfg={"actuate": True})
         handler.tick(object(), GameState.GAME_BATTLE, {"health": 100})
         assert t.updates == 1
         assert c.orients == [0.5]
 
     def test_no_autonomous_roll_without_running_mission(self):
-        handler, t, _, c = _tracking(ctrl=_TrackCtrlStub(mission_running=False))
+        """Sensing does not need a running mission — only actuation does
+        (SAF-001: no autonomous roll without mission control)."""
+        handler, t, _, c = _tracking(
+            ctrl=_TrackCtrlStub(mission_running=False),
+            tracking_cfg={"actuate": True},
+        )
         handler.tick(object(), GameState.GAME_BATTLE, {"health": 100})
-        assert t.updates == 0
+        assert t.updates == 1
         assert c.orients == []
 
-    def test_no_tracking_in_manual_mode(self):
-        handler, t, _, c = _tracking()
+    def test_sensing_runs_in_manual_mode_but_actuation_never_does(self):
+        """The whole point of the sensing/actuation split: fly manually,
+        point at targets, validate detection quality — with actuate:true
+        this must still never roll the aircraft while the operator has
+        control (SAF-001)."""
+        handler, t, _, c = _tracking(tracking_cfg={"actuate": True})
         handler.tick(object(), GameState.GAME_BATTLE_MANUAL, {"health": 100})
-        assert t.updates == 0
+        assert t.updates == 1
+        assert c.orients == []
 
     def test_disabled_tracker_is_skipped(self):
         handler, t, _, _ = _tracking(tracker=_TrackerStub(enabled=False))

@@ -13,6 +13,16 @@ nested:
   display: ":3"
   size: "1920x1200"
 
+# Design 011 (ACS Mode), step 1: which weapon-employment tactic the active
+# airframe supports. Read once at startup into AnalyzerSnapshot.has_padlock.
+# Nothing branches on this yet — every profile is has_padlock: true today —
+# it exists so a future BoresightEngage leaf has something to condition on.
+jet_profile:
+  active: j20
+  profiles:
+    j20:
+      has_padlock: true
+
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
 # Default false — accepting drops the aircraft into someone else's squad
@@ -485,6 +495,14 @@ return_to_battle: {region: [0.36, 0.32, 0.64, 0.378], min_red_frac: 0.10,
   text: [RETURNTO, TOBATTLE, NTOBAT, RNTOBAT, TOBAT]}
 tracking:
   enabled: false
+  # Design 005 dry-run/live split. enabled:true + actuate:false is pure
+  # sensing and logging — feeds the HUD in both GAME_BATTLE and
+  # GAME_BATTLE_MANUAL, never presses a key — the "Live dry-run logging
+  # mode" the design already specified but the code never separated out.
+  # Fly manually and point at targets to validate detection quality with
+  # zero actuation risk. actuate:true restores real roll correction, still
+  # strictly GAME_BATTLE + mission-running only (SAF-001, unchanged).
+  actuate: false
   acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
   deadband: 0.05
   kp: 0.3
