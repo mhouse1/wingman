@@ -68,7 +68,9 @@ def test_telemetry_corpus_exact_match_rate():
     from wingman.crop_region import get_crop
 
     corpus = _load_corpus()
-    assert corpus, f"no labeled corpus frames found in {_CORPUS_DIR}"
+    if not corpus:
+        pytest.skip(f"no labeled corpus frames found in {_CORPUS_DIR} "
+                    "(untracked test corpus, ADR 100 D7)")
 
     with open(_CONFIG_PATH, encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)

@@ -5,6 +5,13 @@ A single 'm' press during a battle state must NOT force GAME_LOBBY: at
 GAME_LOBBY, clicked PLAY into the battlefield, and left the lobby quick-scan
 pressing ESC against the running game. A deliberate double press within 2 s
 keeps the stuck-state recovery available.
+
+GAME_BATTLE_MANUAL is the one carve-out, and it postdates that incident.
+'m' is registered as a handback key alongside 'u' (main.py, SAF-001), so in
+manual it means "wingman, take it back" and acts on the first press. The two
+are not in tension: the guarded path is the destructive one (force GAME_LOBBY
+and click PLAY into a live battlefield), while handback only returns to
+GAME_BATTLE, which the operator undoes by pressing the takeover key again.
 """
 
 import threading
@@ -33,6 +40,9 @@ class _FakeFSMAnalyzer:
         self.triggered.append(name)
         if name == "manual_reset":
             self.game_state = GameState.GAME_LOBBY
+        elif name == "manual_release":
+            self.game_state = GameState.GAME_BATTLE
+        return True
 
 
 def _make_ctrl(monkeypatch, analyzer):
@@ -49,8 +59,8 @@ def _make_ctrl(monkeypatch, analyzer):
 
 
 def test_single_press_in_battle_is_refused(monkeypatch):
-    for state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL,
-                  GameState.GAME_BATTLE_EJECT):
+    """GAME_BATTLE_MANUAL is deliberately absent — see the handback test."""
+    for state in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
         analyzer = _FakeFSMAnalyzer(state)
         ctrl = _make_ctrl(monkeypatch, analyzer)
         ctrl._on_auto_mission_hotkey()
@@ -58,8 +68,23 @@ def test_single_press_in_battle_is_refused(monkeypatch):
             f"single press forced lobby from {state.name}")
 
 
-def test_double_press_in_battle_forces_lobby(monkeypatch):
+def test_single_press_in_manual_hands_control_back(monkeypatch):
+    """SAF-001: in manual the key means "wingman, take it" and acts at once.
+
+    Waiting for a second press would leave the operator flying an aircraft they
+    have already asked to give up. The recovery it costs is still reachable —
+    this press lands in GAME_BATTLE, where the double-press guard applies.
+    """
     analyzer = _FakeFSMAnalyzer(GameState.GAME_BATTLE_MANUAL)
+    ctrl = _make_ctrl(monkeypatch, analyzer)
+    ctrl._on_auto_mission_hotkey()
+    assert analyzer.triggered == ["manual_release"]
+    assert ctrl._auto_respawn_restart is True, (
+        "handback must re-arm auto respawn, or wingman flies but never restarts")
+
+
+def test_double_press_in_battle_forces_lobby(monkeypatch):
+    analyzer = _FakeFSMAnalyzer(GameState.GAME_BATTLE)
     ctrl = _make_ctrl(monkeypatch, analyzer)
     ctrl._on_auto_mission_hotkey()
     assert analyzer.triggered == []

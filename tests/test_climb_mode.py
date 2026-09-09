@@ -15,6 +15,7 @@ from wingman.controller import (
     AFTERBURNER_KEY,
     Controller,
     NOSE_UP_KEY,
+    ROLL_RIGHT_KEY,
 )
 
 CLIMB_KEYS = {NOSE_UP_KEY, AFTERBURNER_KEY}
@@ -917,3 +918,117 @@ def test_incoming_does_not_force_burner_on_an_empty_tank(monkeypatch):
 
     ctrl._climb_stop.set()
     assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# ADR 107: BoundaryTurn owns roll AND pitch
+# ---------------------------------------------------------------------------
+
+def _wait_for(pred, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_the_boundary_turn_banks_and_pulls(monkeypatch):
+    """ADR 101 held roll alone and it was measured inert — 8 s of rolling on
+    2026-09-03 left the aircraft at its closest approach, because Climb owned
+    pitch and a bank without a pull does not turn the flight path. Owning both
+    axes is the whole reason this became a tactic."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.boundary_turn_mode(max_s=10.0)
+    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY)), "never banked"
+    assert _presses(kb, NOSE_UP_KEY), "banked without pulling — the ADR 101 defect"
+    assert ctrl.is_boundary_turning()
+    ctrl._boundary_turn_stop.set()
+    assert _wait_for(lambda: not ctrl.is_boundary_turning()), "turn never ended"
+
+
+def test_the_turn_hands_the_airframe_back_flyable(monkeypatch):
+    """SAF-010. This tactic holds NOSE_UP, so it owes the same exit push the
+    climb does: ADR 086 exists because a climb released at +73 degrees coasted
+    1500 m, stalled at 24 KPH and hit the ground."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    # exit_pitch_deg is what ARMS the push; unset it is the documented
+    # pre-ADR-086 behaviour, so the test must configure it to assert on it.
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, exit_pitch_deg=10))
+
+    ctrl.boundary_turn_mode(max_s=0.3)
+    assert _wait_for(lambda: not ctrl.is_boundary_turning(), timeout=4.0)
+    assert _releases(kb, ROLL_RIGHT_KEY), "roll left held"
+    assert _releases(kb, NOSE_UP_KEY), "nose-up left held"
+    assert _presses(kb, NOSE_DOWN_KEY), "no SAF-010 exit push"
+
+
+def test_the_turn_is_idempotent_while_running(monkeypatch):
+    """The ADR 070 d8 pattern: a second selection must not start a second
+    thread onto the same two flight axes."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.boundary_turn_mode(max_s=10.0)
+    assert _wait_for(lambda: _presses(kb, ROLL_RIGHT_KEY))
+    before = len(_presses(kb, ROLL_RIGHT_KEY))
+    ctrl.boundary_turn_mode(max_s=10.0)
+    time.sleep(0.3)
+    assert len(_presses(kb, ROLL_RIGHT_KEY)) == before
+    ctrl._boundary_turn_stop.set()
+    _wait_for(lambda: not ctrl.is_boundary_turning())
+
+
+def test_manual_takeover_stops_the_turn(monkeypatch):
+    """SAF-001. It holds two flight axes, so it must let go the instant the
+    operator asks for the aircraft."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.boundary_turn_mode(max_s=30.0)
+    assert _wait_for(lambda: ctrl.is_boundary_turning())
+    ctrl.release_for_manual_takeover()
+    assert _wait_for(lambda: not ctrl.is_boundary_turning(), timeout=4.0)
+    assert _releases(kb, ROLL_RIGHT_KEY) and _releases(kb, NOSE_UP_KEY)
+
+
+def test_the_turn_reports_what_the_airframe_did(monkeypatch):
+    """ADR 107 V9. Two sessions say a commanded turn does not move the aircraft
+    away from the edge, and nothing recorded whether the AIRFRAME responded —
+    only whether the range did. Without this, "the turn does not work" cannot be
+    split into keys-not-arriving, aircraft-not-rotating, and
+    rotated-but-range-did-not-follow."""
+    from wingman.controller import _summarise_turn
+    assert "n/a" in _summarise_turn([])
+    assert "n/a" in _summarise_turn([(None, None, None)])
+    line = _summarise_turn([(10.0, 900.0, 4000.0), (-40.0, 1500.0, 3000.0)])
+    assert "swing 50" in line, line
+    assert "speed 900..1500" in line
+    assert "n=2" in line
+
+
+def test_the_summary_reports_range_not_endpoints():
+    """A turn that swings the nose through 90 degrees and back reads as no
+    change on endpoints alone — the exact ambiguity V9 needs resolved."""
+    from wingman.controller import _summarise_turn
+    line = _summarise_turn([(0.0, None, None), (90.0, None, None), (0.0, None, None)])
+    assert "swing 90" in line, line
+
+
+def test_the_turn_sampler_keys_on_the_reading_not_the_call():
+    """2026-09-04: a 3.0 s turn reported "swing 0, n=11" — eleven samples of ONE
+    reading. get_telemetry() stamps `taken_at_s` with time.time() on every call,
+    so deduplicating on it never dedupes. The signals carry their own accept
+    timestamps; those are what change when a new reading lands."""
+    import inspect
+    from wingman.controller import Controller
+    src = inspect.getsource(Controller.boundary_turn_mode)
+    assert 'getattr(_snap.speed, "ts", None)' in src
+    assert "taken_at_s" not in src.split("_last_ts[0]")[0].split("_ts = ")[-1], \
+        "taken_at_s changes every call and cannot deduplicate"

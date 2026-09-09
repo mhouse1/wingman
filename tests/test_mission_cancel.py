@@ -123,6 +123,67 @@ def test_mission_lock_not_held_after_cancel_completion(ctrl):
 
 
 # ---------------------------------------------------------------------------
+# Standby (ADR 099): 'u'/'y' must actually restart the mission, not just the
+# FSM state.
+#
+# Measured 2026-09-06 04:25-04:27, wingman.log: after the first Backspace put
+# wingman into standby, every 'u' press logged "mission 'j20' started ->
+# GAME_BATTLE" immediately followed (~50ms later, same poll tick) by "exit
+# requested, aborting mission wait" and "mission_j20 - cancelled, stopping
+# loops". The FSM reached GAME_BATTLE but the mission never ran a single 0.5s
+# cycle — `_exit_event` is set once by the first Backspace and never cleared,
+# so any mission started afterwards saw it immediately and self-cancelled,
+# even though standby keeps hotkeys alive specifically so 'u'/'y' can restart
+# the mission by hand.
+# ---------------------------------------------------------------------------
+
+def test_standby_hotkey_mission_survives_stale_exit_event(ctrl):
+    """A mission started while in standby (operator already hit Backspace once)
+    must keep running — the stale `_exit_event` must not self-cancel it."""
+    ctrl._operator_stop_event.set()  # first Backspace already happened
+    ctrl._exit_event.set()           # left set for the rest of the process
+
+    t = threading.Thread(target=ctrl.mission_j20, daemon=True)
+    t.start()
+
+    deadline = time.time() + 2.0
+    while not ctrl.is_mission_running() and time.time() < deadline:
+        time.sleep(0.01)
+    assert ctrl.is_mission_running(), "mission_j20 never acquired the lock"
+
+    # The old bug self-cancelled within ~50ms of starting; give it far longer
+    # and confirm the mission is still up.
+    time.sleep(0.3)
+    assert ctrl.is_mission_running(), (
+        "mission_j20 self-cancelled on the stale exit_event left over from "
+        "standby entry — 'u' during standby must actually restart the mission"
+    )
+
+    ctrl.cancel_mission()
+    t.join(timeout=2.0)
+    assert not ctrl.is_mission_running()
+
+
+def test_real_exit_still_aborts_the_mission(ctrl):
+    """Without standby (no Backspace yet), a real exit_requested — e.g. SIGTERM
+    or the startup-stall path — must still abort a running mission on its own,
+    with no explicit cancel_mission() call needed."""
+    t = threading.Thread(target=ctrl.mission_j20, daemon=True)
+    t.start()
+
+    deadline = time.time() + 2.0
+    while not ctrl.is_mission_running() and time.time() < deadline:
+        time.sleep(0.01)
+    assert ctrl.is_mission_running(), "mission_j20 never acquired the lock"
+
+    ctrl._exit_event.set()
+    t.join(timeout=2.0)
+
+    assert not t.is_alive(), "mission_j20 did not exit on a real exit_requested"
+    assert not ctrl.is_mission_running()
+
+
+# ---------------------------------------------------------------------------
 # GAME_STARTING loop cancellation tests (stall bug fix)
 # ---------------------------------------------------------------------------
 

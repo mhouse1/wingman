@@ -626,7 +626,10 @@ class Capture:
         """Top-left of the game window in absolute monitor coordinates, or None.
 
         On Wayland/PipeWire: returns the cached xwininfo/frame-diff position.
-        On Windows/X11/mss: returns None (caller uses mss monitor rect instead).
+        On Windows/X11/mss: returns the monitor rect origin, which is where the
+        frames actually came from. It used to return None here, which is what
+        made every click on an X11 session fail with "offset not known yet".
+        An explicitly configured offset wins over both.
         """
         b = self._backend
         if hasattr(b, "_configured_offset") and b._configured_offset is not None:

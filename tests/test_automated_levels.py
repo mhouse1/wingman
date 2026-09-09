@@ -34,6 +34,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 
 def _load_image(image_path: Path):
+    if not image_path.exists():
+        pytest.skip(f"{image_path} not present (untracked test corpus, ADR 100 D7)")
     frame = cv2.imread(str(image_path))
     assert frame is not None, f"Could not load image: {image_path}"
     return frame
@@ -81,7 +83,8 @@ def test_level1_static_screenshot():
         ("P1_030 (battle HUD)", TEST_SCREENSHOT_B, False)
     ]
     for name, path, should_detect in screenshots:
-        assert path.exists(), f"Test screenshot not found: {path}"
+        if not path.exists():
+            pytest.skip(f"{path} not present (untracked test corpus, ADR 100 D7)")
         cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'
         code, out, err, elapsed = run_command(cmd)
         print(f"\n[Level 1 Output for {name}]\n", out)
@@ -111,7 +114,8 @@ def test_respawn_detection_positive():
         ("P1_050 (respawn overlay)", TEST_SCREENSHOT, "normal quality"),
     ]
     for name, path, description in screenshots:
-        assert path.exists(), f"Test screenshot not found: {path}"
+        if not path.exists():
+            pytest.skip(f"{path} not present (untracked test corpus, ADR 100 D7)")
         cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'
         code, out, err, elapsed = run_command(cmd)
         print(f"\n[Respawn Detection Positive - {name} ({description})]\n", out)
@@ -134,7 +138,8 @@ def test_respawn_detection_negative():
         ("P1_060 (battle HUD)", TEST_SCREENSHOT_D, "no respawn text"),
     ]
     for name, path, description in screenshots:
-        assert path.exists(), f"Test screenshot not found: {path}"
+        if not path.exists():
+            pytest.skip(f"{path} not present (untracked test corpus, ADR 100 D7)")
         cmd = f'"{sys.executable}" {SCRIPT} {path} --grid'
         code, out, err, elapsed = run_command(cmd)
         print(f"\n[Respawn Detection Negative - {name} ({description})]\n", out)
@@ -237,7 +242,8 @@ def test_level3_unit_ocr():
     - Reports preprocessing and recognition timing metrics
     - Completes reliably on CPU (no GPU acceleration required)
     """
-    assert TEST_SCREENSHOT.exists(), f"Test screenshot not found: {TEST_SCREENSHOT}"
+    if not TEST_SCREENSHOT.exists():
+        pytest.skip(f"{TEST_SCREENSHOT} not present (untracked test corpus, ADR 100 D7)")
 
     stage_times = {}
 
@@ -269,7 +275,14 @@ def test_level3_unit_ocr():
     ],
 )
 def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
-    """Validate continue text OCR includes 'LICK TO C' in the click_to crop region."""
+    """Validate continue text OCR includes 'LICK TO' in the click_to crop region.
+
+    Tolerant substring of "CLICK TO CONTINUE" — EasyOCR's exact truncation of
+    this crop varies run to run on identical pixels (observed both "LICK TO C"
+    and "CLICK TO" against the same P1_070 frame). "LICK TO" is the substring
+    common to every truncation seen so far; narrower checks flake on real OCR
+    non-determinism rather than catching a regression.
+    """
     cfg = load_config()
     analyzer = GameStateAnalyzer(cfg)
     frame = _load_image(image_path)
@@ -287,8 +300,8 @@ def test_level4_region33_contains_lick_to_c(require_easyocr, image_path: Path):
     extracted_text = " ".join(str(result) for result in ocr_results)
     normalized = " ".join(extracted_text.upper().split())
 
-    assert "LICK TO C" in normalized, (
-        f"Expected 'LICK TO C' in click_to crop for {image_path.name}; got: {normalized!r}"
+    assert "LICK TO" in normalized, (
+        f"Expected 'LICK TO' in click_to crop for {image_path.name}; got: {normalized!r}"
     )
 
 

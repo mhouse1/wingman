@@ -148,7 +148,8 @@ def test_the_deferred_exit_is_broader_than_the_guards_safe_point():
     The guards and the hotkey mean different things. A guard exit means
     "restart wingman at a clean moment" and should wait for a real lobby. 'z'
     means "stop unless that would abandon an aircraft in flight"."""
-    assert "if ctrl.finish_round_requested() and not _in_round:" in MAIN_SRC
+    assert ("if ctrl.finish_round_requested() and not (_in_round or _ending_round"
+            in MAIN_SRC)
     assert "_in_round = analyzer.game_state in BATTLE_STATES" in MAIN_SRC
     # The guards keep the narrow, lobby-only condition.
     assert "if liveness.should_stop() and _safe:" in MAIN_SRC
@@ -168,12 +169,44 @@ def test_the_exit_still_never_fires_mid_round():
 
 def test_states_that_must_now_permit_an_immediate_exit():
     """The states the old condition wrongly excluded. GAME_UNKNOWN is the one
-    that prompted the change; GAME_END_B is post-scoring, so nothing is lost."""
+    that prompted the change.
+
+    GAME_END_B was on this list and has been removed: it is post-scoring, so
+    nothing in flight is lost, but exiting there strands MetalStorm on the
+    end-of-round screen and the next session opens outside the lobby. It is now
+    handled by _ending_round below — deferred, not immediate."""
     from wingman.analyzer import BATTLE_STATES, GameState
     for st in (GameState.GAME_UNKNOWN, GameState.GAME_LOBBY,
                GameState.GAME_WAITING, GameState.GAME_STARTING,
-               GameState.GAME_STARTING_STALLED, GameState.GAME_END_B):
+               GameState.GAME_STARTING_STALLED):
         assert st not in BATTLE_STATES, st
+
+
+def test_the_end_of_round_screen_defers_the_exit():
+    """The 2026-09-01 report: 'z' stopped in GAME_END_B one second after the
+    state was entered, leaving the game on the end screen. GAME_END_B is not a
+    battle state, so only the dedicated clause holds the exit there."""
+    assert "_ending_round = analyzer.game_state == GameState.GAME_END_B" in MAIN_SRC
+    # The flag has to actually gate the exit, not merely be computed.
+    assert ("if ctrl.finish_round_requested() and not (_in_round or _ending_round"
+            in MAIN_SRC)
+
+
+def test_the_settle_is_timed_from_the_click_not_the_state_change():
+    """Waiting on GAME_LOBBY alone would race: the analyzer can report the lobby
+    before the game has finished settling into it. The window runs from the
+    click that demonstrably went out."""
+    assert "FINISH_ROUND_SETTLE_S = 3.0" in MAIN_SRC
+    assert "final_continue_ts[0] > 0.0" in MAIN_SRC
+    assert "time.time() - final_continue_ts[0] < FINISH_ROUND_SETTLE_S" in MAIN_SRC
+
+
+def test_the_deferred_exit_cannot_wait_forever():
+    """Both new waits are bounded. Without the stall guard a stuck click-to OCR
+    would hold 'z' in GAME_END_B for the rest of the session — the exact
+    open-ended hang the hotkey exists to avoid."""
+    assert "GAME_END_B timeout — click-to OCR may be stuck" in MAIN_SRC
+    assert 'analyzer.trigger_event("manual_reset")' in MAIN_SRC
 
 
 def test_battle_states_has_a_single_definition():

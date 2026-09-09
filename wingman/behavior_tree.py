@@ -38,6 +38,7 @@ TACTIC_RESPAWN_WAIT = "RespawnWait"
 TACTIC_EJECT = "Eject"
 TACTIC_MISSILE_EVADE = "MissileEvade"
 TACTIC_EVADE = "Evade"
+TACTIC_BOUNDARY_TURN = "BoundaryTurn"
 TACTIC_DISENGAGE = "Disengage"
 TACTIC_CLIMB = "Climb"
 TACTIC_ENGAGE = "Engage"
@@ -80,6 +81,21 @@ class AnalyzerSnapshot:
     # measured 2026-08-30 — and where the tree previously flew the mission
     # script with nothing steering toward the battle.
     friendly_contacts: int = 0
+    # ADR 107: nearest map-boundary range and its forward component, both in
+    # minimap radii, or None when the boundary is not readable. Before this the
+    # tree had no boundary input at all, which is why nothing in it could act
+    # on an aircraft flying out of the arena.
+    # ADR 109: mission_loiter owns the aircraft and its objective is survival.
+    # Tactics that trade the airframe for a tactical outcome must yield to it.
+    survival_hold: bool = False
+    boundary_dist: "float | None" = None
+    boundary_forward: "float | None" = None
+    # ADR 120: nearest reading in the median window. The release decision uses
+    # this rather than the filtered value; entry still uses the filtered one.
+    boundary_near: "float | None" = None
+    # ADR 122: lateral offset of the nearest boundary point, positive to the
+    # RIGHT of the nose. The turn rolls away from it.
+    boundary_lateral: "float | None" = None
 
     @property
     def contacts(self) -> int:
@@ -161,13 +177,23 @@ def is_respawning(snapshot: AnalyzerSnapshot) -> bool:
 
 
 def is_missiles_empty(snapshot: AnalyzerSnapshot) -> bool:
-    return snapshot.missiles == 0
+    # ADR 109: never during a survival hold. Eject exists to trade a rearmed
+    # aircraft for an empty one; mission_loiter exists to keep THIS one alive,
+    # and an empty rack is irrelevant to that. Measured 2026-09-04 09:58:45 —
+    # Eject dove a loitering aircraft at -71 degrees, suppressed its climb for
+    # four seconds, and killed it.
+    return snapshot.missiles == 0 and not snapshot.survival_hold
 
 
 def is_eject_confirmed(snapshot: AnalyzerSnapshot) -> bool:
     """The debounced verdict — used instead of the raw read once the Eject
-    leaf actuates (ADR 024 3.1b gate)."""
-    return snapshot.missiles_empty_confirmed
+    leaf actuates (ADR 024 3.1b gate).
+
+    ADR 109: yields to a survival hold, on the same reasoning as
+    ``is_missiles_empty`` — this is the actuating path, so it is the one that
+    matters in a live session.
+    """
+    return snapshot.missiles_empty_confirmed and not snapshot.survival_hold
 
 
 def make_missile_evade_condition(is_running_fn=None):
@@ -208,6 +234,152 @@ def make_disengage_condition(absent_after_s: float):
 # trigger is trusted again (ADR 086 d2). Sessions start already settled — only
 # an observed respawn imposes the wait.
 _SETTLED = 2
+
+
+def make_boundary_condition(turn_frac: "float | None",
+                            recede_frac: float = 0.06,
+                            yields_to_fn=None,
+                            release_frac: "float | None" = None,
+                            min_clear_frac: float = 0.35,
+                            blind_ticks: int = 3,
+                            entry_ratio: float = 0.25):
+    """ADR 107: true while the arena edge is ahead and not yet receding.
+
+    ENTRY needs a positive ``boundary_forward`` — otherwise any pass within the
+    band would turn the aircraft. The HOLD does not, and that distinction is
+    measured rather than assumed: over 32 crossing traces on 2026-09-01 the sign
+    of ``forward`` flipped between adjacent ticks 27% of the time and read <= 0
+    on 51% of the ticks where the aircraft was demonstrably closing. Releasing on
+    it made the turn chatter and the heading never moved.
+
+    ``dist`` is the trustworthy channel, so the turn holds until the aircraft is
+    RECEDING — range risen ``recede_frac`` above the closest approach OF THIS
+    TURN, not above where it started, so an arc that dips and then opens out is
+    recognised as working.
+
+    **Recession alone is not enough to let go.** It answers "is the turn
+    working", and the first version wrongly used it to answer "are we safe now".
+    Measured 2026-09-03 over 105 turns: the median release was 0.34R, 40%
+    released inside 0.30R and 27% inside 0.20R — one logged 0.02R to 0.06R,
+    which satisfies a 0.06 margin while handing back an aircraft still sitting
+    on the edge, free to drift straight back over. Nine of that session's twelve
+    crossings happened with the turn running.
+
+    So the release is a hysteresis band, as Climb's altitude band already is:
+    let go at ``release_frac`` (above ``turn_frac``, so the leaf cannot chatter
+    on the entry threshold), or on recession but only once ``min_clear_frac``
+    away. Below that the aircraft is still on the edge whatever the trend says.
+
+    ``yields_to_fn`` lets a higher-priority condition win without reordering the
+    selector: ADR 107 D4 uses it for Climb's emergency altitude band, because
+    hitting the ground is certain while the boundary is a countdown.
+
+    **Deliberately NOT sticky while the actuation runs.** MissileEvade and Climb
+    hold their selection that way because they run to a goal of their own — a
+    missile cleared, an altitude reached. This tactic has no goal but the
+    reading: the condition IS the closed loop, so making it sticky means the loop
+    can never open. It shipped sticky on 2026-09-03 and every one of the nine
+    turns that session burned the full 12 s cap, four of them back to back on one
+    approach, while the range oscillated 0.216R to 0.514R — clearing the release
+    margin repeatedly and never being allowed to act on it.
+
+    A ``turn_frac`` of None or 0 disables the leaf (the Evade precedent), and a
+    missing reading never selects — blindness is not an emergency.
+    """
+    state = {"active": False, "min_dist": None, "blind": 0}
+
+    def _reset():
+        state["active"] = False
+        state["min_dist"] = None
+        state["blind"] = 0
+
+    def _condition(snapshot) -> bool:
+        if not turn_frac:
+            return False
+        # A respawn is a NEW aircraft. Any latched turn state describes where the
+        # last one was and must not survive: on 2026-09-04 a turn held through a
+        # respawn and re-selected one second after it, with the aircraft freshly
+        # spawned and nowhere near an edge. An aircraft never spawns pointing at
+        # the boundary, which makes a turn straight after a respawn a reliable
+        # indicator that something upstream has latched.
+        if getattr(snapshot, "is_respawning", False) or \
+                snapshot.game_state != GameState.GAME_BATTLE:
+            _reset()
+            return False
+        if yields_to_fn is not None and yields_to_fn():
+            _reset()
+            return False
+        dist = getattr(snapshot, "boundary_dist", None)
+        forward = getattr(snapshot, "boundary_forward", None)
+        # ADR 120: the NEAREST recent reading, for deciding "am I clear".
+        # Falls back to `dist` so a snapshot without it behaves as before.
+        near = getattr(snapshot, "boundary_near", None)
+        if near is None:
+            near = dist
+        if dist is None or forward is None:
+            # Freeze rather than release — a dropped reading mid-turn is a gap
+            # in perception, not evidence the aircraft is clear — but BOUNDED.
+            # Unbounded it is a latch: the detector is blind ~70% of ticks, so
+            # "hold until a reading disagrees" means "hold indefinitely", which
+            # is exactly what carried a turn through the 2026-09-04 respawn.
+            state["blind"] += 1
+            if state["blind"] > blind_ticks:
+                _reset()
+                return False
+            return state["active"]
+        state["blind"] = 0
+        clear_at = release_frac if release_frac else turn_frac
+        # ADR 120: ENTER on the filtered reading, LEAVE on the nearest one.
+        #
+        # The two errors do not cost the same. A spurious near reading buys one
+        # unnecessary turn, and turns are cheap — 83 in a session, measured
+        # break-even. A missed near reading buys a crossing, which is the metric.
+        # So noise-reject where it is cheap to be wrong (entry) and be
+        # conservative where it is not (release).
+        #
+        # Measured 2026-09-05: of 67 raw readings inside 0.10R with a fresh
+        # predecessor, 58 (87%) arrived via a physically reachable jump — real
+        # approaches — against 9 that could not be. Yet the median reported
+        # 0.10R or more for 44% of raw readings inside 0.10R, including
+        # 0.019 -> 0.516. A single reading above `clear_at` releases the turn
+        # outright, so that path released turns with the aircraft at the edge.
+        if (near if state["active"] else dist) >= (
+                clear_at if state["active"] else turn_frac):
+            # Entering uses turn_frac; leaving uses the wider release_frac, so
+            # the two thresholds cannot sit on top of each other and flap.
+            _reset()
+            return False
+        if not state["active"]:
+            # "Ahead" means ahead, not merely not-behind. `forward` is the
+            # component of the range along the nose, so forward/dist is the
+            # cosine of the bearing to the nearest boundary point: near 1 the
+            # edge is dead ahead, near 0 it is abeam and the aircraft is flying
+            # ALONG it, not at it.
+            #
+            # `forward > 0` alone accepted 0.006/0.281 = 0.02 on 2026-09-04 and
+            # turned a freshly respawned aircraft — the operator's point that a
+            # turn straight after a respawn cannot be real, since nothing spawns
+            # pointed at an edge.
+            #
+            # Measured over 184 ticks preceding confirmed crossings, genuine
+            # approaches run a median of 0.82 with a 10th percentile of 0.24. A
+            # 0.25 gate drops about a tenth of those ticks, and an approach
+            # produces many, so entry is delayed by a tick rather than missed.
+            if forward <= 0 or forward < entry_ratio * dist:
+                return False
+            state["active"] = True
+            state["min_dist"] = dist
+            return True
+        state["min_dist"] = min(state["min_dist"], near)
+        # Recession is also a clearance claim, so it reads the nearest value
+        # too — otherwise a filtered reading can manufacture a recession the
+        # aircraft never flew.
+        if near >= min_clear_frac and near >= state["min_dist"] + recede_frac:
+            _reset()
+            return False
+        return True
+
+    return _condition
 
 
 def make_climb_condition(enter_below_alt: "float | None",
@@ -310,6 +482,12 @@ def make_climb_condition(enter_below_alt: "float | None",
             state["ttg_streak"] = 0
 
         alt = snapshot.altitude
+        # ADR 107 D4: BoundaryTurn outranks the ordinary altitude-recovery climb
+        # but not this. Published on the closure rather than reordering the
+        # selector, because the emergency is a MODE of the climb condition, not
+        # a separate leaf — splitting it would duplicate the hysteresis state
+        # that decides it.
+        climb.emergency_active = bool(emergency)
         if emergency:
             # The band must not release a recovery it did not start: in this
             # dive the altitude was far ABOVE exit_above_alt the whole way
@@ -329,6 +507,7 @@ def make_climb_condition(enter_below_alt: "float | None",
             else:
                 state["streak"] = 0
         return state["active"] or (is_running_fn is not None and is_running_fn())
+    climb.emergency_active = False
     return climb
 
 
@@ -406,6 +585,7 @@ def build_tree(bt_cfg: dict, clock=time.time,
     disengage_fns = actuators.get(TACTIC_DISENGAGE)
     missile_evade_fns = actuators.get(TACTIC_MISSILE_EVADE)
     climb_fns = actuators.get(TACTIC_CLIMB)
+    boundary_fns = actuators.get(TACTIC_BOUNDARY_TURN)
 
     if eject_fns is not None:
         eject_leaf = ConditionTactic(TACTIC_EJECT, is_eject_confirmed,
@@ -459,6 +639,7 @@ def build_tree(bt_cfg: dict, clock=time.time,
     # pre-empt Engage actuation and silently pause geometry at low altitude.
     # While disabled, BehaviorTreeHandler logs would-select from an
     # independent condition instance instead.
+    _climb_emergency_fn = None
     if bool(climb_cfg.get("enabled", False)):
         climb_kwargs = {}
         if climb_fns is not None:
@@ -500,6 +681,39 @@ def build_tree(bt_cfg: dict, clock=time.time,
         _engage_at = next(i for i, c in enumerate(children)
                           if c.name == TACTIC_ENGAGE)
         children.insert(_engage_at, climb_leaf)
+        # ADR 107 D4. The flag is published by the closure each tick; read it
+        # lazily so the boundary leaf sees the CURRENT tick's verdict.
+        def _climb_emergency_fn(_e=emergency):
+            return bool(getattr(_e, "emergency_active", False))
+
+    # ADR 107: BoundaryTurn. Added after the climb block so it can yield to the
+    # emergency band, and placed by NAME rather than offset — the ADR 073
+    # lesson, where `len(children) - 2` silently inverted a priority the moment
+    # another leaf was added.
+    boundary_cfg = bt_cfg.get("boundary", {}) or {}
+    if boundary_cfg.get("turn_frac"):
+        boundary_kwargs = {}
+        if boundary_fns is not None:
+            boundary_kwargs = {"start_fn": boundary_fns[0],
+                               "is_running_fn": boundary_fns[1]}
+        boundary_leaf = MinimumHold(
+            TACTIC_BOUNDARY_TURN,
+            ConditionTactic(
+                f"{TACTIC_BOUNDARY_TURN}Condition",
+                make_boundary_condition(
+                    float(boundary_cfg["turn_frac"]),
+                    float(boundary_cfg.get("recede_frac", 0.06)),
+                    yields_to_fn=_climb_emergency_fn,
+                    release_frac=boundary_cfg.get("release_frac"),
+                    min_clear_frac=float(
+                        boundary_cfg.get("min_clear_frac", 0.35)),
+                    blind_ticks=int(boundary_cfg.get("blind_ticks", 3)),
+                    entry_ratio=float(boundary_cfg.get("entry_ratio", 0.25))),
+                **boundary_kwargs),
+            hold_s=float(boundary_cfg.get("hold_s", 3.0)), clock=clock)
+        _evade_at = next(i for i, c in enumerate(children)
+                         if c.name == TACTIC_EVADE)
+        children.insert(_evade_at, boundary_leaf)
 
     # ADR 028 revision 4. The leaf is added only when regroup is enabled, so
     # `minimap.regroup_enabled: false` disables the FEATURE rather than half of

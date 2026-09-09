@@ -41,6 +41,7 @@ class ControllerConfig:
     good_luck_wait_s: float = 13.0
     good_luck_bypass_on_alive: bool = True
     capture_stale_inject_s: float = 10.0
+    j20_turn_guard_s: float = 10.0      # ADR 132
 
     # --- Run-mode flags. Not pure config: replay and capture lanes override
     #     these, which is why they are `replace`-able rather than read-only
@@ -54,7 +55,13 @@ class ControllerConfig:
     telemetry: dict = field(default_factory=dict)
     missile_evade: dict = field(default_factory=dict)
     climb: dict = field(default_factory=dict)
+    afterburner_cruise: dict = field(default_factory=dict)
     fuel: dict = field(default_factory=dict)
+    # ADR 116: mission_loiter's block. It was read with
+    # `config.get("loiter_mission")` guarded by `isinstance(config, dict)`,
+    # and `config` is this dataclass — so the guard was always False and the
+    # whole section of config.yaml was dead.
+    loiter: dict = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, cfg: dict | None, **overrides) -> "ControllerConfig":
@@ -77,12 +84,15 @@ class ControllerConfig:
             good_luck_wait_s=float(mission.get("good_luck_wait_s", 13.0)),
             good_luck_bypass_on_alive=bool(mission.get("good_luck_bypass_on_alive", True)),
             capture_stale_inject_s=float(mission.get("capture_stale_inject_s", 10.0)),
+            j20_turn_guard_s=float(mission.get("j20_turn_guard_s", 10.0)),
             target_painting_mode=bool(j20.get("target_painting_mode", False)),
             capture_with_overlay=bool(debug.get("capture_with_overlay", True)),
             telemetry=cfg.get("telemetry", {}) or {},
             missile_evade=bt.get("missile_evade", {}) or {},
             climb=bt.get("climb", {}) or {},
+            afterburner_cruise=bt.get("afterburner_cruise", {}) or {},
             fuel=cfg.get("fuel", {}) or {},
+            loiter=cfg.get("loiter_mission", {}) or {},
         )
         if not overrides:
             return base

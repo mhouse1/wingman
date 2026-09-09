@@ -466,10 +466,12 @@ def test_flight_keys_still_take_over_from_the_operator_display():
 
 
 def test_wingmans_own_injected_keys_are_ignored_on_the_injection_display():
+    """'u' is deliberately NOT covered here — see test_mission_key_is_echo_safe
+    below. It is both an injected key and the operator's stuck-state escape
+    hatch, so it carries its own exception; 'p' has no such conflict."""
     il = _lane()
     try:
         assert il.should_deliver_hotkey(":3", "p", 0) is False
-        assert il.should_deliver_hotkey(":3", "u", 0) is False
     finally:
         il.set_injection_display(None)
 
@@ -492,13 +494,12 @@ def test_every_injectable_key_is_declared():
 
 
 def test_the_handback_key_is_delivered_only_during_manual():
-    """SAF-001: 'u' hands the aircraft back — the key the operator already used
-    for this in GAME_BATTLE.
-
-    It is one wingman injects itself (the game-starting loop presses it), so it
-    is delivered on the injection display ONLY while the takeover is active,
-    where wingman injects nothing but flares and there is nothing it could be
-    confused with."""
+    """Unit-level check of the _handback_keys mechanism in isolation (no
+    _echo_safe_keys configured). In the real running system 'u' is ALSO
+    declared echo-safe (see test_mission_key_is_echo_safe below), which
+    supersedes this gate for 'u' specifically — this test only pins down that
+    the handback gate itself still behaves correctly for whichever key relies
+    on it."""
     from wingman.controller import INJECTABLE_KEYS
     from wingman.keybindings import MISSION_J20_KEY
     assert MISSION_J20_KEY in INJECTABLE_KEYS, \
@@ -512,6 +513,31 @@ def test_the_handback_key_is_delivered_only_during_manual():
         assert il.should_deliver_hotkey(":3", MISSION_J20_KEY, 0) is True
     finally:
         il.set_handback_keys((), manual_state_fn=lambda: False)
+        il.set_injection_display(None)
+
+
+def test_mission_key_is_echo_safe():
+    """Regression test (observed 2026-09-01): 'u' forces GAME_BATTLE out of any
+    wedged state — including GAME_LOBBY, which is not GAME_BATTLE_MANUAL, so
+    the handback gate above does not cover it. Wingman also injects 'u' itself
+    (game_starting_loop), so without this exception every genuine press
+    outside manual takeover was silently dropped: no hotkey callback, no FSM
+    transition, no log line — the operator's press did nothing and the
+    GAME_LOBBY escape loop kept firing on its own 45s cycle as if nothing had
+    happened. This is exactly the mechanism controller.py's own bracket +
+    grace window (_programmatic_key_counts / _prog_release_grace_until)
+    already exists to make safe — should_deliver_hotkey must get out of its
+    way and let every 'u' event through, in every state."""
+    from wingman.controller import INJECTABLE_KEYS
+    from wingman.keybindings import MISSION_J20_KEY
+    il = _lane(injected=INJECTABLE_KEYS)
+    il.set_echo_safe_keys((MISSION_J20_KEY,))
+    try:
+        # Not in manual, no handback carve-out active: this is the exact
+        # "stuck in GAME_LOBBY" scenario, and it must still get through.
+        assert il.should_deliver_hotkey(":3", MISSION_J20_KEY, 0) is True
+    finally:
+        il.set_echo_safe_keys(())
         il.set_injection_display(None)
 
 

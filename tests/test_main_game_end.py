@@ -73,3 +73,66 @@ def test_startup_stall_never_shuts_down_the_host():
         "wingman.main imports subprocess again — it was only ever used to power "
         "off the host on a stall"
     )
+
+
+def test_on_complete_fires_after_the_final_click():
+    """ADR 094: the deferred 'z' exit times its settle from this callback, so it
+    must fire after the PLAY click has gone out — not on entry, and not merely
+    when the state flips."""
+    ctrl = _FakeController()
+    fired = []
+    analyzer = SimpleNamespace(
+        crops={"click_to": object(), "PLAY": object()},
+        trigger_event=lambda name: fired.append(("trigger", name)),
+    )
+
+    _click_through_game_end(
+        ctrl=ctrl, analyzer=analyzer, logger=logging.getLogger("test"),
+        settle_seconds=0.0, sleep_fn=lambda _s: None,
+        on_complete=lambda: fired.append(("complete", len(ctrl.calls))),
+    )
+
+    assert ("complete", 2) in fired, "must fire only after both clicks"
+
+
+def test_on_complete_does_not_fire_when_there_was_no_final_click():
+    """The missing-PLAY-crop path returns without clicking. Firing anyway would
+    start a settle timed from a click that never happened, and 'z' would exit
+    with the game still on the end screen — the bug this callback exists to
+    fix, reintroduced silently."""
+    ctrl = _FakeController()
+    fired = []
+    analyzer = SimpleNamespace(
+        crops={"click_to": object()},          # no PLAY
+        trigger_event=lambda name: fired.append(name),
+    )
+
+    _click_through_game_end(
+        ctrl=ctrl, analyzer=analyzer, logger=logging.getLogger("test"),
+        settle_seconds=0.0, sleep_fn=lambda _s: None,
+        on_complete=lambda: fired.append("complete"),
+    )
+
+    assert "complete" not in fired
+    assert len(ctrl.calls) == 1                # only the centre prompt
+
+
+def test_a_raising_on_complete_does_not_lose_the_lobby_transition():
+    """The callback is operator-supplied bookkeeping. If it throws, the state
+    change it is observing must still stand."""
+    ctrl = _FakeController()
+    triggered = []
+    analyzer = SimpleNamespace(
+        crops={"click_to": object(), "PLAY": object()},
+        trigger_event=lambda name: triggered.append(name),
+    )
+
+    def _boom():
+        raise RuntimeError("bookkeeping blew up")
+
+    _click_through_game_end(
+        ctrl=ctrl, analyzer=analyzer, logger=logging.getLogger("test"),
+        settle_seconds=0.0, sleep_fn=lambda _s: None, on_complete=_boom,
+    )
+
+    assert "continue_clicked" in triggered

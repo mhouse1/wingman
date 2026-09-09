@@ -1,0 +1,33 @@
+{
+  "version": "1.8.7",
+  "run_id": "20260830_182042",
+  "account": null,
+  "start_ts": 1788128442.167,
+  "end_ts": 1788128484.126,
+  "rounds": 0,
+  "ocr_crops": {},
+  "reaction": {
+    "n": 0,
+    "mean": 0.0,
+    "p50": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "max": 0.0
+  },
+  "reaction_segments": null,
+  "host": {
+    "hostname": "veda",
+    "cpu_count": 20,
+    "rd_mode": "trial",
+    "load_start": [
+      1.26,
+      2.1,
+      3.7
+    ],
+    "load_end": [
+      1.3,
+      2.02,
+      3.61
+    ]
+  }
+}
