@@ -1,0 +1,1665 @@
+{
+  "wingman_version": "1.8.8",
+  "run_id": "20260903_192425",
+  "session_start_ts": 1788477865.605,
+  "session_duration_s": 15756.7,
+  "missions_started": 46,
+  "missions_click_to": 46,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 130,
+  "total_flare_bursts": 180,
+  "total_flare_reloads": 8,
+  "total_manual_takeovers": 0,
+  "total_missile_evades": 42,
+  "spawn_crashes": {
+    "window_s": 10.0,
+    "min_s": 3.0,
+    "count": 3,
+    "died_after_s": [
+      7.5,
+      6.0,
+      7.5
+    ],
+    "immediate_redetects": 2,
+    "redetect_after_s": [
+      1.5,
+      1.5
+    ]
+  },
+  "missile_engagements": {
+    "window_s": 10.0,
+    "engagements": 54,
+    "evaded_total": 37,
+    "evaded_died": 2,
+    "evaded_survival": 0.946,
+    "not_evaded_total": 17,
+    "not_evaded_died": 5,
+    "not_evaded_survival": 0.706,
+    "detail": [
+      {
+        "ts": 1788477977.96,
+        "alerts": 5,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788478171.298,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788478522.897,
+        "alerts": 5,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788478546.895,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": 8.8
+      },
+      {
+        "ts": 1788478757.484,
+        "alerts": 4,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788479120.75,
+        "alerts": 2,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788479425.015,
+        "alerts": 6,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788479568.066,
+        "alerts": 4,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788479589.698,
+        "alerts": 4,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788479917.752,
+        "alerts": 1,
+        "evaded": false,
+        "died_after_s": 7.3
+      },
+      {
+        "ts": 1788480313.185,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788480372.393,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788480696.338,
+        "alerts": 1,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481159.888,
+        "alerts": 2,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481168.908,
+        "alerts": 1,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481176.467,
+        "alerts": 1,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481191.451,
+        "alerts": 2,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481201.918,
+        "alerts": 1,
+        "evaded": false,
+        "died_after_s": 5.8
+      },
+      {
+        "ts": 1788481350.028,
+        "alerts": 5,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481420.094,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481489.636,
+        "alerts": 5,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481973.257,
+        "alerts": 2,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788481980.728,
+        "alerts": 2,
+        "evaded": true,
+        "died_after_s": 7.3
+      },
+      {
+        "ts": 1788482442.801,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788482453.352,
+        "alerts": 5,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788482786.319,
+        "alerts": 2,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788483759.428,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788483996.713,
+        "alerts": 4,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788484005.672,
+        "alerts": 5,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788484016.234,
+        "alerts": 2,
+        "evaded": false,
+        "died_after_s": 7.3
+      },
+      {
+        "ts": 1788484099.768,
+        "alerts": 1,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788484569.224,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788484582.665,
+        "alerts": 2,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788484657.241,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788484678.246,
+        "alerts": 2,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788484684.21,
+        "alerts": 1,
+        "evaded": false,
+        "died_after_s": 8.8
+      },
+      {
+        "ts": 1788486051.159,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788486261.784,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788487069.268,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788487134.783,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788487149.793,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788487965.414,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788488256.005,
+        "alerts": 10,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788488306.776,
+        "alerts": 6,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788489002.112,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788489054.218,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788489265.734,
+        "alerts": 4,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788489469.743,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788489936.972,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788490026.621,
+        "alerts": 4,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788492532.428,
+        "alerts": 3,
+        "evaded": false,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788492573.471,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": null
+      },
+      {
+        "ts": 1788492620.044,
+        "alerts": 1,
+        "evaded": false,
+        "died_after_s": 8.8
+      },
+      {
+        "ts": 1788492837.784,
+        "alerts": 7,
+        "evaded": true,
+        "died_after_s": null
+      }
+    ]
+  },
+  "avg_mission_duration_s": 267.5,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1788477936.666,
+      "duration_s": 285.8,
+      "respawn_count": 3,
+      "flare_burst_count": 9,
+      "flare_reload_count": 0,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 1,
+      "start_ts": 1788478346.728,
+      "duration_s": 280.4,
+      "respawn_count": 2,
+      "flare_burst_count": 8,
+      "flare_reload_count": 1,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 2,
+      "start_ts": 1788478709.449,
+      "duration_s": 287.6,
+      "respawn_count": 3,
+      "flare_burst_count": 4,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 3,
+      "start_ts": 1788479062.528,
+      "duration_s": 231.3,
+      "respawn_count": 2,
+      "flare_burst_count": 2,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 4,
+      "start_ts": 1788479397.881,
+      "duration_s": 285.4,
+      "respawn_count": 4,
+      "flare_burst_count": 14,
+      "flare_reload_count": 1,
+      "missile_evade_count": 3,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 5,
+      "start_ts": 1788479760.774,
+      "duration_s": 280.8,
+      "respawn_count": 3,
+      "flare_burst_count": 1,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 6,
+      "start_ts": 1788480086.408,
+      "duration_s": 173.7,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 7,
+      "start_ts": 1788480304.164,
+      "duration_s": 273.9,
+      "respawn_count": 4,
+      "flare_burst_count": 6,
+      "flare_reload_count": 0,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 8,
+      "start_ts": 1788480664.758,
+      "duration_s": 249.7,
+      "respawn_count": 3,
+      "flare_burst_count": 1,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 9,
+      "start_ts": 1788480954.765,
+      "duration_s": 272.6,
+      "respawn_count": 4,
+      "flare_burst_count": 7,
+      "flare_reload_count": 0,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 10,
+      "start_ts": 1788481329.881,
+      "duration_s": 207.7,
+      "respawn_count": 3,
+      "flare_burst_count": 14,
+      "flare_reload_count": 1,
+      "missile_evade_count": 3,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 11,
+      "start_ts": 1788481578.506,
+      "duration_s": 292.9,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 1,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 12,
+      "start_ts": 1788481935.329,
+      "duration_s": 258.8,
+      "respawn_count": 3,
+      "flare_burst_count": 4,
+      "flare_reload_count": 0,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 13,
+      "start_ts": 1788482274.862,
+      "duration_s": 266.3,
+      "respawn_count": 3,
+      "flare_burst_count": 9,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 14,
+      "start_ts": 1788482613.025,
+      "duration_s": 213.3,
+      "respawn_count": 2,
+      "flare_burst_count": 2,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 15,
+      "start_ts": 1788482894.304,
+      "duration_s": 316.3,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 16,
+      "start_ts": 1788483302.161,
+      "duration_s": 256.3,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 17,
+      "start_ts": 1788483624.385,
+      "duration_s": 260.6,
+      "respawn_count": 3,
+      "flare_burst_count": 4,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 18,
+      "start_ts": 1788483953.117,
+      "duration_s": 243.5,
+      "respawn_count": 3,
+      "flare_burst_count": 12,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 19,
+      "start_ts": 1788484258.065,
+      "duration_s": 198.8,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 20,
+      "start_ts": 1788484551.077,
+      "duration_s": 269.0,
+      "respawn_count": 3,
+      "flare_burst_count": 12,
+      "flare_reload_count": 1,
+      "missile_evade_count": 3,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 21,
+      "start_ts": 1788484894.768,
+      "duration_s": 211.1,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 22,
+      "start_ts": 1788485179.955,
+      "duration_s": 342.8,
+      "respawn_count": 4,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 23,
+      "start_ts": 1788485630.414,
+      "duration_s": 285.8,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 24,
+      "start_ts": 1788486025.557,
+      "duration_s": 347.4,
+      "respawn_count": 3,
+      "flare_burst_count": 6,
+      "flare_reload_count": 0,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 25,
+      "start_ts": 1788486444.723,
+      "duration_s": 402.2,
+      "respawn_count": 4,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 26,
+      "start_ts": 1788486968.209,
+      "duration_s": 270.9,
+      "respawn_count": 3,
+      "flare_burst_count": 10,
+      "flare_reload_count": 1,
+      "missile_evade_count": 3,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 27,
+      "start_ts": 1788487282.321,
+      "duration_s": 254.7,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 28,
+      "start_ts": 1788487583.121,
+      "duration_s": 166.7,
+      "respawn_count": 1,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 29,
+      "start_ts": 1788487868.266,
+      "duration_s": 280.0,
+      "respawn_count": 2,
+      "flare_burst_count": 3,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 30,
+      "start_ts": 1788488233.531,
+      "duration_s": 209.1,
+      "respawn_count": 2,
+      "flare_burst_count": 16,
+      "flare_reload_count": 1,
+      "missile_evade_count": 4,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 31,
+      "start_ts": 1788488545.293,
+      "duration_s": 239.0,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 32,
+      "start_ts": 1788488847.303,
+      "duration_s": 253.7,
+      "respawn_count": 2,
+      "flare_burst_count": 7,
+      "flare_reload_count": 0,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 33,
+      "start_ts": 1788489174.139,
+      "duration_s": 323.4,
+      "respawn_count": 3,
+      "flare_burst_count": 7,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 34,
+      "start_ts": 1788489549.278,
+      "duration_s": 192.3,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 35,
+      "start_ts": 1788489816.192,
+      "duration_s": 300.7,
+      "respawn_count": 2,
+      "flare_burst_count": 8,
+      "flare_reload_count": 0,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 36,
+      "start_ts": 1788490157.132,
+      "duration_s": 283.5,
+      "respawn_count": 4,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 37,
+      "start_ts": 1788490483.968,
+      "duration_s": 312.8,
+      "respawn_count": 4,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 38,
+      "start_ts": 1788490890.009,
+      "duration_s": 264.3,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 39,
+      "start_ts": 1788491191.559,
+      "duration_s": 380.4,
+      "respawn_count": 5,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 40,
+      "start_ts": 1788491611.814,
+      "duration_s": 221.5,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 41,
+      "start_ts": 1788491881.851,
+      "duration_s": 232.7,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 42,
+      "start_ts": 1788492170.705,
+      "duration_s": 219.5,
+      "respawn_count": 2,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 43,
+      "start_ts": 1788492482.916,
+      "duration_s": 259.7,
+      "respawn_count": 3,
+      "flare_burst_count": 7,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 44,
+      "start_ts": 1788492819.691,
+      "duration_s": 250.0,
+      "respawn_count": 4,
+      "flare_burst_count": 7,
+      "flare_reload_count": 1,
+      "missile_evade_count": 2,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 45,
+      "start_ts": 1788493193.872,
+      "duration_s": 394.2,
+      "respawn_count": 4,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 109,
+    "ocr_respawns": 151,
+    "matched": 108,
+    "matched_within_5s": 44,
+    "false_fires": 1,
+    "missed_ocr_respawns": 43,
+    "fire_deltas_s": [
+      5.6,
+      3.55,
+      3.46,
+      2.21,
+      3.45,
+      4.56,
+      3.87,
+      2.25,
+      3.56,
+      2.57,
+      4.85,
+      4.48,
+      3.42,
+      5.43,
+      6.52,
+      5.48,
+      5.45,
+      6.52,
+      5.4,
+      5.34,
+      2.34,
+      6.43,
+      6.71,
+      5.95,
+      5.36,
+      4.03,
+      5.49,
+      3.82,
+      3.82,
+      6.5,
+      6.42,
+      10.55,
+      9.88,
+      9.57,
+      7.64,
+      8.54,
+      3.9,
+      9.93,
+      9.95,
+      3.44,
+      9.54,
+      11.04,
+      6.4,
+      2.48,
+      5.36,
+      5.37,
+      5.27,
+      5.38,
+      3.45,
+      5.41,
+      5.49,
+      3.5,
+      5.33,
+      3.86,
+      4.49,
+      3.92,
+      4.34,
+      4.43,
+      4.38,
+      4.86,
+      2.39,
+      3.53,
+      3.87,
+      5.5,
+      2.47,
+      6.43,
+      5.93,
+      5.44,
+      5.33,
+      5.64,
+      5.75,
+      5.37,
+      3.44,
+      6.43,
+      5.39,
+      10.55,
+      2.41,
+      9.62,
+      6.29,
+      11.08,
+      2.21,
+      6.5,
+      9.51,
+      9.64,
+      6.39,
+      2.43,
+      9.6,
+      6.26,
+      5.36,
+      5.22,
+      2.31,
+      5.38,
+      5.48,
+      5.46,
+      6.88,
+      2.39,
+      5.28,
+      6.84,
+      6.55,
+      5.35,
+      6.49,
+      2.32,
+      6.39,
+      3.43,
+      2.47,
+      3.43,
+      4.49,
+      4.83
+    ],
+    "max_confirmed_gap_s": 16.2,
+    "confirmed_gaps_over_threshold": 119,
+    "ocr_edge_latencies": [
+      {
+        "since_confirmed_s": 6.17,
+        "no_digits_for_s": 3.04
+      },
+      {
+        "since_confirmed_s": 4.64,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 7.05,
+        "no_digits_for_s": 0.87
+      },
+      {
+        "since_confirmed_s": 4.69,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 7.15,
+        "no_digits_for_s": null
+      },
+      {
+        "since_confirmed_s": 4.79,
+        "no_digits_for_s": 3.18
+      },
+      {
+        "since_confirmed_s": 7.4,
+        "no_digits_for_s": 1.35
+      },
+      {
+        "since_confirmed_s": 6.09,
+        "no_digits_for_s": 3.0
+      },
+      {
+        "since_confirmed_s": 4.68,
+        "no_digits_for_s": 3.18
+      },
+      {
+        "since_confirmed_s": 4.63,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 4.57,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 4.67,
+        "no_digits_for_s": 3.01
+      },
+      {
+        "since_confirmed_s": 7.33,
+        "no_digits_for_s": 1.28
+      },
+      {
+        "since_confirmed_s": 4.49,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 6.23,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 4.68,
+        "no_digits_for_s": 3.17
+      },
+      {
+        "since_confirmed_s": 7.61,
+        "no_digits_for_s": null
+      },
+      {
+        "since_confirmed_s": 4.71,
+        "no_digits_for_s": 3.09
+      },
+      {
+        "since_confirmed_s": 4.82,
+        "no_digits_for_s": 3.17
+      },
+      {
+        "since_confirmed_s": 6.1,
+        "no_digits_for_s": 3.05
+      },
+      {
+        "since_confirmed_s": 4.63,
+        "no_digits_for_s": 3.15
+      },
+      {
+        "since_confirmed_s": 4.68,
+        "no_digits_for_s": 3.02
+      },
+      {
+        "since_confirmed_s": 4.65,
+        "no_digits_for_s": 3.04
+      },
+      {
+        "since_confirmed_s": 6.22,
+        "no_digits_for_s": null
+      },
+      {
+        "since_confirmed_s": 4.73,
+        "no_digits_for_s": 3.07
+      },
+      {
+        "since_confirmed_s": 4.64,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 4.58,
+        "no_digits_for_s": 3.13
+      },
+      {
+        "since_confirmed_s": 4.65,
+        "no_digits_for_s": 3.17
+      },
+      {
+        "since_confirmed_s": 4.76,
+        "no_digits_for_s": 3.04
+      },
+      {
+        "since_confirmed_s": 4.59,
+        "no_digits_for_s": 3.05
+      },
+      {
+        "since_confirmed_s": 8.82,
+        "no_digits_for_s": 2.71
+      },
+      {
+        "since_confirmed_s": 4.77,
+        "no_digits_for_s": 3.08
+      },
+      {
+        "since_confirmed_s": 4.82,
+        "no_digits_for_s": 3.2
+      },
+      {
+        "since_confirmed_s": 4.68,
+        "no_digits_for_s": 3.17
+      },
+      {
+        "since_confirmed_s": 4.81,
+        "no_digits_for_s": 3.17
+      },
+      {
+        "since_confirmed_s": 4.77,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 4.62,
+        "no_digits_for_s": 3.14
+      },
+      {
+        "since_confirmed_s": 7.05,
+        "no_digits_for_s": 0.97
+      },
+      {
+        "since_confirmed_s": 6.22,
+        "no_digits_for_s": 4.72
+      },
+      {
+        "since_confirmed_s": 4.7,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 7.23,
+        "no_digits_for_s": 1.18
+      },
+      {
+        "since_confirmed_s": 7.76,
+        "no_digits_for_s": 4.62
+      },
+      {
+        "since_confirmed_s": 4.64,
+        "no_digits_for_s": 3.21
+      },
+      {
+        "since_confirmed_s": 6.13,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 4.84,
+        "no_digits_for_s": 3.24
+      },
+      {
+        "since_confirmed_s": 7.33,
+        "no_digits_for_s": 1.09
+      },
+      {
+        "since_confirmed_s": 4.61,
+        "no_digits_for_s": 3.09
+      },
+      {
+        "since_confirmed_s": 13.19,
+        "no_digits_for_s": 6.9
+      },
+      {
+        "since_confirmed_s": 4.7,
+        "no_digits_for_s": 3.16
+      },
+      {
+        "since_confirmed_s": 4.78,
+        "no_digits_for_s": 3.16
+      },
+      {
+        "since_confirmed_s": 4.67,
+        "no_digits_for_s": 3.18
+      },
+      {
+        "since_confirmed_s": 4.62,
+        "no_digits_for_s": 3.13
+      },
+      {
+        "since_confirmed_s": 7.04,
+        "no_digits_for_s": 0.92
+      },
+      {
+        "since_confirmed_s": 6.11,
+        "no_digits_for_s": 4.65
+      },
+      {
+        "since_confirmed_s": 4.57,
+        "no_digits_for_s": 3.05
+      },
+      {
+        "since_confirmed_s": 11.24,
+        "no_digits_for_s": 5.06
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.15
+      },
+      {
+        "since_confirmed_s": 4.79,
+        "no_digits_for_s": 3.16
+      },
+      {
+        "since_confirmed_s": 4.66,
+        "no_digits_for_s": 3.15
+      },
+      {
+        "since_confirmed_s": 11.21,
+        "no_digits_for_s": 4.92
+      },
+      {
+        "since_confirmed_s": 4.69,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 4.63,
+        "no_digits_for_s": 3.09
+      },
+      {
+        "since_confirmed_s": 1.77,
+        "no_digits_for_s": null
+      },
+      {
+        "since_confirmed_s": 4.58,
+        "no_digits_for_s": 3.07
+      },
+      {
+        "since_confirmed_s": 8.25,
+        "no_digits_for_s": 2.0
+      },
+      {
+        "since_confirmed_s": 4.72,
+        "no_digits_for_s": 3.08
+      },
+      {
+        "since_confirmed_s": 9.16,
+        "no_digits_for_s": 7.51
+      },
+      {
+        "since_confirmed_s": 4.7,
+        "no_digits_for_s": 3.13
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.13
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 4.8,
+        "no_digits_for_s": 3.08
+      },
+      {
+        "since_confirmed_s": 6.14,
+        "no_digits_for_s": 4.45
+      },
+      {
+        "since_confirmed_s": 7.54,
+        "no_digits_for_s": 6.07
+      },
+      {
+        "since_confirmed_s": 4.68,
+        "no_digits_for_s": 3.02
+      },
+      {
+        "since_confirmed_s": 4.69,
+        "no_digits_for_s": null
+      },
+      {
+        "since_confirmed_s": 7.48,
+        "no_digits_for_s": 6.04
+      },
+      {
+        "since_confirmed_s": 4.78,
+        "no_digits_for_s": 3.07
+      },
+      {
+        "since_confirmed_s": 4.6,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 6.14,
+        "no_digits_for_s": 4.58
+      },
+      {
+        "since_confirmed_s": 4.59,
+        "no_digits_for_s": 3.07
+      },
+      {
+        "since_confirmed_s": 4.58,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 4.77,
+        "no_digits_for_s": 3.17
+      },
+      {
+        "since_confirmed_s": 4.8,
+        "no_digits_for_s": 3.17
+      },
+      {
+        "since_confirmed_s": 4.48,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 4.67,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 4.58,
+        "no_digits_for_s": 3.06
+      },
+      {
+        "since_confirmed_s": 4.73,
+        "no_digits_for_s": 3.14
+      },
+      {
+        "since_confirmed_s": 4.68,
+        "no_digits_for_s": 3.21
+      },
+      {
+        "since_confirmed_s": 7.14,
+        "no_digits_for_s": 1.06
+      },
+      {
+        "since_confirmed_s": 4.58,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 6.13,
+        "no_digits_for_s": 4.61
+      },
+      {
+        "since_confirmed_s": 4.72,
+        "no_digits_for_s": 3.01
+      },
+      {
+        "since_confirmed_s": 4.58,
+        "no_digits_for_s": 3.09
+      },
+      {
+        "since_confirmed_s": 4.69,
+        "no_digits_for_s": 3.09
+      },
+      {
+        "since_confirmed_s": 8.66,
+        "no_digits_for_s": 2.62
+      },
+      {
+        "since_confirmed_s": 4.72,
+        "no_digits_for_s": 3.09
+      },
+      {
+        "since_confirmed_s": 6.19,
+        "no_digits_for_s": 4.55
+      },
+      {
+        "since_confirmed_s": 4.65,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.15
+      },
+      {
+        "since_confirmed_s": 4.6,
+        "no_digits_for_s": 3.04
+      },
+      {
+        "since_confirmed_s": 4.86,
+        "no_digits_for_s": 3.2
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 6.07,
+        "no_digits_for_s": 4.53
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.08
+      },
+      {
+        "since_confirmed_s": 4.69,
+        "no_digits_for_s": 3.14
+      },
+      {
+        "since_confirmed_s": 4.66,
+        "no_digits_for_s": 3.17
+      },
+      {
+        "since_confirmed_s": 4.6,
+        "no_digits_for_s": 3.06
+      },
+      {
+        "since_confirmed_s": 11.61,
+        "no_digits_for_s": 5.65
+      },
+      {
+        "since_confirmed_s": 4.57,
+        "no_digits_for_s": 3.03
+      },
+      {
+        "since_confirmed_s": 4.77,
+        "no_digits_for_s": 3.21
+      },
+      {
+        "since_confirmed_s": 7.36,
+        "no_digits_for_s": 1.27
+      },
+      {
+        "since_confirmed_s": 4.8,
+        "no_digits_for_s": 3.15
+      },
+      {
+        "since_confirmed_s": 4.71,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 6.11,
+        "no_digits_for_s": 2.94
+      },
+      {
+        "since_confirmed_s": 13.99,
+        "no_digits_for_s": 6.29
+      },
+      {
+        "since_confirmed_s": 4.74,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 7.2,
+        "no_digits_for_s": 1.16
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.09
+      },
+      {
+        "since_confirmed_s": 4.58,
+        "no_digits_for_s": 3.06
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.09
+      },
+      {
+        "since_confirmed_s": 7.61,
+        "no_digits_for_s": 6.17
+      },
+      {
+        "since_confirmed_s": 12.1,
+        "no_digits_for_s": 10.48
+      },
+      {
+        "since_confirmed_s": 4.59,
+        "no_digits_for_s": 3.06
+      },
+      {
+        "since_confirmed_s": 4.72,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 4.79,
+        "no_digits_for_s": 3.23
+      },
+      {
+        "since_confirmed_s": 4.69,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 4.89,
+        "no_digits_for_s": 3.26
+      },
+      {
+        "since_confirmed_s": 4.82,
+        "no_digits_for_s": 3.18
+      },
+      {
+        "since_confirmed_s": 8.29,
+        "no_digits_for_s": 2.23
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.18
+      },
+      {
+        "since_confirmed_s": 4.6,
+        "no_digits_for_s": 3.07
+      },
+      {
+        "since_confirmed_s": 4.69,
+        "no_digits_for_s": 3.21
+      },
+      {
+        "since_confirmed_s": 4.81,
+        "no_digits_for_s": 3.2
+      },
+      {
+        "since_confirmed_s": 4.77,
+        "no_digits_for_s": 3.16
+      },
+      {
+        "since_confirmed_s": 8.67,
+        "no_digits_for_s": 2.58
+      },
+      {
+        "since_confirmed_s": 4.84,
+        "no_digits_for_s": 3.23
+      },
+      {
+        "since_confirmed_s": 4.79,
+        "no_digits_for_s": 3.13
+      },
+      {
+        "since_confirmed_s": 4.59,
+        "no_digits_for_s": 3.02
+      },
+      {
+        "since_confirmed_s": 4.76,
+        "no_digits_for_s": 3.15
+      },
+      {
+        "since_confirmed_s": 4.83,
+        "no_digits_for_s": 3.22
+      },
+      {
+        "since_confirmed_s": 4.65,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 9.27,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 4.72,
+        "no_digits_for_s": 3.18
+      },
+      {
+        "since_confirmed_s": 4.63,
+        "no_digits_for_s": 3.13
+      },
+      {
+        "since_confirmed_s": 6.2,
+        "no_digits_for_s": 4.64
+      },
+      {
+        "since_confirmed_s": 6.2,
+        "no_digits_for_s": 3.12
+      },
+      {
+        "since_confirmed_s": 4.61,
+        "no_digits_for_s": 3.11
+      },
+      {
+        "since_confirmed_s": 4.74,
+        "no_digits_for_s": 3.15
+      },
+      {
+        "since_confirmed_s": 4.81,
+        "no_digits_for_s": 3.2
+      },
+      {
+        "since_confirmed_s": 4.84,
+        "no_digits_for_s": 3.27
+      },
+      {
+        "since_confirmed_s": 4.81,
+        "no_digits_for_s": 3.2
+      }
+    ],
+    "edge_since_confirmed_mean_s": 5.6,
+    "edge_since_confirmed_max_s": 13.99
+  },
+  "health_dropouts": {
+    "buckets": {
+      "lt2s": 4275,
+      "2to5s": 47,
+      "5to10s": 3,
+      "10to20s": 0,
+      "gte20s": 0
+    },
+    "count": 4325,
+    "over_5s": 3,
+    "p95_s": 1.6,
+    "max_s": 6.13
+  },
+  "stats_path": "docs/performance/current/run_20260903_192425_stats.json"
+}
