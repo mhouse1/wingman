@@ -191,6 +191,11 @@ crops:
     coords:
     - [0.3451, 0.58]
     - [0.4146, 0.61]
+  LEAVE:
+    coords:
+    - [0.5597, 0.4844]
+    - [0.6194, 0.5167]
+    text: [LEAVE]
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
@@ -241,6 +246,7 @@ stall_recovery:
   unready_dwell_s: 30.0       # UNREADY suppressing the PLAY click before leaving the squad
   scan_interval_s: 5.0        # how often the stall batch runs once the gate is open
   play_click_delay_s: 2.0     # after leaving the squad, before clicking PLAY
+  leave_click_delay_s: 1.0    # after clicking LEAVE (squad-leave confirmation), before re-scanning PLAY/READY
   cooldown_s: 20.0            # per-crop minimum between recovery actions
 
 unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 5,
@@ -524,6 +530,18 @@ tracking_hsv:
   green_upper: [75, 255, 255]
   min_contour_area: 12
   min_aspect_ratio: 2.5
+# ADR 136: padlock-off indicator — a dashed green ring at screen center when
+# padlock is disengaged (calibrated against a live capture 2026-09-09: ~40
+# short dash segments, not a single filled dot). Own HSV bounds, notably
+# lower saturation/value than tracking_hsv's enemy-marker green since this
+# is a translucent HUD reticle rather than a solid marker.
+padlock_indicator:
+  region_pct: [0.42, 0.39, 0.67, 0.67]
+  green_lower: [40, 30, 100]
+  green_upper: [75, 200, 255]
+  min_contour_area: 3
+  max_contour_area: 30
+  min_dashes: 6
 hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
 telemetry:
   # ADR 123: NOSE_DIRECTION deadband. Level flight jitters around zero altitude
@@ -551,7 +569,9 @@ telemetry:
     legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,
     rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0,
-    abort_on_rearm: true}   # ADR 088: cancel the dive if missiles rearm mid-descent
+    abort_on_rearm: true,   # ADR 088: cancel the dive if missiles rearm mid-descent
+    heatdive_enabled: true,  # ADR 136: heat-seeker switch + tracking-guided roll during the dive
+    heatdive_padlock_verify: false}  # ADR 136 D4: off — detector tracks the wrong HUD element (2026-09-09)
 # ADR 090 — bound the unfixed Performance 008 leak. Soft limit stops at the
 # next lobby (no mission in flight); hard limit stops immediately, because an
 # OOM kill can take the whole desktop session down with it.

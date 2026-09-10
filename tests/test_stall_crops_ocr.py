@@ -32,6 +32,9 @@ STALL_CASES = [
     ("STALL_RETRY",           "STALL_RETRY.png",           "RETRY"),
     # ADR 093: the PROFILE overlay that livelocked a session for 110 minutes.
     ("STALL_PROFILE",         "STALL_PROFILE.png",         "PROFILE"),
+    # Squad-leave confirmation, scanned only after the STALL_MULTI_PLAYER
+    # red-X click (2026-09-10: some squads confirm with a second dialog).
+    ("LEAVE",                 "LEAVE.png",                 "LEAVE"),
 ]
 
 

@@ -308,8 +308,18 @@ def make_boundary_condition(turn_frac: "float | None",
         # spawned and nowhere near an edge. An aircraft never spawns pointing at
         # the boundary, which makes a turn straight after a respawn a reliable
         # indicator that something upstream has latched.
+        #
+        # ADR 138: is_respawning alone left a gap. Measured live 2026-09-10
+        # 03:03:26 — the respawn screen clears (is_respawning -> False) up to
+        # ~1.5s BEFORE mission_j20 actually restarts (the ADR 059 respawn-clear
+        # stability window), and THAT restart is what arms the ADR 132 turn
+        # guard. This condition doesn't wait for mission_running, so it
+        # selected and actuated a full 12s, 180-degree-swing turn starting
+        # inside that gap — the exact "circling instead of joining the fight"
+        # ADR 132 exists to prevent, just from a different timing hole.
         if getattr(snapshot, "is_respawning", False) or \
-                snapshot.game_state != GameState.GAME_BATTLE:
+                snapshot.game_state != GameState.GAME_BATTLE or \
+                not snapshot.mission_running:
             _reset()
             return False
         if yields_to_fn is not None and yields_to_fn():
@@ -739,7 +749,12 @@ def build_tree(bt_cfg: dict, clock=time.time,
         memory=False,
         children=children,
     )
-    return py_trees.trees.BehaviourTree(root)
+    tree = py_trees.trees.BehaviourTree(root)
+    # Exposed so the Climb actuator (tick_handlers.py's _start_climb) can read
+    # THIS tick's ADR 086 emergency verdict without a new actuator-contract
+    # parameter — same closure BoundaryTurn's yields_to_fn already reads.
+    tree.climb_emergency_fn = _climb_emergency_fn
+    return tree
 
 
 def make_snapshot_writer() -> py_trees.blackboard.Client:

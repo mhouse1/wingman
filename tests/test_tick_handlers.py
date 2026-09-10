@@ -456,15 +456,20 @@ class _RespawnAnalyzerStub:
 
 
 class _RespawnCtrlStub:
-    def __init__(self, *, mission_running=False, teardown=False, auto_restart=True):
+    def __init__(self, *, mission_running=False, teardown=False, auto_restart=True,
+                 ejecting=False):
         self._running = mission_running
         self._teardown = teardown
         self._auto = auto_restart
+        self._ejecting = ejecting
         self.restarts = 0
         self.eject_stops = 0
         self.cancels = 0
         self.spawn_guard_starts = 0
         self.spawn_alive_notifies = 0
+
+    def is_ejecting(self):
+        return self._ejecting
 
     def is_mission_running(self):
         return self._running
@@ -494,7 +499,8 @@ class _RespawnCtrlStub:
         self.spawn_alive_notifies += 1
 
 
-def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None):
+def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None,
+             emit_capture_event=None):
     from wingman.main import RespawnState, _alive_transition_disposition
     from wingman.tick_handlers import RespawnHandler
     a = analyzer or _RespawnAnalyzerStub()
@@ -504,7 +510,8 @@ def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None
     h = RespawnHandler(a, c, {"respawn_clear_stability_s": stability_s},
                        enemy_presence=enemy, ammo_events=ammo,
                        disposition_fn=_alive_transition_disposition,
-                       respawn_state_enum=RespawnState)
+                       respawn_state_enum=RespawnState,
+                       emit_capture_event=emit_capture_event)
     return h, a, c
 
 
@@ -663,6 +670,55 @@ class TestRespawnDetection:
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
         assert armed == [1]
         assert suppressed == [10.0]
+
+
+class TestCrashWithMissilesInstrument:
+    """ADR 137: crashed into terrain while still armed, not a deliberate
+    eject (ADR 069/106/109's intentional empty-rack trade)."""
+
+    def _gs(self, respawning=True):
+        return {"is_respawning": respawning, "respawn_confidence": 1.0}
+
+    def test_emits_when_not_ejecting_and_missiles_remain(self):
+        events = []
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "crash_with_missiles" in events
+
+    def test_does_not_emit_while_ejecting(self):
+        events = []
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           ctrl=_RespawnCtrlStub(ejecting=True),
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "crash_with_missiles" not in events
+
+    def test_does_not_emit_when_missiles_already_zero(self):
+        """Nothing was wasted — this respawn belongs to the eject/empty-rack
+        path even if the eject state itself already cleared."""
+        events = []
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=0),
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "crash_with_missiles" not in events
+
+    def test_emits_when_missiles_unreadable(self):
+        """Fail-open: an OCR miss counts as still-armed (ADR 137) — the cost
+        of a false positive here is far lower than a silently uncounted
+        real crash."""
+        events = []
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=None),
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "crash_with_missiles" in events
+
+    def test_respawn_detected_still_emitted_alongside_it(self):
+        events = []
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert events == ["crash_with_missiles", "respawn_detected"]
 
 
 class _TrackerStub:

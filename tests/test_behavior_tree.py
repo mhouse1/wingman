@@ -941,6 +941,24 @@ def test_outside_battle_clears_the_turn():
     assert c(_bsnap(0.20, +0.18, game_state=GameState.GAME_LOBBY)) is False
 
 
+def test_mission_not_running_clears_the_turn():
+    """ADR 138. Measured live 2026-09-10 03:03:26: the respawn screen cleared
+    (is_respawning -> False) up to ~1.5s before mission_j20 actually
+    restarted (the ADR 059 stability window) — and mission_j20 restarting is
+    what arms the ADR 132 turn guard. is_respawning alone did not close this
+    gap: a full 12s, 180-degree boundary turn selected and ran starting
+    inside it, unguarded. mission_running is the same "is this a live,
+    commanded aircraft" question is_respawning already answers, just closing
+    the later half of the window."""
+    c = _bcond(min_clear_frac=0.0)
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(0.20, +0.18, mission_running=False)) is False
+    # And the latch is gone, not merely masked for that tick (same guarantee
+    # test_a_respawn_clears_a_held_turn makes for is_respawning).
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(None, None, mission_running=False)) is False
+
+
 def test_a_boundary_abeam_does_not_start_a_turn():
     """2026-09-04, one second after a respawn: dist=0.281 fwd=+0.006. The
     forward component is 2% of the range, so the edge is essentially

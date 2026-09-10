@@ -370,6 +370,11 @@ class RespawnHandler:
         if not (game_state.get('is_respawning') or health_fallback):
             return False
 
+        # ADR 137: captured BEFORE stop_eject_sequence() below changes it — a
+        # death mid-eject is the deliberate ADR 069 trade (empty rack for a
+        # rearmed one), not the unwanted crash-while-armed this stat tracks.
+        was_ejecting = ctrl.is_ejecting()
+
         # Interrupt any in-progress eject_and_dive immediately on any detected respawn,
         # independent of the mission-restart dedup cooldown below — a real respawn screen
         # means afterburner should release now, not hold until the 120s safety timeout.
@@ -392,6 +397,15 @@ class RespawnHandler:
                 # restart the mission after the NEXT respawn clears but before
                 # health actually returns.
                 analyzer.alive_event.clear()
+                # ADR 137: crash-while-armed instrument. Reuses the generic
+                # capture-event funnel (already proven harmless for consumers
+                # that don't recognize a name, e.g. "missiles_empty") rather
+                # than adding a new constructor parameter — MissionStatsTracker
+                # is the only consumer that acts on it.
+                if not was_ejecting:
+                    missiles = analyzer.get_ammo_missiles()
+                    if missiles is None or missiles > 0:
+                        self._emit_capture_event("crash_with_missiles")
                 self._emit_capture_event("respawn_detected")
                 # Live capture for the respawn frame itself rides the
                 # RESPAWN_DETECTED event, which fires from the background OCR
@@ -861,6 +875,7 @@ class BehaviorTreeHandler:
         # logged as would-select evidence.
         climb_cfg = bt_cfg.get("climb", {}) or {}
         self._climb_shadow = None
+        self._climb_emergency_fn = None
         self._climb_shadow_active = False
         self._climb_shadow_since = 0.0
         self._climb_band = (climb_cfg.get("enter_below_alt"),
@@ -912,6 +927,7 @@ class BehaviorTreeHandler:
                 bt_cfg, actuators=actuators or None,
                 regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
             self._writer = make_snapshot_writer()
+            self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
 
     def _start_boundary_turn(self) -> None:
         """BoundaryTurn start_fn. ADR 122: tell the turn which side the edge is
@@ -935,6 +951,11 @@ class BehaviorTreeHandler:
         terrain outranks the evade reserve. Otherwise the sustain band selected
         it: climb to the operating altitude with the evade fuel reserve
         honoured, so the burner is released once fuel drops to the reserve.
+
+        Also reads THIS tick's ADR 086 emergency verdict (the same closure
+        BoundaryTurn's yields_to_fn already reads) and passes it through —
+        the emergency case gets a more aggressive actuation (airbrake, no
+        pulse/observe gap) inside climb_mode/_run_climb_hold.
         """
         alt = self._last_altitude
         emergency_enter = self._climb_band[0]
@@ -942,13 +963,15 @@ class BehaviorTreeHandler:
                       and self._sustain_exit_alt is not None
                       and alt is not None
                       and (emergency_enter is None or alt >= float(emergency_enter)))
+        emergency = bool(self._climb_emergency_fn()) if self._climb_emergency_fn is not None else False
         if is_sustain:
             self._ctrl.climb_mode(target_alt=float(self._sustain_exit_alt),
                                   max_s=self._sustain_max_s,
                                   fuel_floor_pct=self._climb_fuel_reserve,
-                                  exit_lead_s=self._climb_exit_lead_s)
+                                  exit_lead_s=self._climb_exit_lead_s,
+                                  emergency=emergency)
         else:
-            self._ctrl.climb_mode()
+            self._ctrl.climb_mode(emergency=emergency)
 
     def _start_disengage(self) -> None:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence

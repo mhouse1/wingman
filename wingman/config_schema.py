@@ -174,6 +174,7 @@ SCHEMA = Section(
             "unready_dwell_s": SECONDS,
             "scan_interval_s": SECONDS,
             "play_click_delay_s": SECONDS,
+            "leave_click_delay_s": SECONDS,
             "cooldown_s": SECONDS,
         }),
 
@@ -424,6 +425,15 @@ SCHEMA = Section(
             "min_aspect_ratio": _num(0),
         }),
 
+        "padlock_indicator": Section(children={
+            "region_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "green_lower": _HSV,
+            "green_upper": _HSV,
+            "min_contour_area": _num(0),
+            "max_contour_area": _num(0),
+            "min_dashes": _int(1),
+        }),
+
         "hud": Section(children={
             "enabled": BOOL,
             "output_path": STR,
@@ -483,6 +493,8 @@ SCHEMA = Section(
                 "max_rotation_pulses": _int(1),
                 "eject_max_s": SECONDS,
                     "abort_on_rearm": BOOL,
+                "heatdive_enabled": BOOL,
+                "heatdive_padlock_verify": BOOL,
             }),
         }),
 

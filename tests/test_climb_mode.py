@@ -13,6 +13,7 @@ import wingman.controller as controller_module
 from wingman.controller_config import ControllerConfig
 from wingman.controller import (
     AFTERBURNER_KEY,
+    AIRBRAKE_KEY,
     Controller,
     NOSE_UP_KEY,
     ROLL_RIGHT_KEY,
@@ -158,6 +159,59 @@ def test_max_climb_backstop(monkeypatch):
     assert _wait_done(ctrl), "climb did not end at the backstop"
     for key in CLIMB_KEYS:
         assert _releases(kb, key), f"'{key}' never released"
+
+
+def test_emergency_holds_and_releases_airbrake(monkeypatch):
+    """ADR 137: the emergency case (only) holds AIRBRAKE_KEY alongside the
+    existing keys, released unconditionally when the climb ends."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.climb_mode(emergency=True)
+    assert ctrl.is_climbing()
+    time.sleep(0.3)
+    assert _presses(kb, AIRBRAKE_KEY), "emergency climb never pressed airbrake"
+
+    analyzer.set(1100.0, t0 + 0.1)
+    time.sleep(0.3)
+    analyzer.set(1150.0, t0 + 0.2)
+    assert _wait_done(ctrl), "emergency climb did not end on altitude recovery"
+    assert _releases(kb, AIRBRAKE_KEY), "airbrake never released at climb end"
+
+
+def test_emergency_never_presses_afterburner(monkeypatch):
+    """ADR 137: holding airbrake and afterburner together cancels the
+    airbrake's own deceleration (operator observation, 2026-09-09) — the
+    emergency case must never press AFTERBURNER_KEY, even with plentiful
+    fuel (fuel=100 would press it in the routine case)."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.climb_mode(emergency=True)
+    time.sleep(0.3)
+    assert _presses(kb, AIRBRAKE_KEY), "emergency climb never pressed airbrake"
+    assert not _presses(kb, AFTERBURNER_KEY), "afterburner pressed during emergency climb"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_non_emergency_never_presses_airbrake(monkeypatch):
+    """The routine (non-emergency) altitude-band/sustain climb is unchanged —
+    no airbrake, ever."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=0.5)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()  # emergency=False by default
+    assert _wait_done(ctrl)
+    assert not _presses(kb, AIRBRAKE_KEY)
+    assert not _releases(kb, AIRBRAKE_KEY)
 
 
 def test_duplicate_start_suppressed(monkeypatch):

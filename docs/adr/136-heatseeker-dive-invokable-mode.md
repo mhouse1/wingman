@@ -80,6 +80,99 @@ Decision below reflects that — see Consequences for why this also produces a
 *better* validation path for Design 005 than a manually-invoked mode would
 have.
 
+## Implementation status (2026-09-09)
+
+D1–D3 are implemented: `Controller.switch_weapon()`, `Controller.set_target_tracker()`,
+`Controller._eject_heatdive_loop()`, the `eject_closed_loop.heatdive_enabled`
+config key (`config.yaml`/`config_schema.py`), the `main.py` tracker wiring,
+and the `eject_and_dive()` start/stop integration are all in place and
+covered by `tests/test_eject_heatdive.py`. `heatdive_enabled` defaults
+`false`, so this is a no-op change until enabled. One correction found
+during implementation, not caught by review: `self._eject_stop` is **not**
+set on the dive's natural completion (only external cancellation sets it —
+see `controller.py:1943` finally block), so the heatdive thread cannot rely
+on that event alone to know when to stop. Fixed by having `eject_and_dive`'s
+own `finally` block explicitly signal and join a per-call `heatdive_stop`
+event, in addition to the loop watching `self._eject_stop` for prompt
+reaction to external cancellation.
+
+**First live trial (2026-09-09, `heatdive_enabled=true`), two dives, both
+false-aborted after ~8s** with `Controller: eject_and_dive — ABORT, 2
+missile(s) rearmed mid-descent (ADR 088)`. Root cause: ADR 088's rearm-abort
+check (`controller.py`, inside `_eject_descent_control` and the post-descent
+hold loop) reads `Analyzer.get_ammo_missiles()` and treats any nonzero
+result as the primary rack having refilled. It was written before ADR 136
+existed and has no way to know `switch_weapon()` just repointed that same
+crop at the fixed two-round secondary loadout — so it read "2" and aborted
+the dive almost immediately every time, defeating the whole point of this
+ADR. This was very likely also the source of an operator report during the
+same session ("padlock is still toggling, padlock should not toggle after
+primary missile run out"): the false abort ends the dive early, the mission
+auto-restarts, and `search_and_destroy_loop`'s padlock cycling resumes
+within seconds — reading exactly like "padlock never stopped" from the
+operator's seat, even though it *did* stop correctly at eject start each
+time (confirmed in the log: `search_and_destroy padlock loop stopped` fires
+right on cue both times).
+
+**Fix**: a new `self._eject_weapon_switched` flag, set the moment
+`switch_weapon()` succeeds inside `eject_and_dive`, reset to `False` at the
+top of every `eject_and_dive()` call. Both ADR 088 rearm-abort check sites
+now skip themselves while it's `True` — deliberately trading away ADR 088's
+mid-dive rearm protection for the rest of *this* dive once heatdive has
+switched weapons, since the shared crop can no longer distinguish "primary
+rearmed" from "secondary loadout active." Covered by
+`test_rearm_abort_check_skips_secondary_loadout_reading` (the fix doesn't
+false-abort), `test_rearm_abort_check_still_fires_without_a_weapon_switch`
+(ADR 088's original protection is untouched when heatdive never switches),
+and `test_eject_and_dive_resets_weapon_switched_flag_per_dive` (no stale
+flag from a previous dive). Also fixed in the same pass, found by directly
+measuring recorded press durations in the same live log: `switch_weapon()`,
+`fire_active_weapon()`, and `orient_nose_to_target()`'s roll calls were all
+being cut to 0-11ms instead of their intended hold, because
+`eject_and_dive` calls `cancel_mission()` before the heatdive loop starts
+and `_execute_key_press`'s hold loop treats an already-set
+`self._mission_cancel` as an immediate cancel signal. Fixed by adding
+`ignore_cancel: bool = False` to `fire_active_weapon`, `switch_weapon`,
+`roll_left`, `roll_right`, and `orient_nose_to_target` (mirroring the
+existing `deploy_flares` precedent), and passing `True` from every call this
+ADR's own code makes.
+
+**Padlock-off requirement (2026-09-09, operator observation during the same
+live session)**: `orient_nose_to_target`'s roll correction assumes the
+on-screen error reflects where the *aircraft's nose* is pointed. With
+padlock camera engaged, the view instead follows whatever the game has
+locked, so the roll loop would be steering blind against a moving reference
+it doesn't control. This wasn't caught in the original design — it surfaced
+only once the operator watched a live dive and reported padlock still
+toggling (the report that also led to finding the ADR 088 false-abort
+above; both symptoms were visible in the same sessions, though only the
+rearm-abort was confirmed as their root cause — this padlock-off
+requirement is a separate, independently real correctness gap the same
+observation prompted).
+
+`PADLOCK_CAMERA` is a pure toggle with no on/off argument
+(`Controller.padlock_camera`'s own docstring — confirmed by code search, no
+existing on/off state tracking anywhere in the codebase), so the only
+reliable way to know which state a press leaves it in is to look at the
+screen, not to count presses. **D4** (below) adds a screen-verified
+padlock-off check, `Controller.ensure_padlock_off()`, called once when
+heatdive switches weapons, before the tracking-roll loop starts.
+
+**D1-D3 live-validated (2026-09-09).** After the fixes above,
+`eject.heatdive_enabled=true` ran across many consecutive live ejects in one
+session with `heatdive_padlock_verify=false`: switch-weapon, tracking roll,
+and fire all fired correctly each time, and — the specific thing being
+checked — zero false `rearmed` aborts. Exit reasons across the run were the
+legitimate ones only (`respawn_detected`, `established`-then-hold); the
+`rearmed` exit reason, which fired on effectively every heatdive-enabled
+dive before the fix (measured: 5 of 5 trials that day), did not recur once
+across five consecutive dives after it. Status stays `Draft` regardless —
+D4 is a known-open item (see below), and "validated" here means the
+measured behavior this ADR set out to fix, not the whole feature surface
+(no heat-seeker kill has yet been confirmed, for instance — Open Question 2
+on the fire trigger is still open in spirit even though D1 step 4 shipped a
+default answer).
+
 ## Decision
 
 **D1. This is a config-gated addition inside `eject_and_dive`'s existing
@@ -145,6 +238,90 @@ the existing 120s-class timeout — because nothing new is introduced here.
 The roll-tracking addition stops the instant `self._eject_stop` is set; same
 event, no separate teardown path. SAF-011/012 ground-collision recovery is
 unmodified and still applies underneath exactly as it does today.
+
+**D4. Padlock is verified off, not assumed off, before the roll loop
+starts.** `Controller.ensure_padlock_off(max_attempts=3)` reads a new
+screen detector — `TargetTracker.detect_padlock_off(frame)`. Since
+`padlock_camera()` is a pure toggle with no on/off argument,
+`ensure_padlock_off` loops: check the screen, and only if the indicator is
+absent, press `padlock_camera()` once and re-check — up to `max_attempts`
+(default 3) before giving up and logging a warning. This fails open: it
+does not block the dive if it can never confirm off, since the report that
+prompted this was a correctness gap in the roll, not something that
+threatens the aircraft the way a stuck key would. Called once, right after
+`switch_weapon()`/`_eject_weapon_switched` and before the heatdive thread
+starts — not re-checked continuously through the dive, since nothing else
+presses `PADLOCK_CAMERA` once `cancel_mission()` has stopped
+`search_and_destroy_loop` (verified: `_padlock_loop`'s own
+`while ... and not self._mission_cancel.is_set()` guard,
+`controller.py:2061`, plus `eject_and_dive`'s own wait for
+`is_mission_running()` to clear before doing anything else). If a later
+session finds padlock re-engaging mid-dive some other way, this would need
+to move from a one-time check to a per-cycle one inside
+`_eject_heatdive_loop` — not needed yet, so not built yet.
+
+**Detector recalibrated against a live capture (2026-09-09), after the
+first design missed the indicator on every trial.** The original detector
+assumed a single small filled green dot and never found anything —
+`ensure_padlock_off` logged "could not confirm padlock off after 3
+attempts" on both of the first two redeployed dives. A frame grabbed
+mid-dive (`DISPLAY=:3`, same mss path `grab_from_thread` uses) showed the
+real indicator: a **dashed green ring** centered on screen (a small
+crosshair dot at its exact center, but the ring is the dominant, reliably
+visible feature), made of roughly 40 short dash segments, not one shape.
+Measured directly from that frame: dash color H 40-75 / S 30-200 / V
+100-255 — markedly less saturated than `tracking_hsv`'s enemy-marker green
+(S >= 150), consistent with a translucent HUD reticle rather than a solid
+marker; the ring spans roughly `[0.42, 0.39]` to `[0.67, 0.67]` of the
+frame, well outside the original `[0.46, 0.44]`-`[0.54, 0.56]` region that
+only covered the exact center pixel.
+
+`detect_padlock_off` was rewritten to match: count contours sized like a
+single dash (`min_contour_area`/`max_contour_area`, no aspect-ratio filter
+since dashes are short curved strokes) and require at least `min_dashes`
+(default 6, well under the ~40 observed, so partial occlusion by the
+aircraft nose or HUD clutter doesn't cost a false negative) rather than
+accepting any one matching contour — a single stray green pixel elsewhere
+in the wider region would otherwise false-positive. Verified against the
+same captured frame after the fix: `detect_padlock_off` returns `True`.
+Config (`padlock_indicator`), synthetic tests (`TestPadlockIndicator`, now
+drawing a dash ring via `_draw_dashed_ring` instead of one circle), and
+this section were all updated together in the same pass.
+
+**D4 disabled by default after redeployment showed the recalibrated
+detector still failed live, intermittently (2026-09-09).** Two more dives
+after the recalibration: one succeeded (`detect_padlock_off` confirmed off
+on attempt 3), one failed all 3 attempts. Temporary diagnostic
+instrumentation saved the exact frame each check saw. Comparing a
+`off=False` frame against a `off=True` frame settled it: the dashed ring is
+**not fixed at screen center** — in the failure frame it sat in the
+upper-right of the screen during a banked turn; in the success frame it was
+upper-left-of-center during a different attitude. This is consistent with a
+**flight-path/velocity-vector marker** (common in this class of HUD,
+showing actual travel direction vs. nose direction) that moves with flight
+attitude, not a padlock on/off indicator at a fixed position. Both the
+original hand-captured reference frame and the live `off=True` frame that
+seemed to confirm the recalibration were very likely coincidences — the
+marker happened to drift through the fixed detection region at those
+particular moments, not because padlock state had actually changed.
+
+Given this, blindly toggling the real `PADLOCK_CAMERA` key up to 3 times
+per dive against a signal that was measuring something else entirely was
+actively worse than doing nothing — the final padlock state after
+`ensure_padlock_off` gave up was effectively unconstrained (0-3 net
+toggles). Operator decision: **disable the auto-toggle call site, keep
+D1-D3 running.** A new flag, `eject_closed_loop.heatdive_padlock_verify`
+(default `false`), now gates whether `eject_and_dive` calls
+`ensure_padlock_off()` at all — `Controller.ensure_padlock_off()` and
+`TargetTracker.detect_padlock_off()` are left in place (and still directly
+unit-testable) for a future attempt once the actual indicator is correctly
+identified, rather than deleted. D1-D3 (weapon switch, tracking roll, fire,
+the ADR 088 rearm-abort fix) are unaffected — the rearm-abort fix in
+particular was independently confirmed correct across multiple live ejects
+this session (`respawn_detected` and `established` exit reasons, no more
+false `rearmed` aborts). This is an open item, not a closed one: identifying
+the real padlock-off indicator (or an entirely different verification
+approach) is still needed before D4 can be re-enabled.
 
 ## Non-Goals
 

@@ -21,7 +21,7 @@ except ImportError:
     colorama = None
 
 WINGMAN_VERSION = "1.8.9"
-WINGMAN_VERSION_DETAILS = "ACS"
+WINGMAN_VERSION_DETAILS = "ACS mission_j20 next phase, switch to secondary weapons then guide towards target during dive"
 
 from .capture import Capture
 from .config_schema import assert_valid_config
@@ -645,6 +645,10 @@ def main():
         on_auto_mission_key=_on_auto_mission_key,
         crops=analyzer.crops,
     )
+    # ADR 136: give the eject heatdive addition a tracker to call directly —
+    # Controller cannot construct its own, TargetTracker is owned/configured
+    # alongside HudRenderer above.
+    ctrl.set_target_tracker(target_tracker)
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry
     # (ADR 060 Phase 1). Every subscriber is named; a duplicate name raises at
@@ -777,6 +781,7 @@ def main():
 
     stall_cfg = cfg.get("stall_recovery", {}) or {}
     stall_play_delay_s = float(stall_cfg.get("play_click_delay_s", 2.0))
+    stall_leave_delay_s = float(stall_cfg.get("leave_click_delay_s", 1.0))
     stall_cooldown_s = float(stall_cfg.get("cooldown_s", 20.0))
 
     def _handle_stall_recovery(crop):
@@ -860,6 +865,22 @@ def main():
                 if new_frame is None:
                     logger.warning("STALL_MULTI_PLAYER: frame capture returned None")
                     return
+                # LEAVE only ever gets scanned here, after the red X — some
+                # squads apparently confirm with a second dialog before the
+                # game actually drops you, and clicking only the red X left
+                # PLAY/READY never appearing (observed 2026-09-10, fell
+                # through to the slower QUEUE_FALLBACK path instead).
+                if analyzer.scan_region_for_leave(new_frame):
+                    logger.info("\033[92m🔧 Stall recovery: clicking LEAVE "
+                                "(squad-leave confirmation)\033[0m")
+                    ctrl.click_crop(analyzer.crops["LEAVE"], block=False, count=1,
+                                    region_name="LEAVE")
+                    time.sleep(stall_leave_delay_s)
+                    new_frame = cap.grab_from_thread()
+                    if new_frame is None:
+                        logger.warning("STALL_MULTI_PLAYER: frame capture "
+                                       "returned None after clicking LEAVE")
+                        return
                 # Re-scans UNREADY too, so a squad we failed to leave suppresses
                 # the click instead of firing PLAY into a still-blocked lobby.
                 ready = analyzer.scan_region_for_play_button(new_frame)
