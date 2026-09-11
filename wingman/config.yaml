@@ -270,12 +270,20 @@ health:
   decline_evidence_window_s: 6.0
   dropout_capture: {enabled: true, capture_after_s: 5.0, recapture_interval_s: 60.0,
     max_per_session: 12}
-  # ADR 137 D7: dropout_capture above deliberately skips this exact window
-  # (telemetry not live = "death/menu gap, not a dropout") — captured here
-  # instead, to see what the health crop actually shows while wingman waits
-  # on it post-respawn. capture_after_s is shorter than dropout_capture's:
-  # a normal restart confirms in 1-3s, so 8s is already well past normal.
-  respawn_stall_capture: {enabled: true, capture_after_s: 8.0, recapture_interval_s: 15.0,
+  # ADR 137 D7, retuned 2026-09-11: dropout_capture above deliberately skips
+  # this exact window (telemetry not live = "death/menu gap, not a
+  # dropout") — captured here instead, to see what the health crop shows
+  # while wingman waits on it post-respawn. capture_after_s was 8.0
+  # (chosen before checking ADR 062's own Phase A data) but that turned out
+  # to be AT the game's normal respawn-overlay duration, not past it — ADR
+  # 062 documented the shadow health-detector normally confirming +4 to +8s
+  # after the OCR respawn edge, and the shadow-detector session summary's
+  # own fire_deltas_s corroborates that same 2-13s range live. At 8.0 the
+  # recorder fired on ordinary respawns (12/12 session cap in ~24 minutes,
+  # all normal). Raised to 30.0 — comfortably above the documented normal
+  # range, well below the 60-153s extreme outliers this is actually meant
+  # to catch (all 9 of which followed an ADR 136 heatdive death).
+  respawn_stall_capture: {enabled: true, capture_after_s: 30.0, recapture_interval_s: 20.0,
     max_per_session: 12}
 fuel: {stale_after_s: 6.0, rearm_margin_pct: 5}
 # ADR 098: suppress injection when the game does not have focus. Off until a

@@ -2208,13 +2208,19 @@ class RespawnHealthStallRecorder:
     itself ended before `mission_j20` ever restarted. This exists to show
     what the health crop actually looks like during that stretch, before
     guessing at a fix.
+
+    `capture_after_s` must sit above ADR 062's documented normal respawn
+    gap (+4 to +8s, corroborated by the shadow-detector session summary's
+    own `fire_deltas_s`) — 8.0 fired on ordinary respawns; retuned to 30.0
+    to target only the 60-153s extreme outliers this was actually built
+    for (see ADR 137 D7 for the retuning record).
     """
 
     def __init__(self, cfg: "dict | None", analyzer, ctrl, clock=time.time):
         cfg = cfg or {}
         self._enabled = bool(cfg.get("enabled", True))
-        self._after_s = float(cfg.get("capture_after_s", 8.0))
-        self._recapture_s = float(cfg.get("recapture_interval_s", 15.0))
+        self._after_s = float(cfg.get("capture_after_s", 30.0))
+        self._recapture_s = float(cfg.get("recapture_interval_s", 20.0))
         self._max_per_session = int(cfg.get("max_per_session", 12))
         self._dir = str(cfg.get("dir", "test_screenshots/respawn_health_stalls"))
         self._analyzer = analyzer

@@ -308,3 +308,70 @@ this block directly.
   the Backspace in this session, so the new `close_all_requested()` branch
   was never entered. Still open: a session where the two actually race.
 
+## SIGTERM had no effect at all on a live, ticking process (2026-09-11)
+
+A fifth variant, and the first where the loop itself was never in doubt.
+
+**Observed 2026-09-11 06:44-06:52.** The nested Xwayland server on `:3` died
+out from under a live session — gone from `/proc` and from `/tmp/.X11-unix`
+between two ticks, with no OOM-kill or segfault in `dmesg`/`journalctl` and no
+exit trace in the server's own log (`/tmp/wingman-nested-display.log`, last
+written at session start). Cause unknown; not this ADR's concern. What
+followed is.
+
+Wingman kept running — the tick loop, `Controller.fire_active_weapon`,
+`padlock_camera`, and the XKey listener's own reconnect-every-3s loop all
+continued firing normally, once a second, for the next several minutes,
+`Linux key event for 'f' failed after retry` on every attempt since the
+display no longer existed. This is measured, not inferred: `wingman.log` shows
+continuous, evenly-spaced output throughout, unlike the original 2026-09-05
+incident's signature ("stopped logging on the same second") and unlike the
+2026-09-08 SIGHUP incident (log stops mid-write). The process was never stuck
+— it was doing useless work, correctly, forever.
+
+`kill -TERM` was sent directly to the interpreter PID (confirmed via `ps`,
+not the `uv run` shim). `exit_requested.is_set()` sits unconditionally at the
+top of `main.py`'s `while True:` (line 1060), checked once per tick, before
+anything else. The tick kept running at its normal ~1 s cadence for 75+
+seconds afterward. It never logged `Exit requested, shutting down`. No
+`SHUTDOWN WATCHDOG` line appeared either, for the structural reason below.
+`kill -KILL` was sent after that wait; the process died immediately and
+cleanly (confirmed by the `uv`/`make rd` shim reporting exit 137 one second
+later), so nothing downstream of the signal was itself hung — the interpreter
+was fully responsive to SIGKILL throughout.
+
+**What is not known.** Whether the SIGTERM was delivered to the process at
+all, delivered but masked for the main thread, or delivered and handled (the
+lambda ran, `exit_requested.set()` executed) yet the *same* `threading.Event`
+object somehow read `False` from the loop — cannot be distinguished
+post-mortem with the process already gone. Guessing at which would repeat
+the mistake ADR 121's original incident already recorded. Instrumentation
+belongs in the signal handler itself, not in a theory about it.
+
+**The structural gap this exposes.** `_arm_shutdown_watchdog()` is called
+from the `finally:` block wrapping the main loop (`main.py:1459`) — reached
+only once the loop actually breaks out of `while True:`, which requires
+`exit_requested.is_set()` to have been true at the top of some tick. Every
+variant this ADR has recorded so far — the original hang, the SIGHUP gap, the
+Ctrl-C race — is a failure *after* that point, or a signal that bypassed
+`exit_requested` entirely (SIGHUP's default disposition). This is the first
+one where the signal that is supposed to *set* `exit_requested` produced no
+observable effect while the loop kept running in full health. The 90 s
+watchdog cannot fire for a failure that never reaches the code that arms it.
+
+**Decision.** Not yet fixed. Recorded here per this ADR's own rule — the next
+occurrence should carry more than a correlation. The candidate fix is an
+independent timer armed in the signal handler itself (or immediately after
+`signal.signal(...)` registration), separate from `_arm_shutdown_watchdog`,
+that forces exit if `exit_requested` is still unset some bounded time after
+the OS delivered the signal — closing the one path left where a termination
+request can be silently absorbed. See SAF-015 (`docs/requirements/001-safety.sdoc`)
+for the property this gap violates.
+
+### Validation
+
+- V1 — open. Next SIGTERM-during-XKey-reconnect-storm session should either
+  reproduce this (and get a signal-handler-level instrument added) or show
+  clean acknowledgment, narrowing whether the reconnect storm is a factor or
+  coincidental to this specific occurrence.
+

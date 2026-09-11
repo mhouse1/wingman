@@ -373,6 +373,38 @@ chased. Whether `AttackSupport` should do something more useful than coast
 during a known-long respawn wait is a separate, legitimate design question
 this ADR does not resolve.
 
+**Correction and retuning, same day**: the "objective-mode matches have a
+longer respawn timer" theory above was built from only 3 screenshots that
+all happened to be objective/conquest-mode matches — there was no
+deathmatch-mode counterexample to confirm the game mode was the actual
+differentiator rather than coincidence. Re-reading
+[ADR 062](062-health-signal-respawn-detection-retiring-respawn-ocr.md)'s
+own Phase A data (2026-08-01/02) found this was already measured, months
+earlier and apparently mode-independently: *"OCR fires at overlay start
+while health cannot return until the overlay clears ~8s later — live
+matches landed at +4 to +8s."* The `Shadow respawn detector (ADR 062
+Phase A)` block every session still prints at shutdown corroborates this
+live, tonight: `fire_deltas_s` across 18-283 samples per session clusters
+mostly in the same 2-13s range documented in 2026-08. **D7's 8.0s
+threshold, chosen without checking this, sat at the documented normal
+baseline rather than past it** — which is why it filled its 12-per-session
+cap in the first 24 minutes, on ordinary respawns, not anomalies. This is
+also why yesterday's `stop_eject_sequence` fix (D6) needed to check
+`is_secondary_weapon_active` so carefully: the ~8s window is normal and
+frequent enough that any logic gating on "respawn took a while" without a
+tighter threshold will trip on it constantly.
+
+The genuinely unexplained finding is unchanged and separate: the 9 extreme
+outliers found earlier (60-153s, 8-20x the documented ~8s baseline, all 9
+following an ADR 136 heatdive death) are not explained by ADR 062's normal
+range. `capture_after_s` raised 8.0 → 30.0 (comfortably above the
+documented normal range, well below the extreme outliers) so D7 only fires
+on those going forward, instead of drowning in baseline noise.
+`recapture_interval_s` widened 15.0 → 20.0 to spread the session cap
+across more of a long episode's duration rather than exhausting it on one.
+No frame from an actual extreme-range stall has been captured yet — that
+is what this retuning is for.
+
 ## Non-Goals
 
 1. ~~**Not a fix to the ADR 086 trigger threshold itself**
