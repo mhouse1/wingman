@@ -255,6 +255,27 @@ def test_eject_and_dive_resets_weapon_switched_flag_per_dive(monkeypatch):
     assert ctrl._eject_weapon_switched is False
 
 
+def test_stop_eject_sequence_also_clears_weapon_switched_flag(monkeypatch):
+    """ADR 137: a respawn or match end restores the primary loadout in-game,
+    so the "AMMO_MISSILE currently reads secondary" ambiguity must clear
+    right there too — not only at the next dive's own start. Without this,
+    a life with no further eject in it would read stale-True for its whole
+    duration, wrongly suppressing a genuine crash_with_missiles count."""
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_CaptureStub())
+    ctrl._eject_weapon_switched = True
+
+    ctrl.stop_eject_sequence()
+
+    assert ctrl._eject_weapon_switched is False
+
+
+def test_is_secondary_weapon_active_reflects_the_flag(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_CaptureStub())
+    assert ctrl.is_secondary_weapon_active() is False
+    ctrl._eject_weapon_switched = True
+    assert ctrl.is_secondary_weapon_active() is True
+
+
 # ---------------------------------------------------------------------------
 # ADR 136: padlock must be verified off before tracking-guided roll starts
 # ---------------------------------------------------------------------------

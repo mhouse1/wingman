@@ -215,7 +215,8 @@ class RespawnHandler:
 
     def __init__(self, analyzer, ctrl, mission_cfg, *, enemy_presence, ammo_events,
                  behavior_tree=None, live_capture=None, emit_capture_event=None,
-                 disposition_fn, respawn_state_enum, cooldown_s: float = 10.0):
+                 disposition_fn, respawn_state_enum, cooldown_s: float = 10.0,
+                 replay_mode: bool = False):
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._enemy_presence = enemy_presence
@@ -235,6 +236,20 @@ class RespawnHandler:
         self._state = respawn_state_enum.IDLE
         self._cooldown_until = 0.0
         self._clear_since = 0.0   # timestamp since the respawn cache has been continuously false
+
+        # ADR 137 D5: one frame per crash_with_missiles occurrence, capped
+        # per session — see _capture_crash_frame. Defaults to OFF when the
+        # section is absent entirely (a caller must opt in explicitly,
+        # e.g. via config.yaml) — code-review finding, 2026-09-11: the old
+        # default-True-when-absent let any config/test/tool that omits this
+        # section start writing real PNGs to disk unasked.
+        _cc_cfg = mission_cfg.get("crash_capture", {}) or {}
+        _raw_max = _cc_cfg.get("max_per_session", 20)
+        self._crash_capture_enabled = (bool(_cc_cfg.get("enabled", False))
+                                       and not replay_mode)
+        self._crash_capture_max = int(20 if _raw_max is None else _raw_max)
+        self._crash_capture_dir = str(_cc_cfg.get("dir", "test_screenshots/crash_with_missiles"))
+        self._crash_captures = 0
 
     # -- state --------------------------------------------------------------
 
@@ -354,6 +369,54 @@ class RespawnHandler:
         self._emit_capture_event("restart_last_mission")
         self._state = self._RespawnState.IDLE
 
+    # -- crash capture --------------------------------------------------------
+
+    def _capture_crash_frame(self, frame) -> None:
+        """Save the tick's frame to disk at a crash_with_missiles occurrence.
+
+        ADR 137 D5: the log-only instrument (D4) could not tell a genuine
+        mid-flight perception gap apart from an ordinary death/explosion
+        screen — every OCR channel reads "no digits" either way. A saved
+        frame settles it by inspection. Capped per SESSION (`max_per_session`),
+        not per episode — unlike UnknownAnomalyRecorder, there is no
+        recurring "episode" here to bound captures within.
+        """
+        if not self._crash_capture_enabled or frame is None:
+            return
+        if self._crash_captures >= self._crash_capture_max:
+            # ADR 137 D5, code-review finding 2026-09-11: a silent return
+            # here reintroduces the exact log-only ambiguity D5 exists to
+            # remove — an operator seeing captures stop must be able to
+            # tell "cap reached" from "no further crashes" at a glance.
+            logger.debug("Crash capture: session cap (%d) reached — not saving",
+                         self._crash_capture_max)
+            return
+        try:
+            # heavy import kept local — matches _capture_boundary_frame's
+            # per-call style; UnknownAnomalyRecorder/HealthDropoutRecorder
+            # import once in __init__ instead, a different precedent this
+            # method does not follow (code-review finding, 2026-09-11).
+            import cv2
+            from pathlib import Path
+            out_dir = Path(self._crash_capture_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            # The sequence suffix (not just the timestamp) is required, not
+            # cosmetic: two crashes in the same wall-clock second — plausible
+            # in a fast tick loop — would otherwise silently overwrite one
+            # PNG with the other while the counter still claims both were
+            # saved (code-review finding, 2026-09-11).
+            path = out_dir / f"crash_{stamp}_{self._crash_captures}.png"
+            if not cv2.imwrite(str(path), frame):
+                logger.warning("Crash capture: write failed: %s", path)
+                return
+            self._crash_captures += 1
+            logger.info("Crash capture: saved %s (%d/%d this session)",
+                        path, self._crash_captures, self._crash_capture_max)
+        except Exception as e:
+            logger.warning("Crash capture: failed to save frame: %s: %s",
+                           type(e).__name__, e)
+
     # -- tick ---------------------------------------------------------------
 
     def tick_detect(self, frame, game_state, current_game_state) -> bool:
@@ -374,6 +437,13 @@ class RespawnHandler:
         # death mid-eject is the deliberate ADR 069 trade (empty rack for a
         # rearmed one), not the unwanted crash-while-armed this stat tracks.
         was_ejecting = ctrl.is_ejecting()
+        # Same reason, same timing requirement: once heatdive (ADR 136) has
+        # switched weapons this dive, AMMO_MISSILE reads the secondary
+        # (heatseeker) rack, not the primary one — a crash counted from that
+        # reading would be counting leftover heatseekers, not unused primary
+        # ordnance. stop_eject_sequence() below clears this flag as a side
+        # effect, so it must be read first.
+        had_secondary_weapon_active = ctrl.is_secondary_weapon_active()
 
         # Interrupt any in-progress eject_and_dive immediately on any detected respawn,
         # independent of the mission-restart dedup cooldown below — a real respawn screen
@@ -401,10 +471,44 @@ class RespawnHandler:
                 # capture-event funnel (already proven harmless for consumers
                 # that don't recognize a name, e.g. "missiles_empty") rather
                 # than adding a new constructor parameter — MissionStatsTracker
-                # is the only consumer that acts on it.
-                if not was_ejecting:
+                # is the only consumer that acts on it. Excludes both a
+                # death mid-eject (was_ejecting — ADR 069's deliberate trade)
+                # and a death while ADR 136 heatdive had switched to the
+                # secondary loadout (had_secondary_weapon_active) — in the
+                # latter case AMMO_MISSILE reads the heatseeker rack, not
+                # the primary one, so "missiles > 0" would be counting
+                # leftover secondaries as unused primary ordnance.
+                if not was_ejecting and not had_secondary_weapon_active:
                     missiles = analyzer.get_ammo_missiles()
                     if missiles is None or missiles > 0:
+                        # ADR 137 D4: this is the only per-occurrence record —
+                        # the stats counter alone forced a multi-hour log dig
+                        # to characterize the first sample of these. alt/rate
+                        # come from the same telemetry the Climb tactic reads,
+                        # so a dive-recovery failure is visible directly here.
+                        # Guarded (unlike a bare attribute chain would be):
+                        # this diagnostic must never be able to take down the
+                        # whole respawn-handling tick, the same fail-safe
+                        # posture _capture_crash_frame below already has
+                        # (code-review finding, 2026-09-11).
+                        alt, rate = None, None
+                        try:
+                            snap = analyzer.get_telemetry()
+                            if snap is not None:
+                                # .value (raw last-accepted reading), not
+                                # .stable_value — the smoothed mean is the
+                                # documented lag source D4 itself exists to
+                                # work around; a diagnostic line reporting it
+                                # would understate exactly the dives it's
+                                # meant to characterize (code-review finding).
+                                alt = snap.altitude.value
+                                rate = snap.altitude.rate
+                        except Exception:
+                            logger.debug("crash_with_missiles: telemetry read failed", exc_info=True)
+                        logger.warning(
+                            "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
+                            "alt=%s rate=%s\033[0m", missiles, alt, rate)
+                        self._capture_crash_frame(frame)
                         self._emit_capture_event("crash_with_missiles")
                 self._emit_capture_event("respawn_detected")
                 # Live capture for the respawn frame itself rides the
@@ -2087,5 +2191,78 @@ class HealthDropoutRecorder:
         logger.info(
             "ADR080 dropout: health unconfirmed %.0fs with live telemetry — "
             "frame %d/%d saved to %s",
+            gap, self._captured_total, self._max_per_session, path)
+        return str(path)
+
+
+class RespawnHealthStallRecorder:
+    """ADR 137 D7: capture frames while health stays unconfirmed after a
+    respawn, specifically the window `HealthDropoutRecorder` excludes.
+
+    That recorder gates on `telemetry_hud_live()` and skips a "death/menu
+    gap" on purpose — this window (mission not yet running, in GAME_BATTLE,
+    health unconfirmed) *is* that gap. Investigating a live incident
+    (2026-09-11) found every stall of this kind followed an ADR 136 heatdive
+    death, with health OCR reading zero digits — not slowly, but completely
+    — for the rest of the life; several ran long enough that the match
+    itself ended before `mission_j20` ever restarted. This exists to show
+    what the health crop actually looks like during that stretch, before
+    guessing at a fix.
+    """
+
+    def __init__(self, cfg: "dict | None", analyzer, ctrl, clock=time.time):
+        cfg = cfg or {}
+        self._enabled = bool(cfg.get("enabled", True))
+        self._after_s = float(cfg.get("capture_after_s", 8.0))
+        self._recapture_s = float(cfg.get("recapture_interval_s", 15.0))
+        self._max_per_session = int(cfg.get("max_per_session", 12))
+        self._dir = str(cfg.get("dir", "test_screenshots/respawn_health_stalls"))
+        self._analyzer = analyzer
+        self._ctrl = ctrl
+        self._clock = clock
+        self._captured_total = 0
+        self._episode_captured = False
+        self._last_capture_ts = 0.0
+
+    def tick(self, frame, current_game_state) -> "str | None":
+        """Capture when health has stayed unconfirmed past the threshold
+        while GAME_BATTLE is active but mission_j20 has not yet restarted.
+        Returns the saved path (for tests/logging), else None."""
+        if not self._enabled or frame is None:
+            return None
+        if current_game_state != GameState.GAME_BATTLE or self._ctrl.is_mission_running():
+            # Mission running again, or state moved on — the episode is
+            # over one way or another.
+            self._episode_captured = False
+            return None
+        gap = self._analyzer.health_confirmed_gap_s()
+        if gap is None or gap < self._after_s:
+            self._episode_captured = False
+            return None
+        if self._captured_total >= self._max_per_session:
+            return None
+        now = self._clock()
+        if self._episode_captured and now - self._last_capture_ts < self._recapture_s:
+            return None
+        try:
+            import cv2  # heavy import kept local: recorder is constructed once
+            from pathlib import Path
+            out_dir = Path(self._dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            path = out_dir / f"stall_{stamp}_gap{int(gap)}s.png"
+            if not cv2.imwrite(str(path), frame):
+                logger.warning("ADR137 respawn stall: screenshot write failed: %s", path)
+                return None
+        except Exception as e:
+            logger.warning("ADR137 respawn stall: screenshot capture failed: %s: %s",
+                           type(e).__name__, e)
+            return None
+        self._captured_total += 1
+        self._episode_captured = True
+        self._last_capture_ts = now
+        logger.info(
+            "ADR137 respawn stall: health unconfirmed %.0fs, mission not yet "
+            "restarted — frame %d/%d saved to %s",
             gap, self._captured_total, self._max_per_session, path)
         return str(path)

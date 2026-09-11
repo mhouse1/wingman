@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 
 from wingman.analyzer import GameState
+from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
 from wingman.tick_handlers import WaitingFallbackHandler
 
 
@@ -435,10 +436,11 @@ class TestFlares:
 
 class _RespawnAnalyzerStub:
     def __init__(self, *, state=GameState.GAME_BATTLE, missiles=4,
-                 alive_after_observed_death=False):
+                 alive_after_observed_death=False, telemetry=None):
         self.game_state = state
         self.alive_after_observed_death = alive_after_observed_death
         self._missiles = missiles
+        self._telemetry = telemetry
         self.alive_event = _EventStub()
         self.health_respawn_event = _EventStub()
         self.triggers = []
@@ -446,6 +448,9 @@ class _RespawnAnalyzerStub:
 
     def get_ammo_missiles(self):
         return self._missiles
+
+    def get_telemetry(self):
+        return self._telemetry
 
     def reset_health_for_respawn(self):
         self.health_resets += 1
@@ -457,11 +462,12 @@ class _RespawnAnalyzerStub:
 
 class _RespawnCtrlStub:
     def __init__(self, *, mission_running=False, teardown=False, auto_restart=True,
-                 ejecting=False):
+                 ejecting=False, secondary_weapon_active=False):
         self._running = mission_running
         self._teardown = teardown
         self._auto = auto_restart
         self._ejecting = ejecting
+        self._secondary_weapon_active = secondary_weapon_active
         self.restarts = 0
         self.eject_stops = 0
         self.cancels = 0
@@ -470,6 +476,9 @@ class _RespawnCtrlStub:
 
     def is_ejecting(self):
         return self._ejecting
+
+    def is_secondary_weapon_active(self):
+        return self._secondary_weapon_active
 
     def is_mission_running(self):
         return self._running
@@ -500,14 +509,18 @@ class _RespawnCtrlStub:
 
 
 def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None,
-             emit_capture_event=None):
+             emit_capture_event=None, crash_capture=None):
     from wingman.main import RespawnState, _alive_transition_disposition
     from wingman.tick_handlers import RespawnHandler
     a = analyzer or _RespawnAnalyzerStub()
     c = ctrl or _RespawnCtrlStub()
     enemy = enemy or SimpleNamespace(arm=lambda: None)
     ammo = ammo or SimpleNamespace(suppress_after_respawn=lambda s: None)
-    h = RespawnHandler(a, c, {"respawn_clear_stability_s": stability_s},
+    # Real capture disabled by default — no test should write to disk
+    # unless it is specifically exercising ADR 137 D5's capture behavior.
+    mission_cfg = {"respawn_clear_stability_s": stability_s,
+                   "crash_capture": {"enabled": False} if crash_capture is None else crash_capture}
+    h = RespawnHandler(a, c, mission_cfg,
                        enemy_presence=enemy, ammo_events=ammo,
                        disposition_fn=_alive_transition_disposition,
                        respawn_state_enum=RespawnState,
@@ -694,6 +707,28 @@ class TestCrashWithMissilesInstrument:
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
         assert "crash_with_missiles" not in events
 
+    def test_does_not_emit_when_secondary_weapon_was_active(self):
+        """ADR 136/137: once heatdive has switched weapons this dive,
+        AMMO_MISSILE reads the heatseeker rack, not the primary one — a
+        crash here is not "still had missiles" in the sense this stat
+        tracks, even though is_ejecting() may already read False (the eject
+        sequence can end before the aircraft actually dies)."""
+        events = []
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           ctrl=_RespawnCtrlStub(ejecting=False, secondary_weapon_active=True),
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "crash_with_missiles" not in events
+        assert "respawn_detected" in events   # only the crash count is suppressed
+
+    def test_still_emits_when_secondary_weapon_inactive(self):
+        events = []
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           ctrl=_RespawnCtrlStub(ejecting=False, secondary_weapon_active=False),
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "crash_with_missiles" in events
+
     def test_does_not_emit_when_missiles_already_zero(self):
         """Nothing was wasted — this respawn belongs to the eject/empty-rack
         path even if the eject state itself already cleared."""
@@ -719,6 +754,188 @@ class TestCrashWithMissilesInstrument:
                            emit_capture_event=events.append)
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
         assert events == ["crash_with_missiles", "respawn_detected"]
+
+    def test_logs_the_raw_altitude_not_the_smoothed_one(self, caplog):
+        """ADR 137 D4, code-review finding 2026-09-11: stable_value lags real
+        altitude by up to ~1500m in a fast dive (the exact mechanism D4
+        exists to work around) — the diagnostic line must report .value."""
+        snap = TelemetrySnapshot(
+            speed=TelemetrySignal(value=900, stable_value=900, ts=1.0, rate=0.0),
+            altitude=TelemetrySignal(value=317, stable_value=1820, ts=1.0, rate=-602.0),
+            taken_at_s=1.0)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=1, telemetry=snap),
+                           emit_capture_event=lambda _n: None)
+        with caplog.at_level("WARNING"):
+            h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        [msg] = [r.getMessage() for r in caplog.records if "CRASH WITH MISSILES" in r.getMessage()]
+        assert "alt=317" in msg, msg
+        assert "1820" not in msg, msg
+        assert "rate=-602.0" in msg, msg
+
+    def test_a_telemetry_read_failure_does_not_break_the_tick(self):
+        """The diagnostic must never be able to take down respawn handling —
+        the same fail-safe posture _capture_crash_frame already has."""
+        class _BoomAnalyzer(_RespawnAnalyzerStub):
+            def get_telemetry(self):
+                raise RuntimeError("ocr thread died mid-read")
+        events = []
+        h, a, c = _respawn(_BoomAnalyzer(missiles=2), emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)   # must not raise
+        assert events == ["crash_with_missiles", "respawn_detected"]
+
+
+class TestCrashCapture:
+    """ADR 137 D5: a frame saved at the exact crash_with_missiles tick —
+    log-only evidence could not tell a perception gap from an ordinary
+    death screen, since every OCR channel reads "no digits" either way."""
+
+    def _gs(self, respawning=True):
+        return {"is_respawning": respawning, "respawn_confidence": 1.0}
+
+    def _no_real_disk(self, monkeypatch):
+        from pathlib import Path
+        monkeypatch.setattr(Path, "mkdir", lambda *a, **kw: None)
+
+    def test_saves_a_frame_on_crash_when_enabled(self, monkeypatch):
+        import cv2
+        self._no_real_disk(monkeypatch)
+        writes = []
+        monkeypatch.setattr(cv2, "imwrite",
+                            lambda path, frame: writes.append((path, frame)) or True)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           crash_capture={"enabled": True, "max_per_session": 20,
+                                          "dir": "test_screenshots/crash_with_missiles"})
+        h.tick_detect("a_frame", self._gs(True), GameState.GAME_BATTLE)
+        assert len(writes) == 1
+        assert writes[0][1] == "a_frame"
+        assert "test_screenshots/crash_with_missiles" in writes[0][0]
+
+    def test_disabled_never_writes(self, monkeypatch):
+        import cv2
+        writes = []
+        monkeypatch.setattr(cv2, "imwrite",
+                            lambda path, frame: writes.append((path, frame)) or True)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           crash_capture={"enabled": False})
+        h.tick_detect("a_frame", self._gs(True), GameState.GAME_BATTLE)
+        assert writes == []
+
+    def test_no_crash_no_capture(self, monkeypatch):
+        import cv2
+        writes = []
+        monkeypatch.setattr(cv2, "imwrite",
+                            lambda path, frame: writes.append((path, frame)) or True)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=0),   # empty rack: not a crash
+                           crash_capture={"enabled": True, "max_per_session": 20,
+                                          "dir": "test_screenshots/crash_with_missiles"})
+        h.tick_detect("a_frame", self._gs(True), GameState.GAME_BATTLE)
+        assert writes == []
+
+    def test_stops_at_the_session_cap(self, monkeypatch):
+        """Exercises _capture_crash_frame directly — tick_detect's own
+        cooldown (ADR 059) means driving four crashes through the full
+        respawn flow in one test would test the cooldown, not the cap."""
+        import cv2
+        self._no_real_disk(monkeypatch)
+        writes = []
+        monkeypatch.setattr(cv2, "imwrite",
+                            lambda path, frame: writes.append((path, frame)) or True)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           crash_capture={"enabled": True, "max_per_session": 2,
+                                          "dir": "test_screenshots/crash_with_missiles"})
+        for _ in range(4):
+            h._capture_crash_frame("a_frame")
+        assert len(writes) == 2
+
+    def test_same_second_captures_get_distinct_filenames(self, monkeypatch):
+        """Regression guard, code-review finding 2026-09-11: the filename
+        must not depend only on wall-clock seconds — two captures landing in
+        the same second must not overwrite each other."""
+        import cv2
+        self._no_real_disk(monkeypatch)
+        writes = []
+        monkeypatch.setattr(cv2, "imwrite",
+                            lambda path, frame: writes.append(path) or True)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           crash_capture={"enabled": True, "max_per_session": 20,
+                                          "dir": "test_screenshots/crash_with_missiles"})
+        h._capture_crash_frame("frame_1")
+        h._capture_crash_frame("frame_2")
+        assert len(writes) == 2
+        assert writes[0] != writes[1], writes
+
+    def test_imwrite_returning_false_is_not_counted_as_saved(self, monkeypatch):
+        """Regression guard, code-review finding 2026-09-11: cv2.imwrite can
+        fail by returning False rather than raising — that must not be
+        recorded as a successful capture."""
+        import cv2
+        self._no_real_disk(monkeypatch)
+        monkeypatch.setattr(cv2, "imwrite", lambda path, frame: False)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           crash_capture={"enabled": True, "max_per_session": 20,
+                                          "dir": "test_screenshots/crash_with_missiles"})
+        h._capture_crash_frame("a_frame")
+        assert h._crash_captures == 0
+
+    def test_a_write_failure_does_not_raise(self, monkeypatch):
+        import cv2
+        self._no_real_disk(monkeypatch)
+        def _boom(_path, _frame):
+            raise OSError("disk full")
+        monkeypatch.setattr(cv2, "imwrite", _boom)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           crash_capture={"enabled": True, "max_per_session": 20,
+                                          "dir": "test_screenshots/crash_with_missiles"})
+        # Must not raise — a capture failure is not allowed to break respawn handling.
+        h.tick_detect("a_frame", self._gs(True), GameState.GAME_BATTLE)
+
+    def test_none_frame_is_skipped(self, monkeypatch):
+        import cv2
+        writes = []
+        monkeypatch.setattr(cv2, "imwrite",
+                            lambda path, frame: writes.append((path, frame)) or True)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           crash_capture={"enabled": True, "max_per_session": 20,
+                                          "dir": "test_screenshots/crash_with_missiles"})
+        h.tick_detect(None, self._gs(True), GameState.GAME_BATTLE)
+        assert writes == []
+
+    def test_enabled_defaults_to_off_when_section_is_absent(self, monkeypatch):
+        """Code-review finding 2026-09-11: a config/caller that omits
+        crash_capture entirely must not silently start writing to disk."""
+        import cv2
+        from wingman.main import RespawnState, _alive_transition_disposition
+        from wingman.tick_handlers import RespawnHandler
+        writes = []
+        monkeypatch.setattr(cv2, "imwrite",
+                            lambda path, frame: writes.append((path, frame)) or True)
+        h = RespawnHandler(
+            _RespawnAnalyzerStub(missiles=2), _RespawnCtrlStub(), {},  # no crash_capture key at all
+            enemy_presence=SimpleNamespace(arm=lambda: None),
+            ammo_events=SimpleNamespace(suppress_after_respawn=lambda s: None),
+            disposition_fn=_alive_transition_disposition,
+            respawn_state_enum=RespawnState)
+        h.tick_detect("a_frame", self._gs(True), GameState.GAME_BATTLE)
+        assert writes == []
+
+    def test_replay_mode_disables_capture_even_if_config_enables_it(self):
+        """Code-review finding 2026-09-11: rr-path1-gate and the OCR replay
+        integration tests run the real main.py against the real config.yaml
+        (crash_capture enabled) — replay_mode must still suppress real writes."""
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
+                           crash_capture={"enabled": True, "max_per_session": 20})
+        assert h._crash_capture_enabled is True   # sanity: enabled without replay_mode
+        from wingman.main import RespawnState, _alive_transition_disposition
+        from wingman.tick_handlers import RespawnHandler
+        h2 = RespawnHandler(
+            _RespawnAnalyzerStub(missiles=2), _RespawnCtrlStub(),
+            {"crash_capture": {"enabled": True, "max_per_session": 20}},
+            enemy_presence=SimpleNamespace(arm=lambda: None),
+            ammo_events=SimpleNamespace(suppress_after_respawn=lambda s: None),
+            disposition_fn=_alive_transition_disposition,
+            respawn_state_enum=RespawnState,
+            replay_mode=True)
+        assert h2._crash_capture_enabled is False
 
 
 class _TrackerStub:
@@ -1166,6 +1383,122 @@ class TestHealthDropoutRecorder:
         a.gap = 30.0
         r = self._recorder(tmp_path, a, self._clock(), enabled=False)
         assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestRespawnHealthStallRecorder:
+    """ADR 137 D7: frames captured while health stays unconfirmed after a
+    respawn, long enough that mission_j20 hasn't restarted — the exact
+    window HealthDropoutRecorder's telemetry_hud_live() gate excludes."""
+
+    class _FakeStallAnalyzer:
+        def __init__(self):
+            self.gap = None
+
+        def health_confirmed_gap_s(self):
+            return self.gap
+
+    class _FakeStallCtrl:
+        def __init__(self, mission_running=False):
+            self.mission_running = mission_running
+
+        def is_mission_running(self):
+            return self.mission_running
+
+    def _recorder(self, tmp_path, analyzer, ctrl, clock, **cfg_overrides):
+        from wingman.tick_handlers import RespawnHealthStallRecorder
+        cfg = {"capture_after_s": 8.0, "recapture_interval_s": 15.0,
+               "max_per_session": 2, "dir": str(tmp_path)}
+        cfg.update(cfg_overrides)
+        return RespawnHealthStallRecorder(cfg, analyzer, ctrl, clock=clock)
+
+    @staticmethod
+    def _frame():
+        import numpy as np
+        return np.zeros((4, 4, 3), dtype=np.uint8)
+
+    @staticmethod
+    def _clock(start=1000.0):
+        state = {"now": start}
+        def clock():
+            return state["now"]
+        clock.state = state
+        return clock
+
+    def test_short_gap_never_captures(self, tmp_path):
+        a, c = self._FakeStallAnalyzer(), self._FakeStallCtrl()
+        a.gap = 3.0
+        r = self._recorder(tmp_path, a, c, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_captures_past_threshold_with_gap_in_name(self, tmp_path):
+        a, c = self._FakeStallAnalyzer(), self._FakeStallCtrl()
+        a.gap = 9.2
+        r = self._recorder(tmp_path, a, c, self._clock())
+        path = r.tick(self._frame(), GameState.GAME_BATTLE)
+        assert path is not None and "gap9s" in path
+        assert (tmp_path / path.split("/")[-1]).exists()
+
+    def test_mission_already_running_never_captures(self, tmp_path):
+        """This is exactly the case HealthDropoutRecorder already covers —
+        the complementary gate here must not double-capture it."""
+        a, c = self._FakeStallAnalyzer(), self._FakeStallCtrl(mission_running=True)
+        a.gap = 30.0
+        r = self._recorder(tmp_path, a, c, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_non_battle_state_never_captures(self, tmp_path):
+        a, c = self._FakeStallAnalyzer(), self._FakeStallCtrl()
+        a.gap = 30.0
+        r = self._recorder(tmp_path, a, c, self._clock())
+        assert r.tick(self._frame(), GameState.GAME_LOBBY) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_one_per_episode_plus_recapture_and_session_cap(self, tmp_path):
+        a, c = self._FakeStallAnalyzer(), self._FakeStallCtrl()
+        a.gap = 9.0
+        clock = self._clock()
+        r = self._recorder(tmp_path, a, c, clock)
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # 1st
+        clock.state["now"] += 5.0
+        a.gap = 14.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None     # interval gate
+        clock.state["now"] += 15.0
+        a.gap = 29.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # recapture
+        clock.state["now"] += 15.0
+        a.gap = 44.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None     # session cap (2)
+
+    def test_mission_restarting_mid_episode_ends_it(self, tmp_path):
+        """The moment mission_j20 restarts, this is no longer the window
+        being investigated — a later stall must start a fresh episode."""
+        a, c = self._FakeStallAnalyzer(), self._FakeStallCtrl()
+        a.gap = 9.0
+        clock = self._clock()
+        r = self._recorder(tmp_path, a, c, clock)
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # episode 1
+        c.mission_running = True
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None      # mission back
+        c.mission_running = False
+        clock.state["now"] += 1.0
+        a.gap = 9.0
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is not None  # new episode
+
+    def test_disabled_config_is_noop(self, tmp_path):
+        a, c = self._FakeStallAnalyzer(), self._FakeStallCtrl()
+        a.gap = 30.0
+        r = self._recorder(tmp_path, a, c, self._clock(), enabled=False)
+        assert r.tick(self._frame(), GameState.GAME_BATTLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_none_frame_is_skipped(self, tmp_path):
+        a, c = self._FakeStallAnalyzer(), self._FakeStallCtrl()
+        a.gap = 30.0
+        r = self._recorder(tmp_path, a, c, self._clock())
+        assert r.tick(None, GameState.GAME_BATTLE) is None
         assert list(tmp_path.iterdir()) == []
 
 

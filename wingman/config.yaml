@@ -270,6 +270,13 @@ health:
   decline_evidence_window_s: 6.0
   dropout_capture: {enabled: true, capture_after_s: 5.0, recapture_interval_s: 60.0,
     max_per_session: 12}
+  # ADR 137 D7: dropout_capture above deliberately skips this exact window
+  # (telemetry not live = "death/menu gap, not a dropout") — captured here
+  # instead, to see what the health crop actually shows while wingman waits
+  # on it post-respawn. capture_after_s is shorter than dropout_capture's:
+  # a normal restart confirms in 1-3s, so 8s is already well past normal.
+  respawn_stall_capture: {enabled: true, capture_after_s: 8.0, recapture_interval_s: 15.0,
+    max_per_session: 12}
 fuel: {stale_after_s: 6.0, rearm_margin_pct: 5}
 # ADR 098: suppress injection when the game does not have focus. Off until a
 # full session confirms it never suppresses legitimate presses (ADR 098 D6).
@@ -299,7 +306,13 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # ADR 132: seconds after mission_j20 starts (battle entry or a respawn
   # restart) during which left/right turns are suppressed. The aircraft flies
   # the heading it spawned on, which points into the arena. 0 disables.
-  j20_turn_guard_s: 10.0}
+  j20_turn_guard_s: 10.0,
+  # ADR 137 D5: one frame saved at the exact crash_with_missiles tick — the
+  # log-only instrument (D4) couldn't tell a genuine perception gap apart
+  # from an ordinary death/explosion screen; every OCR channel reads "no
+  # digits" in both cases. Capped per session, not per episode (there is no
+  # episode concept here, unlike unknown_anomaly).
+  crash_capture: {enabled: true, max_per_session: 20, dir: test_screenshots/crash_with_missiles}}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
 # mission_loiter ('y'): the survival hold. Two behaviours only — climb to the
@@ -386,7 +399,16 @@ behavior_tree:
     enter_below_alt: 500
     exit_above_alt: 1000
     confirm_reads: 2
-    max_climb_s: 15.0
+    # ADR 137 D4, code-review finding 2026-09-11: raised 15.0 -> 22.5 (the
+    # same 1.5x scaling already applied to confirm_bypass_time_s below) —
+    # recover_below_time_s widened 20->30 so shallower dives now enter this
+    # same emergency actuator, but its own unconditional duration cap had
+    # stayed unchanged, risking a force-release mid-recovery for exactly the
+    # population the wider trigger newly admits. Proportional, not measured:
+    # no live session has yet hit this cap before the dive resolved one way
+    # or the other, so watch for "climb max duration (23s) reached" against
+    # an EMERGENCY hold specifically in the next live session.
+    max_climb_s: 22.5
     pitch_pulse_s: 1.5
     pulse_observe_s: 2.5
     min_climb_rate: 30.0
@@ -409,8 +431,18 @@ behavior_tree:
     # than the ADR's proposed 12s: the smoothed altitude the tree reads lags
     # ~1500m in a 560 m/s dive, so 12s of PREDICTED margin was only ~4s of real
     # margin in the 2026-08-21 18:41 crash. See "Deviation" in the ADR.
-    recover_below_time_s: 20.0
-    confirm_bypass_time_s: 10.0   # below this, fire on a single read (d3)
+    # ADR 137 D4: raised 20 -> 30. Measured 2026-09-10 07:24:42 — emergency
+    # fired correctly at the first 19s-to-ground read (airbrake + nose-up
+    # engaged within 1.5s), and the descent rate still WORSENED afterward
+    # (-333 -> -526 -> -602 m/s over the next 4.5s) before the aircraft hit
+    # the ground ~10.5s after the first read, with 1 missile still aboard.
+    # Same lag mechanism the 12->20 change was written for, still present at
+    # 20s: the compression ratio here was milder (~1.8x vs the original 3x)
+    # but still left too little real margin for airbrake+nose-up to arrest
+    # an established near-vertical dive. confirm_bypass_time_s scaled with it
+    # to hold the same proportion of the window (was 10/20 = 50%).
+    recover_below_time_s: 30.0
+    confirm_bypass_time_s: 15.0   # below this, fire on a single read (d3)
     descent_memory_s: 5.0         # hold a known descent across rejected reads (d4)
     fuel_reserve_pct: 10
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,

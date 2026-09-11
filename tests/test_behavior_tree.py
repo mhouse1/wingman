@@ -519,7 +519,11 @@ class TestTimeToGroundRecovery:
 
     @staticmethod
     def _cond(clock, **kw):
-        opts = dict(recover_below_time_s=20.0, confirm_bypass_time_s=10.0,
+        # ADR 137 D4: 30.0/15.0 — the values actually shipped in
+        # config.yaml, not the pre-D4 20.0/10.0 (code-review finding,
+        # 2026-09-11: this fixture previously never exercised the real
+        # production thresholds).
+        opts = dict(recover_below_time_s=30.0, confirm_bypass_time_s=15.0,
                     descent_memory_s=5.0, clock=clock)
         opts.update(kw)
         return make_climb_condition(500, 1000, **opts)
@@ -532,11 +536,11 @@ class TestTimeToGroundRecovery:
                 f"altitude band should not fire at {alt} m (it never did)"
 
     def test_fires_on_time_to_ground_while_still_high(self):
-        """6636 m at -338 m/s is ~19.6 s from impact — inside the 20 s window,
-        and ~10 s before the observed impact rather than 4 s."""
+        """8700 m at -300 m/s is 29 s from impact — inside the ADR 137 D4
+        30 s window (and would have been OUTSIDE the pre-D4 20 s one)."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=1)
-        assert cond(make_snap(altitude=6636.0, altitude_rate=-338.0)) is True
+        assert cond(make_snap(altitude=8700.0, altitude_rate=-300.0)) is True
 
     def test_does_not_fire_in_a_gentle_descent(self):
         """Same altitude, ordinary rate: 6636 m at -50 m/s is 133 s away."""
@@ -550,18 +554,21 @@ class TestTimeToGroundRecovery:
         assert cond(make_snap(altitude=3000.0, altitude_rate=+200.0)) is False
 
     def test_single_read_bypass_inside_the_margin(self):
-        """d3: with confirm_reads=2, a 6 s time-to-ground must not wait for a
-        second read — the wait spends the margin the trigger protects."""
+        """d3, ADR 137 D4: with confirm_reads=2, a 12 s time-to-ground (inside
+        the 15 s bypass shipped by D4, outside the pre-D4 10 s one) must not
+        wait for a second read — the wait spends the margin the trigger
+        protects."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=2)
-        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
+        assert cond(make_snap(altitude=1800.0, altitude_rate=-150.0)) is True
 
     def test_outside_bypass_still_debounces(self):
-        """A 15 s time-to-ground is urgent but not immediate: honour the
+        """A 20 s time-to-ground is urgent but not immediate (outside the
+        ADR 137 D4 15 s bypass, inside its 30 s recovery band): honour the
         confirm count so one bad reading cannot command a climb."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=2)
-        snap = make_snap(altitude=7500.0, altitude_rate=-500.0)
+        snap = make_snap(altitude=8000.0, altitude_rate=-400.0)
         assert cond(snap) is False, "fired on a single read outside the bypass"
         assert cond(snap) is True
 
@@ -578,8 +585,8 @@ class TestTimeToGroundRecovery:
     def test_descent_memory_expires(self):
         """The hold is bounded — it must not latch a climb forever."""
         clock = FakeClock()
-        cond = make_climb_condition(500, 1000, recover_below_time_s=20.0,
-                                    confirm_bypass_time_s=10.0,
+        cond = make_climb_condition(500, 1000, recover_below_time_s=30.0,
+                                    confirm_bypass_time_s=15.0,
                                     descent_memory_s=5.0, confirm_reads=1,
                                     clock=clock)
         assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
@@ -612,8 +619,8 @@ class TestDiveRecoveryRespawnGuard:
 
     @staticmethod
     def _cond(clock):
-        return make_climb_condition(500, 1000, recover_below_time_s=20.0,
-                                    confirm_bypass_time_s=10.0,
+        return make_climb_condition(500, 1000, recover_below_time_s=30.0,
+                                    confirm_bypass_time_s=15.0,
                                     descent_memory_s=5.0, confirm_reads=1,
                                     clock=clock)
 

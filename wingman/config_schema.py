@@ -214,6 +214,17 @@ SCHEMA = Section(
                 "max_per_session": _int(0),
                 "dir": STR,
             }),
+            # ADR 137 D7: the dropout_capture episode above explicitly
+            # excludes this window (telemetry_hud_live() gates it out as a
+            # "death/menu gap, not a dropout") — this is that excluded case,
+            # captured on purpose instead of skipped.
+            "respawn_stall_capture": Section(children={
+                "enabled": BOOL,
+                "capture_after_s": SECONDS,
+                "recapture_interval_s": SECONDS,
+                "max_per_session": _int(0),
+                "dir": STR,
+            }),
         }),
 
         "fuel": Section(children={
@@ -250,6 +261,12 @@ SCHEMA = Section(
             "capture_stale_inject_s": SECONDS,
             "j20_turn_guard_s": SECONDS,   # ADR 132
             "padlock_spread_missiles": _int(0),
+            # ADR 137 D5
+            "crash_capture": Section(children={
+                "enabled": BOOL,
+                "max_per_session": _int(0),
+                "dir": STR,
+            }),
             # ADR 047 waiting-state fallback (read in tick_handlers.py)
             "waiting_fallback_enabled": BOOL,
             "waiting_fallback_diff_threshold": FRACTION,

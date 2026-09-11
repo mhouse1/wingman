@@ -2297,6 +2297,17 @@ class Controller:
         (ADR 024 3.1b — the Eject leaf's is_running_fn)."""
         return self._ejecting.is_set()
 
+    def is_secondary_weapon_active(self) -> bool:
+        """True once ADR 136 heatdive has pressed SWITCH_WEAPON this dive.
+
+        AMMO_MISSILE then reads the secondary (heatseeker) rack, not the
+        primary one — a caller comparing that reading against "still armed"
+        must know it may not mean what it usually means. Cleared by
+        `stop_eject_sequence()` (respawn or match end both restore the
+        primary loadout in-game), not just by the next dive starting.
+        """
+        return self._eject_weapon_switched
+
     def missile_evade_mode(self):
         """Hold AFTERBURNER + ROLL_RIGHT + YAW_LEFT until incoming clears (ADR 070).
 
@@ -4425,6 +4436,13 @@ class Controller:
         """Cancel an in-progress eject-and-dive sequence if one is active."""
         self._eject_stop_reason = reason
         self._eject_stop.set()
+        # Every caller of this method represents a moment the game itself
+        # restores the primary loadout — a respawn or a match ending — so
+        # the "AMMO_MISSILE currently reads secondary" ambiguity clears here,
+        # not only at the next dive's own start. Previously this only reset
+        # at trigger_eject_and_dive(), so it could read stale-True for an
+        # entire following life with no further eject in it.
+        self._eject_weapon_switched = False
 
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:

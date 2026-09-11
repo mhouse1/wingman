@@ -45,6 +45,7 @@ from .tick_handlers import (
     BehaviorTreeHandler,
     EnemyPresenceHandler,
     RespawnHandler,
+    RespawnHealthStallRecorder,
     TrackingHudHandler,
     HealthDropoutRecorder,
     UnknownAnomalyRecorder,
@@ -995,12 +996,19 @@ def main():
         live_capture=live_capture, emit_capture_event=_emit_capture_event,
         disposition_fn=_alive_transition_disposition,
         respawn_state_enum=RespawnState,
+        # ADR 137 D5, code-review finding 2026-09-11: rr-path1-gate and the
+        # OCR replay integration tests run this real main() against the real
+        # config.yaml (crash_capture enabled) — replay is not a live crash,
+        # so it must not write real PNGs to disk as a release-gate side effect.
+        replay_mode=replay_mode,
     )
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
     )
     health_dropout = HealthDropoutRecorder(
         (cfg.get("health", {}) or {}).get("dropout_capture", {}), analyzer)
+    respawn_health_stall = RespawnHealthStallRecorder(
+        (cfg.get("health", {}) or {}).get("respawn_stall_capture", {}), analyzer, ctrl)
     # Performance 008: periodic RESOURCE line for long-session leak diagnosis.
     resource_sampler = ResourceSampler(
         cfg.get("resource_monitor", {}), perf_tracker=tracker)
@@ -1380,6 +1388,11 @@ def main():
             # ADR 080: archive the screen when health OCR drops out during
             # live flight — the evidence the perception fix is built from.
             health_dropout.tick(frame, current_game_state)
+
+            # ADR 137 D7: archive the screen when health stays unconfirmed
+            # after a respawn, long enough that mission_j20 hasn't restarted
+            # — the window health_dropout above deliberately excludes.
+            respawn_health_stall.tick(frame, current_game_state)
 
             tracking_hud.tick(frame, current_game_state, game_state)
 
