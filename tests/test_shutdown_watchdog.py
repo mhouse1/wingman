@@ -110,3 +110,107 @@ def test_arming_replaces_a_previous_watchdog():
 def _watchdog_timers():
     return [t for t in threading.enumerate()
             if isinstance(t, threading.Timer) and t.is_alive()]
+
+
+# ADR 121, 2026-09-11 addendum: a SIGTERM produced no break out of the main
+# loop for 75+ seconds despite the loop ticking normally throughout, and
+# `_arm_shutdown_watchdog` never got a chance to fire because the code that
+# arms it (the `finally:` block) was never reached. `_arm_signal_ack_watchdog`
+# closes the narrower case — the handler runs and sets exit_requested, and
+# something downstream still fails to act on it in time — by arming from
+# inside the handler itself rather than waiting for the loop to react.
+
+from wingman.main import (  # noqa: E402
+    _arm_signal_ack_watchdog,
+    _cancel_shutdown_watchdog,
+    _cancel_signal_ack_watchdog,
+)
+
+
+def test_signal_ack_watchdog_fires_when_nothing_cancels_it():
+    """The exact failure mode observed 2026-09-11: the handler ran, but
+    cleanup never started to cancel this timer."""
+    with mock.patch("os._exit") as exit_:
+        _arm_signal_ack_watchdog("SIGTERM", timeout_s=0.1)
+        time.sleep(0.6)
+        exit_.assert_called_once_with(2)
+
+
+def test_signal_ack_watchdog_names_the_signal_and_bound_in_the_log(caplog):
+    with mock.patch("os._exit"):
+        with caplog.at_level(logging.ERROR):
+            _arm_signal_ack_watchdog("SIGTERM", timeout_s=0.1)
+            time.sleep(0.6)
+    assert any("SIGTERM" in r.message for r in caplog.records)
+
+
+def test_signal_ack_watchdog_dumps_thread_stacks_before_exiting():
+    with mock.patch("os._exit"), \
+         mock.patch("faulthandler.dump_traceback") as dump:
+        _arm_signal_ack_watchdog("SIGTERM", timeout_s=0.1)
+        time.sleep(0.6)
+        assert dump.called
+        assert dump.call_args.kwargs.get("all_threads") is True
+
+
+def test_signal_ack_watchdog_is_a_daemon():
+    with mock.patch("os._exit"):
+        _arm_signal_ack_watchdog("SIGTERM", timeout_s=30.0)
+    timers = _watchdog_timers()
+    assert timers, "no signal-ack watchdog timer was armed"
+    assert all(t.daemon for t in timers)
+    _cancel_signal_ack_watchdog()
+
+
+def test_signal_ack_watchdog_can_be_cancelled_directly():
+    with mock.patch("os._exit") as exit_:
+        _arm_signal_ack_watchdog("SIGTERM", timeout_s=0.1)
+        _cancel_signal_ack_watchdog()
+        time.sleep(0.6)
+        exit_.assert_not_called()
+
+
+def test_cancelling_signal_ack_watchdog_twice_is_harmless():
+    _cancel_signal_ack_watchdog()
+    _cancel_signal_ack_watchdog()
+
+
+def test_arming_the_shutdown_watchdog_cancels_a_pending_signal_ack_watchdog():
+    """The moment cleanup legitimately begins — for any reason — the narrower
+    signal-ack guard has nothing left to guard. If it stayed armed it would
+    force-exit a session that was already shutting down normally, just more
+    slowly than SIGNAL_ACK_WATCHDOG_S allows."""
+    with mock.patch("os._exit") as exit_:
+        _arm_signal_ack_watchdog("SIGTERM", timeout_s=0.1)
+        _arm_shutdown_watchdog(timeout_s=30.0)
+        time.sleep(0.6)
+        exit_.assert_not_called()
+    _cancel_shutdown_watchdog()
+
+
+def test_arming_signal_ack_watchdog_replaces_a_previous_one():
+    """Mirrors test_arming_replaces_a_previous_watchdog for the older
+    watchdog: a repeat signal must not leave a first timer running
+    alongside a second — found alongside the STANDBY gap below, since both
+    stem from the same 'who cancels this' question."""
+    with mock.patch("os._exit"):
+        _arm_signal_ack_watchdog("SIGTERM", timeout_s=30.0)
+        first = _watchdog_timers()
+        _arm_signal_ack_watchdog("SIGTERM", timeout_s=30.0)
+        second = _watchdog_timers()
+    assert len(first) == 1 and len(second) == 1, \
+        f"timers leaked: {len(first)} then {len(second)}"
+    _cancel_signal_ack_watchdog()
+
+
+def test_signal_ack_watchdog_does_not_fire_after_cleanup_supersedes_it():
+    """Same as above, phrased as the regression this exists to prevent: a
+    healthy shutdown that merely takes longer than 10s to notice the signal
+    must not be killed by the narrower watchdog once the wider one is active."""
+    with mock.patch("os._exit") as exit_:
+        _arm_signal_ack_watchdog("SIGTERM", timeout_s=0.2)
+        time.sleep(0.1)
+        _arm_shutdown_watchdog(timeout_s=30.0)
+        time.sleep(0.4)
+        exit_.assert_not_called()
+    _cancel_shutdown_watchdog()

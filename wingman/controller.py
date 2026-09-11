@@ -245,6 +245,9 @@ class Controller:
         # press cannot be mistaken for the second.
         self._close_all_event = threading.Event()
         self._last_exit_press = 0.0
+        # Set once the backspace hotkey is actually registered below — None
+        # if registration was skipped (disable_hotkeys, no keyboard access).
+        self._exit_script_hotkey = None
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
@@ -666,6 +669,10 @@ class Controller:
                                 "Backspace again to close everything.\033[0m")
                     if self._exit_event:
                         self._exit_event.set()
+                # Kept on self so cleanup(keep_hotkeys=True) can re-register
+                # just this one hotkey after tearing every other one down —
+                # see the comment there for why.
+                self._exit_script_hotkey = exit_script_hotkey
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey 'backspace' to exit script")
             except ImportError as e:
@@ -4651,10 +4658,24 @@ class Controller:
     def cleanup(self, keep_hotkeys: bool = False):
         """Stop injection activity, release held keys, deregister hooks.
 
-        `keep_hotkeys=True` skips the deregistration so the process can stay in
-        standby watching for a second Backspace (ADR 099). Everything else still
-        runs: the writers stop and every injectable key is released, so nothing
-        wingman was holding survives into the operator's manual flight.
+        `keep_hotkeys=True` tears down every hotkey except Backspace itself,
+        so standby is equivalent to a `make g` session (MetalStorm running
+        with no wingman attached) plus one listener for the close signal —
+        not the operator's own flight. Every other injected key, mission
+        hotkey and takeover key is gone; only the second Backspace still
+        does anything. Everything else still runs: the writers stop and
+        every injectable key is released, so nothing wingman was holding
+        survives into the operator's manual flight.
+
+        Before this, standby kept EVERY hotkey live — 'u' still restarted
+        the J20 mission, maneuver keys still cancelled it, etc. — because
+        `keep_hotkeys=True` simply skipped `unhook_all()` entirely. Observed
+        2026-09-11: pressing 'u' during standby silently re-engaged the
+        mission 5.5s before a second Backspace closed everything, which is
+        not "MetalStorm is yours to fly" — it is wingman still partly
+        attached. Re-registering just Backspace, from the same closure
+        `__init__` already built (`self._exit_script_hotkey`), needs no
+        change to that hotkey's own first/second-press logic.
 
         Order matters: XTest-injected key state lives in the X SERVER, not this
         client, so it survives process exit — and daemon threads die without
@@ -4706,8 +4727,22 @@ class Controller:
 
         # 3. Deregister hooks last so the guards above stay active meanwhile.
         if keep_hotkeys:
-            logger.info("Controller: keyboard hooks kept for standby — press "
-                        "Backspace again to close MetalStorm")
+            if keyboard_module and self._exit_script_hotkey is not None:
+                try:
+                    keyboard_module.unhook_all()
+                    keyboard_module.on_press_key(
+                        'backspace', self._exit_script_hotkey, suppress=False)
+                    logger.info(
+                        "Controller: standby — every hotkey released except "
+                        "Backspace (equivalent to a wingman-less MetalStorm "
+                        "session); press it again to close MetalStorm")
+                except Exception:
+                    logger.exception(
+                        "Controller: failed to narrow hotkeys down to "
+                        "Backspace for standby — hooks left as they were")
+            else:
+                logger.info("Controller: keyboard hooks kept for standby — press "
+                            "Backspace again to close MetalStorm")
         elif keyboard_module:
             try:
                 keyboard_module.unhook_all()

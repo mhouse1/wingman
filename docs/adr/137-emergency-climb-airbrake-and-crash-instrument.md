@@ -405,6 +405,86 @@ across more of a long episode's duration rather than exhausting it on one.
 No frame from an actual extreme-range stall has been captured yet — that
 is what this retuning is for.
 
+**D8 (2026-09-11): the crash frame itself was captured too late to show
+anything.** The fourth live trial's own analysis (above) found the cause
+directly: `_capture_crash_frame` fires from `tick_detect` on respawn-
+DETECTED, which is after the death/`KILLED BY` overlay has already replaced
+the in-flight HUD. Measured, not inferred — every one of that session's 11
+`crash_with_missiles` log lines read `None` for missiles, altitude, AND
+rate, with no exception. The operator's own suspicion, stated directly:
+"we are not actually capturing a crash."
+
+`RespawnHandler` now keeps a small rolling buffer — `(frame, missiles, alt,
+rate, timestamp)` sampled every tick while `GAME_BATTLE` and a mission is
+running, evicted once older than `pre_crash_buffer_s` (default 8.0, chosen
+to comfortably outlast the ~3s total-OCR-blackout-before-death signature
+Open Questions 4/5 already document). A tick where neither missiles nor
+altitude is readable is not buffered at all — which is exactly what
+naturally happens once the death overlay takes over, so the buffer's
+newest entry is, by construction, the last tick where the HUD was still
+live. On a `crash_with_missiles` detection, both the saved frame AND the
+logged missiles/alt/rate now come from that buffered sample instead of the
+current (death-screen) tick — falling back to the old behavior only if the
+buffer is empty (e.g. death on the very first tick after a mission starts,
+before anything was ever buffered).
+
+Config: `mission.crash_capture.pre_crash_buffer_s` (new key, default 8.0).
+Memory cost is bounded and small — a handful of frames at most, evicted by
+age, only while `crash_capture.enabled` and a mission is actually running.
+
+Covered by `tests/test_tick_handlers.py::TestPreCrashBuffer` (13 tests):
+buffering gated correctly on state/mission/enabled, skips unreadable ticks,
+prunes by age, and — the core behavior — a crash uses the buffered frame
+and numbers, not the death-screen ones, with a clean fallback when the
+buffer is empty.
+
+### Validation
+
+- V1-V6 — unit, satisfied (see test list above).
+- **V7 — live, MET AND FAILED, same day.** A 15:14-16:22 session ran the
+  fix. `alt`/`rate` were real numbers in all 9 `crash_with_missiles` lines
+  (`pre-crash frame, 0.0s old` on every one) — the buffer itself worked, and
+  the age tag proved it. But `missiles` still read `None` in all 9, and both
+  frames spot-checked were still `KILLED BY` panels, not the in-flight HUD
+  this was built to capture. The buffer had reproduced the exact bug it was
+  meant to fix, just with better bookkeeping.
+
+**Root cause, found by checking `wingman/telemetry.py` rather than guessing:**
+`TelemetrySignal.value` is a held-over last-known reading by design —
+`TelemetrySnapshot.stale_after_s` defaults to 6.0s, so slower consumers
+(the Climb tactic among them) can tolerate a brief OCR gap without treating
+the aircraft as suddenly blind. `alt is not None` therefore does not mean
+"the HUD shows this right now" — it means "an altitude was read at some
+point in roughly the last 6 seconds," which is comfortably long enough to
+span the moment a `KILLED BY` panel takes over the screen. `missiles`, read
+straight from `get_ammo_missiles()` with no such holdover, correctly went
+`None` the instant the HUD element it depends on was covered — which is
+exactly why the two disagreed: the buffer kept a several-seconds-stale
+altitude reading as "current" while missiles told the truth.
+
+This is the same class of bug this project's own `iterate` skill already
+carries a war story for — a `.fresh` check that has to be called, not just
+tested for `None` — found here by reading `TelemetrySignal.age_s`/`is_fresh`
+directly rather than assuming non-None meant live.
+
+**Fix, same day.** `_sample_pre_crash_buffer` now computes
+`snap.altitude.age_s(snap.taken_at_s)` and requires it under a new,
+deliberately tight `pre_crash_freshness_s` (default 2.0s — about one tick,
+nowhere near the general-purpose 6.0s tolerance) before accepting the
+altitude reading at all. `missiles` needed no change — the data already
+showed it behaving correctly. Two new regression tests pin the exact bug:
+a stale-but-non-None altitude reading must not be buffered
+(`test_does_not_buffer_a_stale_altitude_reading`), and a session where
+altitude goes stale but an earlier missiles-only tick was genuinely live
+must still save THAT frame, not the death screen
+(`test_crash_capture_skips_the_stale_reading_and_prefers_missiles`).
+
+### Validation (D8 freshness fix)
+
+- V8-V9 — unit, satisfied (the two regression tests above).
+- V10 — live, open. Still needs a session with the freshness gate live to
+  confirm the saved frame is finally an in-flight HUD, not a death overlay.
+
 ## Non-Goals
 
 1. ~~**Not a fix to the ADR 086 trigger threshold itself**
@@ -544,6 +624,67 @@ against the D4 case (which by contrast *did* get the emergency treatment
 correctly — a fresh Engage → Climb selection, not a continuation, so the
 `_start_climb` gate wasn't in play there).
 
+## Fourth live trial (2026-09-11, 3h41m, D4+D6+D7 all live)
+
+07:37:55-11:19:19. Clean session throughout: zero `[ERROR]` lines, zero
+tracebacks, normal shutdown sequence (game closed, nested display closed, no
+watchdog needed — unrelated ADR 121 work landed the same session but never
+had cause to fire here).
+
+**39 missions, 113 respawns, 11 `crash_with_missiles`** (9.7% of respawns) —
+in line with the last validated baseline (10.5%), not a clear move either
+way on its own.
+
+**Visual review of 5 of the 11 D5 crash-frame captures** (not all 11 —
+labelled accordingly): 3 were unambiguous combat kills, each a full-screen
+`KILLED BY [enemy name]` panel naming the aircraft and weapon, each at full
+health at the moment of death (280/280, 286/286, 312/312 — an instant kill,
+not attrition):
+
+- 07:43:23 — `[RiCo] ShadowHawk`, Mirage 2000, Super 530D
+- 10:09:45 — `[A∀²] Ringo`, J35 Draken, RB 27 Super Falcon
+- 11:08:54 — `[FXB¹] Everest`, F-14 Tomcat, AIM-54 Phoenix
+
+One (10:34:56) shows an `EJECTED` banner with no killer named, immediately
+after a `LOST THE LEAD` banner — and the log around it rules out a wingman-
+initiated eject as the cause: the mission's *actual* `eject_and_dive`
+happened a full 79s earlier (10:33:37, missiles-empty triggered, completed
+and cancelled cleanly by 10:33:58 with no `crash_with_missiles` count — D6's
+exclusion worked correctly for that one), the aircraft respawned and
+restarted its mission normally at 10:34:09, then died again 47s later with
+no second eject anywhere in the log. An unattributed `EJECTED` death with no
+enemy named and no wingman eject in progress is the closest thing in this
+sample to the instrument's own namesake — plausibly a genuine unintended
+terrain/self-destruction event, though "plausibly" is as far as one frame
+plus a log trace can go without an altitude reading at the moment (see next
+paragraph for why that reading is missing).
+
+One (11:07:41) is not a death screen at all — it is a live, active in-flight
+HUD frame: 854m, 1097 kph, missiles visibly 4/4 and 2/2 in the HUD, nose
+pointed near a mountain peak close ahead. The `crash_with_missiles` log line
+for this same timestamp reads `None missile(s), alt=None rate=None` despite
+missiles clearly being loaded on screen — the frame capture and the
+telemetry/ammo reads it logs alongside are not the same sample: **all 11 of
+this session's instances logged `None` for missiles, altitude, and rate,
+with no exception**, which is consistent with the capture firing at the
+instant a `KILLED BY`/`EJECTED` overlay takes over the screen — exactly when
+the in-flight HUD elements the OCR reads depend on have already been
+replaced. This is very likely why every reading came back `None` rather than
+a new regression: not "the sensors broke," but "there is nothing left to
+read once the death screen is up," for 10 of 11 instances — the 11:07:41
+frame is the outlier precisely because it was captured *before* that
+overlay appeared.
+
+**D7 fired once** (08:52:28, gap 31s, frame 1/12) — and the captured frame
+is a post-match results screen (`2ND`/`MVP`/`3RD` leaderboard, "Click to
+Continue..."), not an in-flight stall. `current_game_state` was apparently
+still read as `GAME_BATTLE` during the results screen for D7's gate to have
+fired at all. This is a false positive for the specific failure D7 was built
+to catch (the earlier "flew straight after respawn without restarting
+mission_j20" bug) — recorded as a new open question below rather than fixed
+here, since narrowing D7's gate needs its own look at why the FSM state read
+stale through a results screen.
+
 ## Open Questions
 
 1. ~~Does holding `AIRBRAKE_KEY` while `AFTERBURNER_KEY` is also held
@@ -656,6 +797,28 @@ correctly — a fresh Engage → Climb selection, not a continuation, so the
    rather than this spot check to pin down precisely. Not narrating every
    further capture here — the picture is established; a full tally is
    future work, not a per-frame ADR update.
+
+   **Five more spot-checked from the fourth live trial session (2026-09-11,
+   see above)**: 3 unambiguous combat kills, same signature as every prior
+   one (full `KILLED BY` panel, full health at death, named enemy/aircraft/
+   weapon) — `07:43:23`, `10:09:45`, `11:08:54`. 1 likely terrain/self-
+   destruction event with no enemy attribution (`10:34:56` — `EJECTED`
+   banner, no killer named, no wingman-initiated eject anywhere in the
+   preceding minute of log — see the trial section above for the full
+   trace). 1 not a death frame at all — a live in-flight HUD shot near a
+   mountain (`11:07:41`), ambiguous in a new way: it shows the moment
+   *before* whatever killed the aircraft, not the aftermath, so it cannot
+   itself be classified as combat or terrain. Running tally across twelve
+   spot-checked frames: 8 combat kills, 2 terrain/unattributed, 2 ambiguous
+   (one canyon shot with no kill-feed, one pre-death in-flight frame).
+   Combat losses remain the clear majority. New in this batch: **every
+   `crash_with_missiles` log line across all 11 of this session's instances
+   read `None` for missiles, altitude, and rate** — the capture fires at
+   the instant a death/results overlay has already replaced the in-flight
+   HUD the OCR reads depend on, which is very likely why the instrument's
+   own log line carries no usable telemetry alongside the frame it saves.
+   That is a property of *when* the capture fires relative to the overlay,
+   not evidence of a new sensor regression.
 4. What causes a death within 1-1.5s of a missile-evade release ending
    (2 of session B's 7)? Not diagnosed — boundary distance and incoming-
    region OCR showed nothing unusual in either case. Needs either a wider
@@ -740,6 +903,23 @@ correctly — a fresh Engage → Climb selection, not a continuation, so the
    diagnosed. Possibly enemy fire during the turn rather than anything the
    turn itself does wrong — the ring-count field (rings=16) in one case is
    suggestive but not confirmed as causal.
+6. Does `RespawnHealthStallRecorder` (D7) fire on a post-match results
+   screen? Its one fire in the fourth live trial (2026-09-11 08:52:28,
+   gap=31s) captured a `2ND`/`MVP`/`3RD` leaderboard, not an in-flight
+   stall — `current_game_state == GAME_BATTLE` was apparently still true
+   during a results screen for D7's gate (`GAME_BATTLE and not
+   is_mission_running()`) to trigger at all. Not diagnosed further this
+   pass: either the FSM's state read is genuinely stale through the
+   results-screen transition (worth checking against the FSM's own
+   transition log around that timestamp), or the results screen is shown
+   while the FSM is still nominally in `GAME_BATTLE` by design and D7
+   simply needs its own exclusion for it, mirroring how it already excludes
+   `is_mission_running()`. Either way this is a false positive for the
+   specific failure D7 was built to catch (a stuck-after-respawn mission
+   that never restarts) — the 30s threshold and 12-per-session cap mean
+   this is cheap to leave as-is for now, but it means D7's future fires
+   need the same "is this really a stall, or a mundane state" visual check
+   this one got, not an assumption that every fire is the target failure.
 
 ## D5 code review (2026-09-11)
 

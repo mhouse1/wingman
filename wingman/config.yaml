@@ -320,7 +320,25 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # from an ordinary death/explosion screen; every OCR channel reads "no
   # digits" in both cases. Capped per session, not per episode (there is no
   # episode concept here, unlike unknown_anomaly).
-  crash_capture: {enabled: true, max_per_session: 20, dir: test_screenshots/crash_with_missiles}}
+  # D8 (2026-09-11): the saved frame is captured on respawn-DETECTED, which
+  # is after the death overlay has already replaced the HUD — measured
+  # 2026-09-11, all 11 of one session's crash_with_missiles log lines read
+  # "None missile(s), alt=None rate=None" because there was nothing left to
+  # OCR by then. pre_crash_buffer_s keeps a rolling window of (frame,
+  # missiles, alt, rate) samples from while the HUD was still live, so the
+  # capture can use the newest one that still had real data instead. 8.0s
+  # gives margin over the ~3s total-OCR-blackout-before-death signature this
+  # ADR's Open Questions already document.
+  # pre_crash_freshness_s (2026-09-11, same-day fix): a non-None altitude
+  # value is NOT the same as "the HUD shows this right now" — TelemetrySignal
+  # holds its last reading for up to stale_after_s (6.0s default) so slower
+  # consumers can tolerate brief OCR gaps. First cut of pre_crash_buffer_s
+  # used bare not-None and, measured live, captured a KILLED BY panel every
+  # time (9/9) instead of the in-flight frame, because altitude kept reading
+  # non-None for seconds into the death overlay. This bounds how recent the
+  # reading itself must be, independent of the general staleness tolerance.
+  crash_capture: {enabled: true, max_per_session: 20, pre_crash_buffer_s: 8.0,
+    pre_crash_freshness_s: 2.0, dir: test_screenshots/crash_with_missiles}}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
 # mission_loiter ('y'): the survival hold. Two behaviours only — climb to the

@@ -213,6 +213,38 @@ def _rss_mb() -> float:
 
 
 SHUTDOWN_WATCHDOG_S = 90.0
+# 2x the rough worst-case a single tick can legitimately cost under
+# starvation, not just "much less than 90s" — analyzer.py's per-tick lock
+# acquires (background_ocr 5.0s; ammo/fuel/telemetry/health at 1.0s each) sum
+# to roughly 9s in a pathological single tick, and this watchdog must not
+# force-exit a merely-slow-but-healthy tick before it ever reaches the
+# exit_requested check. Found during code review of the first cut (10.0s,
+# no headroom above that ~9s figure) — see ADR 121's 2026-09-11 addendum.
+SIGNAL_ACK_WATCHDOG_S = 20.0
+
+
+def _dump_stacks_and_force_exit(banner: str) -> None:
+    """Shared tail for both watchdogs below: log, dump every thread to the
+    log FILE (not just stderr — an unattended soak has no terminal), then
+    os._exit(2). ADR 121 D2/D3: the dump is the only record of where a hang
+    stuck, and os._exit (not sys.exit) is deliberate — normal shutdown is by
+    definition not happening, so anything that runs atexit handlers or joins
+    threads would stick in the same place this is guarding against.
+    """
+    _log = logging.getLogger(__name__)
+    try:
+        _log.error(banner)
+        for h in list(_log.handlers) + list(logging.getLogger().handlers):
+            with contextlib.suppress(Exception):
+                h.flush()
+        for h in logging.getLogger().handlers:
+            stream = getattr(h, "stream", None)
+            if stream is not None and not stream.closed:
+                with contextlib.suppress(Exception):
+                    faulthandler.dump_traceback(file=stream, all_threads=True)
+                    stream.flush()
+    finally:
+        os._exit(2)
 
 
 def _arm_shutdown_watchdog(timeout_s: float = SHUTDOWN_WATCHDOG_S) -> None:
@@ -231,31 +263,17 @@ def _arm_shutdown_watchdog(timeout_s: float = SHUTDOWN_WATCHDOG_S) -> None:
     — so this captures evidence rather than guessing at a cause. The daemon
     timer does not hold up a healthy exit.
     """
-    def _bark():
-        _log = logging.getLogger(__name__)
-        try:
-            _log.error(
-                "SHUTDOWN WATCHDOG: cleanup still running after %.0fs — dumping "
-                "all thread stacks and forcing exit", timeout_s)
-            for h in list(_log.handlers) + list(logging.getLogger().handlers):
-                with contextlib.suppress(Exception):
-                    h.flush()
-            # To the log FILE, not just stderr: an unattended soak has no
-            # terminal, and this dump is the only record of where it stuck.
-            for h in logging.getLogger().handlers:
-                stream = getattr(h, "stream", None)
-                if stream is not None and not stream.closed:
-                    with contextlib.suppress(Exception):
-                        faulthandler.dump_traceback(file=stream, all_threads=True)
-                        stream.flush()
-        finally:
-            # os._exit, not sys.exit: the point is that normal shutdown is
-            # already stuck, so anything that runs atexit handlers or joins
-            # threads would stick in the same place.
-            os._exit(2)
-
     _cancel_shutdown_watchdog()
-    t = threading.Timer(timeout_s, _bark)
+    # Cleanup has legitimately begun by definition of being called — whatever
+    # was guarding against the signal never being noticed has nothing left to
+    # guard. See _arm_signal_ack_watchdog. This is the ONLY place that cancels
+    # it on the normal path; every call site of THIS function (main-loop
+    # finally:, STANDBY's second Backspace, the Ctrl-C race handler) inherits
+    # the cancellation for free.
+    _cancel_signal_ack_watchdog()
+    t = threading.Timer(timeout_s, lambda: _dump_stacks_and_force_exit(
+        f"SHUTDOWN WATCHDOG: cleanup still running after {timeout_s:.0f}s — "
+        "dumping all thread stacks and forcing exit"))
     t.daemon = True
     t.start()
     globals()["_SHUTDOWN_WATCHDOG_TIMER"] = t
@@ -274,6 +292,67 @@ def _cancel_shutdown_watchdog() -> None:
         with contextlib.suppress(Exception):
             t.cancel()
         globals()["_SHUTDOWN_WATCHDOG_TIMER"] = None
+
+
+def _arm_signal_ack_watchdog(signal_name: str, timeout_s: float = SIGNAL_ACK_WATCHDOG_S) -> None:
+    """Force an exit if a termination signal ran its handler but nothing
+    downstream ever noticed. ADR 121 (2026-09-11 addendum).
+
+    `_arm_shutdown_watchdog` bounds cleanup once the main loop has already
+    broken out of `while True:` — it is armed from the `finally:` block that
+    only runs after that break happens. On 2026-09-11 a SIGTERM produced no
+    such break for 75+ seconds: the loop kept ticking normally, once a
+    second, and `exit_requested.is_set()` — checked unconditionally at the
+    top of every tick, before anything else — never once returned True. The
+    90 s watchdog could not help, because the code that arms it was never
+    reached.
+
+    This is armed from INSIDE the SIGTERM/SIGHUP handler itself, the instant
+    `exit_requested.set()` runs, instead of waiting for the loop to react to
+    it. If `_arm_shutdown_watchdog` fires first for any reason — the loop DID
+    break, or STANDBY's own close path ran — it cancels this timer there,
+    because that is exactly the signal that cleanup has legitimately begun.
+
+    CALLERS MUST STAND THIS DOWN before entering any state where
+    exit_requested is deliberately not honored — STANDBY's parked wait for a
+    second Backspace does not check exit_requested at all, and does not run
+    through `_arm_shutdown_watchdog` until that second Backspace arrives. A
+    code-review pass on the first cut of this function found exactly that
+    gap: a signal arriving while parked in STANDBY force-killed the session
+    10s later with no cleanup, reproducing the ADR 124 incident on a 9x
+    shorter fuse. STANDBY's entry now calls _cancel_signal_ack_watchdog
+    explicitly, immediately after its existing _cancel_shutdown_watchdog call.
+
+    Still much shorter than the 90 s cleanup watchdog, deliberately: noticing
+    a flag at the top of a roughly 1.5 s tick loop should cost about one tick,
+    not most of a minute. Reusing SHUTDOWN_WATCHDOG_S here would let this
+    watchdog sleep through the exact failure it exists to catch.
+
+    This does NOT cover a signal that never reaches this handler at all — a
+    check that only runs once the handler has already run cannot detect the
+    handler not running. Per the 2026-09-11 log (no "Exit requested" line for
+    75+ seconds against a ~1 s tick cadence), that non-delivery case is the
+    more likely explanation for the incident that motivated this, and it
+    stays open. This closes the narrower case — the handler runs, the flag is
+    set, and something downstream still fails to act on it in time — which is
+    strictly worth closing regardless of which one actually happened.
+    """
+    _cancel_signal_ack_watchdog()
+    t = threading.Timer(timeout_s, lambda: _dump_stacks_and_force_exit(
+        f"SIGNAL ACK WATCHDOG: {signal_name} was handled {timeout_s:.0f}s ago "
+        "but cleanup never started — dumping all thread stacks and forcing exit"))
+    t.daemon = True
+    t.start()
+    globals()["_SIGNAL_ACK_WATCHDOG_TIMER"] = t
+
+
+def _cancel_signal_ack_watchdog() -> None:
+    """Stand the signal-ack watchdog down. Safe to call whether or not one is armed."""
+    t = globals().get("_SIGNAL_ACK_WATCHDOG_TIMER")
+    if t is not None:
+        with contextlib.suppress(Exception):
+            t.cancel()
+        globals()["_SIGNAL_ACK_WATCHDOG_TIMER"] = None
 
 
 def main():
@@ -498,10 +577,33 @@ def main():
     # way mid-session, and the orphaned Xwayland :3 outlived it. This is a
     # SEPARATE gap from ADR 121's shutdown watchdog, which only arms once
     # exit_requested is already set — SIGHUP previously never set it.
+    #
+    # Each handler also arms _arm_signal_ack_watchdog immediately, rather than
+    # relying solely on the main loop noticing exit_requested on its own next
+    # tick. Observed 2026-09-11: a SIGTERM produced no break out of the main
+    # loop for 75+ seconds despite the loop ticking normally throughout — see
+    # ADR 121's 2026-09-11 addendum.
+    #
+    # Only arms it on the FIRST signal: exit_requested is one-way (nothing
+    # ever clears it), so a repeat SIGTERM/SIGHUP arriving after the first has
+    # already been acted on would otherwise re-arm a fresh, uncancelled timer
+    # with no later _arm_shutdown_watchdog call left to stand it down — found
+    # in the same code-review pass as the STANDBY gap below, e.g. a second
+    # signal landing mid-cleanup (systemd's stop-then-kill pattern) could
+    # force-exit before _close_session finishes, destroying the very
+    # session-summary/stats artifacts ADR 121 exists to protect.
+    def _make_terminate_handler(name):
+        def _handler(_sig, _frm):
+            first_signal = not exit_requested.is_set()
+            exit_requested.set()
+            if first_signal:
+                _arm_signal_ack_watchdog(name)
+        return _handler
+
     try:
         import signal
-        signal.signal(signal.SIGTERM, lambda _sig, _frm: exit_requested.set())
-        signal.signal(signal.SIGHUP, lambda _sig, _frm: exit_requested.set())
+        signal.signal(signal.SIGTERM, _make_terminate_handler("SIGTERM"))
+        signal.signal(signal.SIGHUP, _make_terminate_handler("SIGHUP"))
     except (ValueError, OSError) as e:  # non-main thread or unsupported platform
         print(f"WARNING: SIGTERM/SIGHUP handler not installed ({e}); "
               "a SIGTERM or SIGHUP may leave injected keys held", file=sys.stderr)
@@ -1645,7 +1747,16 @@ def main():
             # watchdog exists to bound a STALL, and it cannot tell the two
             # apart from inside — so it is disarmed here and re-armed for the
             # close that follows the second Backspace, which is bounded.
+            #
+            # The signal-ack watchdog (ADR 121, 2026-09-11 addendum) needs the
+            # identical treatment and was missing it in the first cut: the
+            # wait loop below only watches ctrl.wait_for_close_all(), never
+            # exit_requested, so a SIGTERM/SIGHUP arriving while parked here
+            # would otherwise force-exit 20s later with no cleanup — the
+            # ADR 124 incident again, on a much shorter fuse, found by code
+            # review before it shipped to a live session.
             _cancel_shutdown_watchdog()
+            _cancel_signal_ack_watchdog()
             try:
                 while not ctrl.wait_for_close_all(timeout=1.0):
                     pass

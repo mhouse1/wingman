@@ -251,6 +251,28 @@ class RespawnHandler:
         self._crash_capture_dir = str(_cc_cfg.get("dir", "test_screenshots/crash_with_missiles"))
         self._crash_captures = 0
 
+        # ADR 137 D8: the saved frame is captured when a respawn is DETECTED,
+        # which is after the death/KILLED BY overlay has already replaced the
+        # in-flight HUD — every crash_with_missiles log line ever recorded
+        # read "None missile(s), alt=None rate=None" because there was
+        # nothing left on screen to OCR by that point (measured 2026-09-11,
+        # all 11 of one session's instances). This rolling buffer keeps the
+        # last few seconds of (frame, missiles, alt, rate) samples from
+        # WHILE the HUD was still readable, so a crash can save the newest
+        # one that still had real data instead of the death screen itself.
+        # Pruned by wall-clock age, not a fixed tick count, so it is not
+        # coupled to an assumed tick cadence.
+        _raw_window = _cc_cfg.get("pre_crash_buffer_s", 8.0)
+        self._pre_crash_window_s = float(8.0 if _raw_window is None else _raw_window)
+        # How recent an altitude READING must be (not how recent the tick
+        # is) to count as "the HUD is showing this now" rather than a
+        # held-over value — see _sample_pre_crash_buffer. Deliberately much
+        # tighter than TelemetrySnapshot's own 6.0s general-purpose
+        # staleness tolerance.
+        _raw_fresh = _cc_cfg.get("pre_crash_freshness_s", 2.0)
+        self._pre_crash_freshness_s = float(2.0 if _raw_fresh is None else _raw_fresh)
+        self._pre_crash_buffer: "collections.deque" = collections.deque()
+
     # -- state --------------------------------------------------------------
 
     @property
@@ -417,12 +439,62 @@ class RespawnHandler:
             logger.warning("Crash capture: failed to save frame: %s: %s",
                            type(e).__name__, e)
 
+    # -- pre-crash buffer -----------------------------------------------------
+
+    def _sample_pre_crash_buffer(self, frame, current_game_state) -> None:
+        """Record this tick's (frame, missiles, alt, rate) while the in-flight
+        HUD is actually readable, so a later crash has real data to pull from.
+        ADR 137 D8. No-op outside active flight, or once nothing is readable —
+        the death overlay naturally stops new entries from landing, which is
+        exactly the point: the buffer's newest entry is then the last known
+        good state before whatever happened next.
+        """
+        if not self._crash_capture_enabled or frame is None:
+            return
+        if current_game_state != GameState.GAME_BATTLE or not self._ctrl.is_mission_running():
+            return
+        missiles = self._analyzer.get_ammo_missiles()
+        alt, rate = None, None
+        try:
+            snap = self._analyzer.get_telemetry()
+            if snap is not None:
+                # Freshness, not just non-None: `.value` is a held-over last-
+                # known reading by design (TelemetrySnapshot.stale_after_s
+                # defaults to 6.0s, tuned for consumers like the Climb tactic
+                # that must tolerate brief OCR gaps) — it does NOT mean the
+                # HUD is showing this right now. Live 2026-09-11: every one
+                # of a session's 9 buffered "pre-crash" frames was still a
+                # KILLED BY panel, because altitude kept reading as non-None
+                # for several seconds into the death overlay while missiles
+                # (no holdover at this layer) had already gone None. A much
+                # tighter bound than the general 6.0s tolerance is needed
+                # here specifically because the question is "is this tick
+                # live," not "is this reading usable."
+                age = snap.altitude.age_s(snap.taken_at_s)
+                if age is not None and age <= self._pre_crash_freshness_s:
+                    alt = snap.altitude.value
+                    rate = snap.altitude.rate
+        except Exception:
+            pass
+        if missiles is None and alt is None:
+            return
+        now = time.time()
+        self._pre_crash_buffer.append((frame.copy(), missiles, alt, rate, now))
+        cutoff = now - self._pre_crash_window_s
+        while self._pre_crash_buffer and self._pre_crash_buffer[0][4] < cutoff:
+            self._pre_crash_buffer.popleft()
+
+    def _last_pre_crash_sample(self):
+        """The newest buffered (frame, missiles, alt, rate, ts), or None."""
+        return self._pre_crash_buffer[-1] if self._pre_crash_buffer else None
+
     # -- tick ---------------------------------------------------------------
 
     def tick_detect(self, frame, game_state, current_game_state) -> bool:
         """Detect and handle a respawn. Returns True when the loop must
         sleep-and-continue (respawn screen still up)."""
         analyzer, ctrl = self._analyzer, self._ctrl
+        self._sample_pre_crash_buffer(frame, current_game_state)
 
         # Respawn from overlay OCR, or (ADR 064 dual mode) from the health
         # detector's composite evidence when OCR missed the episode.
@@ -505,10 +577,29 @@ class RespawnHandler:
                                 rate = snap.altitude.rate
                         except Exception:
                             logger.debug("crash_with_missiles: telemetry read failed", exc_info=True)
-                        logger.warning(
-                            "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
-                            "alt=%s rate=%s\033[0m", missiles, alt, rate)
-                        self._capture_crash_frame(frame)
+
+                        # ADR 137 D8: by this point the death overlay has
+                        # already replaced the in-flight HUD, which is why
+                        # `missiles`/`alt`/`rate` above are almost always
+                        # None — there is nothing left on screen to read.
+                        # Prefer the newest pre-crash buffer sample, taken
+                        # while the HUD was still live, for both the frame
+                        # AND the reported numbers.
+                        pre = self._last_pre_crash_sample()
+                        capture_frame = frame
+                        if pre is not None:
+                            capture_frame, missiles, alt, rate, pre_ts = pre
+                            age_s = time.time() - pre_ts
+                            logger.warning(
+                                "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
+                                "alt=%s rate=%s (pre-crash frame, %.1fs old)\033[0m",
+                                missiles, alt, rate, age_s)
+                        else:
+                            logger.warning(
+                                "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
+                                "alt=%s rate=%s (no pre-crash frame buffered)\033[0m",
+                                missiles, alt, rate)
+                        self._capture_crash_frame(capture_frame)
                         self._emit_capture_event("crash_with_missiles")
                 self._emit_capture_event("respawn_detected")
                 # Live capture for the respawn frame itself rides the

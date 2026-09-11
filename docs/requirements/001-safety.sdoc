@@ -415,7 +415,21 @@ assumed the trigger would at least be noticed, eventually, if not acted on
 cleanly) — see ADR 121, "SIGTERM had no effect at all on a live, ticking
 process."
 
-Not yet enforced in code; no independent timer currently starts at signal
-delivery. Recorded as a requirement ahead of the fix so the gap has a named,
-testable target rather than remaining implicit in ADR 121's narrative.
+Enforced by `_arm_signal_ack_watchdog`, armed from inside the SIGTERM/SIGHUP
+handlers themselves at the instant `exit_requested.set()` runs, independent
+of `_arm_shutdown_watchdog`'s existing 90 s cleanup-stall guard; the operator's
+second Backspace is covered by that existing 90 s guard directly, since its
+own detection loop polls reliably and was never the silent-absorption risk
+SIGTERM/SIGHUP had. It does not cover a signal that never reaches the handler
+at all — see ADR 121's 2026-09-11 addendum for what is and is not closed by
+this, and why that gap may still be live.
+
+A same-day code review of the first cut found this enforcement was itself
+incomplete: STANDBY — an intentional, unbounded, operator-controlled wait
+that never checks `exit_requested` — did not cancel the signal-ack watchdog
+on entry, so a SIGTERM/SIGHUP arriving while parked there would have violated
+SAF-010 (the operator's manual-flight handback) by force-exiting the session
+regardless. Fixed the same day; see ADR 121's "Code review caught two
+regressions before they shipped live" section for this and a second,
+narrower repeat-signal gap found and fixed alongside it.
 <<<
