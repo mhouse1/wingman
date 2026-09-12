@@ -4163,6 +4163,34 @@ class GameStateAnalyzer:
             logger.warning("Analyzer: Play button scan failed: %s", e)
             return None
 
+    def scan_region_for_leave(self, frame) -> bool:
+        """Synchronously scan the LEAVE crop — the squad-leave confirmation
+        button that can appear after clicking STALL_MULTI_PLAYER's red X.
+
+        Returns True if LEAVE is visible, False if not found or the crop is
+        not configured (e.g. not yet calibrated).
+        """
+        if "LEAVE" not in self.crops:
+            logger.debug("Analyzer: LEAVE crop not configured — skipping scan")
+            return False
+        executor = self.ocr_executor
+        if executor is None:
+            logger.warning("Analyzer: OCR executor not available for LEAVE scan")
+            return False
+        try:
+            region_frame = get_crop(frame, *self.crops["LEAVE"][:4])
+            detected, _, text = executor.submit(
+                _process_text_region, region_frame, self.crops["LEAVE"].text or []
+            ).result(timeout=30)
+            if detected:
+                logger.info("Analyzer: LEAVE button detected (text='%s')", text)
+            else:
+                logger.debug("Analyzer: LEAVE button not found in LEAVE crop")
+            return detected
+        except Exception as e:
+            logger.warning("Analyzer: LEAVE scan failed: %s", e)
+            return False
+
     def scan_region_for_cancel(self, frame) -> bool:
         """Synchronously scan the CANCEL crop to confirm matchmaking is active.
 

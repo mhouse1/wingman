@@ -13,6 +13,16 @@ nested:
   display: ":3"
   size: "1920x1200"
 
+# Design 011 (ACS Mode), step 1: which weapon-employment tactic the active
+# airframe supports. Read once at startup into AnalyzerSnapshot.has_padlock.
+# Nothing branches on this yet — every profile is has_padlock: true today —
+# it exists so a future BoresightEngage leaf has something to condition on.
+jet_profile:
+  active: j20
+  profiles:
+    j20:
+      has_padlock: true
+
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
 # Default false — accepting drops the aircraft into someone else's squad
@@ -181,6 +191,11 @@ crops:
     coords:
     - [0.3451, 0.58]
     - [0.4146, 0.61]
+  LEAVE:
+    coords:
+    - [0.5597, 0.4844]
+    - [0.6194, 0.5167]
+    text: [LEAVE]
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
@@ -231,6 +246,7 @@ stall_recovery:
   unready_dwell_s: 30.0       # UNREADY suppressing the PLAY click before leaving the squad
   scan_interval_s: 5.0        # how often the stall batch runs once the gate is open
   play_click_delay_s: 2.0     # after leaving the squad, before clicking PLAY
+  leave_click_delay_s: 1.0    # after clicking LEAVE (squad-leave confirmation), before re-scanning PLAY/READY
   cooldown_s: 20.0            # per-crop minimum between recovery actions
 
 unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 5,
@@ -253,6 +269,21 @@ health:
   decline_evidence_drop: 80
   decline_evidence_window_s: 6.0
   dropout_capture: {enabled: true, capture_after_s: 5.0, recapture_interval_s: 60.0,
+    max_per_session: 12}
+  # ADR 137 D7, retuned 2026-09-11: dropout_capture above deliberately skips
+  # this exact window (telemetry not live = "death/menu gap, not a
+  # dropout") — captured here instead, to see what the health crop shows
+  # while wingman waits on it post-respawn. capture_after_s was 8.0
+  # (chosen before checking ADR 062's own Phase A data) but that turned out
+  # to be AT the game's normal respawn-overlay duration, not past it — ADR
+  # 062 documented the shadow health-detector normally confirming +4 to +8s
+  # after the OCR respawn edge, and the shadow-detector session summary's
+  # own fire_deltas_s corroborates that same 2-13s range live. At 8.0 the
+  # recorder fired on ordinary respawns (12/12 session cap in ~24 minutes,
+  # all normal). Raised to 30.0 — comfortably above the documented normal
+  # range, well below the 60-153s extreme outliers this is actually meant
+  # to catch (all 9 of which followed an ADR 136 heatdive death).
+  respawn_stall_capture: {enabled: true, capture_after_s: 30.0, recapture_interval_s: 20.0,
     max_per_session: 12}
 fuel: {stale_after_s: 6.0, rearm_margin_pct: 5}
 # ADR 098: suppress injection when the game does not have focus. Off until a
@@ -283,7 +314,43 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # ADR 132: seconds after mission_j20 starts (battle entry or a respawn
   # restart) during which left/right turns are suppressed. The aircraft flies
   # the heading it spawned on, which points into the arena. 0 disables.
-  j20_turn_guard_s: 10.0}
+  j20_turn_guard_s: 10.0,
+  # ADR 137 D5: one frame saved at the exact crash_with_missiles tick — the
+  # log-only instrument (D4) couldn't tell a genuine perception gap apart
+  # from an ordinary death/explosion screen; every OCR channel reads "no
+  # digits" in both cases. Capped per session, not per episode (there is no
+  # episode concept here, unlike unknown_anomaly).
+  # D8 (2026-09-11): the saved frame is captured on respawn-DETECTED, which
+  # is after the death overlay has already replaced the HUD — measured
+  # 2026-09-11, all 11 of one session's crash_with_missiles log lines read
+  # "None missile(s), alt=None rate=None" because there was nothing left to
+  # OCR by then. pre_crash_buffer_s keeps a rolling window of (frame,
+  # missiles, alt, rate) samples from while the HUD was still live, so the
+  # capture can use the newest one that still had real data instead. 8.0s
+  # gives margin over the ~3s total-OCR-blackout-before-death signature this
+  # ADR's Open Questions already document.
+  # pre_crash_freshness_s (2026-09-11, same-day fix): a non-None altitude
+  # value is NOT the same as "the HUD shows this right now" — TelemetrySignal
+  # holds its last reading for up to stale_after_s (6.0s default) so slower
+  # consumers can tolerate brief OCR gaps. First cut of pre_crash_buffer_s
+  # used bare not-None and, measured live, captured a KILLED BY panel every
+  # time (9/9) instead of the in-flight frame, because altitude kept reading
+  # non-None for seconds into the death overlay. This bounds how recent the
+  # reading itself must be, independent of the general staleness tolerance.
+  # pre_crash_lookback_s (2026-09-12, replaces "pick the newest valid
+  # sample"): two dated fixes above still weren't enough — even gating on
+  # missiles/altitude freshness and on game_state['is_respawning'], a saved
+  # frame could still land on the explosion itself or a respawn-text color
+  # variant the detector hadn't matched yet. The explosion/respawn-text/
+  # KILLED BY sequence spans several seconds with genuinely inconsistent
+  # per-tick OCR visibility (this ADR's own documented "~3s total OCR
+  # blackout"), so no single per-tick signal reliably marks its start.
+  # Fixed lookback sidesteps detecting that boundary: always use whichever
+  # buffered frame is closest to 5.0s before detection, comfortably clear
+  # of the whole sequence, rather than the newest one that still looked ok.
+  crash_capture: {enabled: true, max_per_session: 20, pre_crash_buffer_s: 8.0,
+    pre_crash_freshness_s: 2.0, pre_crash_lookback_s: 5.0,
+    dir: test_screenshots/crash_with_missiles}}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
 # mission_loiter ('y'): the survival hold. Two behaviours only — climb to the
@@ -370,7 +437,16 @@ behavior_tree:
     enter_below_alt: 500
     exit_above_alt: 1000
     confirm_reads: 2
-    max_climb_s: 15.0
+    # ADR 137 D4, code-review finding 2026-09-11: raised 15.0 -> 22.5 (the
+    # same 1.5x scaling already applied to confirm_bypass_time_s below) —
+    # recover_below_time_s widened 20->30 so shallower dives now enter this
+    # same emergency actuator, but its own unconditional duration cap had
+    # stayed unchanged, risking a force-release mid-recovery for exactly the
+    # population the wider trigger newly admits. Proportional, not measured:
+    # no live session has yet hit this cap before the dive resolved one way
+    # or the other, so watch for "climb max duration (23s) reached" against
+    # an EMERGENCY hold specifically in the next live session.
+    max_climb_s: 22.5
     pitch_pulse_s: 1.5
     pulse_observe_s: 2.5
     min_climb_rate: 30.0
@@ -393,8 +469,18 @@ behavior_tree:
     # than the ADR's proposed 12s: the smoothed altitude the tree reads lags
     # ~1500m in a 560 m/s dive, so 12s of PREDICTED margin was only ~4s of real
     # margin in the 2026-08-21 18:41 crash. See "Deviation" in the ADR.
-    recover_below_time_s: 20.0
-    confirm_bypass_time_s: 10.0   # below this, fire on a single read (d3)
+    # ADR 137 D4: raised 20 -> 30. Measured 2026-09-10 07:24:42 — emergency
+    # fired correctly at the first 19s-to-ground read (airbrake + nose-up
+    # engaged within 1.5s), and the descent rate still WORSENED afterward
+    # (-333 -> -526 -> -602 m/s over the next 4.5s) before the aircraft hit
+    # the ground ~10.5s after the first read, with 1 missile still aboard.
+    # Same lag mechanism the 12->20 change was written for, still present at
+    # 20s: the compression ratio here was milder (~1.8x vs the original 3x)
+    # but still left too little real margin for airbrake+nose-up to arrest
+    # an established near-vertical dive. confirm_bypass_time_s scaled with it
+    # to hold the same proportion of the window (was 10/20 = 50%).
+    recover_below_time_s: 30.0
+    confirm_bypass_time_s: 15.0   # below this, fire on a single read (d3)
     descent_memory_s: 5.0         # hold a known descent across rejected reads (d4)
     fuel_reserve_pct: 10
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
@@ -485,6 +571,14 @@ return_to_battle: {region: [0.36, 0.32, 0.64, 0.378], min_red_frac: 0.10,
   text: [RETURNTO, TOBATTLE, NTOBAT, RNTOBAT, TOBAT]}
 tracking:
   enabled: false
+  # Design 005 dry-run/live split. enabled:true + actuate:false is pure
+  # sensing and logging — feeds the HUD in both GAME_BATTLE and
+  # GAME_BATTLE_MANUAL, never presses a key — the "Live dry-run logging
+  # mode" the design already specified but the code never separated out.
+  # Fly manually and point at targets to validate detection quality with
+  # zero actuation risk. actuate:true restores real roll correction, still
+  # strictly GAME_BATTLE + mission-running only (SAF-001, unchanged).
+  actuate: false
   acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
   deadband: 0.05
   kp: 0.3
@@ -506,6 +600,18 @@ tracking_hsv:
   green_upper: [75, 255, 255]
   min_contour_area: 12
   min_aspect_ratio: 2.5
+# ADR 136: padlock-off indicator — a dashed green ring at screen center when
+# padlock is disengaged (calibrated against a live capture 2026-09-09: ~40
+# short dash segments, not a single filled dot). Own HSV bounds, notably
+# lower saturation/value than tracking_hsv's enemy-marker green since this
+# is a translucent HUD reticle rather than a solid marker.
+padlock_indicator:
+  region_pct: [0.42, 0.39, 0.67, 0.67]
+  green_lower: [40, 30, 100]
+  green_upper: [75, 200, 255]
+  min_contour_area: 3
+  max_contour_area: 30
+  min_dashes: 6
 hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
 telemetry:
   # ADR 123: NOSE_DIRECTION deadband. Level flight jitters around zero altitude
@@ -533,7 +639,9 @@ telemetry:
     legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,
     rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0,
-    abort_on_rearm: true}   # ADR 088: cancel the dive if missiles rearm mid-descent
+    abort_on_rearm: true,   # ADR 088: cancel the dive if missiles rearm mid-descent
+    heatdive_enabled: true,  # ADR 136: heat-seeker switch + tracking-guided roll during the dive
+    heatdive_padlock_verify: false}  # ADR 136 D4: off — detector tracks the wrong HUD element (2026-09-09)
 # ADR 090 — bound the unfixed Performance 008 leak. Soft limit stops at the
 # next lobby (no mission in flight); hard limit stops immediately, because an
 # OOM kill can take the whole desktop session down with it.

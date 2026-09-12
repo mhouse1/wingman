@@ -519,7 +519,11 @@ class TestTimeToGroundRecovery:
 
     @staticmethod
     def _cond(clock, **kw):
-        opts = dict(recover_below_time_s=20.0, confirm_bypass_time_s=10.0,
+        # ADR 137 D4: 30.0/15.0 — the values actually shipped in
+        # config.yaml, not the pre-D4 20.0/10.0 (code-review finding,
+        # 2026-09-11: this fixture previously never exercised the real
+        # production thresholds).
+        opts = dict(recover_below_time_s=30.0, confirm_bypass_time_s=15.0,
                     descent_memory_s=5.0, clock=clock)
         opts.update(kw)
         return make_climb_condition(500, 1000, **opts)
@@ -532,11 +536,11 @@ class TestTimeToGroundRecovery:
                 f"altitude band should not fire at {alt} m (it never did)"
 
     def test_fires_on_time_to_ground_while_still_high(self):
-        """6636 m at -338 m/s is ~19.6 s from impact — inside the 20 s window,
-        and ~10 s before the observed impact rather than 4 s."""
+        """8700 m at -300 m/s is 29 s from impact — inside the ADR 137 D4
+        30 s window (and would have been OUTSIDE the pre-D4 20 s one)."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=1)
-        assert cond(make_snap(altitude=6636.0, altitude_rate=-338.0)) is True
+        assert cond(make_snap(altitude=8700.0, altitude_rate=-300.0)) is True
 
     def test_does_not_fire_in_a_gentle_descent(self):
         """Same altitude, ordinary rate: 6636 m at -50 m/s is 133 s away."""
@@ -550,18 +554,21 @@ class TestTimeToGroundRecovery:
         assert cond(make_snap(altitude=3000.0, altitude_rate=+200.0)) is False
 
     def test_single_read_bypass_inside_the_margin(self):
-        """d3: with confirm_reads=2, a 6 s time-to-ground must not wait for a
-        second read — the wait spends the margin the trigger protects."""
+        """d3, ADR 137 D4: with confirm_reads=2, a 12 s time-to-ground (inside
+        the 15 s bypass shipped by D4, outside the pre-D4 10 s one) must not
+        wait for a second read — the wait spends the margin the trigger
+        protects."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=2)
-        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
+        assert cond(make_snap(altitude=1800.0, altitude_rate=-150.0)) is True
 
     def test_outside_bypass_still_debounces(self):
-        """A 15 s time-to-ground is urgent but not immediate: honour the
+        """A 20 s time-to-ground is urgent but not immediate (outside the
+        ADR 137 D4 15 s bypass, inside its 30 s recovery band): honour the
         confirm count so one bad reading cannot command a climb."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=2)
-        snap = make_snap(altitude=7500.0, altitude_rate=-500.0)
+        snap = make_snap(altitude=8000.0, altitude_rate=-400.0)
         assert cond(snap) is False, "fired on a single read outside the bypass"
         assert cond(snap) is True
 
@@ -578,8 +585,8 @@ class TestTimeToGroundRecovery:
     def test_descent_memory_expires(self):
         """The hold is bounded — it must not latch a climb forever."""
         clock = FakeClock()
-        cond = make_climb_condition(500, 1000, recover_below_time_s=20.0,
-                                    confirm_bypass_time_s=10.0,
+        cond = make_climb_condition(500, 1000, recover_below_time_s=30.0,
+                                    confirm_bypass_time_s=15.0,
                                     descent_memory_s=5.0, confirm_reads=1,
                                     clock=clock)
         assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
@@ -612,8 +619,8 @@ class TestDiveRecoveryRespawnGuard:
 
     @staticmethod
     def _cond(clock):
-        return make_climb_condition(500, 1000, recover_below_time_s=20.0,
-                                    confirm_bypass_time_s=10.0,
+        return make_climb_condition(500, 1000, recover_below_time_s=30.0,
+                                    confirm_bypass_time_s=15.0,
                                     descent_memory_s=5.0, confirm_reads=1,
                                     clock=clock)
 
@@ -941,6 +948,24 @@ def test_outside_battle_clears_the_turn():
     assert c(_bsnap(0.20, +0.18, game_state=GameState.GAME_LOBBY)) is False
 
 
+def test_mission_not_running_clears_the_turn():
+    """ADR 138. Measured live 2026-09-10 03:03:26: the respawn screen cleared
+    (is_respawning -> False) up to ~1.5s before mission_j20 actually
+    restarted (the ADR 059 stability window) — and mission_j20 restarting is
+    what arms the ADR 132 turn guard. is_respawning alone did not close this
+    gap: a full 12s, 180-degree boundary turn selected and ran starting
+    inside it, unguarded. mission_running is the same "is this a live,
+    commanded aircraft" question is_respawning already answers, just closing
+    the later half of the window."""
+    c = _bcond(min_clear_frac=0.0)
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(0.20, +0.18, mission_running=False)) is False
+    # And the latch is gone, not merely masked for that tick (same guarantee
+    # test_a_respawn_clears_a_held_turn makes for is_respawning).
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(None, None, mission_running=False)) is False
+
+
 def test_a_boundary_abeam_does_not_start_a_turn():
     """2026-09-04, one second after a respawn: dist=0.281 fwd=+0.006. The
     forward component is 2% of the range, so the edge is essentially
@@ -1049,3 +1074,52 @@ def test_a_snapshot_without_the_near_field_behaves_as_before():
     c = _bcond(turn_frac=0.30, release_frac=0.45)
     assert c(_bsnap(0.20, +0.19)) is True
     assert c(_bsnap(0.52, +0.40)) is False
+
+
+# ---------------------------------------------------------------------------
+# Design 011 (ACS Mode) step 1: jet_profile -> AnalyzerSnapshot.has_padlock.
+# Config plumbing only — nothing branches on this yet, so these tests only
+# guard the resolution logic, not any tactic behaviour.
+# ---------------------------------------------------------------------------
+
+def test_snapshot_has_padlock_defaults_true():
+    """Every profile shipped today is has_padlock: true; a snapshot built
+    without the field must not silently read as boresight-only."""
+    assert make_snap().has_padlock is True
+
+
+def test_snapshot_has_padlock_can_be_overridden():
+    assert make_snap(has_padlock=False).has_padlock is False
+
+
+def _handler(jet_profile_cfg=None):
+    from wingman.tick_handlers import BehaviorTreeHandler
+    return BehaviorTreeHandler(None, None, {}, jet_profile_cfg=jet_profile_cfg)
+
+
+def test_handler_resolves_has_padlock_true_for_the_active_profile():
+    h = _handler({"active": "j20", "profiles": {"j20": {"has_padlock": True}}})
+    assert h._has_padlock is True
+
+
+def test_handler_resolves_has_padlock_false_for_the_active_profile():
+    h = _handler({"active": "generic_boresight",
+                  "profiles": {"j20": {"has_padlock": True},
+                               "generic_boresight": {"has_padlock": False}}})
+    assert h._has_padlock is False
+
+
+def test_handler_defaults_to_padlock_true_with_no_jet_profile_config():
+    """A config predating Design 011 has no jet_profile block at all — must
+    resolve to today's only real airframe behaviour, not crash or guess
+    boresight-only."""
+    assert _handler(None)._has_padlock is True
+    assert _handler({})._has_padlock is True
+
+
+def test_handler_defaults_to_padlock_true_for_an_unknown_active_profile():
+    """A typo'd or not-yet-defined active profile must not silently resolve
+    to boresight-only — the safe default matches every profile shipped
+    today."""
+    h = _handler({"active": "does_not_exist", "profiles": {}})
+    assert h._has_padlock is True

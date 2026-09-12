@@ -26,7 +26,7 @@ from wingman.keybindings import AFTERBURNER_KEY
 
 
 def _ctrl(min_fuel_pct=40.0, rearm_fuel_pct=90.0, confirm_reads=2, fuel=None,
-          manual_takeover=False):
+          manual_takeover=False, climb_emergency=False):
     c = Controller.__new__(Controller)
     c._cruise_ab_enabled = True
     c._cruise_ab_min_fuel_pct = min_fuel_pct
@@ -34,6 +34,7 @@ def _ctrl(min_fuel_pct=40.0, rearm_fuel_pct=90.0, confirm_reads=2, fuel=None,
     c._cruise_ab_confirm_reads = confirm_reads
     c._cruise_ab_active = False
     c._cruise_ab_low_streak = 0
+    c._climb_emergency_active = climb_emergency
     c._climb_key = mock.MagicMock()
     c._manual_takeover_active = mock.MagicMock(return_value=manual_takeover)
     c._read_fuel_pct = mock.MagicMock(return_value=fuel)
@@ -173,6 +174,43 @@ def test_manual_takeover_releases_an_existing_hold():
     c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
     assert not c.is_afterburner_cruising()
     assert _releases(c)
+
+
+def test_climb_emergency_blocks_a_new_press():
+    """ADR 137: the one exception to D9's "override everything" — measured
+    live 2026-09-09, cruise re-pressing the key inside 10 of 18 emergency
+    climb windows cancelled the airbrake's own deceleration each time."""
+    c = _ctrl(fuel=95, climb_emergency=True)
+    c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+    assert not c.is_afterburner_cruising()
+    assert not _presses(c)
+
+
+def test_climb_emergency_releases_an_existing_hold():
+    c = _ctrl(fuel=95)
+    c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+    assert c.is_afterburner_cruising()
+    c._climb_emergency_active = True
+    c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+    assert not c.is_afterburner_cruising()
+    assert _releases(c)
+
+
+def test_climb_emergency_ending_lets_cruise_resume():
+    c = _ctrl(fuel=95, climb_emergency=True)
+    c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+    assert not c.is_afterburner_cruising()
+    c._climb_emergency_active = False
+    c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+    assert c.is_afterburner_cruising()
+
+
+def test_ejecting_still_holds_afterburner_when_not_a_climb_emergency():
+    """D9's other overrides (eject, evade, climb's own fuel logic) are
+    unaffected — only the climb-emergency case is a new exception."""
+    c = _ctrl(fuel=95, climb_emergency=False)
+    c.note_afterburner_cruise(GameState.GAME_BATTLE_EJECT, False)
+    assert c.is_afterburner_cruising()
 
 
 def test_stale_fuel_reading_reasserts_but_does_not_release():

@@ -94,6 +94,11 @@ class MissionStatsTracker:
         self._total_flare_reloads = 0
         self._total_manual_takeovers = 0
         self._total_missile_evades = 0
+        # ADR 137: respawns where the aircraft was NOT in a deliberate eject
+        # dive (ADR 069's "trade an empty airframe for a rearmed one") and
+        # still had primary missiles — i.e. it crashed into terrain while
+        # armed, not by design. Tracked toward zero.
+        self._total_crashes_with_missiles = 0
 
         # ADR 070 V5: per-ENGAGEMENT survival, the measure a per-mission death
         # rate cannot give. Missions mix engagements the tactic touched with
@@ -156,6 +161,9 @@ class MissionStatsTracker:
                     else:
                         self._immediate_redetects.append(round(since_restart, 1))
                 self._last_restart_ts = None
+
+        elif event_name == "crash_with_missiles":
+            self._total_crashes_with_missiles += 1
 
         elif event_name == "restart_last_mission":
             self._last_restart_ts = ts
@@ -294,6 +302,7 @@ class MissionStatsTracker:
             "total_flare_reloads": self._total_flare_reloads,
             "total_manual_takeovers": self._total_manual_takeovers,
             "total_missile_evades": self._total_missile_evades,
+            "total_crashes_with_missiles": self._total_crashes_with_missiles,
             "spawn_crashes": {
                 "window_s": _SPAWN_CRASH_WINDOW_S,
                 "min_s": _SPAWN_CRASH_MIN_S,
@@ -355,6 +364,8 @@ class MissionStatsTracker:
             f"Flare reloads     : {s['total_flare_reloads']}",
             f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
+            f"Crash w/ missiles : {s.get('total_crashes_with_missiles', 0)}  "
+            f"(dove into terrain while armed — track toward 0)",
         ]
 
         sc = s.get("spawn_crashes") or {}

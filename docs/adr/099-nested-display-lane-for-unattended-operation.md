@@ -163,6 +163,22 @@ and an undebounced handler reads one long press as both stages, closing the game
 the operator meant to keep. `close_game: false` opts out of standby entirely —
 there would be nothing for the second press to do.
 
+**"Holding nothing but its hotkey listeners" was aspirational, not actual,
+until 2026-09-11.** `Controller.cleanup(keep_hotkeys=True)` simply skipped
+`unhook_all()` on the first press, which left every registered hotkey fully
+functional, not just present — `u` still restarted the J20 mission, the
+maneuver keys still cancelled it, `m` still worked, and so on. Observed
+2026-09-11 18:44: `u` pressed during standby restarted the mission at
+18:44:52, and the second Backspace closed everything down 5.5s later at
+18:44:57 — the operator was not "flying by hand," wingman had silently
+re-engaged. Standby is now what this section always said it was: every
+hotkey is torn down (`keyboard_module.unhook_all()`) and only Backspace's
+own closure is re-registered, so the first press leaves MetalStorm exactly
+as if it had been launched via `make g` with no wingman attached at all,
+except for the one listener waiting for the second press. See
+`Controller.cleanup` (the `keep_hotkeys` branch) and
+`tests/test_finish_round_then_exit.py`.
+
 Standby costs a parked process. `analyzer.cleanup()` joins the OCR pool before
 it starts, and a `malloc_trim(0)` hands the freed arenas back to the OS —
 measured at **2065 MB to 778 MB**, since glibc otherwise retains them (the

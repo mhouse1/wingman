@@ -241,6 +241,9 @@ class FakeAnalyzer:
     def get_ammo_missiles(self):
         return self._ammo_missiles
 
+    def get_telemetry(self):
+        return None
+
     def get_respawn_cache_result(self):
         return (False, 0.0, None)
 

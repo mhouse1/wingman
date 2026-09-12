@@ -30,7 +30,6 @@
 #            (nested.enabled). Every run target honours it; override one run
 #            with "make rd NESTED=0" / "NESTED=1".
 #   make nested-status / nested-stop -> inspect or tear down the nested display
-#   make rg          -> alias for r (backwards compat)
 #   make launch-game -> launch MetalStorm via umu-run in background (kills stale instance first)
 #   make wait-game   -> poll until Metalstorm.exe process is alive, wait for lobby
 #   make setup-capture -> one-time GNOME window picker: select MetalStorm, saves restore token
@@ -41,7 +40,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd rg launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
+.PHONY: leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -582,9 +581,6 @@ undecorate-game-window:
 # then set game_window_offset in wingman/config.yaml.
 find-game:
 	$(PYTHON_RUN) wingman/find_game_window.py
-
-# rg is now an alias for r on Linux (kept for backwards compatibility).
-rg: r
 
 # One-time GNOME Wayland capture setup (PipeWire portal restore token).
 # One-time setup: GNOME window picker appears; select MetalStorm and click Share.

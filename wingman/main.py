@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.8"
-WINGMAN_VERSION_DETAILS = "Minimap boundary detection"
+WINGMAN_VERSION = "1.8.9"
+WINGMAN_VERSION_DETAILS = "ACS mission_j20 next phase, switch to secondary weapons then guide towards target during dive"
 
 from .capture import Capture
 from .config_schema import assert_valid_config
@@ -39,12 +39,13 @@ from .liveness_guard import LivenessGuard
 from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
 from .game_shutdown import (GamePresenceWatch, close_game,
-                            close_nested_display)
+                            close_nested_display, find_game_pids)
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
     EnemyPresenceHandler,
     RespawnHandler,
+    RespawnHealthStallRecorder,
     TrackingHudHandler,
     HealthDropoutRecorder,
     UnknownAnomalyRecorder,
@@ -212,6 +213,38 @@ def _rss_mb() -> float:
 
 
 SHUTDOWN_WATCHDOG_S = 90.0
+# 2x the rough worst-case a single tick can legitimately cost under
+# starvation, not just "much less than 90s" — analyzer.py's per-tick lock
+# acquires (background_ocr 5.0s; ammo/fuel/telemetry/health at 1.0s each) sum
+# to roughly 9s in a pathological single tick, and this watchdog must not
+# force-exit a merely-slow-but-healthy tick before it ever reaches the
+# exit_requested check. Found during code review of the first cut (10.0s,
+# no headroom above that ~9s figure) — see ADR 121's 2026-09-11 addendum.
+SIGNAL_ACK_WATCHDOG_S = 20.0
+
+
+def _dump_stacks_and_force_exit(banner: str) -> None:
+    """Shared tail for both watchdogs below: log, dump every thread to the
+    log FILE (not just stderr — an unattended soak has no terminal), then
+    os._exit(2). ADR 121 D2/D3: the dump is the only record of where a hang
+    stuck, and os._exit (not sys.exit) is deliberate — normal shutdown is by
+    definition not happening, so anything that runs atexit handlers or joins
+    threads would stick in the same place this is guarding against.
+    """
+    _log = logging.getLogger(__name__)
+    try:
+        _log.error(banner)
+        for h in list(_log.handlers) + list(logging.getLogger().handlers):
+            with contextlib.suppress(Exception):
+                h.flush()
+        for h in logging.getLogger().handlers:
+            stream = getattr(h, "stream", None)
+            if stream is not None and not stream.closed:
+                with contextlib.suppress(Exception):
+                    faulthandler.dump_traceback(file=stream, all_threads=True)
+                    stream.flush()
+    finally:
+        os._exit(2)
 
 
 def _arm_shutdown_watchdog(timeout_s: float = SHUTDOWN_WATCHDOG_S) -> None:
@@ -230,31 +263,17 @@ def _arm_shutdown_watchdog(timeout_s: float = SHUTDOWN_WATCHDOG_S) -> None:
     — so this captures evidence rather than guessing at a cause. The daemon
     timer does not hold up a healthy exit.
     """
-    def _bark():
-        _log = logging.getLogger(__name__)
-        try:
-            _log.error(
-                "SHUTDOWN WATCHDOG: cleanup still running after %.0fs — dumping "
-                "all thread stacks and forcing exit", timeout_s)
-            for h in list(_log.handlers) + list(logging.getLogger().handlers):
-                with contextlib.suppress(Exception):
-                    h.flush()
-            # To the log FILE, not just stderr: an unattended soak has no
-            # terminal, and this dump is the only record of where it stuck.
-            for h in logging.getLogger().handlers:
-                stream = getattr(h, "stream", None)
-                if stream is not None and not stream.closed:
-                    with contextlib.suppress(Exception):
-                        faulthandler.dump_traceback(file=stream, all_threads=True)
-                        stream.flush()
-        finally:
-            # os._exit, not sys.exit: the point is that normal shutdown is
-            # already stuck, so anything that runs atexit handlers or joins
-            # threads would stick in the same place.
-            os._exit(2)
-
     _cancel_shutdown_watchdog()
-    t = threading.Timer(timeout_s, _bark)
+    # Cleanup has legitimately begun by definition of being called — whatever
+    # was guarding against the signal never being noticed has nothing left to
+    # guard. See _arm_signal_ack_watchdog. This is the ONLY place that cancels
+    # it on the normal path; every call site of THIS function (main-loop
+    # finally:, STANDBY's second Backspace, the Ctrl-C race handler) inherits
+    # the cancellation for free.
+    _cancel_signal_ack_watchdog()
+    t = threading.Timer(timeout_s, lambda: _dump_stacks_and_force_exit(
+        f"SHUTDOWN WATCHDOG: cleanup still running after {timeout_s:.0f}s — "
+        "dumping all thread stacks and forcing exit"))
     t.daemon = True
     t.start()
     globals()["_SHUTDOWN_WATCHDOG_TIMER"] = t
@@ -273,6 +292,67 @@ def _cancel_shutdown_watchdog() -> None:
         with contextlib.suppress(Exception):
             t.cancel()
         globals()["_SHUTDOWN_WATCHDOG_TIMER"] = None
+
+
+def _arm_signal_ack_watchdog(signal_name: str, timeout_s: float = SIGNAL_ACK_WATCHDOG_S) -> None:
+    """Force an exit if a termination signal ran its handler but nothing
+    downstream ever noticed. ADR 121 (2026-09-11 addendum).
+
+    `_arm_shutdown_watchdog` bounds cleanup once the main loop has already
+    broken out of `while True:` — it is armed from the `finally:` block that
+    only runs after that break happens. On 2026-09-11 a SIGTERM produced no
+    such break for 75+ seconds: the loop kept ticking normally, once a
+    second, and `exit_requested.is_set()` — checked unconditionally at the
+    top of every tick, before anything else — never once returned True. The
+    90 s watchdog could not help, because the code that arms it was never
+    reached.
+
+    This is armed from INSIDE the SIGTERM/SIGHUP handler itself, the instant
+    `exit_requested.set()` runs, instead of waiting for the loop to react to
+    it. If `_arm_shutdown_watchdog` fires first for any reason — the loop DID
+    break, or STANDBY's own close path ran — it cancels this timer there,
+    because that is exactly the signal that cleanup has legitimately begun.
+
+    CALLERS MUST STAND THIS DOWN before entering any state where
+    exit_requested is deliberately not honored — STANDBY's parked wait for a
+    second Backspace does not check exit_requested at all, and does not run
+    through `_arm_shutdown_watchdog` until that second Backspace arrives. A
+    code-review pass on the first cut of this function found exactly that
+    gap: a signal arriving while parked in STANDBY force-killed the session
+    10s later with no cleanup, reproducing the ADR 124 incident on a 9x
+    shorter fuse. STANDBY's entry now calls _cancel_signal_ack_watchdog
+    explicitly, immediately after its existing _cancel_shutdown_watchdog call.
+
+    Still much shorter than the 90 s cleanup watchdog, deliberately: noticing
+    a flag at the top of a roughly 1.5 s tick loop should cost about one tick,
+    not most of a minute. Reusing SHUTDOWN_WATCHDOG_S here would let this
+    watchdog sleep through the exact failure it exists to catch.
+
+    This does NOT cover a signal that never reaches this handler at all — a
+    check that only runs once the handler has already run cannot detect the
+    handler not running. Per the 2026-09-11 log (no "Exit requested" line for
+    75+ seconds against a ~1 s tick cadence), that non-delivery case is the
+    more likely explanation for the incident that motivated this, and it
+    stays open. This closes the narrower case — the handler runs, the flag is
+    set, and something downstream still fails to act on it in time — which is
+    strictly worth closing regardless of which one actually happened.
+    """
+    _cancel_signal_ack_watchdog()
+    t = threading.Timer(timeout_s, lambda: _dump_stacks_and_force_exit(
+        f"SIGNAL ACK WATCHDOG: {signal_name} was handled {timeout_s:.0f}s ago "
+        "but cleanup never started — dumping all thread stacks and forcing exit"))
+    t.daemon = True
+    t.start()
+    globals()["_SIGNAL_ACK_WATCHDOG_TIMER"] = t
+
+
+def _cancel_signal_ack_watchdog() -> None:
+    """Stand the signal-ack watchdog down. Safe to call whether or not one is armed."""
+    t = globals().get("_SIGNAL_ACK_WATCHDOG_TIMER")
+    if t is not None:
+        with contextlib.suppress(Exception):
+            t.cancel()
+        globals()["_SIGNAL_ACK_WATCHDOG_TIMER"] = None
 
 
 def main():
@@ -497,10 +577,33 @@ def main():
     # way mid-session, and the orphaned Xwayland :3 outlived it. This is a
     # SEPARATE gap from ADR 121's shutdown watchdog, which only arms once
     # exit_requested is already set — SIGHUP previously never set it.
+    #
+    # Each handler also arms _arm_signal_ack_watchdog immediately, rather than
+    # relying solely on the main loop noticing exit_requested on its own next
+    # tick. Observed 2026-09-11: a SIGTERM produced no break out of the main
+    # loop for 75+ seconds despite the loop ticking normally throughout — see
+    # ADR 121's 2026-09-11 addendum.
+    #
+    # Only arms it on the FIRST signal: exit_requested is one-way (nothing
+    # ever clears it), so a repeat SIGTERM/SIGHUP arriving after the first has
+    # already been acted on would otherwise re-arm a fresh, uncancelled timer
+    # with no later _arm_shutdown_watchdog call left to stand it down — found
+    # in the same code-review pass as the STANDBY gap below, e.g. a second
+    # signal landing mid-cleanup (systemd's stop-then-kill pattern) could
+    # force-exit before _close_session finishes, destroying the very
+    # session-summary/stats artifacts ADR 121 exists to protect.
+    def _make_terminate_handler(name):
+        def _handler(_sig, _frm):
+            first_signal = not exit_requested.is_set()
+            exit_requested.set()
+            if first_signal:
+                _arm_signal_ack_watchdog(name)
+        return _handler
+
     try:
         import signal
-        signal.signal(signal.SIGTERM, lambda _sig, _frm: exit_requested.set())
-        signal.signal(signal.SIGHUP, lambda _sig, _frm: exit_requested.set())
+        signal.signal(signal.SIGTERM, _make_terminate_handler("SIGTERM"))
+        signal.signal(signal.SIGHUP, _make_terminate_handler("SIGHUP"))
     except (ValueError, OSError) as e:  # non-main thread or unsupported platform
         print(f"WARNING: SIGTERM/SIGHUP handler not installed ({e}); "
               "a SIGTERM or SIGHUP may leave injected keys held", file=sys.stderr)
@@ -645,6 +748,10 @@ def main():
         on_auto_mission_key=_on_auto_mission_key,
         crops=analyzer.crops,
     )
+    # ADR 136: give the eject heatdive addition a tracker to call directly —
+    # Controller cannot construct its own, TargetTracker is owned/configured
+    # alongside HudRenderer above.
+    ctrl.set_target_tracker(target_tracker)
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry
     # (ADR 060 Phase 1). Every subscriber is named; a duplicate name raises at
@@ -777,6 +884,7 @@ def main():
 
     stall_cfg = cfg.get("stall_recovery", {}) or {}
     stall_play_delay_s = float(stall_cfg.get("play_click_delay_s", 2.0))
+    stall_leave_delay_s = float(stall_cfg.get("leave_click_delay_s", 1.0))
     stall_cooldown_s = float(stall_cfg.get("cooldown_s", 20.0))
 
     def _handle_stall_recovery(crop):
@@ -860,6 +968,22 @@ def main():
                 if new_frame is None:
                     logger.warning("STALL_MULTI_PLAYER: frame capture returned None")
                     return
+                # LEAVE only ever gets scanned here, after the red X — some
+                # squads apparently confirm with a second dialog before the
+                # game actually drops you, and clicking only the red X left
+                # PLAY/READY never appearing (observed 2026-09-10, fell
+                # through to the slower QUEUE_FALLBACK path instead).
+                if analyzer.scan_region_for_leave(new_frame):
+                    logger.info("\033[92m🔧 Stall recovery: clicking LEAVE "
+                                "(squad-leave confirmation)\033[0m")
+                    ctrl.click_crop(analyzer.crops["LEAVE"], block=False, count=1,
+                                    region_name="LEAVE")
+                    time.sleep(stall_leave_delay_s)
+                    new_frame = cap.grab_from_thread()
+                    if new_frame is None:
+                        logger.warning("STALL_MULTI_PLAYER: frame capture "
+                                       "returned None after clicking LEAVE")
+                        return
                 # Re-scans UNREADY too, so a squad we failed to leave suppresses
                 # the click instead of firing PLAY into a still-blocked lobby.
                 ready = analyzer.scan_region_for_play_button(new_frame)
@@ -962,6 +1086,7 @@ def main():
     behavior_tree = BehaviorTreeHandler(
         analyzer, ctrl, cfg.get("behavior_tree", {}), j20_cfg, cfg.get("minimap", {}),
         ammo_events=ammo_events, stats_tracker=stats_tracker,
+        jet_profile_cfg=cfg.get("jet_profile", {}),
     )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
@@ -973,12 +1098,19 @@ def main():
         live_capture=live_capture, emit_capture_event=_emit_capture_event,
         disposition_fn=_alive_transition_disposition,
         respawn_state_enum=RespawnState,
+        # ADR 137 D5, code-review finding 2026-09-11: rr-path1-gate and the
+        # OCR replay integration tests run this real main() against the real
+        # config.yaml (crash_capture enabled) — replay is not a live crash,
+        # so it must not write real PNGs to disk as a release-gate side effect.
+        replay_mode=replay_mode,
     )
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
     )
     health_dropout = HealthDropoutRecorder(
         (cfg.get("health", {}) or {}).get("dropout_capture", {}), analyzer)
+    respawn_health_stall = RespawnHealthStallRecorder(
+        (cfg.get("health", {}) or {}).get("respawn_stall_capture", {}), analyzer, ctrl)
     # Performance 008: periodic RESOURCE line for long-session leak diagnosis.
     resource_sampler = ResourceSampler(
         cfg.get("resource_monitor", {}), perf_tracker=tracker)
@@ -1359,6 +1491,11 @@ def main():
             # live flight — the evidence the perception fix is built from.
             health_dropout.tick(frame, current_game_state)
 
+            # ADR 137 D7: archive the screen when health stays unconfirmed
+            # after a respawn, long enough that mission_j20 hasn't restarted
+            # — the window health_dropout above deliberately excludes.
+            respawn_health_stall.tick(frame, current_game_state)
+
             tracking_hud.tick(frame, current_game_state, game_state)
 
             # Detect respawn — from overlay OCR, or (ADR 064 dual mode) from the
@@ -1610,13 +1747,59 @@ def main():
             # watchdog exists to bound a STALL, and it cannot tell the two
             # apart from inside — so it is disarmed here and re-armed for the
             # close that follows the second Backspace, which is bounded.
+            #
+            # The signal-ack watchdog (ADR 121, 2026-09-11 addendum) needs the
+            # identical treatment and was missing it in the first cut: the
+            # wait loop below only watches ctrl.wait_for_close_all(), never
+            # exit_requested, so a SIGTERM/SIGHUP arriving while parked here
+            # would otherwise force-exit 20s later with no cleanup — the
+            # ADR 124 incident again, on a much shorter fuse, found by code
+            # review before it shipped to a live session.
             _cancel_shutdown_watchdog()
+            _cancel_signal_ack_watchdog()
+            _standby_game_gone = False
+            _game_process_name = (cfg.get("resource_monitor", {}) or {}).get(
+                "game_process_name", "Metalstorm.exe")
+
+            def _game_pids_now():
+                return find_game_pids(_game_process_name)
+
+            def _game_confirmed_gone():
+                """Two fast, back-to-back /proc scans, not GamePresenceWatch's
+                game_has_gone() — that one is tuned for the main tick loop and
+                only actually re-scans every poll_interval_s (default 5.0),
+                needing absent_reads (default 2) agreeing reads before it
+                reports True. STANDBY never re-enters that loop, so the first
+                cut of this fix (2026-09-12 AM) called game_has_gone() here
+                too and it read stale: a Ctrl-C landing 3.7s into STANDBY hit
+                a scan that was still mid-debounce and reported "still
+                running" even though the operator had already quit the game,
+                leaving the window up exactly as before. Kept at two reads
+                rather than one — a single scan can still race a crash or a
+                relaunch mid-flight (the same gap ADR 105 guards against) and
+                a false "gone" here would yank the nested display out from
+                under a game that is still there.
+                """
+                if not game_watch.armed or _game_pids_now():
+                    return False
+                time.sleep(0.3)
+                return not _game_pids_now()
+
             try:
                 while not ctrl.wait_for_close_all(timeout=1.0):
-                    pass
-                logger.info("STANDBY: second Backspace — closing down")
-                _arm_shutdown_watchdog()
-                _close_session()
+                    if _game_confirmed_gone():
+                        _standby_game_gone = True
+                        break
+                if _standby_game_gone:
+                    logger.info("STANDBY: MetalStorm exited on its own — "
+                                "closing the nested display it was hosted on "
+                                "(ADR 105)")
+                    if nested_display:
+                        close_nested_display(nested_display, grace_s=_grace)
+                else:
+                    logger.info("STANDBY: second Backspace — closing down")
+                    _arm_shutdown_watchdog()
+                    _close_session()
             except KeyboardInterrupt:
                 # A SIGINT racing the second Backspace can win the wait loop
                 # by a millisecond and land here with the close request
@@ -1630,6 +1813,21 @@ def main():
                                 "had already arrived — closing down anyway")
                     _arm_shutdown_watchdog()
                     _close_session()
+                elif game_watch.armed and not _game_pids_now():
+                    # A single immediate scan, not the two-read confirmation
+                    # helper the passive loop above uses: this branch is
+                    # already reacting to the operator's own Ctrl-C, so there
+                    # is no idle time to spend on a confirmation read (and a
+                    # second Ctrl-C landing inside that read's sleep would
+                    # escape this except block uncaught). The operator has
+                    # already said "stop" either way — the only question
+                    # this check answers is whether MetalStorm is still there
+                    # to protect.
+                    logger.info("STANDBY: interrupted, but MetalStorm had "
+                                "already exited on its own — closing the "
+                                "nested display it was hosted on (ADR 105)")
+                    if nested_display:
+                        close_nested_display(nested_display, grace_s=_grace)
                 else:
                     logger.info("STANDBY: interrupted — leaving MetalStorm running")
             finally:

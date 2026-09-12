@@ -308,3 +308,168 @@ this block directly.
   the Backspace in this session, so the new `close_all_requested()` branch
   was never entered. Still open: a session where the two actually race.
 
+## SIGTERM had no effect at all on a live, ticking process (2026-09-11)
+
+A fifth variant, and the first where the loop itself was never in doubt.
+
+**Observed 2026-09-11 06:44-06:52.** The nested Xwayland server on `:3` died
+out from under a live session — gone from `/proc` and from `/tmp/.X11-unix`
+between two ticks, with no OOM-kill or segfault in `dmesg`/`journalctl` and no
+exit trace in the server's own log (`/tmp/wingman-nested-display.log`, last
+written at session start). Cause unknown; not this ADR's concern. What
+followed is.
+
+Wingman kept running — the tick loop, `Controller.fire_active_weapon`,
+`padlock_camera`, and the XKey listener's own reconnect-every-3s loop all
+continued firing normally, once a second, for the next several minutes,
+`Linux key event for 'f' failed after retry` on every attempt since the
+display no longer existed. This is measured, not inferred: `wingman.log` shows
+continuous, evenly-spaced output throughout, unlike the original 2026-09-05
+incident's signature ("stopped logging on the same second") and unlike the
+2026-09-08 SIGHUP incident (log stops mid-write). The process was never stuck
+— it was doing useless work, correctly, forever.
+
+`kill -TERM` was sent directly to the interpreter PID (confirmed via `ps`,
+not the `uv run` shim). `exit_requested.is_set()` sits unconditionally at the
+top of `main.py`'s `while True:` (line 1060), checked once per tick, before
+anything else. The tick kept running at its normal ~1 s cadence for 75+
+seconds afterward. It never logged `Exit requested, shutting down`. No
+`SHUTDOWN WATCHDOG` line appeared either, for the structural reason below.
+`kill -KILL` was sent after that wait; the process died immediately and
+cleanly (confirmed by the `uv`/`make rd` shim reporting exit 137 one second
+later), so nothing downstream of the signal was itself hung — the interpreter
+was fully responsive to SIGKILL throughout.
+
+**What is not known.** Whether the SIGTERM was delivered to the process at
+all, delivered but masked for the main thread, or delivered and handled (the
+lambda ran, `exit_requested.set()` executed) yet the *same* `threading.Event`
+object somehow read `False` from the loop — cannot be distinguished
+post-mortem with the process already gone. Guessing at which would repeat
+the mistake ADR 121's original incident already recorded. Instrumentation
+belongs in the signal handler itself, not in a theory about it.
+
+**The structural gap this exposes.** `_arm_shutdown_watchdog()` is called
+from the `finally:` block wrapping the main loop (`main.py:1459`) — reached
+only once the loop actually breaks out of `while True:`, which requires
+`exit_requested.is_set()` to have been true at the top of some tick. Every
+variant this ADR has recorded so far — the original hang, the SIGHUP gap, the
+Ctrl-C race — is a failure *after* that point, or a signal that bypassed
+`exit_requested` entirely (SIGHUP's default disposition). This is the first
+one where the signal that is supposed to *set* `exit_requested` produced no
+observable effect while the loop kept running in full health. The 90 s
+watchdog cannot fire for a failure that never reaches the code that arms it.
+
+**Decision. Built same day, ahead of a second occurrence** — an explicit
+exception to "record and wait," made because the fix is narrow, additive, and
+independently testable regardless of whether it explains the 2026-09-11
+incident. `_arm_signal_ack_watchdog(signal_name, timeout_s=SIGNAL_ACK_WATCHDOG_S)`
+(`main.py`, `SIGNAL_ACK_WATCHDOG_S = 20.0`) is armed from inside the SIGTERM
+and SIGHUP handlers themselves, the instant `exit_requested.set()` runs, not
+from the `finally:` block. If nothing cancels it within the bound, it dumps
+every thread's stack and force-exits exactly like `_arm_shutdown_watchdog`
+does, via a helper (`_dump_stacks_and_force_exit`) now shared between both
+watchdogs rather than duplicated.
+
+**Cancellation.** `_arm_shutdown_watchdog` cancels any pending signal-ack
+watchdog the moment it is itself called — from any of its three call sites
+(main-loop `finally:`, STANDBY's second Backspace, the Ctrl-C race handler) —
+because that call is exactly the signal that cleanup has legitimately begun.
+Any state that legitimately does NOT run through one of those three call
+sites, however, must cancel it explicitly — see the STANDBY finding below,
+which is exactly that case and was missed in the first cut.
+
+**What this does and does not cover.** It closes the case where the handler
+runs, `exit_requested` is set, and something downstream still fails to act on
+it within the bound — a real gap regardless of what caused 2026-09-11, since
+it needs no assumption about that incident to be worth closing. It does NOT
+cover a signal that never reaches the handler at all: a check that only runs
+once the handler has already run cannot detect the handler not running. Per
+the 2026-09-11 log (no `Exit requested` line for 75+ seconds against a ~1 s
+tick cadence, with the tick loop otherwise fully healthy), non-delivery is
+the more likely explanation for that specific incident — so this fix may not
+have prevented it. It is built anyway because it is correct and cheap on its
+own terms, and because the narrower gap it does close is real.
+
+Covered by `tests/test_shutdown_watchdog.py` (9 new tests): fires when
+uncancelled, dumps thread stacks, is a daemon, cancels cleanly, replaces a
+previous timer rather than leaking one, and — specifically — is cancelled by
+`_arm_shutdown_watchdog` firing first, so a merely-slow-to-notice healthy
+shutdown is never killed by the narrower guard.
+
+### Validation
+
+- V1-V4 — unit, satisfied: fires on timeout, stands down when cancelled
+  directly, stands down when `_arm_shutdown_watchdog` supersedes it, daemon
+  (does not block a healthy exit).
+- V5 — live, open. The next SIGTERM/SIGHUP this ADR's monitoring catches
+  should show either a normal `Exit requested` within ~1 tick (nothing to
+  guard against), or — if the non-delivery theory above is right — total
+  silence exactly like 2026-09-11's, with this watchdog equally unable to
+  help, which would confirm non-delivery over "handler ran, loop didn't
+  notice" as the actual mechanism. Either outcome is informative.
+
+## Code review caught two regressions before they shipped live (2026-09-11)
+
+The signal-ack watchdog above was reviewed on the same day it was written,
+before any live session had exercised it. Two findings were confirmed by
+direct code tracing, not just plausible on inspection:
+
+**STANDBY had no idea the new watchdog existed.** STANDBY's entry already
+disarms the 90 s cleanup watchdog (`_cancel_shutdown_watchdog()`, the ADR 124
+fix) because it is an unbounded, deliberate, operator-controlled wait — not a
+stall. The new signal-ack watchdog needed the identical treatment and did not
+get it: STANDBY's parked loop (`while not ctrl.wait_for_close_all(...)`)
+checks only the second-Backspace event, never `exit_requested`, and nothing
+in that path called `_arm_shutdown_watchdog` to trigger the signal-ack
+watchdog's own cancellation. A SIGTERM or SIGHUP arriving while parked in a
+live standby — the operator flying manually, potentially for hours — would
+have force-exited 10 s later with no cleanup: no session summary, no stats,
+MetalStorm and the nested display orphaned, any injected key left held. This
+is the exact ADR 124 incident ("killed a live standby... taking the SAF-010
+handback with it"), reproduced by the fix meant to prevent silent hangs, on a
+fuse an order of magnitude shorter than the one that incident was measured
+against. Fixed: STANDBY's entry now calls `_cancel_signal_ack_watchdog()`
+immediately beside its existing `_cancel_shutdown_watchdog()` call.
+
+**A repeat signal during the cleanup window could re-arm an orphaned timer.**
+`_arm_shutdown_watchdog` cancels a pending signal-ack watchdog once, the
+first time cleanup begins. A second SIGTERM or SIGHUP landing after that —
+systemd's stop-then-kill pattern, or an operator sending it twice — re-armed
+a fresh signal-ack watchdog with no later `_arm_shutdown_watchdog` call left
+to cancel it, since the main loop does not re-enter `finally:` a second time.
+If cleanup legitimately took close to the new bound, this could force-exit
+before `_close_session()` finished, destroying the exact session-summary and
+stats artifacts this ADR exists to protect. Fixed: the handler now arms the
+signal-ack watchdog only on the transition from unset to set — `exit_requested`
+never clears once set, so at most one signal-ack watchdog is ever armed via
+the handler for the life of the process, and whichever `_arm_shutdown_watchdog`
+call site fires first retains sole responsibility for cancelling it.
+
+A third finding — `SIGNAL_ACK_WATCHDOG_S = 10.0` left almost no margin above
+this file's own documented worst-case per-tick lock-acquire timeouts
+(`analyzer.py`: `background_ocr` at 5.0 s, plus four more at 1.0 s each,
+summing to roughly 9 s in a pathological single tick) — was addressed by
+raising the bound to 20.0 s, giving better than 2x headroom above that
+inferred (not measured) worst case while staying well clear of the 90 s
+cleanup watchdog.
+
+Two findings were noted and deliberately not acted on: `threading.Timer.cancel()`
+has no effect once its callback has already started (a documented Python
+limitation), which is a narrow, pre-existing race shared symmetrically with
+the original 90 s watchdog rather than something new introduced here; and the
+suggestion to redesign cancellation as a structural property of session phase
+rather than a per-call-site responsibility, which is a legitimate long-term
+concern but a materially larger change than this fix warrants — the STANDBY
+fix instead mirrors the exact pattern already proven for the original
+watchdog, rather than inventing a new one.
+
+### Validation
+
+- V6 — unit, satisfied: a repeat arm of the signal-ack watchdog replaces
+  rather than leaks a timer (`test_arming_signal_ack_watchdog_replaces_a_previous_one`).
+- V7 — live, open. STANDBY's fix is inline in `main()`, matching this ADR's
+  existing SIGHUP and Ctrl-C-race fixes — neither of which got a direct unit
+  test either, for the same reason (not an extracted, mockable function).
+  The next session where a signal arrives during a live standby is the real
+  test.
+

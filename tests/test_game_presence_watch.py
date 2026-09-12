@@ -117,3 +117,68 @@ def test_the_game_gone_exit_needs_no_safe_point():
     src = Path("wingman/main.py").read_text()
     check = src.split("if game_watch.game_has_gone():")[1].split("break")[0]
     assert "_safe" not in check
+
+
+def _standby_block():
+    """The `elif standby_armed:` branch runs to the end of main() — nothing
+    else follows it, so slicing from there to EOF isolates it."""
+    from pathlib import Path
+    src = Path("wingman/main.py").read_text()
+    return src.split("elif standby_armed:")[1]
+
+
+def test_standby_polls_for_the_game_going_away():
+    """2026-09-12 AM: game_watch was only ever polled from the main tick loop,
+    which STANDBY parks outside of. An operator who exited MetalStorm by hand
+    while parked in STANDBY had no path back to a closed nested display short
+    of the second Backspace — Ctrl-C left it orphaned too.
+
+    2026-09-12 PM: the first fix called GamePresenceWatch.game_has_gone()
+    here, but that method is debounced for the main loop's cadence (only
+    actually re-scans every poll_interval_s, and needs absent_reads agreeing
+    reads before it reports True) — up to ~10s. A Ctrl-C landing 3.7s into
+    STANDBY still read "still running" and the window stayed orphaned. STANDBY
+    must use its own prompt, unthrottled check instead."""
+    block = _standby_block()
+    wait_loop = block.split("while not ctrl.wait_for_close_all")[1].split(
+        "except KeyboardInterrupt:")[0]
+    assert "game_watch.game_has_gone()" not in wait_loop, \
+        "the debounced watch method is too slow for STANDBY's own poll"
+    assert "_game_confirmed_gone()" in wait_loop
+
+
+def test_standby_game_gone_skips_close_game():
+    """Same ADR 105 rule as the main-loop teardown: when the game is already
+    gone there is nothing running for close_game to protect or kill, so the
+    STANDBY game-gone path must close only the nested display."""
+    block = _standby_block()
+    branch = block.split("if _standby_game_gone:")[1].split("else:")[0]
+    assert "close_nested_display(nested_display" in branch
+    assert "close_game(" not in branch
+    assert "_close_session()" not in branch
+
+
+def test_standby_confirmed_gone_is_two_reads_not_one():
+    """A single scan can still race a crash or a relaunch mid-flight — the
+    same gap ADR 105's absent_reads guards against — and a false "gone" would
+    yank the nested display out from under a game that is still there. The
+    passive wait loop has idle time to spend on a second read, so it should."""
+    from pathlib import Path
+    src = Path("wingman/main.py").read_text()
+    helper = src.split("def _game_confirmed_gone():")[1].split(
+        "try:\n                while not ctrl.wait_for_close_all")[0]
+    assert helper.count("_game_pids_now()") == 2
+    assert "time.sleep" in helper
+
+
+def test_standby_interrupt_checks_presence_without_a_confirmation_sleep():
+    """The except branch reacts to the operator's own Ctrl-C, so it must not
+    spend the passive loop's confirmation sleep — a second Ctrl-C landing
+    inside that sleep would raise out of this except block uncaught rather
+    than being handled by it (observed pattern on 2026-09-08 for the
+    second-Backspace race, same shape of hazard here)."""
+    block = _standby_block()
+    except_branch = block.split("except KeyboardInterrupt:")[1]
+    assert "_game_pids_now()" in except_branch
+    assert "_game_confirmed_gone()" not in except_branch
+    assert "close_nested_display(nested_display" in except_branch
