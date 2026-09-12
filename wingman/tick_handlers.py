@@ -216,7 +216,8 @@ class RespawnHandler:
     def __init__(self, analyzer, ctrl, mission_cfg, *, enemy_presence, ammo_events,
                  behavior_tree=None, live_capture=None, emit_capture_event=None,
                  disposition_fn, respawn_state_enum, cooldown_s: float = 10.0,
-                 replay_mode: bool = False):
+                 replay_mode: bool = False, clock=time.time):
+        self._clock = clock
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._enemy_presence = enemy_presence
@@ -271,6 +272,15 @@ class RespawnHandler:
         # staleness tolerance.
         _raw_fresh = _cc_cfg.get("pre_crash_freshness_s", 2.0)
         self._pre_crash_freshness_s = float(2.0 if _raw_fresh is None else _raw_fresh)
+        # ADR 137 D8 (fixed-lookback revision, 2026-09-12): the target age of
+        # the frame a crash should save, measured back from the moment the
+        # crash is detected. Comfortably past the several-second explosion/
+        # respawn-text/KILLED BY sequence this ADR's Open Questions already
+        # document as a total-OCR-blackout window of variable, imperfectly
+        # known length — see _lookback_pre_crash_sample for why this
+        # replaced "pick whichever sample still looked valid."
+        _raw_lookback = _cc_cfg.get("pre_crash_lookback_s", 5.0)
+        self._pre_crash_lookback_s = float(5.0 if _raw_lookback is None else _raw_lookback)
         self._pre_crash_buffer: "collections.deque" = collections.deque()
 
     # -- state --------------------------------------------------------------
@@ -441,52 +451,70 @@ class RespawnHandler:
 
     # -- pre-crash buffer -----------------------------------------------------
 
-    def _sample_pre_crash_buffer(self, frame, current_game_state) -> None:
-        """Record this tick's (frame, missiles, alt, rate) while the in-flight
-        HUD is actually readable, so a later crash has real data to pull from.
-        ADR 137 D8. No-op outside active flight, or once nothing is readable —
-        the death overlay naturally stops new entries from landing, which is
-        exactly the point: the buffer's newest entry is then the last known
-        good state before whatever happened next.
+    def _sample_pre_crash_buffer(self, frame, game_state, current_game_state) -> None:
+        """Record this tick's (frame, missiles, alt, rate, ts) so a crash can
+        later pick a frame from a fixed time before detection. ADR 137 D8.
+
+        Buffers EVERY qualifying tick — it does not require missiles or
+        altitude to be readable this specific tick. Two earlier cuts of this
+        picked "the newest sample where something still looked valid," and
+        each one found a new way for something to look valid right up
+        against the death sequence: altitude held over past the overlay
+        appearing (D8 rev 1), then missiles reading a plausible number
+        during it too — likely OCR catching part of the KILLED BY panel's
+        own stat digits (rev 2), then a respawn-text color variant the
+        detector didn't recognize yet while the explosion was already on
+        screen (rev 3). All three are instances of the same problem: no
+        per-tick signal reliably marks the exact start of dying, because
+        that sequence (explosion, respawn text, KILLED BY panel) spans
+        several seconds of its own with inconsistent OCR visibility — the
+        "~3s total OCR blackout" this ADR's Open Questions already flag.
+        Picking a frame from a fixed distance in the past sidesteps needing
+        to detect that boundary at all: `_lookback_pre_crash_sample` takes
+        whichever buffered frame is closest to `pre_crash_lookback_s`
+        (default 5.0) before now, comfortably past that whole sequence.
+
+        Still excludes a tick already flagged `game_state['is_respawning']`
+        — free to check, and keeps an obviously-dying frame out of the
+        buffer even if the lookback target were ever misconfigured short.
         """
         if not self._crash_capture_enabled or frame is None:
             return
         if current_game_state != GameState.GAME_BATTLE or not self._ctrl.is_mission_running():
+            return
+        if game_state.get('is_respawning'):
             return
         missiles = self._analyzer.get_ammo_missiles()
         alt, rate = None, None
         try:
             snap = self._analyzer.get_telemetry()
             if snap is not None:
-                # Freshness, not just non-None: `.value` is a held-over last-
-                # known reading by design (TelemetrySnapshot.stale_after_s
-                # defaults to 6.0s, tuned for consumers like the Climb tactic
-                # that must tolerate brief OCR gaps) — it does NOT mean the
-                # HUD is showing this right now. Live 2026-09-11: every one
-                # of a session's 9 buffered "pre-crash" frames was still a
-                # KILLED BY panel, because altitude kept reading as non-None
-                # for several seconds into the death overlay while missiles
-                # (no holdover at this layer) had already gone None. A much
-                # tighter bound than the general 6.0s tolerance is needed
-                # here specifically because the question is "is this tick
-                # live," not "is this reading usable."
+                # Still worth reporting only a fresh reading: `.value` is a
+                # held-over last-known value by design (TelemetrySnapshot.
+                # stale_after_s defaults to 6.0s) — a stale number would be
+                # actively misleading in the log line even though it no
+                # longer decides whether this tick gets buffered at all.
                 age = snap.altitude.age_s(snap.taken_at_s)
                 if age is not None and age <= self._pre_crash_freshness_s:
                     alt = snap.altitude.value
                     rate = snap.altitude.rate
         except Exception:
             pass
-        if missiles is None and alt is None:
-            return
-        now = time.time()
+        now = self._clock()
         self._pre_crash_buffer.append((frame.copy(), missiles, alt, rate, now))
         cutoff = now - self._pre_crash_window_s
         while self._pre_crash_buffer and self._pre_crash_buffer[0][4] < cutoff:
             self._pre_crash_buffer.popleft()
 
-    def _last_pre_crash_sample(self):
-        """The newest buffered (frame, missiles, alt, rate, ts), or None."""
-        return self._pre_crash_buffer[-1] if self._pre_crash_buffer else None
+    def _lookback_pre_crash_sample(self):
+        """The buffered (frame, missiles, alt, rate, ts) closest to
+        `pre_crash_lookback_s` seconds before now, or None if the buffer is
+        empty. Fixed-age pick, not "the newest one" — see
+        _sample_pre_crash_buffer for why that was replaced."""
+        if not self._pre_crash_buffer:
+            return None
+        target = self._clock() - self._pre_crash_lookback_s
+        return min(self._pre_crash_buffer, key=lambda entry: abs(entry[4] - target))
 
     # -- tick ---------------------------------------------------------------
 
@@ -494,7 +522,7 @@ class RespawnHandler:
         """Detect and handle a respawn. Returns True when the loop must
         sleep-and-continue (respawn screen still up)."""
         analyzer, ctrl = self._analyzer, self._ctrl
-        self._sample_pre_crash_buffer(frame, current_game_state)
+        self._sample_pre_crash_buffer(frame, game_state, current_game_state)
 
         # Respawn from overlay OCR, or (ADR 064 dual mode) from the health
         # detector's composite evidence when OCR missed the episode.
@@ -582,14 +610,14 @@ class RespawnHandler:
                         # already replaced the in-flight HUD, which is why
                         # `missiles`/`alt`/`rate` above are almost always
                         # None — there is nothing left on screen to read.
-                        # Prefer the newest pre-crash buffer sample, taken
-                        # while the HUD was still live, for both the frame
-                        # AND the reported numbers.
-                        pre = self._last_pre_crash_sample()
+                        # Prefer the fixed-lookback pre-crash buffer sample,
+                        # taken from comfortably before the death sequence,
+                        # for both the frame AND the reported numbers.
+                        pre = self._lookback_pre_crash_sample()
                         capture_frame = frame
                         if pre is not None:
                             capture_frame, missiles, alt, rate, pre_ts = pre
-                            age_s = time.time() - pre_ts
+                            age_s = self._clock() - pre_ts
                             logger.warning(
                                 "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
                                 "alt=%s rate=%s (pre-crash frame, %.1fs old)\033[0m",

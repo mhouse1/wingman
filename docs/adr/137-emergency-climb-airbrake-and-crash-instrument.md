@@ -482,8 +482,87 @@ must still save THAT frame, not the death screen
 ### Validation (D8 freshness fix)
 
 - V8-V9 — unit, satisfied (the two regression tests above).
-- V10 — live, open. Still needs a session with the freshness gate live to
-  confirm the saved frame is finally an in-flight HUD, not a death overlay.
+- **V10 — live, MET AND FAILED AGAIN, 2026-09-12.** A session run with the
+  freshness fix live produced 2 `crash_with_missiles` captures. The log
+  lines were now genuinely more informative — real missile counts
+  (`1 missile(s)`, `2 missile(s)`) instead of `None` — but the saved frame
+  was, again, a `KILLED BY` panel, not the in-flight HUD. The fix improved
+  the accuracy of the logged numbers without fixing the actual goal.
+
+**Root cause, third pass.** `_sample_pre_crash_buffer` only checked the
+FSM's `current_game_state` (stays `GAME_BATTLE` for a tick or two after the
+death overlay appears) and reading freshness — it never checked the
+per-tick `game_state['is_respawning']` flag the respawn OCR itself sets,
+which is the one signal that directly means "the overlay this instrument
+is trying to avoid is on screen right now." Missiles evidently can read a
+plausible, non-stale number during that overlay window too (no holdover at
+that layer, unlike altitude — most likely OCR catching part of the panel's
+own stat digits, e.g. a K/D or score number, rather than a real ammo
+count), so the freshness gate alone could not tell the difference.
+
+**Fix, same day.** `_sample_pre_crash_buffer` now takes `game_state` (not
+just `current_game_state`) and returns immediately if
+`game_state['is_respawning']` is truthy, before reading missiles or
+telemetry at all. This is a more direct signal than inferring liveness from
+reading freshness: it is the same flag `tick_detect` itself uses to decide
+a respawn has happened, just checked one layer earlier, per tick, rather
+than waiting for the FSM's own state to catch up.
+
+Covered by `test_does_not_buffer_a_tick_where_respawn_is_already_detected`.
+
+### Validation (D8 respawn-flag fix)
+
+- V11 — unit, satisfied (test above).
+- **V12 — live, MET AND FAILED A THIRD TIME, 2026-09-12.** Confirmed the
+  anticipated failure mode directly: the saved frame was the explosion
+  itself, mid-fireball, with "RESPAWN 2" already rendered on screen in
+  cyan — a color/style variant the respawn OCR does not match (the known
+  pattern is `variant: gray, text: REPAWN`). `is_respawning` stayed False
+  on that tick despite the death sequence having visibly started, so the
+  buffer accepted it as "still fine."
+
+**Decision: stop chasing per-tick validity signals.** Three cuts in a row —
+altitude staleness, missile-value plausibility, respawn-flag timing — each
+closed one specific leak and revealed another. All three are symptoms of
+the same underlying fact, already on record in this ADR's Open Questions:
+the death sequence (explosion, respawn text, KILLED BY panel) spans several
+seconds with inconsistent, apparently uncatalogued OCR visibility through
+it, so no single per-tick "is this still a live HUD" check is likely to be
+complete. Continuing to patch each newly-discovered leak individually was
+producing steadily smaller returns for the same iteration cost.
+
+**D8 rev 4: fixed lookback, not "newest that still looks valid."**
+`_lookback_pre_crash_sample` no longer asks whether a sample looks live —
+it picks whichever buffered `(frame, missiles, alt, rate, ts)` entry is
+closest to `pre_crash_lookback_s` (default 5.0s) before the moment of
+picking, comfortably clear of the whole explosion/text/panel sequence.
+`_sample_pre_crash_buffer` correspondingly buffers every qualifying tick
+now (still gated on `GAME_BATTLE`, a running mission, and not already
+`is_respawning` — cheap and still worth keeping as a floor), regardless of
+whether missiles or altitude were individually readable that tick — the
+frame itself is always valid; only the selection needed to stop trusting
+per-tick readability as a proxy for liveness. `RespawnHandler` gained an
+injectable `clock` (`time.time` by default) so this age-based selection is
+actually testable without depending on how fast a test happens to execute.
+
+Covered by `tests/test_tick_handlers.py::TestPreCrashBuffer` (rewritten):
+selection tests seed the buffer with controlled ages via a fake clock and
+assert the closest-to-target entry wins, not the newest; buffering tests
+confirm a tick with nothing readable still gets buffered (with None
+numbers) rather than being dropped.
+
+### Validation (D8 rev 4: fixed lookback)
+
+- V13 — unit, satisfied: closest-to-target selection, including a
+  no-exact-match case; an empty buffer still returns None cleanly; a tick
+  with nothing readable still gets buffered.
+- V14 — live, open. Fourth attempt at the same live check, now with a
+  qualitatively different mechanism rather than another leak patch — the
+  next session's `crash_with_missiles` frame should be an ordinary in-flight
+  HUD moment from ~5s before detection. If a systematic issue remains after
+  this, it is likely something other than "which tick has valid-looking
+  data" — worth re-examining `pre_crash_lookback_s` itself against a
+  measured, not assumed, death-sequence duration before patching further.
 
 ## Non-Goals
 

@@ -39,7 +39,7 @@ from .liveness_guard import LivenessGuard
 from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
 from .game_shutdown import (GamePresenceWatch, close_game,
-                            close_nested_display)
+                            close_nested_display, find_game_pids)
 from .tick_handlers import (
     AmmoEventsHandler,
     BehaviorTreeHandler,
@@ -1757,12 +1757,49 @@ def main():
             # review before it shipped to a live session.
             _cancel_shutdown_watchdog()
             _cancel_signal_ack_watchdog()
+            _standby_game_gone = False
+            _game_process_name = (cfg.get("resource_monitor", {}) or {}).get(
+                "game_process_name", "Metalstorm.exe")
+
+            def _game_pids_now():
+                return find_game_pids(_game_process_name)
+
+            def _game_confirmed_gone():
+                """Two fast, back-to-back /proc scans, not GamePresenceWatch's
+                game_has_gone() — that one is tuned for the main tick loop and
+                only actually re-scans every poll_interval_s (default 5.0),
+                needing absent_reads (default 2) agreeing reads before it
+                reports True. STANDBY never re-enters that loop, so the first
+                cut of this fix (2026-09-12 AM) called game_has_gone() here
+                too and it read stale: a Ctrl-C landing 3.7s into STANDBY hit
+                a scan that was still mid-debounce and reported "still
+                running" even though the operator had already quit the game,
+                leaving the window up exactly as before. Kept at two reads
+                rather than one — a single scan can still race a crash or a
+                relaunch mid-flight (the same gap ADR 105 guards against) and
+                a false "gone" here would yank the nested display out from
+                under a game that is still there.
+                """
+                if not game_watch.armed or _game_pids_now():
+                    return False
+                time.sleep(0.3)
+                return not _game_pids_now()
+
             try:
                 while not ctrl.wait_for_close_all(timeout=1.0):
-                    pass
-                logger.info("STANDBY: second Backspace — closing down")
-                _arm_shutdown_watchdog()
-                _close_session()
+                    if _game_confirmed_gone():
+                        _standby_game_gone = True
+                        break
+                if _standby_game_gone:
+                    logger.info("STANDBY: MetalStorm exited on its own — "
+                                "closing the nested display it was hosted on "
+                                "(ADR 105)")
+                    if nested_display:
+                        close_nested_display(nested_display, grace_s=_grace)
+                else:
+                    logger.info("STANDBY: second Backspace — closing down")
+                    _arm_shutdown_watchdog()
+                    _close_session()
             except KeyboardInterrupt:
                 # A SIGINT racing the second Backspace can win the wait loop
                 # by a millisecond and land here with the close request
@@ -1776,6 +1813,21 @@ def main():
                                 "had already arrived — closing down anyway")
                     _arm_shutdown_watchdog()
                     _close_session()
+                elif game_watch.armed and not _game_pids_now():
+                    # A single immediate scan, not the two-read confirmation
+                    # helper the passive loop above uses: this branch is
+                    # already reacting to the operator's own Ctrl-C, so there
+                    # is no idle time to spend on a confirmation read (and a
+                    # second Ctrl-C landing inside that read's sleep would
+                    # escape this except block uncaught). The operator has
+                    # already said "stop" either way — the only question
+                    # this check answers is whether MetalStorm is still there
+                    # to protect.
+                    logger.info("STANDBY: interrupted, but MetalStorm had "
+                                "already exited on its own — closing the "
+                                "nested display it was hosted on (ADR 105)")
+                    if nested_display:
+                        close_nested_display(nested_display, grace_s=_grace)
                 else:
                     logger.info("STANDBY: interrupted — leaving MetalStorm running")
             finally:

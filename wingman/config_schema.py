@@ -261,12 +261,14 @@ SCHEMA = Section(
             "capture_stale_inject_s": SECONDS,
             "j20_turn_guard_s": SECONDS,   # ADR 132
             "padlock_spread_missiles": _int(0),
-            # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s added D8
+            # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
+            # pre_crash_lookback_s added D8
             "crash_capture": Section(children={
                 "enabled": BOOL,
                 "max_per_session": _int(0),
                 "pre_crash_buffer_s": SECONDS,
                 "pre_crash_freshness_s": SECONDS,
+                "pre_crash_lookback_s": SECONDS,
                 "dir": STR,
             }),
             # ADR 047 waiting-state fallback (read in tick_handlers.py)

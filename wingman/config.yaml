@@ -337,8 +337,20 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # time (9/9) instead of the in-flight frame, because altitude kept reading
   # non-None for seconds into the death overlay. This bounds how recent the
   # reading itself must be, independent of the general staleness tolerance.
+  # pre_crash_lookback_s (2026-09-12, replaces "pick the newest valid
+  # sample"): two dated fixes above still weren't enough — even gating on
+  # missiles/altitude freshness and on game_state['is_respawning'], a saved
+  # frame could still land on the explosion itself or a respawn-text color
+  # variant the detector hadn't matched yet. The explosion/respawn-text/
+  # KILLED BY sequence spans several seconds with genuinely inconsistent
+  # per-tick OCR visibility (this ADR's own documented "~3s total OCR
+  # blackout"), so no single per-tick signal reliably marks its start.
+  # Fixed lookback sidesteps detecting that boundary: always use whichever
+  # buffered frame is closest to 5.0s before detection, comfortably clear
+  # of the whole sequence, rather than the newest one that still looked ok.
   crash_capture: {enabled: true, max_per_session: 20, pre_crash_buffer_s: 8.0,
-    pre_crash_freshness_s: 2.0, dir: test_screenshots/crash_with_missiles}}
+    pre_crash_freshness_s: 2.0, pre_crash_lookback_s: 5.0,
+    dir: test_screenshots/crash_with_missiles}}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
 # mission_loiter ('y'): the survival hold. Two behaviours only — climb to the
