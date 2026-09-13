@@ -419,6 +419,14 @@ class Controller:
         # that has only ever climbed is under-rotated, not over-rotated.
         self._eject_descended_since_press = False
         self._eject_tel_stale_after_s = float(_tel_cfg.get("stale_after_s", 6.0))
+        # Anomaly 003 (2026-09-13): the "holding until respawn" wait below
+        # otherwise depends entirely on respawn OCR or an ADR 061 observed
+        # death — both proven unreliable during the exact transition that
+        # triggers this hold in the first place. N consecutive fresh
+        # telemetry reads is independent evidence the aircraft is alive and
+        # flying, good enough to resume without either. 0 disables (falls
+        # back to the pre-existing behaviour: wait for OCR or eject_max_s).
+        self._eject_telemetry_confirm_polls = int(_ecl.get("telemetry_confirm_polls", 4))
         # True while AFTERBURNER is deliberately engaged by the descent
         # controller (ADR 069 d8 — burner is gated on descending flight).
         self._eject_ab_engaged = False
@@ -2085,10 +2093,35 @@ class Controller:
                     # completed carrying missiles (2026-08-22 02:18 session),
                     # because the rack refilled AFTER descent control ended.
                     _hold_deadline = time.time() + self._eject_cl_max_s
+                    _telemetry_confirm_streak = 0
                     while not self._eject_stop.wait(
                             timeout=self._eject_cl_check_interval_s):
                         if time.time() >= _hold_deadline:
                             break
+                        # Anomaly 003: independent of the rearm check below —
+                        # runs every iteration, not gated on
+                        # _eject_abort_on_rearm. See the __init__ comment on
+                        # _eject_telemetry_confirm_polls for why this exists.
+                        if (self._eject_telemetry_confirm_polls > 0
+                                and self._analyzer is not None):
+                            try:
+                                _snap = self._analyzer.get_telemetry()
+                            except Exception:
+                                _snap = None
+                            if _snap is not None and _snap.altitude_fresh():
+                                _telemetry_confirm_streak += 1
+                            else:
+                                _telemetry_confirm_streak = 0
+                            if _telemetry_confirm_streak >= self._eject_telemetry_confirm_polls:
+                                logger.warning(
+                                    "Controller: eject_and_dive — ABORT hold, "
+                                    "telemetry confirms aircraft alive and "
+                                    "flying (%d consecutive fresh reads, "
+                                    "Anomaly 003) — resuming normal control "
+                                    "without a respawn confirmation",
+                                    _telemetry_confirm_streak)
+                                self._eject_stop_reason = "telemetry_confirmed_alive"
+                                break
                         if not (self._eject_abort_on_rearm
                                 and not self._eject_weapon_switched
                                 and self._analyzer is not None):

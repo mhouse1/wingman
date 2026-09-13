@@ -522,6 +522,7 @@ SCHEMA = Section(
                     "abort_on_rearm": BOOL,
                 "heatdive_enabled": BOOL,
                 "heatdive_padlock_verify": BOOL,
+                "telemetry_confirm_polls": _int(0),
             }),
         }),
 

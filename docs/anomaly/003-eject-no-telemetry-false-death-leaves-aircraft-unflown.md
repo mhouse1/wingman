@@ -6,14 +6,19 @@
 
 ## Summary
 
-**Status as of 2026-09-13: detection implemented and live-validated twice;
-the underlying bug is NOT fixed.** `EjectStuckDetector` now catches this
-condition and ends the session (with a recording) rather than letting it
-run unresolved indefinitely — see "This is detection only — the underlying
-bug is NOT resolved" under "Implemented 2026-09-13" below. The false
-`no_telemetry` declaration, the aircraft going unflown, and it drifting out
-of the arena still happen exactly as before every time; only the session's
-response to that has changed.
+**Status as of 2026-09-13 (later same day): detection implemented and
+live-validated twice; the root-cause fix implemented AND live-validated
+once, with a clean recovery.** `EjectStuckDetector` catches the stuck
+condition and ends the session (with a recording) if nothing else resolves
+it. Separately, `eject_and_dive`'s post-descent hold now also resumes
+control on telemetry confirmation alone (Disposition item 2) — not gated
+behind `--record-session`; it changes default eject behavior for everyone.
+Caught a real `no_telemetry` false-death live on the third `make r1 v` run
+and recovered in 6.28s, full flight AND mission control both restored,
+versus 63.3s/41.8s uncorrected in the two prior real occurrences. One clean
+trial — not yet enough to call this closed; see Disposition item 2 for the
+evidence and the residual gap (mission resumption depends on health being
+known, unconfirmed for the case where it isn't).
 
 **Revision (2026-09-13, later same day):** the original theory below —
 "the aircraft never died, so nothing was ever going to end the wait" — turned
@@ -469,22 +474,119 @@ below) is implemented and confirmed working against a genuine recurrence
 two fix candidates (1, 2) remain open. Three candidate directions were
 identified, not mutually exclusive:
 
-1. **Now the leading candidate**, given the corrected timeline: raise
-   `telemetry.stale_after_s` (currently 6.0s) — or give
-   `_eject_descent_control` its own, longer, eject-specific allowance —
-   so it stops declaring `no_telemetry` partway through an ordinary
-   respawn transition. This incident's own numbers make the case directly:
-   a ~7s normal transition against a 6s timeout leaves essentially no
-   margin, and this incident's actual gap (~12s) suggests transitions can
-   legitimately run longer than 7s. Needs more occurrences (or a corpus of
-   healthy respawn-during-eject transitions) to calibrate precisely rather
-   than picking a number from one data point.
-2. Independent of (1): `eject_max_s` (120s) already guarantees FSM recovery
-   via `eject_complete` regardless of respawn OCR (see "Why nothing
-   recovered") — whether 120s of uncorrected flight is an acceptable bound
-   on its own, and whether `mission_running`/BT actuation actually resume
-   correctly once `eject_complete` fires, are not established by this log.
-3. **Detection — implemented.** `EjectStuckDetector`
+1. Raise `telemetry.stale_after_s` (currently 6.0s) — or give
+   `_eject_descent_control` its own, longer, eject-specific allowance — so
+   it stops declaring `no_telemetry` partway through an ordinary respawn
+   transition. Weaker than it first looked: two measured gaps (~6s and
+   ~12s) span a 2x range on n=2, so no single raised value reliably covers
+   both, and it does nothing about the deeper issue in (2) even where it
+   works. Still open; deprioritized below (2).
+2. **Implemented 2026-09-13 (later same day).** Rather than tuning the
+   timeout, gave the aircraft a way back to normal flight that doesn't
+   depend on the unreliable signal at all. `Controller.eject_and_dive`'s
+   post-descent "holding until respawn" wait (`controller.py`, the natural-
+   completion `else:` branch) now also watches telemetry directly: N
+   consecutive fresh reads (default 4, `eject_closed_loop.
+   telemetry_confirm_polls`, ≈6.0s at the 1.5s poll interval) ends the hold
+   early via the exact same `_eject_stop`/`on_complete`/`eject_complete`
+   path the healthy `respawn_detected` cases already use — reusing proven
+   machinery rather than adding a new FSM transition. A single fresh blip
+   does not count; the streak resets on any stale read. Config: `0`
+   disables it (falls back to the pre-existing wait-for-OCR-or-120s
+   behaviour). 3 new tests in `tests/test_eject_closed_loop.py`
+   (`test_hold_phase_resumes_when_telemetry_confirms_alive`,
+   `..._is_not_cut_short_by_a_single_fresh_read`,
+   `test_telemetry_confirm_polls_zero_disables_the_check`); full
+   `eject_closed_loop` suite (31 tests) and `make lint && make test` green.
+
+   **Live-validated 2026-09-13, same day, third `make r1 v` run
+   (`session_20260913_121658_acct1`).** A real `no_telemetry` false-death
+   fired at `13:25:42.026`; the telemetry-confirm check ended the hold at
+   `13:25:48.027` — **6.28s later**, essentially exactly the designed 4 x
+   1.5s = 6.0s window. FSM reached `GAME_BATTLE` by `13:25:48.305`.
+   Compare: the two prior real occurrences ran uncorrected for 63.3s and
+   41.8s (the latter only because the detector ended the session — it
+   never actually recovered on its own). This is the first observed
+   natural recovery, and it answers the mission-resumption question left
+   open above: `mission_j20` restarted, `search_and_destroy` loops started,
+   and the tree resumed real tactical selection the same tick
+   (`Idle → Engage`), correctly reacting to a fast altitude drop six
+   seconds later (`Engage → Climb`, `alt_rate=-570m/s`). Health was
+   evidently known at the moment of recovery in this occurrence, so the
+   `alive_event`-gated restart chain fired cleanly — the residual gap noted
+   above (health unknown → mission stays paused) remains a real but
+   unconfirmed risk, not observed in this trial.
+
+   **Second live occurrence, same session, ~12 minutes later
+   (`13:37:16.372` → `13:37:23.885`, 7.51s).** Different exit reason this
+   time (`established`, not `no_telemetry`) — confirms the fix isn't
+   narrowly tied to one exit path; it helps whenever the hold outlasts a
+   respawn-OCR confirmation, regardless of why descent control gave up.
+   Most direct evidence yet: the tree's first action on resuming was
+   `Idle → BoundaryTurn`, not `Engage` — the aircraft was apparently near
+   the arena edge at the exact moment control came back, and the tactic
+   this whole investigation exists to protect engaged immediately, followed
+   by `BoundaryTurn → Climb` 4s later. Mission restarted cleanly again.
+   Two for two, both fast, both full recoveries.
+
+   **Occurrence log** (further occurrences append here, not as new prose —
+   same session unless noted; all `session_20260913_121658_acct1`):
+
+   | # | exit reason | gave up → recovered | recovery time | first tactic on resume | notes |
+   |---|---|---|---|---|---|
+   | 1 | `no_telemetry` | 13:25:42.026 → 13:25:48.027 | 6.28s | Engage | mission restarted; detail above |
+   | 2 | `established` | 13:37:16.372 → 13:37:23.885 | 7.51s | **BoundaryTurn** | the actual boundary-save, on camera |
+   | 3 | `no_telemetry` | 13:43:00.671 → 13:43:06.693 | 6.02s | — | 3rd in 26 min of one session — frequency itself worth noting, see "What to watch" |
+   | 4 | `no_telemetry` | 14:00:45.938 → 14:00:51.939 | 6.00s | — | clean, no errors |
+
+   **New session, `session_20260913_164406_acct1` (started 16:44:06,
+   ongoing).** Much higher sample: 11 `no_telemetry` occurrences in the
+   first ~2h20m alone (roughly one per 12-15 min of active combat — this
+   session's rate, not yet known to be typical). Every one resolved at or
+   under **12.3s**, none via the 120s `eject_max_s` backstop, and
+   `EjectStuckDetector` fired **zero** times (see main.py `ANOMALY 003
+   DETECTED` — absent from this session's log entirely). Not every
+   occurrence resolved via the telemetry-confirm path specifically — three
+   independent recovery routes are visibly sharing the load, none of them
+   slow:
+
+   | # | gave up (no_telemetry) | resolved via | recovery time |
+   |---|---|---|---|
+   | 5 | 16:54:03.084 | respawn OCR confirmed | 3.8s |
+   | 6 | 17:10:36.014 | round ended (GAME_END_B) | 6.3s |
+   | 7 | 17:47:29.530 | **telemetry-confirm fix** | 6.0s |
+   | 8 | 17:49:22.490 | round ended (GAME_END_B) | 12.3s |
+   | 9 | 17:56:18.233 | respawn OCR confirmed | 0.3s |
+   | 10 | 18:02:22.112 | **telemetry-confirm fix** | 7.6s |
+   | 11 | 18:03:16.291 | round ended (GAME_END_B) | 12.3s |
+   | 12 | 18:08:27.499 | round ended (GAME_END_B) | 10.8s |
+   | 13 | 18:12:19.682 | respawn OCR confirmed | 1.8s |
+   | 14 | 18:29:08.107 | round ended (GAME_END_B) | 7.8s |
+   | 15 | 19:03:39.628 | **telemetry-confirm fix** | 6.1s |
+
+   This is the first data showing the trigger recurs frequently under
+   normal play (not a rare edge case) while the harmful consequence — long
+   uncorrected drift — has not recurred even once since the fix shipped.
+   "Round ended naturally" resolving the hold is a pre-existing, unrelated
+   path (the match simply concluded) — counted here only to show the
+   ceiling on unflown time stayed low regardless of which path closed it.
+
+   Traced the downstream question this raises before implementing: does
+   exiting `GAME_BATTLE_EJECT` alone (independent of whether the mission
+   also restarts) restore the safety-critical behavior? Yes for the part
+   that matters most: `BoundaryTurn`'s condition has no `mission_running`
+   dependency, so once the FSM leaves `GAME_BATTLE_EJECT`, `Idle` stops
+   winning and `BoundaryTurn`/`Climb`/`Evade` can actuate again regardless
+   of whether full mission/combat also resumes. Mission/combat resumption
+   specifically depends on `analyzer.alive_event`, which `on_enter_
+   GAME_BATTLE` only sets if health is already known (`self._health is not
+   None`) — health OCR has been unreliable in both real occurrences, so
+   combat may stay paused for a life even after this fix correctly restores
+   flight safety. Flagged as a smaller, separate residual gap, not blocking.
+3. `eject_max_s` (120s) already guarantees FSM recovery via `eject_complete`
+   regardless of respawn OCR (see "Why nothing recovered") — this is now
+   the backstop behind (2) rather than the primary recovery path.
+4. **Detection — implemented.** `EjectStuckDetector`
    (`wingman/eject_stuck_detector.py`), gated on `--record-session`,
    watching how long `GAME_BATTLE_EJECT` itself persists — the one
    condition that held for the entire 63.3s harmful window, not just the
@@ -492,10 +594,10 @@ identified, not mutually exclusive:
    the gap directly and would not have fired on this incident; see "Signal
    — revised twice"). Ends the session via the same `break` the
    `liveness`/`resource_sampler` guards already use, deliberately not
-   gated on their `_safe` (GAME_LOBBY) requirement. Useful on its own even
-   once (1) is fixed — a detector that only fires on genuinely abnormal
-   dwell has ongoing diagnostic value, not just one-time investigation
-   value.
+   gated on their `_safe` (GAME_LOBBY) requirement. Now a secondary
+   backstop behind (2) as well — if telemetry-confirmed resumption works,
+   this should fire far less often, and only ever on genuinely unrecovered
+   cases.
 
 Design 012 (session video + BT trace recording, `make rd v`) is available,
 verified working, and paired with the detector: the `20260913_113129_acct1`
@@ -511,6 +613,12 @@ Not conclusive on its own (one occurrence), but it argues for weighing (1)'s
 ## What to watch
 
 - Any recurrence of the log signature above.
+- **Frequency, newly observed**: 3 occurrences in 26 minutes of one session
+  (`20260913_121658_acct1`) — notably more often than the ~1-per-session
+  rate seen across the two earlier live-test sessions. Not yet clear
+  whether this session hit a patch of degraded OCR/capture specifically, or
+  whether the true base rate was simply undersampled before. Track dwell/
+  gap frequency across future sessions rather than assuming either.
 - **Resolved by the `20260913_113129_acct1` recording**: whether a future
   occurrence's video shows a respawn transition — it showed
   `RETURN TO BATTLE: 8` instead, with health intact, arguing against a

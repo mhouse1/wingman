@@ -32,6 +32,10 @@ STALL_CASES = [
     ("STALL_RETRY",           "STALL_RETRY.png",           "RETRY"),
     # ADR 093: the PROFILE overlay that livelocked a session for 110 minutes.
     ("STALL_PROFILE",         "STALL_PROFILE.png",         "PROFILE"),
+    # Anomaly 004: parts-distribution overlay opened on a normal round-end.
+    ("STALL_PARTS_CONFIRM",   "STALL_PARTS_CONFIRM.png",   "CONFIRM"),
+    # Anomaly 005: reward-crate screen at session start, same parts flow.
+    ("STALL_PARTS_CRATE",     "STALL_PARTS_CRATE.png",     "PARTS"),
     # Squad-leave confirmation, scanned only after the STALL_MULTI_PLAYER
     # red-X click (2026-09-10: some squads confirm with a second dialog).
     ("LEAVE",                 "LEAVE.png",                 "LEAVE"),

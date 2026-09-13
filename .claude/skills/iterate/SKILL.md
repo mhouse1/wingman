@@ -1,6 +1,6 @@
 ---
 name: iterate
-description: Run one live-fix cycle on wingman — review the newest session log, diagnose from measurement, fix with tests, pass the gates, relaunch, and watch for the failure to recur. Use when the operator says "iterate", reports a live misbehaviour, or asks to review a log and act on it.
+description: Run one live-fix cycle on wingman — review the newest session log, diagnose from measurement, fix with tests, pass the gates, relaunch, and watch for the failure to recur. Use when the operator says "iterate", reports a live misbehaviour, or asks to review a log and act on it. Also supports a self-directed continuous mode — triggered by phrasing like "iterate with your recommendations", "keep looping", or "until I tell you to stop" — that picks its own target each cycle, keeps a running ELI5 changelog, and reschedules itself until the operator stops it or the session ends.
 ---
 
 # Iterate
@@ -9,6 +9,73 @@ One cycle: **review → diagnose → fix → gate → run → watch → record.*
 
 Do not skip to the fix. Most of the value is in the diagnosis, and most of the
 mistakes come from acting on inference that looked like measurement.
+
+## Loop Mode
+
+Triggered by phrasing like *"iterate with your recommendations"*, *"keep
+iterating"*, *"keep looping until I tell you to stop"*, or *"loop this until
+credits run out"*. This runs the same seven-step cycle below, repeated
+automatically, with these differences from a single manual cycle:
+
+**Pick your own target.** Don't wait for the operator to name a bug. At the
+top of each cycle, choose the next-highest-value thing to work on and state it
+in one line before starting Review:
+
+- the newest unresolved row in a tracking ADR (grep `docs/adr/` for open items)
+- a "Standing traps" entry below that the current log shows is still live
+- the most significant anomaly in the newest session log
+- if nothing stands out, re-run `make tp` and treat any regression as the target
+
+State it as a recommendation ("going after X because Y"), not a question —
+loop mode exists so the operator doesn't have to steer each cycle.
+
+**Keep an ELI5 changelog.** After every fix (step 3) or notable decision (a
+hypothesis rejected, a fix deferred, a gate that failed and why), append one
+entry to `iterate-eli5.md` in your scratchpad directory:
+
+```
+## Cycle <n> — <YYYY-MM-DD HH:MM:SS> — <one-line title>
+<2-4 plain-English sentences: what changed, why, what it should do differently
+now. No jargon, no function names unless a name IS the point.>
+```
+
+Get the timestamp from `date '+%Y-%m-%d %H:%M:%S'` at the moment you write the
+entry — never guess or reuse the previous entry's time. The gap between
+consecutive headings is the whole point: it's how the operator tells a loop
+that's grinding through cycles in seconds from one that's waiting hours on
+live runs.
+
+Post the same entry into your reply to the operator — the file is a durable
+backup for when the conversation compacts, not the only copy. If you're unsure
+what earlier cycles did, read the whole file back rather than trusting memory
+of a compacted transcript.
+
+**Keep going without being asked.** Run steps 1-7 exactly as below — don't
+skip Gate or Run to go faster. The standing permission-to-run rule in step 5
+is satisfied once, by the operator's request to loop — don't re-ask "should I
+launch a run?" every cycle. Do stop and ask if a gate fails in a way you can't
+diagnose, or a decision genuinely needs the operator (ambiguous requirement,
+destructive action, anything the git rule below reserves to them).
+
+At the end of a cycle, call `ScheduleWakeup` to queue the next one instead of
+looping synchronously — a live run needs wall-clock time to produce evidence.
+Pass the operator's original loop request back as `prompt` so re-entry repeats
+correctly. Once Watch has a Monitor armed, use a long fallback delay
+(1200s+) — the Monitor notification is the real signal that something
+happened; the scheduled wakeup is just the safety net if it doesn't.
+
+Never stop yourself after N cycles "to check in." The only valid stops are:
+the operator explicitly says stop (call `ScheduleWakeup` with `stop: true` and
+post a final ELI5 summary), or you hit a decision point per the bullet above.
+Running out of credits ends the session on its own — it is not something to
+plan around or announce in advance.
+
+**The git rule still applies.** Loop mode is not a standing commit
+authorization. `git commit`, `git push`, `git tag`, `make p`, and `make
+wrelease` still require the operator to ask in the current request — see the
+rule at the top of this repo's CLAUDE.md, which outranks this skill. The ELI5
+changelog is what the operator reviews before deciding to commit any of it
+themselves.
 
 ## 1. Review
 

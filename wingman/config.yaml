@@ -187,6 +187,45 @@ crops:
     - [0.4681, 0.5344]
     - [0.5285, 0.5644]
     text: [RETRY]
+  # Anomaly 004 (2026-09-13): "SELECT AN AIRCRAFT TO RECEIVE PARTS" overlay
+  # opened over the lobby on a normal round-end, unprompted by any wingman
+  # click — same blackout shape as STALL_PROFILE, different screen. Detect
+  # + click are the same crop (like STALL_RETRY): CONFIRM is both the
+  # overlay's own label and a real button, so clicking it does not risk
+  # firing on a label-only text the way STALL_PROFILE's title would.
+  # Coordinates measured directly from the archived reference frame
+  # (pixel color thresholding around the button, not estimated).
+  #
+  # NOT wired into auto-recovery (see analyzer.py comment) — CONFIRM only
+  # commits once an aircraft is selected (verified live 2026-09-13:
+  # clicking an aircraft card auto-assigns it all 100/100 parts; CONFIRM
+  # then turns from grey to white/active). Which of the operator's owned
+  # aircraft gets the parts is a real decision, so this crop is calibrated
+  # for detection/future use, not autonomous action.
+  STALL_PARTS_CONFIRM:
+    coords:
+    - [0.4188, 0.8067]
+    - [0.5807, 0.8625]
+    text: [CONFIRM]
+  # Anomaly 005 (2026-09-13): "+100 UNIVERSAL PARTS" reward-crate screen,
+  # shown at session start before any lobby is reached — verified live to
+  # be the SAME parts-currency flow as STALL_PARTS_CONFIRM above: clicking
+  # the crate's glowing '?' opens it and transitions directly into that
+  # screen. Unlike STALL_PARTS_CONFIRM, clicking here commits nothing — it
+  # only reveals/collects a reward the operator already owns — so this IS
+  # wired into auto-recovery (see STALL_RECOVERY_CROPS, analyzer.py).
+  # Detection text measured from the "+100 UNIVERSAL PARTS" banner;
+  # STALL_PARTS_CRATE_DISMISS is the '?' mark itself (both pixel-color-
+  # thresholded from the archived reference frame).
+  STALL_PARTS_CRATE:
+    coords:
+    - [0.0901, 0.325]
+    - [0.2641, 0.3425]
+    text: [PARTS, UNIVERSAL]
+  STALL_PARTS_CRATE_DISMISS:
+    coords:
+    - [0.6365, 0.5608]
+    - [0.701, 0.7075]
   REJECT:
     coords:
     - [0.3451, 0.58]
@@ -653,7 +692,8 @@ telemetry:
     rotation_pulse_s: 2.0, observe_after_pulse_s: 3.5, max_rotation_pulses: 12, eject_max_s: 120.0,
     abort_on_rearm: true,   # ADR 088: cancel the dive if missiles rearm mid-descent
     heatdive_enabled: true,  # ADR 136: heat-seeker switch + tracking-guided roll during the dive
-    heatdive_padlock_verify: false}  # ADR 136 D4: off — detector tracks the wrong HUD element (2026-09-09)
+    heatdive_padlock_verify: false,  # ADR 136 D4: off — detector tracks the wrong HUD element (2026-09-09)
+    telemetry_confirm_polls: 4}  # Anomaly 003: 4 x check_interval_s = 6.0s of fresh telemetry resumes control without waiting on respawn OCR
 # ADR 090 — bound the unfixed Performance 008 leak. Soft limit stops at the
 # next lobby (no mission in flight); hard limit stops immediately, because an
 # OOM kill can take the whole desktop session down with it.

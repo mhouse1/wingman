@@ -72,7 +72,7 @@ STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
 # Scan order: most specific screen first. The batch stops at the first hit, so a
 # generic match must never pre-empt a precise one.
-STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_RETRY",
+STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_PARTS_CRATE", "STALL_RETRY",
                         "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
 
 # Gated on UNREADY dwell rather than state dwell: UNREADY makes
@@ -3169,6 +3169,18 @@ class GameStateAnalyzer:
                 and "STALL_PROFILE" in self.crops
                 and "STALL_PROFILE" not in targets):
             targets.insert(0, "STALL_PROFILE")
+        # Anomaly 004 (2026-09-13): STALL_PARTS_CONFIRM is calibrated (below,
+        # config.yaml) and OCR-verified (tests/test_stall_crops_ocr.py) for
+        # DETECTION, but deliberately NOT added to this auto-click gate yet.
+        # Unlike STALL_PROFILE's close-X and STALL_EXIT_TO_DESKTOP's Cancel —
+        # both a strictly de-escalating dismiss, which is this gate's whole
+        # documented invariant (see test_lobby_blackout_past_dwell_opens_
+        # only_de_escalating_crops) — clicking CONFIRM here commits an
+        # in-game action (100 parts assigned to whichever aircraft the game
+        # has pre-selected). Low-stakes, but a real policy widening, not a
+        # same-shape addition, so it's left for the operator to decide rather
+        # than crossed autonomously. See docs/anomaly/004-parts-distribution-
+        # overlay-lobby-stall.md.
         # Independent gate: a stuck UNREADY blocks classification outright, so it
         # is timed from the UNREADY read itself rather than from the state.
         if (self._unready_since

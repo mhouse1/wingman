@@ -974,6 +974,25 @@ def main():
                 ctrl.press_escape(hold_seconds=0.05, block=False)
             return
 
+        if crop == "STALL_PARTS_CRATE":
+            # Anomaly 005. Same detect-one/click-another shape as
+            # STALL_PROFILE: the '+100 UNIVERSAL PARTS' banner is a label,
+            # not a button; the crate's '?' mark elsewhere on screen is what
+            # actually opens it. Strictly de-escalating (collects a reward
+            # already owned, commits nothing — unlike STALL_PARTS_CONFIRM,
+            # deliberately not auto-clicked, see analyzer.py).
+            logger.warning(
+                "\033[93m🔧 Stall recovery: '%s' — opening the reward crate "
+                "(state=%s)\033[0m", crop, current.name)
+            if "STALL_PARTS_CRATE_DISMISS" in analyzer.crops:
+                ctrl.click_crop(analyzer.crops["STALL_PARTS_CRATE_DISMISS"], block=False,
+                                count=1, region_name="STALL_PARTS_CRATE_DISMISS")
+            else:
+                logger.warning("Stall recovery: STALL_PARTS_CRATE_DISMISS not "
+                               "calibrated — pressing ESC instead")
+                ctrl.press_escape(hold_seconds=0.05, block=False)
+            return
+
         if crop == "STALL_AIRCRAFT":
             # Unchanged (ADR 084): no adjacent destructive button, ESC works.
             logger.warning("\033[93m🔧 Stall recovery: '%s' — pressing ESC (state=%s)\033[0m",
