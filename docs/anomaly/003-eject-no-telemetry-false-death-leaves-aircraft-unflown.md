@@ -6,6 +6,15 @@
 
 ## Summary
 
+**Status as of 2026-09-13: detection implemented and live-validated twice;
+the underlying bug is NOT fixed.** `EjectStuckDetector` now catches this
+condition and ends the session (with a recording) rather than letting it
+run unresolved indefinitely — see "This is detection only — the underlying
+bug is NOT resolved" under "Implemented 2026-09-13" below. The false
+`no_telemetry` declaration, the aircraft going unflown, and it drifting out
+of the arena still happen exactly as before every time; only the session's
+response to that has changed.
+
 **Revision (2026-09-13, later same day):** the original theory below —
 "the aircraft never died, so nothing was ever going to end the wait" — turned
 out to be built on an incomplete check. Re-examined against the exact
@@ -27,8 +36,10 @@ behavior tree sat on `Idle` (zero actuation) for at least 64 measured
 seconds with nothing correcting heading, until the operator intervened to
 stop it flying toward the map boundary — before the existing 120s bound
 (`eject_max_s`) would have resolved the FSM on its own (see "Why nothing
-recovered"). **No existing mechanism detects this class of stall** — see
-"Detection" below.
+recovered"). At the time this was originally written, no existing mechanism
+detected this class of stall at all — see "Detection" below for that gap
+analysis, and "Implemented 2026-09-13" for the detector since built and
+live-validated to close it (detection only, not a fix).
 
 This is the same `no_telemetry` misclassification documented as the trigger
 for the 2026-09-12 incident fixed by ADR 136 D5 — but D5 only stopped a
@@ -367,14 +378,75 @@ is False; a still-active dive of any length is silent. 3 new tests pin the
 false positive directly (`test_quiet_while_descent_control_is_still_active`,
 a 200-tick active dive that must never fire) alongside the corrected true-
 incident case. `make lint && make test` green (14 detector-related tests
-total). Re-running `make r1 v` to validate the correction live.
+total).
 
-This is exactly what `/iterate`'s Run/Watch steps are for — stopping at the
-gate, as the first implementation pass did, would have shipped a broken
-detector behind a fully green test suite; only actually running it live
-surfaced the false positive. See `.claude/skills/iterate/SKILL.md` step 5
-for the standing rule this incident reinforces (a green gate is not the end
-of the cycle).
+**Live-validated on the very next run — a real recurrence, caught
+correctly.** `make r1 v` was relaunched (session `20260913_113129_acct1`).
+Two ejects resolved normally (`respawn_detected`, ~18s and ~21s) — the
+corrected detector stayed silent through both, confirming the false-positive
+fix held. The third hit the exact original signature:
+`"Controller: eject_and_dive — descent control ended (no_telemetry) —
+holding until respawn"` at `11:36:06.517`, then no resolution until the
+detector fired at `11:36:48.294` — **41.8s later**, just past the 40s
+threshold, exactly as designed. `telemetry fresh=True at termination`
+(logged automatically) — telemetry had recovered by then, same shape as the
+original incident (the gap that causes the false-death call closes on its
+own; the harm is what happens after).
+
+The recorded video adds the piece the original incident never had:
+**`RETURN TO BATTLE: 8`** — the game's own out-of-bounds warning, visible on
+screen at t=300s into the recording, countdown running. Health reads intact
+in the same frame — not a combat death. This is the mechanism the very
+first `/check` in this investigation predicted from the operator's report
+("why did it fly straight continuously... had to interrupt it to prevent it
+flying out of bounds") now confirmed on video as a direct, actual
+consequence rather than an inference: the aircraft was never killed, it
+drifted out of the arena with nothing steering it back, exactly as
+"Why nothing recovered" describes.
+
+This closes the loop `/iterate`'s Run/Watch steps exist for. The first live
+run caught a real defect in the fix itself (the false positive above) that
+`make lint && make test` could not — a green gate is not the same as a
+validated fix, and only actually running it, twice, surfaced first the bug
+in the detector and then confirmed the corrected detector against a genuine
+recurrence. See `.claude/skills/iterate/SKILL.md` step 5 for the standing
+rule this incident reinforces.
+
+### Detection timing, measured precisely (`20260913_113129_acct1`)
+
+Two distinct moments, 41.8s apart — worth separating explicitly, since
+"wingman detected it" is easy to misread as "at the moment it happened":
+
+| video elapsed | wall clock | event |
+|---|---|---|
+| ~4:07 (247.1s) | 11:35:36.318 | Eject #3 begins (missiles empty) |
+| ~4:37 (277.3s) | 11:36:06.517 | `_eject_descent_control` gives up: `"descent control ended (no_telemetry) — holding until respawn"` — **routine INFO logging, not flagged as an anomaly.** This existing log line predates Design 012/Anomaly 003 entirely; on its own it looks like ordinary eject bookkeeping. |
+| **~5:19 (319.1s)** | **11:36:48.294** | `ANOMALY 003 DETECTED`, session ends |
+
+The 41.8s gap between them is **by design**, not latency or a miss:
+`eject_stuck_after_s: 40.0` requires the stuck state to persist that long,
+specifically so the detector never fires on a brief, self-correcting
+hiccup. Reviewing this video around 4:35 shows ordinary-looking flight two
+seconds before the no-telemetry moment — there is no visible sign at 4:35
+itself that anything is wrong; the aircraft only visibly drifts out of the
+arena and triggers `RETURN TO BATTLE` well after, around t=300s (~4:40
+after the no-telemetry moment).
+
+### This is detection only — the underlying bug is NOT resolved
+
+Stated plainly because "live-validated" above describes the *detector*
+working correctly, not the *anomaly* being fixed: **nothing about the
+false `no_telemetry` declaration, the aircraft being left unflown, or it
+drifting out of the arena has changed.** Every occurrence still plays out
+exactly as before — descent control still gives up wrongly, the aircraft is
+still unflown, it still drifts and still triggers `RETURN TO BATTLE`. The
+only difference `EjectStuckDetector` makes is that the **session now ends
+itself, with a recording already captured**, ~40 seconds after the harmful
+state begins, instead of continuing indefinitely until an operator notices
+and interrupts (or the 120s `eject_max_s` bound resolves the FSM on its
+own, with the aircraft's actual fate — recovered, still out of bounds,
+penalized — unobserved either way). Disposition items (1) and (2) below —
+the actual fix — remain fully open.
 
 ## Impact
 
@@ -390,10 +462,12 @@ of the cycle).
 
 ## Disposition
 
-**Partially addressed.** Diagnosed via `/check` against
-`logs/wingman_20260913_080229.log`. Detection (item 3 below) is
-implemented; the two fix candidates (1, 2) remain open. Three candidate
-directions were identified, not mutually exclusive:
+**Partially addressed, detection now live-validated.** Diagnosed via
+`/check` against `logs/wingman_20260913_080229.log`. Detection (item 3
+below) is implemented and confirmed working against a genuine recurrence
+(session `20260913_113129_acct1`, see "Implemented 2026-09-13" above); the
+two fix candidates (1, 2) remain open. Three candidate directions were
+identified, not mutually exclusive:
 
 1. **Now the leading candidate**, given the corrected timeline: raise
    `telemetry.stale_after_s` (currently 6.0s) — or give
@@ -424,26 +498,40 @@ directions were identified, not mutually exclusive:
    value.
 
 Design 012 (session video + BT trace recording, `make rd v`) is available,
-verified working, and now paired with the detector above: a future
-recurrence terminates itself with a recording already captured, settling
-whether this really is a missed respawn overlay during a real transition
-(supporting (1)) — without needing an operator to notice and interrupt
-manually. **Still needs a live `make rd v` session to actually exercise this
-against a real recurrence** — nothing here has been validated live yet.
+verified working, and paired with the detector: the `20260913_113129_acct1`
+recurrence terminated itself with a recording already captured, and that
+recording is what showed `RETURN TO BATTLE: 8` — the out-of-bounds warning
+— rather than a missed respawn overlay. That's evidence against a missed-
+overlay explanation for item (1) specifically: health read intact in the
+frame, suggesting no death occurred at all in this occurrence either, closer
+to the original incident's theory than the "likely missed overlay" revision.
+Not conclusive on its own (one occurrence), but it argues for weighing (1)'s
+`stale_after_s` fix over a respawn-overlay-detection fix specifically.
 
 ## What to watch
 
 - Any recurrence of the log signature above.
-- Whether a future occurrence's recorded video (Design 012) actually shows
-  a respawn transition (killcam, blackout, spawn animation) during the gap —
-  the single fact that would confirm the corrected theory over the original
-  one.
-- `GAME_BATTLE_EJECT` dwell times and telemetry-gap durations across future
-  eject-during-respawn cases in general, healthy or not — to calibrate
-  `stale_after_s` (currently 6.0s) and `eject_stuck_after_s` (proposed
-  40.0s) from data rather than one incident and one estimate each.
+- **Resolved by the `20260913_113129_acct1` recording**: whether a future
+  occurrence's video shows a respawn transition — it showed
+  `RETURN TO BATTLE: 8` instead, with health intact, arguing against a
+  missed-overlay explanation. Still worth checking on further occurrences
+  whether this is the typical shape or this one instance's particular case.
+- **New, from the same recording**: what happens if `RETURN TO BATTLE`'s
+  countdown expires with nothing correcting course — the session ended
+  (by the detector) before this was observed. Does the game kill the
+  aircraft, teleport it back, or something else? Relevant to how urgent
+  fix candidate (1)/(2) actually are.
+- Whether leaving the arena itself (not just the eject) disrupts HUD
+  rendering or OCR — a speculative link between `RETURN TO BATTLE` and the
+  `59:04`-window OCR trouble in the original incident, not yet checked.
+- `GAME_BATTLE_EJECT` dwell times (from `eject_descent_active` going False,
+  not raw entry) and telemetry-gap durations across future eject-during-
+  respawn cases in general, healthy or not — to calibrate `stale_after_s`
+  (currently 6.0s) and `eject_stuck_after_s` (40.0s, now confirmed to fire
+  with real margin on one live recurrence) from more data.
 - Whether `eject_max_s` (120s) is ever actually reached in a future
-  occurrence — this record only observed the first 43s of that window.
+  occurrence — every observed occurrence so far has been caught by the
+  40s detector well before that bound.
 
 ## References
 
