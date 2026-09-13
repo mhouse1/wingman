@@ -99,17 +99,59 @@ def test_an_unreadable_window_tree_returns_empty_rather_than_raising():
 
 # --- start is idempotent, and refuses the one env that cannot work ------------
 
-def test_start_leaves_a_running_display_alone():
+def test_start_leaves_an_idle_running_display_alone():
     """Safe as a Makefile prerequisite: a second `make rd` must not spawn a
-    second server on the same display.
+    second server on the same display when nothing is using the existing one.
 
     ADR 119 moved the seam from `display_is_up` to `probe_display`, which
     distinguishes a wedged server from an absent one. The guarantee is
     unchanged; only the function that decides it moved.
     """
     with mock.patch.object(nd, "probe_display", return_value="up"), \
+         mock.patch("wingman.game_shutdown.find_game_pids", return_value=[]), \
          mock.patch("subprocess.Popen") as popen:
         assert nd.start(":3", "1920x1200") == 0
+    popen.assert_not_called()
+
+
+def test_start_restarts_a_display_with_a_game_still_attached():
+    """2026-09-13 05:54-06:01 (wingman.log): a display left up by STANDBY (or
+    a Ctrl-C that deliberately 'leaves everything up') still had a live
+    MetalStorm attached when a fresh `make rd` began. launch-game kills and
+    relaunches the game into the SAME, unrestarted Xwayland regardless — that
+    combination left hotkey observation dead for the whole session: matchmaking
+    stalled with 'Good Luck' never detected, and neither backspace nor 'z' was
+    ever even observed as pressed, forcing a Ctrl-C. The old idempotent-always
+    behaviour must not reuse a display with a game still on it — both must be
+    torn down, game first, and restarted fresh."""
+    calls = []
+    with mock.patch.object(nd, "probe_display", return_value="up"), \
+         mock.patch("wingman.game_shutdown.find_game_pids", return_value=[9999]), \
+         mock.patch("wingman.game_shutdown.find_nested_display_pids", return_value=[]), \
+         mock.patch("wingman.game_shutdown.close_game",
+                    side_effect=lambda *a, **k: calls.append("close_game")), \
+         mock.patch("wingman.game_shutdown.close_nested_display",
+                    side_effect=lambda *a, **k: calls.append("close_nested_display")), \
+         mock.patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0"}), \
+         mock.patch("subprocess.Popen") as popen, \
+         mock.patch.object(nd, "display_is_up", return_value=True), \
+         mock.patch("time.sleep"):
+        assert nd.start(":3", "1920x1200") == 0
+    assert calls == ["close_game", "close_nested_display"], \
+        "the game must be closed before the display it depends on (ADR 099 ordering)"
+    popen.assert_called_once()
+
+
+def test_start_reports_failure_when_the_stale_teardown_raises():
+    """close_game/close_nested_display are documented never to raise, but
+    start() must still fail loudly rather than plough on into spawning a
+    second server if that contract is ever broken."""
+    with mock.patch.object(nd, "probe_display", return_value="up"), \
+         mock.patch("wingman.game_shutdown.find_game_pids", return_value=[9999]), \
+         mock.patch("wingman.game_shutdown.close_game",
+                    side_effect=RuntimeError("boom")), \
+         mock.patch("subprocess.Popen") as popen:
+        assert nd.start(":3", "1920x1200") == 1
     popen.assert_not_called()
 
 

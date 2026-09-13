@@ -35,11 +35,15 @@ from .behavior_tree import (
     TACTIC_RESPAWN_WAIT,
     TACTIC_MISSILE_EVADE,
     AnalyzerSnapshot,
+    boundary_tactic_enabled,
     build_tree,
+    climb_tactic_enabled,
     make_climb_condition,
     make_snapshot_writer,
     TACTIC_BOUNDARY_TURN,
     selected_tactic,
+    tree_status_dict,
+    tree_status_text,
 )
 from .engage_nav import RING_LONG, RING_MID, RING_SHORT, EngageNavigator, bin_rings
 
@@ -977,50 +981,25 @@ class EnemyPresenceHandler:
         return False
 
 
-class BehaviorTreeHandler:
-    """ADR 024 Phase 3 behavior tree: tactic selection + 3.1a geometry cutover.
+class BoundaryPerceptionHandler:
+    """ADR 139 D5: map-boundary detection, respawn-settle suppression,
+    median filtering, blind-frame capture, crossing/approach instrumentation,
+    and per-turn range/bearing analytics — extracted from
+    `BehaviorTreeHandler.tick()`, which had grown to mix this perception
+    concern with snapshot assembly, tree ticking, and actuation gating.
+    Naming matches the file's `EnemyPresenceHandler`/`UnknownAnomalyRecorder`/
+    `HealthDropoutRecorder`/`RespawnHealthStallRecorder` precedent.
 
-    mode: off | shadow | active.
-    - **shadow**: build one frozen AnalyzerSnapshot per tick, tick the
-      selector, log the selected tactic — actuate nothing.
-    - **active**: same, plus an Engage selection actuates ring-engage
-      geometry (Design 003 / ADR 028, FR-005) through the mission-agnostic
-      EngageNavigator: steer via orient_nose_to_target with coarse gains,
-      orbit via the open-loop roll cadence. This absorbs the retired
-      EngageNavHandler; one minimap scan per tick serves both the snapshot
-      and the actuation. With an ammo handler wired (3.1b), the Eject leaf
-      actuates via AmmoEventsHandler.fire_eject on the DEBOUNCED
-      missiles_empty_confirmed verdict — never the raw zero read (the
-      2026-08-08 shadow-session gate) — and the Disengage leaf fires
-      disengage_roll_right with legacy fire-once-and-reset semantics.
-      Evade stays selection-only: threshold unset, no Controller tactic.
-
-    Arbitration with target tracking is unchanged: steer intents share
-    orient_nose_to_target's single cooldown timestamp, so the fine tracking
-    loop wins whenever both want the roll axis.
-
-    Owns: the tree, the snapshot writer, the minimap-based `enemy_absent`
-    clock (ring-occupancy replacement for the legacy ENEMY_CLOSE_BY timer),
-    the EngageNavigator, and the orbit cadence timer.
+    Owned exclusively by one `BehaviorTreeHandler` instance — not a
+    general-purpose collaborator, so its private state is reached directly
+    by that owner where a property is not worth the indirection (matching
+    how `BehaviorTreeHandler` itself is written).
     """
 
-    def __init__(self, analyzer, ctrl, bt_cfg, j20_cfg=None, minimap_cfg=None,
-                 ammo_events=None, stats_tracker=None, jet_profile_cfg=None):
+    def __init__(self, analyzer, minimap_cfg=None):
         self._analyzer = analyzer
-        self._ctrl = ctrl
-        self._mode = str(bt_cfg.get("mode", "off")).lower()
-        # Design 011 (ACS Mode) step 1: read once at startup, not per tick —
-        # the airframe does not change mid-session. Unknown/missing active
-        # profile defaults to has_padlock: true, the safe default matching
-        # every profile actually shipped today.
-        _jp = jet_profile_cfg or {}
-        _active_profile = str(_jp.get("active", "j20"))
-        _profiles = _jp.get("profiles", {}) or {}
-        self._has_padlock = bool(
-            (_profiles.get(_active_profile, {}) or {}).get("has_padlock", True))
-        self._enemy_last_seen_ts = 0.0
+        minimap_cfg = minimap_cfg or {}
         # ADR 028 revision 4 / Design 010 instrumentation.
-        self._friendly_components = None
         self._rtb_active = False
         # True only once OCR has confirmed the CURRENT colour trigger, so
         # 'back inside' is not announced for a crossing never announced.
@@ -1033,259 +1012,68 @@ class BehaviorTreeHandler:
         # — the folder is gitignored, but a bad night should not write hundreds
         # of 2 MB frames to the operator's disk.
         self._rtb_capture_dir = str(
-            (minimap_cfg or {}).get("boundary_capture_dir",
-                                    "test_screenshots/unknown_anomalies"))
-        self._rtb_capture_max = int(
-            (minimap_cfg or {}).get("boundary_capture_max", 20))
+            minimap_cfg.get("boundary_capture_dir", "test_screenshots/unknown_anomalies"))
+        self._rtb_capture_max = int(minimap_cfg.get("boundary_capture_max", 20))
         self._captures: "dict[str, int]" = {}
         self._approach_capture_max = int(
-            (minimap_cfg or {}).get("boundary_approach_capture_max", 10))
+            minimap_cfg.get("boundary_approach_capture_max", 10))
         self._boundary_reading = None
         self._turn_dists = []
         # ADR 125: bearing to the boundary during a turn, for heading change.
         self._turn_bearings = []
         self._respawn_settle_until = 0.0
         self._boundary_respawn_settle_s = float(
-            (minimap_cfg or {}).get("boundary_respawn_settle_s", 5.0))
+            minimap_cfg.get("boundary_respawn_settle_s", 5.0))
         # ADR 113: the last few readings, for the median filter. Bounded by
         # both length and age — a reading either side of a 30 s blind gap tells
         # you nothing about the same approach.
         self._boundary_recent = collections.deque(maxlen=3)
-        self._boundary_median_age_s = float(
-            (minimap_cfg or {}).get("boundary_median_age_s", 5.0))
+        self._boundary_median_age_s = float(minimap_cfg.get("boundary_median_age_s", 5.0))
         # ADR 117: blind-frame evidence. Off by default in the sense that a cap
         # of 0 disables it — it is a diagnostic, not a permanent cost.
-        self._blind_capture_max = int(
-            (minimap_cfg or {}).get("blind_capture_max", 40))
+        self._blind_capture_max = int(minimap_cfg.get("blind_capture_max", 40))
         self._blind_capture_interval_s = float(
-            (minimap_cfg or {}).get("blind_capture_interval_s", 45.0))
+            minimap_cfg.get("blind_capture_interval_s", 45.0))
         self._blind_capture_next_ts = 0.0
         # ADR 117: frames declined because no minimap was drawn. Counted rather
         # than silently dropped — if this dominates, the capture is being asked
         # for during a screen that has no minimap and the gate above is the bug.
         self._blind_no_minimap_skips = 0
-        self._boundary_near_frac = float(
-            (minimap_cfg or {}).get("boundary_near_frac", 0.25))
+        self._boundary_near_frac = float(minimap_cfg.get("boundary_near_frac", 0.25))
         self._boundary_turn_min_dist = 1.0
         # ~30 s of lead-up at a 1.5 s tick. Bounded: a session must not grow a
         # trace buffer, and only the approach matters, not the whole mission.
         self._boundary_trace = collections.deque(
-            maxlen=int((minimap_cfg or {}).get("boundary_trace_ticks", 20)))
+            maxlen=int(minimap_cfg.get("boundary_trace_ticks", 20)))
         self._session_start = time.time()
-        self._last_selection = "none"
-        self._ammo_events = ammo_events
-        # ADR 070: the evade entry event is emitted from the actuator wrapper —
-        # the Controller holds no stats tracker, so this is the only seam.
-        self._stats = stats_tracker
-        j20_cfg = j20_cfg or {}
-        self._dry_run = bool(j20_cfg.get("attack_mode_dry_run", False))
-        self._nav = EngageNavigator(j20_cfg, minimap_cfg)
-        self._ctl_cfg = {
-            "deadband": self._nav.deadband_norm,
-            "kp": float(j20_cfg.get("coarse_kp", 0.5)),
-            "min_hold_sec": float(j20_cfg.get("coarse_min_hold_s", 0.15)),
-            "max_hold_sec": float(j20_cfg.get("coarse_max_hold_s", 0.6)),
-            "cooldown_sec": float(j20_cfg.get("coarse_cooldown_s", 2.0)),
-        }
-        self._orbit_hold_s = float(j20_cfg.get("orbit_roll_hold_s", 0.3))
-        self._orbit_interval_s = float(j20_cfg.get("orbit_roll_interval_s", 2.0))
-        self._last_orbit_roll_ts = 0.0
-        self._last_nav_mode = self._nav.mode
-        # ADR 073 Phase 3.2a: while the Climb leaf is disabled it stays OUT of
-        # the selector (a selection-only leaf would pre-empt Engage actuation —
-        # not shadow). Instead an independent instance of the same condition is
-        # evaluated against the same frozen snapshot and transitions are
-        # logged as would-select evidence.
-        climb_cfg = bt_cfg.get("climb", {}) or {}
-        self._climb_shadow = None
-        self._climb_emergency_fn = None
-        self._climb_shadow_active = False
-        self._climb_shadow_since = 0.0
-        self._climb_band = (climb_cfg.get("enter_below_alt"),
-                            climb_cfg.get("exit_above_alt"))
-        self._climb_confirm = int(climb_cfg.get("confirm_reads", 1))
-        # ADR 075: armed altitude-sustain band and the evade fuel reserve. The
-        # start_fn wrapper picks the sustain target when the aircraft is above
-        # the emergency band — the leaf is shared, the targets are not.
-        _sustain_cfg = climb_cfg.get("sustain", {}) or {}
-        self._sustain_enabled = bool(_sustain_cfg.get("enabled", False))
-        self._sustain_exit_alt = _sustain_cfg.get("exit_above_alt")
-        self._sustain_max_s = float(_sustain_cfg.get("max_climb_s", 90.0))
-        self._climb_fuel_reserve = float(climb_cfg.get("fuel_reserve_pct", 0.0))
-        # ADR 083 d1/d2: predictive exit lead, sustain climbs only.
-        self._climb_exit_lead_s = float(climb_cfg.get("exit_lead_s", 0.0))
-        self._last_altitude: "float | None" = None
-        if not bool(climb_cfg.get("enabled", False)):
-            self._climb_shadow = make_climb_condition(
-                *self._climb_band, confirm_reads=self._climb_confirm)
-        if self.enabled:
-            # ADR 024 3.1b: in active mode with an ammo handler wired, the
-            # Eject and Disengage leaves actuate their Controller tactics.
-            actuators = {}
-            if self.active and ammo_events is not None:
-                actuators.update({
-                    TACTIC_EJECT: (ammo_events.fire_eject, ctrl.is_ejecting),
-                    TACTIC_DISENGAGE: (self._start_disengage,
-                                       ctrl.is_disengage_running),
-                })
-            # ADR 070: MissileEvade actuates when active and enabled; disabled
-            # leaves the leaf selection-only (the shadow pattern), so agreement
-            # can be checked against the flare-burst log before keys are pressed.
-            me_cfg = bt_cfg.get("missile_evade", {}) or {}
-            if self.active and bool(me_cfg.get("enabled", False)):
-                actuators[TACTIC_MISSILE_EVADE] = (self._start_missile_evade,
-                                                   ctrl.is_missile_evading)
-            # ADR 073 3.2b: Climb actuates when active and enabled — the leaf
-            # is only inserted in that case (see build_tree), so there is no
-            # in-tree selection-only variant to wire.
-            if self.active and bool(climb_cfg.get("enabled", False)):
-                actuators[TACTIC_CLIMB] = (self._start_climb, ctrl.is_climbing)
-            # ADR 107: BoundaryTurn actuates when active and configured. Like
-            # Climb the leaf is only built when configured, so there is no
-            # selection-only variant to wire.
-            if self.active and (bt_cfg.get("boundary", {}) or {}).get("turn_frac"):
-                actuators[TACTIC_BOUNDARY_TURN] = (self._start_boundary_turn,
-                                                   ctrl.is_boundary_turning)
-            self._tree = build_tree(
-                bt_cfg, actuators=actuators or None,
-                regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
-            self._writer = make_snapshot_writer()
-            self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
-
-    def _start_boundary_turn(self) -> None:
-        """BoundaryTurn start_fn. ADR 122: tell the turn which side the edge is
-        on, so it rolls away from it rather than always right.
-
-        Reads the CURRENT tick's reading — the turn is started from the same
-        tick that selected it, so this is the reading the decision was made on.
-        A 2-tuple (older stub or recording) leaves lateral None and the turn
-        keeps its fixed direction.
-        """
-        lat = None
-        if self._boundary_reading and len(self._boundary_reading) > 2:
-            lat = self._boundary_reading[2]
-        self._ctrl.boundary_turn_mode(lateral=lat)
-
-    def _start_climb(self) -> None:
-        """Climb leaf start_fn (ADR 075): pick the band the selection came from.
-
-        Below the emergency enter threshold (or with altitude unknown) this is
-        a terrain-avoidance climb: Controller defaults, no fuel held back —
-        terrain outranks the evade reserve. Otherwise the sustain band selected
-        it: climb to the operating altitude with the evade fuel reserve
-        honoured, so the burner is released once fuel drops to the reserve.
-
-        Also reads THIS tick's ADR 086 emergency verdict (the same closure
-        BoundaryTurn's yields_to_fn already reads) and passes it through —
-        the emergency case gets a more aggressive actuation (airbrake, no
-        pulse/observe gap) inside climb_mode/_run_climb_hold.
-        """
-        alt = self._last_altitude
-        emergency_enter = self._climb_band[0]
-        is_sustain = (self._sustain_enabled
-                      and self._sustain_exit_alt is not None
-                      and alt is not None
-                      and (emergency_enter is None or alt >= float(emergency_enter)))
-        emergency = bool(self._climb_emergency_fn()) if self._climb_emergency_fn is not None else False
-        if is_sustain:
-            self._ctrl.climb_mode(target_alt=float(self._sustain_exit_alt),
-                                  max_s=self._sustain_max_s,
-                                  fuel_floor_pct=self._climb_fuel_reserve,
-                                  exit_lead_s=self._climb_exit_lead_s,
-                                  emergency=emergency)
-        else:
-            self._ctrl.climb_mode(emergency=emergency)
-
-    def _start_disengage(self) -> None:
-        """Disengage leaf start_fn: fire the roll, then re-arm the absence
-        clock — the legacy handler's fire-once-and-reset semantics, so the
-        next disengage requires a fresh full absence window.
-
-        ADR 110: never during a survival hold. ``disengage_roll_right`` opens
-        with ``cancel_mission()``, and the condition is 30 s without an enemy —
-        which is precisely the state a survival hold produces. Loiter was built
-        to eventually cancel itself.
-        """
-        if self._ctrl.is_survival_hold():
-            logger.debug("Disengage suppressed — survival hold owns the aircraft")
-            return
-        self._ctrl.disengage_roll_right()
-        self._enemy_last_seen_ts = time.time()
-
-    def _start_missile_evade(self) -> None:
-        """MissileEvade leaf start_fn (ADR 070): start the hold and count the
-        event. The stats call sits after the start so a duplicate-suppressed
-        trigger (d8) still counts the EVENT — the quantity V5 compares against
-        flare_burst_count."""
-        self._ctrl.missile_evade_mode()
-        if self._stats is not None:
-            self._stats.on_event("missile_evade", time.time())
-
-    def arm_absence_clock(self) -> None:
-        """Restart the enemy-absence clock — called by the respawn flow, the
-        3.1b analogue of EnemyPresenceHandler.arm()."""
-        self._enemy_last_seen_ts = time.time()
+        self._instrument_fail_count = 0
 
     @property
-    def enabled(self) -> bool:
-        return self._mode in ("shadow", "active")
+    def reading(self):
+        """This tick's filtered boundary reading (dist, forward[, lateral])
+        or None — read by `BehaviorTreeHandler._start_boundary_turn`."""
+        return self._boundary_reading
 
-    @property
-    def active(self) -> bool:
-        return self._mode == "active"
+    def perceive(self, frame, now, is_respawning) -> tuple:
+        """Detect the boundary, suppress a stale post-respawn reading,
+        median-filter it, and maybe capture a blind frame. Returns
+        `(dist, forward, lateral, near)` for this tick's snapshot — every
+        element is None when there is no usable reading right now.
 
-    def on_state_change(self, new_state, prev_state=None):
-        """Arm the absence clock on battle entry; reset the navigator on exit."""
-        if new_state == GameState.GAME_BATTLE:
-            self._enemy_last_seen_ts = time.time()
-        if prev_state in _BATTLE_STATES and new_state not in _BATTLE_STATES:
-            self._nav.reset()
-            self._last_orbit_roll_ts = 0.0
-            self._last_nav_mode = self._nav.mode
-
-    def tick(self, frame, current_game_state, game_state) -> bool:
-        if not self.enabled:
-            return False
-        now = time.time()
-        components = self._analyzer.detect_enemy_map_components(frame)
-        # ADR 028 revision 4: scanned every tick but consumed only when no enemy
-        # is on the minimap, so it costs one extra mask over an already-decoded
-        # crop and never competes with an enemy contact.
-        self._friendly_components = self._analyzer.detect_friendly_map_components(frame)
-        rings = bin_rings(components or [])
-        if (rings[RING_SHORT].count or rings[RING_MID].count or rings[RING_LONG].count):
-            self._enemy_last_seen_ts = now
-        absent_s = now - self._enemy_last_seen_ts if self._enemy_last_seen_ts else 0.0
-        snapshot_obj = self._analyzer.get_telemetry()
-        altitude = None
-        altitude_rate = None
-        if snapshot_obj is not None and snapshot_obj.altitude_fresh():
-            altitude = snapshot_obj.altitude.stable_value
-            altitude_rate = getattr(snapshot_obj.altitude, "rate", None)
-        # Stored for _start_climb, which runs inside tree.tick() below and
-        # needs the altitude the selection was made against (ADR 075).
-        self._last_altitude = altitude
-        is_respawning, _, _ = self._analyzer.get_respawn_cache_result()
-        incoming, _, _ = self._analyzer.get_incoming_cache_result()
-        missiles_empty_confirmed = False
-        if self.active and self._ammo_events is not None:
-            missiles_empty_confirmed = (
-                self._ammo_events.consume_missiles_empty_confirmed())
-        # ADR 107: read the boundary BEFORE the snapshot, so the tree acts on
-        # THIS frame rather than the previous tick's. The reading is cached for
-        # _instrument_boundary below, which would otherwise pay for a second
-        # detection on the same pixels.
+        ADR 107: read BEFORE the snapshot, so the tree acts on THIS frame
+        rather than the previous tick's.
+        """
         try:
-            self._boundary_reading = self._analyzer.detect_map_boundary(frame)
+            reading = self._analyzer.detect_map_boundary(frame)
         except Exception:
             logger.debug("Boundary read failed", exc_info=True)
-            self._boundary_reading = None
+            reading = None
         # ADR 117: the RAW verdict, before the respawn settle and the median
         # filter. Only a raw None is detector blindness; a reading that exists
         # and is then suppressed is a decision we already understand, and
         # capturing it as "blind" pollutes the corpus with frames whose answer
         # is already known.
-        _boundary_raw = self._boundary_reading
+        boundary_raw = reading
         # A respawn SETTLE, not just a respawn gate. The overlay is still on
         # screen after the FSM clears is_respawning — measured 2026-09-04
         # 01:33:29, one tick after respawn=False went away: dist=0.073 fwd=+0.032
@@ -1294,7 +1082,7 @@ class BehaviorTreeHandler:
         # from the edge, so the reading is false however well-formed it looks.
         if is_respawning:
             self._respawn_settle_until = now + self._boundary_respawn_settle_s
-        if self._boundary_reading is not None and (
+        if reading is not None and (
                 is_respawning or now < self._respawn_settle_until):
             # DURING the respawn as well as after it. The first version only
             # suppressed in the elif — it armed the deadline while respawning
@@ -1305,9 +1093,8 @@ class BehaviorTreeHandler:
             logger.debug("BOUNDARY: reading suppressed — %s",
                          "respawning" if is_respawning
                          else f"{self._respawn_settle_until - now:.1f}s of settle left")
-            self._boundary_reading = None
-        self._boundary_reading = self._median_boundary(
-            self._boundary_reading, now)
+            reading = None
+        self._boundary_reading = self._median_boundary(reading, now)
         # ADR 117: capture what BLINDNESS looks like.
         #
         # Measured 2026-09-04: the detector produced a reading on 514 of 2204
@@ -1325,7 +1112,7 @@ class BehaviorTreeHandler:
         # evidence. Measured on the same session, readability is 56% in
         # GAME_BATTLE against 24% outside it — the 23% figure that motivated
         # this capture was an average across screens with no minimap on them.
-        _in_battle = getattr(self._analyzer, "game_state", None) == GameState.GAME_BATTLE
+        in_battle = getattr(self._analyzer, "game_state", None) == GameState.GAME_BATTLE
         #
         # GAME_BATTLE is not enough on its own. Killcam, transition and
         # cinematic frames are in battle with no HUD drawn, and 11 of the 40
@@ -1333,218 +1120,26 @@ class BehaviorTreeHandler:
         # budget spent on frames that cannot answer the question. The timer is
         # NOT advanced when a frame is skipped, so the next tick that does have
         # a minimap is captured rather than waiting out another interval.
-        self._maybe_capture_blind(frame, now, _boundary_raw, _in_battle,
-                                  is_respawning)
+        self.maybe_capture_blind(frame, now, boundary_raw, in_battle, is_respawning)
         # ADR 122: readings are (dist, forward, lateral). Tolerate a 2-tuple so
         # a stub or an older recording does not crash the tick — lateral is
         # then None and the turn falls back to its fixed direction.
         if self._boundary_reading:
-            _b_dist = self._boundary_reading[0]
-            _b_fwd = self._boundary_reading[1]
-            _b_lat = (self._boundary_reading[2]
+            dist = self._boundary_reading[0]
+            forward = self._boundary_reading[1]
+            lateral = (self._boundary_reading[2]
                       if len(self._boundary_reading) > 2 else None)
         else:
-            _b_dist = _b_fwd = _b_lat = None
+            dist = forward = lateral = None
         # ADR 120: the nearest reading still in the median window. The turn's
         # RELEASE reads this, so a filtered value cannot claim the aircraft is
         # clear while a recent reading says it is at the edge.
-        _b_near = _b_dist
+        near = dist
         if self._boundary_recent:
-            _recent_min = min(r[0] for _, r in self._boundary_recent)
-            if _b_near is None or _recent_min < _b_near:
-                _b_near = _recent_min
-        # ADR 128: refresh the missile-evade afterburner deadline every tick,
-        # not only on a NEW alert. The requirement is "held until incoming has
-        # not appeared for N seconds", so a detection that persists across
-        # ticks must extend the burn rather than let it lapse mid-alert.
-        try:
-            self._ctrl.note_incoming(bool(incoming), now)
-        except Exception:
-            logger.debug("note_incoming failed", exc_info=True)
-        # ADR 134: cruise afterburner. Tree-independent for the same reason
-        # note_incoming is — it only touches one key and would rarely tick if
-        # it had to compete with Engage/AttackSupport for tree priority.
-        try:
-            self._ctrl.note_afterburner_cruise(
-                current_game_state, self._ctrl.is_mission_running())
-        except Exception:
-            logger.debug("note_afterburner_cruise failed", exc_info=True)
-        # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
-        # control loop, so it needs the reading rather than the tactic.
-        try:
-            self._ctrl.note_boundary(_b_dist, _b_fwd)
-        except Exception:
-            logger.debug("note_boundary failed", exc_info=True)
-        snap = AnalyzerSnapshot(
-            health=game_state.get("health"),
-            missiles=self._analyzer.get_ammo_missiles(),
-            flares=self._analyzer.get_ammo_flares(),
-            ring_short=rings[RING_SHORT].count,
-            ring_mid=rings[RING_MID].count,
-            ring_long=rings[RING_LONG].count,
-            enemy_absent_seconds=absent_s,
-            altitude=altitude,
-            is_respawning=bool(is_respawning),
-            incoming_detected=bool(incoming),
-            mission_running=self._ctrl.is_mission_running(),
-            survival_hold=self._ctrl.is_survival_hold(),
-            game_state=current_game_state,
-            missiles_empty_confirmed=missiles_empty_confirmed,
-            fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
-            altitude_rate=altitude_rate,
-            friendly_contacts=len(self._friendly_components or []),
-            boundary_dist=_b_dist,
-            boundary_near=_b_near,
-            boundary_lateral=_b_lat,
-            boundary_forward=_b_fwd,
-            has_padlock=self._has_padlock,
-        )
-        self._writer.set("snapshot", snap)
-        self._tree.tick()
-        selection = selected_tactic(self._tree)
-        if selection != self._last_selection:
-            logger.info("BT[%s]: tactic %s → %s", self._mode, self._last_selection, selection)
-            self._last_selection = selection
-        logger.debug(
-            "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
-            "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s",
-            self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
-            snap.ring_long, absent_s, snap.is_respawning, altitude,
-            _fmt_rate(altitude_rate), _fmt_ttg(altitude, altitude_rate),
-            snap.fuel_pct, snap.mission_running,
-        )
-        if self._climb_shadow is not None:
-            # Outside GAME_BATTLE the Idle leaf would own selection, and the
-            # freeze-on-None policy would otherwise carry a stale would-select
-            # through the lobby — force-release there instead of evaluating.
-            if snap.game_state == GameState.GAME_BATTLE:
-                would = self._climb_shadow(snap)
-            else:
-                would = False
-                if self._climb_shadow_active:
-                    # Drop the closure's frozen hysteresis state too, or the
-                    # next battle would open on last battle's verdict.
-                    self._climb_shadow = make_climb_condition(
-                        *self._climb_band, confirm_reads=self._climb_confirm)
-            if would != self._climb_shadow_active:
-                if would:
-                    self._climb_shadow_since = now
-                    logger.info(
-                        "BT[shadow-climb]: would_select=True alt=%s "
-                        "selected=%s respawn=%s", altitude, selection,
-                        snap.is_respawning)
-                else:
-                    logger.info(
-                        "BT[shadow-climb]: would_select=False alt=%s held=%.0fs",
-                        altitude, now - self._climb_shadow_since)
-                self._climb_shadow_active = would
-        # After the selection, so each buffered record carries the tactic that
-        # was actually chosen on that tick — the question a crossing trace has
-        # to answer is what wingman was doing on the way out.
-        self._instrument_boundary(frame, now, snap, selection)
-        # SAF-001: never command flight outside GAME_BATTLE. In
-        # GAME_BATTLE_MANUAL the selector already yields Idle, but the gate is
-        # stated here too so a future leaf cannot reintroduce commanded flight
-        # while the operator has taken over.
-        _may_fly = (self.active and snap.mission_running
-                    and snap.game_state == GameState.GAME_BATTLE)
-        # ADR 107: the condition is the closed loop, so the actuation must end
-        # when the selection does. Without this the thread runs to its own cap
-        # regardless — measured 2026-09-03, every turn burning the full 12 s and
-        # restarting, four back to back on one approach.
-        if selection == TACTIC_BOUNDARY_TURN:
-            if _b_dist is not None:
-                self._turn_dists.append(_b_dist)
-                # ADR 125: the BEARING to the boundary, which is the thing a
-                # turn is supposed to change and the one thing nothing measures.
-                # The attitude sampler reports PITCH (derived from altitude
-                # rate); range says where the aircraft ended up. Neither answers
-                # "did the aircraft rotate", and two hypotheses have already
-                # been disproved for want of it.
-                #
-                # The minimap is heading-up, so the bearing to a fixed boundary
-                # point rotates with the aircraft. atan2(lateral, forward) is
-                # therefore a heading-change proxy that needs no new sensor.
-                if _b_lat is not None and _b_fwd is not None:
-                    self._turn_bearings.append(
-                        math.degrees(math.atan2(_b_lat, _b_fwd)))
-        elif self._turn_dists:
-            # ADR 107 V9: the RANGE half of the same question the controller's
-            # attitude summary answers. Logged on every turn, not only on the
-            # crossings — the ~60 turns a session that do NOT end in a crossing
-            # are where the evidence is, and until now none of them left a trace.
-            _d = self._turn_dists
-            logger.info(
-                "🗺  BOUNDARY TURN range: %.2fR → %.2fR (closest %.2fR, "
-                "%d ticks, %s)", _d[0], _d[-1], min(_d), len(_d),
-                "receded" if _d[-1] > min(_d) + 1e-9 else "never receded")
-            _brg = self._turn_bearings
-            if len(_brg) >= 2:
-                # Unwrapped, so a turn through the +/-180 seam is not read as a
-                # 350-degree swing in the opposite direction.
-                total = 0.0
-                for a, b in zip(_brg, _brg[1:], strict=False):
-                    d = (b - a + 180.0) % 360.0 - 180.0
-                    total += d
-                logger.info(
-                    "🗺  BOUNDARY TURN bearing: %+.0f deg → %+.0f deg "
-                    "(net %+.0f deg, path %.0f deg, %d samples)",
-                    _brg[0], _brg[-1], total,
-                    sum(abs((b - a + 180.0) % 360.0 - 180.0)
-                        for a, b in zip(_brg, _brg[1:], strict=False)), len(_brg))
-            else:
-                logger.info("🗺  BOUNDARY TURN bearing: n/a (%d samples)",
-                            len(_brg))
-            self._turn_dists = []
-            self._turn_bearings = []
-        if (selection != TACTIC_BOUNDARY_TURN
-                and self._ctrl.is_boundary_turning()):
-            self._ctrl.stop_boundary_turn()
-        # ADR 110: during a survival hold the MISSION owns the flight path, and
-        # the combat branch must not steer. Measured 2026-09-04: a five-minute
-        # loiter took 203 EngageNav commands, so the navigator was flying at the
-        # enemy throughout a hold whose objective is to stay away from it — and
-        # the long-ring contacts it chased sit at the arena edge.
-        #
-        # Gated at the ACTUATION, not in the conditions: the tree still reports
-        # what it would have chosen, which is the shadow pattern used elsewhere
-        # here and keeps the log readable.
-        #
-        # Regroup is gated too. It steers to rejoin the fight, which is the one
-        # thing a hold exists to avoid, and it would be a second writer on the
-        # roll axis the orbit is using. Staying in bounds is BoundaryTurn's job
-        # and BoundaryTurn stays live.
-        _combat_ok = _may_fly and not snap.survival_hold
-        if _combat_ok and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):
-            # Regroup: enemy components are empty by the condition that selected
-            # the leaf, so the navigator falls through to the friendly centroid.
-            self._actuate_engage(components, altitude, now)
-        elif _may_fly and selection == TACTIC_CLIMB:
-            # ADR 028 revision 5. Climb owns the PITCH axis (ADR 073); the
-            # navigator commands only roll (ADR 028: "this policy only commands
-            # the roll axis"). The selector's one-tactic-at-a-time model forced
-            # an either/or the axes do not require, and Climb takes ~43% of
-            # battle ticks — so for nearly half of every battle nothing steered
-            # horizontally at all.
-            #
-            # Measured 2026-08-30: a confirmed boundary crossing ran entirely
-            # under Climb with friendly icons visible the whole way (4, 3, 3, 1)
-            # and the boundary closing 0.29R to 0.02R. Regroup had a signal and
-            # was outranked by a tactic that was not using the roll axis.
-            #
-            # Orbit is suppressed here: it is a sustained roll hold, and holding
-            # roll through a climb is a different manoeuvre from correcting
-            # heading during one.
-            #
-            # ADR 110: and not during a survival hold. This is the SECOND caller
-            # of _actuate_engage — the ADR 028 rev 5 path where Climb owns pitch
-            # and the navigator still commands roll. Gating only the Engage /
-            # Regroup selection missed it, and 9 EngageNav commands reached a
-            # loitering aircraft on 2026-09-04 15:31 because loiter climbs, so
-            # Climb is the selection for most of a hold.
-            if not snap.survival_hold:
-                self._actuate_engage(components, altitude, now, steer_only=True)
-        return False
+            recent_min = min(r[0] for _, r in self._boundary_recent)
+            if near is None or recent_min < near:
+                near = recent_min
+        return dist, forward, lateral, near
 
     def _median_boundary(self, reading, now):
         """Median-of-3 over recent boundary readings. ADR 113.
@@ -1582,7 +1177,7 @@ class BehaviorTreeHandler:
                          reading[0], filtered[0])
         return filtered
 
-    def _instrument_boundary(self, frame, now, snap=None, selection=None):
+    def instrument_boundary(self, frame, now, snap=None, selection=None):
         """Count map-boundary approaches and crossings. Design 010.
 
         INSTRUMENTATION ONLY — nothing steers on this. It exists because the
@@ -1703,8 +1298,8 @@ class BehaviorTreeHandler:
             else:
                 logger.debug("Boundary instrumentation failed: %s", e)
 
-    def _maybe_capture_blind(self, frame, now, boundary_raw,
-                             in_battle, is_respawning) -> bool:
+    def maybe_capture_blind(self, frame, now, boundary_raw,
+                            in_battle, is_respawning) -> bool:
         """Capture a frame the detector read nothing on (ADR 117). True if saved.
 
         Extracted from the tick body so the gate below is reachable by a test.
@@ -1818,6 +1413,501 @@ class BehaviorTreeHandler:
                 text, self._boundary_crossings, self._rtb_false_positives)
         except Exception:
             pass
+
+    def record_turn_tick(self, selection, dist, forward, lateral) -> None:
+        """ADR 107/125: per-tick boundary-turn range/bearing tracking, logged
+        once the turn ends (selection moves away from BoundaryTurn).
+
+        Called AFTER the tree's selection, so each buffered record and this
+        summary carry the tactic actually chosen on the way out.
+        """
+        # ADR 107: the condition is the closed loop, so the actuation must end
+        # when the selection does. Without this the thread runs to its own cap
+        # regardless — measured 2026-09-03, every turn burning the full 12 s and
+        # restarting, four back to back on one approach.
+        if selection == TACTIC_BOUNDARY_TURN:
+            if dist is not None:
+                self._turn_dists.append(dist)
+                # ADR 125: the BEARING to the boundary, which is the thing a
+                # turn is supposed to change and the one thing nothing measures.
+                # The attitude sampler reports PITCH (derived from altitude
+                # rate); range says where the aircraft ended up. Neither answers
+                # "did the aircraft rotate", and two hypotheses have already
+                # been disproved for want of it.
+                #
+                # The minimap is heading-up, so the bearing to a fixed boundary
+                # point rotates with the aircraft. atan2(lateral, forward) is
+                # therefore a heading-change proxy that needs no new sensor.
+                if lateral is not None and forward is not None:
+                    self._turn_bearings.append(
+                        math.degrees(math.atan2(lateral, forward)))
+            return
+        if not self._turn_dists:
+            return
+        # ADR 107 V9: the RANGE half of the same question the controller's
+        # attitude summary answers. Logged on every turn, not only on the
+        # crossings — the ~60 turns a session that do NOT end in a crossing
+        # are where the evidence is, and until now none of them left a trace.
+        _d = self._turn_dists
+        logger.info(
+            "🗺  BOUNDARY TURN range: %.2fR → %.2fR (closest %.2fR, "
+            "%d ticks, %s)", _d[0], _d[-1], min(_d), len(_d),
+            "receded" if _d[-1] > min(_d) + 1e-9 else "never receded")
+        _brg = self._turn_bearings
+        if len(_brg) >= 2:
+            # Unwrapped, so a turn through the +/-180 seam is not read as a
+            # 350-degree swing in the opposite direction.
+            total = 0.0
+            for a, b in zip(_brg, _brg[1:], strict=False):
+                d = (b - a + 180.0) % 360.0 - 180.0
+                total += d
+            logger.info(
+                "🗺  BOUNDARY TURN bearing: %+.0f deg → %+.0f deg "
+                "(net %+.0f deg, path %.0f deg, %d samples)",
+                _brg[0], _brg[-1], total,
+                sum(abs((b - a + 180.0) % 360.0 - 180.0)
+                    for a, b in zip(_brg, _brg[1:], strict=False)), len(_brg))
+        else:
+            logger.info("🗺  BOUNDARY TURN bearing: n/a (%d samples)",
+                        len(_brg))
+        self._turn_dists = []
+        self._turn_bearings = []
+
+
+class BehaviorTreeHandler:
+    """ADR 024 Phase 3 behavior tree: tactic selection + 3.1a geometry cutover.
+
+    mode: off | shadow | active.
+    - **shadow**: build one frozen AnalyzerSnapshot per tick, tick the
+      selector, log the selected tactic — actuate nothing.
+    - **active**: same, plus an Engage selection actuates ring-engage
+      geometry (Design 003 / ADR 028, FR-005) through the mission-agnostic
+      EngageNavigator: steer via orient_nose_to_target with coarse gains,
+      orbit via the open-loop roll cadence. This absorbs the retired
+      EngageNavHandler; one minimap scan per tick serves both the snapshot
+      and the actuation. With an ammo handler wired (3.1b), the Eject leaf
+      actuates via AmmoEventsHandler.fire_eject on the DEBOUNCED
+      missiles_empty_confirmed verdict — never the raw zero read (the
+      2026-08-08 shadow-session gate) — and the Disengage leaf fires
+      disengage_roll_right with legacy fire-once-and-reset semantics.
+      Evade stays selection-only: threshold unset, no Controller tactic.
+
+    Arbitration with target tracking is unchanged: steer intents share
+    orient_nose_to_target's single cooldown timestamp, so the fine tracking
+    loop wins whenever both want the roll axis.
+
+    Owns: the tree, the snapshot writer, the minimap-based `enemy_absent`
+    clock (ring-occupancy replacement for the legacy ENEMY_CLOSE_BY timer),
+    the EngageNavigator, and the orbit cadence timer.
+    """
+
+    def __init__(self, analyzer, ctrl, bt_cfg, j20_cfg=None, minimap_cfg=None,
+                 ammo_events=None, stats_tracker=None, jet_profile_cfg=None,
+                 trace_writer=None):
+        self._analyzer = analyzer
+        self._ctrl = ctrl
+        # Design 012: optional BtTraceWriter, recording the same
+        # selection-change edge the BT[...] log line and DEBUG status dump
+        # already fire on. None when --record-session was not passed.
+        self._trace_writer = trace_writer
+        self._mode = str(bt_cfg.get("mode", "off")).lower()
+        # Design 011 (ACS Mode) step 1: read once at startup, not per tick —
+        # the airframe does not change mid-session. Unknown/missing active
+        # profile defaults to has_padlock: true, the safe default matching
+        # every profile actually shipped today.
+        _jp = jet_profile_cfg or {}
+        _active_profile = str(_jp.get("active", "j20"))
+        _profiles = _jp.get("profiles", {}) or {}
+        self._has_padlock = bool(
+            (_profiles.get(_active_profile, {}) or {}).get("has_padlock", True))
+        self._enemy_last_seen_ts = 0.0
+        # ADR 028 revision 4 / Design 010 instrumentation.
+        self._friendly_components = None
+        # ADR 139 D5: boundary detection, respawn-settle suppression, median
+        # filtering, blind-frame capture, and crossing/approach/turn
+        # instrumentation all live on this collaborator now — see
+        # BoundaryPerceptionHandler above.
+        self._boundary = BoundaryPerceptionHandler(analyzer, minimap_cfg)
+        self._last_selection = "none"
+        self._ammo_events = ammo_events
+        # ADR 070: the evade entry event is emitted from the actuator wrapper —
+        # the Controller holds no stats tracker, so this is the only seam.
+        self._stats = stats_tracker
+        j20_cfg = j20_cfg or {}
+        self._dry_run = bool(j20_cfg.get("attack_mode_dry_run", False))
+        self._nav = EngageNavigator(j20_cfg, minimap_cfg)
+        self._ctl_cfg = {
+            "deadband": self._nav.deadband_norm,
+            "kp": float(j20_cfg.get("coarse_kp", 0.5)),
+            "min_hold_sec": float(j20_cfg.get("coarse_min_hold_s", 0.15)),
+            "max_hold_sec": float(j20_cfg.get("coarse_max_hold_s", 0.6)),
+            "cooldown_sec": float(j20_cfg.get("coarse_cooldown_s", 2.0)),
+        }
+        self._orbit_hold_s = float(j20_cfg.get("orbit_roll_hold_s", 0.3))
+        self._orbit_interval_s = float(j20_cfg.get("orbit_roll_interval_s", 2.0))
+        self._last_orbit_roll_ts = 0.0
+        self._last_nav_mode = self._nav.mode
+        # ADR 073 Phase 3.2a: while the Climb leaf is disabled it stays OUT of
+        # the selector (a selection-only leaf would pre-empt Engage actuation —
+        # not shadow). Instead an independent instance of the same condition is
+        # evaluated against the same frozen snapshot and transitions are
+        # logged as would-select evidence.
+        climb_cfg = bt_cfg.get("climb", {}) or {}
+        self._climb_shadow = None
+        self._climb_emergency_fn = None
+        self._climb_shadow_active = False
+        self._climb_shadow_since = 0.0
+        self._climb_band = (climb_cfg.get("enter_below_alt"),
+                            climb_cfg.get("exit_above_alt"))
+        self._climb_confirm = int(climb_cfg.get("confirm_reads", 1))
+        # ADR 075: armed altitude-sustain band and the evade fuel reserve. The
+        # start_fn wrapper picks the sustain target when the aircraft is above
+        # the emergency band — the leaf is shared, the targets are not.
+        _sustain_cfg = climb_cfg.get("sustain", {}) or {}
+        self._sustain_enabled = bool(_sustain_cfg.get("enabled", False))
+        self._sustain_exit_alt = _sustain_cfg.get("exit_above_alt")
+        self._sustain_max_s = float(_sustain_cfg.get("max_climb_s", 90.0))
+        self._climb_fuel_reserve = float(climb_cfg.get("fuel_reserve_pct", 0.0))
+        # ADR 083 d1/d2: predictive exit lead, sustain climbs only.
+        self._climb_exit_lead_s = float(climb_cfg.get("exit_lead_s", 0.0))
+        self._last_altitude: "float | None" = None
+        if not climb_tactic_enabled(bt_cfg):
+            self._climb_shadow = make_climb_condition(
+                *self._climb_band, confirm_reads=self._climb_confirm)
+        if self.enabled:
+            # ADR 024 3.1b: in active mode with an ammo handler wired, the
+            # Eject and Disengage leaves actuate their Controller tactics.
+            actuators = {}
+            if self.active and ammo_events is not None:
+                actuators.update({
+                    TACTIC_EJECT: (ammo_events.fire_eject, ctrl.is_ejecting),
+                    TACTIC_DISENGAGE: (self._start_disengage,
+                                       ctrl.is_disengage_running),
+                })
+            # ADR 070: MissileEvade actuates when active and enabled; disabled
+            # leaves the leaf selection-only (the shadow pattern), so agreement
+            # can be checked against the flare-burst log before keys are pressed.
+            me_cfg = bt_cfg.get("missile_evade", {}) or {}
+            if self.active and bool(me_cfg.get("enabled", False)):
+                actuators[TACTIC_MISSILE_EVADE] = (self._start_missile_evade,
+                                                   ctrl.is_missile_evading)
+            # ADR 073 3.2b / ADR 139 D2: Climb actuates when active and
+            # enabled — the leaf is only inserted in that case (see
+            # `climb_tactic_enabled` / `_build_climb_slot` in
+            # behavior_tree.py, the single shared predicate), so there is no
+            # in-tree selection-only variant to wire.
+            if self.active and climb_tactic_enabled(bt_cfg):
+                actuators[TACTIC_CLIMB] = (self._start_climb, ctrl.is_climbing,
+                                          self._update_climb)
+            # ADR 107 / ADR 139 D2: BoundaryTurn actuates when active and
+            # configured. Like Climb the leaf is only built when configured
+            # (`boundary_tactic_enabled` / `_build_boundary_slot`), so there
+            # is no selection-only variant to wire.
+            if self.active and boundary_tactic_enabled(bt_cfg):
+                actuators[TACTIC_BOUNDARY_TURN] = (self._start_boundary_turn,
+                                                   ctrl.is_boundary_turning)
+            self._tree = build_tree(
+                bt_cfg, actuators=actuators or None,
+                regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
+            self._writer = make_snapshot_writer()
+            self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
+
+    def _start_boundary_turn(self) -> None:
+        """BoundaryTurn start_fn. ADR 122: tell the turn which side the edge is
+        on, so it rolls away from it rather than always right.
+
+        Reads the CURRENT tick's reading — the turn is started from the same
+        tick that selected it, so this is the reading the decision was made on.
+        A 2-tuple (older stub or recording) leaves lateral None and the turn
+        keeps its fixed direction.
+        """
+        lat = None
+        reading = self._boundary.reading
+        if reading and len(reading) > 2:
+            lat = reading[2]
+        self._ctrl.boundary_turn_mode(lateral=lat)
+
+    def _start_climb(self) -> None:
+        """Climb leaf start_fn (ADR 075): pick the band the selection came from.
+
+        Below the emergency enter threshold (or with altitude unknown) this is
+        a terrain-avoidance climb: Controller defaults, no fuel held back —
+        terrain outranks the evade reserve. Otherwise the sustain band selected
+        it: climb to the operating altitude with the evade fuel reserve
+        honoured, so the burner is released once fuel drops to the reserve.
+
+        Also reads THIS tick's ADR 086 emergency verdict (the same closure
+        BoundaryTurn's yields_to_fn already reads) and passes it through —
+        the emergency case gets a more aggressive actuation (airbrake, no
+        pulse/observe gap) inside climb_mode/_run_climb_hold.
+        """
+        alt = self._last_altitude
+        emergency_enter = self._climb_band[0]
+        is_sustain = (self._sustain_enabled
+                      and self._sustain_exit_alt is not None
+                      and alt is not None
+                      and (emergency_enter is None or alt >= float(emergency_enter)))
+        emergency = bool(self._climb_emergency_fn()) if self._climb_emergency_fn is not None else False
+        if is_sustain:
+            self._ctrl.climb_mode(target_alt=float(self._sustain_exit_alt),
+                                  max_s=self._sustain_max_s,
+                                  fuel_floor_pct=self._climb_fuel_reserve,
+                                  exit_lead_s=self._climb_exit_lead_s,
+                                  emergency=emergency)
+        else:
+            self._ctrl.climb_mode(emergency=emergency)
+
+    def _update_climb(self, _snapshot) -> None:
+        """Climb leaf update_fn (ADR 137 D9): called every tick Climb is
+        already RUNNING — the channel ``_start_climb`` above has no
+        equivalent of, since it only fires once on selection. Pushes THIS
+        tick's emergency verdict into the running actuator thread so a
+        mid-hold escalation or de-escalation is no longer stuck at whatever
+        value was true when the hold started (ADR 137 "Third Live Trial").
+        """
+        if self._climb_emergency_fn is not None:
+            self._ctrl.set_climb_emergency(bool(self._climb_emergency_fn()))
+
+    def _start_disengage(self) -> None:
+        """Disengage leaf start_fn: fire the roll, then re-arm the absence
+        clock — the legacy handler's fire-once-and-reset semantics, so the
+        next disengage requires a fresh full absence window.
+
+        ADR 110: never during a survival hold. ``disengage_roll_right`` opens
+        with ``cancel_mission()``, and the condition is 30 s without an enemy —
+        which is precisely the state a survival hold produces. Loiter was built
+        to eventually cancel itself.
+        """
+        if self._ctrl.is_survival_hold():
+            logger.debug("Disengage suppressed — survival hold owns the aircraft")
+            return
+        self._ctrl.disengage_roll_right()
+        self._enemy_last_seen_ts = time.time()
+
+    def _start_missile_evade(self) -> None:
+        """MissileEvade leaf start_fn (ADR 070): start the hold and count the
+        event. The stats call sits after the start so a duplicate-suppressed
+        trigger (d8) still counts the EVENT — the quantity V5 compares against
+        flare_burst_count."""
+        self._ctrl.missile_evade_mode()
+        if self._stats is not None:
+            self._stats.on_event("missile_evade", time.time())
+
+    def arm_absence_clock(self) -> None:
+        """Restart the enemy-absence clock — called by the respawn flow, the
+        3.1b analogue of EnemyPresenceHandler.arm()."""
+        self._enemy_last_seen_ts = time.time()
+
+    @property
+    def enabled(self) -> bool:
+        return self._mode in ("shadow", "active")
+
+    @property
+    def active(self) -> bool:
+        return self._mode == "active"
+
+    def on_state_change(self, new_state, prev_state=None):
+        """Arm the absence clock on battle entry; reset the navigator on exit."""
+        if new_state == GameState.GAME_BATTLE:
+            self._enemy_last_seen_ts = time.time()
+        if prev_state in _BATTLE_STATES and new_state not in _BATTLE_STATES:
+            self._nav.reset()
+            self._last_orbit_roll_ts = 0.0
+            self._last_nav_mode = self._nav.mode
+
+    def tick(self, frame, current_game_state, game_state) -> bool:
+        if not self.enabled:
+            return False
+        now = time.time()
+        components = self._analyzer.detect_enemy_map_components(frame)
+        # ADR 028 revision 4: scanned every tick but consumed only when no enemy
+        # is on the minimap, so it costs one extra mask over an already-decoded
+        # crop and never competes with an enemy contact.
+        self._friendly_components = self._analyzer.detect_friendly_map_components(frame)
+        rings = bin_rings(components or [])
+        if (rings[RING_SHORT].count or rings[RING_MID].count or rings[RING_LONG].count):
+            self._enemy_last_seen_ts = now
+        absent_s = now - self._enemy_last_seen_ts if self._enemy_last_seen_ts else 0.0
+        snapshot_obj = self._analyzer.get_telemetry()
+        altitude = None
+        altitude_rate = None
+        if snapshot_obj is not None and snapshot_obj.altitude_fresh():
+            altitude = snapshot_obj.altitude.stable_value
+            altitude_rate = getattr(snapshot_obj.altitude, "rate", None)
+        # Stored for _start_climb, which runs inside tree.tick() below and
+        # needs the altitude the selection was made against (ADR 075).
+        self._last_altitude = altitude
+        is_respawning, _, _ = self._analyzer.get_respawn_cache_result()
+        incoming, _, _ = self._analyzer.get_incoming_cache_result()
+        missiles_empty_confirmed = False
+        if self.active and self._ammo_events is not None:
+            missiles_empty_confirmed = (
+                self._ammo_events.consume_missiles_empty_confirmed())
+        # ADR 107 / ADR 139 D5: read, suppress, and median-filter the boundary
+        # BEFORE the snapshot, so the tree acts on THIS frame rather than the
+        # previous tick's — see BoundaryPerceptionHandler.perceive().
+        _b_dist, _b_fwd, _b_lat, _b_near = self._boundary.perceive(
+            frame, now, is_respawning)
+        # ADR 128: refresh the missile-evade afterburner deadline every tick,
+        # not only on a NEW alert. The requirement is "held until incoming has
+        # not appeared for N seconds", so a detection that persists across
+        # ticks must extend the burn rather than let it lapse mid-alert.
+        try:
+            self._ctrl.note_incoming(bool(incoming), now)
+        except Exception:
+            logger.debug("note_incoming failed", exc_info=True)
+        # ADR 134: cruise afterburner. Tree-independent for the same reason
+        # note_incoming is — it only touches one key and would rarely tick if
+        # it had to compete with Engage/AttackSupport for tree priority.
+        try:
+            self._ctrl.note_afterburner_cruise(
+                current_game_state, self._ctrl.is_mission_running())
+        except Exception:
+            logger.debug("note_afterburner_cruise failed", exc_info=True)
+        # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
+        # control loop, so it needs the reading rather than the tactic.
+        try:
+            self._ctrl.note_boundary(_b_dist, _b_fwd)
+        except Exception:
+            logger.debug("note_boundary failed", exc_info=True)
+        snap = AnalyzerSnapshot(
+            health=game_state.get("health"),
+            missiles=self._analyzer.get_ammo_missiles(),
+            flares=self._analyzer.get_ammo_flares(),
+            ring_short=rings[RING_SHORT].count,
+            ring_mid=rings[RING_MID].count,
+            ring_long=rings[RING_LONG].count,
+            enemy_absent_seconds=absent_s,
+            altitude=altitude,
+            is_respawning=bool(is_respawning),
+            incoming_detected=bool(incoming),
+            mission_running=self._ctrl.is_mission_running(),
+            survival_hold=self._ctrl.is_survival_hold(),
+            game_state=current_game_state,
+            missiles_empty_confirmed=missiles_empty_confirmed,
+            fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
+            altitude_rate=altitude_rate,
+            friendly_contacts=len(self._friendly_components or []),
+            boundary_dist=_b_dist,
+            boundary_near=_b_near,
+            boundary_lateral=_b_lat,
+            boundary_forward=_b_fwd,
+            has_padlock=self._has_padlock,
+        )
+        self._writer.set("snapshot", snap)
+        self._tree.tick()
+        selection = selected_tactic(self._tree)
+        if selection != self._last_selection:
+            logger.info("BT[%s]: tactic %s → %s", self._mode, self._last_selection, selection)
+            if logger.isEnabledFor(logging.DEBUG):
+                # Research 013: live-status view. Gated on the selection edge,
+                # not every tick — the ascii dump is for "what just changed
+                # and why," not a per-tick flood.
+                logger.debug("BT[%s]: tree status\n%s", self._mode, tree_status_text(self._tree))
+            if self._trace_writer is not None:
+                # Design 012: same edge, structured sink — the JSONL a
+                # recorded session's video is cross-referenced against.
+                self._trace_writer.record(self._last_selection, selection,
+                                          tree_status_dict(self._tree))
+            self._last_selection = selection
+        logger.debug(
+            "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
+            "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s",
+            self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
+            snap.ring_long, absent_s, snap.is_respawning, altitude,
+            _fmt_rate(altitude_rate), _fmt_ttg(altitude, altitude_rate),
+            snap.fuel_pct, snap.mission_running,
+        )
+        if self._climb_shadow is not None:
+            # Outside GAME_BATTLE the Idle leaf would own selection, and the
+            # freeze-on-None policy would otherwise carry a stale would-select
+            # through the lobby — force-release there instead of evaluating.
+            if snap.game_state == GameState.GAME_BATTLE:
+                would = self._climb_shadow(snap)
+            else:
+                would = False
+                if self._climb_shadow_active:
+                    # Drop the closure's frozen hysteresis state too, or the
+                    # next battle would open on last battle's verdict.
+                    self._climb_shadow = make_climb_condition(
+                        *self._climb_band, confirm_reads=self._climb_confirm)
+            if would != self._climb_shadow_active:
+                if would:
+                    self._climb_shadow_since = now
+                    logger.info(
+                        "BT[shadow-climb]: would_select=True alt=%s "
+                        "selected=%s respawn=%s", altitude, selection,
+                        snap.is_respawning)
+                else:
+                    logger.info(
+                        "BT[shadow-climb]: would_select=False alt=%s held=%.0fs",
+                        altitude, now - self._climb_shadow_since)
+                self._climb_shadow_active = would
+        # After the selection, so each buffered record carries the tactic that
+        # was actually chosen on that tick — the question a crossing trace has
+        # to answer is what wingman was doing on the way out.
+        self._boundary.instrument_boundary(frame, now, snap, selection)
+        # SAF-001: never command flight outside GAME_BATTLE. In
+        # GAME_BATTLE_MANUAL the selector already yields Idle, but the gate is
+        # stated here too so a future leaf cannot reintroduce commanded flight
+        # while the operator has taken over.
+        _may_fly = (self.active and snap.mission_running
+                    and snap.game_state == GameState.GAME_BATTLE)
+        # ADR 107 / ADR 139 D5: the condition is the closed loop, so the
+        # actuation must end when the selection does. Without this the
+        # thread runs to its own cap regardless — measured 2026-09-03, every
+        # turn burning the full 12 s and restarting, four back to back on one
+        # approach. Per-tick range/bearing tracking, logged as a summary once
+        # the turn ends, lives on BoundaryPerceptionHandler now.
+        self._boundary.record_turn_tick(selection, _b_dist, _b_fwd, _b_lat)
+        if (selection != TACTIC_BOUNDARY_TURN
+                and self._ctrl.is_boundary_turning()):
+            self._ctrl.stop_boundary_turn()
+        # ADR 110: during a survival hold the MISSION owns the flight path, and
+        # the combat branch must not steer. Measured 2026-09-04: a five-minute
+        # loiter took 203 EngageNav commands, so the navigator was flying at the
+        # enemy throughout a hold whose objective is to stay away from it — and
+        # the long-ring contacts it chased sit at the arena edge.
+        #
+        # Gated at the ACTUATION, not in the conditions: the tree still reports
+        # what it would have chosen, which is the shadow pattern used elsewhere
+        # here and keeps the log readable.
+        #
+        # Regroup is gated too. It steers to rejoin the fight, which is the one
+        # thing a hold exists to avoid, and it would be a second writer on the
+        # roll axis the orbit is using. Staying in bounds is BoundaryTurn's job
+        # and BoundaryTurn stays live.
+        _combat_ok = _may_fly and not snap.survival_hold
+        if _combat_ok and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):
+            # Regroup: enemy components are empty by the condition that selected
+            # the leaf, so the navigator falls through to the friendly centroid.
+            self._actuate_engage(components, altitude, now)
+        elif _may_fly and selection == TACTIC_CLIMB:
+            # ADR 028 revision 5. Climb owns the PITCH axis (ADR 073); the
+            # navigator commands only roll (ADR 028: "this policy only commands
+            # the roll axis"). The selector's one-tactic-at-a-time model forced
+            # an either/or the axes do not require, and Climb takes ~43% of
+            # battle ticks — so for nearly half of every battle nothing steered
+            # horizontally at all.
+            #
+            # Measured 2026-08-30: a confirmed boundary crossing ran entirely
+            # under Climb with friendly icons visible the whole way (4, 3, 3, 1)
+            # and the boundary closing 0.29R to 0.02R. Regroup had a signal and
+            # was outranked by a tactic that was not using the roll axis.
+            #
+            # Orbit is suppressed here: it is a sustained roll hold, and holding
+            # roll through a climb is a different manoeuvre from correcting
+            # heading during one.
+            #
+            # ADR 110: and not during a survival hold. This is the SECOND caller
+            # of _actuate_engage — the ADR 028 rev 5 path where Climb owns pitch
+            # and the navigator still commands roll. Gating only the Engage /
+            # Regroup selection missed it, and 9 EngageNav commands reached a
+            # loitering aircraft on 2026-09-04 15:31 because loiter climbs, so
+            # Climb is the selection for most of a hold.
+            if not snap.survival_hold:
+                self._actuate_engage(components, altitude, now, steer_only=True)
+        return False
 
     def _actuate_engage(self, components, altitude, now, steer_only: bool = False):
         """3.1a: the Engage selection drives ring-engage geometry (ported from

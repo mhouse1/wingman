@@ -241,6 +241,13 @@ liveness_guard:
   enabled: true
   stall_limit_s: 300.0        # log loudly, let recovery escalate
   hard_limit_s: 900.0         # end the session at the next safe point
+# Anomaly 003: diagnostic-only, only checked when --record-session (make rd v)
+# is active. 40s is a first estimate from one incident, not a calibrated
+# default — see docs/anomaly/003-eject-no-telemetry-false-death-leaves-
+# aircraft-unflown.md before trusting it beyond that one case.
+eject_stuck_detector:
+  enabled: true
+  eject_stuck_after_s: 40.0
 stall_recovery:
   action_after_s: 15.0        # dwell in GAME_UNKNOWN/GAME_STARTING_STALLED before acting
   unready_dwell_s: 30.0       # UNREADY suppressing the PLAY click before leaving the squad
@@ -613,6 +620,11 @@ padlock_indicator:
   max_contour_area: 30
   min_dashes: 6
 hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
+# Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
+# "make rd v"), never the default — a multi-hour session's file size and CPU
+# cost scale with fps. Low by design: this is reviewed at tactic-selection
+# cadence (seconds), not watched as smooth video.
+session_recording: {fps: 2.0, scale: 0.5}
 telemetry:
   # ADR 123: NOSE_DIRECTION deadband. Level flight jitters around zero altitude
   # rate, and a direction that flips every tick is not a direction — the loiter

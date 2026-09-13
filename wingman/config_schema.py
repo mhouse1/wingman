@@ -461,6 +461,12 @@ SCHEMA = Section(
             "interval_sec": SECONDS,
         }),
 
+        # Design 012: opt-in session video, paired with the BT JSONL trace.
+        "session_recording": Section(children={
+            "fps": _num(0),
+            "scale": FRACTION,
+        }),
+
         # ADR 099: nested display lane
         "nested": Section(children={
             "enabled": BOOL,
@@ -547,6 +553,12 @@ SCHEMA = Section(
             "enabled": BOOL,
             "stall_limit_s": SECONDS,
             "hard_limit_s": SECONDS,
+        }),
+        # Anomaly 003 — diagnostic-only, gated on --record-session at the
+        # call site (see docs/anomaly/003-eject-no-telemetry-...).
+        "eject_stuck_detector": Section(children={
+            "enabled": BOOL,
+            "eject_stuck_after_s": SECONDS,
         }),
         # ADR 093 — ceiling on the ADR 087 blackout ESC suppression.
         "lobby_blackout": Section(children={

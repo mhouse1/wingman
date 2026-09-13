@@ -1814,8 +1814,8 @@ class _FakeBoundaryAnalyzer:
 
 def _boundary_handler(analyzer):
     import collections
-    from wingman.tick_handlers import BehaviorTreeHandler
-    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    from wingman.tick_handlers import BoundaryPerceptionHandler
+    h = BoundaryPerceptionHandler.__new__(BoundaryPerceptionHandler)
     h._analyzer = analyzer
     h._rtb_false_positives = 0
     h._rtb_active = False
@@ -1836,7 +1836,7 @@ def test_the_trace_records_every_tick_not_only_crossings():
     """A crossing logged alone says it happened, not why."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([False, False, False]))
     for i in range(3):
-        h._instrument_boundary(None, float(i))
+        h.instrument_boundary(None, float(i))
     assert len(h._boundary_trace) == 3
 
 
@@ -1844,7 +1844,7 @@ def test_the_trace_is_bounded():
     """A session must not grow a trace buffer without limit."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([False] * 50))
     for i in range(50):
-        h._instrument_boundary(None, float(i))
+        h.instrument_boundary(None, float(i))
     assert len(h._boundary_trace) == 20
 
 
@@ -1866,7 +1866,7 @@ def test_a_crossing_counts_once_per_edge_not_per_tick():
     ticks in between add nothing."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([True, True, True, False, True]))
     for i in range(5):
-        h._instrument_boundary(None, float(i), snap=_flying(), selection="Engage")
+        h.instrument_boundary(None, float(i), snap=_flying(), selection="Engage")
     assert h._boundary_crossings == 0, "nothing counts before the OCR verdict"
     h._on_rtb_confirmed(True, "RETURNTOBATTLE")
     h._on_rtb_confirmed(True, "RETURNTOBATTLE")
@@ -1877,15 +1877,15 @@ def test_the_banner_is_ignored_while_ejecting():
     """Live 2026-08-30: the colour test fired on the eject fireball one tick
     after an eject — bright red, centre screen, where the banner sits."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([True, True]))
-    h._instrument_boundary(None, 0.0, snap=_flying(), selection="Eject")
-    h._instrument_boundary(None, 1.0, snap=_flying(is_respawning=True),
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Eject")
+    h.instrument_boundary(None, 1.0, snap=_flying(is_respawning=True),
                            selection="Idle")
     assert h._boundary_crossings == 0
 
 
 def test_the_banner_is_ignored_outside_battle():
     h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
-    h._instrument_boundary(None, 0.0,
+    h.instrument_boundary(None, 0.0,
                            snap=_flying(game_state=GameState.GAME_LOBBY),
                            selection="Idle")
     assert h._boundary_crossings == 0
@@ -1900,7 +1900,7 @@ def test_an_unconfirmed_crossing_never_enters_the_count():
     and because the count was decremented back to zero every time, all five
     announced themselves as "crossing 1 this session"."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
-    h._instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
     assert h._boundary_crossings == 0
     h._on_rtb_confirmed(False, None)
     assert h._boundary_crossings == 0
@@ -1909,7 +1909,7 @@ def test_an_unconfirmed_crossing_never_enters_the_count():
 
 def test_a_confirmed_crossing_is_kept():
     h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
-    h._instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
     h._on_rtb_confirmed(True, "RETURNTOBATTLE:5")
     assert h._boundary_crossings == 1
     assert h._rtb_false_positives == 0
@@ -1920,14 +1920,14 @@ def test_ocr_confirmation_is_one_shot_per_crossing():
     analyzer = _FakeBoundaryAnalyzer([True, True, True])
     h = _boundary_handler(analyzer)
     for i in range(3):
-        h._instrument_boundary(None, float(i), snap=_flying(), selection="Engage")
+        h.instrument_boundary(None, float(i), snap=_flying(), selection="Engage")
     assert analyzer.ocr_calls == 1
 
 
 def test_the_trace_carries_the_selected_tactic():
     """What wingman was doing on the way out is the question being asked."""
     h = _boundary_handler(_FakeBoundaryAnalyzer([False]))
-    h._instrument_boundary(None, 0.0, snap=None, selection="Climb")
+    h.instrument_boundary(None, 0.0, snap=None, selection="Climb")
     assert h._boundary_trace[-1]["tactic"] == "Climb"
 
 
@@ -1936,7 +1936,7 @@ def test_instrumentation_never_raises_into_the_tick():
         def detect_return_to_battle(self, _f):
             raise RuntimeError("detector exploded")
     h = _boundary_handler(_Boom())
-    h._instrument_boundary(None, 0.0)   # must not propagate
+    h.instrument_boundary(None, 0.0)   # must not propagate
 
 
 def test_the_trace_is_dumped_only_for_confirmed_crossings():
@@ -1946,7 +1946,7 @@ def test_the_trace_is_dumped_only_for_confirmed_crossings():
     would add ~180 multi-KB WARNING lines to a three-hour soak."""
     import wingman.tick_handlers as th
     h = _boundary_handler(_FakeBoundaryAnalyzer([True]))
-    h._instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
     dumped = []
     real_warning = th.logger.warning
     th.logger.warning = lambda fmt, *a: dumped.append(fmt % a if a else fmt)
@@ -2059,15 +2059,17 @@ def test_boundary_readings_are_suppressed_after_a_respawn():
     however well-formed it looks. Gating on the flag alone is not enough; the
     screen needs time to settle."""
     import inspect
-    from wingman.tick_handlers import BehaviorTreeHandler
-    src = inspect.getsource(BehaviorTreeHandler)
+    # ADR 139 D5: this logic lives on BoundaryPerceptionHandler.perceive()
+    # now, not BehaviorTreeHandler — the slot table moved it, not the guard.
+    from wingman.tick_handlers import BoundaryPerceptionHandler
+    src = inspect.getsource(BoundaryPerceptionHandler)
     assert "_respawn_settle_until" in src
     # Suppression must clear the READING, so the instrumentation and the tactic
     # see the same thing — a false approach must not reach the stats either.
     # Suppression must clear the READING itself, so the instrumentation and the
     # tactic see the same thing — a false approach must not reach the stats.
-    guard = src.split("if self._boundary_reading is not None and (")[1]
-    assert "self._boundary_reading = None" in guard.split("def ")[0]
+    guard = src.split("if reading is not None and (")[1]
+    assert "reading = None" in guard.split("def ")[0]
     # DURING the respawn too, not only after it. The first version armed the
     # deadline in an if and suppressed in the elif, so the respawn tick itself —
     # the least trustworthy frame there is — passed straight through. Measured
@@ -2151,12 +2153,30 @@ def test_disengage_cannot_cancel_a_survival_hold():
 
 def test_boundary_turn_stays_live_during_a_hold():
     """Staying in bounds is the one steering job the hold does NOT take over —
-    it is why gating Regroup costs nothing."""
+    it is why gating Regroup costs nothing.
+
+    ADR 139 D5: the per-tick range/bearing recording moved to
+    BoundaryPerceptionHandler.record_turn_tick(), but the actuation-gating
+    stop check below is what this test actually guards, and it stays here."""
     import inspect
     from wingman.tick_handlers import BehaviorTreeHandler
     src = inspect.getsource(BehaviorTreeHandler)
-    turn = src.split("if selection == TACTIC_BOUNDARY_TURN:")[1][:300]
+    turn = src.split("if (selection != TACTIC_BOUNDARY_TURN")[1][:300]
     assert "survival_hold" not in turn
+
+
+def test_trace_writer_records_on_the_same_edge_as_the_selection_log():
+    """Design 012: the JSONL trace is a third sink on the exact selection-
+    change edge that already drives the BT[...] INFO log line — never a
+    separate check that could drift out of sync with it."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler.tick)
+    after_log = src.split('logger.info("BT[%s]: tactic %s')[1]
+    edge = after_log.split("self._last_selection = selection")[0]
+    assert "if self._trace_writer is not None:" in edge
+    assert "self._trace_writer.record(self._last_selection, selection," in edge
+    assert "tree_status_dict(self._tree)" in edge
 
 
 class TestBoundaryMedianFilter:
@@ -2172,8 +2192,8 @@ class TestBoundaryMedianFilter:
     @staticmethod
     def _h():
         import collections
-        from wingman.tick_handlers import BehaviorTreeHandler
-        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        from wingman.tick_handlers import BoundaryPerceptionHandler
+        h = BoundaryPerceptionHandler.__new__(BoundaryPerceptionHandler)
         h._boundary_recent = collections.deque(maxlen=3)
         h._boundary_median_age_s = 5.0
         return h
@@ -2238,8 +2258,8 @@ class TestBlindFrameCapture:
     @staticmethod
     def _h(cap=40, interval=45.0):
         import collections
-        from wingman.tick_handlers import BehaviorTreeHandler
-        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        from wingman.tick_handlers import BoundaryPerceptionHandler
+        h = BoundaryPerceptionHandler.__new__(BoundaryPerceptionHandler)
         h._boundary_recent = collections.deque(maxlen=3)
         h._boundary_median_age_s = 5.0
         h._blind_capture_max = cap
@@ -2357,8 +2377,8 @@ class TestBoundaryInstrumentationSurvivesReadingWidth:
     def _h():
         import collections
         import unittest.mock as _m
-        from wingman.tick_handlers import BehaviorTreeHandler
-        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        from wingman.tick_handlers import BoundaryPerceptionHandler
+        h = BoundaryPerceptionHandler.__new__(BoundaryPerceptionHandler)
         h._analyzer = _m.MagicMock()
         h._analyzer.detect_return_to_battle.return_value = False
         h._boundary_trace = collections.deque(maxlen=20)
@@ -2380,7 +2400,7 @@ class TestBoundaryInstrumentationSurvivesReadingWidth:
         h._boundary_reading = reading
         snap = _battle_snap()
         with caplog.at_level(logging.DEBUG):
-            h._instrument_boundary(object(), 100.0, snap, "Engage")
+            h.instrument_boundary(object(), 100.0, snap, "Engage")
         return caplog.text
 
     def test_a_three_tuple_reading_does_not_break_instrumentation(self, caplog):
@@ -2412,9 +2432,9 @@ class TestBoundaryInstrumentationSurvivesReadingWidth:
         h._boundary_reading = (0.3, 0.2, 0.1)
         snap = _battle_snap()
         with caplog.at_level(logging.DEBUG):
-            h._instrument_boundary(object(), 100.0, snap, "Engage")
+            h.instrument_boundary(object(), 100.0, snap, "Engage")
             first_errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-            h._instrument_boundary(object(), 101.0, snap, "Engage")
+            h.instrument_boundary(object(), 101.0, snap, "Engage")
             all_errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert len(first_errors) == 1, "first failure was not reported at ERROR"
         assert len(all_errors) == 1, "repeat failures must not flood at ERROR"

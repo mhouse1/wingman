@@ -564,6 +564,57 @@ numbers) rather than being dropped.
   data" — worth re-examining `pre_crash_lookback_s` itself against a
   measured, not assumed, death-sequence duration before patching further.
 
+**D9 (2026-09-12): the emergency flag is now re-read every poll iteration,
+not just once at selection.** The Third Live Trial section below names this
+gap directly: `_start_climb` reads `climb.emergency_active` and passes it
+into `climb_mode(..., emergency=...)` only on the FAILURE→RUNNING edge
+(`ConditionTactic.update()`, `behavior_tree.py`) — an already-`RUNNING`
+Climb selection never re-fires `_start_climb`, so a mid-hold escalation or
+de-escalation was invisible to the running actuator thread. Measured twice
+in that trial (08:15:00, 08:16:14) without a crash resulting, but flagged
+as "a real architectural hole" needing "its own design pass."
+
+Fix, in two parts:
+
+1. **`ConditionTactic` gains an `update_fn(snapshot)`** (`behavior_tree.py`),
+   called on every RUNNING tick *after* the first — never on the same tick
+   as `start_fn`. Climb's is wired to
+   `BehaviorTreeHandler._update_climb`, which pushes the current tick's
+   `climb.emergency_active` verdict into a new `Controller.set_climb_emergency()`
+   setter.
+2. **`_run_climb_hold`'s poll loop re-reads `self._climb_emergency_requested`
+   every 0.25s iteration** (the same "self-owned attribute, read live every
+   poll" idiom its fuel and telemetry reads already use) instead of only
+   acting on the `emergency` parameter frozen in at thread start. On a
+   change it presses/releases `AIRBRAKE_KEY`/`AFTERBURNER_KEY` accordingly
+   (escalation drops afterburner before raising airbrake, matching D1's
+   original ordering reasoning; de-escalation releases airbrake and resumes
+   the normal fuel-floor logic on the next iteration) and logs at WARNING —
+   `climb — emergency ESCALATED mid-hold` / `climb — emergency CLEARED
+   mid-hold` — exactly once per transition, so a live session can confirm
+   this fires correctly from the log alone.
+
+Once [ADR 139](139-behavior-tree-slot-composition-and-wiring.md) D4's shared
+`_may_hold_key` arbiter is in place, the escalation press and de-escalation
+release route through it rather than pressing directly — not done yet in
+this decision, to keep the two changes independently reviewable.
+
+### Validation (D9)
+
+- V15 — unit, satisfied: `tests/test_behavior_tree.py::test_climb_update_fn_called_only_while_already_running`
+  (the channel fires only after the first RUNNING tick, never alongside
+  `start_fn`); `tests/test_climb_mode.py::test_emergency_escalates_mid_hold`
+  and `::test_emergency_de_escalates_mid_hold` (correct key press/release
+  sequence on a live transition, and each WARNING line fires exactly once,
+  not once per poll tick).
+- **V16 — live, MET, 2026-09-12 (Fifth live trial, below).** 33 mid-hold
+  transitions (12 escalations, 21 clearances) in one 4h34m session, zero
+  missed, zero double-fires. Two spot-checked recoveries confirmed clean
+  (no crash); two escalations still ended in a crash, matching D4's
+  already-documented airbrake-ceiling limitation rather than a new failure
+  mode of D9 itself. The mechanism does its one job; it does not raise the
+  physical ceiling D4 already flagged as unresolved.
+
 ## Non-Goals
 
 1. ~~**Not a fix to the ADR 086 trigger threshold itself**
@@ -703,6 +754,13 @@ against the D4 case (which by contrast *did* get the emergency treatment
 correctly — a fresh Engage → Climb selection, not a continuation, so the
 `_start_climb` gate wasn't in play there).
 
+**Addressed by D9 below** (2026-09-12): the first option sketched here — the
+poll loop rereads the emergency verdict each iteration and escalates or
+de-escalates a live hold in place — is what shipped, with the hysteresis
+concern in the second option sidestepped entirely rather than needing new
+discipline, since escalation/de-escalation happens inside the SAME running
+hold rather than by restarting `_start_climb`'s dispatch gate.
+
 ## Fourth live trial (2026-09-11, 3h41m, D4+D6+D7 all live)
 
 07:37:55-11:19:19. Clean session throughout: zero `[ERROR]` lines, zero
@@ -763,6 +821,58 @@ to catch (the earlier "flew straight after respawn without restarting
 mission_j20" bug) — recorded as a new open question below rather than fixed
 here, since narrowing D7's gate needs its own look at why the FSM state read
 stale through a results screen.
+
+## Fifth live trial (2026-09-12, 4h34m, D9 live)
+
+First live data on D9. Session: 08:58:14-13:31:57, 47 missions, 100%
+click-to-finish, 152 respawns, 27 `crash_with_missiles` (20 captured, the
+session cap), zero `[ERROR]` lines, zero tracebacks. Log archived to
+`logs/wingman_20260912_085814.log` before this session's `wingman.log` could
+be overwritten by a later run.
+
+**The mechanism fires, repeatedly, on real mid-hold transitions.** 12
+`ESCALATED mid-hold` and 21 `CLEARED mid-hold` lines this session (33 total)
+— for comparison, the gap D9 exists to close was measured only **twice** in
+the entire session that found it (Third Live Trial, 2026-09-10). The
+asymmetry (more clears than escalations) is expected, not a bug: a `CLEARED`
+with no preceding `ESCALATED` in the same hold means Climb was selected
+already in emergency mode (the ordinary `_start_climb` path, unchanged by
+D9) and later cleared mid-hold — D9 only instruments the *transition*, not
+every emergency episode.
+
+**Two clean full recoveries, spot-checked from the log directly:**
+- 09:15:11 — `DIVE RECOVERY` at 2s-to-ground (alt=1436m, rate=-733m/s,
+  nose -90°). Escalated within 6ms. Altitude 1436m → 4060m (+3s) → 4560m,
+  nose +90° climbing (+6s) → 4763m, cleared at +8.7s. No crash.
+- 11:28:46 — `DIVE RECOVERY` at 2s-to-ground (alt=803m, rate=-466m/s, nose
+  -90°). Escalated within 15ms. Altitude 803m → 2750m, nose +90° (+3s) →
+  3082m (+6s), cleared at +7.5s. No crash.
+
+**Two mid-hold escalations that still ended in a crash**, both matching the
+exact signature ADR 137's own D4 corrected picture already documented
+(airbrake-only recovery has a ceiling on how steep/fast a dive it can
+arrest, independent of how promptly it's triggered):
+- 09:28:27 — `DIVE RECOVERY` at 11s-to-ground (alt=1313m, rate=-125m/s).
+  Escalated within 8ms. Dive kept steepening anyway — 930m/-247m/s at
+  -76° three seconds later — telemetry went blind, respawn confirmed at
+  09:28:36, `CRASH WITH MISSILES` logged the same second (3 missiles).
+- 10:55:06 — `DIVE RECOVERY` at 7s-to-ground (alt=2973m, rate=-398m/s).
+  Escalated within 4ms. 938m/-404m/s three seconds later, crash confirmed
+  at 10:55:13 (2 missiles).
+
+**Reading this measurement plainly**: D9 does exactly the one job it was
+built for — an already-running Climb hold now reliably learns about a
+mid-hold emergency change, engaging airbrake and suppressing afterburner
+within single-digit milliseconds of the tree's verdict, every time, with
+zero missed transitions and zero double-fires across 33 events. It does
+**not** — and was never meant to — raise the ceiling on how steep a dive
+airbrake-only recovery can arrest; 2 of 12 mid-hold escalations this
+session crashed anyway, consistent with (not worse than) the rate D4
+already found for escalations caught even earlier (22s-to-ground) in the
+2026-09-10 session. Whether that ceiling itself is worth addressing (a
+still-earlier trigger, a stronger recovery input, or accepting it as a
+physical limit) remains the open question D4 already left unresolved — this
+trial adds two more data points to it, not a new one.
 
 ## Open Questions
 

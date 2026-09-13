@@ -214,6 +214,58 @@ def test_non_emergency_never_presses_airbrake(monkeypatch):
     assert not _releases(kb, AIRBRAKE_KEY)
 
 
+def test_emergency_escalates_mid_hold(monkeypatch, caplog):
+    """ADR 137 D9: a non-emergency hold that gets a live escalation mid-hold
+    engages airbrake and suppresses afterburner without needing to restart
+    the hold — the "Third Live Trial" gap this decision closes."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False, fuel=100)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=5.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()   # emergency=False
+    time.sleep(0.1)
+    assert _presses(kb, AFTERBURNER_KEY), "routine climb never pressed afterburner"
+    assert not _presses(kb, AIRBRAKE_KEY)
+
+    with caplog.at_level("WARNING"):
+        ctrl.set_climb_emergency(True)
+        time.sleep(0.4)   # let the 0.25s poll loop pick up the escalation
+
+    assert _presses(kb, AIRBRAKE_KEY), "escalation never engaged airbrake"
+    assert _releases(kb, AFTERBURNER_KEY), "escalation never released afterburner"
+    escalated = [r for r in caplog.records if "ESCALATED" in r.message]
+    assert len(escalated) == 1, "escalation logged once per transition, not per poll tick"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+    assert _releases(kb, AIRBRAKE_KEY), "airbrake never released at climb end"
+
+
+def test_emergency_de_escalates_mid_hold(monkeypatch, caplog):
+    """ADR 137 D9: an emergency hold that clears mid-hold releases airbrake
+    and resumes normal fuel-floor logic."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False, fuel=100)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=5.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(emergency=True)
+    time.sleep(0.1)
+    assert _presses(kb, AIRBRAKE_KEY), "emergency climb never pressed airbrake"
+
+    with caplog.at_level("WARNING"):
+        ctrl.set_climb_emergency(False)
+        time.sleep(0.4)
+
+    assert _releases(kb, AIRBRAKE_KEY), "de-escalation never released airbrake"
+    cleared = [r for r in caplog.records if "CLEARED" in r.message]
+    assert len(cleared) == 1, "de-escalation logged once per transition, not per poll tick"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
 def test_duplicate_start_suppressed(monkeypatch):
     analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
     kb = _FakeKeyboard()

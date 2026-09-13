@@ -35,6 +35,7 @@ from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler, read_loadavg
 from .heap_census import HeapCensus
+from .eject_stuck_detector import EjectStuckDetector
 from .liveness_guard import LivenessGuard
 from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
@@ -396,6 +397,11 @@ def main():
                              "game window. Required for the ADR 045 presenter lane (frames are "
                              "drawn AT the region); wrong for real-game capture (make p1/p2/p3), "
                              "where the game window sits at its own desktop offset.")
+    parser.add_argument("--record-session", action="store_true",
+                        help="Design 012: record a video of this session (logs/session_<run_id>.mp4) "
+                             "paired with a JSONL behavior-tree trace (logs/bt_trace_<run_id>.jsonl), "
+                             "both keyed to PerformanceTracker.run_id. Opt-in — set via the "
+                             "Makefile's 'v' argument (make rd v), not the default.")
     args = parser.parse_args()
 
     console_level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -503,7 +509,7 @@ def main():
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import (set_injection_display, set_injected_keys,
                                   set_takeover_keys, set_handback_keys,
-                                  set_echo_safe_keys)
+                                  set_echo_safe_keys, set_operator_release_keys)
         from .keybindings import MISSION_J20_KEY, AUTO_MISSION_KEY
         from .controller import INJECTABLE_KEYS, TAKEOVER_KEYS
         set_injection_display(nested_display)
@@ -525,6 +531,14 @@ def main():
         # discriminates wingman's periodic game_starting_loop presses from a
         # genuine operator press, so it is safe to always deliver.
         set_echo_safe_keys((MISSION_J20_KEY,))
+        # ADR 099 D4c: Backspace's second press (close everything) only fires
+        # after the first press already stopped wingman's automation, so
+        # there is nothing left for a stray keypress to hijack by then — the
+        # first press keeps requiring ctrl+alt. `ctrl` is assigned later in
+        # this function; the lambda resolves it at call time, same as
+        # `manual_state_fn` above resolving `analyzer`.
+        set_operator_release_keys(
+            ('backspace',), operator_stopped_fn=lambda: ctrl.operator_stop_requested())
         from .input_linux import _observe_display_names
         logger.info("ADR 099: nested lane ACTIVE - capture and injection on %s, "
                     "hotkeys observed on %s", nested_display,
@@ -688,6 +702,28 @@ def main():
 
     tracker = PerformanceTracker(cfg, version=WINGMAN_VERSION)
     analyzer = GameStateAnalyzer(cfg, tracker=tracker)  # also usable as a context manager via __enter__/__exit__
+
+    # Design 012: opt-in session video + behavior-tree trace, keyed to the
+    # same run_id. Real/live sessions only — replay/capture mode already
+    # have their own dedicated capture engines, and filming a replay would
+    # just re-record pre-recorded screenshots.
+    video_recorder = None
+    bt_trace_writer = None
+    if args.record_session and not replay_mode and not capture_mode:
+        from .session_recording import BtTraceWriter, VideoRecorder
+        Path("logs").mkdir(exist_ok=True)
+        _rec_cfg = cfg.get("session_recording", {}) or {}
+        video_recorder = VideoRecorder(
+            region, monitor_index, game_window_offset, nested_display,
+            out_path=f"logs/session_{tracker.run_id}.mp4",
+            fps=float(_rec_cfg.get("fps", 2.0)),
+            scale=float(_rec_cfg.get("scale", 0.5)),
+        )
+        video_recorder.start()
+        bt_trace_writer = BtTraceWriter(f"logs/bt_trace_{tracker.run_id}.jsonl")
+        logger.info("Design 012: recording session video to logs/session_%s.mp4 "
+                    "and behavior-tree trace to logs/bt_trace_%s.jsonl",
+                    tracker.run_id, tracker.run_id)
 
     # Party invites are DECLINED by default: accepting drops the aircraft into
     # someone else's squad mid-session, which silently changes what an unattended
@@ -1087,6 +1123,7 @@ def main():
         analyzer, ctrl, cfg.get("behavior_tree", {}), j20_cfg, cfg.get("minimap", {}),
         ammo_events=ammo_events, stats_tracker=stats_tracker,
         jet_profile_cfg=cfg.get("jet_profile", {}),
+        trace_writer=bt_trace_writer,
     )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
@@ -1133,6 +1170,10 @@ def main():
     # work — this is the generic backstop, in the shape of ADR 090's guard.
     liveness = LivenessGuard(cfg.get("liveness_guard", {}))
     _liveness_ocr_offsets = None
+    # Anomaly 003: diagnostic-only, checked below only when --record-session
+    # is active. See docs/anomaly/003-eject-no-telemetry-false-death-leaves-
+    # aircraft-unflown.md.
+    eject_stuck = EjectStuckDetector(cfg.get("eject_stuck_detector", {}))
     heap_census = HeapCensus(cfg.get("heap_census", {}))
     if heap_census.enabled:
         logger.info(
@@ -1239,6 +1280,19 @@ def main():
                     "\033[93m🛑 MEMORY GUARD: ending session (%s) — restart to "
                     "reset perception latency (ADR 090)\033[0m",
                     resource_sampler.guard_reason())
+                break
+            # Anomaly 003: diagnostic-only, and deliberately NOT gated on
+            # _safe like the two guards above — the aircraft is already
+            # unflown (that is the anomaly), so waiting for GAME_LOBBY would
+            # mean waiting on the same respawn confirmation that never comes.
+            if args.record_session and eject_stuck.check(
+                    analyzer.game_state, ctrl.eject_descent_active()):
+                snap = analyzer.get_telemetry()   # context only, not the trigger
+                logger.warning(
+                    "\033[93m🛑 ANOMALY 003: ending session — GAME_BATTLE_EJECT "
+                    "stuck with no resolution (telemetry fresh=%s at "
+                    "termination); recording in progress for review\033[0m",
+                    snap.altitude_fresh() if snap else "unavailable")
                 break
             # Capture and analyze frame
             frame = cap.get_frame()
@@ -1642,6 +1696,18 @@ def main():
                          and _close_enabled)
         if hasattr(cap, "cleanup"):
             cap.cleanup()
+        # Design 012: never let a recording failure block a normal shutdown —
+        # same defensive posture as every other cleanup step here.
+        if video_recorder is not None:
+            try:
+                video_recorder.stop()
+            except Exception as e:
+                logger.warning("Design 012: video recorder stop failed: %s", e)
+        if bt_trace_writer is not None:
+            try:
+                bt_trace_writer.close()
+            except Exception as e:
+                logger.warning("Design 012: trace writer close failed: %s", e)
         ctrl.cleanup(keep_hotkeys=standby_armed)
         # ADR 095: the run file is written from inside analyzer.cleanup(), via
         # on_session_end() once the OCR pool has joined. load_end has to be taken

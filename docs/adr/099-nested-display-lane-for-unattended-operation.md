@@ -121,6 +121,28 @@ the same seconds, against SAF-001's 2.0 s cessation bound. The `i/j/k/l` path
 is not lost — it moves to the operator's display, where wingman injects nothing
 and `ctrl+alt` separates it from typing.
 
+**D4c (2026-09-12). Once wingman has already stopped, its own release key
+bypasses `ctrl+alt` on the operator's display too.** Live-observed:
+Backspace's first press ends wingman's automation (MetalStorm keeps running,
+under manual control) and requires `ctrl+alt` like any other operator-display
+hotkey — D4a's exact case, since wingman is still actively flying up to that
+instant. The **second** press, which closes MetalStorm and the nested
+display, was requiring the same modifier — but by then wingman has already
+released every key and is doing nothing but waiting; there is no aircraft
+left for a stray keypress to hijack, so the modifier was protecting nothing.
+The operator's own framing: the first Backspace is supposed to hand over
+full manual control "above all states," and a shutdown confirmation that
+needs a specific modifier combo remembered under pressure undermines that.
+
+Implemented as `set_operator_release_keys` in `input_linux.py` — the
+operator-display analogue of D4a's `_handback_keys` bypass, keyed on
+`Controller.operator_stop_requested()` instead of manual-takeover FSM state
+(STANDBY is not an FSM state). Deliberately scoped to the **second** press
+only: exempting the first press too would reopen the exact 2026-08-30
+incident D4a measured (`'backspace'` was one of the keys named in it) — a
+bare Backspace pressed anywhere on the operator's desktop while wingman is
+still actively flying would end the automation mid-session by accident.
+
 **D5. The switch is `nested.enabled` in config, not a parallel make target.**
 A single environment variable cannot express D4 — it sets one display for all
 three consumers, which is why the first implementation silently broke hotkeys.

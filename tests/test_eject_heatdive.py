@@ -64,15 +64,18 @@ def _keys(ctrl):
 
 
 def _make_ctrl(monkeypatch, analyzer=None, capture=None, heatdive_enabled=False,
-                legacy_nose_hold_s=0.05, heatdive_padlock_verify=False):
+                legacy_nose_hold_s=0.05, heatdive_padlock_verify=False,
+                eject_max_s=0.2, check_interval_s=None):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     ecl = {
         "enabled": False,               # legacy branch — fast, deterministic
         "legacy_nose_hold_s": legacy_nose_hold_s,
-        "eject_max_s": 0.2,
+        "eject_max_s": eject_max_s,
         "heatdive_enabled": heatdive_enabled,
         "heatdive_padlock_verify": heatdive_padlock_verify,
     }
+    if check_interval_s is not None:
+        ecl["check_interval_s"] = check_interval_s
     return Controller(
         (0, 0, 1920, 1200),
         analyzer=analyzer,
@@ -164,6 +167,45 @@ def test_heatdive_thread_does_not_outlive_the_dive(monkeypatch):
     updates_at_return = tracker.updates
     time.sleep(0.3)
     assert tracker.updates == updates_at_return, "heatdive loop kept running after the dive ended"
+
+
+def test_heatdive_thread_stops_when_descent_control_ends_not_at_full_dive_completion(monkeypatch):
+    """ADR 136 D5. Regression for a live incident (2026-09-12): descent
+    control gave up on a transient telemetry loss ("no_telemetry", assuming
+    the aircraft had died), telemetry then recovered and the aircraft kept
+    flying for 31s with no pitch input at all — while the heatdive loop kept
+    re-acquiring targets and rolling toward them the whole time, because
+    nothing told it to stop until eject_and_dive()'s outer `finally`, which
+    only runs at the END of the hold-until-respawn wait. The heatdive loop
+    must stop as soon as descent control itself ends, well before the
+    surrounding hold phase (and eject_and_dive() as a whole) completes."""
+    analyzer = _AnalyzerStub(ammo=2)
+    capture = _CaptureStub()
+    tracker = _TrackerStub()
+    # Descent "ends naturally" quickly (short nose hold); the surrounding
+    # hold-until-respawn phase is deliberately long, so a fix that only
+    # stops the heatdive loop at full dive completion — not right after
+    # descent control ends — would show tracker.updates still growing well
+    # into that hold window.
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=capture,
+                       heatdive_enabled=True, legacy_nose_hold_s=0.1,
+                       eject_max_s=2.0, check_interval_s=0.1)
+    ctrl.set_target_tracker(tracker)
+
+    ctrl.eject_and_dive()
+    # Wait past descent-control's own natural end (~0.1s) plus a couple of
+    # the heatdive loop's own 0.2s poll cycles, well short of the 2.0s hold.
+    time.sleep(0.5)
+    assert ctrl.is_ejecting(), "test setup: the hold phase should still be running"
+    updates_after_descent_ends = tracker.updates
+    time.sleep(0.5)
+    assert ctrl.is_ejecting(), "test setup: still mid-hold, not yet complete"
+    assert tracker.updates == updates_after_descent_ends, (
+        "heatdive loop kept tracking/rolling during the hold-until-respawn "
+        "phase, after descent control itself had already ended")
+
+    ctrl._eject_thread.join(timeout=3.0)
+    assert not ctrl._eject_thread.is_alive(), "eject_and_dive did not complete in time"
 
 
 # ---------------------------------------------------------------------------

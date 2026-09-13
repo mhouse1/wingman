@@ -40,7 +40,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight
+.PHONY: leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -226,6 +226,12 @@ leak-check-gate:
 		echo "   Run a session of at least 1h before trusting a clean result."; \
 	fi
 
+# Research 013: renders the actual build_tree() output (config as loaded, no
+# actuators, no live game) so "does the diagram in architecture.md match the
+# code" is answerable by running something instead of re-reading both.
+tree:
+	@$(PYTHON_RUN) scripts/render-behavior-tree.py $(BT_ARGS)
+
 # The gate set both preview targets must run. Shared so the two cannot drift:
 # tp-full is documented as "tp + the ADR037 real-OCR lane" (CLAUDE.md), and it
 # had silently fallen behind — reqs-gate was missing, and leak-check-gate was
@@ -385,14 +391,24 @@ else
 GAME_LAUNCH_DEPS :=
 endif
 
+# Design 012: "make rd v" (also r, r1, r2 — r1/r2 chain through rd below)
+# opts into recording a session video + BT JSONL trace. `v` is a real,
+# no-op target purely so GNU Make accepts it as a second goal on the
+# command line — without a rule for it, "make rd v" fails with "No rule to
+# make target 'v'". Plain "make rd" is unaffected either way.
+v:
+	@:
+
+RECORD_FLAG = $(if $(filter v,$(MAKECMDGOALS)),--record-session,)
+
 # Launch MetalStorm without starting Wingman (Linux: launch-game + wait-game; Windows: no-op).
 g: $(GAME_LAUNCH_DEPS)
 
 r: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main
+	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main $(RECORD_FLAG)
 
 rd: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log
+	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG)
 
 # ---------------------------------------------------------------------------
 # Per-account run targets (Research 005)
@@ -468,6 +484,10 @@ r1-probe:
 #   make turn-outcome LOG=logs/<session>.log
 turn-outcome:
 	$(PYTHON_RUN) scripts/turn-outcome.py $(or $(LOG),wingman.log)
+
+# Design 012: make frame VIDEO=logs/session_<run_id>.mp4 AT=1842.3 [OUT=/tmp/frame.png]
+frame:
+	$(PYTHON_RUN) scripts/extract-frame.py --video "$(VIDEO)" --at "$(AT)" --out "$(or $(OUT),/tmp/frame.png)"
 
 sendevent-probe:
 	$(PYTHON_RUN) scripts/sendevent-probe.py --wait-for-game $(or $(WAIT),60) \

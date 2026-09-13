@@ -26,6 +26,8 @@ from wingman.behavior_tree import (
     make_climb_condition,
     make_snapshot_writer,
     selected_tactic,
+    tree_status_dict,
+    tree_status_text,
 )
 
 BT_CFG = {"disengage_after_s": 30, "disengage_hold_s": 10, "evade_hold_s": 10}
@@ -102,6 +104,36 @@ def test_engage_when_any_ring_occupied(harness):
     assert tick(harness, make_snap(ring_short=1)) == TACTIC_ENGAGE
 
 
+def test_tree_status_text_names_the_running_leaf(harness):
+    """Research 013's live-status view: the selected tactic must show RUNNING
+    and every other top-level slot must appear too, not just the winner —
+    the whole point is seeing what did NOT run, not only what did."""
+    tick(harness, make_snap(ring_long=1))
+    text = tree_status_text(harness[0])
+    assert "Engage [*]" in text          # '*' is py_trees' RUNNING glyph
+    assert "AttackSupport [-]" in text   # never reached: still INVALID
+    for name in (TACTIC_IDLE, TACTIC_EJECT):
+        assert name in text
+
+
+def test_tree_status_text_before_any_tick_does_not_raise(harness):
+    # A freshly built tree has no status yet (py_trees.common.Status.INVALID)
+    # — this must render, not crash, since nothing here has ticked once.
+    text = tree_status_text(harness[0])
+    assert "TacticSelector" in text
+
+
+def test_tree_status_dict_is_the_structured_sibling(harness):
+    """Design 012: same data as tree_status_text, JSON-serializable instead
+    of ascii art — the JSONL trace writer's actual payload."""
+    tick(harness, make_snap(ring_long=1))
+    statuses = tree_status_dict(harness[0])
+    assert statuses["Engage"] == "RUNNING"
+    assert statuses["Idle"] == "FAILURE"
+    assert statuses["AttackSupport"] == "INVALID"
+    assert statuses["TacticSelector"] == "RUNNING"
+
+
 def test_attack_support_is_the_fallback(harness):
     snap = make_snap(enemy_absent_seconds=5.0)   # no contacts, not absent long enough
     assert tick(harness, snap) == TACTIC_ATTACK_SUPPORT
@@ -146,17 +178,22 @@ def test_missiles_unknown_is_not_empty(harness):
 # ---------------------------------------------------------------------------
 
 class _TacticRecorder:
-    """start_fn / is_running_fn pair that records starts."""
+    """start_fn / is_running_fn / update_fn trio that records calls."""
 
     def __init__(self):
         self.starts = 0
         self.running = False
+        self.updates = 0
 
     def start(self):
         self.starts += 1
 
     def is_running(self):
         return self.running
+
+    def update(self, _snapshot):
+        # ADR 137 D9: the RUNNING-tick update channel.
+        self.updates += 1
 
 
 def make_actuated_harness(clock, eject=None, disengage=None, missile_evade=None):
@@ -901,9 +938,11 @@ def test_the_release_threshold_is_wider_than_the_entry():
 
 
 def test_the_hysteresis_is_wired_from_config():
+    """ADR 139 D1: this logic lives in `_build_boundary_slot` now, not
+    inline in `build_tree` — the slot table moved it, not the wiring."""
     import inspect
-    from wingman.behavior_tree import build_tree
-    src = inspect.getsource(build_tree)
+    from wingman.behavior_tree import _build_boundary_slot
+    src = inspect.getsource(_build_boundary_slot)
     assert "release_frac=boundary_cfg.get(\"release_frac\")" in src
     assert "min_clear_frac" in src
 
@@ -1123,3 +1162,172 @@ def test_handler_defaults_to_padlock_true_for_an_unknown_active_profile():
     today."""
     h = _handler({"active": "does_not_exist", "profiles": {}})
     assert h._has_padlock is True
+
+
+# --- ADR 139: golden-master child order, pre slot-table refactor ------------
+#
+# Captured against the pre-refactor `build_tree` (imperative `children.insert`
+# calls) across the full climb/boundary/regroup/sustain flag matrix. This must
+# stay green, unmodified, once ADR 139 D1 replaces the imperative inserts with
+# a declared slot table — it is the only thing that makes "zero behavior
+# change" verified rather than asserted.
+
+_CLIMB_BAND = {"enter_below_alt": 1000, "exit_above_alt": 2000}
+_SUSTAIN_BAND = {"enabled": True, "enter_below_alt": 3000, "exit_above_alt": 4000}
+
+_CHILD_ORDER_MATRIX = [
+    # (climb_enabled, boundary_configured, regroup_enabled, sustain_enabled) -> names
+    ((False, False, False, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Engage", "AttackSupport")),
+    ((False, False, False, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Engage", "AttackSupport")),
+    ((False, False, True, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Engage", "Regroup", "AttackSupport")),
+    ((False, False, True, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Engage", "Regroup", "AttackSupport")),
+    ((False, True, False, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Engage", "AttackSupport")),
+    ((False, True, False, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Engage", "AttackSupport")),
+    ((False, True, True, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Engage", "Regroup", "AttackSupport")),
+    ((False, True, True, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Engage", "Regroup", "AttackSupport")),
+    ((True, False, False, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Climb", "Engage", "AttackSupport")),
+    ((True, False, False, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Climb", "Engage", "AttackSupport")),
+    ((True, False, True, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Climb", "Engage", "Regroup", "AttackSupport")),
+    ((True, False, True, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Climb", "Engage", "Regroup", "AttackSupport")),
+    ((True, True, False, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Climb", "Engage", "AttackSupport")),
+    ((True, True, False, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Climb", "Engage", "AttackSupport")),
+    ((True, True, True, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Climb", "Engage", "Regroup", "AttackSupport")),
+    ((True, True, True, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Climb", "Engage", "Regroup", "AttackSupport")),
+]
+
+
+@pytest.mark.parametrize("flags,expected_names", _CHILD_ORDER_MATRIX)
+def test_build_tree_child_order_across_flag_matrix(flags, expected_names):
+    climb_enabled, boundary_configured, regroup_enabled, sustain_enabled = flags
+    climb_cfg = dict(_CLIMB_BAND, enabled=climb_enabled)
+    if sustain_enabled:
+        climb_cfg["sustain"] = dict(_SUSTAIN_BAND)
+    bt_cfg = dict(BT_CFG, climb=climb_cfg)
+    if boundary_configured:
+        bt_cfg["boundary"] = {"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0}
+    tree = build_tree(bt_cfg, regroup_enabled=regroup_enabled)
+    names = tuple(c.name for c in tree.root.children)
+    assert names == expected_names
+
+
+# --- ADR 139 D2: consolidated Climb / BoundaryTurn enablement predicates ----
+
+from wingman.behavior_tree import climb_tactic_enabled, boundary_tactic_enabled
+
+
+def test_climb_tactic_enabled():
+    assert climb_tactic_enabled({"climb": {"enabled": True}}) is True
+    assert climb_tactic_enabled({"climb": {"enabled": False}}) is False
+    assert climb_tactic_enabled({"climb": {}}) is False
+    assert climb_tactic_enabled({}) is False
+
+
+def test_boundary_tactic_enabled():
+    assert boundary_tactic_enabled({"boundary": {"turn_frac": 0.5}}) is True
+    assert boundary_tactic_enabled({"boundary": {"turn_frac": 0.0}}) is False
+    assert boundary_tactic_enabled({"boundary": {}}) is False
+    assert boundary_tactic_enabled({}) is False
+
+
+def test_climb_and_boundary_enabled_checks_share_one_predicate():
+    """ADR 139 D2: getting Climb/BoundaryTurn to actuate live used to require
+    two independently-written boolean expressions (one in `build_tree`
+    deciding tree insertion, one in `BehaviorTreeHandler.__init__` deciding
+    actuator wiring) to agree. Assert both sites call the same named
+    predicate instead of each spelling out its own `.get(...)` check."""
+    import inspect
+    from wingman.behavior_tree import _build_climb_slot, _build_boundary_slot
+    from wingman.tick_handlers import BehaviorTreeHandler
+
+    bt_src = inspect.getsource(_build_climb_slot) + inspect.getsource(_build_boundary_slot)
+    handler_src = inspect.getsource(BehaviorTreeHandler.__init__)
+
+    assert "climb_tactic_enabled(" in bt_src
+    assert "boundary_tactic_enabled(" in bt_src
+    assert "climb_tactic_enabled(" in handler_src
+    assert "boundary_tactic_enabled(" in handler_src
+    for src in (bt_src, handler_src):
+        assert 'climb_cfg.get("enabled"' not in src
+        assert 'boundary_cfg.get("turn_frac"' not in src
+
+
+# --- ADR 139 D3: hysteresis state is inspectable via named attributes ------
+
+def test_climb_condition_state_is_introspectable_via_named_attributes():
+    clock = FakeClock()
+    cond = make_climb_condition(1000, 2000, clock=clock)
+    assert cond.active is False
+    assert cond.emergency_active is False
+    # Below enter_below_alt: crosses the band.
+    assert cond(make_snap(altitude=500.0)) is True
+    assert cond.active is True
+    assert cond.emergency_active is False
+
+
+def test_climb_update_fn_called_only_while_already_running():
+    """ADR 137 D9: `update_fn` fires on every RUNNING tick AFTER the first
+    — never on the same tick as `start_fn`, and never before selection."""
+    climb = _TacticRecorder()
+    cfg = dict(BT_CFG, climb={"enabled": True, "enter_below_alt": 1000,
+                              "exit_above_alt": 2000})
+    tree = build_tree(cfg, actuators={
+        TACTIC_CLIMB: (climb.start, climb.is_running, climb.update)})
+    writer = make_snapshot_writer()
+
+    def _tick(snap):
+        writer.set("snapshot", snap)
+        tree.tick()
+        return selected_tactic(tree)
+
+    # Tick 1: newly selected — start_fn fires, update_fn does not.
+    assert _tick(make_snap(altitude=500.0)) == TACTIC_CLIMB
+    assert climb.starts == 1
+    assert climb.updates == 0
+
+    # Tick 2: still selected (is_running_fn now True) — update_fn fires,
+    # start_fn does not fire again.
+    climb.running = True
+    assert _tick(make_snap(altitude=500.0)) == TACTIC_CLIMB
+    assert climb.starts == 1
+    assert climb.updates == 1
+
+
+def test_boundary_condition_state_is_introspectable_via_named_attributes():
+    cond = make_boundary_condition(0.50, min_clear_frac=0.0)
+    assert cond.active is False
+    assert cond.min_dist is None
+    assert cond(_bsnap(0.40, +0.30)) is True
+    assert cond.active is True
+    assert cond.min_dist == 0.40

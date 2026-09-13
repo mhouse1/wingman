@@ -553,3 +553,57 @@ def test_a_broken_manual_predicate_does_not_open_the_gate():
     finally:
         il.set_handback_keys((), manual_state_fn=lambda: False)
         il.set_injection_display(None)
+
+
+def test_the_release_key_needs_ctrl_alt_while_wingman_is_still_running():
+    """ADR 099 D4c: Backspace's FIRST press (ending wingman) is exactly D4a's
+    case — wingman may still be actively flying, so a bare press must not
+    reach the handler."""
+    il = _lane()
+    stopped = {"on": False}
+    il.set_operator_release_keys(("backspace",), operator_stopped_fn=lambda: stopped["on"])
+    try:
+        assert il.should_deliver_hotkey(":0", "backspace", 0) is False
+        assert il.should_deliver_hotkey(":0", "backspace", CTRL_ALT) is True
+    finally:
+        il.set_operator_release_keys((), operator_stopped_fn=lambda: False)
+        il.set_injection_display(None)
+
+
+def test_the_release_key_bypasses_ctrl_alt_once_wingman_has_stopped():
+    """The SECOND press (close everything) fires only after the first press
+    already stopped wingman — nothing left running for a stray keypress to
+    hijack, so the modifier is no longer protecting anything real."""
+    il = _lane()
+    stopped = {"on": False}
+    il.set_operator_release_keys(("backspace",), operator_stopped_fn=lambda: stopped["on"])
+    try:
+        stopped["on"] = True
+        assert il.should_deliver_hotkey(":0", "backspace", 0) is True
+    finally:
+        il.set_operator_release_keys((), operator_stopped_fn=lambda: False)
+        il.set_injection_display(None)
+
+
+def test_the_release_key_bypass_does_not_leak_to_other_keys():
+    """Only the declared release key gets the bypass — ordinary hotkeys still
+    need ctrl+alt even after wingman has stopped."""
+    il = _lane()
+    il.set_operator_release_keys(("backspace",), operator_stopped_fn=lambda: True)
+    try:
+        assert il.should_deliver_hotkey(":0", "m", 0) is False
+    finally:
+        il.set_operator_release_keys((), operator_stopped_fn=lambda: False)
+        il.set_injection_display(None)
+
+
+def test_a_broken_operator_stopped_predicate_does_not_open_the_gate():
+    def boom():
+        raise RuntimeError("state unavailable")
+    il = _lane()
+    il.set_operator_release_keys(("backspace",), operator_stopped_fn=boom)
+    try:
+        assert il.should_deliver_hotkey(":0", "backspace", 0) is False
+    finally:
+        il.set_operator_release_keys((), operator_stopped_fn=lambda: False)
+        il.set_injection_display(None)

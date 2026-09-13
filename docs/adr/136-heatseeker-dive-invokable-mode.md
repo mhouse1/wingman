@@ -323,6 +323,61 @@ false `rearmed` aborts). This is an open item, not a closed one: identifying
 the real padlock-off indicator (or an entirely different verification
 approach) is still needed before D4 can be re-enabled.
 
+**D5 (2026-09-12): the heatdive loop now stops right when descent control
+ends, not only when the whole dive completes.** D3 said the roll-tracking
+addition "stops the instant `self._eject_stop` is set" — true for an
+*externally cancelled* dive (respawn, manual takeover), but the dive's own
+**natural**-completion path (`established`, `no_telemetry`, `over_rotation`,
+`pulses_exhausted`, `timeout`) never sets `self._eject_stop` at all. The only
+place that told the heatdive thread to stop on that path was the outer
+`finally` in `eject_and_dive`'s `_run()` — which runs *after* the entire
+subsequent hold-until-respawn wait, not right after descent control itself
+ends. `_eject_heatdive_loop`'s own docstring already promised "stops...
+right after the dive ends for any reason"; the implementation didn't match
+it.
+
+Live-measured, 2026-09-12: descent control hit its telemetry-staleness
+horizon (`no_telemetry`) and gave up on pitch, assuming the aircraft had
+died — logged as "descent control ended (no_telemetry) — holding until
+respawn." Telemetry actually recovered a few seconds later (altitude
+readings resumed and varied normally: 1748m to 1805m, a dip to 1221m at
+-606 m/s, recovering to 1967m) — the aircraft was genuinely still alive and
+flying, not dead. No respawn was ever detected in the following 31 seconds.
+For that entire window the heatdive loop kept running (nothing had told it
+to stop — `self._eject_stop` was never set on this path), repeatedly
+re-acquiring on-screen targets and rolling toward them with **zero pitch
+input from wingman at all**: an aircraft flying forward on whatever attitude
+it had settled into, twitching its roll axis toward re-tracked targets with
+no coordinated dive, no firing pattern tied to an actual engagement — until
+the operator took manual control.
+
+Fix: `eject_and_dive`'s natural-completion branch now calls
+`heatdive_stop.set()` / `heatdive_thread.join(timeout=2.0)` immediately
+after logging "descent control ended... holding until respawn", before
+entering the hold-until-respawn wait — not only in the outer `finally`
+(kept as a belt-and-braces last resort; both calls are idempotent). The
+*cancelled* branch needs no equivalent change: `self._eject_stop` is
+already set there, which `_eject_heatdive_loop`'s own loop condition
+(`while not stop_event.is_set() and not self._eject_stop.is_set()`) already
+checks directly.
+
+Covered by
+`tests/test_eject_heatdive.py::test_heatdive_thread_stops_when_descent_control_ends_not_at_full_dive_completion`
+— a long hold-until-respawn window (`eject_max_s=2.0`) against a short
+descent phase (`legacy_nose_hold_s=0.1`), asserting tracker activity stops
+within the descent phase's own timeframe rather than continuing into the
+hold. Verified to fail without the fix (reverted locally: 3 tracker updates
+during the hold window instead of the expected 2, i.e. the loop kept
+running past the point it should have stopped).
+
+### Validation (D5)
+
+- Unit, satisfied (test above, confirmed to fail without the fix).
+- Live, open. Next session's log should show `TargetTracker`/`roll_right`
+  activity stop within roughly one heatdive-loop poll cycle (0.2s) of
+  "descent control ended" firing, rather than continuing through any
+  subsequent "holding until respawn" window.
+
 ## Non-Goals
 
 1. **Not a separate mission mode.** Superseded by the revision above — no

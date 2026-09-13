@@ -104,6 +104,28 @@ file is picked up automatically.
 
 ## 5. Run
 
+**The gate is step 4 of 7, not the end of the cycle.** An anomaly-detector fix
+landed 2026-09-13: tests went green, and the report to the operator described
+running it live as "worth doing" — advice for later, not a step taken or even
+asked about. The cycle stalled one short of its own stated shape, silently,
+and the operator had to notice and ask why nothing had actually run.
+
+After the gate passes, do one of these two things **in the same turn** —
+never describe Run as something to consider later:
+
+- **Launch it** — `make r1`/`make rd` below, backgrounded if long.
+- **Ask, explicitly**, if launching now is not your call to make — a live
+  session is a bigger action than a test run: it can run for hours
+  unattended and occupies the operator's own game account, which is reason
+  to confirm before starting it, not reason to omit it as the next step.
+  "Gate's green — want me to start a live run now?" is one sentence.
+
+**A fix for a rare or intermittent failure is not an exception.** "Small
+samples mislead" (above) means a short check afterward cannot prove the fix
+worked — it does not mean skip running. Background a long session anyway;
+Watch (step 6) is what accumulates evidence toward a real verdict, across
+this run and the ones after it, not a single same-turn check.
+
 ```bash
 make r1        # account 1; r2 for account 2. Long-running: background it.
 make rd        # attaches to a game that is already up
