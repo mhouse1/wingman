@@ -20,10 +20,10 @@ post-descent hold now also resumes control on telemetry confirmation alone
 (Disposition item 2) — not gated behind `--record-session`; it changes
 default eject behavior for everyone.
 
-**As of the 2026-09-14 full-day measurement plus one further `/check`
-verification session: n=49 real occurrences across five sessions
-(2026-09-13 x4, 2026-09-14 x1), recovery time (declaration to resolution)
-min 1.29s / median ~7s / max 18.77s — zero exceeded 30s, zero reached the
+**As of 2026-09-14 06:38 (session still in progress — this count will
+still grow): n=62 real occurrences across six sessions (2026-09-13 x4,
+2026-09-14 x2), recovery time (declaration to resolution) min 1.29s /
+median ~7-8s / max 18.77s — zero exceeded 30s, zero reached the
 120s backstop, zero triggered the detector, across every session
 measured.** Compare to 63.3s/41.8s uncorrected before the fix existed. This
 is no longer "one clean trial" — it's a large, repeated, measured sample
@@ -494,7 +494,10 @@ open by design.** Diagnosed via `/check` against
 `logs/wingman_20260913_080229.log`; the fix's resolution was itself
 re-confirmed via a second `/check` on 2026-09-14 against n=49 real
 occurrences across five sessions (see item 2's "`/check` verification"
-entry below) — the operator reviewed that result and agreed. Detection
+entry below) — the operator reviewed that result and agreed. A sixth
+session, still in progress as of 06:38, has added 13 more (n=62 running
+total) with no exceptions — see the Summary above for the live count.
+Detection
 (item 4 below) is implemented and confirmed working against a genuine
 recurrence (session `20260913_113129_acct1`, see "Implemented 2026-09-13"
 above). Item 2 (the actual fix) is implemented and heavily validated. Item
@@ -665,10 +668,17 @@ identified, not mutually exclusive:
    via the explicit telemetry-confirm code path this time (all via
    respawn OCR or round-end — the other two of the three established
    routes, confirming the fix isn't the only thing keeping recovery fast).
-   Zero detector firings. Running total: **n=49 across five sessions, zero
-   exceptions to the sub-19s ceiling.** Operator reviewed this result and
-   agreed the harmful consequence is resolved (2026-09-14) — the basis for
-   this doc's Summary update above.
+   Zero detector firings. Running total at that point: **n=49 across five
+   sessions, zero exceptions to the sub-19s ceiling.** Operator reviewed
+   this result and agreed the harmful consequence is resolved (2026-09-14)
+   — the basis for this doc's Summary update above.
+
+   **Sixth session, still running as of 06:38.** 13 more occurrences,
+   3.30s-16.31s, zero exceptions, zero detector firings. Running total:
+   **n=62 across six sessions.** This session was not itself independently
+   `/check`-verified line-by-line (the operator-agreed resolution above
+   already stands on n=49) — logged here as a live count update, not a
+   new verification pass.
 3. `eject_max_s` (120s) already guarantees FSM recovery via `eject_complete`
    regardless of respawn OCR (see "Why nothing recovered") — this is now
    the backstop behind (2) rather than the primary recovery path.
