@@ -6,19 +6,32 @@
 
 ## Summary
 
-**Status as of 2026-09-13 (later same day): detection implemented and
-live-validated twice; the root-cause fix implemented AND live-validated
-once, with a clean recovery.** `EjectStuckDetector` catches the stuck
+**Status as of 2026-09-14: the harmful consequence is fixed and heavily
+validated; the doc stays Draft pending operator sign-off, and two smaller
+items remain genuinely open.** `EjectStuckDetector` catches the stuck
 condition and ends the session (with a recording) if nothing else resolves
-it. Separately, `eject_and_dive`'s post-descent hold now also resumes
-control on telemetry confirmation alone (Disposition item 2) — not gated
-behind `--record-session`; it changes default eject behavior for everyone.
-Caught a real `no_telemetry` false-death live on the third `make r1 v` run
-and recovered in 6.28s, full flight AND mission control both restored,
-versus 63.3s/41.8s uncorrected in the two prior real occurrences. One clean
-trial — not yet enough to call this closed; see Disposition item 2 for the
-evidence and the residual gap (mission resumption depends on health being
-known, unconfirmed for the case where it isn't).
+it — never had to fire across any session on 2026-09-13. Separately,
+`eject_and_dive`'s post-descent hold now also resumes control on telemetry
+confirmation alone (Disposition item 2) — not gated behind
+`--record-session`; it changes default eject behavior for everyone.
+
+**As of the 2026-09-14 full-day measurement: n=43 real occurrences across
+four sessions on 2026-09-13, recovery time (declaration to resolution)
+min 1.29s / median 7.37s / mean 8.22s / max 18.77s — zero exceeded 30s,
+zero reached the 120s backstop, zero triggered the detector.** Compare to
+63.3s/41.8s uncorrected before the fix existed. This is no longer "one
+clean trial" — it's a large, repeated, measured sample with a consistent
+ceiling well under the original harmful window. See Disposition item 2 for
+the full occurrence log and the "Full-day measurement" write-up.
+
+**What's still genuinely open, not just unclosed paperwork:** (a) the
+residual gap where mission/combat resumption depends on health being known
+at the moment of recovery — flight safety (BoundaryTurn/Climb) is confirmed
+to resume regardless, but full combat resumption in the health-unknown case
+has not been observed in any trial yet; (b) the root cause of the
+underlying telemetry blackout itself is still not understood — this fix is
+a robust mitigation, not a diagnosis of why the blackout happens. Both are
+tracked in Disposition and "What to watch," not silently dropped.
 
 **Revision (2026-09-13, later same day):** the original theory below —
 "the aircraft never died, so nothing was ever going to end the wait" — turned
@@ -477,10 +490,13 @@ identified, not mutually exclusive:
 1. Raise `telemetry.stale_after_s` (currently 6.0s) — or give
    `_eject_descent_control` its own, longer, eject-specific allowance — so
    it stops declaring `no_telemetry` partway through an ordinary respawn
-   transition. Weaker than it first looked: two measured gaps (~6s and
-   ~12s) span a 2x range on n=2, so no single raised value reliably covers
-   both, and it does nothing about the deeper issue in (2) even where it
-   works. Still open; deprioritized below (2).
+   transition. Originally deprioritized on n=2 as "weaker than it first
+   looked." **Re-measured 2026-09-14 on n=43** (see "Full-day measurement"
+   under item 2 below) — still deprioritized, but now for a stronger
+   reason: item (2)'s fix bounds the actual harm to under 19s regardless
+   of when (1) fires, so raising the threshold would reduce declaration
+   *frequency*, not *harm*. Open, low-priority, revisit only if recovery
+   times start climbing.
 2. **Implemented 2026-09-13 (later same day).** Rather than tuning the
    timeout, gave the aircraft a way back to normal flight that doesn't
    depend on the unreliable signal at all. `Controller.eject_and_dive`'s
@@ -583,6 +599,49 @@ identified, not mutually exclusive:
    None`) — health OCR has been unreliable in both real occurrences, so
    combat may stay paused for a life even after this fix correctly restores
    flight safety. Flagged as a smaller, separate residual gap, not blocking.
+
+   **Full-day measurement (2026-09-14, `/iterate` review of the day's
+   archived logs — no new live run, all data already existed from today's
+   sessions).** Every `no_telemetry` occurrence across all of 2026-09-13's
+   sessions with real combat (`wingman_20260913_154430.log` —
+   `session_20260913_121658_acct1`, the log behind rows 1-4 above;
+   `wingman_20260913_203647.log`, behind rows 5-15 above;
+   `wingman_20260913_212404.log`; and the still-unarchived `wingman.log`
+   from the last session of the day), measured with the same real-event
+   pairing used for rows 1-15 (`descent control ended (no_telemetry)` →
+   the next `GAME_BATTLE_EJECT → GAME_BATTLE` or `→ GAME_END_B`, scoped to
+   the same episode — not a proxy signal; a first attempt using
+   `alt=None`/`alt=<value>` in the BT snapshot line was tried and
+   discarded because it kept measuring across state boundaries into
+   unrelated lobby/matchmaking gaps, the exact "instrumentation can lie"
+   trap this skill warns about):
+
+   **n=43. Recovery time (declaration to resolution): min 1.29s, median
+   7.37s, mean 8.22s, max 18.77s. Zero exceeded 30s. Zero exceeded 60s.
+   Zero reached the 120s `eject_max_s` backstop. `EjectStuckDetector`
+   fired zero times across all four sessions.** 12 of the 43 resolved via
+   the telemetry-confirm fix specifically (items 2 above); the remainder
+   via respawn OCR or the round simply ending — the fix is one of three
+   routes sharing the load, exactly as rows 5-15 already showed, now
+   confirmed at more than 4x the sample size.
+
+   **This changes the calculus on Disposition item (1).** The original
+   deprioritization reasoned from n=2 that "no single raised
+   `stale_after_s` value reliably covers both" measured gaps (~6s, ~12s).
+   That's still numerically true, but the premise it was protecting
+   against — that a too-early declaration causes real harm — is now much
+   weaker than when it was written: item (2)'s fix bounds the *consequence*
+   of every declaration to under 19s regardless of whether the 6.0s
+   threshold fires "early" or "on time." Raising `stale_after_s` would
+   mean fewer declarations (less FSM churn, fewer eject-hold cycles,
+   marginally less log noise) but would not measurably reduce harm, since
+   harm is already tightly bounded by (2) independent of when (1) fires.
+   **Recommendation: keep item (1) deprioritized, now on stronger grounds
+   than "weak evidence" — not because the evidence is weak, but because
+   n=43 shows the thing it would fix no longer matters much.** Revisit
+   only if future data shows recovery times climbing (e.g., if the
+   telemetry-confirm fix's assumptions stop holding under some
+   not-yet-seen game-state combination).
 3. `eject_max_s` (120s) already guarantees FSM recovery via `eject_complete`
    regardless of respawn OCR (see "Why nothing recovered") — this is now
    the backstop behind (2) rather than the primary recovery path.

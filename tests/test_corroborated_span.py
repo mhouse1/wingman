@@ -92,12 +92,23 @@ def test_it_reads_frames_the_strict_gate_called_blind():
 
 @needs_corpus
 def test_the_void_corroboration_rejects_no_real_crossing():
-    """The whole design rests on this. If the void can be absent on a genuine
-    crossing, corroboration would VETO real detections — turning a recall fix
-    into a recall regression."""
+    """The whole design rests on this. If the void is absent on a genuine
+    crossing, the relaxation bonus is withheld for that frame — but the code
+    is written so that only ever costs the BONUS, never the underlying
+    detection (`analyzer.py`, ADR 133: "the strict gate stands on its own —
+    this only ever lowers the bar, never raises it"). So the actual safety
+    property isn't "void is always present" (measured false: 2026-09-09's
+    `rtb_..._crossing3.png` has void=0.0002 against a 0.01 threshold, a real
+    RETURN TO BATTLE frame, confirmed by direct inspection) — it's that a low
+    void never coincides with a MISSED detection. Checked here with the real
+    `detect_map_boundary`, not the intermediate void-fraction float, so this
+    can't drift out of sync with what `test_the_relaxed_path_only_ever_lowers_
+    the_bar` already separately guarantees; a genuine regression in the
+    strict gate itself would fail both.
+    """
     a = _analyzer()
     try:
-        voids = []
+        missed_without_void = []
         for f in CROSSINGS:
             img = cv2.imread(str(f))
             if img is None:
@@ -106,12 +117,15 @@ def test_the_void_corroboration_rejects_no_real_crossing():
             crop = get_crop(img, *a.crops["MINIMAP"][:4])
             h, w = crop.shape[:2]
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-            voids.append(a.minimap_void_fraction(hsv, w, h, min(w, h) / 2.0))
-        v = np.array(voids)
-        assert (v > a._boundary_void_min_frac).all(), (
-            f"{(v <= a._boundary_void_min_frac).sum()} of {len(v)} real crossings "
-            f"would be vetoed; lowest void {v.min():.4f} vs "
-            f"threshold {a._boundary_void_min_frac}")
+            void_frac = a.minimap_void_fraction(hsv, w, h, min(w, h) / 2.0)
+            if void_frac > a._boundary_void_min_frac:
+                continue   # gets the relaxation bonus; not what this checks
+            if a.detect_map_boundary(img) is None:
+                missed_without_void.append((f.name, void_frac))
+        assert not missed_without_void, (
+            f"{len(missed_without_void)} real crossing(s) had both low void "
+            f"and a failed detection (would be a genuine recall regression): "
+            f"{missed_without_void[:5]}")
     finally:
         a.cleanup()
 

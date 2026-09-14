@@ -874,6 +874,35 @@ still-earlier trigger, a stronger recovery input, or accepting it as a
 physical limit) remains the open question D4 already left unresolved — this
 trial adds two more data points to it, not a new one.
 
+## Sixth live trial (2026-09-13, 3h52m39s, session
+`session_20260913_164406_acct1`)
+
+Answers Open Question 2's still-unmeasured half: does the wider
+`recover_below_time_s: 30.0` band (raised from 20.0 by D4) increase
+false-positive Climb selections during ordinary combat dives? Session ended
+cleanly via `GAME GONE` (ADR 105 — the game process itself closed; a known,
+separately-tracked memory-growth pattern per Performance 008, not a wingman
+failure) with a full summary: 42 missions, 100% click-to-finish, 0 unknown
+outcomes, 136 respawns, 40 `crash_with_missiles`.
+
+**Measured**: 31 `DIVE RECOVERY` (ADR 086 d2, the time-to-ground trigger
+this question is actually about) events across 42 rounds — 0.74 per round.
+Of those 31, only **4 (13%)** were followed by a `CRASH WITH MISSILES`
+within 20s (the same near-immediate-crash window the Fifth trial used
+informally). Separately, D9's own instrumentation logged 15 `ESCALATED
+mid-hold` / 21 `CLEARED mid-hold` — comparable in magnitude to the Fifth
+trial's 12/21 over a similar-length session (4h34m, 47 missions).
+
+**Reading this plainly**: no sign of the widened band causing a runaway
+false-positive rate — the crash-after-recovery rate (13%) is in the same
+range as the Fifth trial's 17% (2 of 12), and the raw `DIVE RECOVERY`
+frequency (0.74/round) doesn't look qualitatively different from ordinary
+combat-dive frequency reported elsewhere in this ADR. Two data points
+across two sessions on two different days, both in the same range — not
+enough to close Open Question 2 outright (same "small samples mislead"
+caution D2/D4 already apply elsewhere in this ADR), but no evidence yet
+that 30.0 needs revisiting.
+
 ## Open Questions
 
 1. ~~Does holding `AIRBRAKE_KEY` while `AFTERBURNER_KEY` is also held
