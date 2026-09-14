@@ -2,27 +2,36 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-09-13 | 1.8.9           |
+| Draft  | 2026-09-14 | 1.8.9           |
 
 ## Summary
 
-**Status as of 2026-09-14: the harmful consequence is fixed and heavily
-validated; the doc stays Draft pending operator sign-off, and two smaller
-items remain genuinely open.** `EjectStuckDetector` catches the stuck
-condition and ends the session (with a recording) if nothing else resolves
-it — never had to fire across any session on 2026-09-13. Separately,
-`eject_and_dive`'s post-descent hold now also resumes control on telemetry
-confirmation alone (Disposition item 2) — not gated behind
-`--record-session`; it changes default eject behavior for everyone.
+**Status as of 2026-09-14: the harmful consequence is fixed, heavily
+validated, and operator-confirmed resolved — reviewed via `/check` and
+agreed 2026-09-14.** Kept as `Draft` per this project's own convention for
+this doc series (every anomaly doc here stays `Draft` in the table
+regardless of resolution; see Anomaly 001/005 for precedent) — resolution
+is recorded here in prose, not in the status table. Two smaller items
+remain genuinely open (see below), tracked but not blocking.
+`EjectStuckDetector` catches the stuck condition and ends the session
+(with a recording) if nothing else resolves it — never had to fire across
+any session on 2026-09-13 or 2026-09-14. Separately, `eject_and_dive`'s
+post-descent hold now also resumes control on telemetry confirmation alone
+(Disposition item 2) — not gated behind `--record-session`; it changes
+default eject behavior for everyone.
 
-**As of the 2026-09-14 full-day measurement: n=43 real occurrences across
-four sessions on 2026-09-13, recovery time (declaration to resolution)
-min 1.29s / median 7.37s / mean 8.22s / max 18.77s — zero exceeded 30s,
-zero reached the 120s backstop, zero triggered the detector.** Compare to
-63.3s/41.8s uncorrected before the fix existed. This is no longer "one
-clean trial" — it's a large, repeated, measured sample with a consistent
-ceiling well under the original harmful window. See Disposition item 2 for
-the full occurrence log and the "Full-day measurement" write-up.
+**As of the 2026-09-14 full-day measurement plus one further `/check`
+verification session: n=49 real occurrences across five sessions
+(2026-09-13 x4, 2026-09-14 x1), recovery time (declaration to resolution)
+min 1.29s / median ~7s / max 18.77s — zero exceeded 30s, zero reached the
+120s backstop, zero triggered the detector, across every session
+measured.** Compare to 63.3s/41.8s uncorrected before the fix existed. This
+is no longer "one clean trial" — it's a large, repeated, measured sample
+with a consistent ceiling well under the original harmful window, now
+spanning two calendar days and confirmed independently via `/check`
+against the newest session rather than just the original implementation
+run. See Disposition item 2 for the full occurrence log and the "Full-day
+measurement" write-up.
 
 **What's still genuinely open, not just unclosed paperwork:** (a) the
 residual gap where mission/combat resumption depends on health being known
@@ -480,11 +489,17 @@ the actual fix — remain fully open.
 
 ## Disposition
 
-**Partially addressed, detection now live-validated.** Diagnosed via
-`/check` against `logs/wingman_20260913_080229.log`. Detection (item 3
-below) is implemented and confirmed working against a genuine recurrence
-(session `20260913_113129_acct1`, see "Implemented 2026-09-13" above); the
-two fix candidates (1, 2) remain open. Three candidate directions were
+**Resolved (operator-confirmed 2026-09-14), with two smaller items left
+open by design.** Diagnosed via `/check` against
+`logs/wingman_20260913_080229.log`; the fix's resolution was itself
+re-confirmed via a second `/check` on 2026-09-14 against n=49 real
+occurrences across five sessions (see item 2's "`/check` verification"
+entry below) — the operator reviewed that result and agreed. Detection
+(item 4 below) is implemented and confirmed working against a genuine
+recurrence (session `20260913_113129_acct1`, see "Implemented 2026-09-13"
+above). Item 2 (the actual fix) is implemented and heavily validated. Item
+1 is deprioritized on strong grounds (see its entry). Item 3 is a
+pre-existing backstop, not new work. Four candidate directions were
 identified, not mutually exclusive:
 
 1. Raise `telemetry.stale_after_s` (currently 6.0s) — or give
@@ -642,6 +657,18 @@ identified, not mutually exclusive:
    only if future data shows recovery times climbing (e.g., if the
    telemetry-confirm fix's assumptions stop holding under some
    not-yet-seen game-state combination).
+
+   **`/check` verification, 2026-09-14, session started 02:30:** a fifth
+   session (first on 2026-09-14) added 6 more real occurrences, checked
+   independently via the `/check` skill against this exact fix rather than
+   assumed from the earlier measurement. All 6 resolved 1.82s-11.81s, none
+   via the explicit telemetry-confirm code path this time (all via
+   respawn OCR or round-end — the other two of the three established
+   routes, confirming the fix isn't the only thing keeping recovery fast).
+   Zero detector firings. Running total: **n=49 across five sessions, zero
+   exceptions to the sub-19s ceiling.** Operator reviewed this result and
+   agreed the harmful consequence is resolved (2026-09-14) — the basis for
+   this doc's Summary update above.
 3. `eject_max_s` (120s) already guarantees FSM recovery via `eject_complete`
    regardless of respawn OCR (see "Why nothing recovered") — this is now
    the backstop behind (2) rather than the primary recovery path.
