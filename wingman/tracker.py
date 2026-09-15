@@ -66,6 +66,25 @@ class TargetTracker:
         self._min_area = float(hsv.get("min_contour_area", 12))
         self._min_aspect = float(hsv.get("min_aspect_ratio", 2.5))
 
+        # ADR 136: padlock-off indicator — a dashed green ring centered on
+        # screen when padlock is disengaged (calibrated against a live
+        # capture 2026-09-09: ~40 short dash segments, H 40-75/S 30-200/
+        # V 100-255, spanning roughly [0.42,0.39]-[0.67,0.67] of the frame —
+        # not a single filled dot, an earlier draft of this detector assumed
+        # a dot and never found the ring at all). Own config block, own HSV
+        # bounds — deliberately not reusing tracking_hsv/acquisition_region
+        # so calibrating one detector can't drift the other.
+        pli = config.get("padlock_indicator", {})
+        self._padlock_region_pct = [float(v) for v in pli.get(
+            "region_pct", [0.42, 0.39, 0.67, 0.67])]
+        self._padlock_green_lower = np.array(
+            pli.get("green_lower", [40, 30, 100]), dtype=np.uint8)
+        self._padlock_green_upper = np.array(
+            pli.get("green_upper", [75, 200, 255]), dtype=np.uint8)
+        self._padlock_min_area = float(pli.get("min_contour_area", 3))
+        self._padlock_max_area = float(pli.get("max_contour_area", 30))
+        self._padlock_min_dashes = int(pli.get("min_dashes", 6))
+
         self._mode = TrackMode.SEARCHING
         self._last_x: "float | None" = None
         self._last_y: "float | None" = None
@@ -163,6 +182,39 @@ class TargetTracker:
             "n_detections": len(local_hits),
             "roi_rect": self._roi_rect,
         }
+
+    def detect_padlock_off(self, frame: np.ndarray) -> bool:
+        """ADR 136: True if the padlock-off indicator — a dashed green ring
+        centered on screen, made of many short dash segments rather than
+        one filled shape — is visible this frame.
+
+        Counts contours sized like a single dash (min AND max area bounds,
+        no aspect-ratio filter since dashes are short curved strokes, not
+        tall bars) and requires at least min_dashes of them, rather than
+        treating any one green blob as confirmation — a single stray green
+        pixel elsewhere in the region would otherwise false-positive.
+        """
+        if frame is None or frame.size == 0:
+            return False
+        h, w = frame.shape[:2]
+        x1 = int(w * self._padlock_region_pct[0])
+        y1 = int(h * self._padlock_region_pct[1])
+        x2 = int(w * self._padlock_region_pct[2])
+        y2 = int(h * self._padlock_region_pct[3])
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return False
+        try:
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        except Exception:
+            return False
+        mask = cv2.inRange(hsv, self._padlock_green_lower, self._padlock_green_upper)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        dash_count = sum(
+            1 for c in contours
+            if self._padlock_min_area <= cv2.contourArea(c) <= self._padlock_max_area
+        )
+        return dash_count >= self._padlock_min_dashes
 
     # ------------------------------------------------------------------
     # Internal

@@ -26,6 +26,8 @@ from wingman.behavior_tree import (
     make_climb_condition,
     make_snapshot_writer,
     selected_tactic,
+    tree_status_dict,
+    tree_status_text,
 )
 
 BT_CFG = {"disengage_after_s": 30, "disengage_hold_s": 10, "evade_hold_s": 10}
@@ -102,6 +104,36 @@ def test_engage_when_any_ring_occupied(harness):
     assert tick(harness, make_snap(ring_short=1)) == TACTIC_ENGAGE
 
 
+def test_tree_status_text_names_the_running_leaf(harness):
+    """Research 013's live-status view: the selected tactic must show RUNNING
+    and every other top-level slot must appear too, not just the winner —
+    the whole point is seeing what did NOT run, not only what did."""
+    tick(harness, make_snap(ring_long=1))
+    text = tree_status_text(harness[0])
+    assert "Engage [*]" in text          # '*' is py_trees' RUNNING glyph
+    assert "AttackSupport [-]" in text   # never reached: still INVALID
+    for name in (TACTIC_IDLE, TACTIC_EJECT):
+        assert name in text
+
+
+def test_tree_status_text_before_any_tick_does_not_raise(harness):
+    # A freshly built tree has no status yet (py_trees.common.Status.INVALID)
+    # — this must render, not crash, since nothing here has ticked once.
+    text = tree_status_text(harness[0])
+    assert "TacticSelector" in text
+
+
+def test_tree_status_dict_is_the_structured_sibling(harness):
+    """Design 012: same data as tree_status_text, JSON-serializable instead
+    of ascii art — the JSONL trace writer's actual payload."""
+    tick(harness, make_snap(ring_long=1))
+    statuses = tree_status_dict(harness[0])
+    assert statuses["Engage"] == "RUNNING"
+    assert statuses["Idle"] == "FAILURE"
+    assert statuses["AttackSupport"] == "INVALID"
+    assert statuses["TacticSelector"] == "RUNNING"
+
+
 def test_attack_support_is_the_fallback(harness):
     snap = make_snap(enemy_absent_seconds=5.0)   # no contacts, not absent long enough
     assert tick(harness, snap) == TACTIC_ATTACK_SUPPORT
@@ -146,17 +178,22 @@ def test_missiles_unknown_is_not_empty(harness):
 # ---------------------------------------------------------------------------
 
 class _TacticRecorder:
-    """start_fn / is_running_fn pair that records starts."""
+    """start_fn / is_running_fn / update_fn trio that records calls."""
 
     def __init__(self):
         self.starts = 0
         self.running = False
+        self.updates = 0
 
     def start(self):
         self.starts += 1
 
     def is_running(self):
         return self.running
+
+    def update(self, _snapshot):
+        # ADR 137 D9: the RUNNING-tick update channel.
+        self.updates += 1
 
 
 def make_actuated_harness(clock, eject=None, disengage=None, missile_evade=None):
@@ -519,7 +556,11 @@ class TestTimeToGroundRecovery:
 
     @staticmethod
     def _cond(clock, **kw):
-        opts = dict(recover_below_time_s=20.0, confirm_bypass_time_s=10.0,
+        # ADR 137 D4: 30.0/15.0 — the values actually shipped in
+        # config.yaml, not the pre-D4 20.0/10.0 (code-review finding,
+        # 2026-09-11: this fixture previously never exercised the real
+        # production thresholds).
+        opts = dict(recover_below_time_s=30.0, confirm_bypass_time_s=15.0,
                     descent_memory_s=5.0, clock=clock)
         opts.update(kw)
         return make_climb_condition(500, 1000, **opts)
@@ -532,11 +573,11 @@ class TestTimeToGroundRecovery:
                 f"altitude band should not fire at {alt} m (it never did)"
 
     def test_fires_on_time_to_ground_while_still_high(self):
-        """6636 m at -338 m/s is ~19.6 s from impact — inside the 20 s window,
-        and ~10 s before the observed impact rather than 4 s."""
+        """8700 m at -300 m/s is 29 s from impact — inside the ADR 137 D4
+        30 s window (and would have been OUTSIDE the pre-D4 20 s one)."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=1)
-        assert cond(make_snap(altitude=6636.0, altitude_rate=-338.0)) is True
+        assert cond(make_snap(altitude=8700.0, altitude_rate=-300.0)) is True
 
     def test_does_not_fire_in_a_gentle_descent(self):
         """Same altitude, ordinary rate: 6636 m at -50 m/s is 133 s away."""
@@ -550,18 +591,21 @@ class TestTimeToGroundRecovery:
         assert cond(make_snap(altitude=3000.0, altitude_rate=+200.0)) is False
 
     def test_single_read_bypass_inside_the_margin(self):
-        """d3: with confirm_reads=2, a 6 s time-to-ground must not wait for a
-        second read — the wait spends the margin the trigger protects."""
+        """d3, ADR 137 D4: with confirm_reads=2, a 12 s time-to-ground (inside
+        the 15 s bypass shipped by D4, outside the pre-D4 10 s one) must not
+        wait for a second read — the wait spends the margin the trigger
+        protects."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=2)
-        assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
+        assert cond(make_snap(altitude=1800.0, altitude_rate=-150.0)) is True
 
     def test_outside_bypass_still_debounces(self):
-        """A 15 s time-to-ground is urgent but not immediate: honour the
+        """A 20 s time-to-ground is urgent but not immediate (outside the
+        ADR 137 D4 15 s bypass, inside its 30 s recovery band): honour the
         confirm count so one bad reading cannot command a climb."""
         clock = FakeClock()
         cond = self._cond(clock, confirm_reads=2)
-        snap = make_snap(altitude=7500.0, altitude_rate=-500.0)
+        snap = make_snap(altitude=8000.0, altitude_rate=-400.0)
         assert cond(snap) is False, "fired on a single read outside the bypass"
         assert cond(snap) is True
 
@@ -578,8 +622,8 @@ class TestTimeToGroundRecovery:
     def test_descent_memory_expires(self):
         """The hold is bounded — it must not latch a climb forever."""
         clock = FakeClock()
-        cond = make_climb_condition(500, 1000, recover_below_time_s=20.0,
-                                    confirm_bypass_time_s=10.0,
+        cond = make_climb_condition(500, 1000, recover_below_time_s=30.0,
+                                    confirm_bypass_time_s=15.0,
                                     descent_memory_s=5.0, confirm_reads=1,
                                     clock=clock)
         assert cond(make_snap(altitude=3000.0, altitude_rate=-500.0)) is True
@@ -612,8 +656,8 @@ class TestDiveRecoveryRespawnGuard:
 
     @staticmethod
     def _cond(clock):
-        return make_climb_condition(500, 1000, recover_below_time_s=20.0,
-                                    confirm_bypass_time_s=10.0,
+        return make_climb_condition(500, 1000, recover_below_time_s=30.0,
+                                    confirm_bypass_time_s=15.0,
                                     descent_memory_s=5.0, confirm_reads=1,
                                     clock=clock)
 
@@ -803,6 +847,67 @@ def test_it_yields_to_the_climb_emergency_band():
     assert c(_bsnap(0.40, +0.30)) is False
 
 
+# --- Anomaly 007: the yield above never fires in real tree-ticking order -----
+#
+# The test above proves the yield MECHANISM works when fed a mock
+# `yields_to_fn` under direct, isolated control. It does not, and never did,
+# prove the real one stays current — `yields_to_fn` reads
+# `ClimbCondition.emergency_active`, which is only computed as a side effect
+# of py-trees actually ticking Climb's own leaf. py-trees' priority Selector
+# never ticks a leaf a higher-priority sibling keeps beating, so while
+# BoundaryTurn wins every tick, Climb's condition was never invoked at all —
+# `emergency_active` sat frozen at whatever it was before BoundaryTurn took
+# over. Live 2026-09-14: ttg measured 6-8s (threshold 30s) for 9+ continuous
+# seconds while BoundaryTurn stayed selected and never yielded; the operator
+# intervened manually at ~470m still descending. These two tests reproduce it
+# with the real tree, not a mock, and pin the fix (`update_emergency`, called
+# once per tick before `tree.tick()`, same as `BehaviorTreeHandler.tick()`
+# now does in production).
+
+_DIVE_BT_CFG = dict(
+    BT_CFG,
+    boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0,
+             "min_clear_frac": 0.0},
+    climb={"enabled": True, "enter_below_alt": 500, "exit_above_alt": 1000,
+          "recover_below_time_s": 30.0, "confirm_bypass_time_s": 15.0,
+          "confirm_reads": 1},
+)
+
+
+def test_reproduces_the_incident_without_the_pre_tick_update(clock):
+    """Pins the bug: omit the fix's pre-tick call and BoundaryTurn never
+    yields, no matter how deep the emergency, because Climb's own condition
+    is simply never asked while BoundaryTurn keeps winning."""
+    tree = build_tree(dict(_DIVE_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    # Approaching the edge AND in a 6s-to-ground dive (well inside the 30s
+    # emergency window) — the exact live shape, altitude/rate chosen to
+    # match the incident's own readings (2439m at -424m/s -> ttg=5.75s).
+    snap = make_snap(altitude=2439.0, altitude_rate=-424.0,
+                     boundary_dist=0.40, boundary_forward=+0.30)
+    for _ in range(5):
+        writer.set("snapshot", snap)
+        tree.tick()   # the old production call site: no pre-tick update
+        clock.advance(1.5)
+        assert selected_tactic(tree) == TACTIC_BOUNDARY_TURN, \
+            "reproduction failed — the bug this test pins may already differ"
+
+
+def test_yields_to_climb_when_the_pre_tick_update_runs(clock):
+    """The fix: call tree.climb_emergency_update_fn(snap, now) every tick,
+    before tree.tick() — exactly what BehaviorTreeHandler.tick() does now.
+    Climb must win within the same tick the emergency becomes current."""
+    tree = build_tree(dict(_DIVE_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=2439.0, altitude_rate=-424.0,
+                     boundary_dist=0.40, boundary_forward=+0.30)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_CLIMB, \
+        "BoundaryTurn still won — the emergency flag was not fresh in time"
+
+
 def test_selection_beats_climb_engage_and_regroup(clock):
     cfg = dict(BT_CFG, boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0},
                climb={"enabled": True, "enter_below_alt": 1000, "exit_above_alt": 2000})
@@ -894,9 +999,11 @@ def test_the_release_threshold_is_wider_than_the_entry():
 
 
 def test_the_hysteresis_is_wired_from_config():
+    """ADR 139 D1: this logic lives in `_build_boundary_slot` now, not
+    inline in `build_tree` — the slot table moved it, not the wiring."""
     import inspect
-    from wingman.behavior_tree import build_tree
-    src = inspect.getsource(build_tree)
+    from wingman.behavior_tree import _build_boundary_slot
+    src = inspect.getsource(_build_boundary_slot)
     assert "release_frac=boundary_cfg.get(\"release_frac\")" in src
     assert "min_clear_frac" in src
 
@@ -939,6 +1046,24 @@ def test_outside_battle_clears_the_turn():
     c = _bcond(min_clear_frac=0.0)
     assert c(_bsnap(0.20, +0.18)) is True
     assert c(_bsnap(0.20, +0.18, game_state=GameState.GAME_LOBBY)) is False
+
+
+def test_mission_not_running_clears_the_turn():
+    """ADR 138. Measured live 2026-09-10 03:03:26: the respawn screen cleared
+    (is_respawning -> False) up to ~1.5s before mission_j20 actually
+    restarted (the ADR 059 stability window) — and mission_j20 restarting is
+    what arms the ADR 132 turn guard. is_respawning alone did not close this
+    gap: a full 12s, 180-degree boundary turn selected and ran starting
+    inside it, unguarded. mission_running is the same "is this a live,
+    commanded aircraft" question is_respawning already answers, just closing
+    the later half of the window."""
+    c = _bcond(min_clear_frac=0.0)
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(0.20, +0.18, mission_running=False)) is False
+    # And the latch is gone, not merely masked for that tick (same guarantee
+    # test_a_respawn_clears_a_held_turn makes for is_respawning).
+    assert c(_bsnap(0.20, +0.18)) is True
+    assert c(_bsnap(None, None, mission_running=False)) is False
 
 
 def test_a_boundary_abeam_does_not_start_a_turn():
@@ -1049,3 +1174,221 @@ def test_a_snapshot_without_the_near_field_behaves_as_before():
     c = _bcond(turn_frac=0.30, release_frac=0.45)
     assert c(_bsnap(0.20, +0.19)) is True
     assert c(_bsnap(0.52, +0.40)) is False
+
+
+# ---------------------------------------------------------------------------
+# Design 011 (ACS Mode) step 1: jet_profile -> AnalyzerSnapshot.has_padlock.
+# Config plumbing only — nothing branches on this yet, so these tests only
+# guard the resolution logic, not any tactic behaviour.
+# ---------------------------------------------------------------------------
+
+def test_snapshot_has_padlock_defaults_true():
+    """Every profile shipped today is has_padlock: true; a snapshot built
+    without the field must not silently read as boresight-only."""
+    assert make_snap().has_padlock is True
+
+
+def test_snapshot_has_padlock_can_be_overridden():
+    assert make_snap(has_padlock=False).has_padlock is False
+
+
+def _handler(jet_profile_cfg=None):
+    from wingman.tick_handlers import BehaviorTreeHandler
+    return BehaviorTreeHandler(None, None, {}, jet_profile_cfg=jet_profile_cfg)
+
+
+def test_handler_resolves_has_padlock_true_for_the_active_profile():
+    h = _handler({"active": "j20", "profiles": {"j20": {"has_padlock": True}}})
+    assert h._has_padlock is True
+
+
+def test_handler_resolves_has_padlock_false_for_the_active_profile():
+    h = _handler({"active": "generic_boresight",
+                  "profiles": {"j20": {"has_padlock": True},
+                               "generic_boresight": {"has_padlock": False}}})
+    assert h._has_padlock is False
+
+
+def test_handler_defaults_to_padlock_true_with_no_jet_profile_config():
+    """A config predating Design 011 has no jet_profile block at all — must
+    resolve to today's only real airframe behaviour, not crash or guess
+    boresight-only."""
+    assert _handler(None)._has_padlock is True
+    assert _handler({})._has_padlock is True
+
+
+def test_handler_defaults_to_padlock_true_for_an_unknown_active_profile():
+    """A typo'd or not-yet-defined active profile must not silently resolve
+    to boresight-only — the safe default matches every profile shipped
+    today."""
+    h = _handler({"active": "does_not_exist", "profiles": {}})
+    assert h._has_padlock is True
+
+
+# --- ADR 139: golden-master child order, pre slot-table refactor ------------
+#
+# Captured against the pre-refactor `build_tree` (imperative `children.insert`
+# calls) across the full climb/boundary/regroup/sustain flag matrix. This must
+# stay green, unmodified, once ADR 139 D1 replaces the imperative inserts with
+# a declared slot table — it is the only thing that makes "zero behavior
+# change" verified rather than asserted.
+
+_CLIMB_BAND = {"enter_below_alt": 1000, "exit_above_alt": 2000}
+_SUSTAIN_BAND = {"enabled": True, "enter_below_alt": 3000, "exit_above_alt": 4000}
+
+_CHILD_ORDER_MATRIX = [
+    # (climb_enabled, boundary_configured, regroup_enabled, sustain_enabled) -> names
+    ((False, False, False, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Engage", "AttackSupport")),
+    ((False, False, False, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Engage", "AttackSupport")),
+    ((False, False, True, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Engage", "Regroup", "AttackSupport")),
+    ((False, False, True, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Engage", "Regroup", "AttackSupport")),
+    ((False, True, False, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Engage", "AttackSupport")),
+    ((False, True, False, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Engage", "AttackSupport")),
+    ((False, True, True, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Engage", "Regroup", "AttackSupport")),
+    ((False, True, True, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Engage", "Regroup", "AttackSupport")),
+    ((True, False, False, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Climb", "Engage", "AttackSupport")),
+    ((True, False, False, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Climb", "Engage", "AttackSupport")),
+    ((True, False, True, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Climb", "Engage", "Regroup", "AttackSupport")),
+    ((True, False, True, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "Evade", "Disengage",
+      "Climb", "Engage", "Regroup", "AttackSupport")),
+    ((True, True, False, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Climb", "Engage", "AttackSupport")),
+    ((True, True, False, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Climb", "Engage", "AttackSupport")),
+    ((True, True, True, False),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Climb", "Engage", "Regroup", "AttackSupport")),
+    ((True, True, True, True),
+     ("Idle", "RespawnWait", "Eject", "MissileEvade", "BoundaryTurn", "Evade",
+      "Disengage", "Climb", "Engage", "Regroup", "AttackSupport")),
+]
+
+
+@pytest.mark.parametrize("flags,expected_names", _CHILD_ORDER_MATRIX)
+def test_build_tree_child_order_across_flag_matrix(flags, expected_names):
+    climb_enabled, boundary_configured, regroup_enabled, sustain_enabled = flags
+    climb_cfg = dict(_CLIMB_BAND, enabled=climb_enabled)
+    if sustain_enabled:
+        climb_cfg["sustain"] = dict(_SUSTAIN_BAND)
+    bt_cfg = dict(BT_CFG, climb=climb_cfg)
+    if boundary_configured:
+        bt_cfg["boundary"] = {"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0}
+    tree = build_tree(bt_cfg, regroup_enabled=regroup_enabled)
+    names = tuple(c.name for c in tree.root.children)
+    assert names == expected_names
+
+
+# --- ADR 139 D2: consolidated Climb / BoundaryTurn enablement predicates ----
+
+from wingman.behavior_tree import climb_tactic_enabled, boundary_tactic_enabled
+
+
+def test_climb_tactic_enabled():
+    assert climb_tactic_enabled({"climb": {"enabled": True}}) is True
+    assert climb_tactic_enabled({"climb": {"enabled": False}}) is False
+    assert climb_tactic_enabled({"climb": {}}) is False
+    assert climb_tactic_enabled({}) is False
+
+
+def test_boundary_tactic_enabled():
+    assert boundary_tactic_enabled({"boundary": {"turn_frac": 0.5}}) is True
+    assert boundary_tactic_enabled({"boundary": {"turn_frac": 0.0}}) is False
+    assert boundary_tactic_enabled({"boundary": {}}) is False
+    assert boundary_tactic_enabled({}) is False
+
+
+def test_climb_and_boundary_enabled_checks_share_one_predicate():
+    """ADR 139 D2: getting Climb/BoundaryTurn to actuate live used to require
+    two independently-written boolean expressions (one in `build_tree`
+    deciding tree insertion, one in `BehaviorTreeHandler.__init__` deciding
+    actuator wiring) to agree. Assert both sites call the same named
+    predicate instead of each spelling out its own `.get(...)` check."""
+    import inspect
+    from wingman.behavior_tree import _build_climb_slot, _build_boundary_slot
+    from wingman.tick_handlers import BehaviorTreeHandler
+
+    bt_src = inspect.getsource(_build_climb_slot) + inspect.getsource(_build_boundary_slot)
+    handler_src = inspect.getsource(BehaviorTreeHandler.__init__)
+
+    assert "climb_tactic_enabled(" in bt_src
+    assert "boundary_tactic_enabled(" in bt_src
+    assert "climb_tactic_enabled(" in handler_src
+    assert "boundary_tactic_enabled(" in handler_src
+    for src in (bt_src, handler_src):
+        assert 'climb_cfg.get("enabled"' not in src
+        assert 'boundary_cfg.get("turn_frac"' not in src
+
+
+# --- ADR 139 D3: hysteresis state is inspectable via named attributes ------
+
+def test_climb_condition_state_is_introspectable_via_named_attributes():
+    clock = FakeClock()
+    cond = make_climb_condition(1000, 2000, clock=clock)
+    assert cond.active is False
+    assert cond.emergency_active is False
+    # Below enter_below_alt: crosses the band.
+    assert cond(make_snap(altitude=500.0)) is True
+    assert cond.active is True
+    assert cond.emergency_active is False
+
+
+def test_climb_update_fn_called_only_while_already_running():
+    """ADR 137 D9: `update_fn` fires on every RUNNING tick AFTER the first
+    — never on the same tick as `start_fn`, and never before selection."""
+    climb = _TacticRecorder()
+    cfg = dict(BT_CFG, climb={"enabled": True, "enter_below_alt": 1000,
+                              "exit_above_alt": 2000})
+    tree = build_tree(cfg, actuators={
+        TACTIC_CLIMB: (climb.start, climb.is_running, climb.update)})
+    writer = make_snapshot_writer()
+
+    def _tick(snap):
+        writer.set("snapshot", snap)
+        tree.tick()
+        return selected_tactic(tree)
+
+    # Tick 1: newly selected — start_fn fires, update_fn does not.
+    assert _tick(make_snap(altitude=500.0)) == TACTIC_CLIMB
+    assert climb.starts == 1
+    assert climb.updates == 0
+
+    # Tick 2: still selected (is_running_fn now True) — update_fn fires,
+    # start_fn does not fire again.
+    climb.running = True
+    assert _tick(make_snap(altitude=500.0)) == TACTIC_CLIMB
+    assert climb.starts == 1
+    assert climb.updates == 1
+
+
+def test_boundary_condition_state_is_introspectable_via_named_attributes():
+    cond = make_boundary_condition(0.50, min_clear_frac=0.0)
+    assert cond.active is False
+    assert cond.min_dist is None
+    assert cond(_bsnap(0.40, +0.30)) is True
+    assert cond.active is True
+    assert cond.min_dist == 0.40

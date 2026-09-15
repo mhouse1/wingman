@@ -121,6 +121,28 @@ the same seconds, against SAF-001's 2.0 s cessation bound. The `i/j/k/l` path
 is not lost — it moves to the operator's display, where wingman injects nothing
 and `ctrl+alt` separates it from typing.
 
+**D4c (2026-09-12). Once wingman has already stopped, its own release key
+bypasses `ctrl+alt` on the operator's display too.** Live-observed:
+Backspace's first press ends wingman's automation (MetalStorm keeps running,
+under manual control) and requires `ctrl+alt` like any other operator-display
+hotkey — D4a's exact case, since wingman is still actively flying up to that
+instant. The **second** press, which closes MetalStorm and the nested
+display, was requiring the same modifier — but by then wingman has already
+released every key and is doing nothing but waiting; there is no aircraft
+left for a stray keypress to hijack, so the modifier was protecting nothing.
+The operator's own framing: the first Backspace is supposed to hand over
+full manual control "above all states," and a shutdown confirmation that
+needs a specific modifier combo remembered under pressure undermines that.
+
+Implemented as `set_operator_release_keys` in `input_linux.py` — the
+operator-display analogue of D4a's `_handback_keys` bypass, keyed on
+`Controller.operator_stop_requested()` instead of manual-takeover FSM state
+(STANDBY is not an FSM state). Deliberately scoped to the **second** press
+only: exempting the first press too would reopen the exact 2026-08-30
+incident D4a measured (`'backspace'` was one of the keys named in it) — a
+bare Backspace pressed anywhere on the operator's desktop while wingman is
+still actively flying would end the automation mid-session by accident.
+
 **D5. The switch is `nested.enabled` in config, not a parallel make target.**
 A single environment variable cannot express D4 — it sets one display for all
 three consumers, which is why the first implementation silently broke hotkeys.
@@ -162,6 +184,22 @@ The handler is debounced at 0.5 s: X auto-repeats a held key at roughly 25 Hz,
 and an undebounced handler reads one long press as both stages, closing the game
 the operator meant to keep. `close_game: false` opts out of standby entirely —
 there would be nothing for the second press to do.
+
+**"Holding nothing but its hotkey listeners" was aspirational, not actual,
+until 2026-09-11.** `Controller.cleanup(keep_hotkeys=True)` simply skipped
+`unhook_all()` on the first press, which left every registered hotkey fully
+functional, not just present — `u` still restarted the J20 mission, the
+maneuver keys still cancelled it, `m` still worked, and so on. Observed
+2026-09-11 18:44: `u` pressed during standby restarted the mission at
+18:44:52, and the second Backspace closed everything down 5.5s later at
+18:44:57 — the operator was not "flying by hand," wingman had silently
+re-engaged. Standby is now what this section always said it was: every
+hotkey is torn down (`keyboard_module.unhook_all()`) and only Backspace's
+own closure is re-registered, so the first press leaves MetalStorm exactly
+as if it had been launched via `make g` with no wingman attached at all,
+except for the one listener waiting for the second press. See
+`Controller.cleanup` (the `keep_hotkeys` branch) and
+`tests/test_finish_round_then_exit.py`.
 
 Standby costs a parked process. `analyzer.cleanup()` joins the OCR pool before
 it starts, and a `malloc_trim(0)` hands the freed arenas back to the OS —

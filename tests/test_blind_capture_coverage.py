@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 from wingman.analyzer import GameStateAnalyzer
-from wingman.tick_handlers import BehaviorTreeHandler
+from wingman.tick_handlers import BoundaryPerceptionHandler
 
 ROOT = Path(__file__).parent.parent
 CORPUS = ROOT / "test_screenshots" / "unknown_anomalies"
@@ -99,7 +99,7 @@ class _AnalyzerStub:
 
 
 def _handler(present=True, interval=300.0, cap=120):
-    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    h = BoundaryPerceptionHandler.__new__(BoundaryPerceptionHandler)
     h._analyzer = _AnalyzerStub(present)
     h._boundary_recent = collections.deque(maxlen=3)
     h._blind_capture_max = cap
@@ -115,12 +115,12 @@ def _handler(present=True, interval=300.0, cap=120):
 
 def test_a_frame_with_a_minimap_is_captured():
     h = _handler(present=True)
-    assert h._maybe_capture_blind(object(), 100.0, None, True, False) is True
+    assert h.maybe_capture_blind(object(), 100.0, None, True, False) is True
 
 
 def test_a_frame_with_no_minimap_is_skipped():
     h = _handler(present=False)
-    assert h._maybe_capture_blind(object(), 100.0, None, True, False) is False
+    assert h.maybe_capture_blind(object(), 100.0, None, True, False) is False
     assert h._blind_no_minimap_skips == 1
 
 
@@ -129,19 +129,19 @@ def test_a_skip_does_not_spend_the_interval():
     interval would be burned on a frame carrying no information, and the real
     minimap arriving a second later would wait out the whole interval."""
     h = _handler(present=False)
-    h._maybe_capture_blind(object(), 100.0, None, True, False)
+    h.maybe_capture_blind(object(), 100.0, None, True, False)
     assert h._blind_capture_next_ts == 0.0
 
     h._analyzer.present = True
-    assert h._maybe_capture_blind(object(), 100.0, None, True, False) is True
+    assert h.maybe_capture_blind(object(), 100.0, None, True, False) is True
     assert h._blind_capture_next_ts == pytest.approx(400.0)
 
 
 def test_a_capture_does_spend_the_interval():
     h = _handler(present=True, interval=300.0)
-    h._maybe_capture_blind(object(), 100.0, None, True, False)
-    assert h._maybe_capture_blind(object(), 399.0, None, True, False) is False
-    assert h._maybe_capture_blind(object(), 400.0, None, True, False) is True
+    h.maybe_capture_blind(object(), 100.0, None, True, False)
+    assert h.maybe_capture_blind(object(), 399.0, None, True, False) is False
+    assert h.maybe_capture_blind(object(), 400.0, None, True, False) is True
 
 
 @pytest.mark.parametrize("kw", [
@@ -153,7 +153,7 @@ def test_the_existing_gates_still_apply(kw):
     args = dict(boundary_raw=None, in_battle=True, is_respawning=False)
     args.update(kw)
     h = _handler(present=True)
-    assert h._maybe_capture_blind(object(), 100.0, **args) is False
+    assert h.maybe_capture_blind(object(), 100.0, **args) is False
     assert h._analyzer.calls == 0, "minimap_present should not be reached"
 
 

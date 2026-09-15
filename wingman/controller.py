@@ -137,6 +137,7 @@ INJECTABLE_KEYS = (
     YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
     DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
     PADLOCK_CAMERA, SPECIAL_ABILITY, MISSION_J20_KEY,
+    SWITCH_WEAPON,
     'escape',
 )
 
@@ -244,6 +245,9 @@ class Controller:
         # press cannot be mistaken for the second.
         self._close_all_event = threading.Event()
         self._last_exit_press = 0.0
+        # Set once the backspace hotkey is actually registered below — None
+        # if registration was skipped (disable_hotkeys, no keyboard access).
+        self._exit_script_hotkey = None
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
         self._analyzer = analyzer
@@ -261,9 +265,25 @@ class Controller:
 
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
+        # ADR 136: last-known padlock state, verified (not assumed) via
+        # TargetTracker.detect_padlock_off — PADLOCK_CAMERA is a pure toggle
+        # with no on/off argument, so this is the only way to know which way
+        # a press just flipped it. None = never checked this session.
+        self._padlock_engaged: "bool | None" = None
 
         # Target tracking: timestamp of last orient_nose_to_target command
         self._last_orient_ts: float = 0.0
+        # ADR 136: TargetTracker reference, wired in from main.py after both
+        # objects exist (Controller cannot construct it — it needs the
+        # Analyzer-independent HSV/contour config TrackingHudHandler owns).
+        # None until set_target_tracker() is called; the eject heatdive loop
+        # no-ops when it is None.
+        self._target_tracker = None
+        # ADR 136: True once switch_weapon() has fired for the current eject —
+        # the shared AMMO_MISSILE crop then reads the secondary loadout, not
+        # the primary rack, so ADR 088's rearm-abort check must stop trusting
+        # it (see eject_and_dive/_eject_descent_control). Reset every dive.
+        self._eject_weapon_switched = False
 
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
@@ -323,6 +343,12 @@ class Controller:
         # Handle to the current disengage_roll_right maneuver thread
         # (ADR 024 3.1b — liveness for the Disengage leaf).
         self._disengage_thread: "threading.Thread | None" = None
+        # Stop event for the disengage roll hold — deliberately separate from
+        # _mission_cancel (the roll must outlive the cancel it issues itself,
+        # see disengage_roll_right's own comment) but must still yield to a
+        # manual takeover. Set by release_for_manual_takeover(); cleared at
+        # the start of each new disengage_roll_right() call.
+        self._disengage_stop = threading.Event()
         # ADR 070: set SYNCHRONOUSLY by missile_evade_mode() before the thread
         # spawns (d8 — the duplicate-start guard is a design property, closed
         # in the caller's thread before any concurrency exists), cleared by the
@@ -372,12 +398,35 @@ class Controller:
             _ecl.get("target_dive_angle_deg", 75.0))
         self._eject_cl_dive_angle_floor_deg = float(
             _ecl.get("dive_angle_floor_deg", 60.0))
+        # ADR 136: switch to the secondary heat-seeker loadout and run
+        # tracking-guided roll + fire alongside the (unmodified) descent
+        # control, while the airframe is being sacrificed anyway. Default
+        # off — enabling it changes nothing about eject's own triggering or
+        # descent mechanics, only what else happens during the dive.
+        self._eject_cl_heatdive_enabled = bool(_ecl.get("heatdive_enabled", False))
+        # ADR 136 D4: off by default — the detector this gates
+        # (TargetTracker.detect_padlock_off) turned out to be tracking what
+        # a live capture comparison showed is most likely a flight-path
+        # marker that drifts around the screen with attitude, not a
+        # fixed padlock indicator (2026-09-09). Left disabled, blindly
+        # toggling PADLOCK_CAMERA up to 3x against a signal that isn't
+        # actually padlock state was worse than doing nothing. D1-D3 (the
+        # dive itself) are unaffected either way.
+        self._eject_cl_heatdive_padlock_verify = bool(_ecl.get("heatdive_padlock_verify", False))
         # ADR 068 d1: True once ANY descending sample has been seen during the
         # CURRENT rotation attempt. The over-rotation guard requires it —
         # rotating past vertical means passing THROUGH a dive, so a flight path
         # that has only ever climbed is under-rotated, not over-rotated.
         self._eject_descended_since_press = False
         self._eject_tel_stale_after_s = float(_tel_cfg.get("stale_after_s", 6.0))
+        # Anomaly 003 (2026-09-13): the "holding until respawn" wait below
+        # otherwise depends entirely on respawn OCR or an ADR 061 observed
+        # death — both proven unreliable during the exact transition that
+        # triggers this hold in the first place. N consecutive fresh
+        # telemetry reads is independent evidence the aircraft is alive and
+        # flying, good enough to resume without either. 0 disables (falls
+        # back to the pre-existing behaviour: wait for OCR or eject_max_s).
+        self._eject_telemetry_confirm_polls = int(_ecl.get("telemetry_confirm_polls", 4))
         # True while AFTERBURNER is deliberately engaged by the descent
         # controller (ADR 069 d8 — burner is gated on descending flight).
         self._eject_ab_engaged = False
@@ -423,6 +472,23 @@ class Controller:
         self._cruise_ab_confirm_reads = max(1, int(_cruise_cfg.get("confirm_reads", 2)))
         self._cruise_ab_active = False
         self._cruise_ab_low_streak = 0
+        # ADR 137: True for the duration of an emergency climb's airbrake
+        # hold. Cruise-afterburner (D9, below) yields to this specifically —
+        # measured live 2026-09-09: cruise re-pressed AFTERBURNER_KEY inside
+        # 10 of 18 emergency-climb windows in one session, cancelling the
+        # airbrake's own deceleration each time. Everything else D9 already
+        # overrides (climb's OWN fuel logic, evade, eject) is unaffected.
+        self._climb_emergency_active = False
+        # ADR 137 D9: the tree's CURRENT-tick emergency verdict, refreshed
+        # every tick a Climb selection is already RUNNING (BehaviorTreeHandler
+        # ._update_climb -> set_climb_emergency). Distinct from
+        # `_climb_emergency_active` above: that one is write-only from
+        # `_run_climb_hold`'s own perspective and read by
+        # note_afterburner_cruise; this one is the loop-READABLE input the
+        # poll loop re-checks each iteration, closing the gap where a
+        # mid-hold escalation or de-escalation was previously invisible to an
+        # already-running hold (ADR 137 "Third Live Trial").
+        self._climb_emergency_requested = False
 
         # ADR 073 Phase 3.2b — CLIMB tactic hold (NOSE_UP + AFTERBURNER).
         # The mission-start prologue climb (3.2c) is retired: the ADR 075
@@ -621,6 +687,10 @@ class Controller:
                                 "Backspace again to close everything.\033[0m")
                     if self._exit_event:
                         self._exit_event.set()
+                # Kept on self so cleanup(keep_hotkeys=True) can re-register
+                # just this one hotkey after tearing every other one down —
+                # see the comment there for why.
+                self._exit_script_hotkey = exit_script_hotkey
                 keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
                 logger.info("Controller: registered hotkey 'backspace' to exit script")
             except ImportError as e:
@@ -1256,17 +1326,29 @@ class Controller:
                     max(0.0, self._turn_guard_until - time.monotonic()))
         return True
 
-    def roll_left(self, hold_seconds: float = 0.3, block: bool = True):
+    def set_target_tracker(self, tracker) -> None:
+        """Wire in the TargetTracker instance (ADR 136).
+
+        Called once from main.py after both objects exist — Controller
+        cannot construct its own tracker (Design 005's TargetTracker is
+        owned and configured alongside TrackingHudHandler). Until this is
+        called, the eject heatdive loop stays a no-op.
+        """
+        self._target_tracker = tracker
+
+    def roll_left(self, hold_seconds: float = 0.3, block: bool = True, ignore_cancel: bool = False):
         """Roll left by holding the configured roll-left key."""
         if self._turn_blocked("roll_left"):
             return
-        self._execute_key_press(ROLL_LEFT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_left')
+        self._execute_key_press(ROLL_LEFT_KEY, hold_seconds=hold_seconds, block=block,
+                                 action_name='roll_left', ignore_cancel=ignore_cancel)
 
-    def roll_right(self, hold_seconds: float = 0.3, block: bool = True):
+    def roll_right(self, hold_seconds: float = 0.3, block: bool = True, ignore_cancel: bool = False):
         """Roll right by holding the configured roll-right key."""
         if self._turn_blocked("roll_right"):
             return
-        self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block, action_name='roll_right')
+        self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block,
+                                 action_name='roll_right', ignore_cancel=ignore_cancel)
 
     def orient_nose_to_target(
         self,
@@ -1277,6 +1359,7 @@ class Controller:
         min_hold_sec: float = 0.08,
         max_hold_sec: float = 0.35,
         cooldown_sec: float = 0.15,
+        ignore_cancel: bool = False,
     ) -> "str | None":
         """Apply proportional roll correction toward a target.
 
@@ -1288,6 +1371,12 @@ class Controller:
             kp:         Proportional gain; hold_sec = kp * abs(error_norm).
             min_hold_sec / max_hold_sec: Clamp bounds on the roll hold duration.
             cooldown_sec: Minimum interval between consecutive roll commands.
+            ignore_cancel: Pass True for callers running after self._mission_cancel
+                            is already set for the whole call's duration (e.g. ADR
+                            136's eject heatdive loop) — otherwise the hold is cut
+                            to near-zero on the very first _mission_cancel.wait()
+                            poll, since the event is already set (measured live,
+                            2026-09-09: 0-11ms instead of the requested hold).
 
         Returns:
             'left', 'right', or None if suppressed by deadband or cooldown.
@@ -1300,9 +1389,9 @@ class Controller:
         hold = float(min(max(kp * abs(error_norm), min_hold_sec), max_hold_sec))
         self._last_orient_ts = now
         if error_norm < 0:
-            self.roll_left(hold_seconds=hold, block=False)
+            self.roll_left(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
             return "left"
-        self.roll_right(hold_seconds=hold, block=False)
+        self.roll_right(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
         return "right"
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
@@ -1323,9 +1412,10 @@ class Controller:
             ignore_cancel=True,
         )
 
-    def padlock_camera(self, hold_seconds: float = 0.1, block: bool = True):
+    def padlock_camera(self, hold_seconds: float = 0.1, block: bool = True, ignore_cancel: bool = False):
         """Toggle padlock camera by pressing the configured padlock camera key."""
-        self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block, action_name='padlock_camera')
+        self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block,
+                                 action_name='padlock_camera', ignore_cancel=ignore_cancel)
 
     def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
         """Press padlock N times to cycle to a new target, then pause the auto-padlock loop briefly.
@@ -1346,9 +1436,21 @@ class Controller:
         """Fire machine gun by holding the configured machine-gun key."""
         self._execute_key_press(FIRE_MACHINE_GUN, hold_seconds=hold_seconds, block=block, action_name='fire_machine_gun')
 
-    def fire_active_weapon(self, hold_seconds: float = 0.1, block: bool = True):
+    def fire_active_weapon(self, hold_seconds: float = 0.1, block: bool = True, ignore_cancel: bool = False):
         """Activate the currently selected weapon (short press)."""
-        self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=hold_seconds, block=block, action_name='fire_active_weapon')
+        self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=hold_seconds, block=block,
+                                 action_name='fire_active_weapon', ignore_cancel=ignore_cancel)
+
+    def switch_weapon(self, hold_seconds: float = 0.1, block: bool = True, ignore_cancel: bool = False):
+        """Switch to the secondary weapon loadout (short press, ADR 136).
+
+        The secondary loadout is a fixed two heat-seeking missiles; the game
+        redraws the same AMMO_MISSILE HUD region for whichever weapon is
+        selected, so Analyzer.get_ammo_missiles() reads it for free once
+        switched — no separate ammo source exists or is needed.
+        """
+        self._execute_key_press(SWITCH_WEAPON, hold_seconds=hold_seconds, block=block,
+                                 action_name='switch_weapon', ignore_cancel=ignore_cancel)
 
     def reload_flares(self, block: bool = False):
         """Press SPECIAL_ABILITY to reload flares (triggered when flare count == 2)."""
@@ -1568,7 +1670,11 @@ class Controller:
             # 01:51:33 — missiles went 0 -> 1 thirteen seconds into a dive
             # started because the count was 0, and the aircraft flew a usable
             # missile into the ground. Re-check the premise while acting on it.
-            if self._eject_abort_on_rearm and self._analyzer is not None:
+            # ADR 136: once heatdive has switched weapons, AMMO_MISSILE reads
+            # the secondary loadout, not the rack this check was written for —
+            # skip it rather than false-abort on the heat-seeker count.
+            if (self._eject_abort_on_rearm and not self._eject_weapon_switched
+                    and self._analyzer is not None):
                 try:
                     _mis = self._analyzer.get_ammo_missiles()
                 except Exception:
@@ -1742,7 +1848,11 @@ class Controller:
             descending = angle <= -self._eject_cl_dive_angle_floor_deg
         else:
             descending = rate <= -self._eject_cl_descent_floor_mps
-        if descending and not self._eject_ab_engaged:
+        # ADR 139 D4: explicit consolidation-point call — always True today
+        # (eject's afterburner press is unconditional; see `_may_hold_key`),
+        # kept visible for the same reason as the other call sites.
+        if (descending and not self._eject_ab_engaged
+                and self._may_hold_key(AFTERBURNER_KEY, requester="eject")):
             self._eject_key(True, AFTERBURNER_KEY)
             self._eject_ab_engaged = True
             logger.info("Controller: eject_and_dive — descending (%.0f m/s) — "
@@ -1752,6 +1862,89 @@ class Controller:
             self._eject_ab_engaged = False
             logger.info("Controller: eject_and_dive — descent shallow (%.0f m/s) — "
                         "afterburner released to avoid crossing the arena", rate)
+
+    def ensure_padlock_off(self, max_attempts: int = 3) -> bool:
+        """ADR 136: verify, don't assume, that padlock is off before the
+        tracking-guided roll starts.
+
+        With padlock engaged the camera follows the locked target rather
+        than the aircraft's own nose, so error_norm from TargetTracker no
+        longer reflects where the nose is actually pointed and
+        orient_nose_to_target's roll correction would be steering blind.
+        PADLOCK_CAMERA is a pure toggle (no on/off argument, ADR 136
+        research 2026-09-09) — the only reliable way to know which state a
+        press leaves it in is to look at the screen, not to count presses.
+
+        Returns True once TargetTracker.detect_padlock_off confirms off,
+        False if it can't be confirmed within max_attempts (fails open —
+        does not block the dive, the operator's padlock report was about a
+        correctness gap, not a hard safety one).
+        """
+        if self._target_tracker is None or self._capture is None:
+            return False
+        for _attempt in range(max_attempts):
+            try:
+                frame = self._capture.grab_from_thread()
+                off = self._target_tracker.detect_padlock_off(frame)
+            except Exception:
+                logger.exception("Controller: padlock-off check failed")
+                off = False
+            if off:
+                self._padlock_engaged = False
+                logger.info(
+                    "Controller: padlock-off confirmed (attempt %d/%d, ADR 136)",
+                    _attempt + 1, max_attempts)
+                return True
+            self.padlock_camera(hold_seconds=0.1, block=True, ignore_cancel=True)
+            time.sleep(0.2)  # let the HUD settle before the next screen check
+        logger.warning(
+            "Controller: could not confirm padlock off after %d attempts (ADR 136)",
+            max_attempts)
+        return False
+
+    def _eject_heatdive_loop(self, stop_event: threading.Event) -> None:
+        """ADR 136: roll toward the tracked target and fire heat-seekers.
+
+        Runs on its own thread alongside eject_and_dive's existing,
+        unmodified NOSE_DOWN descent control — this method never touches
+        pitch. Stops on either `stop_event` (set by eject_and_dive itself,
+        right after the dive ends for any reason) or `self._eject_stop`
+        (set by external cancellation — manual takeover, survival hold,
+        shutdown), whichever comes first, so it never outlives the dive it
+        belongs to.
+        """
+        logger.info("Controller: eject heatdive loop started")
+        try:
+            while not stop_event.is_set() and not self._eject_stop.is_set():
+                try:
+                    frame = self._capture.grab_from_thread()
+                    obs = self._target_tracker.update(frame)
+                    if obs.get("visible") and obs.get("error_norm") is not None:
+                        # ignore_cancel: eject_and_dive already called
+                        # cancel_mission() before this loop ever started, so
+                        # self._mission_cancel stays set for the whole dive —
+                        # without this every hold is cut to near-zero on the
+                        # first _mission_cancel.wait() poll (measured live,
+                        # 2026-09-09: 0-11ms instead of the requested hold).
+                        self.orient_nose_to_target(obs["error_norm"], ignore_cancel=True)
+                    ammo = None
+                    if self._analyzer is not None:
+                        try:
+                            ammo = self._analyzer.get_ammo_missiles()
+                        except Exception:
+                            ammo = None
+                    # Fire whenever ammo is unreadable (fail open, matching
+                    # the pre-ADR-136 default of just firing) or still > 0.
+                    # ADR 136 D1 step 4: no lock/tone detection — the game
+                    # decides when a held trigger actually releases a shot.
+                    if ammo is None or ammo > 0:
+                        self.fire_active_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                except Exception:
+                    logger.exception("Controller: eject heatdive loop cycle failed")
+                if stop_event.wait(timeout=0.2) or self._eject_stop.is_set():
+                    break
+        finally:
+            logger.info("Controller: eject heatdive loop stopped")
 
     def eject_and_dive(self, on_complete=None):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
@@ -1777,6 +1970,11 @@ class Controller:
         self._eject_stop.clear()
         self._eject_held_keys.clear()
         self._eject_phase_exit_reason = ""
+        # ADR 136: once heatdive switches to the secondary loadout, the
+        # AMMO_MISSILE crop no longer reads the primary rack — reset each
+        # dive so a stale True from a previous eject can't suppress a real
+        # ADR 088 rearm-abort next time.
+        self._eject_weapon_switched = False
         # Opens nose-hold accounting for this sequence (None = not in an eject).
         # The rotation-evidence flag is NOT reset here — the descent controller
         # owns its scoping (CR-014-13).
@@ -1795,6 +1993,8 @@ class Controller:
             self._analyzer.mark_health_dead_synthetic()
 
         def _run():
+            heatdive_thread = None
+            heatdive_stop = None
             self._ejecting.set()
             try:
                 if not self._simulate_os_input and not keyboard_module:
@@ -1810,6 +2010,32 @@ class Controller:
                     "Controller: eject_and_dive — descent control engaged "
                     "(impulse rotation, target %.0f m/s)",
                     self._eject_cl_descent_target_mps)
+
+                # ADR 136: switch to heat-seekers and start tracking-guided
+                # roll/fire alongside the descent control below — the pitch
+                # loop itself is completely untouched by this addition.
+                if self._eject_cl_heatdive_enabled and self._target_tracker is not None:
+                    # ignore_cancel: cancel_mission() already ran above, before
+                    # this thread even started (same reason as the heatdive
+                    # loop's own presses — see _eject_heatdive_loop).
+                    self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                    # ADR 136: AMMO_MISSILE now reads the secondary loadout,
+                    # not the primary rack — ADR 088's rearm-abort check below
+                    # must not mistake that for a primary rearm (measured
+                    # live, 2026-09-09: false "2 missile(s) rearmed" abort on
+                    # both trials, ~8s into every heatdive-enabled dive).
+                    self._eject_weapon_switched = True
+                    # ADR 136 D4: padlock must be OFF for the roll below to
+                    # mean anything — with it on, the camera (and error_norm)
+                    # tracks the locked target, not the aircraft's nose. Gated
+                    # off by default (heatdive_padlock_verify) pending a
+                    # correct on-screen signal — see _eject_cl_heatdive_padlock_verify.
+                    if self._eject_cl_heatdive_padlock_verify:
+                        self.ensure_padlock_off()
+                    heatdive_stop = threading.Event()
+                    heatdive_thread = threading.Thread(
+                        target=self._eject_heatdive_loop, args=(heatdive_stop,), daemon=True)
+                    heatdive_thread.start()
 
                 # ADR 069: one controller owns the whole descent — rotation
                 # pulses, the ballistic phase, afterburner gating, and the
@@ -1840,17 +2066,64 @@ class Controller:
                     logger.info(
                         "Controller: eject_and_dive — descent control ended (%s) "
                         "— holding until respawn", self._eject_phase_exit_reason or "unknown")
+                    # ADR 136 D5: stop the heatdive roll/fire loop HERE, not only
+                    # in the outer finally — _eject_heatdive_loop's own docstring
+                    # already promised "right after the dive ends for any
+                    # reason", but until now nothing actually set heatdive_stop
+                    # on this natural-completion path; only the finally block
+                    # did, which runs after the ENTIRE hold-until-respawn wait
+                    # below. Measured live 2026-09-12: descent control gave up on
+                    # a transient telemetry loss ("no_telemetry", assuming the
+                    # aircraft had died), telemetry then recovered and the
+                    # aircraft kept flying for 31s with no pitch input at all,
+                    # while the heatdive loop kept re-acquiring targets and
+                    # rolling toward them the whole time — an uncontrolled plane
+                    # visibly twitching its roll axis with no dive, no pitch,
+                    # and no coordinated maneuver, until the operator took
+                    # manual control. The cancelled branch above needs no
+                    # equivalent fix: self._eject_stop is already set there,
+                    # which _eject_heatdive_loop's own loop condition already
+                    # checks directly.
+                    if heatdive_thread is not None:
+                        heatdive_stop.set()
+                        heatdive_thread.join(timeout=2.0)
                     # ADR 088 d1: the hold outlives the rearm timer just as the
                     # descent does, so it needs the same re-check. Polled rather
                     # than a single wait — with one wait, 4 of 85 dives still
                     # completed carrying missiles (2026-08-22 02:18 session),
                     # because the rack refilled AFTER descent control ended.
                     _hold_deadline = time.time() + self._eject_cl_max_s
+                    _telemetry_confirm_streak = 0
                     while not self._eject_stop.wait(
                             timeout=self._eject_cl_check_interval_s):
                         if time.time() >= _hold_deadline:
                             break
+                        # Anomaly 003: independent of the rearm check below —
+                        # runs every iteration, not gated on
+                        # _eject_abort_on_rearm. See the __init__ comment on
+                        # _eject_telemetry_confirm_polls for why this exists.
+                        if (self._eject_telemetry_confirm_polls > 0
+                                and self._analyzer is not None):
+                            try:
+                                _snap = self._analyzer.get_telemetry()
+                            except Exception:
+                                _snap = None
+                            if _snap is not None and _snap.altitude_fresh():
+                                _telemetry_confirm_streak += 1
+                            else:
+                                _telemetry_confirm_streak = 0
+                            if _telemetry_confirm_streak >= self._eject_telemetry_confirm_polls:
+                                logger.warning(
+                                    "Controller: eject_and_dive — ABORT hold, "
+                                    "telemetry confirms aircraft alive and "
+                                    "flying (%d consecutive fresh reads, "
+                                    "Anomaly 003) — resuming normal control "
+                                    "without a respawn confirmation",
+                                    _telemetry_confirm_streak)
+                                self._eject_stop_reason = "telemetry_confirmed_alive"
+                                break
                         if not (self._eject_abort_on_rearm
+                                and not self._eject_weapon_switched
                                 and self._analyzer is not None):
                             continue
                         try:
@@ -1864,6 +2137,18 @@ class Controller:
                             self._eject_stop_reason = "rearmed"
                             break
             finally:
+                # ADR 136: the dive's own natural-completion paths never set
+                # self._eject_stop (only external cancellation does), so the
+                # heatdive loop must be told explicitly rather than inferring
+                # its stop condition from that event alone. Belt-and-braces
+                # here (Event.set()/Thread.join() are both idempotent) — ADR
+                # 136 D5 added the real fix at the point descent control
+                # itself ends, so this no longer has to be the FIRST place
+                # the natural-completion path stops the heatdive loop, only
+                # a guaranteed last one.
+                if heatdive_thread is not None:
+                    heatdive_stop.set()
+                    heatdive_thread.join(timeout=2.0)
                 self._ejecting.clear()
                 self._eject_nose_held_total_s = None
                 self._eject_nose_down_since = None
@@ -2008,10 +2293,13 @@ class Controller:
             return
         logger.info("\033[93m↩ No enemy for 30s — cancelling mission and rolling right for %.0fs\033[0m", duration)
         self.cancel_mission()
+        self._disengage_stop.clear()
 
         def _run():
             if not keyboard_module:
                 logger.error("Controller: keyboard library not available for disengage_roll_right")
+                return
+            if self._disengage_stop.is_set():
                 return
             self.start_search_and_destroy_loop()
             # ROLL_RIGHT is a watched maneuver key: without the programmatic
@@ -2022,17 +2310,29 @@ class Controller:
             self._inc_programmatic_key(ROLL_RIGHT_KEY)
             try:
                 _press_key(ROLL_RIGHT_KEY)
-                # NOT _interruptible_sleep: cancel_mission() above set
-                # _mission_cancel, which would abort the roll after
-                # milliseconds and leave the aircraft flying straight out of
-                # the arena (observed 2026-07-28 20:40:03, an 8 ms "roll").
-                # The roll must outlive the cancel it issued; only program
-                # exit interrupts it.
+                # NOT _interruptible_sleep on _mission_cancel: cancel_mission()
+                # above set it, and reacting to it here would abort the roll
+                # after milliseconds and leave the aircraft flying straight
+                # out of the arena (observed 2026-07-28 20:40:03, an 8 ms
+                # "roll"). The roll must outlive the cancel it issued.
+                #
+                # SAF-001 (2026-09-09): that guard had no manual-takeover
+                # awareness at all — this thread held ROLL_RIGHT via the raw
+                # _press_key primitive, bypassing _execute_key_press's takeover
+                # gate entirely, and start_search_and_destroy_loop() above ran
+                # unconditionally. Enter mid-roll left wingman rolling the
+                # aircraft and re-arming padlock/weapon fire for up to the
+                # full duration while the operator believed they had control.
+                # _disengage_stop is dedicated to exactly this — set only by
+                # release_for_manual_takeover(), never by a plain mission
+                # cancel — so it can interrupt the roll without reintroducing
+                # the bug above.
                 deadline = time.time() + duration
                 while time.time() < deadline:
                     if self._exit_event is not None and self._exit_event.is_set():
                         break
-                    time.sleep(0.1)
+                    if self._disengage_stop.wait(timeout=0.1):
+                        break
             finally:
                 _release_started = time.time()
                 try:
@@ -2076,6 +2376,34 @@ class Controller:
         """True while an eject_and_dive sequence is in progress
         (ADR 024 3.1b — the Eject leaf's is_running_fn)."""
         return self._ejecting.is_set()
+
+    def eject_descent_active(self) -> bool:
+        """True only while `_eject_descent_control` is still actively flying
+        the dive — False once it has exited for any reason (including the
+        passive "holding until respawn" phase) or no eject is in progress.
+
+        Anomaly 003 (2026-09-13 live test): a stuck-detector gated on raw
+        `is_ejecting()`/GAME_BATTLE_EJECT dwell false-positived on a
+        legitimately long, still-actively-diving eject (ttg=10s, health
+        critical, visibly banking in the recorded video) — nothing was
+        wrong, the dive just took longer than the detector's threshold.
+        `_eject_phase_exit_reason` is set the instant descent control gives
+        up for any reason, which is the actual moment nothing is flying the
+        aircraft anymore — the correct thing to gate a stuck-detector on,
+        not entry into GAME_BATTLE_EJECT itself.
+        """
+        return self._ejecting.is_set() and not self._eject_phase_exit_reason
+
+    def is_secondary_weapon_active(self) -> bool:
+        """True once ADR 136 heatdive has pressed SWITCH_WEAPON this dive.
+
+        AMMO_MISSILE then reads the secondary (heatseeker) rack, not the
+        primary one — a caller comparing that reading against "still armed"
+        must know it may not mean what it usually means. Cleared by
+        `stop_eject_sequence()` (respawn or match end both restore the
+        primary loadout in-game), not just by the next dive starting.
+        """
+        return self._eject_weapon_switched
 
     def missile_evade_mode(self):
         """Hold AFTERBURNER + ROLL_RIGHT + YAW_LEFT until incoming clears (ADR 070).
@@ -2242,7 +2570,13 @@ class Controller:
                 # re-press once the rearm margin refills. The evade may burn
                 # the climb tactic's reserve; only empty forces a release.
                 fuel = self._read_fuel_pct()
-                if fuel is not None:
+                # ADR 139 D4: explicit consolidation-point call — always True
+                # today (missile_evade's own fuel gate and the state_exit
+                # backstop above are its real conditions; see
+                # `_may_hold_key`), kept visible for the same reason as the
+                # climb call site.
+                if fuel is not None and self._may_hold_key(
+                        AFTERBURNER_KEY, requester="missile_evade"):
                     if ab_held and fuel <= 0:
                         _set_burner(False)
                         ab_held = False
@@ -2482,7 +2816,8 @@ class Controller:
     def climb_mode(self, target_alt: "float | None" = None,
                    max_s: "float | None" = None,
                    fuel_floor_pct: float = 0.0,
-                   exit_lead_s: float = 0.0):
+                   exit_lead_s: float = 0.0,
+                   emergency: bool = False):
         """Hold NOSE_UP + AFTERBURNER until altitude recovers (ADR 073 3.2b).
 
         Non-blocking and idempotent while the thread is alive (the ADR 070
@@ -2493,6 +2828,16 @@ class Controller:
         ``target_alt``/``max_s`` default to the emergency band's
         ``exit_above_alt``/``max_climb_s``; the mission-start prologue passes
         its own operating-altitude target (3.2c).
+
+        ``emergency`` (ADR 086 d2 forced-climb case, live-measured 2026-09-09:
+        a -419 m/s dive accelerated to -807 m/s and crashed ~9s after Climb
+        took over, using the routine pulse/observe cadence): holds
+        AIRBRAKE_KEY instead of AFTERBURNER_KEY (ADR 137 — holding both
+        cancels the airbrake's own deceleration, so the emergency case never
+        touches afterburner at all, regardless of fuel or an incoming
+        missile) and removes the observe gap between pitch pulses so nose-up
+        re-applies every poll tick instead of waiting ``pulse_observe_s`` —
+        see ``_run_climb_hold``.
 
         Termination: ``confirm_reads`` consecutive FRESH telemetry reads at or
         above the target (a fresh read = the stable value's timestamp
@@ -2516,10 +2861,18 @@ class Controller:
             logger.warning("Controller: climb_mode disabled — exit_above_alt unset")
             return
         cap_s = float(max_s) if max_s is not None else self._climb_max_s
+        # ADR 137 D9: seed the loop-readable verdict with the same one-time
+        # value _start_climb already computed, before the poll loop's first
+        # iteration ever reads it. BehaviorTreeHandler._update_climb refreshes
+        # this every subsequent tick the hold stays RUNNING.
+        self._climb_emergency_requested = bool(emergency)
         self._climbing.set()
         self._climb_stop.clear()
-        logger.info("\033[95m⬆️  CLIMB — holding nose up + afterburner "
-                    "(target alt %.0f, cap %.0fs)\033[0m", float(exit_alt), cap_s)
+        logger.info("\033[95m⬆️  CLIMB — holding nose up + %s "
+                    "(target alt %.0f, cap %.0fs)\033[0m",
+                    "airbrake (EMERGENCY, afterburner suppressed)" if emergency
+                    else "afterburner",
+                    float(exit_alt), cap_s)
 
         def _run():
             try:
@@ -2528,12 +2881,24 @@ class Controller:
                     return
                 self._run_climb_hold(float(exit_alt), cap_s,
                                      fuel_floor_pct=float(fuel_floor_pct),
-                                     exit_lead_s=float(exit_lead_s))
+                                     exit_lead_s=float(exit_lead_s),
+                                     emergency=bool(emergency))
             finally:
                 self._climbing.clear()
 
         self._climb_thread = threading.Thread(target=_run, daemon=True)
         self._climb_thread.start()
+
+    def set_climb_emergency(self, value: bool) -> None:
+        """ADR 137 D9: push the tree's CURRENT-tick emergency verdict into
+        the running climb hold. Called every tick Climb is already RUNNING
+        (``BehaviorTreeHandler._update_climb``); ``_run_climb_hold``'s poll
+        loop re-reads this each iteration, the same "self-owned attribute,
+        read live every poll" idiom its fuel/telemetry reads already use, so
+        a mid-hold escalation or de-escalation is no longer stuck at
+        whatever value was true when the hold started.
+        """
+        self._climb_emergency_requested = bool(value)
 
     def note_incoming(self, detected: bool, now: "float | None" = None) -> None:
         """Refresh the missile-evade afterburner deadline. ADR 128.
@@ -2584,7 +2949,13 @@ class Controller:
                     # would be off exactly when a missile is inbound, with
                     # nothing in the log to say so. Pressing a held key again
                     # is harmless.
-                    if now - last_press >= 1.0:
+                    # ADR 139 D4: explicit consolidation-point call — always
+                    # True today (this hold has no may-hold condition beyond
+                    # its own deadline/cap above; see `_may_hold_key`), kept
+                    # visible for the same reason as the other call sites.
+                    if (now - last_press >= 1.0
+                            and self._may_hold_key(AFTERBURNER_KEY,
+                                                   requester="afterburner_evade")):
                         self._climb_key(AFTERBURNER_KEY, press=True,
                                         action="evade")
                         last_press = now
@@ -2658,7 +3029,10 @@ class Controller:
             return
 
         may_hold = (
-            not self._manual_takeover_active()
+            # ADR 139 D4: the manual-takeover / climb-emergency arbitration
+            # moved into the shared `_may_hold_key` gate; the ADR 137
+            # "one exception to D9" reasoning it encodes is unchanged.
+            self._may_hold_key(AFTERBURNER_KEY, requester="cruise")
             and (
                 (mission_running and game_state == GameState.GAME_BATTLE)
                 or game_state == GameState.GAME_BATTLE_EJECT
@@ -2713,6 +3087,43 @@ class Controller:
     def is_afterburner_cruising(self) -> bool:
         """True while the cruise-afterburner hold owns the throttle."""
         return self._cruise_ab_active
+
+    def _may_hold_key(self, _key: str, requester: str) -> bool:
+        """ADR 139 D4: the single named point for AFTERBURNER_KEY/AIRBRAKE_KEY
+        arbitration across the five tactic threads that share them.
+
+        A consolidation, not a fix: direct audit found these five sites do
+        not agree with each other today, and this first version reproduces
+        each site's current effective behavior exactly rather than
+        normalizing them. Any of these being worth changing (e.g. giving
+        ``climb`` a manual-takeover check it lacks today) is a separate,
+        future decision requiring its own live validation — not folded in
+        here. ``key`` is accepted for the log/signature shape a future
+        per-key policy would need; every requester's condition today is in
+        fact key-independent.
+        """
+        if requester == "cruise":
+            # note_afterburner_cruise's `may_hold` — the only site checking
+            # either flag today.
+            return (not self._manual_takeover_active()
+                   and not self._climb_emergency_active)
+        if requester == "climb":
+            # _run_climb_hold's fuel/afterburner logic has no manual-takeover
+            # check of its own — replicated as-is, not added here.
+            return True
+        if requester == "missile_evade":
+            # _run_missile_evade_hold has its own independent fuel gate and a
+            # state_exit game-state backstop, not a may-hold condition on this
+            # key specifically.
+            return True
+        if requester == "afterburner_evade":
+            # _start_afterburner_evade has no may-hold condition beyond its
+            # own deadline/cap.
+            return True
+        if requester == "eject":
+            # eject_and_dive's afterburner press is unconditional.
+            return True
+        raise ValueError(f"_may_hold_key: unknown requester {requester!r}")
 
     def _climb_key(self, key: str, press: bool, action: str = "climb"):
         """Press/release one climb-family key, honoring simulate mode."""
@@ -2894,7 +3305,8 @@ class Controller:
 
     def _run_climb_hold(self, exit_alt: float, cap_s: float,
                         fuel_floor_pct: float = 0.0,
-                        exit_lead_s: float = 0.0):
+                        exit_lead_s: float = 0.0,
+                        emergency: bool = False):
         """Thread body for climb_mode: pulse-and-observe pitch, poll altitude.
 
         AFTERBURNER is held while fuel stays above ``fuel_floor_pct``
@@ -2909,6 +3321,16 @@ class Controller:
         LOOPS the aircraft instead of climbing it (2026-08-15 20:24 evidence:
         60 s held, altitude oscillated 1650-2400 with zero net gain). The
         eject dive controller's pulse/observe pattern, inverted.
+
+        ``emergency`` (live-measured 2026-09-09: a dive that reached -807 m/s
+        outran the routine cadence and crashed): holds AIRBRAKE_KEY alongside
+        the existing keys to shed the dive's speed directly, rather than only
+        fighting it with pitch, and removes the ``pulse_observe_s`` gap
+        between pulses — each pulse still ends and reassesses rate/ceiling
+        before the next one starts (so a recovered rate or a hit pitch
+        ceiling still stops or reverses it; the oscillation risk above is a
+        continuously HELD key with no reassessment, not a tightened pulse
+        cadence), it just no longer waits idle between pulses.
 
         @relation(SAF-001, scope=function)
         @relation(SAF-008, scope=function)
@@ -2927,6 +3349,12 @@ class Controller:
         pitch_rate = None   # deg/s between the last two angle samples
         ab_held = False
         above_target = False   # ADR 083 d3: latches on the first at-target read
+        # ADR 137 D9: the loop's OWN last-applied emergency state — refreshed
+        # each iteration against `self._climb_emergency_requested`, which
+        # BehaviorTreeHandler._update_climb keeps current for as long as this
+        # hold stays RUNNING. Before D9 this hold only ever saw the value
+        # frozen into the `emergency` parameter at thread start.
+        emergency_now = bool(emergency)
 
         # NOSE_UP and NOSE_DOWN (ADR 076 d3 ceiling) are watched maneuver
         # keys — same programmatic bracket as the evade hold (d4), held
@@ -2959,7 +3387,21 @@ class Controller:
             self._inc_programmatic_key(_key)
         try:
             fuel = self._read_fuel_pct()
-            if fuel is None or fuel > fuel_floor_pct:
+            if emergency_now:
+                # ADR 137: airbrake and afterburner cancel each other out
+                # (operator observation, 2026-09-09 — drag vs. thrust working
+                # against each other) — airbrake owns deceleration for the
+                # whole emergency hold, afterburner stays off regardless of
+                # fuel level. The fuel-floor/incoming-missile logic below is
+                # skipped entirely for the same reason, including the ADR 088
+                # missile override: outrunning a missile is moot if holding
+                # afterburner also cancels the airbrake that is trying to
+                # keep the aircraft off the ground in the first place.
+                self._climb_key(AIRBRAKE_KEY, press=True, action="climb_emergency")
+                self._climb_emergency_active = True
+                logger.info("Controller: climb — EMERGENCY: airbrake held, "
+                            "afterburner suppressed (cruise-afterburner yields too)")
+            elif fuel is None or fuel > fuel_floor_pct:
                 self._climb_key(AFTERBURNER_KEY, press=True)
                 ab_held = True
             else:
@@ -2970,11 +3412,48 @@ class Controller:
             while not self._climb_stop.wait(timeout=0.25):
                 if self._exit_event is not None and self._exit_event.is_set():
                     break
+                # ADR 137 D9: re-read the tree's CURRENT verdict every
+                # iteration instead of only ever acting on the value frozen in
+                # at thread start — the "Third Live Trial" gap, where an
+                # already-running hold never learned its emergency status had
+                # changed mid-hold. Measured live twice, 2026-09-10 08:15/08:16.
+                _requested_emergency = self._climb_emergency_requested
+                if _requested_emergency != emergency_now:
+                    if _requested_emergency:
+                        # Escalation. Airbrake and afterburner cancel each
+                        # other out (ADR 137 D1/D3), so afterburner must come
+                        # down before airbrake goes up.
+                        if ab_held:
+                            self._climb_key(AFTERBURNER_KEY, press=False)
+                            ab_held = False
+                        self._climb_key(AIRBRAKE_KEY, press=True,
+                                        action="climb_emergency")
+                        self._climb_emergency_active = True
+                        logger.warning(
+                            "Controller: climb — emergency ESCALATED mid-hold "
+                            "(ADR 137 D9) — airbrake engaged, afterburner "
+                            "suppressed")
+                    else:
+                        # De-escalation. Release airbrake; normal fuel-floor
+                        # logic resumes on the next iteration below.
+                        self._climb_key(AIRBRAKE_KEY, press=False,
+                                        action="climb_emergency")
+                        self._climb_emergency_active = False
+                        logger.warning(
+                            "Controller: climb — emergency CLEARED mid-hold "
+                            "(ADR 137 D9) — resuming normal fuel-floor logic")
+                    emergency_now = _requested_emergency
                 # ADR 075 burner gate: release at the floor (a held key at 0%
                 # blocks recharge; the sustain floor keeps the evade reserve),
-                # re-press only after the rearm margin refills.
+                # re-press only after the rearm margin refills. ADR 137:
+                # entirely skipped in the emergency case — see above.
                 fuel = self._read_fuel_pct()
-                if fuel is not None:
+                # ADR 139 D4: explicit consolidation-point call — always True
+                # today (climb has no manual-takeover check of its own; see
+                # `_may_hold_key`), kept visible so a future change to the
+                # shared gate is not silently bypassed here.
+                if (fuel is not None and not emergency_now
+                        and self._may_hold_key(AFTERBURNER_KEY, requester="climb")):
                     _incoming = self._incoming_now()
                     if ab_held and fuel <= fuel_floor_pct and not _incoming:
                         self._climb_key(AFTERBURNER_KEY, press=False)
@@ -3052,7 +3531,9 @@ class Controller:
                 if pitch_held is not None and now >= pulse_until:
                     self._climb_key(pitch_held, press=False)
                     pitch_held = None
-                    observe_until = now + self._climb_observe_s
+                    # ADR 137: no idle gap between pulses — the next
+                    # loop tick re-checks rate/ceiling and re-pulses at once.
+                    observe_until = now if emergency_now else now + self._climb_observe_s
                 elif pitch_held is None and now >= observe_until:
                     if _at_pitch_ceiling():   # ADR 086 d7 (was: current angle only)
                         pitch_held = NOSE_DOWN_KEY
@@ -3143,6 +3624,9 @@ class Controller:
             # press of 'l' is mistaken for an echo.
             self._climb_key(NOSE_UP_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
+            if emergency_now:
+                self._climb_key(AIRBRAKE_KEY, press=False, action="climb_emergency")
+                self._climb_emergency_active = False
             # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE
             # going neutral. Burner off first (above), so the push is not
             # fighting thrust — the ADR 083 d3 finding.
@@ -4077,6 +4561,7 @@ class Controller:
         self._climb_stop.set()
         self._boundary_turn_stop.set()   # ADR 107: it holds two flight axes
         self._sg_stop.set()
+        self._disengage_stop.set()   # SAF-001 2026-09-09: was missing entirely
         try:
             self.cancel_mission()
         except Exception:
@@ -4152,6 +4637,13 @@ class Controller:
         """Cancel an in-progress eject-and-dive sequence if one is active."""
         self._eject_stop_reason = reason
         self._eject_stop.set()
+        # Every caller of this method represents a moment the game itself
+        # restores the primary loadout — a respawn or a match ending — so
+        # the "AMMO_MISSILE currently reads secondary" ambiguity clears here,
+        # not only at the next dive's own start. Previously this only reset
+        # at trigger_eject_and_dive(), so it could read stale-True for an
+        # entire following life with no further eject in it.
+        self._eject_weapon_switched = False
 
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:
@@ -4360,10 +4852,24 @@ class Controller:
     def cleanup(self, keep_hotkeys: bool = False):
         """Stop injection activity, release held keys, deregister hooks.
 
-        `keep_hotkeys=True` skips the deregistration so the process can stay in
-        standby watching for a second Backspace (ADR 099). Everything else still
-        runs: the writers stop and every injectable key is released, so nothing
-        wingman was holding survives into the operator's manual flight.
+        `keep_hotkeys=True` tears down every hotkey except Backspace itself,
+        so standby is equivalent to a `make g` session (MetalStorm running
+        with no wingman attached) plus one listener for the close signal —
+        not the operator's own flight. Every other injected key, mission
+        hotkey and takeover key is gone; only the second Backspace still
+        does anything. Everything else still runs: the writers stop and
+        every injectable key is released, so nothing wingman was holding
+        survives into the operator's manual flight.
+
+        Before this, standby kept EVERY hotkey live — 'u' still restarted
+        the J20 mission, maneuver keys still cancelled it, etc. — because
+        `keep_hotkeys=True` simply skipped `unhook_all()` entirely. Observed
+        2026-09-11: pressing 'u' during standby silently re-engaged the
+        mission 5.5s before a second Backspace closed everything, which is
+        not "MetalStorm is yours to fly" — it is wingman still partly
+        attached. Re-registering just Backspace, from the same closure
+        `__init__` already built (`self._exit_script_hotkey`), needs no
+        change to that hotkey's own first/second-press logic.
 
         Order matters: XTest-injected key state lives in the X SERVER, not this
         client, so it survives process exit — and daemon threads die without
@@ -4415,8 +4921,22 @@ class Controller:
 
         # 3. Deregister hooks last so the guards above stay active meanwhile.
         if keep_hotkeys:
-            logger.info("Controller: keyboard hooks kept for standby — press "
-                        "Backspace again to close MetalStorm")
+            if keyboard_module and self._exit_script_hotkey is not None:
+                try:
+                    keyboard_module.unhook_all()
+                    keyboard_module.on_press_key(
+                        'backspace', self._exit_script_hotkey, suppress=False)
+                    logger.info(
+                        "Controller: standby — every hotkey released except "
+                        "Backspace (equivalent to a wingman-less MetalStorm "
+                        "session); press it again to close MetalStorm")
+                except Exception:
+                    logger.exception(
+                        "Controller: failed to narrow hotkeys down to "
+                        "Backspace for standby — hooks left as they were")
+            else:
+                logger.info("Controller: keyboard hooks kept for standby — press "
+                            "Backspace again to close MetalStorm")
         elif keyboard_module:
             try:
                 keyboard_module.unhook_all()

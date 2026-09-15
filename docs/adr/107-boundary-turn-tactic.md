@@ -86,6 +86,25 @@ therefore hoisted above `BoundaryTurn` while the ordinary altitude-recovery
 climb stays below it. Low-and-near-the-edge is the one case where the ordering
 is not obvious, and it needs a stated answer rather than an emergent one.
 
+**D4 correction (2026-09-14, Anomaly 007): it did not actually outrank
+anything, for 9+ months of wall-clock design intent.** The "hoisted above"
+mechanism (`yields_to_fn` reading `ClimbCondition.emergency_active`) reads a
+flag that only updates when py-trees ticks Climb's own leaf — which never
+happens while `BoundaryTurn` is the one winning selection, since a priority
+Selector short-circuits at the first child that succeeds. Live 2026-09-14:
+a real 6-8s time-to-ground emergency ran for 9+ continuous seconds with
+`BoundaryTurn` selected throughout and zero yield — the operator caught it
+manually. Fixed the same day: `ClimbCondition.update_emergency` now runs
+unconditionally every tick, before the tree is ticked, so the flag this D4
+depends on is actually current regardless of what wins selection. Full
+incident, root cause, and fix: `docs/anomaly/007-*.md`. The single existing
+test for this D4 claim (`test_it_yields_to_the_climb_emergency_band`) fed
+the yield check a hand-controlled mock and never exercised the real
+staleness — passing green the entire time this was broken. Two new tests
+(`test_reproduces_the_incident_without_the_pre_tick_update`,
+`test_yields_to_climb_when_the_pre_tick_update_runs`) now cover the real
+tree-ticking integration this D4 actually depends on.
+
 **D5. Reuse the ADR 101 rev 2 condition.** Enter when the boundary is inside
 `boundary_turn_frac` and `forward` is positive; hold until the aircraft is
 receding — `dist` risen `boundary_turn_recede_frac` above the closest approach of

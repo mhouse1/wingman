@@ -542,7 +542,8 @@ def test_release_covers_every_injectable_key():
     src = pathlib.Path("wingman/controller.py").read_text()
     fn = src[src.index("def release_for_manual_takeover"):]
     assert "INJECTABLE_KEYS" in fn[:1400]
-    for stop in ("_eject_stop", "_me_stop", "_climb_stop", "_sg_stop", "cancel_mission"):
+    for stop in ("_eject_stop", "_me_stop", "_climb_stop", "_boundary_turn_stop",
+                 "_sg_stop", "_disengage_stop", "cancel_mission"):
         assert stop in fn[:1400], stop
 
 

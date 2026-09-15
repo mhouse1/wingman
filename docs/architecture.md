@@ -238,7 +238,7 @@ The main loop runs at `loop_interval_sec` (default 1.5 s). Per-concern logic liv
 
 ---
 
-### Behavior Tree (ADR 024, active — 3.1a + 3.1b)
+### Behavior Tree (ADR 024, active — 3.1a + 3.1b; composition per ADR 139)
 
 A py-trees priority selector ticked once per loop tick. Leaves read a single frozen `AnalyzerSnapshot` from the blackboard — no leaf touches the live analyzer. Selection priority is the mutual-exclusion mechanism: a higher tactic being selected is what stops lower tactics actuating.
 
@@ -256,13 +256,46 @@ flowchart LR
     R --> H[AttackSupport]
 ```
 
-Climb (ADR 073), BoundaryTurn (ADR 107) and Regroup (ADR 028 rev 4) are each
-inserted only when their config flag is on (`behavior_tree.climb.enabled`,
-`behavior_tree.boundary.turn_frac`, `minimap.regroup_enabled`) — and each is
-inserted **by name**, not by list offset: the original `len(children) - 2`
-meant "above Engage" only while exactly two leaves followed, and adding
-Regroup silently pushed Climb below Engage until that was fixed. Climb inserts
-itself just above Engage; BoundaryTurn inserts itself just above Evade.
+`build_tree()` assembles this from a single declared `_PRIORITY_ORDER` tuple
+(`wingman/behavior_tree.py`) — the source of truth for both rank and the
+diagram above — rather than the imperative `children.insert(pos, leaf)`
+calls it used before ADR 139 D1. That version found `pos` by searching for a
+named neighbor specifically because an even earlier offset-based version
+(`len(children) - 2`) silently meant "above Engage" only while exactly two
+leaves followed it, and broke the moment Regroup was added. Climb (ADR 073),
+BoundaryTurn (ADR 107) and Regroup (ADR 028 rev 4) are each present only
+when their config flag is on (`behavior_tree.climb.enabled`,
+`behavior_tree.boundary.turn_frac`, `minimap.regroup_enabled`) —
+`climb_tactic_enabled`/`boundary_tactic_enabled` (ADR 139 D2) are the single
+predicates deciding both tree presence and actuator wiring for those two,
+replacing what used to be two independently-written checks per tactic.
+`_build_slots` builds Climb before BoundaryTurn regardless of their
+priority order, since BoundaryTurn's condition reads Climb's emergency
+closure — build order and priority order are declared separately on
+purpose; see ADR 139 D1's own comment for why.
+
+Hysteresis state for Climb and BoundaryTurn (`ClimbCondition`/
+`BoundaryCondition`, ADR 139 D3) lives on named, read-only instance
+properties (`active`, `emergency_active`, `min_dist`, …) rather than a
+closure-captured dict — inspectable, not just a bool. `ConditionTactic` also
+accepts an `update_fn(snapshot)` (ADR 137 D9), called on every tick a tactic
+is already `RUNNING` (never on the same tick as `start_fn`) — the channel
+Climb uses to react to a mid-hold emergency escalation or de-escalation
+instead of only ever seeing the value frozen in at selection time.
+
+A sibling gap on the other side of the same flag: BoundaryTurn's
+`yields_to_fn` reads `ClimbCondition.emergency_active`, but py-trees never
+ticks a leaf a higher-priority sibling keeps beating — while BoundaryTurn
+kept winning, Climb's own condition (and thus `emergency_active`) was never
+invoked at all, so the yield read permanently stale data (Anomaly 007,
+2026-09-14, a real live near-miss). Fixed with a THIRD update channel,
+`ClimbCondition.update_emergency(snapshot, now)`, called unconditionally by
+`BehaviorTreeHandler.tick()` before `tree.tick()` — the same "perceive
+before select" ordering `BoundaryPerceptionHandler` uses for boundary
+readings — so the flag is current regardless of which leaf wins selection.
+`__call__` still recomputes it inline as a fallback when nothing called this
+first (every direct-call test site), so the split is behavior-preserving
+outside the one gap it closes.
 
 | Leaf | Condition | Actuation |
 |---|---|---|
@@ -291,7 +324,7 @@ outranks a boundary the aircraft has not crossed yet — but it must preempt
 ordinary Engage/Disengage/Climb geometry, or the aircraft flies out of the
 arena mid-turn.
 
-Actuating tactics self-terminate in their own Controller threads (clear timers, budgets, caps) — `ConditionTactic.terminate` is deliberately a no-op so selector churn cannot abort a manoeuvre mid-flight. Tactics that share keys (eject and evade both own AFTERBURNER) are excluded both by selector priority **and** a runtime yield check (ADR 070 d11), because priority orders selections, not thread lifetimes. Cruise Afterburner (below) shares the same key by a deliberately opposite rule — see there for why.
+Actuating tactics self-terminate in their own Controller threads (clear timers, budgets, caps) — `ConditionTactic.terminate` is deliberately a no-op so selector churn cannot abort a manoeuvre mid-flight. Tactics that share keys (eject and evade both own AFTERBURNER) are excluded both by selector priority **and** a runtime yield check (ADR 070 d11), because priority orders selections, not thread lifetimes. Cruise Afterburner (below) shares the same key by a deliberately opposite rule — see there for why. `Controller._may_hold_key(key, requester)` (ADR 139 D4) is the one named point all five AFTERBURNER_KEY/AIRBRAKE_KEY holders (cruise, climb, missile evade, afterburner evade, eject) go through — a consolidation of five previously-independent inline conditions, not a new arbitration policy: each requester's check today reproduces exactly what its own call site did before D4.
 
 ---
 
@@ -334,7 +367,10 @@ genuine flight-command state, not one where wingman should stand down), while
 a mission is running, and outside manual takeover
 (`_manual_takeover_active()`, SAF-001) — none of which are tactic state; all
 of them mean "wingman is not commanding flight input right now" rather than
-"a tactic more important than cruise is running."
+"a tactic more important than cruise is running." The manual-takeover and
+climb-emergency checks specifically are `_may_hold_key(AFTERBURNER_KEY,
+requester="cruise")` (ADR 139 D4) — cruise remains the only one of the five
+requesters that actually yields to either.
 
 Live-soaked 8h57m, 92 missions, 267 eject sequences: 916 engage/release
 cycles, exactly balanced, zero stuck keys. Whether the extra speed helps or

@@ -185,11 +185,46 @@ def display_is_up(display: str) -> bool:
 
 
 def start(display: str, size: str) -> int:
-    """Bring up a rootful Xwayland on `display`. Idempotent."""
+    """Bring up a rootful Xwayland on `display`. Idempotent for an IDLE server.
+
+    A server that already answers but still has a game attached is NOT left
+    alone — see the "up" branch below. That used to be unconditional, and it
+    was wrong: STANDBY (ADR 099) or a Ctrl-C that deliberately "leaves
+    everything up" can leave both MetalStorm and its Xwayland running when a
+    fresh `make rd` starts. launch-game kills and relaunches the game
+    unconditionally regardless — but reusing the SAME Xwayland underneath
+    that kill-and-relaunch left hotkey observation dead for an entire
+    session (2026-09-13 05:54-06:01, wingman.log): matchmaking stalled with
+    "Good Luck" never detected, and neither backspace nor 'z' was ever even
+    observed as pressed, forcing a Ctrl-C to get out. A stale server left the
+    operator's compositor with an old, no-longer-relevant window in the mix
+    instead of one unambiguous new one.
+    """
     state = probe_display(display)
     if state == "up":
-        print(f"nested display {display} already running")
-        return 0
+        try:
+            from wingman.game_shutdown import find_game_pids
+            stale_game = bool(find_game_pids())
+        except Exception:
+            stale_game = False
+        if not stale_game:
+            print(f"nested display {display} already running (idle) — reusing")
+            return 0
+        print(f"nested display {display} already running with a game still "
+              f"attached — closing both and starting fresh")
+        try:
+            from wingman.game_shutdown import close_game, close_nested_display
+            # Game first, same ordering as every other teardown here (ADR 099):
+            # close_nested_display assumes the game is already gone, and
+            # killing the display out from under a live game is the abrupt
+            # yank this project has specifically avoided everywhere else.
+            close_game()
+            close_nested_display(display)
+        except Exception as e:
+            print(f"ERROR: could not close the stale display/game: {e}",
+                  file=sys.stderr)
+            return 1
+        state = "down"
     if state == "wedged":
         # Distinguished deliberately. "Down" means start a server; "wedged"
         # means one exists and must be cleared first, and starting a second one

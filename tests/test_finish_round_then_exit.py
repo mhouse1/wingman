@@ -539,6 +539,33 @@ def test_standby_still_releases_every_injected_key():
     assert release < hooks, "keys must be released before the hook decision"
 
 
+def test_standby_narrows_every_hotkey_down_to_backspace():
+    """2026-09-11: standby used to leave EVERY hotkey live, not just
+    Backspace — 'u' silently restarted the mission mid-standby, 5.5s before
+    a second Backspace closed everything. Standby must now be equivalent to
+    a `make g` session (MetalStorm running, no wingman attached) plus one
+    listener for the close signal, not a partial attach."""
+    ctrl_src = Path("wingman/controller.py").read_text()
+    body = ctrl_src[ctrl_src.index("def cleanup(self, keep_hotkeys"):]
+    keep_branch = body[body.index("if keep_hotkeys:"):body.index("elif keyboard_module:")]
+    assert "unhook_all()" in keep_branch, \
+        "standby must tear every hotkey down, not just skip deregistration"
+    assert "on_press_key(\n                        'backspace'" in keep_branch \
+        or "on_press_key('backspace'" in keep_branch, \
+        "Backspace must be re-registered after the blanket unhook"
+    assert "self._exit_script_hotkey" in keep_branch, \
+        "must reuse the existing hotkey closure, not a new one with reset state"
+
+
+def test_exit_script_hotkey_is_kept_on_self():
+    """cleanup() re-registers this closure later — it must survive past the
+    __init__ scope it was defined in."""
+    ctrl_src = Path("wingman/controller.py").read_text()
+    assert "self._exit_script_hotkey = None" in ctrl_src, \
+        "must default to None so cleanup() can safely check before reusing it"
+    assert "self._exit_script_hotkey = exit_script_hotkey" in ctrl_src
+
+
 def test_z_still_closes_immediately_without_standby():
     """'z' means "I am done" — it must not drop into standby."""
     block = MAIN_SRC[MAIN_SRC.index("elif finish_round_exit:"):

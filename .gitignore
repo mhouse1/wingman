@@ -15,6 +15,10 @@ FUTURE/
 wingman.log
 wingman_live.log
 *.log
+# ADR 012: session recording videos and BT trace files — large/per-run debug
+# artifacts, never meant to be published (see logs/session_*.mp4, logs/bt_trace_*.jsonl)
+logs/session_*.mp4
+logs/bt_trace_*.jsonl
 # ADR 100 D7: the whole corpus (including telemetry/, integration_test/, and
 # the loose top-level PNGs D5 originally kept tracked) lives on veda only now.
 # `git rm --cached` was needed once to untrack what this line alone cannot

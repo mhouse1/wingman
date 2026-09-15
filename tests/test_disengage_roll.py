@@ -105,3 +105,73 @@ def test_disengage_roll_aborts_on_exit_event(monkeypatch):
     else:
         raise AssertionError("roll key was not released after exit event")
     assert time.time() - t0 < 2.0  # did not hold for the full 5s
+
+
+def test_disengage_roll_aborts_on_manual_takeover(monkeypatch):
+    """SAF-001, 2026-09-09. Before this fix _disengage_stop did not exist:
+    the roll held ROLL_RIGHT via the raw press primitive (bypassing
+    _execute_key_press's takeover gate) and re-armed the search-and-destroy
+    loop unconditionally, for up to the full duration, regardless of a
+    manual takeover starting mid-roll — reported live as the padlock camera
+    moving on its own during manual flight."""
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb)
+    ctrl._set_last_mission("j20")
+    monkeypatch.setattr(ctrl, "restart_last_mission", lambda: None)
+
+    ctrl.disengage_roll_right(duration=5.0)
+    # Let the roll actually start holding the key before "taking over".
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if any(e[0] == "press" and e[1] == ROLL_RIGHT_KEY for e in kb.events):
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("roll never started")
+
+    t0 = time.time()
+    ctrl._disengage_stop.set()   # what release_for_manual_takeover() does
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if any(e[0] == "release" and e[1] == ROLL_RIGHT_KEY for e in kb.events):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("roll key was not released after manual takeover")
+    assert time.time() - t0 < 2.0  # did not hold for the full 5s
+
+    # Join before returning: the thread's tail still has a bounded
+    # mission-teardown wait after the release, and if it outlives this test
+    # function, monkeypatch reverts controller_module.keyboard_module to the
+    # real XTest shim while the thread is still running against it — the
+    # exact 2026-08-14 stuck-key hazard test_mission_cancel.py's fixture
+    # teardown comment already warns about, confirmed live here by six
+    # unrelated test_input_linux.py failures the first time this test ran
+    # without the join.
+    ctrl._disengage_thread.join(timeout=10.0)
+    assert not ctrl._disengage_thread.is_alive(), "disengage thread outlived the test"
+
+
+def test_disengage_roll_right_clears_the_stop_event_on_a_fresh_start(monkeypatch):
+    """A stop left set from a previous takeover must not silently no-op the
+    next disengage roll."""
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb)
+    ctrl._set_last_mission("j20")
+    monkeypatch.setattr(ctrl, "restart_last_mission", lambda: None)
+    ctrl._disengage_stop.set()
+
+    ctrl.disengage_roll_right(duration=0.3)
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if any(e[0] == "press" and e[1] == ROLL_RIGHT_KEY for e in kb.events):
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("roll never started — stale stop event was not cleared")
+
+    # Join before returning — see the comment in the takeover test above.
+    ctrl._disengage_thread.join(timeout=10.0)
+    assert not ctrl._disengage_thread.is_alive(), "disengage thread outlived the test"
