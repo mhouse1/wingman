@@ -1555,6 +1555,7 @@ class BehaviorTreeHandler:
         climb_cfg = bt_cfg.get("climb", {}) or {}
         self._climb_shadow = None
         self._climb_emergency_fn = None
+        self._climb_emergency_update_fn = None
         self._climb_shadow_active = False
         self._climb_shadow_since = 0.0
         self._climb_band = (climb_cfg.get("enter_below_alt"),
@@ -1611,6 +1612,8 @@ class BehaviorTreeHandler:
                 regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
             self._writer = make_snapshot_writer()
             self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
+            self._climb_emergency_update_fn = getattr(
+                self._tree, "climb_emergency_update_fn", None)
 
     def _start_boundary_turn(self) -> None:
         """BoundaryTurn start_fn. ADR 122: tell the turn which side the edge is
@@ -1795,6 +1798,16 @@ class BehaviorTreeHandler:
             has_padlock=self._has_padlock,
         )
         self._writer.set("snapshot", snap)
+        # Anomaly 007: refresh Climb's ttg emergency verdict unconditionally,
+        # before the tree is ticked — BoundaryTurn's yields_to_fn (ADR 107
+        # D4) needs this to be current even on ticks where BoundaryTurn wins
+        # and py-trees would otherwise never tick Climb's own condition at
+        # all. See ClimbCondition.update_emergency.
+        if self._climb_emergency_update_fn is not None:
+            try:
+                self._climb_emergency_update_fn(snap, now)
+            except Exception:
+                logger.debug("climb_emergency_update_fn failed", exc_info=True)
         self._tree.tick()
         selection = selected_tactic(self._tree)
         if selection != self._last_selection:

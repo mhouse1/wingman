@@ -847,6 +847,67 @@ def test_it_yields_to_the_climb_emergency_band():
     assert c(_bsnap(0.40, +0.30)) is False
 
 
+# --- Anomaly 007: the yield above never fires in real tree-ticking order -----
+#
+# The test above proves the yield MECHANISM works when fed a mock
+# `yields_to_fn` under direct, isolated control. It does not, and never did,
+# prove the real one stays current — `yields_to_fn` reads
+# `ClimbCondition.emergency_active`, which is only computed as a side effect
+# of py-trees actually ticking Climb's own leaf. py-trees' priority Selector
+# never ticks a leaf a higher-priority sibling keeps beating, so while
+# BoundaryTurn wins every tick, Climb's condition was never invoked at all —
+# `emergency_active` sat frozen at whatever it was before BoundaryTurn took
+# over. Live 2026-09-14: ttg measured 6-8s (threshold 30s) for 9+ continuous
+# seconds while BoundaryTurn stayed selected and never yielded; the operator
+# intervened manually at ~470m still descending. These two tests reproduce it
+# with the real tree, not a mock, and pin the fix (`update_emergency`, called
+# once per tick before `tree.tick()`, same as `BehaviorTreeHandler.tick()`
+# now does in production).
+
+_DIVE_BT_CFG = dict(
+    BT_CFG,
+    boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0,
+             "min_clear_frac": 0.0},
+    climb={"enabled": True, "enter_below_alt": 500, "exit_above_alt": 1000,
+          "recover_below_time_s": 30.0, "confirm_bypass_time_s": 15.0,
+          "confirm_reads": 1},
+)
+
+
+def test_reproduces_the_incident_without_the_pre_tick_update(clock):
+    """Pins the bug: omit the fix's pre-tick call and BoundaryTurn never
+    yields, no matter how deep the emergency, because Climb's own condition
+    is simply never asked while BoundaryTurn keeps winning."""
+    tree = build_tree(dict(_DIVE_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    # Approaching the edge AND in a 6s-to-ground dive (well inside the 30s
+    # emergency window) — the exact live shape, altitude/rate chosen to
+    # match the incident's own readings (2439m at -424m/s -> ttg=5.75s).
+    snap = make_snap(altitude=2439.0, altitude_rate=-424.0,
+                     boundary_dist=0.40, boundary_forward=+0.30)
+    for _ in range(5):
+        writer.set("snapshot", snap)
+        tree.tick()   # the old production call site: no pre-tick update
+        clock.advance(1.5)
+        assert selected_tactic(tree) == TACTIC_BOUNDARY_TURN, \
+            "reproduction failed — the bug this test pins may already differ"
+
+
+def test_yields_to_climb_when_the_pre_tick_update_runs(clock):
+    """The fix: call tree.climb_emergency_update_fn(snap, now) every tick,
+    before tree.tick() — exactly what BehaviorTreeHandler.tick() does now.
+    Climb must win within the same tick the emergency becomes current."""
+    tree = build_tree(dict(_DIVE_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=2439.0, altitude_rate=-424.0,
+                     boundary_dist=0.40, boundary_forward=+0.30)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_CLIMB, \
+        "BoundaryTurn still won — the emergency flag was not fresh in time"
+
+
 def test_selection_beats_climb_engage_and_regroup(clock):
     cfg = dict(BT_CFG, boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0},
                climb={"enabled": True, "enter_below_alt": 1000, "exit_above_alt": 2000})

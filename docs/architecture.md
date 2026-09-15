@@ -283,6 +283,20 @@ is already `RUNNING` (never on the same tick as `start_fn`) — the channel
 Climb uses to react to a mid-hold emergency escalation or de-escalation
 instead of only ever seeing the value frozen in at selection time.
 
+A sibling gap on the other side of the same flag: BoundaryTurn's
+`yields_to_fn` reads `ClimbCondition.emergency_active`, but py-trees never
+ticks a leaf a higher-priority sibling keeps beating — while BoundaryTurn
+kept winning, Climb's own condition (and thus `emergency_active`) was never
+invoked at all, so the yield read permanently stale data (Anomaly 007,
+2026-09-14, a real live near-miss). Fixed with a THIRD update channel,
+`ClimbCondition.update_emergency(snapshot, now)`, called unconditionally by
+`BehaviorTreeHandler.tick()` before `tree.tick()` — the same "perceive
+before select" ordering `BoundaryPerceptionHandler` uses for boundary
+readings — so the flag is current regardless of which leaf wins selection.
+`__call__` still recomputes it inline as a fallback when nothing called this
+first (every direct-call test site), so the split is behavior-preserving
+outside the one gap it closes.
+
 | Leaf | Condition | Actuation |
 |---|---|---|
 | Idle | not in GAME_BATTLE | none — other states own the keys |

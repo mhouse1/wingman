@@ -33,14 +33,18 @@ against the newest session rather than just the original implementation
 run. See Disposition item 2 for the full occurrence log and the "Full-day
 measurement" write-up.
 
-**What's still genuinely open, not just unclosed paperwork:** (a) the
-residual gap where mission/combat resumption depends on health being known
-at the moment of recovery — flight safety (BoundaryTurn/Climb) is confirmed
-to resume regardless, but full combat resumption in the health-unknown case
-has not been observed in any trial yet; (b) the root cause of the
-underlying telemetry blackout itself is still not understood — this fix is
-a robust mitigation, not a diagnosis of why the blackout happens. Both are
-tracked in Disposition and "What to watch," not silently dropped.
+**What's still genuinely open:** the residual gap where mission/combat
+resumption depends on health being known at the moment of recovery —
+flight safety (BoundaryTurn/Climb) is confirmed to resume regardless, but
+full combat resumption in the health-unknown case has not been observed
+in any trial yet. **Investigated and closed 2026-09-14:** the root cause
+of the underlying blackout — measured directly (not inferred) across 3
+occurrences in 2 sessions to be a *total* OCR blackout (all six tracked
+channels blank simultaneously, not telemetry alone), consistent with a
+full-screen game transition that simply isn't rendering the HUD, not a
+wingman-side bug. See "Root cause, investigated 2026-09-14" below — there
+is no OCR-side fix available for it, which is why the mitigation approach
+(item 2) was the right call rather than a workaround pending a real fix.
 
 **Revision (2026-09-13, later same day):** the original theory below —
 "the aircraft never died, so nothing was ever going to end the wait" — turned
@@ -736,6 +740,59 @@ Not conclusive on its own (one occurrence), but it argues for weighing (1)'s
 - Whether `eject_max_s` (120s) is ever actually reached in a future
   occurrence — every observed occurrence so far has been caught by the
   40s detector well before that bound.
+
+## Root cause, investigated 2026-09-14
+
+Disposition item (b) — "why does the blackout happen at all" — was flagged
+as open and not investigated, on the reasoning that item (2)'s fix already
+bounds the harm regardless. Took a first pass at it directly, since
+today's sessions left 62 real occurrences already sitting in the logs —
+no live run needed, just reading.
+
+**Measured directly (not inferred) across 3 independent occurrences, 2
+different sessions** (`wingman_20260913_203647.log` lines ~8195-8270 and
+~23510-23545; `wingman_20260913_212404.log` lines ~1740-1765): at the
+exact moment `_eject_descent_control` declares `no_telemetry`, it is not
+alone. **Every single OCR channel wingman tracks reads blank on the same
+tick, every tick, for the full duration of the blackout**:
+`ammo_flares OCR found no digits`, `ammo_missiles OCR found no digits`,
+`Respawn OCR results: []`, `No text detected in INCOMING region`,
+`fuel OCR found no digits`, `health OCR found no digits` — all six,
+simultaneously, repeating in lockstep with telemetry's own staleness. The
+window ends the same way each time: the *first* channel to successfully
+read again (usually the respawn overlay's `RESPAWN`/`REPAWN` text, per
+`RespawnLatency: OCR edge`) is also the moment everything else recovers
+together.
+
+**This sharpens the "Was there a death?" theory above from 3 channels to
+6, and from "likely shared cause" to directly observed.** It was not
+telemetry uniquely failing while other reads occasionally succeeded — it
+is a *total* OCR blackout across the entire tracked screen, which is
+exactly the signature a full-screen game transition (a killcam, a
+blackout beat, or a respawn animation that doesn't composite the normal
+HUD) would produce. Six independently-implemented OCR crops do not fail
+in lockstep by coincidence or by six separate bugs; they fail together
+because there is nothing there to read — the game itself isn't drawing
+its HUD during this window, for any of them.
+
+**Why this closes rather than opens further work:** if the blackout is
+the game not rendering its HUD at all, there is no OCR-side or
+capture-side fix available — you cannot read text that was never drawn.
+The correct response was already built: don't try to eliminate the
+blackout, give the system a reliable way back to normal operation once it
+ends (Disposition item 2). This root-cause pass doesn't change that
+conclusion; it explains *why* tuning `stale_after_s` (item 1) was
+correctly deprioritized on separate grounds — the blackout isn't a
+telemetry-specific timing problem to tune around, it's a rendering-level
+event with no telemetry-side knob to turn.
+
+**Still open, and now more precisely scoped:** *why* the game renders
+this blackout on some deaths/respawns and not others (some occurrences
+this session showed brief or no blackout at all — e.g. respawn OCR
+confirming within 1-2 ticks) is a game-behavior question, not a wingman
+one, and not investigated here. Not pursued further — it's outside what
+wingman's own logs can answer, and the mitigation doesn't depend on the
+answer.
 
 ## References
 

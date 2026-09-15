@@ -516,6 +516,7 @@ class ClimbCondition:
         self._last_ttg_ts = 0.0
         self._post_respawn = _SETTLED
         self._emergency_active = False
+        self._pending_reevaluation = False
 
     @property
     def active(self) -> bool:
@@ -560,7 +561,29 @@ class ClimbCondition:
             return self._last_ttg
         return None
 
-    def __call__(self, snapshot: AnalyzerSnapshot) -> bool:
+    def update_emergency(self, snapshot: AnalyzerSnapshot,
+                         now: "float | None" = None) -> bool:
+        """Refresh the ttg-based emergency verdict — Anomaly 007.
+
+        Split out of ``__call__`` because py-trees' priority Selector never
+        ticks a leaf a higher-priority sibling keeps beating: while
+        BoundaryTurn (or anything else above Climb) wins every tick, this
+        whole condition was simply never invoked, so ``emergency_active``
+        (what ``BoundaryTurn``'s ``yields_to_fn`` reads — ADR 107 D4) sat
+        frozen at whatever it was before that sibling took over. Live
+        2026-09-14: `ttg` measured 6-8s (the emergency threshold is 30s) for
+        9+ continuous seconds while BoundaryTurn stayed selected and never
+        yielded — the operator had to intervene manually at ~470m still
+        descending. The fix: call this unconditionally, every tick, from
+        ``BehaviorTreeHandler.tick()`` BEFORE the tree is ticked — the same
+        "perceive before select" pattern ``BoundaryPerceptionHandler``
+        already uses — so the emergency verdict is always current regardless
+        of what wins the selector. ``__call__`` no longer recomputes this
+        itself when this has already run for the current tick (tracked by
+        ``_pending_reevaluation``); it still does when nothing called this
+        first, so every existing direct-call site (all of
+        ``TestTimeToGroundRecovery``) is unaffected.
+        """
         if self._enter_below_alt is None or self._exit_above_alt is None:
             return False   # ADR 073: disabled until calibrated
 
@@ -569,7 +592,8 @@ class ClimbCondition:
         # 27 s with 2 missiles aboard while the tree kept selecting Engage:
         # the altitude band never opened because the smoothed altitude lags
         # ~1500 m in a 560 m/s dive and the aircraft hit the ground first.
-        now = self._clock()
+        if now is None:
+            now = self._clock()
 
         # ADR 086 d2: a respawn is an altitude DISCONTINUITY, not a descent.
         # The smoothed value carries the dead aircraft's numbers across it, so
@@ -609,13 +633,28 @@ class ClimbCondition:
         else:
             self._ttg_streak = 0
 
+        self._emergency_active = bool(emergency)
+        self._pending_reevaluation = True
+        return self._emergency_active
+
+    def __call__(self, snapshot: AnalyzerSnapshot) -> bool:
+        if self._enter_below_alt is None or self._exit_above_alt is None:
+            return False   # ADR 073: disabled until calibrated
+
+        if not self._pending_reevaluation:
+            # Nobody called update_emergency for this tick — a direct/test
+            # call site, or a real tick where the pre-tick hook didn't run.
+            # Compute it inline, exactly as the pre-split __call__ always did.
+            self.update_emergency(snapshot)
+        self._pending_reevaluation = False
+        emergency = self._emergency_active
+
         alt = snapshot.altitude
         # ADR 107 D4: BoundaryTurn outranks the ordinary altitude-recovery climb
         # but not this. Published as a property rather than reordering the
         # selector, because the emergency is a MODE of the climb condition, not
         # a separate leaf — splitting it would duplicate the hysteresis state
         # that decides it.
-        self._emergency_active = bool(emergency)
         if emergency:
             # The band must not release a recovery it did not start: in this
             # dive the altitude was far ABOVE exit_above_alt the whole way
@@ -734,6 +773,7 @@ class _BuildContext:
     actuators: dict
     regroup_enabled: bool
     climb_emergency_fn: "Callable[[], bool] | None" = None
+    climb_emergency_update_fn: "Callable[[AnalyzerSnapshot, float | None], bool] | None" = None
 
 
 def climb_tactic_enabled(bt_cfg: dict) -> bool:
@@ -870,11 +910,19 @@ def _build_climb_slot(ctx: "_BuildContext"):
         climb_condition = emergency
     climb_leaf = ConditionTactic(TACTIC_CLIMB, climb_condition, **climb_kwargs)
 
-    # ADR 107 D4. The flag is published by the closure each tick; read it
-    # lazily so the boundary leaf sees the CURRENT tick's verdict.
+    # ADR 107 D4, corrected by Anomaly 007: reading this lazily only sees the
+    # CURRENT tick's verdict if something refreshes it every tick regardless
+    # of selection — py-trees never ticks Climb's own condition while a
+    # higher-priority sibling keeps winning, so without the update_fn below
+    # this flag went stale the entire time BoundaryTurn was selected. See
+    # ClimbCondition.update_emergency for the incident and the fix.
     def _climb_emergency_fn(_e=emergency):
         return bool(getattr(_e, "emergency_active", False))
     ctx.climb_emergency_fn = _climb_emergency_fn
+
+    def _climb_emergency_update_fn(snapshot, now=None, _e=emergency):
+        return _e.update_emergency(snapshot, now)
+    ctx.climb_emergency_update_fn = _climb_emergency_update_fn
     return climb_leaf
 
 
@@ -988,6 +1036,10 @@ def build_tree(bt_cfg: dict, clock=time.time,
     # THIS tick's ADR 086 emergency verdict without a new actuator-contract
     # parameter — same closure BoundaryTurn's yields_to_fn already reads.
     tree.climb_emergency_fn = ctx.climb_emergency_fn
+    # Anomaly 007: called once per tick, BEFORE tree.tick(), so the emergency
+    # verdict above is never stale when a higher-priority tactic (chiefly
+    # BoundaryTurn) is the one winning selection.
+    tree.climb_emergency_update_fn = ctx.climb_emergency_update_fn
     return tree
 
 

@@ -903,6 +903,26 @@ enough to close Open Question 2 outright (same "small samples mislead"
 caution D2/D4 already apply elsewhere in this ADR), but no evidence yet
 that 30.0 needs revisiting.
 
+## Related but distinct: Anomaly 007 (2026-09-14)
+
+D9 above fixed Climb's emergency flag going stale *while Climb itself was
+already RUNNING* (the "Third Live Trial" gap). A different, related bug was
+found and fixed the next day: Climb's emergency flag also went stale
+whenever Climb was *not yet selected at all* — specifically, whenever
+`BoundaryTurn` outranked and beat it, py-trees never ticked Climb's
+condition, so `BoundaryTurn`'s own documented yield-to-emergency mechanism
+(ADR 107 D4) read permanently frozen data. Live 2026-09-14: a real 6-8s
+time-to-ground emergency ran 9+ continuous seconds with `BoundaryTurn`
+selected and zero yield; the operator caught it manually. Fixed the same
+day with `ClimbCondition.update_emergency`, called every tick regardless of
+selection. Same symptom family as D9 (a stale emergency read), different
+mechanism (never ticked at all, vs. ticked once then frozen) — not folded
+into D9's own record since it touches `BoundaryTurn`'s side of the
+interaction, not Climb's actuator. Full incident: `docs/anomaly/007-*.md`.
+Cross-referenced here because any future live trial of D9's own mid-hold
+escalation should also watch for this: does the tree even reach Climb in
+the first place when something else is selected at the critical moment.
+
 ## Open Questions
 
 1. ~~Does holding `AIRBRAKE_KEY` while `AFTERBURNER_KEY` is also held
