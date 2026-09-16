@@ -1,0 +1,200 @@
+{
+  "wingman_version": "1.8.9",
+  "run_id": "20260912_191731",
+  "session_start_ts": 1789255051.081,
+  "session_duration_s": 1500.2,
+  "missions_started": 4,
+  "missions_click_to": 4,
+  "missions_missiles_empty": 0,
+  "missions_lobby_exit": 0,
+  "missions_unknown_outcome": 0,
+  "total_respawns": 14,
+  "total_flare_bursts": 5,
+  "total_flare_reloads": 0,
+  "total_manual_takeovers": 0,
+  "total_missile_evades": 1,
+  "total_crashes_with_missiles": 3,
+  "spawn_crashes": {
+    "window_s": 10.0,
+    "min_s": 3.0,
+    "count": 0,
+    "died_after_s": [],
+    "immediate_redetects": 0,
+    "redetect_after_s": []
+  },
+  "missile_engagements": {
+    "window_s": 10.0,
+    "engagements": 2,
+    "evaded_total": 1,
+    "evaded_died": 1,
+    "evaded_survival": 0.0,
+    "not_evaded_total": 1,
+    "not_evaded_died": 1,
+    "not_evaded_survival": 0.0,
+    "detail": [
+      {
+        "ts": 1789255191.083,
+        "alerts": 3,
+        "evaded": true,
+        "died_after_s": 8.8
+      },
+      {
+        "ts": 1789255246.71,
+        "alerts": 2,
+        "evaded": false,
+        "died_after_s": 7.3
+      }
+    ]
+  },
+  "avg_mission_duration_s": 282.4,
+  "missions": [
+    {
+      "index": 0,
+      "start_ts": 1789255158.022,
+      "duration_s": 240.4,
+      "respawn_count": 3,
+      "flare_burst_count": 5,
+      "flare_reload_count": 0,
+      "missile_evade_count": 1,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 1,
+      "start_ts": 1789255439.007,
+      "duration_s": 304.0,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 2,
+      "start_ts": 1789255850.297,
+      "duration_s": 268.8,
+      "respawn_count": 4,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    },
+    {
+      "index": 3,
+      "start_ts": 1789256165.415,
+      "duration_s": 316.6,
+      "respawn_count": 3,
+      "flare_burst_count": 0,
+      "flare_reload_count": 0,
+      "missile_evade_count": 0,
+      "no_missiles_abort": true,
+      "manual_takeover_count": 0,
+      "outcome": "click_to"
+    }
+  ],
+  "respawn_shadow": {
+    "mode": "dual",
+    "shadow_fires": 13,
+    "ocr_respawns": 14,
+    "matched": 13,
+    "matched_within_5s": 4,
+    "false_fires": 0,
+    "missed_ocr_respawns": 1,
+    "fire_deltas_s": [
+      5.51,
+      5.79,
+      5.83,
+      6.4,
+      4.55,
+      5.56,
+      6.78,
+      5.73,
+      5.66,
+      6.13,
+      4.03,
+      4.98,
+      3.38
+    ],
+    "max_confirmed_gap_s": 11.65,
+    "confirmed_gaps_over_threshold": 13,
+    "ocr_edge_latencies": [
+      {
+        "since_confirmed_s": 4.59,
+        "no_digits_for_s": 3.14
+      },
+      {
+        "since_confirmed_s": 4.91,
+        "no_digits_for_s": 3.19
+      },
+      {
+        "since_confirmed_s": 4.56,
+        "no_digits_for_s": 3.08
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 3.1
+      },
+      {
+        "since_confirmed_s": 4.62,
+        "no_digits_for_s": 3.15
+      },
+      {
+        "since_confirmed_s": 6.18,
+        "no_digits_for_s": 4.53
+      },
+      {
+        "since_confirmed_s": 4.75,
+        "no_digits_for_s": 1.69
+      },
+      {
+        "since_confirmed_s": 4.87,
+        "no_digits_for_s": 3.19
+      },
+      {
+        "since_confirmed_s": 4.66,
+        "no_digits_for_s": 3.18
+      },
+      {
+        "since_confirmed_s": 4.78,
+        "no_digits_for_s": 2.79
+      },
+      {
+        "since_confirmed_s": 4.92,
+        "no_digits_for_s": 3.79
+      },
+      {
+        "since_confirmed_s": 4.4,
+        "no_digits_for_s": 2.99
+      },
+      {
+        "since_confirmed_s": 4.55,
+        "no_digits_for_s": 3.08
+      },
+      {
+        "since_confirmed_s": 4.71,
+        "no_digits_for_s": 3.14
+      }
+    ],
+    "edge_since_confirmed_mean_s": 4.8,
+    "edge_since_confirmed_max_s": 6.18
+  },
+  "health_dropouts": {
+    "buckets": {
+      "lt2s": 393,
+      "2to5s": 5,
+      "5to10s": 0,
+      "10to20s": 0,
+      "gte20s": 0
+    },
+    "count": 398,
+    "over_5s": 0,
+    "p95_s": 1.69,
+    "max_s": 3.03
+  },
+  "stats_path": "docs/performance/current/run_20260912_191731_stats.json"
+}

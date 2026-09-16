@@ -241,6 +241,38 @@ def _manual_active() -> bool:
     except Exception:
         return False
 
+
+# ADR 099 D4c: keys that bypass the OPERATOR-display ctrl+alt requirement
+# once wingman has already stopped acting — the operator-display analogue of
+# _handback_keys above, keyed on "wingman is no longer flying" instead of
+# manual-takeover FSM state (STANDBY, the state this exists for, is not an
+# FSM state at all). Backspace's second press (close everything) only fires
+# after the first press already set the operator-stop signal, so by the time
+# it is possible there is nothing left running for a stray keypress to
+# hijack — unlike the first press, which can still land while wingman is
+# actively flying and is exactly the case D4a's 2026-08-30 incident measured
+# ('backspace' among the keys that incident named). The first press keeps
+# requiring ctrl+alt; only the second is exempted.
+_operator_release_keys = frozenset()
+_operator_stopped_fn = None
+
+
+def set_operator_release_keys(keys, operator_stopped_fn=None) -> None:
+    """Declare operator-display hotkeys that skip ctrl+alt once wingman has
+    already stopped acting, and how to ask whether that is true."""
+    global _operator_release_keys, _operator_stopped_fn
+    _operator_release_keys = {str(k).lower() for k in (keys or ())}
+    if operator_stopped_fn is not None:
+        _operator_stopped_fn = operator_stopped_fn
+
+
+def _operator_stopped() -> bool:
+    try:
+        return bool(_operator_stopped_fn and _operator_stopped_fn())
+    except Exception:
+        return False
+
+
 # ADR 099: X modifier mask required for hotkeys observed on the OPERATOR's
 # display while the nested lane is active. ControlMask (1<<2) | Mod1Mask (1<<3).
 #
@@ -311,7 +343,9 @@ def should_deliver_hotkey(display_name: str, key_name: str, state: int) -> bool:
       by display is race-free, unlike counting presses and debiting them on
       observation, because XRecord delivery is asynchronous.
     - On the OPERATOR's display, while the game lives elsewhere, a bare keypress
-      is ordinary typing and must not drive the aircraft.
+      is ordinary typing and must not drive the aircraft — except a declared
+      release key once wingman has already stopped (ADR 099 D4c), since by
+      then there is nothing left for a stray keypress to hijack.
 
     With no nested lane there is one display, the game holds focus on it, and
     both filters are inert — the on-screen lane behaves exactly as before.
@@ -353,6 +387,12 @@ def should_deliver_hotkey(display_name: str, key_name: str, state: int) -> bool:
         # Arrow keys carry no such ambiguity, so takeover on the injection
         # display is unconditional and race-free through them.
         return key_name.lower() not in _injected_keys
+    # ADR 099 D4c: once wingman has already stopped acting, a declared
+    # release key (Backspace's second press) bypasses ctrl+alt — see
+    # _operator_release_keys above for why this is safe where the first
+    # press is not.
+    if key_name.lower() in _operator_release_keys and _operator_stopped():
+        return True
     return (state & _OPERATOR_MOD_MASK) == _OPERATOR_MOD_MASK
 
 

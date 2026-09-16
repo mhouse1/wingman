@@ -99,6 +99,11 @@ _CROP = Section(
 )
 
 
+# Design 011 (ACS Mode) step 1. Profile names are caller-defined (like
+# `crops:`), not fixed schema keys — MapOf, not Section, for the same reason.
+_JET_PROFILE = Section(children={"has_padlock": BOOL})
+
+
 SCHEMA = Section(
     # "Required" means the program cannot construct itself without the key, not
     # merely that a full config would normally carry it. `region` and `monitor`
@@ -110,6 +115,10 @@ SCHEMA = Section(
     children={
         "unattended_mode": BOOL,
         "accept_invite": BOOL,
+        "jet_profile": Section(children={
+            "active": STR,
+            "profiles": MapOf(_JET_PROFILE),
+        }),
         # Upper bound is a sanity guard (a tick slower than a minute is a typo);
         # no lower bound beyond non-negative — the replay lanes tick at 0.01.
         "loop_interval_sec": _num(0.0, 60.0),
@@ -165,6 +174,7 @@ SCHEMA = Section(
             "unready_dwell_s": SECONDS,
             "scan_interval_s": SECONDS,
             "play_click_delay_s": SECONDS,
+            "leave_click_delay_s": SECONDS,
             "cooldown_s": SECONDS,
         }),
 
@@ -198,6 +208,17 @@ SCHEMA = Section(
             "decline_evidence_drop": _num(0),
             "decline_evidence_window_s": SECONDS,
             "dropout_capture": Section(children={
+                "enabled": BOOL,
+                "capture_after_s": SECONDS,
+                "recapture_interval_s": SECONDS,
+                "max_per_session": _int(0),
+                "dir": STR,
+            }),
+            # ADR 137 D7: the dropout_capture episode above explicitly
+            # excludes this window (telemetry_hud_live() gates it out as a
+            # "death/menu gap, not a dropout") — this is that excluded case,
+            # captured on purpose instead of skipped.
+            "respawn_stall_capture": Section(children={
                 "enabled": BOOL,
                 "capture_after_s": SECONDS,
                 "recapture_interval_s": SECONDS,
@@ -240,6 +261,16 @@ SCHEMA = Section(
             "capture_stale_inject_s": SECONDS,
             "j20_turn_guard_s": SECONDS,   # ADR 132
             "padlock_spread_missiles": _int(0),
+            # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
+            # pre_crash_lookback_s added D8
+            "crash_capture": Section(children={
+                "enabled": BOOL,
+                "max_per_session": _int(0),
+                "pre_crash_buffer_s": SECONDS,
+                "pre_crash_freshness_s": SECONDS,
+                "pre_crash_lookback_s": SECONDS,
+                "dir": STR,
+            }),
             # ADR 047 waiting-state fallback (read in tick_handlers.py)
             "waiting_fallback_enabled": BOOL,
             "waiting_fallback_diff_threshold": FRACTION,
@@ -389,6 +420,7 @@ SCHEMA = Section(
 
         "tracking": Section(children={
             "enabled": BOOL,
+            "actuate": BOOL,
             "acquisition_region_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
             "deadband": FRACTION,
             "kp": _num(0),
@@ -414,10 +446,25 @@ SCHEMA = Section(
             "min_aspect_ratio": _num(0),
         }),
 
+        "padlock_indicator": Section(children={
+            "region_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "green_lower": _HSV,
+            "green_upper": _HSV,
+            "min_contour_area": _num(0),
+            "max_contour_area": _num(0),
+            "min_dashes": _int(1),
+        }),
+
         "hud": Section(children={
             "enabled": BOOL,
             "output_path": STR,
             "interval_sec": SECONDS,
+        }),
+
+        # Design 012: opt-in session video, paired with the BT JSONL trace.
+        "session_recording": Section(children={
+            "fps": _num(0),
+            "scale": FRACTION,
         }),
 
         # ADR 099: nested display lane
@@ -473,6 +520,9 @@ SCHEMA = Section(
                 "max_rotation_pulses": _int(1),
                 "eject_max_s": SECONDS,
                     "abort_on_rearm": BOOL,
+                "heatdive_enabled": BOOL,
+                "heatdive_padlock_verify": BOOL,
+                "telemetry_confirm_polls": _int(0),
             }),
         }),
 
@@ -504,6 +554,12 @@ SCHEMA = Section(
             "enabled": BOOL,
             "stall_limit_s": SECONDS,
             "hard_limit_s": SECONDS,
+        }),
+        # Anomaly 003 — diagnostic-only, gated on --record-session at the
+        # call site (see docs/anomaly/003-eject-no-telemetry-...).
+        "eject_stuck_detector": Section(children={
+            "enabled": BOOL,
+            "eject_stuck_after_s": SECONDS,
         }),
         # ADR 093 — ceiling on the ADR 087 blackout ESC suppression.
         "lobby_blackout": Section(children={

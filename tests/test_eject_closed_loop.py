@@ -608,3 +608,54 @@ def test_hold_phase_is_not_cut_short_without_a_rearm(monkeypatch):
     assert _wait_for(lambda: not ctrl._ejecting.is_set(), timeout=8.0)
     held = time.time() - t0
     assert held >= 1.5, f"eject ended after {held:.2f}s — the poll cut the hold short"
+
+
+# ---------------------------------------------------------------------------
+# Anomaly 003: telemetry-confirmed resumption, independent of respawn OCR
+# ---------------------------------------------------------------------------
+
+def test_hold_phase_resumes_when_telemetry_confirms_alive(monkeypatch, caplog):
+    """Fresh telemetry for telemetry_confirm_polls consecutive checks ends the
+    hold on its own — no rearm, no respawn OCR, no ADR 061 observed death."""
+    stub = _TelemetryStub(alt_rate=-120.0)
+    ctrl = _make_ctrl(monkeypatch, stub, eject_max_s=10.0, telemetry_confirm_polls=3)
+
+    caplog.set_level("WARNING")
+    _eject_into_hold(ctrl, stub)
+    assert ctrl._ejecting.is_set(), "eject ended before telemetry recovered"
+
+    stub.available = True   # telemetry recovers mid-hold
+    assert _wait_for(lambda: not ctrl._ejecting.is_set(), timeout=4.0), \
+        "hold phase did not resume once telemetry confirmed the aircraft alive"
+    assert ctrl._eject_stop_reason == "telemetry_confirmed_alive"
+    assert "telemetry confirms aircraft alive and flying" in caplog.text
+
+
+def test_hold_phase_is_not_cut_short_by_a_single_fresh_read(monkeypatch):
+    """A one-tick flicker must not resume control — the streak has to be
+    genuinely consecutive, not just 'fresh at some point during the hold'."""
+    stub = _TelemetryStub(alt_rate=-120.0)
+    ctrl = _make_ctrl(monkeypatch, stub, eject_max_s=2.0, telemetry_confirm_polls=3)
+
+    _eject_into_hold(ctrl, stub)
+    stub.available = True
+    time.sleep(0.06)             # one check_interval_s (0.05) — a single fresh poll
+    stub.available = False       # then drops stale again, breaking the streak
+    assert _wait_for(lambda: not ctrl._ejecting.is_set(), timeout=4.0), \
+        "hold should still end via eject_max_s, not the (broken) telemetry streak"
+    assert ctrl._eject_stop_reason != "telemetry_confirmed_alive"
+
+
+def test_telemetry_confirm_polls_zero_disables_the_check(monkeypatch):
+    """0 must fall back to the pre-existing behaviour: telemetry recovering
+    mid-hold does nothing on its own."""
+    stub = _TelemetryStub(alt_rate=-120.0)
+    ctrl = _make_ctrl(monkeypatch, stub, eject_max_s=1.5, telemetry_confirm_polls=0)
+
+    t0 = time.time()
+    _eject_into_hold(ctrl, stub)
+    stub.available = True   # telemetry recovers, but the check is disabled
+    assert _wait_for(lambda: not ctrl._ejecting.is_set(), timeout=5.0)
+    held = time.time() - t0
+    assert held >= 1.4, f"eject ended after {held:.2f}s — disabled check still fired"
+    assert ctrl._eject_stop_reason != "telemetry_confirmed_alive"

@@ -23,6 +23,7 @@ duration, preventing selection flapping.
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import py_trees
@@ -96,6 +97,12 @@ class AnalyzerSnapshot:
     # ADR 122: lateral offset of the nearest boundary point, positive to the
     # RIGHT of the nose. The turn rolls away from it.
     boundary_lateral: "float | None" = None
+    # Design 011 (ACS Mode), step 1: which weapon-employment tactic the
+    # active airframe supports, read once from jet_profile.active at startup.
+    # True today for every configured profile — nothing branches on this yet,
+    # it exists so a future BoresightEngage leaf has something to condition
+    # on without a second decision framework. See docs/hldd/011-acs-mode-hldd.md.
+    has_padlock: bool = True
 
     @property
     def contacts(self) -> int:
@@ -137,13 +144,23 @@ class ConditionTactic(py_trees.behaviour.Behaviour):
     selection only. Phase 3.1 fills them per the TacticAction glue in
     ADR 024: ``update`` starts the Controller tactic when selected, and
     ``terminate(INVALID)`` cancels it when the selector switches away.
+
+    ADR 137 D9: ``update_fn(snapshot)``, when given, is called on every
+    subsequent RUNNING tick instead — never on the same tick as ``start_fn``,
+    since that only fires on the FAILURE→RUNNING edge. This is the channel a
+    tactic already RUNNING uses to see updated per-tick snapshot data;
+    before it existed, a leaf's actuator thread only ever saw the value
+    frozen into it at selection time (the gap ADR 137's "Third Live Trial"
+    found for Climb's emergency flag).
     """
 
-    def __init__(self, name: str, condition, start_fn=None, is_running_fn=None):
+    def __init__(self, name: str, condition, start_fn=None, is_running_fn=None,
+                 update_fn=None):
         super().__init__(name=name)
         self._condition = condition
         self._start_fn = start_fn
         self._is_running_fn = is_running_fn
+        self._update_fn = update_fn
         self._bb = py_trees.blackboard.Client(name=f"{name}Client")
         self._bb.register_key(key=SNAPSHOT_KEY, access=py_trees.common.Access.READ)
 
@@ -154,6 +171,8 @@ class ConditionTactic(py_trees.behaviour.Behaviour):
         if self._start_fn is not None and self._is_running_fn is not None:
             if not self._is_running_fn():
                 self._start_fn()
+            elif self._update_fn is not None:
+                self._update_fn(snapshot)
         return py_trees.common.Status.RUNNING
 
     def terminate(self, new_status: py_trees.common.Status) -> None:
@@ -236,14 +255,20 @@ def make_disengage_condition(absent_after_s: float):
 _SETTLED = 2
 
 
-def make_boundary_condition(turn_frac: "float | None",
-                            recede_frac: float = 0.06,
-                            yields_to_fn=None,
-                            release_frac: "float | None" = None,
-                            min_clear_frac: float = 0.35,
-                            blind_ticks: int = 3,
-                            entry_ratio: float = 0.25):
+class BoundaryCondition:
     """ADR 107: true while the arena edge is ahead and not yet receding.
+
+    ADR 139 D3: this used to be a closure (``make_boundary_condition``)
+    capturing a mutable ``state`` dict — the hysteresis latch, closest
+    approach, and blind-tick count were invisible to anything outside the
+    closure. Promoted to a plain class (not a ``py_trees.behaviour.Behaviour``
+    subclass: this object is called directly as ``cond(snapshot) -> bool``,
+    never ticked as a composited tree node, so subclassing would add an
+    unused inheritance chain without making anything visible to py-trees'
+    own tooling) so ``active``/``min_dist``/``blind`` are inspectable named
+    attributes instead of dict keys hidden inside a closure. Logic is
+    byte-for-byte identical to the closure it replaces; only ``state["x"]``
+    became ``self._x``.
 
     ENTRY needs a positive ``boundary_forward`` — otherwise any pass within the
     band would turn the aircraft. The HOLD does not, and that distinction is
@@ -286,15 +311,44 @@ def make_boundary_condition(turn_frac: "float | None",
     A ``turn_frac`` of None or 0 disables the leaf (the Evade precedent), and a
     missing reading never selects — blindness is not an emergency.
     """
-    state = {"active": False, "min_dist": None, "blind": 0}
 
-    def _reset():
-        state["active"] = False
-        state["min_dist"] = None
-        state["blind"] = 0
+    def __init__(self, turn_frac: "float | None",
+                recede_frac: float = 0.06,
+                yields_to_fn=None,
+                release_frac: "float | None" = None,
+                min_clear_frac: float = 0.35,
+                blind_ticks: int = 3,
+                entry_ratio: float = 0.25):
+        self._turn_frac = turn_frac
+        self._recede_frac = recede_frac
+        self._yields_to_fn = yields_to_fn
+        self._release_frac = release_frac
+        self._min_clear_frac = min_clear_frac
+        self._blind_ticks = blind_ticks
+        self._entry_ratio = entry_ratio
+        self._active = False
+        self._min_dist: "float | None" = None
+        self._blind = 0
 
-    def _condition(snapshot) -> bool:
-        if not turn_frac:
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    @property
+    def min_dist(self) -> "float | None":
+        return self._min_dist
+
+    @property
+    def blind(self) -> int:
+        return self._blind
+
+    def _reset(self):
+        self._active = False
+        self._min_dist = None
+        self._blind = 0
+
+    def __call__(self, snapshot) -> bool:
+        if not self._turn_frac:
             return False
         # A respawn is a NEW aircraft. Any latched turn state describes where the
         # last one was and must not survive: on 2026-09-04 a turn held through a
@@ -302,12 +356,22 @@ def make_boundary_condition(turn_frac: "float | None",
         # spawned and nowhere near an edge. An aircraft never spawns pointing at
         # the boundary, which makes a turn straight after a respawn a reliable
         # indicator that something upstream has latched.
+        #
+        # ADR 138: is_respawning alone left a gap. Measured live 2026-09-10
+        # 03:03:26 — the respawn screen clears (is_respawning -> False) up to
+        # ~1.5s BEFORE mission_j20 actually restarts (the ADR 059 respawn-clear
+        # stability window), and THAT restart is what arms the ADR 132 turn
+        # guard. This condition doesn't wait for mission_running, so it
+        # selected and actuated a full 12s, 180-degree-swing turn starting
+        # inside that gap — the exact "circling instead of joining the fight"
+        # ADR 132 exists to prevent, just from a different timing hole.
         if getattr(snapshot, "is_respawning", False) or \
-                snapshot.game_state != GameState.GAME_BATTLE:
-            _reset()
+                snapshot.game_state != GameState.GAME_BATTLE or \
+                not snapshot.mission_running:
+            self._reset()
             return False
-        if yields_to_fn is not None and yields_to_fn():
-            _reset()
+        if self._yields_to_fn is not None and self._yields_to_fn():
+            self._reset()
             return False
         dist = getattr(snapshot, "boundary_dist", None)
         forward = getattr(snapshot, "boundary_forward", None)
@@ -322,13 +386,13 @@ def make_boundary_condition(turn_frac: "float | None",
             # Unbounded it is a latch: the detector is blind ~70% of ticks, so
             # "hold until a reading disagrees" means "hold indefinitely", which
             # is exactly what carried a turn through the 2026-09-04 respawn.
-            state["blind"] += 1
-            if state["blind"] > blind_ticks:
-                _reset()
+            self._blind += 1
+            if self._blind > self._blind_ticks:
+                self._reset()
                 return False
-            return state["active"]
-        state["blind"] = 0
-        clear_at = release_frac if release_frac else turn_frac
+            return self._active
+        self._blind = 0
+        clear_at = self._release_frac if self._release_frac else self._turn_frac
         # ADR 120: ENTER on the filtered reading, LEAVE on the nearest one.
         #
         # The two errors do not cost the same. A spurious near reading buys one
@@ -343,13 +407,13 @@ def make_boundary_condition(turn_frac: "float | None",
         # 0.10R or more for 44% of raw readings inside 0.10R, including
         # 0.019 -> 0.516. A single reading above `clear_at` releases the turn
         # outright, so that path released turns with the aircraft at the edge.
-        if (near if state["active"] else dist) >= (
-                clear_at if state["active"] else turn_frac):
+        if (near if self._active else dist) >= (
+                clear_at if self._active else self._turn_frac):
             # Entering uses turn_frac; leaving uses the wider release_frac, so
             # the two thresholds cannot sit on top of each other and flap.
-            _reset()
+            self._reset()
             return False
-        if not state["active"]:
+        if not self._active:
             # "Ahead" means ahead, not merely not-behind. `forward` is the
             # component of the range along the nose, so forward/dist is the
             # cosine of the bearing to the nearest boundary point: near 1 the
@@ -365,32 +429,50 @@ def make_boundary_condition(turn_frac: "float | None",
             # approaches run a median of 0.82 with a 10th percentile of 0.24. A
             # 0.25 gate drops about a tenth of those ticks, and an approach
             # produces many, so entry is delayed by a tick rather than missed.
-            if forward <= 0 or forward < entry_ratio * dist:
+            if forward <= 0 or forward < self._entry_ratio * dist:
                 return False
-            state["active"] = True
-            state["min_dist"] = dist
+            self._active = True
+            self._min_dist = dist
             return True
-        state["min_dist"] = min(state["min_dist"], near)
+        self._min_dist = min(self._min_dist, near)
         # Recession is also a clearance claim, so it reads the nearest value
         # too — otherwise a filtered reading can manufacture a recession the
         # aircraft never flew.
-        if near >= min_clear_frac and near >= state["min_dist"] + recede_frac:
-            _reset()
+        if near >= self._min_clear_frac and near >= self._min_dist + self._recede_frac:
+            self._reset()
             return False
         return True
 
-    return _condition
+
+def make_boundary_condition(turn_frac: "float | None",
+                            recede_frac: float = 0.06,
+                            yields_to_fn=None,
+                            release_frac: "float | None" = None,
+                            min_clear_frac: float = 0.35,
+                            blind_ticks: int = 3,
+                            entry_ratio: float = 0.25) -> BoundaryCondition:
+    """ADR 139 D3: thin factory kept so every existing call site — production
+    and test — is unchanged. See ``BoundaryCondition`` for the logic."""
+    return BoundaryCondition(turn_frac, recede_frac, yields_to_fn=yields_to_fn,
+                             release_frac=release_frac,
+                             min_clear_frac=min_clear_frac,
+                             blind_ticks=blind_ticks, entry_ratio=entry_ratio)
 
 
-def make_climb_condition(enter_below_alt: "float | None",
-                         exit_above_alt: "float | None",
-                         is_running_fn=None,
-                         confirm_reads: int = 1,
-                         recover_below_time_s: "float | None" = None,
-                         confirm_bypass_time_s: "float | None" = None,
-                         descent_memory_s: float = 5.0,
-                         clock=time.time):
+class ClimbCondition:
     """ADR 073: hysteresis band on the telemetry stable altitude.
+
+    ADR 139 D3: this used to be a closure (``make_climb_condition``)
+    capturing a mutable ``state`` dict, with ``emergency_active`` stapled on
+    as a function attribute. Promoted to a plain class (not a
+    ``py_trees.behaviour.Behaviour`` subclass — see ``BoundaryCondition`` for
+    why) so the hysteresis state is inspectable via named properties. The
+    ``emergency_active`` property is named to match exactly, since
+    ``_climb_emergency_fn`` (``_build_climb_slot``) reads it via
+    ``getattr(obj, "emergency_active", False)``, which works identically
+    against an instance property or the old function attribute — that
+    closure needs no change. Logic is byte-for-byte identical to the closure
+    this replaces; only ``state["x"]`` became ``self._x``.
 
     Enters below ``enter_below_alt``, releases only at or above
     ``exit_above_alt`` — a single threshold would flap at the boundary every
@@ -410,10 +492,57 @@ def make_climb_condition(enter_below_alt: "float | None",
     one bad high must never release a genuine one. None reads neither count
     toward nor reset a streak (the freeze policy applied to the debounce).
     """
-    state = {"active": False, "streak": 0, "ttg_streak": 0,
-             "last_ttg": None, "last_ttg_ts": 0.0, "post_respawn": _SETTLED}
 
-    def _time_to_ground(snapshot, now):
+    def __init__(self, enter_below_alt: "float | None",
+                exit_above_alt: "float | None",
+                is_running_fn=None,
+                confirm_reads: int = 1,
+                recover_below_time_s: "float | None" = None,
+                confirm_bypass_time_s: "float | None" = None,
+                descent_memory_s: float = 5.0,
+                clock=time.time):
+        self._enter_below_alt = enter_below_alt
+        self._exit_above_alt = exit_above_alt
+        self._is_running_fn = is_running_fn
+        self._confirm_reads = confirm_reads
+        self._recover_below_time_s = recover_below_time_s
+        self._confirm_bypass_time_s = confirm_bypass_time_s
+        self._descent_memory_s = descent_memory_s
+        self._clock = clock
+        self._active = False
+        self._streak = 0
+        self._ttg_streak = 0
+        self._last_ttg: "float | None" = None
+        self._last_ttg_ts = 0.0
+        self._post_respawn = _SETTLED
+        self._emergency_active = False
+        self._pending_reevaluation = False
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    @property
+    def emergency_active(self) -> bool:
+        return self._emergency_active
+
+    @property
+    def streak(self) -> int:
+        return self._streak
+
+    @property
+    def ttg_streak(self) -> int:
+        return self._ttg_streak
+
+    @property
+    def last_ttg(self) -> "float | None":
+        return self._last_ttg
+
+    @property
+    def post_respawn(self) -> int:
+        return self._post_respawn
+
+    def _time_to_ground(self, snapshot, now):
         """Seconds to impact at the current descent rate, or None.
 
         ADR 086 d4: a REJECTED reading during an established descent is
@@ -425,15 +554,37 @@ def make_climb_condition(enter_below_alt: "float | None",
         rate = getattr(snapshot, "altitude_rate", None)
         if alt is not None and rate is not None and rate < 0:
             ttg = alt / -rate
-            state["last_ttg"], state["last_ttg_ts"] = ttg, now
+            self._last_ttg, self._last_ttg_ts = ttg, now
             return ttg
-        if (state["last_ttg"] is not None
-                and now - state["last_ttg_ts"] <= descent_memory_s):
-            return state["last_ttg"]
+        if (self._last_ttg is not None
+                and now - self._last_ttg_ts <= self._descent_memory_s):
+            return self._last_ttg
         return None
 
-    def climb(snapshot: AnalyzerSnapshot) -> bool:
-        if enter_below_alt is None or exit_above_alt is None:
+    def update_emergency(self, snapshot: AnalyzerSnapshot,
+                         now: "float | None" = None) -> bool:
+        """Refresh the ttg-based emergency verdict — Anomaly 007.
+
+        Split out of ``__call__`` because py-trees' priority Selector never
+        ticks a leaf a higher-priority sibling keeps beating: while
+        BoundaryTurn (or anything else above Climb) wins every tick, this
+        whole condition was simply never invoked, so ``emergency_active``
+        (what ``BoundaryTurn``'s ``yields_to_fn`` reads — ADR 107 D4) sat
+        frozen at whatever it was before that sibling took over. Live
+        2026-09-14: `ttg` measured 6-8s (the emergency threshold is 30s) for
+        9+ continuous seconds while BoundaryTurn stayed selected and never
+        yielded — the operator had to intervene manually at ~470m still
+        descending. The fix: call this unconditionally, every tick, from
+        ``BehaviorTreeHandler.tick()`` BEFORE the tree is ticked — the same
+        "perceive before select" pattern ``BoundaryPerceptionHandler``
+        already uses — so the emergency verdict is always current regardless
+        of what wins the selector. ``__call__`` no longer recomputes this
+        itself when this has already run for the current tick (tracked by
+        ``_pending_reevaluation``); it still does when nothing called this
+        first, so every existing direct-call site (all of
+        ``TestTimeToGroundRecovery``) is unaffected.
+        """
+        if self._enter_below_alt is None or self._exit_above_alt is None:
             return False   # ADR 073: disabled until calibrated
 
         # ADR 086 d2: the emergency trigger is predicted TIME to ground, not
@@ -441,7 +592,8 @@ def make_climb_condition(enter_below_alt: "float | None",
         # 27 s with 2 missiles aboard while the tree kept selecting Engage:
         # the altitude band never opened because the smoothed altitude lags
         # ~1500 m in a 560 m/s dive and the aircraft hit the ground first.
-        now = clock()
+        if now is None:
+            now = self._clock()
 
         # ADR 086 d2: a respawn is an altitude DISCONTINUITY, not a descent.
         # The smoothed value carries the dead aircraft's numbers across it, so
@@ -449,28 +601,28 @@ def make_climb_condition(enter_below_alt: "float | None",
         # Observed 2026-08-21 21:28:49 — fired "2s to ground" at a smoothed
         # 324m while the new aircraft was at 10m and climbing away at +513m/s.
         if snapshot.is_respawning:
-            state["post_respawn"] = 0
-            state["last_ttg"] = None
-            state["ttg_streak"] = 0
+            self._post_respawn = 0
+            self._last_ttg = None
+            self._ttg_streak = 0
         elif snapshot.altitude is not None:
-            state["post_respawn"] += 1
+            self._post_respawn += 1
 
-        ttg = _time_to_ground(snapshot, now)
+        ttg = self._time_to_ground(snapshot, now)
         emergency = False
         # Two clean samples since the respawn before the emergency is trusted:
         # enough to establish a rate that describes the LIVING aircraft.
-        settled = state["post_respawn"] >= _SETTLED
-        if settled and recover_below_time_s is not None and ttg is not None \
-                and ttg < float(recover_below_time_s):
-            if (confirm_bypass_time_s is not None
-                    and ttg < float(confirm_bypass_time_s)):
+        settled = self._post_respawn >= _SETTLED
+        if settled and self._recover_below_time_s is not None and ttg is not None \
+                and ttg < float(self._recover_below_time_s):
+            if (self._confirm_bypass_time_s is not None
+                    and ttg < float(self._confirm_bypass_time_s)):
                 # ADR 086 d3: inside the bypass window, waiting for a second
                 # read spends the very margin the trigger exists to protect.
                 emergency = True
             else:
-                state["ttg_streak"] += 1
-                emergency = state["ttg_streak"] >= max(1, int(confirm_reads))
-            if emergency and not state["active"]:
+                self._ttg_streak += 1
+                emergency = self._ttg_streak >= max(1, int(self._confirm_reads))
+            if emergency and not self._active:
                 logger.warning(
                     "BT: DIVE RECOVERY — %.0fs to ground (alt=%s rate=%s) — "
                     "climb forced (ADR 086 d2)",
@@ -479,36 +631,67 @@ def make_climb_condition(enter_below_alt: "float | None",
                     "held" if getattr(snapshot, "altitude_rate", None) is None
                     else f"{snapshot.altitude_rate:+.0f}m/s")
         else:
-            state["ttg_streak"] = 0
+            self._ttg_streak = 0
+
+        self._emergency_active = bool(emergency)
+        self._pending_reevaluation = True
+        return self._emergency_active
+
+    def __call__(self, snapshot: AnalyzerSnapshot) -> bool:
+        if self._enter_below_alt is None or self._exit_above_alt is None:
+            return False   # ADR 073: disabled until calibrated
+
+        if not self._pending_reevaluation:
+            # Nobody called update_emergency for this tick — a direct/test
+            # call site, or a real tick where the pre-tick hook didn't run.
+            # Compute it inline, exactly as the pre-split __call__ always did.
+            self.update_emergency(snapshot)
+        self._pending_reevaluation = False
+        emergency = self._emergency_active
 
         alt = snapshot.altitude
         # ADR 107 D4: BoundaryTurn outranks the ordinary altitude-recovery climb
-        # but not this. Published on the closure rather than reordering the
+        # but not this. Published as a property rather than reordering the
         # selector, because the emergency is a MODE of the climb condition, not
         # a separate leaf — splitting it would duplicate the hysteresis state
         # that decides it.
-        climb.emergency_active = bool(emergency)
         if emergency:
             # The band must not release a recovery it did not start: in this
             # dive the altitude was far ABOVE exit_above_alt the whole way
             # down, so the ordinary hysteresis would have cleared it instantly.
-            state["active"] = True
-            state["streak"] = 0
+            self._active = True
+            self._streak = 0
         elif alt is not None:
-            if state["active"]:
-                crossing = alt >= exit_above_alt
+            if self._active:
+                crossing = alt >= self._exit_above_alt
             else:
-                crossing = alt < enter_below_alt
+                crossing = alt < self._enter_below_alt
             if crossing:
-                state["streak"] += 1
-                if state["streak"] >= max(1, int(confirm_reads)):
-                    state["active"] = not state["active"]
-                    state["streak"] = 0
+                self._streak += 1
+                if self._streak >= max(1, int(self._confirm_reads)):
+                    self._active = not self._active
+                    self._streak = 0
             else:
-                state["streak"] = 0
-        return state["active"] or (is_running_fn is not None and is_running_fn())
-    climb.emergency_active = False
-    return climb
+                self._streak = 0
+        return self._active or (self._is_running_fn is not None and self._is_running_fn())
+
+
+def make_climb_condition(enter_below_alt: "float | None",
+                         exit_above_alt: "float | None",
+                         is_running_fn=None,
+                         confirm_reads: int = 1,
+                         recover_below_time_s: "float | None" = None,
+                         confirm_bypass_time_s: "float | None" = None,
+                         descent_memory_s: float = 5.0,
+                         clock=time.time) -> ClimbCondition:
+    """ADR 139 D3: thin factory kept so every existing call site — production
+    and test — is unchanged. See ``ClimbCondition`` for the logic."""
+    return ClimbCondition(enter_below_alt, exit_above_alt,
+                          is_running_fn=is_running_fn,
+                          confirm_reads=confirm_reads,
+                          recover_below_time_s=recover_below_time_s,
+                          confirm_bypass_time_s=confirm_bypass_time_s,
+                          descent_memory_s=descent_memory_s, clock=clock)
 
 
 def make_sustain_climb_condition(enter_below_alt: "float | None",
@@ -562,6 +745,266 @@ def always(_snapshot: AnalyzerSnapshot) -> bool:
     return True
 
 
+# ADR 139 D1: declared priority order — top wins. Replaces the earlier
+# imperative `children.insert(pos, leaf)` calls, which found `pos` by name
+# specifically because an offset-based version (`len(children) - 2`) once
+# broke silently: it meant "above Engage" only while exactly two leaves
+# followed it, and adding Regroup pushed Climb below Engage.
+_PRIORITY_ORDER = (
+    TACTIC_IDLE, TACTIC_RESPAWN_WAIT, TACTIC_EJECT, TACTIC_MISSILE_EVADE,
+    TACTIC_BOUNDARY_TURN, TACTIC_EVADE, TACTIC_DISENGAGE, TACTIC_CLIMB,
+    TACTIC_ENGAGE, TACTIC_REGROUP, TACTIC_ATTACK_SUPPORT,
+)
+
+
+@dataclass
+class _BuildContext:
+    """Threaded through the slot-build functions (ADR 139 D1).
+
+    ``climb_emergency_fn`` is set by ``_build_climb_slot`` and read by
+    ``_build_boundary_slot`` — a real cross-slot dependency that does NOT
+    follow priority order (BoundaryTurn outranks Climb in ``_PRIORITY_ORDER``
+    but reads Climb's emergency closure), so slot BUILD order is declared
+    separately from priority order, in ``_build_slots`` below.
+    """
+
+    bt_cfg: dict
+    clock: "Callable[[], float]"
+    actuators: dict
+    regroup_enabled: bool
+    climb_emergency_fn: "Callable[[], bool] | None" = None
+    climb_emergency_update_fn: "Callable[[AnalyzerSnapshot, float | None], bool] | None" = None
+
+
+def climb_tactic_enabled(bt_cfg: dict) -> bool:
+    """ADR 139 D2: the single predicate deciding whether Climb is in the
+    tree at all AND whether its actuator gets wired — shared between
+    ``_build_climb_slot`` (this module) and ``BehaviorTreeHandler.__init__``
+    (``tick_handlers.py``), which previously wrote this check twice."""
+    climb_cfg = bt_cfg.get("climb", {}) or {}
+    return bool(climb_cfg.get("enabled", False))
+
+
+def boundary_tactic_enabled(bt_cfg: dict) -> bool:
+    """ADR 139 D2: the single predicate deciding whether BoundaryTurn is in
+    the tree at all AND whether its actuator gets wired — shared between
+    ``_build_boundary_slot`` (this module) and ``BehaviorTreeHandler.__init__``
+    (``tick_handlers.py``), which previously wrote this check twice."""
+    boundary_cfg = bt_cfg.get("boundary", {}) or {}
+    return bool(boundary_cfg.get("turn_frac"))
+
+
+def _build_idle_slot(_ctx: "_BuildContext"):
+    return ConditionTactic(TACTIC_IDLE, is_idle)
+
+
+def _build_respawn_wait_slot(_ctx: "_BuildContext"):
+    return ConditionTactic(TACTIC_RESPAWN_WAIT, is_respawning)
+
+
+def _build_eject_slot(ctx: "_BuildContext"):
+    eject_fns = ctx.actuators.get(TACTIC_EJECT)
+    if eject_fns is not None:
+        return ConditionTactic(TACTIC_EJECT, is_eject_confirmed,
+                               start_fn=eject_fns[0],
+                               is_running_fn=eject_fns[1])
+    return ConditionTactic(TACTIC_EJECT, is_missiles_empty)
+
+
+def _build_missile_evade_slot(ctx: "_BuildContext"):
+    # ADR 070: the is_running_fn feeds BOTH the actuation gate and the
+    # condition's stickiness — the selection must not fall through to Engage
+    # while the evade thread still owns the roll axis.
+    missile_evade_fns = ctx.actuators.get(TACTIC_MISSILE_EVADE)
+    if missile_evade_fns is not None:
+        return ConditionTactic(
+            TACTIC_MISSILE_EVADE,
+            make_missile_evade_condition(missile_evade_fns[1]),
+            start_fn=missile_evade_fns[0],
+            is_running_fn=missile_evade_fns[1])
+    return ConditionTactic(TACTIC_MISSILE_EVADE, make_missile_evade_condition())
+
+
+def _build_evade_slot(ctx: "_BuildContext"):
+    evade_threshold = ctx.bt_cfg.get("evade_health_threshold")
+    evade_hold_s = float(ctx.bt_cfg.get("evade_hold_s", 10.0))
+    return MinimumHold(
+        TACTIC_EVADE,
+        ConditionTactic(f"{TACTIC_EVADE}Condition",
+                        make_evade_condition(evade_threshold)),
+        hold_s=evade_hold_s, clock=ctx.clock,
+    )
+
+
+def _build_disengage_slot(ctx: "_BuildContext"):
+    disengage_after_s = float(ctx.bt_cfg.get("disengage_after_s", 30.0))
+    disengage_hold_s = float(ctx.bt_cfg.get("disengage_hold_s", 10.0))
+    disengage_fns = ctx.actuators.get(TACTIC_DISENGAGE)
+    disengage_kwargs = {}
+    if disengage_fns is not None:
+        disengage_kwargs = {"start_fn": disengage_fns[0],
+                            "is_running_fn": disengage_fns[1]}
+    return MinimumHold(
+        TACTIC_DISENGAGE,
+        ConditionTactic(f"{TACTIC_DISENGAGE}Condition",
+                        make_disengage_condition(disengage_after_s),
+                        **disengage_kwargs),
+        hold_s=disengage_hold_s, clock=ctx.clock,
+    )
+
+
+def _build_engage_slot(_ctx: "_BuildContext"):
+    return ConditionTactic(TACTIC_ENGAGE, has_contacts)
+
+
+def _build_attack_support_slot(_ctx: "_BuildContext"):
+    return ConditionTactic(TACTIC_ATTACK_SUPPORT, always)
+
+
+def _build_climb_slot(ctx: "_BuildContext"):
+    """ADR 073: absent entirely unless enabled. A selection-only leaf here
+    would not be shadow — every selection would pre-empt Engage actuation and
+    silently pause geometry at low altitude. While disabled,
+    BehaviorTreeHandler logs would-select from an independent condition
+    instance instead. Sets ``ctx.climb_emergency_fn`` as a side effect,
+    consumed by ``_build_boundary_slot``.
+    """
+    if not climb_tactic_enabled(ctx.bt_cfg):
+        return None
+    climb_cfg = ctx.bt_cfg.get("climb", {}) or {}
+    climb_fns = ctx.actuators.get(TACTIC_CLIMB)
+    climb_kwargs = {}
+    if climb_fns is not None:
+        climb_kwargs = {"start_fn": climb_fns[0], "is_running_fn": climb_fns[1]}
+        # ADR 137 D9: optional third element wires the RUNNING-tick update
+        # channel — absent (2-tuple) leaves the leaf without one, unchanged
+        # from before D9.
+        if len(climb_fns) > 2 and climb_fns[2] is not None:
+            climb_kwargs["update_fn"] = climb_fns[2]
+    emergency = make_climb_condition(
+        climb_cfg.get("enter_below_alt"),
+        climb_cfg.get("exit_above_alt"),
+        is_running_fn=climb_fns[1] if climb_fns is not None else None,
+        confirm_reads=int(climb_cfg.get("confirm_reads", 1)),
+        # ADR 086 d2/d3/d4 — time-to-ground recovery. Unset disables it and
+        # leaves the pure ADR 073 altitude band.
+        recover_below_time_s=climb_cfg.get("recover_below_time_s"),
+        confirm_bypass_time_s=climb_cfg.get("confirm_bypass_time_s"),
+        descent_memory_s=float(climb_cfg.get("descent_memory_s", 5.0)))
+    # ADR 075: the armed altitude-sustain band shares the leaf with the
+    # emergency band. Both closures are evaluated EVERY tick (no
+    # short-circuit) so neither hysteresis state machine goes stale while
+    # the other holds the selection.
+    sustain_cfg = climb_cfg.get("sustain", {}) or {}
+    if bool(sustain_cfg.get("enabled", False)):
+        sustain = make_sustain_climb_condition(
+            sustain_cfg.get("enter_below_alt"),
+            sustain_cfg.get("exit_above_alt"),
+            confirm_reads=int(climb_cfg.get("confirm_reads", 1)))
+
+        def climb_condition(snapshot, _e=emergency, _s=sustain):
+            e = _e(snapshot)
+            s = _s(snapshot)
+            return e or s
+    else:
+        climb_condition = emergency
+    climb_leaf = ConditionTactic(TACTIC_CLIMB, climb_condition, **climb_kwargs)
+
+    # ADR 107 D4, corrected by Anomaly 007: reading this lazily only sees the
+    # CURRENT tick's verdict if something refreshes it every tick regardless
+    # of selection — py-trees never ticks Climb's own condition while a
+    # higher-priority sibling keeps winning, so without the update_fn below
+    # this flag went stale the entire time BoundaryTurn was selected. See
+    # ClimbCondition.update_emergency for the incident and the fix.
+    def _climb_emergency_fn(_e=emergency):
+        return bool(getattr(_e, "emergency_active", False))
+    ctx.climb_emergency_fn = _climb_emergency_fn
+
+    def _climb_emergency_update_fn(snapshot, now=None, _e=emergency):
+        return _e.update_emergency(snapshot, now)
+    ctx.climb_emergency_update_fn = _climb_emergency_update_fn
+    return climb_leaf
+
+
+def _build_boundary_slot(ctx: "_BuildContext"):
+    """ADR 107: absent unless configured. Reads ``ctx.climb_emergency_fn`` —
+    built by ``_build_climb_slot``, which ``_build_slots`` therefore always
+    runs first regardless of priority order, since BoundaryTurn outranks
+    Climb but depends on it.
+    """
+    if not boundary_tactic_enabled(ctx.bt_cfg):
+        return None
+    boundary_cfg = ctx.bt_cfg.get("boundary", {}) or {}
+    boundary_fns = ctx.actuators.get(TACTIC_BOUNDARY_TURN)
+    boundary_kwargs = {}
+    if boundary_fns is not None:
+        boundary_kwargs = {"start_fn": boundary_fns[0],
+                           "is_running_fn": boundary_fns[1]}
+    return MinimumHold(
+        TACTIC_BOUNDARY_TURN,
+        ConditionTactic(
+            f"{TACTIC_BOUNDARY_TURN}Condition",
+            make_boundary_condition(
+                float(boundary_cfg["turn_frac"]),
+                float(boundary_cfg.get("recede_frac", 0.06)),
+                yields_to_fn=ctx.climb_emergency_fn,
+                release_frac=boundary_cfg.get("release_frac"),
+                min_clear_frac=float(
+                    boundary_cfg.get("min_clear_frac", 0.35)),
+                blind_ticks=int(boundary_cfg.get("blind_ticks", 3)),
+                entry_ratio=float(boundary_cfg.get("entry_ratio", 0.25))),
+            **boundary_kwargs),
+        hold_s=float(boundary_cfg.get("hold_s", 3.0)), clock=ctx.clock,
+    )
+
+
+def _build_regroup_slot(ctx: "_BuildContext"):
+    # ADR 028 revision 4. Absent unless enabled, so `minimap.regroup_enabled:
+    # false` disables the FEATURE rather than half of it — gating the
+    # navigator mode alone left the leaf still being selected (21 selections
+    # in a nine-minute run with the flag off), which silently invalidates any
+    # A/B comparison the flag is used for.
+    #
+    # Below Engage: a real target always outranks regrouping. Above
+    # AttackSupport: that leaf is `always`, so anything below it is
+    # unreachable — both encoded once, in `_PRIORITY_ORDER`, not here.
+    if not ctx.regroup_enabled:
+        return None
+    return ConditionTactic(TACTIC_REGROUP, has_friendlies)
+
+
+def _build_slots(ctx: "_BuildContext") -> dict:
+    """Build every leaf, returning ``{name: Behaviour}`` for the present ones.
+
+    Build order here is deliberately NOT ``_PRIORITY_ORDER`` — it only has to
+    satisfy real data dependencies (Climb built before Boundary).
+    ``build_tree`` assembles the final children list by walking
+    ``_PRIORITY_ORDER`` and looking each name up here, so priority rank is
+    declared once, in one place, independent of this function's build
+    sequence.
+    """
+    built = {
+        TACTIC_IDLE: _build_idle_slot(ctx),
+        TACTIC_RESPAWN_WAIT: _build_respawn_wait_slot(ctx),
+        TACTIC_EJECT: _build_eject_slot(ctx),
+        TACTIC_MISSILE_EVADE: _build_missile_evade_slot(ctx),
+        TACTIC_EVADE: _build_evade_slot(ctx),
+        TACTIC_DISENGAGE: _build_disengage_slot(ctx),
+        TACTIC_ENGAGE: _build_engage_slot(ctx),
+        TACTIC_ATTACK_SUPPORT: _build_attack_support_slot(ctx),
+    }
+    climb_leaf = _build_climb_slot(ctx)        # may set ctx.climb_emergency_fn
+    if climb_leaf is not None:
+        built[TACTIC_CLIMB] = climb_leaf
+    boundary_leaf = _build_boundary_slot(ctx)  # reads ctx.climb_emergency_fn
+    if boundary_leaf is not None:
+        built[TACTIC_BOUNDARY_TURN] = boundary_leaf
+    regroup_leaf = _build_regroup_slot(ctx)
+    if regroup_leaf is not None:
+        built[TACTIC_REGROUP] = regroup_leaf
+    return built
+
+
 def build_tree(bt_cfg: dict, clock=time.time,
                actuators: "dict | None" = None,
                regroup_enabled: bool = False) -> py_trees.trees.BehaviourTree:
@@ -574,166 +1017,30 @@ def build_tree(bt_cfg: dict, clock=time.time,
     verdict — the shadow-session gate. Evade remains selection-only: no
     Controller tactic exists for it, and its threshold is unset until
     calibrated (ADR 024).
+
+    ADR 139 D1: children are assembled from the declared ``_PRIORITY_ORDER``
+    rather than imperative ``list.insert(...)`` calls at named positions.
     """
-    disengage_after_s = float(bt_cfg.get("disengage_after_s", 30.0))
-    disengage_hold_s = float(bt_cfg.get("disengage_hold_s", 10.0))
-    evade_hold_s = float(bt_cfg.get("evade_hold_s", 10.0))
-    evade_threshold = bt_cfg.get("evade_health_threshold")
-    climb_cfg = bt_cfg.get("climb", {}) or {}
-    actuators = actuators or {}
-    eject_fns = actuators.get(TACTIC_EJECT)
-    disengage_fns = actuators.get(TACTIC_DISENGAGE)
-    missile_evade_fns = actuators.get(TACTIC_MISSILE_EVADE)
-    climb_fns = actuators.get(TACTIC_CLIMB)
-    boundary_fns = actuators.get(TACTIC_BOUNDARY_TURN)
-
-    if eject_fns is not None:
-        eject_leaf = ConditionTactic(TACTIC_EJECT, is_eject_confirmed,
-                                     start_fn=eject_fns[0],
-                                     is_running_fn=eject_fns[1])
-    else:
-        eject_leaf = ConditionTactic(TACTIC_EJECT, is_missiles_empty)
-
-    # ADR 070: the is_running_fn feeds BOTH the actuation gate and the
-    # condition's stickiness — the selection must not fall through to Engage
-    # while the evade thread still owns the roll axis.
-    if missile_evade_fns is not None:
-        missile_evade_leaf = ConditionTactic(
-            TACTIC_MISSILE_EVADE,
-            make_missile_evade_condition(missile_evade_fns[1]),
-            start_fn=missile_evade_fns[0],
-            is_running_fn=missile_evade_fns[1])
-    else:
-        missile_evade_leaf = ConditionTactic(
-            TACTIC_MISSILE_EVADE, make_missile_evade_condition())
-
-    disengage_kwargs = {}
-    if disengage_fns is not None:
-        disengage_kwargs = {"start_fn": disengage_fns[0],
-                            "is_running_fn": disengage_fns[1]}
-
-    children = [
-        ConditionTactic(TACTIC_IDLE, is_idle),
-        ConditionTactic(TACTIC_RESPAWN_WAIT, is_respawning),
-        eject_leaf,
-        missile_evade_leaf,
-        MinimumHold(
-            TACTIC_EVADE,
-            ConditionTactic(f"{TACTIC_EVADE}Condition",
-                            make_evade_condition(evade_threshold)),
-            hold_s=evade_hold_s, clock=clock,
-        ),
-        MinimumHold(
-            TACTIC_DISENGAGE,
-            ConditionTactic(f"{TACTIC_DISENGAGE}Condition",
-                            make_disengage_condition(disengage_after_s),
-                            **disengage_kwargs),
-            hold_s=disengage_hold_s, clock=clock,
-        ),
-        ConditionTactic(TACTIC_ENGAGE, has_contacts),
-        ConditionTactic(TACTIC_ATTACK_SUPPORT, always),
-    ]
-
-    # ADR 073: the Climb leaf enters the selector ONLY when enabled. A
-    # selection-only leaf here would not be shadow — every selection would
-    # pre-empt Engage actuation and silently pause geometry at low altitude.
-    # While disabled, BehaviorTreeHandler logs would-select from an
-    # independent condition instance instead.
-    _climb_emergency_fn = None
-    if bool(climb_cfg.get("enabled", False)):
-        climb_kwargs = {}
-        if climb_fns is not None:
-            climb_kwargs = {"start_fn": climb_fns[0],
-                            "is_running_fn": climb_fns[1]}
-        emergency = make_climb_condition(
-            climb_cfg.get("enter_below_alt"),
-            climb_cfg.get("exit_above_alt"),
-            is_running_fn=climb_fns[1] if climb_fns is not None else None,
-            confirm_reads=int(climb_cfg.get("confirm_reads", 1)),
-            # ADR 086 d2/d3/d4 — time-to-ground recovery. Unset disables it and
-            # leaves the pure ADR 073 altitude band.
-            recover_below_time_s=climb_cfg.get("recover_below_time_s"),
-            confirm_bypass_time_s=climb_cfg.get("confirm_bypass_time_s"),
-            descent_memory_s=float(climb_cfg.get("descent_memory_s", 5.0)))
-        # ADR 075: the armed altitude-sustain band shares the leaf with the
-        # emergency band. Both closures are evaluated EVERY tick (no
-        # short-circuit) so neither hysteresis state machine goes stale while
-        # the other holds the selection.
-        sustain_cfg = climb_cfg.get("sustain", {}) or {}
-        if bool(sustain_cfg.get("enabled", False)):
-            sustain = make_sustain_climb_condition(
-                sustain_cfg.get("enter_below_alt"),
-                sustain_cfg.get("exit_above_alt"),
-                confirm_reads=int(climb_cfg.get("confirm_reads", 1)))
-
-            def climb_condition(snapshot, _e=emergency, _s=sustain):
-                e = _e(snapshot)
-                s = _s(snapshot)
-                return e or s
-        else:
-            climb_condition = emergency
-        climb_leaf = ConditionTactic(TACTIC_CLIMB, climb_condition,
-                                     **climb_kwargs)
-        # Insert by NAME, not by offset. This was `len(children) - 2`, which
-        # silently meant "above Engage" only while exactly two leaves followed
-        # it; adding Regroup in ADR 028 revision 4 pushed Climb below Engage
-        # and inverted the priority the ADR 073 tests assert.
-        _engage_at = next(i for i, c in enumerate(children)
-                          if c.name == TACTIC_ENGAGE)
-        children.insert(_engage_at, climb_leaf)
-        # ADR 107 D4. The flag is published by the closure each tick; read it
-        # lazily so the boundary leaf sees the CURRENT tick's verdict.
-        def _climb_emergency_fn(_e=emergency):
-            return bool(getattr(_e, "emergency_active", False))
-
-    # ADR 107: BoundaryTurn. Added after the climb block so it can yield to the
-    # emergency band, and placed by NAME rather than offset — the ADR 073
-    # lesson, where `len(children) - 2` silently inverted a priority the moment
-    # another leaf was added.
-    boundary_cfg = bt_cfg.get("boundary", {}) or {}
-    if boundary_cfg.get("turn_frac"):
-        boundary_kwargs = {}
-        if boundary_fns is not None:
-            boundary_kwargs = {"start_fn": boundary_fns[0],
-                               "is_running_fn": boundary_fns[1]}
-        boundary_leaf = MinimumHold(
-            TACTIC_BOUNDARY_TURN,
-            ConditionTactic(
-                f"{TACTIC_BOUNDARY_TURN}Condition",
-                make_boundary_condition(
-                    float(boundary_cfg["turn_frac"]),
-                    float(boundary_cfg.get("recede_frac", 0.06)),
-                    yields_to_fn=_climb_emergency_fn,
-                    release_frac=boundary_cfg.get("release_frac"),
-                    min_clear_frac=float(
-                        boundary_cfg.get("min_clear_frac", 0.35)),
-                    blind_ticks=int(boundary_cfg.get("blind_ticks", 3)),
-                    entry_ratio=float(boundary_cfg.get("entry_ratio", 0.25))),
-                **boundary_kwargs),
-            hold_s=float(boundary_cfg.get("hold_s", 3.0)), clock=clock)
-        _evade_at = next(i for i, c in enumerate(children)
-                         if c.name == TACTIC_EVADE)
-        children.insert(_evade_at, boundary_leaf)
-
-    # ADR 028 revision 4. The leaf is added only when regroup is enabled, so
-    # `minimap.regroup_enabled: false` disables the FEATURE rather than half of
-    # it. Gating the navigator mode alone left the leaf still being selected —
-    # 21 selections in a nine-minute run with the flag off — which silently
-    # invalidates any A/B comparison the flag is used for.
-    #
-    # Below Engage: a real target always outranks regrouping. Above
-    # AttackSupport: that leaf is `always`, so anything below it is unreachable.
-    if regroup_enabled:
-        _support_at = next(i for i, c in enumerate(children)
-                           if c.name == TACTIC_ATTACK_SUPPORT)
-        children.insert(_support_at, ConditionTactic(TACTIC_REGROUP, has_friendlies))
+    ctx = _BuildContext(bt_cfg=bt_cfg, clock=clock, actuators=actuators or {},
+                        regroup_enabled=regroup_enabled)
+    built = _build_slots(ctx)
+    children = [built[name] for name in _PRIORITY_ORDER if name in built]
 
     root = py_trees.composites.Selector(
         name="TacticSelector",
         memory=False,
         children=children,
     )
-    return py_trees.trees.BehaviourTree(root)
+    tree = py_trees.trees.BehaviourTree(root)
+    # Exposed so the Climb actuator (tick_handlers.py's _start_climb) can read
+    # THIS tick's ADR 086 emergency verdict without a new actuator-contract
+    # parameter — same closure BoundaryTurn's yields_to_fn already reads.
+    tree.climb_emergency_fn = ctx.climb_emergency_fn
+    # Anomaly 007: called once per tick, BEFORE tree.tick(), so the emergency
+    # verdict above is never stale when a higher-priority tactic (chiefly
+    # BoundaryTurn) is the one winning selection.
+    tree.climb_emergency_update_fn = ctx.climb_emergency_update_fn
+    return tree
 
 
 def make_snapshot_writer() -> py_trees.blackboard.Client:
@@ -748,3 +1055,21 @@ def selected_tactic(tree: py_trees.trees.BehaviourTree) -> str:
         if child.status == py_trees.common.Status.RUNNING:
             return child.name
     return "none"
+
+
+def tree_status_text(tree: py_trees.trees.BehaviourTree) -> str:
+    """Per-node status dump of the last tick — Research 013's live-status
+    view. `py_trees` persists `.status` on every node after a tick, so this
+    needs no separate visitor/snapshot bookkeeping; it renders the same
+    RUNNING/FAILURE/SUCCESS the priority selector just acted on, down through
+    decorators (MinimumHold) to the condition leaf underneath, not just which
+    top-level tactic won."""
+    return py_trees.display.ascii_tree(tree.root, show_status=True)
+
+
+def tree_status_dict(tree: py_trees.trees.BehaviourTree) -> dict[str, str]:
+    """{node name: Status name} for every node — Design 012's structured
+    sibling of `tree_status_text`, for a JSONL trace rather than a log
+    line. `py_trees.behaviour.Behaviour.iterate()` walks root then every
+    descendant, so this covers leaves nested under decorators too."""
+    return {node.name: node.status.name for node in tree.root.iterate()}

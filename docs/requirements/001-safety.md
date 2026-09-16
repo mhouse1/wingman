@@ -352,3 +352,53 @@ display, capture or controller are set up. Abstract rather than a PID file
 because the kernel releases the name however the process dies, so a SIGKILLed
 instance leaves no stale lock — the case that would otherwise prevent wingman
 starting at all, which is the more dangerous failure of the two.
+
+## A termination trigger bounds total time to exit, whether or not the main loop notices it
+
+**UID**: SAF-015
+
+**Statement**: Following any termination trigger — SIGTERM, SIGHUP, or the operator's second
+Backspace — wingman shall exit within a bounded time even if the main loop's
+`exit_requested` check never observes the trigger. The bound applies from the
+moment the OS or the operator delivers the trigger, not from the moment
+`exit_requested` is observed set, so a trigger that is silently absorbed
+before reaching that check is still covered.
+
+**Rationale**:
+
+ADR 121 D1 already bounds cleanup once it starts: a watchdog armed in the
+`finally:` block forces exit if cleanup stalls past 90 s. That protects
+everything AFTER the main loop breaks out of `while True:`, which requires
+`exit_requested.is_set()` to have been observed true at the top of some tick.
+It does not protect the step before that — the trigger actually causing
+`exit_requested` to become true in the first place.
+
+Observed 2026-09-11: SIGTERM sent directly to the interpreter PID (confirmed
+via `ps`, not the `uv run` shim) produced no effect for 75+ seconds on a
+process that was, throughout, fully healthy and ticking at its normal ~1 s
+cadence — not stuck, not stalled, just never noticing. No `Exit requested`
+log line, no `SHUTDOWN WATCHDOG` line, because the watchdog structurally
+cannot arm for a signal that never reaches the code that arms it. Ended in a
+manual SIGKILL. This is distinct from, and not covered by, either the
+original 2026-09-05 hang (D1-D5) or the 2026-09-08 SIGHUP gap (both of which
+assumed the trigger would at least be noticed, eventually, if not acted on
+cleanly) — see ADR 121, "SIGTERM had no effect at all on a live, ticking
+process."
+
+Enforced by `_arm_signal_ack_watchdog`, armed from inside the SIGTERM/SIGHUP
+handlers themselves at the instant `exit_requested.set()` runs, independent
+of `_arm_shutdown_watchdog`'s existing 90 s cleanup-stall guard; the operator's
+second Backspace is covered by that existing 90 s guard directly, since its
+own detection loop polls reliably and was never the silent-absorption risk
+SIGTERM/SIGHUP had. It does not cover a signal that never reaches the handler
+at all — see ADR 121's 2026-09-11 addendum for what is and is not closed by
+this, and why that gap may still be live.
+
+A same-day code review of the first cut found this enforcement was itself
+incomplete: STANDBY — an intentional, unbounded, operator-controlled wait
+that never checks `exit_requested` — did not cancel the signal-ack watchdog
+on entry, so a SIGTERM/SIGHUP arriving while parked there would have violated
+SAF-010 (the operator's manual-flight handback) by force-exiting the session
+regardless. Fixed the same day; see ADR 121's "Code review caught two
+regressions before they shipped live" section for this and a second,
+narrower repeat-signal gap found and fixed alongside it.

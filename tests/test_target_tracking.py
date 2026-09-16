@@ -74,6 +74,26 @@ def _draw_circle(frame: np.ndarray, cx: int, cy: int, r: int = 25,
     return out
 
 
+def _draw_dashed_ring(frame: np.ndarray, cx: int, cy: int, radius: int = 25,
+                      n_dashes: int = 12, dash_r: int = 2,
+                      hsv=(55, 90, 200)) -> np.ndarray:
+    """Paint a ring of small dash blobs — the real padlock-off indicator
+    shape (ADR 136), calibrated against a live capture: many short dash
+    segments around a circle, not one filled shape. Default color is the
+    live-measured translucent-HUD green (H=55, S~76, V~127-224) — a fully
+    saturated (0,220,60)-style BGR green falls outside the calibrated
+    S<=200 upper bound and would silently under-test this detector."""
+    out = frame.copy()
+    bgr = tuple(int(v) for v in cv2.cvtColor(
+        np.uint8([[hsv]]), cv2.COLOR_HSV2BGR)[0, 0])
+    for i in range(n_dashes):
+        theta = 2 * np.pi * i / n_dashes
+        dx = int(cx + radius * np.cos(theta))
+        dy = int(cy + radius * np.sin(theta))
+        cv2.circle(out, (dx, dy), dash_r, bgr, -1)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------
@@ -278,6 +298,54 @@ class TestColorPreference:
 
 
 # ---------------------------------------------------------------------------
+# detect_padlock_off (ADR 136): dashed green ring at screen center, counted
+# by dash segments (not a single blob) — calibrated against a live capture,
+# 2026-09-09.
+# ---------------------------------------------------------------------------
+
+class TestPadlockIndicator:
+    def test_detects_dashed_ring_at_center(self):
+        t = _tracker()
+        frame = _black_frame()
+        h, w = frame.shape[:2]
+        frame = _draw_dashed_ring(frame, w // 2, h // 2, radius=25, n_dashes=12)
+        assert t.detect_padlock_off(frame) is True
+
+    def test_no_ring_returns_false(self):
+        t = _tracker()
+        assert t.detect_padlock_off(_black_frame()) is False
+
+    def test_too_few_dashes_is_rejected(self):
+        """Below min_dashes (default 6) — noise or a partial/occluded ring,
+        not a confirmed indicator."""
+        t = _tracker()
+        frame = _black_frame()
+        h, w = frame.shape[:2]
+        frame = _draw_dashed_ring(frame, w // 2, h // 2, radius=25, n_dashes=3)
+        assert t.detect_padlock_off(frame) is False
+
+    def test_one_large_blob_is_rejected(self):
+        """A single big filled shape (e.g. an unrelated green HUD wash)
+        isn't the ring: dash-sized area bounds reject anything much bigger
+        than an individual dash, and one blob alone can never reach
+        min_dashes regardless of size."""
+        t = _tracker()
+        frame = _black_frame()
+        h, w = frame.shape[:2]
+        frame = _draw_circle(frame, w // 2, h // 2, r=20)
+        assert t.detect_padlock_off(frame) is False
+
+    def test_ring_outside_center_region_is_ignored(self):
+        t = _tracker()
+        frame = _draw_dashed_ring(_black_frame(), 30, 30, radius=15, n_dashes=12)
+        assert t.detect_padlock_off(frame) is False
+
+    def test_empty_frame_returns_false(self):
+        t = _tracker()
+        assert t.detect_padlock_off(np.zeros((0, 0, 3), dtype=np.uint8)) is False
+
+
+# ---------------------------------------------------------------------------
 # orient_nose_to_target (Controller method)
 # ---------------------------------------------------------------------------
 
@@ -314,7 +382,7 @@ class TestOrientNoseToTarget:
     def test_hold_is_proportional_and_clamped(self):
         ctrl = self._ctrl()
         captured = {}
-        def _fake_roll_right(hold_seconds=0.3, block=True):
+        def _fake_roll_right(hold_seconds=0.3, block=True, ignore_cancel=False):
             captured["hold"] = hold_seconds
         ctrl.roll_right = _fake_roll_right
         ctrl.orient_nose_to_target(1.0, kp=0.30, min_hold_sec=0.08, max_hold_sec=0.35)
@@ -323,14 +391,14 @@ class TestOrientNoseToTarget:
     def test_hold_clamped_to_min(self):
         ctrl = self._ctrl()
         captured = {}
-        ctrl.roll_right = lambda hold_seconds=0.3, block=True: captured.update(hold=hold_seconds)
+        ctrl.roll_right = lambda hold_seconds=0.3, block=True, ignore_cancel=False: captured.update(hold=hold_seconds)
         ctrl.orient_nose_to_target(0.1, kp=0.30, min_hold_sec=0.08, max_hold_sec=0.35)
         assert captured["hold"] >= 0.08
 
     def test_hold_clamped_to_max(self):
         ctrl = self._ctrl()
         captured = {}
-        ctrl.roll_right = lambda hold_seconds=0.3, block=True: captured.update(hold=hold_seconds)
+        ctrl.roll_right = lambda hold_seconds=0.3, block=True, ignore_cancel=False: captured.update(hold=hold_seconds)
         ctrl.orient_nose_to_target(10.0, kp=0.30, min_hold_sec=0.08, max_hold_sec=0.35)
         assert captured["hold"] <= 0.35
 
