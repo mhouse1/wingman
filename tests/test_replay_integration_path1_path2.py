@@ -290,6 +290,12 @@ class FakeController:
     def set_auto_respawn_restart(self, enabled: bool) -> None:
         self._auto_respawn = enabled
 
+    def set_target_tracker(self, tracker) -> None:
+        """ADR 136: main.py calls this unconditionally after constructing
+        Controller. The stub doesn't drive the eject heatdive loop, so it
+        just needs to exist and not raise."""
+        self._target_tracker = tracker
+
     def eject_and_dive(self, on_complete=None) -> None:
         self._mission_running = False
         self._intents.append({"action_type": "eject_and_dive"})
@@ -328,6 +334,12 @@ class FakeController:
     def is_disengage_running(self) -> bool:
         return False
 
+    def is_survival_hold(self) -> bool:
+        return False  # stub never runs mission_loiter
+
+    def is_secondary_weapon_active(self) -> bool:
+        return False  # ADR 136 heatdive never actuates in the stub
+
     def is_missile_evading(self) -> bool:
         return False
 
@@ -341,8 +353,17 @@ class FakeController:
         return False
 
     def climb_mode(self, target_alt=None, max_s=None, fuel_floor_pct=0.0,
-                   exit_lead_s=0.0) -> None:
+                   exit_lead_s=0.0, emergency=False) -> None:
         self._intents.append({"action_type": "climb_mode"})
+
+    def set_climb_emergency(self, value: bool) -> None:
+        pass
+
+    def is_boundary_turning(self) -> bool:
+        return False
+
+    def boundary_turn_mode(self, lateral=None) -> None:
+        self._intents.append({"action_type": "boundary_turn_mode"})
 
     # Engage-geometry actuation (3.1a) — called when the Engage leaf selects
     # with contacts on the injected battle frames' minimaps.

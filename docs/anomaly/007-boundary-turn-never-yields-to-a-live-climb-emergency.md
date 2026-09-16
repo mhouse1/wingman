@@ -61,7 +61,20 @@ to ~6 seconds — categorically different from the original bug (indefinite,
 resolving on its own) but not literally instant in every case. The initial
 report of "every case within 1-2 ticks" was accurate for the smaller
 first-session sample but did not generalize — corrected here rather than
-left standing, per this project's own convention. See Disposition item 3.
+left standing, per this project's own convention.
+
+**Third session (2026-09-15/16, 14h01m, `wingman_20260915_164836.log`,
+found while reviewing this same log for an unrelated request): 2850 `DIVE
+RECOVERY` firings, 73 while `BoundaryTurn` was selected.** Same measurement
+discipline applied: the two apparent outliers exceeding 10s (max 21.0s) were
+checked directly against the raw `ttg` trend, not trusted from the duration
+proxy alone — both were the same false-alarm shape already documented above
+(a single early warning that self-resolved within 1-2 ticks on its own,
+`BoundaryTurn` then correctly continuing its own unrelated turn afterward,
+not a stuck emergency). Median resolution 3.0s; the genuine worst case
+remains the ~6s from the second session — this third session added no new
+one. **Running total: n=117 across three sessions, zero recurrence of the
+original bug in any of them.** See Disposition item 3.
 
 ## The incident
 
@@ -206,12 +219,13 @@ green.
    live incident's own telemetry. See Root cause above.
 2. **Done.** Fix implemented, tested against a real reproduction of the
    incident (not a mock), full suite green. See Fix above.
-3. **Done.** Live-validated across two sessions the same night, 44 real
-   occurrences total (`DIVE RECOVERY` firing while `BoundaryTurn` was
-   selected). Zero recurrence of the original bug in any of them.
+3. **Done.** Live-validated across three sessions spanning two nights,
+   117 real occurrences total (`DIVE RECOVERY` firing while `BoundaryTurn`
+   was selected). Zero recurrence of the original bug in any of them.
    Resolution time: same-tick in most cases, up to ~6s in one case where
    `MinimumHold`'s own separate 3.0s anti-flapping hold added its own
-   bounded delay on top. See Summary above for the full measurement and the
+   bounded delay on top — the third session added more occurrences but no
+   new worst case. See Summary above for the full measurement and the
    correction to the original, too-small-sample "1-2 ticks always" claim.
 4. **Not done, and out of scope here**: the *other* half of
    `ClimbCondition` — the ordinary altitude-band hysteresis (`_active`,
@@ -230,11 +244,12 @@ green.
 
 ## What to watch
 
-- **Confirmed across two sessions, 2026-09-14/15**: `Climb` always
-  eventually interrupts a live `BoundaryTurn` selection when `ttg` drops
-  inside the emergency window — 44/44 real occurrences, zero unresolved.
-  Resolution time varies (same-tick to ~6s, see Summary) rather than being
-  uniformly instant — worth tracking whether ~6s recurs often enough to be
+- **Confirmed across three sessions, 2026-09-14 through 16**: `Climb`
+  always eventually interrupts a live `BoundaryTurn` selection when `ttg`
+  drops inside the emergency window — 117/117 real occurrences, zero
+  unresolved. Resolution time varies (same-tick to ~6s, see Summary) rather
+  than being uniformly instant — worth tracking whether ~6s recurs often
+  enough to be
   worth shortening (Disposition item 5).
 - Whether the `update_emergency` pre-tick call ever measurably changes
   ordinary (non-BoundaryTurn) session behavior — it shouldn't, since
