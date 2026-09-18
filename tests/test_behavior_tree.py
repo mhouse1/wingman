@@ -645,6 +645,92 @@ class TestTimeToGroundRecovery:
         assert cond(make_snap(altitude=3000.0, altitude_rate=-900.0)) is False
 
 
+class TestTerrainAheadTrigger:
+    """HLDD 001 Phase 1 — forward sky-occlusion terrain-ahead OR-term.
+
+    Same confirm-reads debounce shape as the ttg trigger above, driven by
+    ``snapshot.terrain_sky_frac`` (a raw per-tick fraction from
+    ``analyzer.detect_terrain_ahead``) rather than altitude/rate. Ships with
+    ``terrain_shadow: true`` in production config.yaml — computed and
+    logged, not yet actuating — until live sessions validate the
+    false-positive rate on hazy skies.
+    """
+
+    @staticmethod
+    def _cond(clock, **kw):
+        opts = dict(terrain_enabled=True, terrain_shadow=False,
+                    terrain_sky_min_frac=0.55, terrain_confirm_reads=2,
+                    confirm_reads=1, clock=clock)
+        opts.update(kw)
+        return make_climb_condition(500, 1000, **opts)
+
+    def test_clear_sky_never_triggers(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        for _ in range(5):
+            cond(make_snap(altitude=5000.0, terrain_sky_frac=0.95))
+        assert cond.terrain_ahead_active is False
+        assert cond.emergency_active is False
+
+    def test_low_sky_fraction_triggers_after_confirm_reads(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        snap = make_snap(altitude=5000.0, terrain_sky_frac=0.20)
+        cond(snap)
+        assert cond.emergency_active is False, \
+            "fired on the first read, before terrain_confirm_reads"
+        cond(snap)
+        assert cond.emergency_active is True, \
+            "did not fire on the confirming second read"
+
+    def test_single_tick_dropout_does_not_trigger(self):
+        """A single bad low read followed by a recovered high read must not
+        command a climb — the streak resets on the intervening good read."""
+        clock = FakeClock()
+        cond = self._cond(clock, terrain_confirm_reads=2)
+        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.20))
+        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.95))
+        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.20))
+        assert cond.emergency_active is False, \
+            "streak should have reset on the intervening high-sky read"
+
+    def test_missing_reading_resets_the_streak(self):
+        """Unlike the ttg trigger's blind-read memory (a perception gap holds
+        the last known descent), a missing terrain_sky_frac resets the
+        streak to zero rather than freezing it — see update_emergency's
+        ``if sky_frac is not None`` branch."""
+        clock = FakeClock()
+        cond = self._cond(clock)
+        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.20))
+        cond(make_snap(altitude=5000.0, terrain_sky_frac=None))
+        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.20))
+        assert cond.emergency_active is False
+
+    def test_shadow_mode_logs_but_does_not_actuate(self):
+        """Production config.yaml ships terrain_shadow: true — the streak and
+        terrain_ahead_active still track reality (for the WARNING log and
+        future evidence capture), but emergency_active must stay False so
+        nothing actually climbs on it yet."""
+        clock = FakeClock()
+        cond = self._cond(clock, terrain_shadow=True)
+        snap = make_snap(altitude=5000.0, terrain_sky_frac=0.20)
+        cond(snap)
+        cond(snap)
+        assert cond.terrain_ahead_active is True
+        assert cond.emergency_active is False
+
+    def test_disabled_by_default(self):
+        """terrain_enabled defaults to False: a low sky fraction must not
+        affect the condition at all unless explicitly turned on."""
+        clock = FakeClock()
+        cond = make_climb_condition(500, 1000, confirm_reads=1, clock=clock)
+        snap = make_snap(altitude=5000.0, terrain_sky_frac=0.05)
+        cond(snap)
+        cond(snap)
+        assert cond.emergency_active is False
+        assert cond.terrain_ahead_active is False
+
+
 class TestDiveRecoveryRespawnGuard:
     """ADR 086 d2: a respawn is an altitude discontinuity, not a descent.
 
@@ -906,6 +992,86 @@ def test_yields_to_climb_when_the_pre_tick_update_runs(clock):
     tree.tick()
     assert selected_tactic(tree) == TACTIC_CLIMB, \
         "BoundaryTurn still won — the emergency flag was not fresh in time"
+
+
+# HLDD 001 Phase 1: the terrain-ahead trigger is a second OR-term on the same
+# `emergency` flag Anomaly 007 fixed the freshness of — it must yield
+# BoundaryTurn exactly as the ttg trigger does, through the identical
+# pre-tick `climb_emergency_update_fn` pipeline. `enter_below_alt`/
+# `exit_above_alt` are still set (update_emergency short-circuits entirely
+# when either is None — ADR 073's "disabled until calibrated" path) but
+# `altitude=5000.0` below stays well clear of the band, and
+# `recover_below_time_s` is left unset so the ttg trigger is structurally
+# inert, isolating this test to the terrain OR-term alone.
+_TERRAIN_DIVE_BT_CFG = dict(
+    BT_CFG,
+    boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0,
+             "min_clear_frac": 0.0},
+    climb={"enabled": True, "enter_below_alt": 500, "exit_above_alt": 1000,
+          "confirm_reads": 1,
+          "terrain_avoidance": {"enabled": True, "shadow": False,
+                                "sky_min_frac": 0.55, "confirm_reads": 1}},
+)
+
+
+def test_boundary_turn_yields_to_a_terrain_emergency(clock):
+    """The terrain OR-term must win selection through the same pre-tick
+    update channel the ttg trigger uses — not a parallel mechanism."""
+    tree = build_tree(dict(_TERRAIN_DIVE_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=5000.0, altitude_rate=0.0,
+                     boundary_dist=0.40, boundary_forward=+0.30,
+                     terrain_sky_frac=0.20)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_CLIMB, \
+        "BoundaryTurn still won — the terrain emergency was not fresh in time"
+
+
+def test_boundary_turn_keeps_selection_when_terrain_is_shadowed(clock):
+    """shadow: true (the production default) must compute and log the
+    terrain trigger without ever letting it win selection."""
+    cfg = dict(_TERRAIN_DIVE_BT_CFG)
+    cfg["climb"] = dict(cfg["climb"])
+    cfg["climb"]["terrain_avoidance"] = dict(
+        cfg["climb"]["terrain_avoidance"], shadow=True)
+    tree = build_tree(cfg, clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=5000.0, altitude_rate=0.0,
+                     boundary_dist=0.40, boundary_forward=+0.30,
+                     terrain_sky_frac=0.20)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_BOUNDARY_TURN, \
+        "shadow mode must not actuate — Climb should not have won"
+
+
+def test_climb_terrain_ahead_fn_is_exposed_and_tracks_the_edge(clock):
+    """tick_handlers.py's evidence-capture edge-detector reads this exactly
+    like climb_emergency_fn — it must be present on the tree and reflect
+    the FALSE->TRUE transition, in shadow mode too (capture is not gated on
+    actuation)."""
+    tree = build_tree(dict(_TERRAIN_DIVE_BT_CFG), clock=clock)
+    assert tree.climb_terrain_ahead_fn is not None
+    assert tree.climb_terrain_ahead_fn() is False, "should start False"
+    writer = make_snapshot_writer()
+    clear_snap = make_snap(altitude=5000.0, altitude_rate=0.0,
+                           boundary_dist=0.40, boundary_forward=+0.30,
+                           terrain_sky_frac=0.95)
+    writer.set("snapshot", clear_snap)
+    tree.climb_emergency_update_fn(clear_snap, clock())
+    tree.tick()
+    assert tree.climb_terrain_ahead_fn() is False
+    low_snap = make_snap(altitude=5000.0, altitude_rate=0.0,
+                         boundary_dist=0.40, boundary_forward=+0.30,
+                         terrain_sky_frac=0.20)
+    writer.set("snapshot", low_snap)
+    tree.climb_emergency_update_fn(low_snap, clock())
+    tree.tick()
+    assert tree.climb_terrain_ahead_fn() is True, \
+        "confirm_reads=1 in this fixture — one low read should latch it"
 
 
 def test_selection_beats_climb_engage_and_regroup(clock):

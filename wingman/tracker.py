@@ -85,6 +85,24 @@ class TargetTracker:
         self._padlock_max_area = float(pli.get("max_contour_area", 30))
         self._padlock_min_dashes = int(pli.get("min_dashes", 6))
 
+        # ADR 140: a small solid green dot fixed at exact screen center —
+        # a different element from the dashed ring above, with its own
+        # config block deliberately kept separate so calibrating one never
+        # drifts the other. Measured 2026-09-17 against 8 real padlock-off
+        # captures: OpenCV HSV (55, 76, 224), byte-identical across all 8
+        # regardless of roll/pitch/target state, unlike the ring (which
+        # moved to a different screen position in every one of those same
+        # frames). Padlock-ON comparison not yet done — see ADR 140 Open
+        # Question 1.
+        pci = config.get("padlock_center_indicator", {})
+        self._padlock_center_region_pct = [float(v) for v in pci.get(
+            "region_pct", [0.485, 0.47, 0.515, 0.53])]
+        self._padlock_center_green_lower = np.array(
+            pci.get("green_lower", [50, 60, 200]), dtype=np.uint8)
+        self._padlock_center_green_upper = np.array(
+            pci.get("green_upper", [60, 90, 255]), dtype=np.uint8)
+        self._padlock_center_min_pixels = int(pci.get("min_pixels", 3))
+
         self._mode = TrackMode.SEARCHING
         self._last_x: "float | None" = None
         self._last_y: "float | None" = None
@@ -215,6 +233,36 @@ class TargetTracker:
             if self._padlock_min_area <= cv2.contourArea(c) <= self._padlock_max_area
         )
         return dash_count >= self._padlock_min_dashes
+
+    def detect_padlock_center_dot(self, frame: np.ndarray) -> bool:
+        """ADR 140: True if the fixed-screen-center padlock-off dot is
+        visible this frame.
+
+        Deliberately a tight, fixed crop rather than tracking the moving
+        ring `detect_padlock_off` reads (ADR 136 D4 found that ring drifts
+        with flight attitude) — this detector will simply fail to find the
+        dot, not misidentify something else, whenever it isn't at true
+        screen center. That is the safe failure mode for a signal only
+        ever consumed as one leg of a multi-tick, multi-signal fusion
+        (ADR 140 D4), not as a per-frame source of truth on its own.
+        """
+        if frame is None or frame.size == 0:
+            return False
+        h, w = frame.shape[:2]
+        x1 = int(w * self._padlock_center_region_pct[0])
+        y1 = int(h * self._padlock_center_region_pct[1])
+        x2 = int(w * self._padlock_center_region_pct[2])
+        y2 = int(h * self._padlock_center_region_pct[3])
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return False
+        try:
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        except Exception:
+            return False
+        mask = cv2.inRange(hsv, self._padlock_center_green_lower,
+                           self._padlock_center_green_upper)
+        return int(np.count_nonzero(mask)) >= self._padlock_center_min_pixels
 
     # ------------------------------------------------------------------
     # Internal

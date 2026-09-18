@@ -370,6 +370,186 @@ def test_padlock_hotkey_ignores_wingmans_own_press(monkeypatch):
     assert ctrl._padlock_cooldown_until > time.time()
 
 
+# ---------------------------------------------------------------------------
+# ADR 140: padlock state — respawn / press / center-dot fusion signals
+# ---------------------------------------------------------------------------
+
+class _PressKeyboardStub(_KeyboardStub):
+    """Adds press/release no-ops on top of _KeyboardStub's on_press_key
+    recording, so a real padlock_camera() call can complete."""
+
+    def press(self, key):
+        pass
+
+    def release(self, key):
+        pass
+
+
+def test_stop_eject_sequence_sets_padlock_state_false(monkeypatch):
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    ctrl = Controller(region, analyzer=_AnalyzerStub(GameState.GAME_BATTLE))
+    ctrl._padlock_engaged = None
+
+    ctrl.stop_eject_sequence()
+
+    assert ctrl.padlock_state() is False
+
+
+def test_padlock_camera_call_sets_state_unknown(monkeypatch):
+    """ADR 140 D3: every programmatic press funnels through this one
+    method — a press leaves the real in-game state unknown until
+    re-confirmed, regardless of what it was before."""
+    keyboard_stub = _PressKeyboardStub()
+    monkeypatch.setattr(controller_module, "keyboard_module", keyboard_stub)
+    monkeypatch.setattr(controller_module.threading, "Thread", _ThreadStub)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    ctrl = Controller(region, analyzer=_AnalyzerStub(GameState.GAME_BATTLE))
+    ctrl._padlock_engaged = False
+
+    ctrl.padlock_camera(hold_seconds=0.0, block=True)
+
+    assert ctrl.padlock_state() is None
+
+
+def test_manual_padlock_press_sets_state_unknown(monkeypatch):
+    """ADR 140 D3: a genuine manual press, entirely outside
+    padlock_camera()'s own call graph, still flips the real toggle."""
+    keyboard_stub = _KeyboardStub()
+    monkeypatch.setattr(controller_module, "keyboard_module", keyboard_stub)
+    monkeypatch.setattr(controller_module.threading, "Thread", _ThreadStub)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    ctrl = Controller(region, analyzer=_AnalyzerStub(GameState.GAME_BATTLE))
+    ctrl._padlock_engaged = False
+    handler = keyboard_stub.handlers[controller_module.PADLOCK_CAMERA]
+
+    handler(type("_E", (), {"name": controller_module.PADLOCK_CAMERA})())
+
+    assert ctrl.padlock_state() is None
+
+
+class _FakeCenterDotTracker:
+    def __init__(self):
+        self.dot_present = False
+
+    def detect_padlock_center_dot(self, _frame):
+        return self.dot_present
+
+
+def _fusion_ctrl(monkeypatch, confirm_seconds=2.0):
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    ctrl = Controller(
+        region, analyzer=_AnalyzerStub(GameState.GAME_BATTLE),
+        config=ControllerConfig(
+            padlock_center_indicator={"confirm_seconds": confirm_seconds}),
+    )
+    tracker = _FakeCenterDotTracker()
+    ctrl.set_target_tracker(tracker)
+    return ctrl, tracker
+
+
+def test_center_dot_fusion_needs_all_three_legs(monkeypatch):
+    """ADR 140 D4: the dot alone, without in-mission + secondary-weapon
+    corroboration, must never start (or continue) the confirm streak."""
+    ctrl, tracker = _fusion_ctrl(monkeypatch)
+    monkeypatch.setattr(ctrl, "is_mission_running", lambda: False)
+    monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: True)
+    tracker.dot_present = True
+
+    ctrl.note_padlock_center_dot(frame=None, now=1000.0)
+
+    assert ctrl._padlock_dot_streak_since is None
+    assert ctrl.padlock_state() is None
+
+
+def test_center_dot_fusion_confirms_false_after_the_full_window(monkeypatch):
+    ctrl, tracker = _fusion_ctrl(monkeypatch, confirm_seconds=2.0)
+    monkeypatch.setattr(ctrl, "is_mission_running", lambda: True)
+    monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: True)
+    tracker.dot_present = True
+    t0 = 1000.0
+
+    ctrl.note_padlock_center_dot(frame=None, now=t0)
+    assert ctrl._padlock_dot_streak_since == t0
+    assert ctrl.padlock_state() is None   # streak just started, not yet 2s
+
+    ctrl.note_padlock_center_dot(frame=None, now=t0 + 1.0)
+    assert ctrl.padlock_state() is None   # 1s in, still short of confirm_seconds
+
+    ctrl.note_padlock_center_dot(frame=None, now=t0 + 2.0)
+    assert ctrl.padlock_state() is False   # full 2s window held
+
+
+def test_center_dot_fusion_resets_streak_on_a_single_missed_read(monkeypatch):
+    """A single tick where any leg drops resets the streak entirely — no
+    partial credit carried across the gap."""
+    ctrl, tracker = _fusion_ctrl(monkeypatch, confirm_seconds=2.0)
+    monkeypatch.setattr(ctrl, "is_mission_running", lambda: True)
+    monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: True)
+    tracker.dot_present = True
+    t0 = 1000.0
+
+    ctrl.note_padlock_center_dot(frame=None, now=t0)
+    ctrl.note_padlock_center_dot(frame=None, now=t0 + 1.5)
+    assert ctrl.padlock_state() is None
+
+    tracker.dot_present = False
+    ctrl.note_padlock_center_dot(frame=None, now=t0 + 1.6)
+    assert ctrl._padlock_dot_streak_since is None
+
+    tracker.dot_present = True
+    ctrl.note_padlock_center_dot(frame=None, now=t0 + 1.7)
+    assert ctrl._padlock_dot_streak_since == t0 + 1.7   # restarted, not resumed
+    ctrl.note_padlock_center_dot(frame=None, now=t0 + 3.6)   # only 1.9s since restart
+    assert ctrl.padlock_state() is None
+    ctrl.note_padlock_center_dot(frame=None, now=t0 + 3.7)   # 2.0s since restart
+    assert ctrl.padlock_state() is False
+
+
+def test_center_dot_fusion_never_sets_state_true(monkeypatch):
+    """ADR 140 Non-Goal 1: nothing in this design ever asserts True — a
+    fully agreed, fully elapsed streak still only ever confirms False."""
+    ctrl, tracker = _fusion_ctrl(monkeypatch, confirm_seconds=0.0)
+    monkeypatch.setattr(ctrl, "is_mission_running", lambda: True)
+    monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: True)
+    tracker.dot_present = True
+
+    ctrl.note_padlock_center_dot(frame=None, now=1000.0)
+    ctrl.note_padlock_center_dot(frame=None, now=1000.0)
+
+    assert ctrl.padlock_state() is False
+    assert ctrl.padlock_state() is not True
+
+
+def test_a_tick_with_no_signal_holds_the_last_known_state(monkeypatch):
+    """ADR 140 D5: no signal firing must not touch padlock_state() at all —
+    only D2/D3/D4 change it."""
+    ctrl, tracker = _fusion_ctrl(monkeypatch)
+    ctrl.stop_eject_sequence()   # D2: confirmed False
+    assert ctrl.padlock_state() is False
+
+    monkeypatch.setattr(ctrl, "is_mission_running", lambda: False)
+    monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: False)
+    tracker.dot_present = False
+    ctrl.note_padlock_center_dot(frame=None, now=1000.0)
+
+    assert ctrl.padlock_state() is False   # unchanged, not reset to Unknown
+
+
+def test_padlock_state_defaults_to_unknown(monkeypatch):
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    ctrl = Controller(region, analyzer=None)
+
+    assert ctrl.padlock_state() is None
+
+
 def test_genuine_u_press_during_game_starting_starts_mission(monkeypatch):
     """A real 'u' during GAME_STARTING must start the mission, not be eaten.
 

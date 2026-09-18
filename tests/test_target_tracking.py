@@ -346,6 +346,103 @@ class TestPadlockIndicator:
 
 
 # ---------------------------------------------------------------------------
+# detect_padlock_center_dot (ADR 140): a small SOLID dot fixed at exact
+# screen center — a different element from the dashed, moving ring above.
+# Measured 2026-09-17 against 8 real padlock-off captures: OpenCV HSV
+# (55, 76, 224), byte-identical across all 8 regardless of roll/pitch/target
+# state.
+# ---------------------------------------------------------------------------
+
+def _draw_center_dot(frame: np.ndarray, cx: int, cy: int, size: int = 3,
+                     hsv=(55, 76, 224)) -> np.ndarray:
+    """Paint the small flat-colored dot ADR 140 measured — a filled square,
+    not a circle: the real dot's own bounding box (3x3px at 1920x1200) is
+    too small for a drawn circle to differ meaningfully from a square."""
+    out = frame.copy()
+    bgr = tuple(int(v) for v in cv2.cvtColor(
+        np.uint8([[hsv]]), cv2.COLOR_HSV2BGR)[0, 0])
+    half = size // 2
+    out[max(0, cy - half):cy + half + 1, max(0, cx - half):cx + half + 1] = bgr
+    return out
+
+
+class TestPadlockCenterDot:
+    def test_detects_dot_at_screen_center(self):
+        t = _tracker()
+        frame = _black_frame()
+        h, w = frame.shape[:2]
+        frame = _draw_center_dot(frame, w // 2, h // 2)
+        assert t.detect_padlock_center_dot(frame) is True
+
+    def test_no_dot_returns_false(self):
+        t = _tracker()
+        assert t.detect_padlock_center_dot(_black_frame()) is False
+
+    def test_dot_outside_center_region_is_ignored(self):
+        """Deliberately does NOT track the moving ring (ADR 136 D4) — a dot
+        anywhere off true center, including exactly where that ring drifts
+        to during a bank, must read False, not chase it there."""
+        t = _tracker()
+        frame = _draw_center_dot(_black_frame(), 100, 80)
+        assert t.detect_padlock_center_dot(frame) is False
+
+    def test_too_few_pixels_is_rejected(self):
+        t = _tracker()
+        frame = _black_frame()
+        h, w = frame.shape[:2]
+        frame = _draw_center_dot(frame, w // 2, h // 2, size=1)  # 1px < min_pixels (3)
+        assert t.detect_padlock_center_dot(frame) is False
+
+    def test_empty_frame_returns_false(self):
+        t = _tracker()
+        assert t.detect_padlock_center_dot(np.zeros((0, 0, 3), dtype=np.uint8)) is False
+
+    def test_dashed_ring_alone_is_not_read_as_the_center_dot(self):
+        """The two detectors must stay independent: a ring at center (with
+        no dot painted) should not satisfy the dot detector's own, tighter
+        color bounds (S 60-90 vs the ring's S 30-200)."""
+        t = _tracker()
+        frame = _black_frame()
+        h, w = frame.shape[:2]
+        frame = _draw_dashed_ring(frame, w // 2, h // 2, radius=25, n_dashes=12,
+                                  hsv=(55, 150, 200))  # high-S ring dash, outside dot bounds
+        assert t.detect_padlock_center_dot(frame) is False
+
+
+# Real captures from the 2026-09-17 live session that motivated ADR 140 —
+# enumerated, not globbed (test_minimap_bearing.py's DESERT_FRAMES precedent:
+# a glob absorbs whatever a later session drops into the same directory).
+# Lives under test_screenshots/ (ADR 100 D7: veda-only, gitignored, skips
+# gracefully everywhere else).
+_PADLOCK_OFF_NAMES = (
+    "screenshot_20260917_062804.png",
+    "screenshot_20260917_063103.png",
+    "screenshot_20260917_063139.png",
+    "screenshot_20260917_063144.png",
+    "screenshot_20260917_063149.png",
+    "screenshot_20260917_063210.png",
+    "screenshot_20260917_063216.png",
+    "screenshot_20260917_063218.png",
+)
+PADLOCK_OFF_FRAMES = [
+    p for p in (Path(__file__).resolve().parents[1] / "test_screenshots"
+                / "padlock_off" / n for n in _PADLOCK_OFF_NAMES)
+    if p.exists()
+]
+
+
+@pytest.mark.skipif(len(PADLOCK_OFF_FRAMES) < 8, reason="padlock_off corpus not present")
+def test_center_dot_detected_on_every_real_padlock_off_frame():
+    """All 8 frames span level cruise, hard banks, an enemy near boresight
+    with a name/distance/type label, gun/lock warnings, and a dive toward
+    water — real variety, not one convenient frame (ADR 140 Context)."""
+    t = _tracker()
+    misses = [f.name for f in PADLOCK_OFF_FRAMES
+             if not t.detect_padlock_center_dot(cv2.imread(str(f)))]
+    assert not misses, f"center dot not detected on: {misses}"
+
+
+# ---------------------------------------------------------------------------
 # orient_nose_to_target (Controller method)
 # ---------------------------------------------------------------------------
 

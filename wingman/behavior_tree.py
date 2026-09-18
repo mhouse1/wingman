@@ -103,6 +103,12 @@ class AnalyzerSnapshot:
     # it exists so a future BoresightEngage leaf has something to condition
     # on without a second decision framework. See docs/hldd/011-acs-mode-hldd.md.
     has_padlock: bool = True
+    # HLDD 001 Phase 1: raw per-tick sky fraction in the TERRAIN_FORWARD
+    # crop (analyzer.detect_terrain_ahead), or None when unreadable/disabled.
+    # The confirm-reads debounce and threshold live in ClimbCondition, same
+    # as every other emergency trigger — this is the frozen measurement
+    # only, consistent with boundary_dist/altitude above.
+    terrain_sky_frac: "float | None" = None
 
     @property
     def contacts(self) -> int:
@@ -500,7 +506,11 @@ class ClimbCondition:
                 recover_below_time_s: "float | None" = None,
                 confirm_bypass_time_s: "float | None" = None,
                 descent_memory_s: float = 5.0,
-                clock=time.time):
+                clock=time.time,
+                terrain_enabled: bool = False,
+                terrain_shadow: bool = True,
+                terrain_sky_min_frac: float = 0.55,
+                terrain_confirm_reads: int = 2):
         self._enter_below_alt = enter_below_alt
         self._exit_above_alt = exit_above_alt
         self._is_running_fn = is_running_fn
@@ -517,6 +527,17 @@ class ClimbCondition:
         self._post_respawn = _SETTLED
         self._emergency_active = False
         self._pending_reevaluation = False
+        # HLDD 001 Phase 1: forward sky-occlusion terrain-ahead trigger, a
+        # second OR-term alongside the ttg emergency above. Own debounce
+        # streak, same confirm-reads shape as ttg's, deliberately separate
+        # from _active's edge-detection so a terrain onset logs even when
+        # ttg already has Climb active for an unrelated reason.
+        self._terrain_enabled = terrain_enabled
+        self._terrain_shadow = terrain_shadow
+        self._terrain_sky_min_frac = terrain_sky_min_frac
+        self._terrain_confirm_reads = terrain_confirm_reads
+        self._terrain_streak = 0
+        self._terrain_ahead_active = False
 
     @property
     def active(self) -> bool:
@@ -525,6 +546,10 @@ class ClimbCondition:
     @property
     def emergency_active(self) -> bool:
         return self._emergency_active
+
+    @property
+    def terrain_ahead_active(self) -> bool:
+        return self._terrain_ahead_active
 
     @property
     def streak(self) -> int:
@@ -633,6 +658,31 @@ class ClimbCondition:
         else:
             self._ttg_streak = 0
 
+        # HLDD 001 Phase 1: forward sky-occlusion, same confirm-reads
+        # debounce shape as the ttg trigger above. `terrain_sky_frac` is a
+        # raw per-tick measurement (analyzer.detect_terrain_ahead) carried
+        # on the snapshot exactly like boundary_dist/altitude — the streak
+        # and threshold live here, not in the perception layer, matching
+        # where every other emergency debounce in this class already lives.
+        terrain_ahead = False
+        if self._terrain_enabled:
+            sky_frac = getattr(snapshot, "terrain_sky_frac", None)
+            if sky_frac is not None and sky_frac < self._terrain_sky_min_frac:
+                self._terrain_streak += 1
+            else:
+                self._terrain_streak = 0
+            terrain_ahead = self._terrain_streak >= max(1, int(self._terrain_confirm_reads))
+            if terrain_ahead and not self._terrain_ahead_active:
+                logger.warning(
+                    "BT: TERRAIN AHEAD — sky fraction %.2f below %.2f "
+                    "threshold — climb forced (HLDD 001 phase 1)%s",
+                    sky_frac if sky_frac is not None else -1.0,
+                    self._terrain_sky_min_frac,
+                    " [SHADOW - not actuating]" if self._terrain_shadow else "")
+            self._terrain_ahead_active = terrain_ahead
+            if not self._terrain_shadow:
+                emergency = emergency or terrain_ahead
+
         self._emergency_active = bool(emergency)
         self._pending_reevaluation = True
         return self._emergency_active
@@ -683,7 +733,11 @@ def make_climb_condition(enter_below_alt: "float | None",
                          recover_below_time_s: "float | None" = None,
                          confirm_bypass_time_s: "float | None" = None,
                          descent_memory_s: float = 5.0,
-                         clock=time.time) -> ClimbCondition:
+                         clock=time.time,
+                         terrain_enabled: bool = False,
+                         terrain_shadow: bool = True,
+                         terrain_sky_min_frac: float = 0.55,
+                         terrain_confirm_reads: int = 2) -> ClimbCondition:
     """ADR 139 D3: thin factory kept so every existing call site — production
     and test — is unchanged. See ``ClimbCondition`` for the logic."""
     return ClimbCondition(enter_below_alt, exit_above_alt,
@@ -691,7 +745,11 @@ def make_climb_condition(enter_below_alt: "float | None",
                           confirm_reads=confirm_reads,
                           recover_below_time_s=recover_below_time_s,
                           confirm_bypass_time_s=confirm_bypass_time_s,
-                          descent_memory_s=descent_memory_s, clock=clock)
+                          descent_memory_s=descent_memory_s, clock=clock,
+                          terrain_enabled=terrain_enabled,
+                          terrain_shadow=terrain_shadow,
+                          terrain_sky_min_frac=terrain_sky_min_frac,
+                          terrain_confirm_reads=terrain_confirm_reads)
 
 
 def make_sustain_climb_condition(enter_below_alt: "float | None",
@@ -774,6 +832,7 @@ class _BuildContext:
     regroup_enabled: bool
     climb_emergency_fn: "Callable[[], bool] | None" = None
     climb_emergency_update_fn: "Callable[[AnalyzerSnapshot, float | None], bool] | None" = None
+    climb_terrain_ahead_fn: "Callable[[], bool] | None" = None
 
 
 def climb_tactic_enabled(bt_cfg: dict) -> bool:
@@ -881,6 +940,14 @@ def _build_climb_slot(ctx: "_BuildContext"):
         # from before D9.
         if len(climb_fns) > 2 and climb_fns[2] is not None:
             climb_kwargs["update_fn"] = climb_fns[2]
+    # HLDD 001 Phase 1: forward sky-occlusion terrain-ahead trigger. Lives
+    # under climb (not its own top-level bt_cfg sibling) because it feeds
+    # ClimbCondition directly, same relationship recover_below_time_s has.
+    # The HSV/crop half of this feature lives in analyzer.py's top-level
+    # `terrain_avoidance:` block instead (mirrors minimap.boundary_hsv vs
+    # behavior_tree.boundary — detection config near the detector, trigger
+    # config near the condition it feeds).
+    _terrain_cfg = climb_cfg.get("terrain_avoidance", {}) or {}
     emergency = make_climb_condition(
         climb_cfg.get("enter_below_alt"),
         climb_cfg.get("exit_above_alt"),
@@ -890,7 +957,11 @@ def _build_climb_slot(ctx: "_BuildContext"):
         # leaves the pure ADR 073 altitude band.
         recover_below_time_s=climb_cfg.get("recover_below_time_s"),
         confirm_bypass_time_s=climb_cfg.get("confirm_bypass_time_s"),
-        descent_memory_s=float(climb_cfg.get("descent_memory_s", 5.0)))
+        descent_memory_s=float(climb_cfg.get("descent_memory_s", 5.0)),
+        terrain_enabled=bool(_terrain_cfg.get("enabled", False)),
+        terrain_shadow=bool(_terrain_cfg.get("shadow", True)),
+        terrain_sky_min_frac=float(_terrain_cfg.get("sky_min_frac", 0.55)),
+        terrain_confirm_reads=int(_terrain_cfg.get("confirm_reads", 2)))
     # ADR 075: the armed altitude-sustain band shares the leaf with the
     # emergency band. Both closures are evaluated EVERY tick (no
     # short-circuit) so neither hysteresis state machine goes stale while
@@ -923,6 +994,13 @@ def _build_climb_slot(ctx: "_BuildContext"):
     def _climb_emergency_update_fn(snapshot, now=None, _e=emergency):
         return _e.update_emergency(snapshot, now)
     ctx.climb_emergency_update_fn = _climb_emergency_update_fn
+
+    # HLDD 001 Phase 1: exposed so BehaviorTreeHandler can capture evidence
+    # on the FALSE→TRUE edge — same "read a named property, don't re-derive
+    # it" relationship climb_emergency_fn already has to emergency_active.
+    def _climb_terrain_ahead_fn(_e=emergency):
+        return bool(getattr(_e, "terrain_ahead_active", False))
+    ctx.climb_terrain_ahead_fn = _climb_terrain_ahead_fn
     return climb_leaf
 
 
@@ -1040,6 +1118,11 @@ def build_tree(bt_cfg: dict, clock=time.time,
     # verdict above is never stale when a higher-priority tactic (chiefly
     # BoundaryTurn) is the one winning selection.
     tree.climb_emergency_update_fn = ctx.climb_emergency_update_fn
+    # HLDD 001 Phase 1: exposed so BehaviorTreeHandler can save an evidence
+    # frame on the FALSE->TRUE edge of the terrain-ahead trigger, whether or
+    # not it is enabled/shadowed — the same reasoning as climb_emergency_fn
+    # above, one property read instead of a new actuator-contract parameter.
+    tree.climb_terrain_ahead_fn = ctx.climb_terrain_ahead_fn
     return tree
 
 

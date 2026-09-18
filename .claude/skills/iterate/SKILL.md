@@ -50,6 +50,29 @@ backup for when the conversation compacts, not the only copy. If you're unsure
 what earlier cycles did, read the whole file back rather than trusting memory
 of a compacted transcript.
 
+**Watch (step 6) does not pause the changelog.** This requirement is not
+scoped to Fix — a live trial under Watch can run for hours and produce real
+findings with no code change at all: a crash investigated and its true cause
+found, a false-positive pattern confirmed from real evidence, a capture
+budget quietly exhausted. Those are exactly the "notable decisions" this file
+exists to capture, on the same footing as a code fix.
+
+2026-09-16: a live trial ran 4.5 hours under Watch, producing dozens of
+Monitor notifications. Every one got a full analysis posted to the operator
+in chat — and not one made it into the file, because "reply in chat" and
+"write to the file" quietly split into two separate habits once
+notifications started arriving faster than deliberate cycles did. The
+operator had to notice the file had gone quiet and ask why. Chat is not the
+durable copy — it is the thing that gets compacted away; a finding that only
+exists in a chat reply is one compaction away from gone. Write the file entry
+as part of producing the finding, not as a follow-up after the chat reply. If
+a reply is substantial enough to explain a finding to the operator, it is
+substantial enough to earn one line in the file, in the same turn. When a
+run of Monitor notifications turns repetitive (the same pattern confirming
+itself again), a short chat acknowledgment without a file entry is fine —
+but the moment one of them is actually new, log it before moving on, not
+"later, once things settle down."
+
 **Keep going without being asked.** Run steps 1-7 exactly as below — don't
 skip Gate or Run to go faster. The standing permission-to-run rule in step 5
 is satisfied once, by the operator's request to loop — don't re-ask "should I

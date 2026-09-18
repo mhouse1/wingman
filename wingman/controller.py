@@ -222,6 +222,7 @@ class Controller:
         climb_cfg = _c.climb
         afterburner_cruise_cfg = _c.afterburner_cruise
         fuel_cfg = _c.fuel
+        padlock_center_cfg = _c.padlock_center_indicator
 
         # region is (left, top, width, height)
         self.region = region
@@ -265,11 +266,21 @@ class Controller:
 
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
-        # ADR 136: last-known padlock state, verified (not assumed) via
-        # TargetTracker.detect_padlock_off — PADLOCK_CAMERA is a pure toggle
-        # with no on/off argument, so this is the only way to know which way
-        # a press just flipped it. None = never checked this session.
+        # ADR 136 / ADR 140: last-known padlock state — PADLOCK_CAMERA is a
+        # pure toggle with no on/off argument, so this is the only way to
+        # know which way a press just flipped it. None = Unknown (never
+        # confirmed, or confidence lost since the last press). Driven by
+        # ADR 140's three signals: stop_eject_sequence (respawn) sets False,
+        # any padlock_camera() call or manual press sets None, and the
+        # mission/weapon/center-dot fusion in note_padlock_center_dot sets
+        # False. Never set True by anything today — no positive detector
+        # exists yet (ADR 140 Non-Goal 1).
         self._padlock_engaged: "bool | None" = None
+        # ADR 140 D4: wall-clock timestamp the current all-three-true
+        # streak (mission running, secondary weapon active, center dot
+        # detected) started, or None while any leg is false.
+        self._padlock_dot_streak_since: "float | None" = None
+        self._padlock_dot_confirm_s = float(padlock_center_cfg.get("confirm_seconds", 2.0))
 
         # Target tracking: timestamp of last orient_nose_to_target command
         self._last_orient_ts: float = 0.0
@@ -918,6 +929,10 @@ class Controller:
                             return
                     cooldown = 10.0
                     self._padlock_cooldown_until = time.time() + cooldown
+                    # ADR 140 D3: a genuine manual press, outside padlock_camera()'s
+                    # own call graph entirely — still flips the real toggle, so
+                    # confidence in the last-known state is lost here too.
+                    self._padlock_engaged = None
                     logger.info("Controller: '%s' key pressed manually - padlock loop cooldown set for %.0fs", PADLOCK_CAMERA, cooldown)
                 keyboard_module.on_press_key(PADLOCK_CAMERA, padlock_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to set padlock loop cooldown", PADLOCK_CAMERA)
@@ -1413,7 +1428,15 @@ class Controller:
         )
 
     def padlock_camera(self, hold_seconds: float = 0.1, block: bool = True, ignore_cancel: bool = False):
-        """Toggle padlock camera by pressing the configured padlock camera key."""
+        """Toggle padlock camera by pressing the configured padlock camera key.
+
+        ADR 140 D3: PADLOCK_CAMERA is a pure toggle with no on/off argument,
+        so every press — this is the one choke point every programmatic
+        caller (the auto-cycle loop, ensure_padlock_off's retries,
+        padlock_target_switch) presses through — leaves the real in-game
+        state unknown until re-confirmed.
+        """
+        self._padlock_engaged = None
         self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block,
                                  action_name='padlock_camera', ignore_cancel=ignore_cancel)
 
@@ -1901,6 +1924,70 @@ class Controller:
             "Controller: could not confirm padlock off after %d attempts (ADR 136)",
             max_attempts)
         return False
+
+    def padlock_state(self) -> "bool | None":
+        """ADR 140: last-known padlock-engaged state.
+
+        `False` means confirmed off (respawn, or the fused center-dot
+        signal below). `None` means Unknown — never confirmed, or
+        confidence lost since the last PADLOCK_CAMERA press. Never `True`
+        today: no positive "padlock is on" detector exists yet (ADR 140
+        Non-Goal 1). Callers that need "definitely safe to trust the
+        forward view" must check `padlock_state() is False` explicitly,
+        not `!= True` — Unknown is untrusted.
+        """
+        return self._padlock_engaged
+
+    def note_padlock_center_dot(self, frame, now: "float | None" = None) -> None:
+        """ADR 140 D4: fused, corroborated padlock-off confirmation.
+
+        Called once per tick (tick_handlers.py, battle-state-gated, mirroring
+        the HLDD 001 terrain-ahead call site). Advances a continuous
+        all-three-true streak — in-mission, secondary weapon active, and
+        TargetTracker.detect_padlock_center_dot reading positive — and only
+        sets state False once that streak has held for
+        padlock_center_indicator.confirm_seconds (default 2.0) of wall
+        clock, reset by any single tick where one leg is false. Never sets
+        True (see Non-Goals) and never raises — a detector failure here
+        must not affect flight.
+
+        The center-dot detector alone is not trusted as a sole source of
+        truth (its behaviour while padlock is actually engaged is
+        unverified — ADR 140 Open Question 1); gating it behind
+        operational context that has, so far, only ever been observed
+        alongside a confirmed-off dot narrows how much a stray false read
+        can affect.
+        """
+        now = time.time() if now is None else now
+        if self._target_tracker is None:
+            self._padlock_dot_streak_since = None
+            return
+        try:
+            detected = bool(self._target_tracker.detect_padlock_center_dot(frame))
+        except Exception:
+            logger.debug("Controller: detect_padlock_center_dot failed", exc_info=True)
+            detected = False
+        # ADR 140 Open Question 1: the first live trial could only infer the
+        # raw per-tick reading indirectly from the fused end state — this
+        # logs it directly, every tick, so a future session can correlate it
+        # against real padlock_camera() presses without that inference step.
+        logger.debug(
+            "Controller: padlock center-dot raw=%s mission=%s secondary_weapon=%s",
+            detected, self.is_mission_running(), self.is_secondary_weapon_active())
+        all_true = detected and self.is_mission_running() and self.is_secondary_weapon_active()
+        if not all_true:
+            self._padlock_dot_streak_since = None
+            return
+        if self._padlock_dot_streak_since is None:
+            self._padlock_dot_streak_since = now
+            return
+        streak_s = now - self._padlock_dot_streak_since
+        if streak_s >= self._padlock_dot_confirm_s and self._padlock_engaged is not False:
+            logger.info(
+                "Controller: padlock-off confirmed via center-dot fusion "
+                "(ADR 140, %.1fs streak)", streak_s)
+        if streak_s >= self._padlock_dot_confirm_s:
+            self._padlock_engaged = False
 
     def _eject_heatdive_loop(self, stop_event: threading.Event) -> None:
         """ADR 136: roll toward the tracked target and fire heat-seekers.
@@ -3538,7 +3625,19 @@ class Controller:
                     if _at_pitch_ceiling():   # ADR 086 d7 (was: current angle only)
                         pitch_held = NOSE_DOWN_KEY
                     elif last_rate is None or last_rate < self._climb_min_rate:
-                        pitch_held = NOSE_UP_KEY
+                        # HLDD 001 / live 2026-09-17: once this hold has
+                        # already confirmed the target altitude is met
+                        # (`above_target`), an unknown or low rate must not
+                        # keep defaulting to MORE nose-up — measured live
+                        # (7157m -> 1241m in ~6s) when a terrain-ahead
+                        # escalation mid-hold (ADR 137 D9) kept re-pulsing
+                        # nose-up with no observe gap while rate stayed
+                        # unknown, well after altitude had already reached
+                        # the target. The afterburner cut already treats
+                        # above_target as terminal (ADR 083 d3); this keeps
+                        # the pitch input consistent with that.
+                        if not above_target:
+                            pitch_held = NOSE_UP_KEY
                     elif (self._climb_max_rate is not None
                             and last_rate > float(self._climb_max_rate)):
                         pitch_held = NOSE_DOWN_KEY
@@ -4644,6 +4743,12 @@ class Controller:
         # at trigger_eject_and_dive(), so it could read stale-True for an
         # entire following life with no further eject in it.
         self._eject_weapon_switched = False
+        # ADR 140 D2: same reasoning applies to padlock state — a respawn
+        # (this method's every real caller, tick_handlers.py) restores a
+        # forward/chase camera, the highest-confidence signal this design
+        # has, needing no visual confirmation.
+        self._padlock_engaged = False
+        self._padlock_dot_streak_since = None
 
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:

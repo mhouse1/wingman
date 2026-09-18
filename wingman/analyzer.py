@@ -1024,6 +1024,17 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
+        # HLDD 001 Phase 1: forward sky-occlusion terrain-ahead detector.
+        # Detection config (crop, sky HSV) lives here, top-level, mirroring
+        # minimap.boundary_hsv — the trigger threshold/debounce that
+        # CONSUMES this reading lives under behavior_tree.climb.terrain_avoidance
+        # instead, next to the ttg emergency trigger it's an OR-term beside.
+        _terrain_cfg = config.get("terrain_avoidance", {}) or {}
+        _t_hsv = _terrain_cfg.get("sky_hsv", {}) or {}
+        self._terrain_sky_hsv_lower = np.array(
+            _t_hsv.get("lower", [98, 20, 180]), dtype=np.uint8)
+        self._terrain_sky_hsv_upper = np.array(
+            _t_hsv.get("upper", [115, 100, 255]), dtype=np.uint8)
         # ADR 123: nose direction, maintained from every telemetry update.
         self._nose_direction = NOSE_UNKNOWN
         self._nose_direction_deadband_mps = float(
@@ -3935,6 +3946,40 @@ class GameStateAnalyzer:
                     float(dx[i] / radius))
         except Exception as e:
             logger.warning("Analyzer: detect_map_boundary failed: %s", e)
+            return None
+
+    def detect_terrain_ahead(self, frame) -> "float | None":
+        """Sky fraction in the TERRAIN_FORWARD crop, or None if unreadable.
+
+        HLDD 001 Phase 1 — instrumentation and (config-gated) emergency-climb
+        trigger. Detects the ABSENCE of sky rather than the presence of any
+        particular terrain color: terrain composition (rock, ice, grass,
+        buildings) varies per map, so a positive per-color match doesn't
+        generalize the way `detect_map_boundary`'s fixed-hue HUD stroke does
+        — see docs/hldd/001-terrain-avoidance-hldd.md, "Why the original
+        design doesn't fit."
+
+        Returns the fraction of pixels classified as sky-like (broad blue
+        hues or bright low-saturation cloud-white, `terrain_avoidance.sky_hsv`).
+        A LOW fraction means the forward view is occluded by *something* —
+        deliberately not classified further; see the HLDD's "Explicitly not
+        attempted in Phase 1" note. The confirm-reads debounce and the
+        sky_min_frac threshold live in `ClimbCondition.update_emergency`,
+        not here — this method is instrumentation only, same division of
+        responsibility as `detect_map_boundary`.
+        """
+        if self.crops is None or "TERRAIN_FORWARD" not in self.crops:
+            return None
+        try:
+            crop = get_crop(frame, *self.crops["TERRAIN_FORWARD"][:4])
+            if crop.size == 0:
+                return None
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(
+                hsv, self._terrain_sky_hsv_lower, self._terrain_sky_hsv_upper)
+            return float(np.count_nonzero(mask)) / float(mask.size)
+        except Exception as e:
+            logger.warning("Analyzer: detect_terrain_ahead failed: %s", e)
             return None
 
     def detect_return_to_battle(self, frame) -> bool:

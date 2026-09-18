@@ -383,6 +383,20 @@ SCHEMA = Section(
                     "exit_above_alt": _num(0),
                     "max_climb_s": SECONDS,
                 }),
+                # HLDD 001 Phase 1 — trigger/debounce tuning for the forward
+                # sky-occlusion detector. Detection config (crop, sky HSV)
+                # lives in the top-level terrain_avoidance section instead,
+                # mirroring the minimap.boundary_hsv / behavior_tree.boundary.*
+                # split.
+                "terrain_avoidance": Section(children={
+                    "enabled": BOOL,
+                    "shadow": BOOL,
+                    "sky_min_frac": FRACTION,
+                    "confirm_reads": _int(1),
+                    "capture_max": _int(0),
+                    "capture_cooldown_s": _num(0),
+                    "capture_dir": STR,
+                }),
             }),
         }),
 
@@ -416,6 +430,14 @@ SCHEMA = Section(
             "boundary_capture_dir": STR,
             "boundary_capture_max": _int(0),
             "boundary_approach_capture_max": _int(0),
+        }),
+
+        # HLDD 001 Phase 1 — forward sky-occlusion terrain-ahead detector.
+        # Detection config only; the trigger/debounce tuning that consumes
+        # this reading lives under behavior_tree.climb.terrain_avoidance.
+        "terrain_avoidance": Section(children={
+            "crop": STR,
+            "sky_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
         }),
 
         "tracking": Section(children={
@@ -453,6 +475,17 @@ SCHEMA = Section(
             "min_contour_area": _num(0),
             "max_contour_area": _num(0),
             "min_dashes": _int(1),
+        }),
+
+        # ADR 140: fixed-screen-center padlock-off dot — distinct element
+        # and distinct config block from padlock_indicator above (ADR 136's
+        # dashed ring, which moves with flight attitude and is NOT reused).
+        "padlock_center_indicator": Section(children={
+            "region_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "green_lower": _HSV,
+            "green_upper": _HSV,
+            "min_pixels": _int(1),
+            "confirm_seconds": _num(0),
         }),
 
         "hud": Section(children={

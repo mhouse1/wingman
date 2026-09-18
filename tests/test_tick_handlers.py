@@ -2077,6 +2077,33 @@ def test_boundary_readings_are_suppressed_after_a_respawn():
     assert "is_respawning or now < self._respawn_settle_until" in src
 
 
+def test_terrain_detection_is_gated_to_battle_states():
+    """HLDD 001 Phase 1: TERRAIN_FORWARD has no natural 'not present here'
+    signal the way the boundary/minimap detectors do — it reads whatever is
+    on screen, menu chrome included. Confirmed live 2026-09-16: the very
+    first shadow-mode trial fired 'TERRAIN AHEAD sky fraction 0.00' from a
+    lobby popup before a single round had started. Without this gate, a
+    live false-positive-rate measurement would be measuring menu noise, not
+    flight."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "if current_game_state in _BATTLE_STATES:" in src
+    assert "self._analyzer.detect_terrain_ahead(frame)" in src
+
+
+def test_terrain_capture_fires_only_on_the_false_to_true_edge():
+    """One occurrence saves one frame, not one per tick the trigger stays
+    latched — the same edge-detected shape as every other rare-event capture
+    in this file, confirmed structurally since no full BehaviorTreeHandler
+    construction fixture exists to tick twice against."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "if terrain_ahead_now and not self._terrain_ahead_prev:" in src
+    assert "self._terrain_ahead_prev = terrain_ahead_now" in src
+
+
 def test_approach_captures_cannot_crowd_out_crossings(tmp_path):
     """2026-09-04: a session with six confirmed crossings saved 18 approach
     frames, 0 crossing frames, and suppressed 125. One shared FIFO counter hands
@@ -2298,6 +2325,80 @@ class TestBlindFrameCapture:
         h = self._h()
         h._capture_boundary_frame(object(), "blind", "1")  # not an image
         h._capture_boundary_frame(None, "blind", "1")
+
+
+class TestTerrainAheadCapture:
+    """HLDD 001 Phase 1: evidence capture on the terrain-ahead trigger, same
+    cap-and-never-raise shape as ADR 137 D5's _capture_crash_frame — added
+    2026-09-16 after a live shadow trial's first firings could only be
+    judged from log text and timing correlation, not an actual frame."""
+
+    @staticmethod
+    def _h(cap=20, cooldown_s=0.0):
+        from wingman.tick_handlers import BehaviorTreeHandler
+        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        h._terrain_capture_max = cap
+        h._terrain_capture_cooldown_s = cooldown_s
+        h._terrain_last_capture_ts = 0.0
+        h._terrain_capture_dir = "/nonexistent-on-purpose"
+        h._terrain_captures = 0
+        return h
+
+    def test_a_zero_cap_disables_capture_entirely(self):
+        """It is a diagnostic, not a permanent disk cost."""
+        h = self._h(cap=0)
+        h._capture_terrain_frame(object())
+        assert h._terrain_captures == 0
+
+    def test_capture_stops_at_the_cap(self):
+        h = self._h(cap=2)
+        h._terrain_captures = 2
+        h._capture_terrain_frame(object())
+        assert h._terrain_captures == 2, "wrote past the cap"
+
+    def test_capture_never_raises_on_a_bad_frame(self):
+        """It runs on the tick path; losing evidence must not cost anything."""
+        h = self._h()
+        h._capture_terrain_frame(object())  # not an image
+        h._capture_terrain_frame(None)
+
+    def test_cooldown_blocks_a_capture_too_soon_after_the_last_one(self, tmp_path):
+        """2026-09-16: one ~5-minute dogfight re-crossed the edge every
+        10-25s and burned most of a session's budget. The cooldown bounds
+        how much of it one episode can spend."""
+        h = self._h(cap=20, cooldown_s=20.0)
+        h._terrain_capture_dir = str(tmp_path)
+        h._capture_terrain_frame(_frame(), now=1000.0)
+        assert h._terrain_captures == 1
+        h._capture_terrain_frame(_frame(), now=1010.0)   # 10s later, inside cooldown
+        assert h._terrain_captures == 1, "wrote inside the cooldown window"
+
+    def test_capture_after_cooldown_elapses_succeeds(self, tmp_path):
+        h = self._h(cap=20, cooldown_s=20.0)
+        h._terrain_capture_dir = str(tmp_path)
+        h._capture_terrain_frame(_frame(), now=1000.0)
+        assert h._terrain_captures == 1
+        h._capture_terrain_frame(_frame(), now=1025.0)   # 25s later, past cooldown
+        assert h._terrain_captures == 2, "did not capture once the cooldown had elapsed"
+
+    def test_zero_cooldown_never_blocks(self, tmp_path):
+        """The default before this change — every existing test above relies
+        on it — must still be available as an explicit opt-out."""
+        h = self._h(cap=20, cooldown_s=0.0)
+        h._terrain_capture_dir = str(tmp_path)
+        h._capture_terrain_frame(_frame(), now=1000.0)
+        h._capture_terrain_frame(_frame(), now=1000.001)
+        assert h._terrain_captures == 2
+
+    def test_a_failed_write_does_not_start_the_cooldown(self, tmp_path):
+        """A cooldown armed by a write that never landed would silently
+        suppress the NEXT real occurrence too."""
+        h = self._h(cap=20, cooldown_s=20.0)
+        h._terrain_capture_dir = str(tmp_path)
+        h._capture_terrain_frame(object(), now=1000.0)   # not an image — write fails
+        assert h._terrain_captures == 0
+        h._capture_terrain_frame(_frame(), now=1000.5)
+        assert h._terrain_captures == 1, "the failed write armed the cooldown"
 
 
 class TestTurnBearingTracking:

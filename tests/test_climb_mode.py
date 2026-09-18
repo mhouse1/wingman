@@ -419,6 +419,34 @@ def test_healthy_climb_rate_suppresses_pulse(monkeypatch):
     assert _wait_done(ctrl)
 
 
+def test_emergency_stops_nose_up_once_above_target(monkeypatch):
+    """Live 2026-09-17: an emergency hold whose telemetry was already above
+    the target (7157m vs. a 1000m target) kept re-pulsing NOSE_UP because
+    rate stayed unknown the whole time and the no-observe-gap emergency
+    cadence never let a fresh rate arrive to correct it — altitude then
+    dropped 7157 -> 1241 in ~6s. Once `above_target` latches, an
+    unknown/low rate must not default to more nose-up, matching the
+    afterburner's own above-target cut (ADR 083 d3)."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=7157.0, ts=t0, fuel=100)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=1.5, pitch_pulse_s=0.1, pulse_observe_s=0.5)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    # target_alt (1000) is already far below the telemetry reading (7157),
+    # and the timestamp never advances — so above_target latches on the
+    # first fresh read and no second confirm read ever arrives, leaving the
+    # hold RUNNING (rate unknown throughout) until the max_climb_s backstop.
+    ctrl.climb_mode(target_alt=1000.0, emergency=True)
+    assert _wait_done(ctrl, timeout=4.0)
+
+    nose_presses = len(_presses(kb, NOSE_UP_KEY))
+    assert nose_presses <= 1, (
+        f"expected at most the unavoidable first pulse (rate unknown before "
+        f"the first telemetry read), got {nose_presses} NOSE_UP press(es) "
+        f"after altitude was already above target")
+
+
 # ---------------------------------------------------------------------------
 # ADR 075: fuel-gated afterburner in the climb hold
 # ---------------------------------------------------------------------------

@@ -235,6 +235,22 @@ crops:
     - [0.5597, 0.4844]
     - [0.6194, 0.5167]
     text: [LEAVE]
+  # HLDD 001 Phase 1: forward-center band, upper-biased toward where sky
+  # belongs during safe level/climbing flight, avoiding the top HUD strip
+  # and the bottom weapon/fuel readouts. Bounds and sky_hsv below were
+  # measured against the two reference frames in
+  # docs/hldd/001-terrain-avoidance-hldd.md (test_screenshots/terrain_
+  # blackout_20260914_063746_stuck30s.png, test_screenshots/terrain2_
+  # screenshot_20260916_024055.png) — 4 data points (2 known-dangerous
+  # forward views, 2 sampled clear-sky patches), not a full calibration
+  # pass. terrain_avoidance.enabled: true, shadow: true (see behavior_tree.
+  # climb.terrain_avoidance below) for the first live shadow trial —
+  # computes and logs TERRAIN AHEAD, does not actuate until shadow is
+  # cleared by a session showing the detector agrees with operator judgment.
+  TERRAIN_FORWARD:
+    coords:
+    - [0.3, 0.1]
+    - [0.7, 0.55]
 # ADR 084: recovery actions for screens that strand the FSM. Gated on a real
 # stall (dwell in an unclassifiable state) so these more invasive actions never
 # fire during healthy operation.
@@ -532,6 +548,45 @@ behavior_tree:
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}
     sustain: {enabled: true, enter_below_alt: 4000, exit_above_alt: 5000, max_climb_s: 90.0}
+    # HLDD 001 Phase 1: forward sky-occlusion, a second OR-term alongside
+    # recover_below_time_s above. Ships disabled and, once enabled, shadow
+    # (logs "TERRAIN AHEAD" and would-fire evidence without forcing the
+    # climb) until a live trial confirms the false-positive rate — see the
+    # HLDD's own Testing plan. sky_min_frac/confirm_reads are the trigger
+    # threshold/debounce; the HSV/crop half lives in the top-level
+    # terrain_avoidance: block below (mirrors minimap.boundary_hsv vs this
+    # same climb block's own recover_below_time_s). capture_max saves a PNG
+    # on each FALSE->TRUE edge (test_screenshots/terrain_ahead/) so a shadow
+    # trial's firings can be inspected, not just read from log text and
+    # timing correlation. First live trial (2026-09-16): capture_max: 20
+    # with no cooldown emptied in 42 minutes, then one ~5-minute dogfight
+    # (banked/rolling near real terrain re-triggering the edge every
+    # 10-25s) burned most of what was left, leaving a 6+ hour session with
+    # no budget for anything later. Raised the cap and added a per-episode
+    # cooldown so a long session's budget survives past the first cluster.
+    # GRADUATED 2026-09-16 (operator decision, after ~16h/4 sessions of
+    # shadow-mode live validation — see HLDD 001 "Live trial results"):
+    # shadow: false. Every true positive inspected was real terrain on a
+    # collision course; every false positive (clouds, hard-maneuvering
+    # attitude, post-match cutscenes, eject sequences) fails in the safe
+    # direction. Watch the first live actuations closely — this is the
+    # first session this trigger has ever actually held the controls.
+    #
+    # UN-GRADUATED 2026-09-17 (operator decision): the padlock camera
+    # (Controller._start_search_and_destroy_locked's _padlock_loop, ADR
+    # 136) repoints the capture away from forward-looking whenever it
+    # engages, which can corrupt this trigger's sky-occlusion read in
+    # either direction — a false "terrain ahead" while padlocked onto an
+    # enemy, or a missed real terrain-ahead while padlock happens to be
+    # looking somewhere safe. No reliable padlock-engaged signal exists
+    # yet (TargetTracker.detect_padlock_off is confirmed broken — ADR 136
+    # D4 — and must not be reused). Back to shadow: true — still logs and
+    # captures evidence, never actuates — until padlock state can be
+    # detected reliably. The ttg/recover_below_time_s OR-term above is
+    # telemetry-only and unaffected by camera view; it is NOT part of
+    # this reversion.
+    terrain_avoidance: {enabled: true, shadow: true, sky_min_frac: 0.55,
+      confirm_reads: 2, capture_max: 40, capture_cooldown_s: 20.0}
 # ADR 028 revision 4: `regroup_enabled` gives the navigator a command on the
 # ticks where no enemy is on the minimap — 57% of battle ticks measured over an
 # 11,383-tick session, during which it previously issued nothing and the
@@ -604,6 +659,22 @@ minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   # to whichever event arrived first — the frequent one — and cost every
   # crossing frame of the 2026-09-04 session.
   boundary_approach_capture_max: 10}
+# HLDD 001 phase 1: forward sky-occlusion terrain detection. Detects the
+# ABSENCE of sky (not terrain colour, which varies per map) in a
+# forward-center crop. Range measured directly against two reference
+# incidents (terrain_blackout_20260914_063746_stuck30s.png,
+# terrain2_screenshot_20260916_024055.png): sky reads as a fairly
+# desaturated, high-value blue-grey band. Narrowed deliberately toward
+# rejecting terrain over accepting hazy sky — a false positive here just
+# costs a wasted climb, a false negative flies into the mountain.
+# Trigger/threshold tuning (enabled, sky_min_frac, confirm_reads) lives
+# under behavior_tree.climb.terrain_avoidance instead of here, mirroring
+# the minimap.boundary_hsv / behavior_tree.boundary.* split above.
+terrain_avoidance:
+  crop: TERRAIN_FORWARD
+  sky_hsv:
+    lower: [98, 20, 180]
+    upper: [115, 100, 255]
 # Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
 # acted on — it appears only after the crossing, so it measures the
 # outcome rather than preventing it.
@@ -658,6 +729,24 @@ padlock_indicator:
   min_contour_area: 3
   max_contour_area: 30
   min_dashes: 6
+# ADR 140: a small solid green dot fixed at exact screen center, distinct
+# from padlock_indicator's dashed ring above (that ring moves with flight
+# attitude — ADR 136 D4 — and is not reused here). Measured directly from 8
+# real padlock-off screenshots (2026-09-17,
+# tests/test-output/padlock_off/*.png): OpenCV HSV (55, 76, 224),
+# byte-identical across all 8 frames regardless of roll/pitch/target state,
+# at pixel bbox (959,603)-(961,605) of a 1920x1200 capture. Bounds below pad
+# that measurement for compression/scaling headroom, the same margin-over-
+# measurement approach terrain_avoidance's sky_hsv used. Padlock-ON
+# comparison is NOT yet verified (ADR 140 Open Question 1) — this detector
+# is shadow/observational only until that lands; nothing consumes its
+# output for actuation yet.
+padlock_center_indicator:
+  region_pct: [0.485, 0.47, 0.515, 0.53]
+  green_lower: [50, 60, 200]
+  green_upper: [60, 90, 255]
+  min_pixels: 3
+  confirm_seconds: 2.0
 hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
 # "make rd v"), never the default — a multi-hour session's file size and CPU

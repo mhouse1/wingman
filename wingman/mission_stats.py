@@ -96,8 +96,13 @@ class MissionStatsTracker:
         self._total_missile_evades = 0
         # ADR 137: respawns where the aircraft was NOT in a deliberate eject
         # dive (ADR 069's "trade an empty airframe for a rearmed one") and
-        # still had primary missiles — i.e. it crashed into terrain while
-        # armed, not by design. Tracked toward zero.
+        # still had primary missiles — an unintended death with ordnance
+        # still aboard, not by design. Tracked toward zero. NOT specifically
+        # a terrain metric despite the original framing: ADR 137's seventh
+        # live trial measured 36 telemetry-confirmed occurrences across two
+        # sessions and found only 11% in a steep dive consistent with a
+        # ground impact — 89% read level or climbing, consistent with
+        # getting shot down rather than flying into anything.
         self._total_crashes_with_missiles = 0
 
         # ADR 070 V5: per-ENGAGEMENT survival, the measure a per-mission death
@@ -365,7 +370,8 @@ class MissionStatsTracker:
             f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
             f"Crash w/ missiles : {s.get('total_crashes_with_missiles', 0)}  "
-            f"(dove into terrain while armed — track toward 0)",
+            f"(died with missiles unused — mostly enemy fire, not"
+            f" necessarily terrain; ADR 137 seventh trial)",
         ]
 
         sc = s.get("spawn_crashes") or {}
