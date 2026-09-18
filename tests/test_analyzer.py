@@ -477,6 +477,53 @@ def test_telemetry_harvest_never_blocks_and_feeds_filter(analyzer):
     assert snap.altitude.value == 12000
 
 
+class _FakePadlockController:
+    def __init__(self, state):
+        self._state = state
+
+    def padlock_state(self):
+        return self._state
+
+
+@pytest.mark.parametrize("state,label", [(True, "ON"), (False, "OFF"), (None, "UNKNOWN")])
+def test_telemetry_log_includes_padlock_state(analyzer, caplog, state, label):
+    """ADR 140: the telemetry INFO line the operator watches live must show
+    padlock_state() every time it prints — ON/OFF/UNKNOWN mapped from
+    True/False/None, never coerced (Unknown must not read as OFF)."""
+    from concurrent.futures import Future
+
+    analyzer.set_controller(_FakePadlockController(state))
+    done = Future()
+    done.set_result((600, 12000, 0.42))
+    analyzer._telemetry_future = done
+
+    with caplog.at_level("INFO"):
+        analyzer._harvest_telemetry_future()
+
+    lines = [r.getMessage() for r in caplog.records]
+    matches = [ln for ln in lines if "PADLOCK:" in ln]
+    assert len(matches) == 1, f"expected exactly one PADLOCK line, got: {lines}"
+    assert f"PADLOCK: {label} | Altitude:" in matches[0]
+
+
+def test_telemetry_log_padlock_unknown_without_a_wired_controller(analyzer, caplog):
+    """No set_controller() call at all (e.g. a test harness, or startup
+    order not yet reached) must read UNKNOWN, not raise or default to OFF."""
+    from concurrent.futures import Future
+
+    done = Future()
+    done.set_result((600, 12000, 0.42))
+    analyzer._telemetry_future = done
+
+    with caplog.at_level("INFO"):
+        analyzer._harvest_telemetry_future()
+
+    lines = [r.getMessage() for r in caplog.records]
+    matches = [ln for ln in lines if "PADLOCK:" in ln]
+    assert len(matches) == 1
+    assert "PADLOCK: UNKNOWN | Altitude:" in matches[0]
+
+
 def test_telemetry_split_row_confidence_is_minimum_of_digit_boxes():
     # One doubtful digit box taints the whole row (conservative min), while
     # the other row keeps its own confidence. The row value stays the leading

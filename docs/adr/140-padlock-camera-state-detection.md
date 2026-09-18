@@ -28,6 +28,14 @@ practice) are unresolved — next step is a live session logging
 `padlock_state()` transitions with no consumer wired, before either HLDD
 001 re-graduation or `ensure_padlock_off` reuse are considered.
 
+**Update (2026-09-18)**: Open Question 2 is resolved (reachable, not rare —
+see "First live trial"). Open Question 1 is quantified but not closed — two
+full sessions (5,066 presses) show pressing roughly doubles the dot's flip
+rate over baseline, including in the specific context that looked
+concerning after the first trial (see "Second live trial"). Still purely
+observational; still no consumer wired. The controlled ground-truth test
+remains the recommended next step before any consumer is added.
+
 ## Context
 
 The padlock camera re-points the view at whatever it has locked, instead of
@@ -243,7 +251,17 @@ calls for.
    confirm the center dot actually differs — disappears, changes color, or
    moves — while padlocked. If it turns out to be present in both states,
    D4 as designed produces confident false confirmations and needs
-   rethinking before it ships, not after.
+   rethinking before it ships, not after. **Quantified (not yet closed) by
+   the second live trial below**: across 5,066 real presses and 22,773 raw
+   reads over two full sessions, pressing roughly doubles the dot's
+   flip rate versus a measured no-press baseline (32-36% vs 15-17%) — a
+   real statistical effect, not noise — and the specific context that
+   produced zero flips in the first trial (`secondary_weapon=True`) shows
+   the *highest* flip rate of any stratum measured (60-65%), overturning
+   that as a systematic concern. Ground-truth confirmation (a human-verified
+   "padlock is on right now" frame) still does not exist — the controlled
+   test is still the one thing that would close this fully — but the
+   statistical case now favors this detector tracking something real.
 2. **`is_mission_running()` may rarely coincide with
    `is_secondary_weapon_active()` for a full 2 seconds.** `mission_j20`'s
    runner thread polls `_mission_cancel` every 0.5s
@@ -375,6 +393,68 @@ This does not confirm hypothesis (a) or (b) above — it is still consistent
 with either — but it raises the bar for what "the dot changes when
 padlocked" would need to look like if it's true, and makes it less likely
 this is simply poll-timing luck.
+
+## Second live trial (2026-09-18) — Open Question 1, quantified
+
+Same day, added one line (`Controller.note_padlock_center_dot`) logging the
+**raw** per-tick detector read (`padlock center-dot raw=%s mission=%s
+secondary_weapon=%s`) alongside the fused end-state, specifically so a
+later session could correlate real presses against the raw signal directly
+instead of inferring it from `padlock_state()` transitions the way the
+first trial had to. Landed mid-session (did not require a restart to ship —
+queued for the next natural one), gate-verified, no live risk since it is
+pure logging. Two full sessions ran afterward with it in place:
+`logs/wingman_20260918_010822.log` (2026-09-17 17:59 - 2026-09-18 01:08,
+7h09m) and the current `wingman.log` (01:09 - 06:05, 4h56m) — 3,077 + 1,989
+= 5,066 real `padlock_camera()` presses, 13,345 + 9,428 = 22,773 raw reads,
+reviewed the morning after via `git log`-adjacent script analysis, not
+guessed at.
+
+**Baseline (no-press) noise rate, measured first so the press comparison has
+something to be compared against:** across consecutive raw reads 0.8-3.0s
+apart with **no press anywhere between them**, the dot's value flips on its
+own only 15.1-17.4% of the time (10,469 and 7,618 comparable pairs). This is
+the rate against which "does pressing do anything" must be judged — not
+against 0%.
+
+**Isolated presses (no other press within 3s either side, so a rapid
+double-press can't corrupt a single before/after comparison) — 1,895 and
+1,051 comparable instances:** the dot flips **31.6-35.8%** of the time in
+the 0.8-3.0s after a press — roughly **double** the no-press baseline in
+both sessions independently. This is a real, repeated, statistically
+distinguishable effect, not noise: pressing the key measurably changes what
+the detector reads, at a rate clearly above the do-nothing baseline.
+
+**The specific worry from the first live trial — checked directly, and
+overturned.** Stratifying isolated presses by `secondary_weapon` at press
+time (the exact condition both of yesterday's zero-flip episodes shared)
+gives the opposite of what those two episodes suggested: flip rate is
+**60.7-65.4%** when `secondary_weapon=True` (61 and 52 comparable presses)
+versus **29.8-35.0%** when `secondary_weapon=False` (1,834 and 999
+comparable presses) — higher in the heatdive-like context, not lower or
+zero. Getting zero flips across six presses in that context, as observed
+2026-09-17, is consistent with a small-sample outcome (roughly 0.2-0.4%
+under this session's own measured rate for that context) landing on an
+unlucky run — most plausibly explained by no valid lock target being
+present in that *specific* window (the log showed only long-range minimap
+contacts, `rings=0/0/1`-`0/0/4`, nothing confirmed near boresight), not by
+a systematic flaw tied to the eject-abort context itself.
+
+**Still not fully resolved — the gap that remains is narrower now, not
+closed.** This establishes a real, repeatable *statistical* correlation
+between pressing and the dot changing, well above chance, across two
+independent full sessions. It does not yet establish *ground truth* — no
+frame in this analysis has been independently confirmed (by a human, or a
+second detector) to show the camera actually locked onto a target at the
+moment the dot read `False`. A ~32-36% overall flip rate is also
+consistent with "padlock only actually engages a minority of presses"
+(no valid target most of the time) layered on top of a detector that
+tracks it correctly — which is a different, milder finding than "the
+detector is unreliable." The controlled test from the first trial (padlock
+deliberately onto a nearby, boresight target, screenshot before and after)
+is still the one experiment that would close this decisively, but the
+statistical case for proceeding to that test — rather than abandoning this
+detector — is now much stronger than it was after the first trial alone.
 
 ## Related Documents
 

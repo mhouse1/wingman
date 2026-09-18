@@ -447,6 +447,43 @@ def test_emergency_stops_nose_up_once_above_target(monkeypatch):
         f"after altitude was already above target")
 
 
+def test_emergency_resumes_nose_up_after_falling_back_below_target(monkeypatch):
+    """Live 2026-09-18: the fix above must stop the false-positive over-pulse
+    without disabling pitch recovery for a genuine, worsening dive that
+    happens to start above the sustain target. Measured live: a hold whose
+    very first sample read 6025m (above a 5000m target) latched
+    `above_target`, then the aircraft dove to 294m over ~12s with only that
+    one early pulse ever firing (nose pinned near -90 degrees the whole
+    way down) — the one-way latch suppressed every nose-up pulse for the
+    rest of the fatal dive. Nose-up must resume once altitude is genuinely
+    back below target, regardless of ever having latched above_target."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=6025.0, ts=t0, fuel=100)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=3.0, pitch_pulse_s=0.1, pulse_observe_s=0.5)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(target_alt=5000.0, emergency=True)
+    time.sleep(0.4)  # first pulse (rate unknown) fires, then the fresh
+                     # telemetry read confirms 6025 >= 5000 and latches
+                     # above_target — no more pulses while it stays there
+    first_count = len(_presses(kb, NOSE_UP_KEY))
+    assert first_count <= 1
+
+    # The dive: altitude now well below target, rate still unknown —
+    # exactly the shape of the live crash this test reproduces.
+    analyzer.set(294.0, t0 + 0.1)
+    time.sleep(1.0)
+
+    assert len(_presses(kb, NOSE_UP_KEY)) > first_count, (
+        "nose-up never resumed after altitude genuinely fell back below "
+        "target — the above_target latch is suppressing emergency pitch "
+        "recovery during a real, worsening dive")
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
 # ---------------------------------------------------------------------------
 # ADR 075: fuel-gated afterburner in the climb hold
 # ---------------------------------------------------------------------------

@@ -3436,6 +3436,9 @@ class Controller:
         pitch_rate = None   # deg/s between the last two angle samples
         ab_held = False
         above_target = False   # ADR 083 d3: latches on the first at-target read
+        alt: "float | None" = None   # freshest known altitude, for the pitch
+                                      # gate below — deliberately NOT the
+                                      # above_target latch (see its use site)
         # ADR 137 D9: the loop's OWN last-applied emergency state — refreshed
         # each iteration against `self._climb_emergency_requested`, which
         # BehaviorTreeHandler._update_climb keeps current for as long as this
@@ -3626,17 +3629,37 @@ class Controller:
                         pitch_held = NOSE_DOWN_KEY
                     elif last_rate is None or last_rate < self._climb_min_rate:
                         # HLDD 001 / live 2026-09-17: once this hold has
-                        # already confirmed the target altitude is met
-                        # (`above_target`), an unknown or low rate must not
-                        # keep defaulting to MORE nose-up — measured live
-                        # (7157m -> 1241m in ~6s) when a terrain-ahead
-                        # escalation mid-hold (ADR 137 D9) kept re-pulsing
-                        # nose-up with no observe gap while rate stayed
-                        # unknown, well after altitude had already reached
-                        # the target. The afterburner cut already treats
-                        # above_target as terminal (ADR 083 d3); this keeps
-                        # the pitch input consistent with that.
-                        if not above_target:
+                        # already confirmed the target altitude is met, an
+                        # unknown or low rate must not keep defaulting to
+                        # MORE nose-up — measured live (7157m -> 1241m in
+                        # ~6s) when a terrain-ahead escalation mid-hold
+                        # (ADR 137 D9) kept re-pulsing nose-up with no
+                        # observe gap while rate stayed unknown, well after
+                        # altitude had already reached the target.
+                        #
+                        # Deliberately checks the FRESHEST altitude here,
+                        # not the `above_target` latch the afterburner cut
+                        # above uses — that latch is one-way by design (ADR
+                        # 083 d3: "removing the energy source is the
+                        # physical fix for a zoom climb", so the burner
+                        # should never relight once cut). Pitch input has
+                        # the opposite requirement: live 2026-09-18 measured
+                        # a real, severe dive (6025m -> 294m in ~12s, nose
+                        # pinned near -90 degrees) where the hold's very
+                        # first sample was still fractionally above the
+                        # 5000m sustain target, latching above_target True
+                        # before the dive had even shown up in telemetry —
+                        # every nose-up pulse for the rest of that fatal
+                        # dive was then suppressed by the same one-way
+                        # latch, with only the single pre-telemetry pulse
+                        # ever firing (confirmed via
+                        # "Controller: climb pitch pulse" log count: 1,
+                        # at the very start, none after). Re-deriving the
+                        # comparison from the current `alt` each time — not
+                        # a latch — means nose-up resumes the moment the
+                        # aircraft is genuinely back below target, which is
+                        # exactly when it is needed most.
+                        if not (alt is not None and alt >= exit_alt):
                             pitch_held = NOSE_UP_KEY
                     elif (self._climb_max_rate is not None
                             and last_rate > float(self._climb_max_rate)):

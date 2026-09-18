@@ -788,6 +788,9 @@ def main():
     # Controller cannot construct its own, TargetTracker is owned/configured
     # alongside HudRenderer above.
     ctrl.set_target_tracker(target_tracker)
+    # ADR 140: analyzer needs padlock_state() for the telemetry log line —
+    # same late-bound wiring shape, reverse direction.
+    analyzer.set_controller(ctrl)
 
     # Wire FSM entry-hook callbacks (ADR 025) via the analyzer event registry
     # (ADR 060 Phase 1). Every subscriber is named; a duplicate name raises at

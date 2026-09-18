@@ -943,6 +943,11 @@ class GameStateAnalyzer:
             tracker: Optional PerformanceTracker instance (ADR 031)
         """
         self._tracker = tracker
+        # ADR 140: set once from main.py after both objects exist (the same
+        # late-bound wiring shape as Controller.set_target_tracker) — needed
+        # only to read Controller.padlock_state() for the telemetry log line
+        # below, not a general dependency in either direction.
+        self._controller = None
         startup_cfg = config.get("startup_state_detection", {})
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
@@ -1514,6 +1519,14 @@ class GameStateAnalyzer:
         """
         self.subscribe(GameEvent.RESPAWN_DETECTED, callback, name="legacy", replace=True)
 
+    def set_controller(self, controller) -> None:
+        """ADR 140: wire a Controller reference in, late-bound from main.py
+        after both objects exist — mirrors Controller.set_target_tracker's
+        shape. Only used to read padlock_state() for the telemetry log line
+        in _harvest_telemetry_future; not a general two-way dependency.
+        """
+        self._controller = controller
+
     def trigger_event(self, name: str) -> bool:
         """Dispatch an FSM trigger via the thread-safe trigger wrapper."""
         return self._trigger(name)
@@ -1621,8 +1634,17 @@ class GameStateAnalyzer:
                 nose = f"{angle:+.0f}\N{DEGREE SIGN} ({band})"
             else:
                 nose = "n/a"
-            logger.info("Altitude: %s | Speed: %s | Nose: %s",
-                        altitude_value, speed_value, nose)
+            # ADR 140: padlock_state() is Controller-owned tri-state — None
+            # means Unknown (no positive "on" detector exists yet, D4/
+            # Non-Goal 1), so it must print distinctly from both ON and OFF
+            # rather than being coerced into one of them.
+            padlock_state = (self._controller.padlock_state()
+                             if self._controller is not None else None)
+            padlock_label = ("ON" if padlock_state is True
+                             else "OFF" if padlock_state is False
+                             else "UNKNOWN")
+            logger.info("\033[93mPADLOCK: %s | Altitude: %s | Speed: %s | Nose: %s\033[0m",
+                        padlock_label, altitude_value, speed_value, nose)
             self._update_nose_direction(snap)
         return telemetry_ocr_time
 
