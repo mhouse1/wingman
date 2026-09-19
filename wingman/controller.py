@@ -3805,9 +3805,33 @@ class Controller:
                 if pitch_held is not None and now >= pulse_until:
                     self._climb_key(pitch_held, press=False)
                     pitch_held = None
-                    # ADR 137: no idle gap between pulses — the next
-                    # loop tick re-checks rate/ceiling and re-pulses at once.
-                    observe_until = now if emergency_now else now + self._climb_observe_s
+                    # ADR 137: no idle gap between pulses — the next loop
+                    # tick re-checks rate/ceiling and re-pulses at once.
+                    #
+                    # Operator-caught live, 2026-09-19 (crash 16:15:56,
+                    # nose oscillating +90/-90/+90 until impact): that rule
+                    # assumes the re-check has real telemetry to act on.
+                    # Right after a fresh respawn, `last_angle` is still
+                    # None for the first several seconds (the telemetry_
+                    # handoff gap) — with D1's floor now forcing an
+                    # EMERGENCY climb the instant a respawn lands below
+                    # 4000m, this hold's very first pulses land in that
+                    # blind window. Two back-to-back blind NOSE_UP pulses
+                    # (1.5s each, zero gap) ran before this incident's first
+                    # real telemetry sample arrived, by which point the
+                    # aircraft was already AT the 90deg ceiling — nothing
+                    # had been there yet to check it against. `_at_pitch_
+                    # ceiling()` (ADR 086 d7) cannot protect against an
+                    # angle it has never been given. Blind pulsing still
+                    # has to happen (a genuinely low respawn still needs to
+                    # climb), but it must not compound blind — give a real
+                    # sample a chance to land before committing to a
+                    # second one, same as the non-emergency gap already
+                    # does. Once telemetry is live (`last_angle is not
+                    # None`), the zero-gap rule is unchanged.
+                    observe_until = (
+                        now if emergency_now and last_angle is not None
+                        else now + self._climb_observe_s)
                 elif pitch_held is None and now >= observe_until:
                     if _at_pitch_ceiling():   # ADR 086 d7 (was: current angle only)
                         pitch_held = NOSE_DOWN_KEY
@@ -3936,7 +3960,30 @@ class Controller:
             # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE
             # going neutral. Burner off first (above), so the push is not
             # fighting thrust — the ADR 083 d3 finding.
-            self._climb_exit_push()
+            #
+            # Operator-caught live, 2026-09-19 (screenshot_20260919_143545,
+            # crash at 14:36:02): this hold's own exit_above_alt (1000m) can
+            # be reached while D1's altitude floor (3000m) is still below —
+            # the tree re-selects Climb and a fresh hold starts pushing
+            # NOSE_UP again within one tick. The unconditional push here ran
+            # anyway, so the very next hold immediately fought its own
+            # nose-down with a fresh nose-up — logged as a swing from +10deg
+            # to -24deg in 1.5s, then continued oscillating (+90/-55/+8/-43)
+            # for ~24s while speed bled to 9-12 KPH near the ground, ending
+            # in a crash. `self._climb_emergency_requested` is still fresh
+            # here — `self._climbing` (this hold's own is_running_fn) is not
+            # cleared until AFTER this whole function returns (climb_mode's
+            # `_run()` wrapper), so BehaviorTreeHandler._update_climb keeps
+            # refreshing it every tick right up to this point. If it is
+            # still true, a new hold is about to start regardless of what
+            # this push does — skip it rather than fight the hold that is
+            # seconds (often one tick) from undoing it.
+            if self._climb_emergency_requested:
+                logger.info(
+                    "Controller: climb exit push skipped — emergency still "
+                    "active, a fresh hold is about to restart (2026-09-19)")
+            else:
+                self._climb_exit_push()
             self._climb_key(NOSE_DOWN_KEY, press=False)
             _release_span = time.time() - _release_started
             for _key in guarded_keys:

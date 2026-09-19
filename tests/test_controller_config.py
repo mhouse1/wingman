@@ -91,3 +91,27 @@ def test_tuning_values_are_no_longer_constructor_arguments():
     parameter list. A stray keyword is a TypeError, not a silent no-op."""
     with pytest.raises(TypeError):
         Controller((0, 0, 1920, 1200), disable_hotkeys=True)
+
+
+def test_mission_j20_altitude_doctrine_is_4000m_everywhere(shipped_cfg):
+    """Regression, 2026-09-19: this exact number has now drifted twice in
+    one night without anyone noticing the two mechanisms disagreed.
+
+    ADR 081 d2 (Accepted, 2026-08-18) established the mission's own
+    doctrine in its own words: "the tactical requirement is only that an
+    armed aircraft stays above 4000 m," implemented as `climb.sustain.
+    enter_below_alt: 4000` (armed-only — missiles > 0, running mission).
+    ADR 141 D1 (2026-09-19) added a second, unconditional hard floor,
+    `climb.alt_floor_m`, meant to enforce the SAME doctrine for cases the
+    armed-only band cannot cover — but it shipped at 3000, an operator
+    misrecollection at the time, and nobody caught the two numbers no
+    longer matched until a live session and a second operator correction
+    caught it hours later. Both must target the same altitude — that is
+    the entire point of D1 existing as a backstop for D2's band, not a
+    competing, independently-tuned threshold. This test is the thing that
+    should have caught the mismatch the first time."""
+    climb = shipped_cfg["behavior_tree"]["climb"]
+    assert climb["alt_floor_m"] == 4000, \
+        "the hard, unconditional floor no longer matches mission_j20's doctrine"
+    assert climb["sustain"]["enter_below_alt"] == 4000, \
+        "the armed-only sustain band no longer matches mission_j20's doctrine"

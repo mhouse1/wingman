@@ -615,6 +615,52 @@ this decision, to keep the two changes independently reviewable.
   mode of D9 itself. The mechanism does its one job; it does not raise the
   physical ceiling D4 already flagged as unresolved.
 
+**D10 (2026-09-19): the zero-gap rule from D9 assumed a re-check always has
+real telemetry to act on — it does not, for the first several seconds of a
+fresh hold.** Operator-caught live: `screenshot_20260919_155640.png` and
+`wingman.log`, crash at 16:15:56, aircraft nose oscillating +90/-90/+90
+until impact. Traced via the hold's own `Controller: climb pitch pulse`
+log lines: the first two pulses of this hold fired with `rate=None,
+angle=None` — fully blind, right after a fresh respawn, back to back with
+zero gap (D9's own rule). By the time the first real telemetry sample
+arrived, the aircraft was already at the 90deg ceiling; `_at_pitch_
+ceiling()` (ADR 086 d7) cannot protect against an angle it was never given
+a chance to see. This is now a common path, not a rare one: `ADR 141` D1's
+altitude floor forces an EMERGENCY climb the instant a respawn lands below
+4000m (mission_j20's own respawn point sits near 600-750m, confirmed
+elsewhere this session), so a fresh hold's very first pulses routinely
+land inside the telemetry-handoff gap this trial exposed.
+
+Fix: `_run_climb_hold`'s pulse-release branch now only applies D9's
+zero-gap rule once `last_angle` is no longer `None` — while still blind,
+it falls back to the same `pulse_observe_s` gap the non-emergency case
+already uses. A hold that already has real telemetry keeps D9's behavior
+unchanged from its second pulse onward (the very first transition of
+*any* hold is unavoidably blind — telemetry is fetched after the pulse
+decision each iteration, so `last_angle` cannot reflect a sample until
+the following one — a small, one-time conservative gap this fix accepts
+rather than restructures around). Blind pulsing still happens (a
+genuinely low respawn still needs to climb) — it is throttled, not
+disabled.
+
+### Validation (D10)
+
+- Unit, satisfied: `tests/test_climb_mode.py::
+  test_blind_emergency_pulses_get_an_observe_gap` (a hold that never
+  learns a real angle stays capped at the gapped cadence, not the D9
+  zero-gap one) and `::test_telemetry_informed_emergency_pulses_stay_
+  zero_gap` (control — once telemetry exists, D9's fast cadence resumes
+  from the second pulse on, clearly outpacing the blind case over the
+  same window). `make lint && make test` (full suite): 1663 passed, 2
+  skipped, 1 failed (`test_shutdown_watchdog.py::
+  test_arming_signal_ack_watchdog_replaces_a_previous_one`) — confirmed
+  unrelated, the same pre-existing timing-sensitive thread-count flake
+  already documented this session; passes 17/17 in isolation.
+- **Live — not yet validated.** Found and fixed on the same session's own
+  evidence; needs a dedicated trial watching specifically for a fresh
+  respawn landing below 4000m and confirming the aircraft's first few
+  pulses settle without a full-range angle swing.
+
 ## Non-Goals
 
 1. ~~**Not a fix to the ADR 086 trigger threshold itself**

@@ -394,6 +394,66 @@ def test_pitch_is_pulsed_not_held(monkeypatch):
     assert len(_presses(kb, AFTERBURNER_KEY)) == 1, "AB must be held, not pulsed"
 
 
+# ---------------------------------------------------------------------------
+# Operator-caught live, 2026-09-19 (crash at 16:15:56, nose oscillating
+# +90/-90/+90 until impact): an emergency hold's own "no gap between pulses"
+# rule (ADR 137) fired two consecutive BLIND (no angle telemetry yet)
+# NOSE_UP pulses right after a fresh respawn — D1's altitude floor now
+# forces an emergency climb the instant a respawn lands below 4000m, so
+# this hold's first pulses routinely land in the telemetry_handoff gap
+# before any angle sample exists. By the time real telemetry finally
+# arrived, the aircraft was already at the 90deg ceiling — nothing had been
+# there yet for `_at_pitch_ceiling()` to check it against. Fix: emergency
+# mode's zero-gap rule now only applies once `last_angle` is no longer
+# None; while still blind, it falls back to the same `pulse_observe_s` gap
+# the non-emergency case already uses, giving a real sample a chance to
+# land before a second blind pulse commits.
+# ---------------------------------------------------------------------------
+
+def test_blind_emergency_pulses_get_an_observe_gap(monkeypatch):
+    """The regression this pins: while the hold never learns a real angle
+    (the sustained blind case — telemetry never arrives), every pulse
+    transition keeps paying the observe gap, capping the cadence at
+    roughly one pulse per (pulse_s + observe_s) instead of firing back to
+    back — exactly like the non-emergency case already does."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=5.0, pitch_pulse_s=0.2, pulse_observe_s=1.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(emergency=True)
+    time.sleep(1.8)   # long enough for ~1.5 gapped cycles (1.2s each)
+    assert len(_presses(kb, NOSE_UP_KEY)) <= 2, \
+        "sustained-blind hold fired faster than the observe-gapped cadence"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_telemetry_informed_emergency_pulses_stay_zero_gap(monkeypatch):
+    """Control case: the first pulse-to-pulse transition of any hold is
+    always blind (the loop fetches telemetry after the pulse decision, so
+    `last_angle` cannot reflect a sample until the following iteration —
+    a small, one-time conservative gap this fix accepts). From the second
+    transition on, once real angle telemetry exists, ADR 137's zero-gap
+    behaviour is unchanged: pulses resume firing every ~pulse_s instead of
+    paying the gap on every cycle. Same window as the sustained-blind test
+    above — that one stays capped at <=2 presses; this one, with real
+    telemetry available throughout, must clearly outpace it."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=200.0, ts=t0, fuel=90)
+    analyzer.set(200.0, t0, fresh=True, angle=10.0)   # well below exit_alt (1000)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=5.0, pitch_pulse_s=0.2, pulse_observe_s=1.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode(emergency=True)
+    time.sleep(1.8)
+    assert len(_presses(kb, NOSE_UP_KEY)) >= 4, \
+        "telemetry-informed emergency pulses paid the observe gap every cycle"
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
 def test_healthy_climb_rate_suppresses_pulse(monkeypatch):
     """While the telemetry climb rate meets min_climb_rate, no new pitch
     pulse fires — the aircraft is already climbing."""
@@ -1088,6 +1148,65 @@ def test_exit_push_yields_to_stop_event(monkeypatch):
     assert reason == "interrupted"
     assert len(_presses(kb, NOSE_DOWN_KEY)) <= 1
     assert len(_releases(kb, NOSE_DOWN_KEY)) == len(_presses(kb, NOSE_DOWN_KEY))
+
+
+# ---------------------------------------------------------------------------
+# Operator-caught live, 2026-09-19 (screenshot_20260919_143545, crash at
+# 14:36:02): the exit push above runs unconditionally when a hold ends —
+# including when D1's altitude floor (3000m) is still below and the tree is
+# about to re-select Climb within one tick. The push's own nose-down fought
+# the immediately-restarting hold's nose-up: logged live as a swing from
+# +10deg to -24deg in 1.5s, then continued oscillating (+90/-55/+8/-43) for
+# ~24s while speed bled to 9-12 KPH near the ground, ending in a crash. The
+# fix: skip the exit push when `_climb_emergency_requested` is still true at
+# hold-completion time — a fresh hold is about to start regardless of what
+# the push does, so pushing first only guarantees a wasted, fighting cycle.
+# ---------------------------------------------------------------------------
+
+def test_exit_push_skipped_when_a_fresh_emergency_is_still_pending(monkeypatch, caplog):
+    """The regression this pins: a nose-high exit with the broad emergency
+    (e.g. the altitude floor) still active must not push nose-down at all —
+    a new hold is about to immediately undo it."""
+    t0 = time.time()
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=500.0, ts=t0, fuel=90)
+    analyzer.set(500.0, t0, fresh=True, angle=73.0)   # nose high
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, EXIT_CFG)
+
+    ctrl.climb_mode()
+    time.sleep(0.1)
+    ctrl.set_climb_emergency(True)   # the tree's broad verdict is still true
+    with caplog.at_level("INFO"):
+        time.sleep(0.3)
+        analyzer.set(1100.0, t0 + 0.1, fresh=True, angle=73.0)
+        time.sleep(0.3)
+        analyzer.set(1150.0, t0 + 0.2, fresh=True, angle=73.0)
+        assert _wait_done(ctrl), "climb did not end on altitude recovery"
+
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "exit push fired despite a fresh emergency still pending"
+    skipped = [r for r in caplog.records if "exit push skipped" in r.message]
+    assert len(skipped) == 1
+
+
+def test_exit_push_still_runs_when_no_fresh_emergency_is_pending(monkeypatch):
+    """Control case: the ordinary handback (no emergency about to restart)
+    must keep pushing nose-down exactly as ADR 086 always has."""
+    t0 = time.time()
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=500.0, ts=t0, fuel=90)
+    analyzer.set(500.0, t0, fresh=True, angle=73.0)   # nose high
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, EXIT_CFG)
+
+    ctrl.climb_mode()   # emergency=False, never escalated
+    time.sleep(0.3)
+    analyzer.set(1100.0, t0 + 0.1, fresh=True, angle=73.0)
+    time.sleep(0.3)
+    analyzer.set(1150.0, t0 + 0.2, fresh=True, angle=73.0)
+    assert _wait_done(ctrl), "climb did not end on altitude recovery"
+
+    assert _presses(kb, NOSE_DOWN_KEY), \
+        "exit push must still fire when nothing is about to restart Climb"
 
 
 # ---------------------------------------------------------------------------

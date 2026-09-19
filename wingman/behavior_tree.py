@@ -205,6 +205,45 @@ def is_idle(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.game_state != GameState.GAME_BATTLE
 
 
+def make_idle_condition(yields_to_fn=None):
+    """Operator directive, 2026-09-19: Idle is first in ``_PRIORITY_ORDER``
+    and, unlike every other tactic, had no way to cede the airframe to
+    anything — including a live Climb emergency — for the ENTIRE time the
+    FSM sits in a non-GAME_BATTLE state.
+
+    Live, directly observed by the operator: "it flew forward horizontal
+    after respawn without changing altitude." Traced to `wingman.log`: an
+    `eject_and_dive` sequence aborted mid-dive (Anomaly 003 — telemetry
+    confirmed the aircraft was alive and flying, not actually dead) and
+    handed control back while `game_state` was still `GAME_BATTLE_EJECT`,
+    not yet `GAME_BATTLE`. The new ALTITUDE FLOOR trigger (this same night)
+    correctly fired and logged `climb forced` — but `selected=Idle` won the
+    same tick regardless, because `is_idle` above does not look at the
+    emergency at all. Idle does nothing — no key presses — so the aircraft
+    just kept flying whatever heading it already had.
+
+    Deliberately narrow, not "open up GAME_BATTLE_EJECT to the whole
+    tree": Idle steps aside ONLY when `game_state == GAME_BATTLE_EJECT`
+    *and* a Climb emergency is currently active — every other tactic
+    (Engage, BoundaryTurn, ...) still has no business running during an
+    eject sequence, and `GAME_LOBBY`/`GAME_STARTING` (no aircraft exists
+    to fly at all) are unaffected either way. This does not require an
+    extra "is an eject actually still in progress" check: `TACTIC_EJECT`
+    already outranks `TACTIC_CLIMB` in `_PRIORITY_ORDER`, so if Eject's own
+    condition is still genuinely true, the selector reaches and picks IT
+    before ever reaching Climb — this only matters for the gap where
+    Eject's own condition has already gone false (aborted/confirmed) but
+    the FSM state hasn't caught up yet, which is exactly the live case
+    above.
+    """
+    def idle(snapshot: AnalyzerSnapshot) -> bool:
+        if snapshot.game_state == GameState.GAME_BATTLE_EJECT:
+            if yields_to_fn is not None and yields_to_fn():
+                return False
+        return snapshot.game_state != GameState.GAME_BATTLE
+    return idle
+
+
 def is_respawning(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.is_respawning
 
@@ -551,6 +590,14 @@ class ClimbCondition:
         self._last_ttg_ts = 0.0
         self._post_respawn = _SETTLED
         self._emergency_active = False
+        # Operator directive, 2026-09-19, found live the same night: ttg
+        # (dive recovery) and terrain-ahead are what "hitting the ground is
+        # certain" (ADR 107 D4's own reasoning for why BoundaryTurn yields)
+        # actually means — the altitude floor is a softer, preventive
+        # backstop, not that. Tracked separately so BoundaryTurn can yield
+        # to the former without yielding to the latter — see
+        # hard_emergency_active below.
+        self._hard_emergency_active = False
         self._pending_reevaluation = False
         # HLDD 001 Phase 1: forward sky-occlusion terrain-ahead trigger, a
         # second OR-term alongside the ttg emergency above. Own debounce
@@ -582,6 +629,13 @@ class ClimbCondition:
     @property
     def emergency_active(self) -> bool:
         return self._emergency_active
+
+    @property
+    def hard_emergency_active(self) -> bool:
+        """ttg or terrain only — excludes the altitude floor. What
+        BoundaryTurn's yields_to_fn reads (operator directive, 2026-09-19);
+        see the __init__ comment for why."""
+        return self._hard_emergency_active
 
     @property
     def terrain_ahead_active(self) -> bool:
@@ -734,6 +788,10 @@ class ClimbCondition:
             self._terrain_ahead_active = terrain_ahead
             if not self._terrain_shadow:
                 emergency = emergency or terrain_ahead
+
+        # ttg or terrain only, captured BEFORE the altitude floor below is
+        # folded in — see hard_emergency_active's docstring.
+        self._hard_emergency_active = bool(emergency)
 
         # Operator directive, 2026-09-19: hard altitude floor, no rate
         # involved. Deliberately the simplest possible check — snapshot.
@@ -905,6 +963,11 @@ class _BuildContext:
     actuators: dict
     regroup_enabled: bool
     climb_emergency_fn: "Callable[[], bool] | None" = None
+    # Operator directive, 2026-09-19: ttg-or-terrain only, excludes the
+    # altitude floor — what BoundaryTurn's yields_to_fn reads, distinct
+    # from climb_emergency_fn above (which MissileEvade and Idle still
+    # read, including the floor). See ClimbCondition.hard_emergency_active.
+    climb_hard_emergency_fn: "Callable[[], bool] | None" = None
     climb_emergency_update_fn: "Callable[[AnalyzerSnapshot, float | None], bool] | None" = None
     climb_terrain_ahead_fn: "Callable[[], bool] | None" = None
 
@@ -927,8 +990,13 @@ def boundary_tactic_enabled(bt_cfg: dict) -> bool:
     return bool(boundary_cfg.get("turn_frac"))
 
 
-def _build_idle_slot(_ctx: "_BuildContext"):
-    return ConditionTactic(TACTIC_IDLE, is_idle)
+def _build_idle_slot(ctx: "_BuildContext"):
+    """Operator directive, 2026-09-19: reads ``ctx.climb_emergency_fn`` —
+    built by ``_build_climb_slot``, which ``_build_slots`` therefore calls
+    before this one, same ordering BoundaryTurn's and MissileEvade's slots
+    already rely on."""
+    return ConditionTactic(
+        TACTIC_IDLE, make_idle_condition(yields_to_fn=ctx.climb_emergency_fn))
 
 
 def _build_respawn_wait_slot(_ctx: "_BuildContext"):
@@ -1075,6 +1143,13 @@ def _build_climb_slot(ctx: "_BuildContext"):
         return bool(getattr(_e, "emergency_active", False))
     ctx.climb_emergency_fn = _climb_emergency_fn
 
+    # Operator directive, 2026-09-19: ttg-or-terrain only, for BoundaryTurn
+    # specifically — see ClimbCondition.hard_emergency_active and
+    # _BuildContext.climb_hard_emergency_fn.
+    def _climb_hard_emergency_fn(_e=emergency):
+        return bool(getattr(_e, "hard_emergency_active", False))
+    ctx.climb_hard_emergency_fn = _climb_hard_emergency_fn
+
     def _climb_emergency_update_fn(snapshot, now=None, _e=emergency):
         return _e.update_emergency(snapshot, now)
     ctx.climb_emergency_update_fn = _climb_emergency_update_fn
@@ -1089,10 +1164,24 @@ def _build_climb_slot(ctx: "_BuildContext"):
 
 
 def _build_boundary_slot(ctx: "_BuildContext"):
-    """ADR 107: absent unless configured. Reads ``ctx.climb_emergency_fn`` —
-    built by ``_build_climb_slot``, which ``_build_slots`` therefore always
-    runs first regardless of priority order, since BoundaryTurn outranks
-    Climb but depends on it.
+    """ADR 107: absent unless configured. Reads
+    ``ctx.climb_hard_emergency_fn`` — built by ``_build_climb_slot``, which
+    ``_build_slots`` therefore always runs first regardless of priority
+    order, since BoundaryTurn outranks Climb but depends on it.
+
+    Operator directive, 2026-09-19: deliberately the HARD-only signal
+    (ttg or terrain), not the broader ``climb_emergency_fn`` MissileEvade
+    and Idle read. Live regression: an altitude-floor-triggered climb
+    (alt=1799m, genuinely low, correct) climbed well past its own 3000m
+    floor, but a REPEATEDLY re-firing terrain-ahead trigger (unrelated,
+    pre-existing) kept the broad emergency flag alive for a full 45s —
+    during which BoundaryTurn stayed locked out the entire time and the
+    aircraft flew straight through the map boundary and crossed it. ADR
+    107 D4's own reasoning for this yield — "hitting the ground is certain
+    while the boundary is a countdown" — is true of ttg and terrain, not of
+    the altitude floor, which is a softer, preventive backstop, not a
+    ground-impact-imminent signal. BoundaryTurn now only yields to the
+    former.
     """
     if not boundary_tactic_enabled(ctx.bt_cfg):
         return None
@@ -1109,7 +1198,7 @@ def _build_boundary_slot(ctx: "_BuildContext"):
             make_boundary_condition(
                 float(boundary_cfg["turn_frac"]),
                 float(boundary_cfg.get("recede_frac", 0.06)),
-                yields_to_fn=ctx.climb_emergency_fn,
+                yields_to_fn=ctx.climb_hard_emergency_fn,
                 release_frac=boundary_cfg.get("release_frac"),
                 min_clear_frac=float(
                     boundary_cfg.get("min_clear_frac", 0.35)),
@@ -1139,15 +1228,14 @@ def _build_slots(ctx: "_BuildContext") -> dict:
     """Build every leaf, returning ``{name: Behaviour}`` for the present ones.
 
     Build order here is deliberately NOT ``_PRIORITY_ORDER`` — it only has to
-    satisfy real data dependencies (Climb built before Boundary and, as of
-    2026-09-19, before MissileEvade too).
+    satisfy real data dependencies (Climb built before Boundary, MissileEvade,
+    and, as of 2026-09-19, Idle too).
     ``build_tree`` assembles the final children list by walking
     ``_PRIORITY_ORDER`` and looking each name up here, so priority rank is
     declared once, in one place, independent of this function's build
     sequence.
     """
     built = {
-        TACTIC_IDLE: _build_idle_slot(ctx),
         TACTIC_RESPAWN_WAIT: _build_respawn_wait_slot(ctx),
         TACTIC_EJECT: _build_eject_slot(ctx),
         TACTIC_EVADE: _build_evade_slot(ctx),
@@ -1161,9 +1249,10 @@ def _build_slots(ctx: "_BuildContext") -> dict:
     boundary_leaf = _build_boundary_slot(ctx)  # reads ctx.climb_emergency_fn
     if boundary_leaf is not None:
         built[TACTIC_BOUNDARY_TURN] = boundary_leaf
-    # Operator directive, 2026-09-19: reads ctx.climb_emergency_fn, same
+    # Operator directive, 2026-09-19: both read ctx.climb_emergency_fn, same
     # dependency as boundary above — must build after climb.
     built[TACTIC_MISSILE_EVADE] = _build_missile_evade_slot(ctx)
+    built[TACTIC_IDLE] = _build_idle_slot(ctx)
     regroup_leaf = _build_regroup_slot(ctx)
     if regroup_leaf is not None:
         built[TACTIC_REGROUP] = regroup_leaf
@@ -1201,6 +1290,9 @@ def build_tree(bt_cfg: dict, clock=time.time,
     # THIS tick's ADR 086 emergency verdict without a new actuator-contract
     # parameter — same closure BoundaryTurn's yields_to_fn already reads.
     tree.climb_emergency_fn = ctx.climb_emergency_fn
+    # Operator directive, 2026-09-19: exposed for tests/inspection alongside
+    # the broader flag above, same reasoning.
+    tree.climb_hard_emergency_fn = ctx.climb_hard_emergency_fn
     # Anomaly 007: called once per tick, BEFORE tree.tick(), so the emergency
     # verdict above is never stale when a higher-priority tactic (chiefly
     # BoundaryTurn) is the one winning selection.

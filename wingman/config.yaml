@@ -556,7 +556,17 @@ behavior_tree:
     # and altitude then collapsed ~745m in under a second). Also the
     # backstop MissileEvade now yields to (see behavior_tree.py's
     # make_missile_evade_condition).
-    alt_floor_m: 3000
+    # Corrected 3000 -> 4000 same night, operator direct correction: "during
+    # mission_j20 we're supposed to stay above 4000 m" — the original 3000
+    # was an imprecise recollection; 4000 is the mission's own established
+    # doctrine, already accepted in ADR 081 d2 ("the tactical requirement is
+    # only that an armed aircraft stays above 4000 m") via the sustain band
+    # (climb.sustain.enter_below_alt below). That mechanism is armed-only
+    # (missiles > 0, running mission) and softer (its own debounce/hysteresis,
+    # not folded into the hard emergency verdict); this floor is unconditional
+    # and now matches it in altitude, acting as the always-on backstop for the
+    # cases the armed-only band cannot cover (unarmed, or reacting faster).
+    alt_floor_m: 4000
     fuel_reserve_pct: 10
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}

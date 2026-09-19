@@ -383,6 +383,79 @@ two consecutive sessions with zero spawn crashes and the overshoot
 correction firing this consistently (15 times in 50 minutes) is a real,
 accumulating positive signal, not a single lucky run.
 
+## d1 exit-push-vs-immediate-restart oscillation, found live 2026-09-19 (operator-caught)
+
+A third, distinct d1 failure, surfaced by the same night's later work: ADR 141
+D1 added a hard altitude floor (3000m) well above this ADR's own
+`exit_above_alt` (1000m config default) — the threshold `_run_climb_hold`
+itself uses to decide a hold is complete. A hold can legitimately reach
+1000m, declare `altitude_recovered`, and run this ADR's exit push (the one
+above, d1's overshoot-correction fix) — while still sitting 2000m below the
+floor. The tree re-selects Climb and a fresh hold starts pushing NOSE_UP
+again within one tick, directly fighting the exit push's own just-applied
+NOSE_DOWN.
+
+Operator directly observed the result live (`screenshot_20260919_143545.png`)
+and reported it as the aircraft "tilting up and down until it crashed into
+ground." Traced in `wingman.log`:
+
+```
+14:35:29.209  Nose +10deg (climb), alt 1369 — approaching this hold's own
+              exit_above_alt (1000m), well below the 3000m floor
+14:35:29.256  climb complete (altitude_recovered, 15.0s) — exit push runs
+              unconditionally here, in the pre-fix code
+14:35:30.729  CLIMB — EMERGENCY re-engages (next tick; the floor is still
+              unsatisfied) — a fresh hold immediately requests NOSE_UP
+14:35:32.209  Nose -24deg (dive) — swung 34deg negative in 1.5s, too fast
+              for a deliberate nose-up pulse; the exit push's own nose-down
+              fighting the new hold's nose-up
+14:35:35.211  Nose -55deg (steep_dive)
+14:35:38.208  Nose -16deg (dive)
+14:35:41.211  Nose +8deg (level)
+14:35:44.207  Nose -13deg (dive)
+14:35:47.209  Nose -43deg (dive), alt 394
+14:35:50.210  Nose -37deg (dive), alt 91
+14:35:53.209  Speed 9 KPH, Nose n/a — near-total stall, pitch OCR failing
+14:35:56.210  Speed 12 KPH, Nose n/a — still near-stalled
+14:36:02.226  RespawnWait — dead
+```
+
+24 seconds of alternating, never-settling pitch swings (+90/+47/+10/-24/-55/
+-16/+8/-13/-43/-37 across the whole episode, per the fuller log), altitude
+bleeding from 1293m to near zero, speed collapsing to 9-12 KPH, ending in a
+crash. Unlike the two overshoot bugs above (a single hold mis-detecting its
+own band), this is two holds — the ending one and the immediately-starting
+one — actively fighting each other's pitch commands, repeated on every
+recovery that lands between `exit_above_alt` and the D1 floor.
+
+**Root cause, confirmed by direct code read**: `_run_climb_hold`'s `finally`
+block calls `self._climb_exit_push()` unconditionally, with no check for
+whether the tree is about to immediately restart the hold. `self.
+_climb_emergency_requested` — the broad emergency verdict, kept fresh every
+tick by `BehaviorTreeHandler._update_climb` for as long as `self._climbing`
+stays set (which it does throughout this `finally` block — `climbing.clear()`
+happens one level up, in `climb_mode`'s own wrapper, after this function
+already returns) — is exactly the live, current signal needed to know a
+fresh hold is coming.
+
+**Fixed same night.** `_run_climb_hold`'s `finally` block now checks
+`self._climb_emergency_requested` immediately before calling `_climb_exit_
+push()`; if still true, the push is skipped entirely (logged at INFO) rather
+than run only to be undone one tick later. Regression tests added to
+`tests/test_climb_mode.py`: `test_exit_push_skipped_when_a_fresh_emergency_
+is_still_pending` (the regression this pins — a nose-high exit with the
+emergency still active must press no `NOSE_DOWN_KEY` at all) and `test_exit_
+push_still_runs_when_no_fresh_emergency_is_pending` (control case — an
+ordinary handback with nothing about to restart Climb must keep pushing
+nose-down exactly as before). All pre-existing exit-push tests pass
+unmodified.
+
+**Not yet live-validated** — found and fixed during the same session's D5
+live trial (see ADR 141); needs a dedicated trial watching specifically for
+`climb exit push skipped` appearing at the right moments and for pitch
+angle staying within a single settling swing across a Climb-to-Climb
+handoff, rather than the multi-swing oscillation this fix removes.
+
 ## Deviation from the proposed thresholds, and why
 
 The 2026-08-21 18:41 crash — the case d2 was written for — showed the proposed

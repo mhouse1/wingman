@@ -24,6 +24,7 @@ from wingman.behavior_tree import (
     build_tree,
     make_boundary_condition,
     make_climb_condition,
+    make_idle_condition,
     make_missile_evade_condition,
     make_snapshot_writer,
     selected_tactic,
@@ -87,6 +88,86 @@ def test_idle_outside_battle(harness):
     assert tick(harness, make_snap(game_state=GameState.GAME_LOBBY)) == TACTIC_IDLE
     assert tick(harness, make_snap(game_state=GameState.GAME_BATTLE_MANUAL)) == TACTIC_IDLE
     assert tick(harness, make_snap(game_state=GameState.GAME_BATTLE_EJECT)) == TACTIC_IDLE
+
+
+class TestIdleYieldsToClimbEmergency:
+    """Operator directive, 2026-09-19, directly observed live: "it flew
+    forward horizontal after respawn without changing altitude." Idle was
+    first in priority order and had no way to cede the airframe to
+    anything — including a live Climb emergency — for the entire time the
+    FSM sat in GAME_BATTLE_EJECT (an eject sequence that had already
+    aborted, per Anomaly 003, with the state not yet caught up to
+    GAME_BATTLE). The ALTITUDE FLOOR trigger fired and logged correctly,
+    but Idle still won selection and did nothing.
+    """
+
+    def test_does_not_yield_when_no_emergency_is_wired(self):
+        """The pre-fix behaviour, preserved: no yields_to_fn (Climb
+        disabled or not yet built) means GAME_BATTLE_EJECT always selects
+        Idle, same as `is_idle` always did."""
+        cond = make_idle_condition(yields_to_fn=None)
+        assert cond(make_snap(game_state=GameState.GAME_BATTLE_EJECT)) is True
+
+    def test_yields_during_eject_state_when_emergency_is_active(self):
+        emergency = {"on": True}
+        cond = make_idle_condition(yields_to_fn=lambda: emergency["on"])
+        assert cond(make_snap(game_state=GameState.GAME_BATTLE_EJECT)) is False
+
+    def test_does_not_yield_during_eject_state_without_an_emergency(self):
+        emergency = {"on": False}
+        cond = make_idle_condition(yields_to_fn=lambda: emergency["on"])
+        assert cond(make_snap(game_state=GameState.GAME_BATTLE_EJECT)) is True
+
+    def test_lobby_and_starting_are_unaffected_by_an_active_emergency(self):
+        """No aircraft exists to fly in these states — an emergency must
+        not pull Idle away from them the way it now can for
+        GAME_BATTLE_EJECT specifically."""
+        cond = make_idle_condition(yields_to_fn=lambda: True)
+        assert cond(make_snap(game_state=GameState.GAME_LOBBY)) is True
+        assert cond(make_snap(game_state=GameState.GAME_STARTING)) is True
+
+    def test_game_battle_is_unaffected(self):
+        """Idle already never fires in GAME_BATTLE regardless — confirms
+        the new branch does not accidentally change that."""
+        cond = make_idle_condition(yields_to_fn=lambda: True)
+        assert cond(make_snap(game_state=GameState.GAME_BATTLE)) is False
+
+    def test_through_the_real_tree_climb_wins_when_eject_has_aborted(self, clock):
+        """Integration: the exact live shape. Eject's own condition is
+        false (aborted/no longer confirmed — the Anomaly 003 case), the
+        FSM is still GAME_BATTLE_EJECT, and a real altitude-floor emergency
+        is active. Climb must win, not Idle."""
+        cfg = dict(BT_CFG, climb={"enabled": True, "enter_below_alt": 500,
+                                   "exit_above_alt": 1000, "confirm_reads": 1,
+                                   "alt_floor_m": 3000})
+        tree = build_tree(cfg, clock=clock)
+        writer = make_snapshot_writer()
+        snap = make_snap(game_state=GameState.GAME_BATTLE_EJECT,
+                         missiles=4, altitude=600.0, altitude_rate=0.0)
+        writer.set("snapshot", snap)
+        tree.climb_emergency_update_fn(snap, clock())
+        tree.tick()
+        assert selected_tactic(tree) == TACTIC_CLIMB, \
+            "Idle still won despite an active altitude-floor emergency"
+
+    def test_through_the_real_tree_eject_still_outranks_climb_when_genuine(self, clock):
+        """Control case: Eject's own condition (missiles empty) is still
+        true — Eject must still win over Climb, exactly as before this
+        fix. Idle stepping aside must not let a genuinely still-ejecting
+        aircraft get pulled into Climb instead."""
+        cfg = dict(BT_CFG, climb={"enabled": True, "enter_below_alt": 500,
+                                   "exit_above_alt": 1000, "confirm_reads": 1,
+                                   "alt_floor_m": 3000})
+        tree = build_tree(cfg, clock=clock)
+        writer = make_snapshot_writer()
+        snap = make_snap(game_state=GameState.GAME_BATTLE_EJECT,
+                         missiles=0, missiles_empty_confirmed=True,
+                         altitude=600.0, altitude_rate=0.0)
+        writer.set("snapshot", snap)
+        tree.climb_emergency_update_fn(snap, clock())
+        tree.tick()
+        assert selected_tactic(tree) == TACTIC_EJECT, \
+            "Climb won over a genuinely still-active Eject condition"
 
 
 def test_respawn_wait_beats_everything_in_battle(harness):
@@ -699,6 +780,57 @@ class TestAltitudeFloor:
         assert cond(make_snap(altitude=None, altitude_rate=None)) is False
 
 
+class TestHardEmergencyExcludesTheAltitudeFloor:
+    """Operator directive, 2026-09-19, live regression: an altitude-floor
+    climb (alt=1799m, genuinely low) climbed well past its own 3000m floor,
+    but a repeatedly re-firing terrain-ahead trigger kept the broad
+    emergency flag alive for 45s, during which BoundaryTurn — which yields
+    to ANY active climb emergency (ADR 107 D4) — stayed locked out the
+    entire time and the aircraft flew straight through the map boundary.
+    ADR 107 D4's own reasoning ("hitting the ground is certain") is true of
+    ttg and terrain, not of the altitude floor alone. `hard_emergency_
+    active` is the narrower signal BoundaryTurn now reads instead.
+    """
+
+    def test_altitude_floor_alone_is_not_a_hard_emergency(self):
+        clock = FakeClock()
+        cond = make_climb_condition(500, 1000, alt_floor_m=3000.0,
+                                    confirm_reads=1, clock=clock)
+        snap = make_snap(altitude=1799.0, altitude_rate=0.0)
+        cond(snap)
+        assert cond.emergency_active is True, "the floor itself must still fire"
+        assert cond.hard_emergency_active is False, \
+            "the altitude floor alone must not count as a hard emergency"
+
+    def test_ttg_is_a_hard_emergency(self):
+        clock = FakeClock()
+        cond = make_climb_condition(
+            500, 1000, recover_below_time_s=30.0, confirm_bypass_time_s=15.0,
+            confirm_reads=1, clock=clock)
+        cond(make_snap(altitude=8700.0, altitude_rate=-300.0))
+        assert cond.hard_emergency_active is True
+
+    def test_terrain_is_a_hard_emergency(self):
+        clock = FakeClock()
+        cond = make_climb_condition(
+            500, 1000, terrain_enabled=True, terrain_shadow=False,
+            terrain_sky_min_frac=0.55, terrain_confirm_reads=1, clock=clock)
+        snap = make_snap(altitude=5000.0, terrain_sky_frac=0.20, padlock_state=False)
+        cond(snap)
+        assert cond.hard_emergency_active is True
+
+    def test_ttg_plus_floor_together_still_counts_as_hard(self):
+        """The floor riding alongside a genuine ttg emergency must not
+        somehow cancel it — hard_emergency_active is captured before the
+        floor is folded in, so this is an OR, not a subtraction."""
+        clock = FakeClock()
+        cond = make_climb_condition(
+            500, 1000, alt_floor_m=3000.0, recover_below_time_s=30.0,
+            confirm_bypass_time_s=15.0, confirm_reads=1, clock=clock)
+        cond(make_snap(altitude=1799.0, altitude_rate=-300.0))
+        assert cond.hard_emergency_active is True
+
+
 class TestTerrainAheadTrigger:
     """HLDD 001 Phase 1 — forward sky-occlusion terrain-ahead OR-term.
 
@@ -1284,6 +1416,57 @@ def test_climb_terrain_ahead_fn_is_exposed_and_tracks_the_edge(clock):
     tree.tick()
     assert tree.climb_terrain_ahead_fn() is True, \
         "confirm_reads=1 in this fixture — one low read should latch it"
+
+
+# Operator directive, 2026-09-19: "it keeps flying out of the map, this is
+# regression." Live trace: an altitude-floor climb (alt=1799m, genuinely
+# low) climbed the aircraft past its own 3000m floor, but the terrain-ahead
+# trigger kept re-firing for 45s straight, holding the broad `emergency`
+# flag continuously true. BoundaryTurn's yield (ADR 107 D4) read that same
+# broad flag and stayed locked out the whole window — the aircraft flew
+# straight through the map boundary. Below: altitude floor alone, no ttg,
+# no terrain — must NOT make BoundaryTurn yield.
+_ALT_FLOOR_ONLY_BT_CFG = dict(
+    BT_CFG,
+    boundary={"turn_frac": 0.50, "recede_frac": 0.06, "hold_s": 0.0,
+             "min_clear_frac": 0.0},
+    climb={"enabled": True, "enter_below_alt": 500, "exit_above_alt": 1000,
+          "confirm_reads": 1, "alt_floor_m": 3000},
+)
+
+
+def test_boundary_turn_does_not_yield_to_the_altitude_floor_alone(clock):
+    """The regression this pins: the altitude floor is a soft, preventive
+    backstop, not the "hitting the ground is certain" case ADR 107 D4 was
+    written for. BoundaryTurn must keep selection near the map edge even
+    while the floor is actively holding Climb's own emergency band."""
+    tree = build_tree(dict(_ALT_FLOOR_ONLY_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=1799.0, altitude_rate=0.0,
+                     boundary_dist=0.40, boundary_forward=+0.30)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_BOUNDARY_TURN, \
+        "Climb won on the altitude floor alone — the regression is not fixed"
+
+
+def test_boundary_turn_still_yields_to_ttg_when_the_floor_is_also_active(clock):
+    """Control case: a genuine ttg emergency must still win even with the
+    softer floor riding alongside it — the split must not have accidentally
+    widened BoundaryTurn's protection to swallow real emergencies too."""
+    cfg = dict(_ALT_FLOOR_ONLY_BT_CFG)
+    cfg["climb"] = dict(cfg["climb"], recover_below_time_s=30.0,
+                        confirm_bypass_time_s=15.0)
+    tree = build_tree(cfg, clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=1799.0, altitude_rate=-424.0,
+                     boundary_dist=0.40, boundary_forward=+0.30)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_CLIMB, \
+        "BoundaryTurn won despite a genuine ttg emergency alongside the floor"
 
 
 def test_selection_beats_climb_engage_and_regroup(clock):
