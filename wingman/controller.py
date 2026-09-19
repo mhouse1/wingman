@@ -1938,25 +1938,43 @@ class Controller:
         """
         return self._padlock_engaged
 
-    def note_padlock_center_dot(self, frame, now: "float | None" = None) -> None:
+    def note_padlock_center_dot(self, frame, is_respawning: bool = False,
+                                now: "float | None" = None) -> None:
         """ADR 140 D4: fused, corroborated padlock-off confirmation.
 
-        Called once per tick (tick_handlers.py, battle-state-gated, mirroring
-        the HLDD 001 terrain-ahead call site). Advances a continuous
-        all-three-true streak — in-mission, secondary weapon active, and
-        TargetTracker.detect_padlock_center_dot reading positive — and only
-        sets state False once that streak has held for
+        Called once per tick (tick_handlers.py, battle-state-gated to
+        BATTLE_STATES — GAME_BATTLE/GAME_BATTLE_MANUAL/GAME_BATTLE_EJECT —
+        mirroring the HLDD 001 terrain-ahead call site). Advances a
+        continuous both-true streak — not respawning, and
+        TargetTracker.detect_padlock_center_dot reading positive — and
+        only sets state False once that streak has held for
         padlock_center_indicator.confirm_seconds (default 2.0) of wall
-        clock, reset by any single tick where one leg is false. Never sets
-        True (see Non-Goals) and never raises — a detector failure here
-        must not affect flight.
+        clock, reset by any single tick where either leg is false. Never
+        sets True (see Non-Goals) and never raises — a detector failure
+        here must not affect flight.
 
-        The center-dot detector alone is not trusted as a sole source of
-        truth (its behaviour while padlock is actually engaged is
-        unverified — ADR 140 Open Question 1); gating it behind
-        operational context that has, so far, only ever been observed
-        alongside a confirmed-off dot narrows how much a stray false read
-        can affect.
+        ADR 140 D4 originally (2026-09-17) gated on is_mission_running()
+        AND is_secondary_weapon_active(). The third live trial (2026-09-18)
+        found is_secondary_weapon_active() false through nearly all of
+        ordinary combat, and is_mission_running() separately false for the
+        ENTIRE duration of any eject dive — not just the aborted case: the
+        mission lock releases the instant eject_and_dive calls
+        cancel_mission(), so a normal, uninterrupted eject leaves
+        is_mission_running() false from start to respawn. The raw detector
+        read correctly (confirmed against real operator screenshots) in
+        every blocked context checked, so the corroborating legs were
+        suppressing a working signal, not protecting against a broken one.
+        is_secondary_weapon_active() dropped first (Open Question 5 option
+        a); is_mission_running() then replaced with the caller-supplied
+        is_respawning (Open Question 5 option b, chosen after option a's
+        own live validation still showed eject dives — a large share of
+        real playtime — going unconfirmed) — "not GAME_LOBBY" is already
+        the call site's own BATTLE_STATES gate, so only "not respawning"
+        needed adding explicitly. GAME_BATTLE_EJECT now correctly stays
+        eligible to confirm, matching the operator's own two live examples
+        (`screenshot_20260918_072721.png` through `_072849.png`,
+        `screenshot_20260918_080219.png` through `_080530.png`) of eject
+        dives the previous gate excluded despite a correctly-reading dot.
         """
         now = time.time() if now is None else now
         if self._target_tracker is None:
@@ -1971,23 +1989,74 @@ class Controller:
         # raw per-tick reading indirectly from the fused end state — this
         # logs it directly, every tick, so a future session can correlate it
         # against real padlock_camera() presses without that inference step.
+        # mission/secondary_weapon are logged for diagnostic continuity even
+        # though D4 no longer gates on either (see docstring).
         logger.debug(
-            "Controller: padlock center-dot raw=%s mission=%s secondary_weapon=%s",
-            detected, self.is_mission_running(), self.is_secondary_weapon_active())
-        all_true = detected and self.is_mission_running() and self.is_secondary_weapon_active()
+            "Controller: padlock center-dot raw=%s mission=%s secondary_weapon=%s "
+            "respawning=%s",
+            detected, self.is_mission_running(), self.is_secondary_weapon_active(),
+            is_respawning)
+        all_true = detected and not is_respawning
         if not all_true:
             self._padlock_dot_streak_since = None
-            return
-        if self._padlock_dot_streak_since is None:
+        elif self._padlock_dot_streak_since is None:
             self._padlock_dot_streak_since = now
+        else:
+            streak_s = now - self._padlock_dot_streak_since
+            if streak_s >= self._padlock_dot_confirm_s and self._padlock_engaged is not False:
+                logger.info(
+                    "Controller: padlock-off confirmed via center-dot fusion "
+                    "(ADR 140, %.1fs streak)", streak_s)
+            if streak_s >= self._padlock_dot_confirm_s:
+                self._padlock_engaged = False
+        self._maybe_correct_padlock_unknown()
+
+    def _maybe_correct_padlock_unknown(self) -> None:
+        """ADR 140 D6: actively correct an Unknown reading for as long as
+        secondary weapons stay switched in, not just once at dive start.
+
+        orient_nose_to_target's roll correction (the whole reason ADR 136
+        D4 wanted padlock verified off in the first place) needs the
+        camera following the aircraft's own nose, not a locked target —
+        useless if padlock is actually on and this design has no way to
+        know that from Unknown alone. Pressing corrects the *ambiguous*
+        case; it is never used to try to turn padlock ON (no signal in
+        this design ever asserts that — Non-Goal 1) and never presses
+        while state is already confirmed `False`, only while it is
+        genuinely Unknown. `ignore_cancel=True` matches ADR 136 D1's own
+        precedent for actions that must work during a dive:
+        `eject_and_dive` calls `cancel_mission()` immediately, and without
+        it a press here would be cut to a near-zero-duration tap by the
+        same cancel check, unreliable to register in-game.
+
+        Fixed 2026-09-18 (operator-caught live): a real timing bug —
+        gating solely on a `now + confirm_seconds` timer let this press
+        again mid-streak, while `_padlock_dot_streak_since` was already
+        accumulating toward its own confirmation. That press flips the
+        real in-game toggle, destroying a streak that was on track to
+        succeed on its own, for no reason (state hadn't confirmed yet, so
+        the old check saw "still Unknown, cooldown elapsed" and pressed
+        anyway). The correct gate is not time since the last press, it is
+        whether the state has genuinely been *re-checked* since — a
+        streak actively building (`_padlock_dot_streak_since is not
+        None`) means this tick's check already saw something promising,
+        and must be left alone to keep accumulating or to fail on its
+        own; only a check that found *nothing* building (no streak in
+        progress) means another press is warranted. Each call to this
+        method already corresponds to exactly one fresh check (it only
+        ever runs once per tick, after that tick's own detection), so no
+        separate cooldown timer is needed on top of the streak gate.
+        """
+        if not self.is_secondary_weapon_active():
             return
-        streak_s = now - self._padlock_dot_streak_since
-        if streak_s >= self._padlock_dot_confirm_s and self._padlock_engaged is not False:
-            logger.info(
-                "Controller: padlock-off confirmed via center-dot fusion "
-                "(ADR 140, %.1fs streak)", streak_s)
-        if streak_s >= self._padlock_dot_confirm_s:
-            self._padlock_engaged = False
+        if self._padlock_engaged is not None:
+            return
+        if self._padlock_dot_streak_since is not None:
+            return   # a streak is actively building — let it be checked, not interrupted
+        logger.info(
+            "Controller: padlock unknown during secondary-weapon use — "
+            "pressing to correct (ADR 140 D6)")
+        self.padlock_camera(hold_seconds=0.1, block=True, ignore_cancel=True)
 
     def _eject_heatdive_loop(self, stop_event: threading.Event) -> None:
         """ADR 136: roll toward the tracked target and fire heat-seekers.

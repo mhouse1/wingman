@@ -1874,7 +1874,8 @@ class BehaviorTreeHandler:
         # read whatever a lobby/loading screen happens to show otherwise.
         if current_game_state in _BATTLE_STATES:
             try:
-                self._ctrl.note_padlock_center_dot(frame, now)
+                self._ctrl.note_padlock_center_dot(
+                    frame, is_respawning=bool(is_respawning), now=now)
             except Exception:
                 logger.debug("note_padlock_center_dot failed", exc_info=True)
         snap = AnalyzerSnapshot(

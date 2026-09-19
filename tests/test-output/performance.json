@@ -1,324 +1,108 @@
 {
-  "timestamp": "2026-09-18T07:02:28.193291",
+  "timestamp": "2026-09-18T20:45:46.509675",
   "version": "1.8.9",
   "tests": {
-    "test_exits_on_confirmed_fresh_recovery": {
-      "duration": 0.761837654048577,
+    "test_a_healthy_shutdown_is_not_forced": {
+      "duration": 0.20091110095381737,
       "runs": 1,
-      "min": 0.761837654048577,
-      "max": 0.761837654048577
+      "min": 0.20091110095381737,
+      "max": 0.20091110095381737
     },
-    "test_stalled_signal_does_not_end_climb": {
-      "duration": 1.005235678050667,
+    "test_a_stalled_shutdown_is_forced": {
+      "duration": 0.6014285960700363,
       "runs": 1,
-      "min": 1.005235678050667,
-      "max": 1.005235678050667
+      "min": 0.6014285960700363,
+      "max": 0.6014285960700363
     },
-    "test_max_climb_backstop": {
-      "duration": 0.503304281970486,
+    "test_the_stall_dumps_thread_stacks_before_exiting": {
+      "duration": 0.6012295559048653,
       "runs": 1,
-      "min": 0.503304281970486,
-      "max": 0.503304281970486
+      "min": 0.6012295559048653,
+      "max": 0.6012295559048653
     },
-    "test_emergency_holds_and_releases_airbrake": {
-      "duration": 0.761516670929268,
+    "test_the_timer_is_a_daemon": {
+      "duration": 0.0008125591557472944,
       "runs": 1,
-      "min": 0.761516670929268,
-      "max": 0.761516670929268
+      "min": 0.0008125591557472944,
+      "max": 0.0008125591557472944
     },
-    "test_emergency_never_presses_afterburner": {
-      "duration": 0.3210942139849067,
+    "test_the_dump_goes_to_the_log_file_not_only_stderr": {
+      "duration": 0.6011175459716469,
       "runs": 1,
-      "min": 0.3210942139849067,
-      "max": 0.3210942139849067
+      "min": 0.6011175459716469,
+      "max": 0.6011175459716469
     },
-    "test_non_emergency_never_presses_airbrake": {
-      "duration": 0.5035178877878934,
+    "test_the_watchdog_can_be_cancelled": {
+      "duration": 0.6011008941568434,
       "runs": 1,
-      "min": 0.5035178877878934,
-      "max": 0.5035178877878934
+      "min": 0.6011008941568434,
+      "max": 0.6011008941568434
     },
-    "test_emergency_escalates_mid_hold": {
-      "duration": 0.5214578500017524,
+    "test_cancelling_twice_is_harmless": {
+      "duration": 9.499397128820419e-05,
       "runs": 1,
-      "min": 0.5214578500017524,
-      "max": 0.5214578500017524
+      "min": 9.499397128820419e-05,
+      "max": 9.499397128820419e-05
     },
-    "test_emergency_de_escalates_mid_hold": {
-      "duration": 0.5214942169841379,
+    "test_arming_replaces_a_previous_watchdog": {
+      "duration": 0.001539604039862752,
       "runs": 1,
-      "min": 0.5214942169841379,
-      "max": 0.5214942169841379
+      "min": 0.001539604039862752,
+      "max": 0.001539604039862752
     },
-    "test_duplicate_start_suppressed": {
-      "duration": 0.4709492498077452,
+    "test_signal_ack_watchdog_fires_when_nothing_cancels_it": {
+      "duration": 0.6009122258983552,
       "runs": 1,
-      "min": 0.4709492498077452,
-      "max": 0.4709492498077452
+      "min": 0.6009122258983552,
+      "max": 0.6009122258983552
     },
-    "test_suppressed_while_ejecting": {
-      "duration": 0.00019470392726361752,
+    "test_signal_ack_watchdog_names_the_signal_and_bound_in_the_log": {
+      "duration": 0.6012217949610204,
       "runs": 1,
-      "min": 0.00019470392726361752,
-      "max": 0.00019470392726361752
+      "min": 0.6012217949610204,
+      "max": 0.6012217949610204
     },
-    "test_evade_preempts_running_climb": {
-      "duration": 0.26113672414794564,
+    "test_signal_ack_watchdog_dumps_thread_stacks_before_exiting": {
+      "duration": 0.6011912308167666,
       "runs": 1,
-      "min": 0.26113672414794564,
-      "max": 0.26113672414794564
+      "min": 0.6011912308167666,
+      "max": 0.6011912308167666
     },
-    "test_nose_up_programmatic_bracket": {
-      "duration": 0.5128452340140939,
+    "test_signal_ack_watchdog_is_a_daemon": {
+      "duration": 0.0006853712256997824,
       "runs": 1,
-      "min": 0.5128452340140939,
-      "max": 0.5128452340140939
+      "min": 0.0006853712256997824,
+      "max": 0.0006853712256997824
     },
-    "test_no_start_without_exit_threshold": {
-      "duration": 0.0002469189930707216,
+    "test_signal_ack_watchdog_can_be_cancelled_directly": {
+      "duration": 0.6008028159849346,
       "runs": 1,
-      "min": 0.0002469189930707216,
-      "max": 0.0002469189930707216
+      "min": 0.6008028159849346,
+      "max": 0.6008028159849346
     },
-    "test_target_alt_overrides_config_band": {
-      "duration": 1.2651436938904226,
+    "test_cancelling_signal_ack_watchdog_twice_is_harmless": {
+      "duration": 9.361188858747482e-05,
       "runs": 1,
-      "min": 1.2651436938904226,
-      "max": 1.2651436938904226
+      "min": 9.361188858747482e-05,
+      "max": 9.361188858747482e-05
     },
-    "test_target_alt_reached_ends_climb": {
-      "duration": 0.7619485429022461,
+    "test_arming_the_shutdown_watchdog_cancels_a_pending_signal_ack_watchdog": {
+      "duration": 0.601338452892378,
       "runs": 1,
-      "min": 0.7619485429022461,
-      "max": 0.7619485429022461
+      "min": 0.601338452892378,
+      "max": 0.601338452892378
     },
-    "test_fuel_config_defaults": {
-      "duration": 0.00019206898286938667,
+    "test_arming_signal_ack_watchdog_replaces_a_previous_one": {
+      "duration": 0.0009346581064164639,
       "runs": 1,
-      "min": 0.00019206898286938667,
-      "max": 0.00019206898286938667
+      "min": 0.0009346581064164639,
+      "max": 0.0009346581064164639
     },
-    "test_pitch_is_pulsed_not_held": {
-      "duration": 2.01244997093454,
+    "test_signal_ack_watchdog_does_not_fire_after_cleanup_supersedes_it": {
+      "duration": 0.5016038019675761,
       "runs": 1,
-      "min": 2.01244997093454,
-      "max": 2.01244997093454
-    },
-    "test_healthy_climb_rate_suppresses_pulse": {
-      "duration": 1.2617562098894268,
-      "runs": 1,
-      "min": 1.2617562098894268,
-      "max": 1.2617562098894268
-    },
-    "test_emergency_stops_nose_up_once_above_target": {
-      "duration": 1.5097999579738826,
-      "runs": 1,
-      "min": 1.5097999579738826,
-      "max": 1.5097999579738826
-    },
-    "test_emergency_resumes_nose_up_after_falling_back_below_target": {
-      "duration": 1.4212111569941044,
-      "runs": 1,
-      "min": 1.4212111569941044,
-      "max": 1.4212111569941044
-    },
-    "test_climb_burner_respects_fuel_floor": {
-      "duration": 1.6213998128660023,
-      "runs": 1,
-      "min": 1.6213998128660023,
-      "max": 1.6213998128660023
-    },
-    "test_climb_burner_does_not_relight_while_over_pitch_ceiling": {
-      "duration": 3.021422410849482,
-      "runs": 1,
-      "min": 3.021422410849482,
-      "max": 3.021422410849482
-    },
-    "test_climb_burner_blocked_by_predicted_pitch_ceiling": {
-      "duration": 4.422318525845185,
-      "runs": 1,
-      "min": 4.422318525845185,
-      "max": 4.422318525845185
-    },
-    "test_climb_starts_without_burner_when_fuel_empty": {
-      "duration": 0.4210427589714527,
-      "runs": 1,
-      "min": 0.4210427589714527,
-      "max": 0.4210427589714527
-    },
-    "test_climb_unknown_fuel_keeps_legacy_burner_hold": {
-      "duration": 0.320828421972692,
-      "runs": 1,
-      "min": 0.320828421972692,
-      "max": 0.320828421972692
-    },
-    "test_manual_takeover_state_ends_climb": {
-      "duration": 0.2612509620375931,
-      "runs": 1,
-      "min": 0.2612509620375931,
-      "max": 0.2612509620375931
-    },
-    "test_takeover_handler_stops_running_climb": {
-      "duration": 0.22196154086850584,
-      "runs": 1,
-      "min": 0.22196154086850584,
-      "max": 0.22196154086850584
-    },
-    "test_nose_down_pulse_above_rate_ceiling": {
-      "duration": 1.521949804853648,
-      "runs": 1,
-      "min": 1.521949804853648,
-      "max": 1.521949804853648
-    },
-    "test_no_pulse_between_rate_bands": {
-      "duration": 1.5031693880446255,
-      "runs": 1,
-      "min": 1.5031693880446255,
-      "max": 1.5031693880446255
-    },
-    "test_unset_ceiling_disables_nose_down": {
-      "duration": 1.0022592321038246,
-      "runs": 1,
-      "min": 1.0022592321038246,
-      "max": 1.0022592321038246
-    },
-    "test_over_angle_pulses_nose_down_despite_low_rate": {
-      "duration": 1.2715360030997545,
-      "runs": 1,
-      "min": 1.2715360030997545,
-      "max": 1.2715360030997545
-    },
-    "test_below_ceiling_keeps_rate_logic": {
-      "duration": 1.5046538431197405,
-      "runs": 1,
-      "min": 1.5046538431197405,
-      "max": 1.5046538431197405
-    },
-    "test_unset_ceiling_reproduces_legacy_behavior": {
-      "duration": 1.0025986509863287,
-      "runs": 1,
-      "min": 1.0025986509863287,
-      "max": 1.0025986509863287
-    },
-    "test_lead_exits_a_sample_early": {
-      "duration": 0.5018032020889223,
-      "runs": 1,
-      "min": 0.5018032020889223,
-      "max": 0.5018032020889223
-    },
-    "test_unknown_rate_falls_back_to_raw_altitude": {
-      "duration": 1.2658843519166112,
-      "runs": 1,
-      "min": 1.2658843519166112,
-      "max": 1.2658843519166112
-    },
-    "test_zero_lead_reproduces_legacy_exit": {
-      "duration": 1.2668902589939535,
-      "runs": 1,
-      "min": 1.2668902589939535,
-      "max": 1.2668902589939535
-    },
-    "test_confirm_reads_still_debounces_the_prediction": {
-      "duration": 0.6212361101061106,
-      "runs": 1,
-      "min": 0.6212361101061106,
-      "max": 0.6212361101061106
-    },
-    "test_burner_cut_at_target_and_never_relit": {
-      "duration": 1.1212868238799274,
-      "runs": 1,
-      "min": 1.1212868238799274,
-      "max": 1.1212868238799274
-    },
-    "test_exit_pushes_nose_down_when_leaving_climb_nose_high": {
-      "duration": 0.3013423839583993,
-      "runs": 1,
-      "min": 0.3013423839583993,
-      "max": 0.3013423839583993
-    },
-    "test_exit_push_stops_once_inside_the_band": {
-      "duration": 0.00020142900757491589,
-      "runs": 1,
-      "min": 0.00020142900757491589,
-      "max": 0.00020142900757491589
-    },
-    "test_exit_push_is_single_pulse_when_blind": {
-      "duration": 0.05035439901985228,
-      "runs": 1,
-      "min": 0.05035439901985228,
-      "max": 0.05035439901985228
-    },
-    "test_exit_push_budget_is_bounded": {
-      "duration": 0.30128196789883077,
-      "runs": 1,
-      "min": 0.30128196789883077,
-      "max": 0.30128196789883077
-    },
-    "test_exit_push_disabled_when_unconfigured": {
-      "duration": 0.00018819700926542282,
-      "runs": 1,
-      "min": 0.00018819700926542282,
-      "max": 0.00018819700926542282
-    },
-    "test_exit_push_yields_to_stop_event": {
-      "duration": 0.0001842749770730734,
-      "runs": 1,
-      "min": 0.0001842749770730734,
-      "max": 0.0001842749770730734
-    },
-    "test_incoming_overrides_the_fuel_reserve_floor": {
-      "duration": 1.82130506914109,
-      "runs": 1,
-      "min": 1.82130506914109,
-      "max": 1.82130506914109
-    },
-    "test_incoming_does_not_force_burner_on_an_empty_tank": {
-      "duration": 0.821020880015567,
-      "runs": 1,
-      "min": 0.821020880015567,
-      "max": 0.821020880015567
-    },
-    "test_the_boundary_turn_banks_and_pulls": {
-      "duration": 0.020846216939389706,
-      "runs": 1,
-      "min": 0.020846216939389706,
-      "max": 0.020846216939389706
-    },
-    "test_the_turn_hands_the_airframe_back_flyable": {
-      "duration": 0.5039822591934353,
-      "runs": 1,
-      "min": 0.5039822591934353,
-      "max": 0.5039822591934353
-    },
-    "test_the_turn_is_idempotent_while_running": {
-      "duration": 0.3211477817967534,
-      "runs": 1,
-      "min": 0.3211477817967534,
-      "max": 0.3211477817967534
-    },
-    "test_manual_takeover_stops_the_turn": {
-      "duration": 0.020906725199893117,
-      "runs": 1,
-      "min": 0.020906725199893117,
-      "max": 0.020906725199893117
-    },
-    "test_the_turn_reports_what_the_airframe_did": {
-      "duration": 0.00011147698387503624,
-      "runs": 1,
-      "min": 0.00011147698387503624,
-      "max": 0.00011147698387503624
-    },
-    "test_the_summary_reports_range_not_endpoints": {
-      "duration": 0.00010436493903398514,
-      "runs": 1,
-      "min": 0.00010436493903398514,
-      "max": 0.00010436493903398514
-    },
-    "test_the_turn_sampler_keys_on_the_reading_not_the_call": {
-      "duration": 0.0009229409042745829,
-      "runs": 1,
-      "min": 0.0009229409042745829,
-      "max": 0.0009229409042745829
+      "min": 0.5016038019675761,
+      "max": 0.5016038019675761
     }
   }
 }

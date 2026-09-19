@@ -1416,6 +1416,66 @@ results-screen-specific instrument. Flagged as a new, real, reproducible
 gap; not fixed here — out of scope for this ADR, which owns the emergency-
 climb/crash-instrument mechanisms, not the lobby popup-click library.
 
+## Ninth live trial (2026-09-18, short session, real crash directly
+attributable to a regression this session introduced)
+
+**Found via the operator's own diagnostic question** ("why did it fly into
+the ground with missiles still available?") against a fresh short session
+(`wingman.log`, 06:48-06:54), not proactively — worth recording plainly.
+
+Three `crash_with_missiles` events in six minutes. Two were confirmed by
+directly viewing the saved crash frames: one a hard-banked impact into a
+canyon wall during an Engage turn (unrelated to this finding — telemetry
+had gone blind 3s before impact, consistent with a fast, close-range kill
+during combat maneuvering, not a Climb-mechanism failure), one a genuine,
+unambiguous rock-face impact. The **second** of the three is what matters
+here: telemetry showed a clean, textbook unrecovered dive — 6025m to 294m
+in about 12 seconds, nose pinned between -68 and -90 degrees the entire
+way down, speed 1746-2546 KPH, `EMERGENCY` Climb correctly selected and
+airbrake correctly held from the very start (`target alt 5000`).
+
+Grepping `Controller: climb pitch pulse` across that entire 12-second
+window found exactly **one** pulse logged, at the very start, before the
+first telemetry sample even arrived. None fired again — all the way to
+impact — despite telemetry clearly reporting severe, worsening negative
+rates (-300, -570, -640, -449 m/s) the whole time.
+
+**Root cause: a regression in this session's own earlier fix.** The
+2026-09-17 fix documented in HLDD 001 / this ADR's context (suppress the
+pitch-pulse loop's "rate unknown defaults to nose-up" behavior once a
+climb hold has already reached its target, to stop a terrain-ahead false
+positive from over-rotating an already-safe aircraft) gated that
+suppression on `above_target` — the SAME one-way latch `_run_climb_hold`
+already uses to permanently cut the afterburner once a target is reached
+(ADR 083 d3, correct there: "removing the energy source is the physical
+fix for a zoom climb," and the burner should never relight after that).
+Reusing that latch for the pitch gate was the bug: this hold's very first
+telemetry sample read fractionally above the 5000m target (consistent
+with the dive having only just begun), latched `above_target = True`
+immediately, and then — because the latch never resets — suppressed every
+subsequent nose-up pulse for the rest of the hold, exactly while the
+aircraft plunged 5700+ meters in the opposite direction. The fix that
+was supposed to stop an unnecessary climb ended up disabling the real one.
+
+**Fix**: the pitch-pulse gate now re-derives "is the aircraft currently at
+or above target" from the freshest altitude sample on every check, instead
+of the sticky `above_target` latch. The afterburner cut above is
+unchanged and still correctly one-way — a burner that relights fighting
+the pitch ceiling is a different, already-solved problem (ADR 086 d6) with
+a different correct answer than the pitch axis has here. A new regression
+test, `test_emergency_resumes_nose_up_after_falling_back_below_target`
+(`tests/test_climb_mode.py`), reproduces the exact measured shape (start
+above target, fall back below it, unknown rate throughout) and was
+confirmed to fail against the pre-fix logic before being confirmed to pass
+against the fix.
+
+**Not yet live-validated** — this was diagnosed and fixed from log/frame
+evidence and a unit regression test, not yet watched live. A tenth trial
+should watch specifically for: pitch-pulse activity resuming correctly
+after a hold's `above_target` latches while genuinely still diving, and
+confirm no recurrence of a single-pulse-then-silence pattern during a real
+emergency climb.
+
 ## Related Documents
 
 - `docs/adr/073-*-climb-tactic*.md`, `docs/adr/075-*.md`,
