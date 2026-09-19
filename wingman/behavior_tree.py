@@ -109,6 +109,14 @@ class AnalyzerSnapshot:
     # as every other emergency trigger — this is the frozen measurement
     # only, consistent with boundary_dist/altitude above.
     terrain_sky_frac: "float | None" = None
+    # HLDD 001 Open Question 6 / ADR 140: Controller.padlock_state()'s
+    # tri-state (True/False/None=Unknown), frozen for this tick. The
+    # padlock camera re-points away from forward-looking whenever engaged,
+    # which can corrupt the TERRAIN_FORWARD sky-occlusion read in either
+    # direction — this exists so ClimbCondition can gate the terrain
+    # trigger on a CONFIRMED-off camera rather than trusting a read that
+    # might be looking at a locked target instead of the flight path.
+    padlock_state: "bool | None" = None
 
     @property
     def contacts(self) -> int:
@@ -664,10 +672,22 @@ class ClimbCondition:
         # on the snapshot exactly like boundary_dist/altitude — the streak
         # and threshold live here, not in the perception layer, matching
         # where every other emergency debounce in this class already lives.
+        #
+        # Open Question 6 / ADR 140 (resolved 2026-09-18): the padlock
+        # camera re-points away from forward-looking whenever engaged,
+        # which can corrupt this read in either direction. Only a
+        # CONFIRMED-off padlock_state (not Unknown — never guess ahead of
+        # a real measurement) makes the sky-fraction reading trustworthy
+        # this tick. Same policy as a missing reading: an unreadable tick
+        # resets the streak rather than freezing it, since a perception
+        # gap here is not evidence of danger the way a stale descent
+        # reading is (see the missing-reading test above this one).
         terrain_ahead = False
         if self._terrain_enabled:
             sky_frac = getattr(snapshot, "terrain_sky_frac", None)
-            if sky_frac is not None and sky_frac < self._terrain_sky_min_frac:
+            padlock_confirmed_off = getattr(snapshot, "padlock_state", None) is False
+            if (sky_frac is not None and padlock_confirmed_off
+                    and sky_frac < self._terrain_sky_min_frac):
                 self._terrain_streak += 1
             else:
                 self._terrain_streak = 0

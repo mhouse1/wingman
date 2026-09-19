@@ -1867,11 +1867,13 @@ class BehaviorTreeHandler:
             except Exception:
                 logger.debug("detect_terrain_ahead failed", exc_info=True)
                 _terrain_sky_frac = None
-        # ADR 140 D4: shadow/observational only — drives Controller's
-        # padlock_state() tri-state but nothing yet reads that state for
-        # actuation or gating (Non-Goal 2). Same battle-state gate as the
-        # terrain reading above, same reason: the center-dot crop would
-        # read whatever a lobby/loading screen happens to show otherwise.
+        # ADR 140 D4: drives Controller's padlock_state() tri-state, read
+        # below (before the snapshot) and carried onto it as
+        # snapshot.padlock_state — HLDD 001 Open Question 6's terrain-ahead
+        # trigger gates on this being confirmed False (2026-09-18). Same
+        # battle-state gate as the terrain reading above, same reason: the
+        # center-dot crop would read whatever a lobby/loading screen
+        # happens to show otherwise.
         if current_game_state in _BATTLE_STATES:
             try:
                 self._ctrl.note_padlock_center_dot(
@@ -1902,6 +1904,7 @@ class BehaviorTreeHandler:
             boundary_forward=_b_fwd,
             has_padlock=self._has_padlock,
             terrain_sky_frac=_terrain_sky_frac,
+            padlock_state=self._ctrl.padlock_state(),
         )
         self._writer.set("snapshot", snap)
         # Anomaly 007: refresh Climb's ttg emergency verdict unconditionally,

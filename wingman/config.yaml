@@ -585,7 +585,20 @@ behavior_tree:
     # detected reliably. The ttg/recover_below_time_s OR-term above is
     # telemetry-only and unaffected by camera view; it is NOT part of
     # this reversion.
-    terrain_avoidance: {enabled: true, shadow: true, sky_min_frac: 0.55,
+    #
+    # RE-GRADUATED 2026-09-18 (operator decision): ADR 140's padlock
+    # detector landed and was live-validated (1h41m full session, 24
+    # correction presses, zero landing mid-streak, 39/39 secondary-weapon
+    # episodes stayed confirmed-off once reached). ClimbCondition now
+    # gates the terrain streak on snapshot.padlock_state being CONFIRMED
+    # False (not Unknown), not on removing the concern — see HLDD 001
+    # Open Question 6. This also closes the original motivating gap: a
+    # respawn sets padlock_state() False immediately (ADR 140 D2), so the
+    # terrain trigger is now live exactly during the vulnerable
+    # just-respawned/flying-forward window. Watch the first live
+    # actuations under the new gate closely, same as the first 2026-09-16
+    # graduation.
+    terrain_avoidance: {enabled: true, shadow: false, sky_min_frac: 0.55,
       confirm_reads: 2, capture_max: 40, capture_cooldown_s: 20.0}
 # ADR 028 revision 4: `regroup_enabled` gives the navigator a command on the
 # ticks where no enemy is on the minimap — 57% of battle ticks measured over an

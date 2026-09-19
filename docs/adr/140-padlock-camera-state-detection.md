@@ -370,7 +370,14 @@ ADR 136 D4 itself found broken.
    follow-on change to `tick_handlers.py`, made only after this detector has
    its own live validation — re-graduating the terrain trigger itself stays
    the operator's own explicit decision, per HLDD 001's existing framing of
-   its 2026-09-16 graduation.
+   its 2026-09-16 graduation. **Done 2026-09-18, operator decision**, after
+   this detector's own full-session live validation (Fifth live trial
+   below): `AnalyzerSnapshot.padlock_state` now carries this tri-state onto
+   the snapshot, and `ClimbCondition.update_emergency` gates the terrain
+   streak on it being confirmed `False` — see HLDD 001's "Config" section
+   and Open Question 6 for the full detail. This ADR's own scope (the
+   detector itself) is otherwise unchanged; this note exists so this
+   Non-Goal doesn't read as still-current.
 3. **Not re-enabling `ensure_padlock_off` itself.** ADR 136 D4's ring-based
    detector, its disabled call site, and its up-to-3-rapid-attempts retry
    shape are all still untouched — `Controller.ensure_padlock_off()` is not

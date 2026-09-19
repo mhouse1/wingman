@@ -650,10 +650,14 @@ class TestTerrainAheadTrigger:
 
     Same confirm-reads debounce shape as the ttg trigger above, driven by
     ``snapshot.terrain_sky_frac`` (a raw per-tick fraction from
-    ``analyzer.detect_terrain_ahead``) rather than altitude/rate. Ships with
-    ``terrain_shadow: true`` in production config.yaml — computed and
-    logged, not yet actuating — until live sessions validate the
-    false-positive rate on hazy skies.
+    ``analyzer.detect_terrain_ahead``) rather than altitude/rate, and gated
+    on ``snapshot.padlock_state`` being CONFIRMED False (ADR 140 / Open
+    Question 6, resolved 2026-09-18) — the padlock camera re-points away
+    from forward-looking whenever engaged, which can corrupt the sky
+    reading in either direction. Unless a test is specifically exercising
+    that gate, ``_cond``/``_snap`` below default padlock_state=False so the
+    rest of the debounce logic can be tested in isolation, the same way
+    these tests already isolate sky_frac from altitude.
     """
 
     @staticmethod
@@ -664,18 +668,23 @@ class TestTerrainAheadTrigger:
         opts.update(kw)
         return make_climb_condition(500, 1000, **opts)
 
+    @staticmethod
+    def _snap(**kw):
+        kw.setdefault("padlock_state", False)
+        return make_snap(**kw)
+
     def test_clear_sky_never_triggers(self):
         clock = FakeClock()
         cond = self._cond(clock)
         for _ in range(5):
-            cond(make_snap(altitude=5000.0, terrain_sky_frac=0.95))
+            cond(self._snap(altitude=5000.0, terrain_sky_frac=0.95))
         assert cond.terrain_ahead_active is False
         assert cond.emergency_active is False
 
     def test_low_sky_fraction_triggers_after_confirm_reads(self):
         clock = FakeClock()
         cond = self._cond(clock)
-        snap = make_snap(altitude=5000.0, terrain_sky_frac=0.20)
+        snap = self._snap(altitude=5000.0, terrain_sky_frac=0.20)
         cond(snap)
         assert cond.emergency_active is False, \
             "fired on the first read, before terrain_confirm_reads"
@@ -688,9 +697,9 @@ class TestTerrainAheadTrigger:
         command a climb — the streak resets on the intervening good read."""
         clock = FakeClock()
         cond = self._cond(clock, terrain_confirm_reads=2)
-        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.20))
-        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.95))
-        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.20))
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=0.20))
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=0.95))
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=0.20))
         assert cond.emergency_active is False, \
             "streak should have reset on the intervening high-sky read"
 
@@ -701,9 +710,9 @@ class TestTerrainAheadTrigger:
         ``if sky_frac is not None`` branch."""
         clock = FakeClock()
         cond = self._cond(clock)
-        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.20))
-        cond(make_snap(altitude=5000.0, terrain_sky_frac=None))
-        cond(make_snap(altitude=5000.0, terrain_sky_frac=0.20))
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=0.20))
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=None))
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=0.20))
         assert cond.emergency_active is False
 
     def test_shadow_mode_logs_but_does_not_actuate(self):
@@ -713,7 +722,7 @@ class TestTerrainAheadTrigger:
         nothing actually climbs on it yet."""
         clock = FakeClock()
         cond = self._cond(clock, terrain_shadow=True)
-        snap = make_snap(altitude=5000.0, terrain_sky_frac=0.20)
+        snap = self._snap(altitude=5000.0, terrain_sky_frac=0.20)
         cond(snap)
         cond(snap)
         assert cond.terrain_ahead_active is True
@@ -724,11 +733,82 @@ class TestTerrainAheadTrigger:
         affect the condition at all unless explicitly turned on."""
         clock = FakeClock()
         cond = make_climb_condition(500, 1000, confirm_reads=1, clock=clock)
-        snap = make_snap(altitude=5000.0, terrain_sky_frac=0.05)
+        snap = self._snap(altitude=5000.0, terrain_sky_frac=0.05)
         cond(snap)
         cond(snap)
         assert cond.emergency_active is False
         assert cond.terrain_ahead_active is False
+
+    # -- ADR 140 / Open Question 6: the padlock gate itself -----------------
+
+    def test_padlock_engaged_blocks_the_terrain_trigger(self):
+        """Low sky fraction while padlock is confirmed True (camera is
+        actually looking at a locked target, not the flight path) must not
+        accumulate toward a climb — the reading isn't trustworthy."""
+        clock = FakeClock()
+        cond = self._cond(clock)
+        snap = self._snap(altitude=5000.0, terrain_sky_frac=0.20, padlock_state=True)
+        cond(snap)
+        cond(snap)
+        assert cond.terrain_ahead_active is False
+        assert cond.emergency_active is False
+
+    def test_padlock_unknown_blocks_the_terrain_trigger(self):
+        """Unknown must never be treated as good enough — only a CONFIRMED
+        False padlock_state makes the sky reading trustworthy. Guessing
+        ahead of a real measurement is exactly what this design avoids
+        elsewhere (ADR 140 Non-Goal 1); the terrain gate holds to the same
+        standard."""
+        clock = FakeClock()
+        cond = self._cond(clock)
+        snap = self._snap(altitude=5000.0, terrain_sky_frac=0.20, padlock_state=None)
+        cond(snap)
+        cond(snap)
+        assert cond.terrain_ahead_active is False
+        assert cond.emergency_active is False
+
+    def test_padlock_confirmed_off_allows_the_terrain_trigger(self):
+        """The positive case: padlock_state False plus a real low sky
+        fraction accumulates and fires exactly like the un-gated tests
+        above — the gate adds a precondition, it doesn't change the
+        underlying debounce behavior."""
+        clock = FakeClock()
+        cond = self._cond(clock)
+        snap = self._snap(altitude=5000.0, terrain_sky_frac=0.20, padlock_state=False)
+        cond(snap)
+        assert cond.emergency_active is False
+        cond(snap)
+        assert cond.emergency_active is True
+
+    def test_padlock_engaging_mid_streak_resets_it(self):
+        """Same policy as a missing reading: padlock engaging partway
+        through an accumulating streak must reset it, not freeze or ignore
+        it — a tick where the camera view can't be trusted is not evidence
+        either way."""
+        clock = FakeClock()
+        cond = self._cond(clock, terrain_confirm_reads=2)
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=0.20, padlock_state=False))
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=0.20, padlock_state=True))
+        cond(self._snap(altitude=5000.0, terrain_sky_frac=0.20, padlock_state=False))
+        assert cond.emergency_active is False, \
+            "streak should have reset while padlock was engaged mid-sequence"
+
+    def test_respawn_confirms_padlock_off_so_the_gate_is_satisfiable(self):
+        """HLDD 001's original motivating case: flying forward into terrain
+        right after a respawn. ADR 140 D2 sets padlock_state() False on
+        every respawn detection (Controller.stop_eject_sequence), so the
+        gate this test exercises is exactly what makes the terrain trigger
+        live during that specific vulnerable window — this test pins the
+        integration point (padlock confirmed False + real low sky
+        fraction fires), not the respawn detection itself (that's
+        Controller's own tests)."""
+        clock = FakeClock()
+        cond = self._cond(clock)
+        snap = self._snap(altitude=100.0, terrain_sky_frac=0.15, padlock_state=False)
+        cond(snap)
+        cond(snap)
+        assert cond.terrain_ahead_active is True
+        assert cond.emergency_active is True
 
 
 class TestDiveRecoveryRespawnGuard:
@@ -1021,12 +1101,30 @@ def test_boundary_turn_yields_to_a_terrain_emergency(clock):
     writer = make_snapshot_writer()
     snap = make_snap(altitude=5000.0, altitude_rate=0.0,
                      boundary_dist=0.40, boundary_forward=+0.30,
-                     terrain_sky_frac=0.20)
+                     terrain_sky_frac=0.20, padlock_state=False)
     writer.set("snapshot", snap)
     tree.climb_emergency_update_fn(snap, clock())
     tree.tick()
     assert selected_tactic(tree) == TACTIC_CLIMB, \
         "BoundaryTurn still won — the terrain emergency was not fresh in time"
+
+
+def test_boundary_turn_keeps_selection_when_padlock_is_not_confirmed_off(clock):
+    """ADR 140 / Open Question 6, through the real tree: a real low sky
+    fraction must not force Climb while the padlock camera isn't confirmed
+    pointed forward — the same case test_padlock_engaged_blocks_the_
+    terrain_trigger proves at the ClimbCondition level, exercised here
+    through full selection."""
+    tree = build_tree(dict(_TERRAIN_DIVE_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=5000.0, altitude_rate=0.0,
+                     boundary_dist=0.40, boundary_forward=+0.30,
+                     terrain_sky_frac=0.20, padlock_state=True)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_BOUNDARY_TURN, \
+        "Climb won despite padlock not being confirmed off"
 
 
 def test_boundary_turn_keeps_selection_when_terrain_is_shadowed(clock):
@@ -1040,7 +1138,7 @@ def test_boundary_turn_keeps_selection_when_terrain_is_shadowed(clock):
     writer = make_snapshot_writer()
     snap = make_snap(altitude=5000.0, altitude_rate=0.0,
                      boundary_dist=0.40, boundary_forward=+0.30,
-                     terrain_sky_frac=0.20)
+                     terrain_sky_frac=0.20, padlock_state=False)
     writer.set("snapshot", snap)
     tree.climb_emergency_update_fn(snap, clock())
     tree.tick()
@@ -1059,14 +1157,14 @@ def test_climb_terrain_ahead_fn_is_exposed_and_tracks_the_edge(clock):
     writer = make_snapshot_writer()
     clear_snap = make_snap(altitude=5000.0, altitude_rate=0.0,
                            boundary_dist=0.40, boundary_forward=+0.30,
-                           terrain_sky_frac=0.95)
+                           terrain_sky_frac=0.95, padlock_state=False)
     writer.set("snapshot", clear_snap)
     tree.climb_emergency_update_fn(clear_snap, clock())
     tree.tick()
     assert tree.climb_terrain_ahead_fn() is False
     low_snap = make_snap(altitude=5000.0, altitude_rate=0.0,
                          boundary_dist=0.40, boundary_forward=+0.30,
-                         terrain_sky_frac=0.20)
+                         terrain_sky_frac=0.20, padlock_state=False)
     writer.set("snapshot", low_snap)
     tree.climb_emergency_update_fn(low_snap, clock())
     tree.tick()

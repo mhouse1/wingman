@@ -297,6 +297,36 @@ itself validated; the false-positive taxonomy in "Live trial results" below
 was gathered without controlling for padlock state at all, so it should not
 be read as having already accounted for this.
 
+**Re-graduated to `shadow: false` on 2026-09-18**, operator decision. ADR
+140 (the padlock-engaged detector this section said graduation was gated
+on) landed and was live-validated the same day: a full, clean 1h41m
+session showed 24 corrective presses with zero landing mid-streak, and all
+39 secondary-weapon episodes that reached a confirmed padlock-off stayed
+off for the rest of the episode — see ADR 140's Fifth live trial for the
+full numbers. `ClimbCondition.update_emergency` now gates the terrain
+streak on `snapshot.padlock_state is False` specifically (not merely "not
+True" — Unknown does not count, matching ADR 140 Non-Goal 1's own
+never-guess-ahead-of-measurement standard): a tick where padlock isn't
+confirmed pointed forward resets the streak exactly like a missing
+`terrain_sky_frac` reading does, rather than accumulating toward a climb
+on an untrustworthy view. `snapshot.padlock_state` is a new field on
+`AnalyzerSnapshot`, populated from `Controller.padlock_state()` in
+`tick_handlers.py` at the same pre-snapshot point `note_padlock_center_dot`
+already runs.
+
+This also closes the original motivating gap directly, not just the
+padlock-interference side question: `Controller.stop_eject_sequence`
+(ADR 140 D2) sets `padlock_state()` False on every respawn detection, so
+the terrain trigger is now live exactly during the just-respawned/flying-
+forward window "The problem, measured" opens with — no separate
+respawn-specific logic was needed. Unit and integration coverage added in
+`tests/test_behavior_tree.py` (`TestTerrainAheadTrigger`'s padlock-gate
+cases, plus `test_boundary_turn_keeps_selection_when_padlock_is_not_
+confirmed_off`). Watch the first live actuations under the new gate
+closely, same as the first 2026-09-16 graduation — this is a fresh
+combination (real terrain trigger, now padlock-gated) that has not yet
+held the controls live.
+
 ### Testing plan
 
 - Unit (done, `TestTerrainAheadTrigger` in `test_behavior_tree.py`): clear
@@ -535,7 +565,8 @@ semantic segmentation model (e.g. MobileNetV3 + DeepLabV3).
    be revisited once Phase 1 ships (Design 004's currently-unsatisfiable
    hard gate, Design 011's open fork question) — not done as part of this
    redesign, which is scoped to Design 001 itself.
-6. **Padlock camera interference — new 2026-09-17, unresolved.** The
+6. **Padlock camera interference — new 2026-09-17, resolved 2026-09-18
+   (see "Config" above).** The
    padlock camera (`Controller._start_search_and_destroy_locked`'s
    `_padlock_loop`, ADR 136) re-points the capture away from
    forward-looking whenever it engages — roughly every ~6s during ordinary
