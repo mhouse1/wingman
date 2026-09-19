@@ -1476,6 +1476,37 @@ after a hold's `above_target` latches while genuinely still diving, and
 confirm no recurrence of a single-pulse-then-silence pattern during a real
 emergency climb.
 
+## Tenth live trial (2026-09-19, found via a direct operator report,
+a different bug in the same mechanism)
+
+**Not the above_target regression** — grepping `Controller: climb pitch
+pulse` around this incident shows pulses firing repeatedly and correctly
+choosing "up" throughout, so the Ninth trial's fix held here. The operator
+directly observed live behavior this session ("on respawn i'm observing it
+nose down holding the jet at low altitude") and pointed at three real
+screenshots; tracing `wingman.log` around them found a distinct, more
+fundamental bug one layer earlier: `_climb_exit_push` (ADR 086 d1 / SAF-010
+— the nose-down maneuver that runs on every climb-hold release, in
+`_run_climb_hold`'s `finally` block, before pitch pulses would even get a
+chance to run again) could hand back control while the aircraft had already
+overshot from a steep climb straight through level into a real dive,
+misreporting that overshoot as a safe, in-band landing. Full trace, fix,
+and regression tests are in ADR 086's own new section ("d1 exit-push
+overshoot bug, found live 2026-09-19") rather than duplicated here, since
+d1 is that ADR's decision, not this one's — this entry exists so a reader
+arriving at this ADR's "Ninth live trial" (the same general symptom: Climb
+correctly selected and pulsing, aircraft crashes anyway) finds the pointer
+rather than assuming it's unexplained or the same root cause. **Fixed same
+day, not yet live-validated** — needs its own live trial, same as the
+Ninth's.
+
+This may also be a plausible explanation for two other same-session
+episodes with a similar "climb correctly engages, crashes anyway" shape
+(22:50:45-54, 00:19:40-53, found while investigating this session more
+generally) — but those two do not have a `climb exit` log line immediately
+preceding them the way this one does, so that connection is a hypothesis,
+not a measured finding, and is left open rather than claimed.
+
 ## Related Documents
 
 - `docs/adr/073-*-climb-tactic*.md`, `docs/adr/075-*.md`,

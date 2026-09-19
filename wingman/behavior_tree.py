@@ -229,7 +229,7 @@ def is_eject_confirmed(snapshot: AnalyzerSnapshot) -> bool:
     return snapshot.missiles_empty_confirmed and not snapshot.survival_hold
 
 
-def make_missile_evade_condition(is_running_fn=None):
+def make_missile_evade_condition(is_running_fn=None, yields_to_fn=None):
     """ADR 070: true on incoming detection, sticky while the evade hold runs.
 
     The stickiness is what keeps Engage from re-selecting on the first clear
@@ -241,8 +241,24 @@ def make_missile_evade_condition(is_running_fn=None):
     desynchronise selection from actuation. mission_running is deliberately
     not tested (ADR 070 d9) — a missile is a threat with or without a mission
     thread, and the tactic never touches mission state.
+
+    ``yields_to_fn`` (operator directive, 2026-09-19, same shape as
+    BoundaryTurn's ADR 107 D4): MissileEvade outranks Climb in the selector
+    and had no way to cede the airframe to it, at any altitude, for any
+    reason. Measured live the same night: a MissileEvade hold ran ~6s while
+    the aircraft bled speed to near-stall (27 KPH, then a violent ~745m
+    altitude loss under a second later) with nothing watching underneath
+    it — Climb's own emergency verdict only got a chance to matter once the
+    evade tactic released on its own. Checked first, unconditionally, same
+    as BoundaryTurn: hitting the ground is certain, evading a missile is a
+    probability trade, and this tactic has its own thread-level fuel/state
+    gating (SAF-013) independent of this condition either way — yielding
+    here does not strand the actuator, it just stops the SELECTOR from
+    re-choosing it next tick.
     """
     def missile_evade(snapshot: AnalyzerSnapshot) -> bool:
+        if yields_to_fn is not None and yields_to_fn():
+            return False
         if snapshot.incoming_detected:
             return True
         return is_running_fn is not None and is_running_fn()
@@ -518,7 +534,8 @@ class ClimbCondition:
                 terrain_enabled: bool = False,
                 terrain_shadow: bool = True,
                 terrain_sky_min_frac: float = 0.55,
-                terrain_confirm_reads: int = 2):
+                terrain_confirm_reads: int = 2,
+                alt_floor_m: "float | None" = None):
         self._enter_below_alt = enter_below_alt
         self._exit_above_alt = exit_above_alt
         self._is_running_fn = is_running_fn
@@ -546,6 +563,17 @@ class ClimbCondition:
         self._terrain_confirm_reads = terrain_confirm_reads
         self._terrain_streak = 0
         self._terrain_ahead_active = False
+        # Operator directive, 2026-09-19: a third, deliberately simple
+        # OR-term — no rate, no debounce streak, just "altitude below this
+        # is never acceptable, climb now." Added after a live crash where
+        # MissileEvade held the airframe for ~6s while the aircraft bled
+        # speed to near-stall (27 KPH) and altitude collapsed, with neither
+        # the ttg trigger (rate-based, and MissileEvade has no yields_to_fn
+        # to react to it anyway) nor the terrain trigger catching it in
+        # time. This is the backstop the other two don't cover: a hard
+        # floor, independent of how fast the aircraft got there.
+        self._alt_floor_m = alt_floor_m
+        self._alt_floor_active = False
 
     @property
     def active(self) -> bool:
@@ -558,6 +586,10 @@ class ClimbCondition:
     @property
     def terrain_ahead_active(self) -> bool:
         return self._terrain_ahead_active
+
+    @property
+    def alt_floor_active(self) -> bool:
+        return self._alt_floor_active
 
     @property
     def streak(self) -> int:
@@ -703,6 +735,26 @@ class ClimbCondition:
             if not self._terrain_shadow:
                 emergency = emergency or terrain_ahead
 
+        # Operator directive, 2026-09-19: hard altitude floor, no rate
+        # involved. Deliberately the simplest possible check — snapshot.
+        # altitude below the floor is an emergency, full stop, regardless
+        # of whether the aircraft is diving, level, or even climbing too
+        # slowly. This is what catches the near-stall case the other two
+        # triggers cannot: ttg needs a negative rate to compute anything,
+        # and a stalled aircraft can show a near-zero or even briefly
+        # positive rate while still critically low and unable to climb
+        # away in time.
+        alt_floor = False
+        if self._alt_floor_m is not None and snapshot.altitude is not None:
+            alt_floor = snapshot.altitude < float(self._alt_floor_m)
+            if alt_floor and not self._alt_floor_active:
+                logger.warning(
+                    "BT: ALTITUDE FLOOR — %.0fm below %.0fm — climb forced "
+                    "(operator directive 2026-09-19)",
+                    snapshot.altitude, self._alt_floor_m)
+        self._alt_floor_active = alt_floor
+        emergency = emergency or alt_floor
+
         self._emergency_active = bool(emergency)
         self._pending_reevaluation = True
         return self._emergency_active
@@ -757,7 +809,8 @@ def make_climb_condition(enter_below_alt: "float | None",
                          terrain_enabled: bool = False,
                          terrain_shadow: bool = True,
                          terrain_sky_min_frac: float = 0.55,
-                         terrain_confirm_reads: int = 2) -> ClimbCondition:
+                         terrain_confirm_reads: int = 2,
+                         alt_floor_m: "float | None" = None) -> ClimbCondition:
     """ADR 139 D3: thin factory kept so every existing call site — production
     and test — is unchanged. See ``ClimbCondition`` for the logic."""
     return ClimbCondition(enter_below_alt, exit_above_alt,
@@ -769,7 +822,8 @@ def make_climb_condition(enter_below_alt: "float | None",
                           terrain_enabled=terrain_enabled,
                           terrain_shadow=terrain_shadow,
                           terrain_sky_min_frac=terrain_sky_min_frac,
-                          terrain_confirm_reads=terrain_confirm_reads)
+                          terrain_confirm_reads=terrain_confirm_reads,
+                          alt_floor_m=alt_floor_m)
 
 
 def make_sustain_climb_condition(enter_below_alt: "float | None",
@@ -891,6 +945,10 @@ def _build_eject_slot(ctx: "_BuildContext"):
 
 
 def _build_missile_evade_slot(ctx: "_BuildContext"):
+    """ADR 070, extended by operator directive 2026-09-19 D-yield: reads
+    ``ctx.climb_emergency_fn`` — built by ``_build_climb_slot``, which
+    ``_build_slots`` therefore calls first, same ordering BoundaryTurn's
+    slot already relies on."""
     # ADR 070: the is_running_fn feeds BOTH the actuation gate and the
     # condition's stickiness — the selection must not fall through to Engage
     # while the evade thread still owns the roll axis.
@@ -898,10 +956,13 @@ def _build_missile_evade_slot(ctx: "_BuildContext"):
     if missile_evade_fns is not None:
         return ConditionTactic(
             TACTIC_MISSILE_EVADE,
-            make_missile_evade_condition(missile_evade_fns[1]),
+            make_missile_evade_condition(
+                missile_evade_fns[1], yields_to_fn=ctx.climb_emergency_fn),
             start_fn=missile_evade_fns[0],
             is_running_fn=missile_evade_fns[1])
-    return ConditionTactic(TACTIC_MISSILE_EVADE, make_missile_evade_condition())
+    return ConditionTactic(
+        TACTIC_MISSILE_EVADE,
+        make_missile_evade_condition(yields_to_fn=ctx.climb_emergency_fn))
 
 
 def _build_evade_slot(ctx: "_BuildContext"):
@@ -981,7 +1042,10 @@ def _build_climb_slot(ctx: "_BuildContext"):
         terrain_enabled=bool(_terrain_cfg.get("enabled", False)),
         terrain_shadow=bool(_terrain_cfg.get("shadow", True)),
         terrain_sky_min_frac=float(_terrain_cfg.get("sky_min_frac", 0.55)),
-        terrain_confirm_reads=int(_terrain_cfg.get("confirm_reads", 2)))
+        terrain_confirm_reads=int(_terrain_cfg.get("confirm_reads", 2)),
+        # Operator directive, 2026-09-19: simple hard altitude floor, unset
+        # (None) disables it — same opt-in shape as recover_below_time_s.
+        alt_floor_m=climb_cfg.get("alt_floor_m"))
     # ADR 075: the armed altitude-sustain band shares the leaf with the
     # emergency band. Both closures are evaluated EVERY tick (no
     # short-circuit) so neither hysteresis state machine goes stale while
@@ -1075,7 +1139,8 @@ def _build_slots(ctx: "_BuildContext") -> dict:
     """Build every leaf, returning ``{name: Behaviour}`` for the present ones.
 
     Build order here is deliberately NOT ``_PRIORITY_ORDER`` — it only has to
-    satisfy real data dependencies (Climb built before Boundary).
+    satisfy real data dependencies (Climb built before Boundary and, as of
+    2026-09-19, before MissileEvade too).
     ``build_tree`` assembles the final children list by walking
     ``_PRIORITY_ORDER`` and looking each name up here, so priority rank is
     declared once, in one place, independent of this function's build
@@ -1085,7 +1150,6 @@ def _build_slots(ctx: "_BuildContext") -> dict:
         TACTIC_IDLE: _build_idle_slot(ctx),
         TACTIC_RESPAWN_WAIT: _build_respawn_wait_slot(ctx),
         TACTIC_EJECT: _build_eject_slot(ctx),
-        TACTIC_MISSILE_EVADE: _build_missile_evade_slot(ctx),
         TACTIC_EVADE: _build_evade_slot(ctx),
         TACTIC_DISENGAGE: _build_disengage_slot(ctx),
         TACTIC_ENGAGE: _build_engage_slot(ctx),
@@ -1097,6 +1161,9 @@ def _build_slots(ctx: "_BuildContext") -> dict:
     boundary_leaf = _build_boundary_slot(ctx)  # reads ctx.climb_emergency_fn
     if boundary_leaf is not None:
         built[TACTIC_BOUNDARY_TURN] = boundary_leaf
+    # Operator directive, 2026-09-19: reads ctx.climb_emergency_fn, same
+    # dependency as boundary above — must build after climb.
+    built[TACTIC_MISSILE_EVADE] = _build_missile_evade_slot(ctx)
     regroup_leaf = _build_regroup_slot(ctx)
     if regroup_leaf is not None:
         built[TACTIC_REGROUP] = regroup_leaf

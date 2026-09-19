@@ -1841,6 +1841,14 @@ class BehaviorTreeHandler:
                 current_game_state, self._ctrl.is_mission_running())
         except Exception:
             logger.debug("note_afterburner_cruise failed", exc_info=True)
+        # Operator directive, 2026-09-19: same tree-independent, every-tick
+        # shape as cruise above — a stall is an airframe state, not a
+        # tactic, and must not wait for the tree to select something that
+        # cares about airspeed.
+        try:
+            self._ctrl.note_stall_prevention(current_game_state)
+        except Exception:
+            logger.debug("note_stall_prevention failed", exc_info=True)
         # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
         # control loop, so it needs the reading rather than the tactic.
         try:
@@ -1860,8 +1868,21 @@ class BehaviorTreeHandler:
         # isn't configured. Whether the reading actually forces a climb is
         # gated separately, inside ClimbCondition
         # (behavior_tree.climb.terrain_avoidance.enabled).
+        #
+        # Live 2026-09-18 (first live actuation session, HLDD 001 "Live
+        # trial results" — Config update): the respawn overlay itself is
+        # still within _BATTLE_STATES (is_respawning=True, game_state not
+        # yet transitioned) and reads as a dark, non-sky screen — sky
+        # fraction 0.00, indistinguishable from real terrain, repeating
+        # every confirm_reads window for the whole respawn screen's
+        # duration. It never won selection (RespawnWait outranks Climb)
+        # but it did produce repeated false WARNING logs and burned the
+        # evidence-capture budget on menu noise, exactly what the
+        # battle-state gate above already intends to exclude for every
+        # OTHER menu screen. Same fix as D2/D4's respawn exclusion
+        # elsewhere in this codebase: also require not is_respawning.
         _terrain_sky_frac = None
-        if current_game_state in _BATTLE_STATES:
+        if current_game_state in _BATTLE_STATES and not is_respawning:
             try:
                 _terrain_sky_frac = self._analyzer.detect_terrain_ahead(frame)
             except Exception:

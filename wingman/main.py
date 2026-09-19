@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.9"
-WINGMAN_VERSION_DETAILS = "ACS mission_j20 next phase, switch to secondary weapons then guide towards target during dive"
+WINGMAN_VERSION = "1.8.10"
+WINGMAN_VERSION_DETAILS = "ACS basic terrain avoidance, padlock state detection"
 
 from .capture import Capture
 from .config_schema import assert_valid_config

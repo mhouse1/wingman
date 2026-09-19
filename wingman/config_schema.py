@@ -340,6 +340,16 @@ SCHEMA = Section(
                 "rearm_fuel_pct": _num(0, 100),
                 "confirm_reads": _int(1),
             }),
+            # Operator directive, 2026-09-19: below min_speed_kph, release
+            # the airbrake and hold the afterburner — reducing drag and
+            # adding thrust is the correct response to a near-stall
+            # regardless of what any other tactic currently wants those two
+            # keys doing.
+            "stall_prevention": Section(children={
+                "enabled": BOOL,
+                "min_speed_kph": _num(0),
+                "confirm_reads": _int(1),
+            }),
             "boundary": Section(children={
                 "turn_frac": FRACTION,
                 "recede_frac": FRACTION,
@@ -363,6 +373,9 @@ SCHEMA = Section(
                 "pitch_lead_s": SECONDS,
                 "recover_below_time_s": Leaf(types=NUMBER, allow_none=True),
                 "confirm_bypass_time_s": Leaf(types=NUMBER, allow_none=True),
+                # Operator directive, 2026-09-19: hard altitude floor,
+                # independent of rate — unset disables it.
+                "alt_floor_m": Leaf(types=NUMBER, allow_none=True),
                 "descent_memory_s": SECONDS,
                 "exit_pitch_deg": Leaf(types=NUMBER, allow_none=True),
                 "exit_push_pulse_s": SECONDS,

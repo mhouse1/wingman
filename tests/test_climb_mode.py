@@ -1013,6 +1013,68 @@ def test_exit_push_disabled_when_unconfigured(monkeypatch):
     assert not _presses(kb, NOSE_DOWN_KEY)
 
 
+def test_exit_push_corrects_an_overshoot_into_a_dive(monkeypatch):
+    """Live 2026-09-19 (operator-caught, screenshot_20260919_002537 and
+    later): two nose-down pulses swung the aircraft from a steep climb
+    straight through level into a real -38deg dive. The old check
+    (`angle <= target`) treated -38 <= +20 as a successful landing in the
+    flyable band and released control right as the aircraft was diving —
+    a fresh emergency climb re-engaged 0.3s later, but by the time it had
+    fresh telemetry to act on the dive had already worsened to -90deg at
+    456m and 1000+ kph, too late to recover. The exit push must detect an
+    overshoot below zero and correct with nose-up before handing back
+    control, not report success while the aircraft is mid-dive."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(fuel=90)
+    cfg = dict(CFG, exit_pitch_deg=20.0, exit_push_pulse_s=0.05,
+               exit_push_max_pulses=8)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+    analyzer.set(1200.0, time.time(), fresh=True, angle=73.0)   # steep climb
+
+    result = {}
+
+    def run():
+        result["reason"] = ctrl._climb_exit_push()
+
+    def _poll_until(predicate, timeout=3.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    assert _poll_until(lambda: _presses(kb, NOSE_DOWN_KEY)), \
+        "never pushed down out of the steep climb"
+    analyzer.set(1200.0, time.time(), fresh=True, angle=-38.0)   # overshot into a dive
+    assert _poll_until(lambda: _presses(kb, NOSE_UP_KEY)), \
+        "did not correct the dive overshoot with nose-up"
+    analyzer.set(1200.0, time.time(), fresh=True, angle=10.0)    # corrected back in band
+    t.join(timeout=3.0)
+
+    assert result.get("reason") == "in_band", \
+        "did not recognize the corrected, in-band angle"
+    assert _releases(kb, NOSE_UP_KEY), "nose-up correction never released"
+
+
+def test_exit_push_never_reports_in_band_while_diving(monkeypatch):
+    """Direct pin on the old bug: a negative angle must never satisfy the
+    exit condition, no matter how far below the target it is."""
+    kb = _FakeKeyboard()
+    analyzer = _FakeTelemetryAnalyzer(fuel=90)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, EXIT_CFG)
+    analyzer.set(1200.0, time.time(), fresh=True, angle=-90.0)   # steep dive
+
+    reason = ctrl._climb_exit_push()
+
+    assert reason != "in_band", \
+        "a steep dive (-90deg) was accepted as a safe, in-band handoff"
+    assert _presses(kb, NOSE_UP_KEY), \
+        "a dive angle must correct with nose-up, not nose-down"
+
+
 def test_exit_push_yields_to_stop_event(monkeypatch):
     """Manual takeover / cleanup must cut the exit push (SAF-001, SAF-008)."""
     kb = _FakeKeyboard()
@@ -1136,6 +1198,35 @@ def test_the_turn_hands_the_airframe_back_flyable(monkeypatch):
     assert _releases(kb, ROLL_RIGHT_KEY), "roll left held"
     assert _releases(kb, NOSE_UP_KEY), "nose-up left held"
     assert _presses(kb, NOSE_DOWN_KEY), "no SAF-010 exit push"
+
+
+def test_the_turn_skips_its_own_handback_when_a_climb_hold_already_owns_pitch(monkeypatch):
+    """Live 2026-09-19 (operator-caught, screenshot_20260919_011535 — "it
+    nose dived and died, not from enemy fire"): stop_boundary_turn() only
+    signals a stop event and returns — this cleanup runs on the turn's own
+    thread, on its own time. When the tree interrupts a turn for a
+    higher-priority emergency Climb, that new hold can already be pressing
+    NOSE_UP_KEY before this cleanup even reaches its own SAF-010 push.
+    Measured live: a fresh emergency nose-up pulse at 01:15:33.989, then
+    THIS exit push's own blind nose-down pulse at 01:15:34.741 — 0.75s
+    later, directly opposing it — while a real, unrecovered dive continued
+    underneath both, ending in a crash with 2 missiles unused. Same fix as
+    the existing spawn-guard precedent (controller.py, ~line 3431): if a
+    climb hold already owns the pitch axis, skip this handback rather than
+    fight it."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, dict(CFG, exit_pitch_deg=10))
+
+    ctrl.boundary_turn_mode(max_s=0.3)
+    assert _wait_for(lambda: ctrl.is_boundary_turning())
+    ctrl._climbing.set()   # simulate an emergency Climb claiming the axis
+    assert _wait_for(lambda: not ctrl.is_boundary_turning(), timeout=4.0)
+
+    assert _releases(kb, ROLL_RIGHT_KEY), "roll left held"
+    assert _releases(kb, NOSE_UP_KEY), "nose-up left held"
+    assert not _presses(kb, NOSE_DOWN_KEY), \
+        "pushed nose-down while a climb hold already owned the pitch axis"
 
 
 def test_the_turn_is_idempotent_while_running(monkeypatch):

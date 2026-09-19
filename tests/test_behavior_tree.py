@@ -24,6 +24,7 @@ from wingman.behavior_tree import (
     build_tree,
     make_boundary_condition,
     make_climb_condition,
+    make_missile_evade_condition,
     make_snapshot_writer,
     selected_tactic,
     tree_status_dict,
@@ -645,6 +646,59 @@ class TestTimeToGroundRecovery:
         assert cond(make_snap(altitude=3000.0, altitude_rate=-900.0)) is False
 
 
+class TestAltitudeFloor:
+    """Operator directive, 2026-09-19: a hard altitude floor, independent
+    of rate — the third emergency OR-term. Added after a live crash where
+    MissileEvade held the airframe ~6s while speed bled to near-stall
+    (27 KPH, a 3 KPH reading 3s before that) and altitude then collapsed
+    ~745m in under a second — the ttg trigger needs a negative rate to
+    fire, and a near-stalled aircraft can show a near-zero or even briefly
+    positive rate while still critically low and unable to climb away.
+    """
+
+    @staticmethod
+    def _cond(clock, **kw):
+        opts = dict(alt_floor_m=3000.0, confirm_reads=1, clock=clock)
+        opts.update(kw)
+        return make_climb_condition(500, 1000, **opts)
+
+    def test_fires_below_the_floor_regardless_of_rate(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        # Level, even climbing slightly — altitude alone is what matters
+        # here, not the rate the ttg trigger needs.
+        assert cond(make_snap(altitude=2500.0, altitude_rate=+5.0)) is True
+
+    def test_does_not_fire_above_the_floor(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        assert cond(make_snap(altitude=3500.0, altitude_rate=-500.0)) is False
+
+    def test_disabled_when_unconfigured(self):
+        """Unset alt_floor_m leaves this OR-term inert — same opt-in shape
+        as recover_below_time_s. 2000m is chosen to sit ABOVE the ordinary
+        500/1000 hysteresis band (so the base band cannot itself explain a
+        True result) and would be below a 3000m floor if one were set."""
+        clock = FakeClock()
+        cond = make_climb_condition(500, 1000, confirm_reads=1, clock=clock)
+        assert cond(make_snap(altitude=2000.0, altitude_rate=0.0)) is False
+
+    def test_catches_the_near_stall_case_ttg_cannot(self):
+        """The exact live shape: altitude below the floor, rate near zero
+        (even positive) — ttg's own recover_below_time_s trigger needs a
+        negative rate to compute anything and stays silent here."""
+        clock = FakeClock()
+        cond = make_climb_condition(
+            500, 1000, alt_floor_m=3000.0, recover_below_time_s=30.0,
+            confirm_bypass_time_s=15.0, confirm_reads=1, clock=clock)
+        assert cond(make_snap(altitude=900.0, altitude_rate=+2.0)) is True
+
+    def test_no_conclusion_drawn_when_altitude_is_missing(self):
+        clock = FakeClock()
+        cond = self._cond(clock)
+        assert cond(make_snap(altitude=None, altitude_rate=None)) is False
+
+
 class TestTerrainAheadTrigger:
     """HLDD 001 Phase 1 — forward sky-occlusion terrain-ahead OR-term.
 
@@ -1013,6 +1067,30 @@ def test_it_yields_to_the_climb_emergency_band():
     assert c(_bsnap(0.40, +0.30)) is False
 
 
+def test_missile_evade_yields_to_the_climb_emergency():
+    """Operator directive, 2026-09-19, same shape as ADR 107 D4 above:
+    MissileEvade outranks Climb and had no way to cede the airframe to it.
+    Live: a MissileEvade hold ran ~6s while speed bled to near-stall with
+    nothing watching underneath it."""
+    emergency = {"on": False}
+    c = make_missile_evade_condition(yields_to_fn=lambda: emergency["on"])
+    assert c(make_snap(incoming_detected=True)) is True
+    emergency["on"] = True
+    assert c(make_snap(incoming_detected=True)) is False, \
+        "an active missile threat still lost to the emergency, as intended"
+
+
+def test_missile_evade_stays_sticky_when_not_yielding():
+    """The new yield check must not disturb the existing stickiness (ADR
+    070) when there is nothing to yield to."""
+    running = {"flag": True}
+    c = make_missile_evade_condition(is_running_fn=lambda: running["flag"],
+                                     yields_to_fn=lambda: False)
+    assert c(make_snap(incoming_detected=False)) is True
+    running["flag"] = False
+    assert c(make_snap(incoming_detected=False)) is False
+
+
 # --- Anomaly 007: the yield above never fires in real tree-ticking order -----
 #
 # The test above proves the yield MECHANISM works when fed a mock
@@ -1072,6 +1150,42 @@ def test_yields_to_climb_when_the_pre_tick_update_runs(clock):
     tree.tick()
     assert selected_tactic(tree) == TACTIC_CLIMB, \
         "BoundaryTurn still won — the emergency flag was not fresh in time"
+
+
+_EVADE_DIVE_BT_CFG = dict(
+    BT_CFG,
+    climb={"enabled": True, "enter_below_alt": 500, "exit_above_alt": 1000,
+          "recover_below_time_s": 30.0, "confirm_bypass_time_s": 15.0,
+          "confirm_reads": 1},
+)
+
+
+def test_missile_evade_yields_to_climb_through_the_real_tree(clock):
+    """Operator directive, 2026-09-19, through the real tree — not just the
+    isolated condition test above. Proves _build_slots' build-order change
+    (Climb built before MissileEvade, so ctx.climb_emergency_fn exists when
+    MissileEvade's slot reads it) actually wires correctly end to end."""
+    tree = build_tree(dict(_EVADE_DIVE_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=2439.0, altitude_rate=-424.0, incoming_detected=True)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_CLIMB, \
+        "MissileEvade still won despite an active climb emergency"
+
+
+def test_missile_evade_still_wins_without_an_emergency(clock):
+    """Control case: an ordinary incoming-missile alert with no emergency
+    underneath it must still select MissileEvade normally — the yield must
+    not have swallowed the tactic outright."""
+    tree = build_tree(dict(_EVADE_DIVE_BT_CFG), clock=clock)
+    writer = make_snapshot_writer()
+    snap = make_snap(altitude=5000.0, altitude_rate=0.0, incoming_detected=True)
+    writer.set("snapshot", snap)
+    tree.climb_emergency_update_fn(snap, clock())
+    tree.tick()
+    assert selected_tactic(tree) == TACTIC_MISSILE_EVADE
 
 
 # HLDD 001 Phase 1: the terrain-ahead trigger is a second OR-term on the same

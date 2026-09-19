@@ -2088,8 +2088,26 @@ def test_terrain_detection_is_gated_to_battle_states():
     import inspect
     from wingman.tick_handlers import BehaviorTreeHandler
     src = inspect.getsource(BehaviorTreeHandler)
-    assert "if current_game_state in _BATTLE_STATES:" in src
+    assert "if current_game_state in _BATTLE_STATES and not is_respawning:" in src
     assert "self._analyzer.detect_terrain_ahead(frame)" in src
+
+
+def test_terrain_detection_also_excludes_the_respawn_overlay():
+    """Live 2026-09-18, first live actuation session: the respawn overlay
+    is still within _BATTLE_STATES (is_respawning=True, game_state not yet
+    transitioned) and reads as a dark, non-sky screen — sky fraction 0.00,
+    the same 'menu chrome misread as terrain' failure the battle-state gate
+    above was already built to exclude, just for a screen that gate alone
+    doesn't cover. It never won selection (RespawnWait outranks Climb) but
+    produced repeated false WARNING logs and burned the evidence-capture
+    budget every single respawn. Same fix as ADR 140 D2/D4's respawn
+    exclusion elsewhere in this codebase — pinned structurally since no
+    full BehaviorTreeHandler construction fixture exists to tick against a
+    real respawn frame."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "current_game_state in _BATTLE_STATES and not is_respawning" in src
 
 
 def test_terrain_capture_fires_only_on_the_false_to_true_edge():

@@ -302,6 +302,87 @@ address and it is squarely ADR 083's mechanism, not d1's.
 Sample is 4 climbs in one session. The d7 result is a clear mechanism change;
 the stall-rate criteria in V1/V5 still need a full session to measure.
 
+## d1 exit-push overshoot bug, found live 2026-09-19 (operator-caught)
+
+A more serious d1 failure than the mis-sized budget above: the exit push's
+condition (`angle <= target`, `_climb_exit_push` in `controller.py`) is
+satisfied by *any* angle at or below the +20 deg band — including a steep
+**negative** angle, i.e. an actual dive, not a landing in the intended
+"gentle nose-down to a moderate climb angle" band the push exists to
+produce.
+
+Operator directly observed the resulting behavior live (`screenshot_
+20260919_002537.png` and two later frames the same session) and reported it
+as wrong: the aircraft nose-down and holding low altitude right after a
+climb, instead of the terrain-avoidance trigger forcing it back up. Traced
+in `wingman.log`:
+
+```
+00:25:37.962  Nose -38deg (dive), alt 1068 — climb exit push already overshot
+00:25:39.130  climb exit — nose at -38deg (band +20) after 2 pulse(s)
+              <- old check accepted this as "in_band" and released control
+00:25:39.465  CLIMB — EMERGENCY re-engages (0.3s later, correctly)
+00:25:40.954  Nose -90deg (steep_dive), alt 456, speed 1015 — worsened despite
+              the emergency actuator correctly commanding nose-up throughout
+00:25:43.960  alt=None, speed=1 — telemetry lost, consistent with a crash
+```
+
+Two nose-down pulses (the same 3-pulse budget d1's first live evidence above
+already found under-sized) swung the aircraft from a steep climb straight
+through level into a real dive before the second sample was even read — the
+old check treated `-38 <= +20` as success and handed back control at exactly
+the moment it should not have. The emergency climb trigger *did* re-engage
+almost immediately (0.3s), and its pitch-pulse logic *was* correctly
+commanding nose-up the whole time (confirmed via `climb pitch pulse (up,
+...)` log lines) — but by the time it had fresh telemetry to act on
+decisively, the aircraft was already past the point of recovery at that
+altitude and speed. This is a plausible root cause for a real subset of this
+project's `crash_with_missiles` incidents generally, not specific to any
+padlock/terrain work landing the same session — `_climb_exit_push` runs on
+every climb-hold release, regardless of why the hold started.
+
+**Fixed same day.** The flyable band is `[0, target]`, not "anything at or
+below target" — an angle below zero is an overshoot, not a safe handoff
+point. `_climb_exit_push` now detects this and corrects with nose-up
+(reusing the same bounded impulse-plus-observe-gap pulse budget d1 already
+uses, ADR 069's shape) instead of releasing control believing it succeeded.
+Regression tests added in `tests/test_climb_mode.py`:
+`test_exit_push_corrects_an_overshoot_into_a_dive` (recreates the exact
+73→-38→10 deg sequence from the live log and asserts the push corrects with
+nose-up before reporting `in_band`) and `test_exit_push_never_reports_in_
+band_while_diving` (direct pin: a steep dive angle must never satisfy the
+exit condition). All 6 pre-existing exit-push tests pass unmodified.
+
+**First live trial, same day (2026-09-19, 19m35s, 13 respawns).** The fix
+engaged for real: **9** `overshot into a dive — correcting with nose-up`
+corrections, against only 2 successful unaided `in_band` exits — overshoots
+are apparently the *common* case in real play, not the exception, on this
+account/config. **0 spawn crashes across 13 respawns.** Session ended by
+operator stop (`z`), not a crash, so this is a short, clean, but genuinely
+positive first data point, not proof on its own.
+
+Separately confirmed **not** a regression from this fix: the pre-existing
+"pitch budget (3 pulses) exhausted, releasing anyway" path (the mis-sized
+budget this ADR's own earlier live evidence already found, above) fired
+over 20 times this same short session — unchanged in kind, still the same
+open question about whether 3 pulses is enough. None of those exhaustions
+were observed following an in-progress overshoot correction that ran out of
+budget mid-correction, but the sample is small; worth watching for
+specifically in a longer session, since that specific case (correcting
+nose-up, budget runs out before reaching the band) is new with this fix and
+not yet exercised live.
+
+**Second live trial, same night (2026-09-19, 50m31s, 36 respawns).** Ran
+alongside the ADR 107 BoundaryTurn/Climb race fix (both landed the same
+session — see that ADR). **15** overshoot corrections fired. **0 spawn
+crashes across 36 respawns** — third consecutive clean session tonight
+across both fixes combined (19m35s/13 respawns, this trial, plus one more
+below). Session ended by operator stop, zero Tracebacks. Still not
+long/varied enough to call the mis-sized pulse-budget question closed, but
+two consecutive sessions with zero spawn crashes and the overshoot
+correction firing this consistently (15 times in 50 minutes) is a real,
+accumulating positive signal, not a single lucky run.
+
 ## Deviation from the proposed thresholds, and why
 
 The 2026-08-21 18:41 crash — the case d2 was written for — showed the proposed

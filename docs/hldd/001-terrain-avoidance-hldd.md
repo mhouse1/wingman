@@ -327,6 +327,87 @@ closely, same as the first 2026-09-16 graduation — this is a fresh
 combination (real terrain trigger, now padlock-gated) that has not yet
 held the controls live.
 
+**First live actuation session, same day (2026-09-18), findings:**
+
+1. **First-ever real firing worked exactly as designed.** Mission start,
+   aircraft at 735m with sky fraction 0.00 (real terrain filling the
+   forward view), padlock confirmed False. Climbed to 1319m over the next
+   16s (target 5000, cap 90s), then released cleanly. First direct live
+   evidence this closes the "flying forward into terrain right after
+   spawn" gap the whole document opens with.
+2. **Three `crash_with_missiles` deaths occurred this session** — checked
+   each one directly against its saved frame (`test_screenshots/
+   crash_with_missiles/`), not inferred from log timing. All three show a
+   large fireball/explosion filling the frame with no terrain visible —
+   consistent with this project's own prior finding (ADR 137's seventh
+   live trial, cited in "The problem, measured" above) that most
+   `crash_with_missiles` events are enemy fire, not terrain impacts. None
+   of the three correlate with a terrain-trigger episode that plausibly
+   caused them; the match was simply high-intensity combat (visible
+   scoreboards climbing fast, "5 POINTS TO DEFEAT"). Not attributed to
+   this feature or the new padlock gate.
+3. **Found and fixed a real false-positive source: the respawn overlay
+   itself.** The overlay screen is still within `_BATTLE_STATES`
+   (`is_respawning=True`, `game_state` not yet transitioned) and reads as
+   a dark, non-sky frame — sky fraction 0.00 — repeating every
+   `confirm_reads` window for the overlay's whole duration. `padlock_
+   state()` also reads `False` during this window (ADR 140 D2), so the
+   new gate does not catch this case; both preconditions are satisfied by
+   the overlay itself, for the wrong reason. This produced roughly a dozen
+   false `TERRAIN AHEAD` WARNING logs and burned most of one respawn's
+   worth of the evidence-capture budget on menu noise in under three
+   minutes. **It never won tactic selection** — `RespawnWait` outranks
+   `Climb` in the priority selector, confirmed directly in the log
+   (`selected=RespawnWait` throughout every false firing) — so this was a
+   log/evidence-capture nuisance, not a safety issue. Fixed in
+   `tick_handlers.py`: `detect_terrain_ahead` is now also gated on `not
+   is_respawning`, the identical fix already applied for this identical
+   reason at ADR 140 D2/D4 and for the lobby-popup case this same gate
+   already covered (see `test_terrain_detection_is_gated_to_battle_
+   states`'s own docstring, which already names that precedent). New
+   test: `test_terrain_detection_also_excludes_the_respawn_overlay`. Not
+   yet live in the currently-running session (requires a restart to pick
+   up) — the session was left running rather than interrupting live
+   combat for a log-noise-only fix.
+4. **Both evidence-capture budgets (terrain: 40, crash: 20) were fully
+   exhausted by ~21:35, less than 30 minutes in** — almost entirely by the
+   respawn-overlay false positives above, plus the sheer volume of this
+   session's genuine crashes. Every terrain/crash episode after that point
+   is log-only, no saved frame. This directly cost visual verification on
+   two specific low-altitude dive episodes below — a concrete, not
+   hypothetical, cost of the bug in finding 3.
+5. **A likely-systemic telemetry stall found during low-altitude
+   emergency recovery, unrelated to today's changes.** Two separate crash
+   episodes (22:50:45-54 and 00:19:40-53) share an identical shape: a
+   real, accelerating dive is correctly caught by BOTH the pre-existing
+   ttg-based `DIVE RECOVERY` trigger (ADR 086 d2, predates this feature
+   entirely) and the new terrain trigger; `climb — emergency ESCALATED
+   mid-hold` engages the airbrake; the dive rate visibly starts recovering
+   in the log — and then the altitude reading freezes at one exact value
+   for 3 consecutive ticks (~3s) with `alt_rate` suspiciously reset to
+   near-zero, right through what should be the critical final seconds of
+   the recovery. The next reading is the crash detector itself, at
+   `alt=1` both times. Neither episode has a saved frame (finding 4) to
+   confirm visually. This is a plausible root-cause candidate for a real
+   subset of this session's `crash_with_missiles` count — not something
+   introduced by ADR 140 or the padlock gate (the ttg trigger is
+   independent of both), but a genuine gap in the pre-existing
+   telemetry/recovery path worth its own investigation. Flagged here for
+   visibility; not investigated further as part of this cycle.
+
+**Session closed out cleanly (2026-09-19 00:33, operator `z` stop, ADR
+094).** Full numbers: 3h28m, 136 respawns, 36/36 missions click-to-finish,
+**0 spawn crashes** (`death 3-10s after restart` — the exact metric ADR
+076 and this document's own "The problem, measured" section track) despite
+this being an unusually difficult match (68 `crash_with_missiles`, well
+above this project's typical baseline — every sampled frame showed clear
+enemy-fire explosions, consistent with the summary line's own
+characterization). Zero Tracebacks the entire session. The core claim this
+document opened with — closing the gap ADR 076's blind timer can't see —
+has its first full-session positive result: not proof by itself (one
+session, one match), but a clean data point with no counter-evidence found
+despite deliberately looking for it (findings 2, 5 above).
+
 ### Testing plan
 
 - Unit (done, `TestTerrainAheadTrigger` in `test_behavior_tree.py`): clear

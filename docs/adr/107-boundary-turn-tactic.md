@@ -361,6 +361,51 @@ respond to the manoeuvre at all, not to adjust the manoeuvre further.
 | `tests/test_behavior_tree.py` | 11 tests: entry, hold through sign flips, recession, band exit, freeze on blindness, D4 yield, priority above Climb/Engage and below Eject/RespawnWait |
 | `tests/test_climb_mode.py` | 4 tests: banks AND pulls, SAF-010 handback, idempotence, manual takeover |
 
+## SAF-010 handback raced a higher-priority Climb, found live 2026-09-19
+(operator-caught, "it nose dived and died, not from enemy fire")
+
+`stop_boundary_turn()` only signals `_boundary_turn_stop` and returns — the
+D7 SAF-010 handback (this ADR's own exit push, `_climb_exit_push()` at the
+end of `boundary_turn_mode`'s `_run()`) executes on the turn's own thread,
+on its own time, same as every `finally`-block cleanup in this codebase.
+When the tree interrupts a turn for a higher-priority emergency Climb
+(`TACTIC_CLIMB` outranks `TACTIC_BOUNDARY_TURN` — see this ADR's own D3),
+that new Climb hold can already be pressing `NOSE_UP_KEY` before
+BoundaryTurn's cleanup even reaches its own exit push.
+
+Measured directly in `wingman.log` (01:15:29-38): a genuine dive (raw HUD
+readings the plausibility filter correctly rejected as implausible: alt
+jumping to 7604 then 639, `total_rejected` incrementing) triggered `DIVE
+RECOVERY`, which won selection away from an in-progress `BoundaryTurn`. The
+fresh emergency Climb's own blind nose-up pulse fired at 01:15:33.989. Then,
+**0.75s later**, `BoundaryTurn`'s own cleanup thread reached its SAF-010
+exit push and fired a blind nose-down pulse — directly opposing the
+emergency hold already in progress, both flying blind (no fresh telemetry,
+so each defaulting to its own "safe" fallback direction, which happen to be
+opposite). Telemetry never recovered; the aircraft crashed 4.5s later with
+2 missiles unused (`crash_20260919_011538_3.png`,
+`screenshot_20260919_011535.png`).
+
+Not the ADR 086 d1 exit-push overshoot bug fixed the same day (that bug is
+about misclassifying an already-diving angle as safely in-band; this one
+is two independent actuator threads never coordinating over the same pitch
+axis in the first place) — a distinct failure mode in the same general
+family, found investigating the same session.
+
+**Fixed same day**, reusing the existing spawn-guard precedent
+(`controller.py` ~line 3431, "climb hold owns the pitch key, skipping
+OS-level release") for exactly this class of conflict: `BoundaryTurn`'s
+cleanup now checks `self._climbing.is_set()` before calling
+`_climb_exit_push()` and skips its own handback entirely if a climb hold
+already owns the axis, trusting that hold's own actuator (which already
+handles its own overshoot correction, per the ADR 086 fix) instead of
+fighting it. New test:
+`test_the_turn_skips_its_own_handback_when_a_climb_hold_already_owns_pitch`
+in `tests/test_climb_mode.py`; the existing SAF-010 handback test
+(`test_the_turn_hands_the_airframe_back_flyable`) is unchanged and still
+covers the normal case where no climb hold is active. **Not yet
+live-validated.**
+
 ## References
 
 - ADR 101 — the roll-during-climb mechanism this supersedes, and the rev 2

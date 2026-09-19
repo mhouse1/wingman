@@ -494,6 +494,12 @@ behavior_tree:
   # key — climb and evade keep their own smaller reserves for what cruise
   # leaves behind.
   afterburner_cruise: {enabled: true, min_fuel_pct: 40, rearm_fuel_pct: 90, confirm_reads: 2}
+  # Operator directive, 2026-09-19: below min_speed_kph, release the airbrake
+  # and hold the afterburner regardless of what tactic currently owns those
+  # keys — reducing drag and adding thrust is the correct response to a
+  # near-stall. Same tree-independent, every-tick shape as afterburner_cruise
+  # above (note_stall_prevention, controller.py).
+  stall_prevention: {enabled: true, min_speed_kph: 300, confirm_reads: 2}
   climb:
     enabled: true
     enter_below_alt: 500
@@ -544,6 +550,13 @@ behavior_tree:
     recover_below_time_s: 30.0
     confirm_bypass_time_s: 15.0   # below this, fire on a single read (d3)
     descent_memory_s: 5.0         # hold a known descent across rejected reads (d4)
+    # Operator directive, 2026-09-19: hard altitude floor, independent of
+    # rate — catches a near-stall the ttg trigger's rate requirement cannot
+    # (live: MissileEvade held the airframe ~6s while speed bled to 27 KPH
+    # and altitude then collapsed ~745m in under a second). Also the
+    # backstop MissileEvade now yields to (see behavior_tree.py's
+    # make_missile_evade_condition).
+    alt_floor_m: 3000
     fuel_reserve_pct: 10
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}

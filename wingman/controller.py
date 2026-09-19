@@ -221,6 +221,7 @@ class Controller:
         missile_evade_cfg = _c.missile_evade
         climb_cfg = _c.climb
         afterburner_cruise_cfg = _c.afterburner_cruise
+        stall_prevention_cfg = _c.stall_prevention
         fuel_cfg = _c.fuel
         padlock_center_cfg = _c.padlock_center_indicator
 
@@ -483,6 +484,15 @@ class Controller:
         self._cruise_ab_confirm_reads = max(1, int(_cruise_cfg.get("confirm_reads", 2)))
         self._cruise_ab_active = False
         self._cruise_ab_low_streak = 0
+        # Operator directive, 2026-09-19: airbrake-release / afterburner-hold
+        # below a speed floor, same tree-independent every-tick shape as
+        # cruise above. See note_stall_prevention.
+        _stall_cfg = stall_prevention_cfg or {}
+        self._stall_prevention_enabled = bool(_stall_cfg.get("enabled", False))
+        self._stall_min_speed_kph = float(_stall_cfg.get("min_speed_kph", 300.0))
+        self._stall_confirm_reads = max(1, int(_stall_cfg.get("confirm_reads", 2)))
+        self._stall_active = False
+        self._stall_low_streak = 0
         # ADR 137: True for the duration of an emergency climb's airbrake
         # hold. Cruise-afterburner (D9, below) yields to this specifically —
         # measured live 2026-09-09: cruise re-pressed AFTERBURNER_KEY inside
@@ -2956,7 +2966,26 @@ class Controller:
                 # airframe ballistic at the exit attitude — a climb that ended
                 # at +73 deg coasted 1500 m, stalled at 24 KPH and hit the
                 # ground. This tactic holds nose-up too, so it owes the push.
-                self._climb_exit_push()
+                #
+                # Live 2026-09-19 (operator-caught, screenshot_20260919_011535):
+                # stop_boundary_turn() only signals _boundary_turn_stop and
+                # returns — this finally block runs on its own thread's own
+                # time, same as the spawn-guard precedent at line ~3431. When
+                # the tree interrupts a turn for a higher-priority emergency
+                # Climb, that new hold can already be pressing NOSE_UP_KEY
+                # before this cleanup even reaches this line. Measured: a new
+                # emergency hold's blind nose-up pulse at 01:15:33.989, then
+                # THIS exit push's own blind nose-down pulse at 01:15:34.741 —
+                # 0.75s later, directly opposing it — while a real,
+                # unrecovered dive continued underneath both. Same fix as the
+                # spawn-guard precedent: if a climb hold has already claimed
+                # the pitch axis, it owns the handback now, not this one.
+                if not self._climbing.is_set():
+                    self._climb_exit_push()
+                else:
+                    logger.info(
+                        "Controller: boundary turn exit — climb hold owns "
+                        "the pitch key, skipping SAF-010 handback")
                 self._climb_key(NOSE_DOWN_KEY, press=False, action="boundary")
                 _span = time.time() - _release_started
                 for _k in guarded:
@@ -3244,6 +3273,87 @@ class Controller:
         """True while the cruise-afterburner hold owns the throttle."""
         return self._cruise_ab_active
 
+    def _read_speed_kph(self) -> "float | None":
+        """Last ACCEPTED (not smoothed) speed reading, or None when
+        unreadable. The raw value, not stable_value, on the same reasoning
+        TelemetrySnapshot._ratio_speed already documents (ADR 069 d6): a
+        ~9s smoothing window lags a fast real change, and a stall is
+        exactly that — the whole point is to catch it before the mean
+        catches up."""
+        if self._analyzer is None:
+            return None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return None
+        if snap is None or not snap.speed_fresh():
+            return None
+        return snap.speed.value
+
+    def note_stall_prevention(self, game_state: "GameState") -> None:
+        """Release the airbrake and hold the afterburner below a speed
+        floor. Operator directive, 2026-09-19.
+
+        Tree-independent, called every tick — same shape as
+        ``note_afterburner_cruise`` (ADR 134 D9): a stall is an airframe
+        state, not a tactic, so it overrides whatever any tactic currently
+        wants these two keys doing rather than deferring to them.
+
+        Live 2026-09-19: a MissileEvade hold ran ~6s while speed bled to a
+        confirmed 27 KPH (and a 3 KPH reading 3s before that), with nothing
+        watching airspeed at all — the aircraft then lost ~745m of altitude
+        in under a second. Airbrake adds drag, exactly wrong during a
+        stall; Climb's own emergency mode deliberately HOLDS airbrake
+        (ADR 137) for the opposite reason — bleeding energy out of a fast
+        dive. The two only conflict when both are true at once (a fast dive
+        that has also dropped below the speed floor); this wins, because a
+        stalled airframe has degraded control authority regardless of what
+        the pitch axis is commanding — holding the brake on does not help
+        an aircraft climb out of a stall.
+
+        confirm_reads debounces entry the same way cruise's low-fuel exit
+        does (a single garbage low speed reading must not fire this), but
+        exit is immediate on the first reading back above the floor —
+        there is no reason to keep burning afterburner once speed has
+        genuinely recovered, and the airbrake release is a one-shot action,
+        not a held state, so there is nothing to hold past a good reading.
+        """
+        if not self._stall_prevention_enabled:
+            return
+        if self._manual_takeover_active():
+            return
+        if game_state not in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL,
+                              GameState.GAME_BATTLE_EJECT):
+            return
+        speed = self._read_speed_kph()
+        if speed is None:
+            return   # stale/missing OCR — do nothing, don't flap on it
+        if speed < self._stall_min_speed_kph:
+            self._stall_low_streak += 1
+            if self._stall_low_streak < self._stall_confirm_reads:
+                return
+            if not self._stall_active:
+                logger.warning(
+                    "\033[91m⚠ STALL PREVENTION — speed %.0f KPH below "
+                    "%.0f KPH — airbrake released, afterburner held "
+                    "(operator directive 2026-09-19)\033[0m",
+                    speed, self._stall_min_speed_kph)
+                self._stall_active = True
+            self._climb_key(AIRBRAKE_KEY, press=False, action="stall_prevention")
+            if self._may_hold_key(AFTERBURNER_KEY, requester="stall_prevention"):
+                self._climb_key(AFTERBURNER_KEY, press=True, action="stall_prevention")
+        else:
+            self._stall_low_streak = 0
+            if self._stall_active:
+                logger.info(
+                    "\033[91m⚠ STALL PREVENTION — speed %.0f KPH recovered "
+                    "above %.0f KPH\033[0m", speed, self._stall_min_speed_kph)
+                self._stall_active = False
+
+    def is_stall_prevention_active(self) -> bool:
+        """True while stall prevention owns the airbrake/afterburner keys."""
+        return self._stall_active
+
     def _may_hold_key(self, _key: str, requester: str) -> bool:
         """ADR 139 D4: the single named point for AFTERBURNER_KEY/AIRBRAKE_KEY
         arbitration across the five tactic threads that share them.
@@ -3278,6 +3388,11 @@ class Controller:
             return True
         if requester == "eject":
             # eject_and_dive's afterburner press is unconditional.
+            return True
+        if requester == "stall_prevention":
+            # note_stall_prevention already gates on manual-takeover itself
+            # (checked once, before either key touch, not per-key here) —
+            # unconditional True to match cruise's own shape once past that.
             return True
         raise ValueError(f"_may_hold_key: unknown requester {requester!r}")
 
@@ -3852,7 +3967,7 @@ class Controller:
             return False   # a diagnostic read must never break the climb loop
 
     def _climb_exit_push(self) -> str:
-        """Nose down into the flyable band before the climb releases (ADR 086 d1).
+        """Nose into the flyable band before the climb releases (ADR 086 d1).
 
         Bounded exactly as ADR 069 bounds the eject rotation — impulse plus
         observation gap, a pulse budget — because that ADR established that a
@@ -3865,6 +3980,24 @@ class Controller:
 
         Returns the exit reason, for the caller's log line.
 
+        Fixed 2026-09-19 (operator-caught live, screenshot_20260919_002537
+        and later): the exit check was `angle <= target`, satisfied by ANY
+        angle at or below the +20deg band — including a steep negative
+        angle, i.e. an actual dive, not a landing in the intended "gentle
+        nose-down to a moderate climb angle" band. Measured: two nose-down
+        pulses swung the aircraft from a steep climb straight through
+        level into a real -38deg dive; the old check accepted -38 <= +20
+        as success and released control right as the aircraft was diving.
+        A fresh emergency climb re-engaged 0.3s later but the dive had
+        already worsened to -90deg at 456m and 1000+ kph by the time it
+        had fresh telemetry to act on — too late. The flyable band is
+        `[0, target]`, not "anything at or below target": an angle below
+        zero is an overshoot, not a safe handoff point, and pulsing MORE
+        nose-down would only deepen it — this now corrects with nose-up
+        instead, using the same bounded impulse-plus-observe pulse budget,
+        rather than handing back control blind and relying on the next
+        tick's tree evaluation to catch an already-active dive in time.
+
         @relation(SAF-010, scope=function)
         """
         target = self._climb_exit_pitch_deg
@@ -3872,21 +4005,34 @@ class Controller:
             return "disabled"
         target = float(target)
         pulses = 0
+        pitch_key = NOSE_DOWN_KEY
         while pulses < max(1, self._climb_exit_max_pulses):
             snap = self._eject_telemetry()
             angle = None
             if snap is not None:
                 fn = getattr(snap, "pitch_angle_deg", None)
                 angle = fn() if callable(fn) else None
-            if angle is not None and angle <= target:
-                if pulses:
-                    logger.info("Controller: climb exit — nose at %+.0fdeg "
-                                "(band %+.0f) after %d pulse(s)",
-                                angle, target, pulses)
-                return "in_band"
-            self._climb_key(NOSE_DOWN_KEY, press=True)
+            if angle is not None:
+                if 0.0 <= angle <= target:
+                    if pulses:
+                        logger.info("Controller: climb exit — nose at %+.0fdeg "
+                                    "(band %+.0f) after %d pulse(s)",
+                                    angle, target, pulses)
+                    return "in_band"
+                if angle < 0.0:
+                    if pitch_key != NOSE_UP_KEY:
+                        logger.warning(
+                            "Controller: climb exit — overshot into a dive "
+                            "(nose %+.0fdeg, band %+.0f) after %d pulse(s) "
+                            "— correcting with nose-up", angle, target, pulses)
+                        pitch_key = NOSE_UP_KEY
+                elif pitch_key != NOSE_DOWN_KEY:
+                    # Corrected back above level but still steeper than the
+                    # band — resume nudging down toward it.
+                    pitch_key = NOSE_DOWN_KEY
+            self._climb_key(pitch_key, press=True)
             interrupted = self._climb_stop.wait(timeout=self._climb_exit_pulse_s)
-            self._climb_key(NOSE_DOWN_KEY, press=False)
+            self._climb_key(pitch_key, press=False)
             pulses += 1
             if interrupted or (self._exit_event is not None
                                and self._exit_event.is_set()):
