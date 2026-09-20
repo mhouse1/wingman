@@ -20,7 +20,7 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.9"
+WINGMAN_VERSION = "1.8.10"
 WINGMAN_VERSION_DETAILS = "ACS mission_j20 next phase, switch to secondary weapons then guide towards target during dive"
 
 from .capture import Capture
