@@ -305,7 +305,7 @@ eject_stuck_detector:
   eject_stuck_after_s: 40.0
 stall_recovery:
   action_after_s: 15.0        # dwell in GAME_UNKNOWN/GAME_STARTING_STALLED before acting
-  unready_dwell_s: 30.0       # UNREADY suppressing the PLAY click before leaving the squad
+  unready_dwell_s: 40.0       # UNREADY suppressing the PLAY click before leaving the squad
   scan_interval_s: 5.0        # how often the stall batch runs once the gate is open
   play_click_delay_s: 2.0     # after leaving the squad, before clicking PLAY
   leave_click_delay_s: 1.0    # after clicking LEAVE (squad-leave confirmation), before re-scanning PLAY/READY
