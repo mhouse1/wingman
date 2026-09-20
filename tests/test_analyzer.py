@@ -477,6 +477,53 @@ def test_telemetry_harvest_never_blocks_and_feeds_filter(analyzer):
     assert snap.altitude.value == 12000
 
 
+class _FakePadlockController:
+    def __init__(self, state):
+        self._state = state
+
+    def padlock_state(self):
+        return self._state
+
+
+@pytest.mark.parametrize("state,label", [(True, "ON"), (False, "OFF"), (None, "UNKNOWN")])
+def test_telemetry_log_includes_padlock_state(analyzer, caplog, state, label):
+    """ADR 140: the telemetry INFO line the operator watches live must show
+    padlock_state() every time it prints — ON/OFF/UNKNOWN mapped from
+    True/False/None, never coerced (Unknown must not read as OFF)."""
+    from concurrent.futures import Future
+
+    analyzer.set_controller(_FakePadlockController(state))
+    done = Future()
+    done.set_result((600, 12000, 0.42))
+    analyzer._telemetry_future = done
+
+    with caplog.at_level("INFO"):
+        analyzer._harvest_telemetry_future()
+
+    lines = [r.getMessage() for r in caplog.records]
+    matches = [ln for ln in lines if "PADLOCK:" in ln]
+    assert len(matches) == 1, f"expected exactly one PADLOCK line, got: {lines}"
+    assert f"PADLOCK: {label} | Altitude:" in matches[0]
+
+
+def test_telemetry_log_padlock_unknown_without_a_wired_controller(analyzer, caplog):
+    """No set_controller() call at all (e.g. a test harness, or startup
+    order not yet reached) must read UNKNOWN, not raise or default to OFF."""
+    from concurrent.futures import Future
+
+    done = Future()
+    done.set_result((600, 12000, 0.42))
+    analyzer._telemetry_future = done
+
+    with caplog.at_level("INFO"):
+        analyzer._harvest_telemetry_future()
+
+    lines = [r.getMessage() for r in caplog.records]
+    matches = [ln for ln in lines if "PADLOCK:" in ln]
+    assert len(matches) == 1
+    assert "PADLOCK: UNKNOWN | Altitude:" in matches[0]
+
+
 def test_telemetry_split_row_confidence_is_minimum_of_digit_boxes():
     # One doubtful digit box taints the whole row (conservative min), while
     # the other row keeps its own confidence. The row value stays the leading
@@ -587,3 +634,37 @@ def test_green_label_first_variant_wins_early(monkeypatch):
     value, _ = _process_health_region(_green_digit_frame(), label="fuel")
     assert value == 250
     assert reader.calls == 1, "hsv variant read must early-return"
+
+
+# HLDD 001 Phase 1 — forward sky-occlusion terrain-ahead detector.
+def _hsv_fill_frame(h, s, v, height=300, width=400):
+    hsv = np.full((height, width, 3), (h, s, v), dtype=np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
+def test_detect_terrain_ahead_clear_sky_reads_high_fraction(analyzer):
+    """Filled with a color inside the real production
+    terrain_avoidance.sky_hsv range (measured against
+    terrain_blackout_20260914_063746_stuck30s.png and
+    terrain2_screenshot_20260916_024055.png, not re-guessed here) — must
+    read as almost entirely sky."""
+    frame = _hsv_fill_frame(105, 50, 220)
+    frac = analyzer.detect_terrain_ahead(frame)
+    assert frac is not None
+    assert frac > 0.9, f"clear sky should read as mostly sky, got {frac}"
+
+
+def test_detect_terrain_ahead_terrain_reads_low_fraction(analyzer):
+    """A rock/terrain-toned frame (brown-orange hue) sits well outside the
+    measured sky band and must read low — this is the absence-of-sky signal
+    the whole detector is built on, not a per-terrain-color match."""
+    frame = _hsv_fill_frame(15, 150, 90)
+    frac = analyzer.detect_terrain_ahead(frame)
+    assert frac is not None
+    assert frac < 0.1, f"terrain-toned frame should read as mostly not-sky, got {frac}"
+
+
+def test_detect_terrain_ahead_missing_crop_returns_none(analyzer):
+    analyzer.crops = {k: v for k, v in analyzer.crops.items() if k != "TERRAIN_FORWARD"}
+    frame = _hsv_fill_frame(105, 50, 220)
+    assert analyzer.detect_terrain_ahead(frame) is None

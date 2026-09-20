@@ -67,6 +67,17 @@ def test_battle_states_are_never_rechecked():
         assert st not in LOBBY_RECHECK_STATES, st
 
 
+def test_starting_recheck_checks_ready_and_play():
+    """A stale lobby prompt may still be showing READY while the FSM is in
+    GAME_STARTING, so both crop names must be monitored during the recheck."""
+    from wingman.analyzer import GameStateAnalyzer
+
+    analyzer = GameStateAnalyzer.__new__(GameStateAnalyzer)
+    analyzer.crops = {"PLAY": object(), "READY": object()}
+
+    assert analyzer._lobby_recheck_crops() == ["PLAY", "READY"]
+
+
 # --- debounce -----------------------------------------------------------------
 
 def test_a_single_read_cannot_abort_a_starting_match():

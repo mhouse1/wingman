@@ -221,7 +221,9 @@ class Controller:
         missile_evade_cfg = _c.missile_evade
         climb_cfg = _c.climb
         afterburner_cruise_cfg = _c.afterburner_cruise
+        stall_prevention_cfg = _c.stall_prevention
         fuel_cfg = _c.fuel
+        padlock_center_cfg = _c.padlock_center_indicator
 
         # region is (left, top, width, height)
         self.region = region
@@ -265,11 +267,21 @@ class Controller:
 
         # Padlock camera cooldown: set when the key is pressed manually
         self._padlock_cooldown_until = 0.0
-        # ADR 136: last-known padlock state, verified (not assumed) via
-        # TargetTracker.detect_padlock_off — PADLOCK_CAMERA is a pure toggle
-        # with no on/off argument, so this is the only way to know which way
-        # a press just flipped it. None = never checked this session.
+        # ADR 136 / ADR 140: last-known padlock state — PADLOCK_CAMERA is a
+        # pure toggle with no on/off argument, so this is the only way to
+        # know which way a press just flipped it. None = Unknown (never
+        # confirmed, or confidence lost since the last press). Driven by
+        # ADR 140's three signals: stop_eject_sequence (respawn) sets False,
+        # any padlock_camera() call or manual press sets None, and the
+        # mission/weapon/center-dot fusion in note_padlock_center_dot sets
+        # False. Never set True by anything today — no positive detector
+        # exists yet (ADR 140 Non-Goal 1).
         self._padlock_engaged: "bool | None" = None
+        # ADR 140 D4: wall-clock timestamp the current all-three-true
+        # streak (mission running, secondary weapon active, center dot
+        # detected) started, or None while any leg is false.
+        self._padlock_dot_streak_since: "float | None" = None
+        self._padlock_dot_confirm_s = float(padlock_center_cfg.get("confirm_seconds", 2.0))
 
         # Target tracking: timestamp of last orient_nose_to_target command
         self._last_orient_ts: float = 0.0
@@ -472,6 +484,19 @@ class Controller:
         self._cruise_ab_confirm_reads = max(1, int(_cruise_cfg.get("confirm_reads", 2)))
         self._cruise_ab_active = False
         self._cruise_ab_low_streak = 0
+        # Phase 1 (operator directive): stall prevention — if speed drops
+        # below a floor, release the airbrake and hold the afterburner,
+        # regardless of what tactic currently owns the airframe. Same
+        # tree-independent, every-tick shape as note_afterburner_cruise
+        # above (ADR 134 D9's precedent), for the same reason: it would
+        # rarely tick if it had to compete with Engage/AttackSupport for
+        # selector priority.
+        _stall_cfg = stall_prevention_cfg or {}
+        self._stall_prevention_enabled = bool(_stall_cfg.get("enabled", False))
+        self._stall_min_speed_kph = float(_stall_cfg.get("min_speed_kph", 300.0))
+        self._stall_confirm_reads = max(1, int(_stall_cfg.get("confirm_reads", 2)))
+        self._stall_active = False
+        self._stall_low_streak = 0
         # ADR 137: True for the duration of an emergency climb's airbrake
         # hold. Cruise-afterburner (D9, below) yields to this specifically —
         # measured live 2026-09-09: cruise re-pressed AFTERBURNER_KEY inside
@@ -918,6 +943,10 @@ class Controller:
                             return
                     cooldown = 10.0
                     self._padlock_cooldown_until = time.time() + cooldown
+                    # ADR 140 D3: a genuine manual press, outside padlock_camera()'s
+                    # own call graph entirely — still flips the real toggle, so
+                    # confidence in the last-known state is lost here too.
+                    self._padlock_engaged = None
                     logger.info("Controller: '%s' key pressed manually - padlock loop cooldown set for %.0fs", PADLOCK_CAMERA, cooldown)
                 keyboard_module.on_press_key(PADLOCK_CAMERA, padlock_key_pressed, suppress=False)
                 logger.info("Controller: registered hotkey '%s' to set padlock loop cooldown", PADLOCK_CAMERA)
@@ -1413,7 +1442,15 @@ class Controller:
         )
 
     def padlock_camera(self, hold_seconds: float = 0.1, block: bool = True, ignore_cancel: bool = False):
-        """Toggle padlock camera by pressing the configured padlock camera key."""
+        """Toggle padlock camera by pressing the configured padlock camera key.
+
+        ADR 140 D3: PADLOCK_CAMERA is a pure toggle with no on/off argument,
+        so every press — this is the one choke point every programmatic
+        caller (the auto-cycle loop, ensure_padlock_off's retries,
+        padlock_target_switch) presses through — leaves the real in-game
+        state unknown until re-confirmed.
+        """
+        self._padlock_engaged = None
         self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block,
                                  action_name='padlock_camera', ignore_cancel=ignore_cancel)
 
@@ -1901,6 +1938,139 @@ class Controller:
             "Controller: could not confirm padlock off after %d attempts (ADR 136)",
             max_attempts)
         return False
+
+    def padlock_state(self) -> "bool | None":
+        """ADR 140: last-known padlock-engaged state.
+
+        `False` means confirmed off (respawn, or the fused center-dot
+        signal below). `None` means Unknown — never confirmed, or
+        confidence lost since the last PADLOCK_CAMERA press. Never `True`
+        today: no positive "padlock is on" detector exists yet (ADR 140
+        Non-Goal 1). Callers that need "definitely safe to trust the
+        forward view" must check `padlock_state() is False` explicitly,
+        not `!= True` — Unknown is untrusted.
+        """
+        return self._padlock_engaged
+
+    def note_padlock_center_dot(self, frame, is_respawning: bool = False,
+                                now: "float | None" = None) -> None:
+        """ADR 140 D4: fused, corroborated padlock-off confirmation.
+
+        Called once per tick (tick_handlers.py, battle-state-gated to
+        BATTLE_STATES — GAME_BATTLE/GAME_BATTLE_MANUAL/GAME_BATTLE_EJECT —
+        mirroring the HLDD 001 terrain-ahead call site). Advances a
+        continuous both-true streak — not respawning, and
+        TargetTracker.detect_padlock_center_dot reading positive — and
+        only sets state False once that streak has held for
+        padlock_center_indicator.confirm_seconds (default 2.0) of wall
+        clock, reset by any single tick where either leg is false. Never
+        sets True (see Non-Goals) and never raises — a detector failure
+        here must not affect flight.
+
+        ADR 140 D4 originally (2026-09-17) gated on is_mission_running()
+        AND is_secondary_weapon_active(). The third live trial (2026-09-18)
+        found is_secondary_weapon_active() false through nearly all of
+        ordinary combat, and is_mission_running() separately false for the
+        ENTIRE duration of any eject dive — not just the aborted case: the
+        mission lock releases the instant eject_and_dive calls
+        cancel_mission(), so a normal, uninterrupted eject leaves
+        is_mission_running() false from start to respawn. The raw detector
+        read correctly (confirmed against real operator screenshots) in
+        every blocked context checked, so the corroborating legs were
+        suppressing a working signal, not protecting against a broken one.
+        is_secondary_weapon_active() dropped first (Open Question 5 option
+        a); is_mission_running() then replaced with the caller-supplied
+        is_respawning (Open Question 5 option b, chosen after option a's
+        own live validation still showed eject dives — a large share of
+        real playtime — going unconfirmed) — "not GAME_LOBBY" is already
+        the call site's own BATTLE_STATES gate, so only "not respawning"
+        needed adding explicitly. GAME_BATTLE_EJECT now correctly stays
+        eligible to confirm, matching the operator's own two live examples
+        (`screenshot_20260918_072721.png` through `_072849.png`,
+        `screenshot_20260918_080219.png` through `_080530.png`) of eject
+        dives the previous gate excluded despite a correctly-reading dot.
+        """
+        now = time.time() if now is None else now
+        if self._target_tracker is None:
+            self._padlock_dot_streak_since = None
+            return
+        try:
+            detected = bool(self._target_tracker.detect_padlock_center_dot(frame))
+        except Exception:
+            logger.debug("Controller: detect_padlock_center_dot failed", exc_info=True)
+            detected = False
+        # ADR 140 Open Question 1: the first live trial could only infer the
+        # raw per-tick reading indirectly from the fused end state — this
+        # logs it directly, every tick, so a future session can correlate it
+        # against real padlock_camera() presses without that inference step.
+        # mission/secondary_weapon are logged for diagnostic continuity even
+        # though D4 no longer gates on either (see docstring).
+        logger.debug(
+            "Controller: padlock center-dot raw=%s mission=%s secondary_weapon=%s "
+            "respawning=%s",
+            detected, self.is_mission_running(), self.is_secondary_weapon_active(),
+            is_respawning)
+        all_true = detected and not is_respawning
+        if not all_true:
+            self._padlock_dot_streak_since = None
+        elif self._padlock_dot_streak_since is None:
+            self._padlock_dot_streak_since = now
+        else:
+            streak_s = now - self._padlock_dot_streak_since
+            if streak_s >= self._padlock_dot_confirm_s and self._padlock_engaged is not False:
+                logger.info(
+                    "Controller: padlock-off confirmed via center-dot fusion "
+                    "(ADR 140, %.1fs streak)", streak_s)
+            if streak_s >= self._padlock_dot_confirm_s:
+                self._padlock_engaged = False
+        self._maybe_correct_padlock_unknown()
+
+    def _maybe_correct_padlock_unknown(self) -> None:
+        """ADR 140 D6: actively correct an Unknown reading for as long as
+        secondary weapons stay switched in, not just once at dive start.
+
+        orient_nose_to_target's roll correction (the whole reason ADR 136
+        D4 wanted padlock verified off in the first place) needs the
+        camera following the aircraft's own nose, not a locked target —
+        useless if padlock is actually on and this design has no way to
+        know that from Unknown alone. Pressing corrects the *ambiguous*
+        case; it is never used to try to turn padlock ON (no signal in
+        this design ever asserts that — Non-Goal 1) and never presses
+        while state is already confirmed `False`, only while it is
+        genuinely Unknown. `ignore_cancel=True` matches ADR 136 D1's own
+        precedent for actions that must work during a dive:
+        `eject_and_dive` calls `cancel_mission()` immediately, and without
+        it a press here would be cut to a near-zero-duration tap by the
+        same cancel check, unreliable to register in-game.
+
+        Fixed 2026-09-18 (operator-caught live): a real timing bug —
+        gating solely on a `now + confirm_seconds` timer let this press
+        again mid-streak, while `_padlock_dot_streak_since` was already
+        accumulating toward its own confirmation. That press flips the
+        real in-game toggle, destroying a streak that was on track to
+        succeed on its own, for no reason (state hadn't confirmed yet, so
+        the old check saw "still Unknown, cooldown elapsed" and pressed
+        anyway). The correct gate is not time since the last press, it is
+        whether the state has genuinely been *re-checked* since — a
+        streak actively building (`_padlock_dot_streak_since is not
+        None`) means this tick's check already saw something promising,
+        and must be left alone to keep accumulating or to fail on its
+        own; only a check that found *nothing* building (no streak in
+        progress) means another press is warranted. Each call to this
+        method already corresponds to exactly one fresh check (it only
+        ever runs once per tick, after that tick's own detection), so no
+        separate cooldown timer is needed on top of the streak gate.
+        """
+        if not self.is_secondary_weapon_active():
+            return
+        if self._padlock_engaged is not None:
+            return
+        if self._padlock_dot_streak_since is not None:
+            return   # a streak is actively building — let it be checked, not interrupted
+        logger.info(
+            "Controller: padlock unknown during secondary-weapon use — "
+            "pressing to correct (ADR 140 D6)")
+        self.padlock_camera(hold_seconds=0.1, block=True, ignore_cancel=True)
 
     def _eject_heatdive_loop(self, stop_event: threading.Event) -> None:
         """ADR 136: roll toward the tracked target and fire heat-seekers.
@@ -3088,6 +3258,91 @@ class Controller:
         """True while the cruise-afterburner hold owns the throttle."""
         return self._cruise_ab_active
 
+    def _read_speed_kph(self) -> "float | None":
+        """Fresh raw (unsmoothed) speed reading, or None when unreadable.
+
+        Raw, not `stable_value` — a near-stall needs to be caught on the
+        actual current reading, not a multi-sample average lagging behind a
+        fast-changing number.
+        """
+        if self._analyzer is None:
+            return None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return None
+        if snap is None or not snap.speed_fresh():
+            return None
+        return None if snap.speed.value is None else float(snap.speed.value)
+
+    def note_stall_prevention(self, game_state: "GameState") -> None:
+        """Release AIRBRAKE_KEY and hold AFTERBURNER_KEY while speed is
+        below the configured floor. Phase 1 (operator directive).
+
+        Tree-independent, every-tick call (see the `__init__` note above) —
+        deliberately takes precedence over whatever tactic currently holds
+        the airframe, including Climb's own emergency airbrake hold: a
+        near-stall is a physical fact about the aircraft's energy state, not
+        a tactical decision, and matters regardless of what else is
+        happening. Routed through `_may_hold_key` (requester=
+        "stall_prevention", unconditionally True) for the same
+        single-arbitration-point discipline every other key hold uses, even
+        though this one has no gate of its own to express.
+        """
+        if not self._stall_prevention_enabled:
+            return
+        if self._manual_takeover_active():
+            return
+        if game_state not in (GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL,
+                              GameState.GAME_BATTLE_EJECT):
+            return
+        if not self._may_hold_key(AIRBRAKE_KEY, requester="stall_prevention"):
+            return
+
+        speed = self._read_speed_kph()
+        if speed is None:
+            # Stale/missing OCR — hold current state, don't flap on it, but
+            # still re-assert an existing hold in case another subsystem
+            # dropped the key this same tick.
+            if self._stall_active:
+                self._climb_key(AIRBRAKE_KEY, press=False, action="stall_prevention")
+                self._climb_key(AFTERBURNER_KEY, press=True, action="stall_prevention")
+            return
+
+        if not self._stall_active:
+            if speed < self._stall_min_speed_kph:
+                self._stall_low_streak += 1
+                if self._stall_low_streak >= self._stall_confirm_reads:
+                    self._stall_active = True
+                    self._stall_low_streak = 0
+                    self._climb_key(AIRBRAKE_KEY, press=False, action="stall_prevention")
+                    self._climb_key(AFTERBURNER_KEY, press=True, action="stall_prevention")
+                    logger.warning(
+                        "\033[91m⚠ STALL PREVENTION — speed %d KPH below %.0f "
+                        "KPH — airbrake released, afterburner held (operator "
+                        "directive)\033[0m", speed, self._stall_min_speed_kph)
+            else:
+                self._stall_low_streak = 0
+        else:
+            if speed >= self._stall_min_speed_kph:
+                self._stall_active = False
+                self._stall_low_streak = 0
+                self._climb_key(AFTERBURNER_KEY, press=False, action="stall_prevention")
+                logger.info(
+                    "Controller: stall prevention — speed recovered to %d "
+                    "KPH — afterburner released", speed)
+            else:
+                # Re-assert every tick, not only on the transition — the
+                # same reason note_afterburner_cruise does (D9): whatever
+                # else may have dropped these keys this same tick gets
+                # overridden within one tick instead of staying dropped.
+                self._climb_key(AIRBRAKE_KEY, press=False, action="stall_prevention")
+                self._climb_key(AFTERBURNER_KEY, press=True, action="stall_prevention")
+
+    def is_stall_prevention_active(self) -> bool:
+        """True while stall prevention owns the airbrake/afterburner keys."""
+        return self._stall_active
+
     def _may_hold_key(self, _key: str, requester: str) -> bool:
         """ADR 139 D4: the single named point for AFTERBURNER_KEY/AIRBRAKE_KEY
         arbitration across the five tactic threads that share them.
@@ -3122,6 +3377,11 @@ class Controller:
             return True
         if requester == "eject":
             # eject_and_dive's afterburner press is unconditional.
+            return True
+        if requester == "stall_prevention":
+            # note_stall_prevention (Phase 1, operator directive): a near-
+            # stall is a physical fact regardless of what else is holding
+            # the airframe — unconditional, same shape as eject/climb.
             return True
         raise ValueError(f"_may_hold_key: unknown requester {requester!r}")
 
@@ -3349,6 +3609,9 @@ class Controller:
         pitch_rate = None   # deg/s between the last two angle samples
         ab_held = False
         above_target = False   # ADR 083 d3: latches on the first at-target read
+        alt: "float | None" = None   # freshest known altitude, for the pitch
+                                      # gate below — deliberately NOT the
+                                      # above_target latch (see its use site)
         # ADR 137 D9: the loop's OWN last-applied emergency state — refreshed
         # each iteration against `self._climb_emergency_requested`, which
         # BehaviorTreeHandler._update_climb keeps current for as long as this
@@ -3531,14 +3794,70 @@ class Controller:
                 if pitch_held is not None and now >= pulse_until:
                     self._climb_key(pitch_held, press=False)
                     pitch_held = None
-                    # ADR 137: no idle gap between pulses — the next
-                    # loop tick re-checks rate/ceiling and re-pulses at once.
-                    observe_until = now if emergency_now else now + self._climb_observe_s
+                    # ADR 137: no idle gap between pulses — the next loop
+                    # tick re-checks rate/ceiling and re-pulses at once.
+                    #
+                    # Operator-caught live (crash 16:15:56, nose oscillating
+                    # +90/-90/+90 until impact): that rule assumes the
+                    # re-check has real telemetry to act on. Right after a
+                    # fresh respawn, `last_angle` is still None for the
+                    # first several seconds (the telemetry_handoff gap) —
+                    # with Phase 1's altitude floor forcing an EMERGENCY
+                    # climb the instant a respawn lands below it, this
+                    # hold's very first pulses routinely land in that blind
+                    # window. Two back-to-back blind NOSE_UP pulses (1.5s
+                    # each, zero gap) ran before this incident's first real
+                    # telemetry sample arrived, by which point the aircraft
+                    # was already AT the pitch ceiling — nothing had been
+                    # there yet to check it against. `_at_pitch_ceiling()`
+                    # (ADR 086 d7) cannot protect against an angle it has
+                    # never been given. Blind pulsing still has to happen (a
+                    # genuinely low respawn still needs to climb), but it
+                    # must not compound blind — give a real sample a chance
+                    # to land before committing to a second one, same as the
+                    # non-emergency gap already does. Once telemetry is live
+                    # (`last_angle is not None`), the zero-gap rule is
+                    # unchanged.
+                    observe_until = (
+                        now if emergency_now and last_angle is not None
+                        else now + self._climb_observe_s)
                 elif pitch_held is None and now >= observe_until:
                     if _at_pitch_ceiling():   # ADR 086 d7 (was: current angle only)
                         pitch_held = NOSE_DOWN_KEY
                     elif last_rate is None or last_rate < self._climb_min_rate:
-                        pitch_held = NOSE_UP_KEY
+                        # HLDD 001 / live 2026-09-17: once this hold has
+                        # already confirmed the target altitude is met, an
+                        # unknown or low rate must not keep defaulting to
+                        # MORE nose-up — measured live (7157m -> 1241m in
+                        # ~6s) when a terrain-ahead escalation mid-hold
+                        # (ADR 137 D9) kept re-pulsing nose-up with no
+                        # observe gap while rate stayed unknown, well after
+                        # altitude had already reached the target.
+                        #
+                        # Deliberately checks the FRESHEST altitude here,
+                        # not the `above_target` latch the afterburner cut
+                        # above uses — that latch is one-way by design (ADR
+                        # 083 d3: "removing the energy source is the
+                        # physical fix for a zoom climb", so the burner
+                        # should never relight once cut). Pitch input has
+                        # the opposite requirement: live 2026-09-18 measured
+                        # a real, severe dive (6025m -> 294m in ~12s, nose
+                        # pinned near -90 degrees) where the hold's very
+                        # first sample was still fractionally above the
+                        # 5000m sustain target, latching above_target True
+                        # before the dive had even shown up in telemetry —
+                        # every nose-up pulse for the rest of that fatal
+                        # dive was then suppressed by the same one-way
+                        # latch, with only the single pre-telemetry pulse
+                        # ever firing (confirmed via
+                        # "Controller: climb pitch pulse" log count: 1,
+                        # at the very start, none after). Re-deriving the
+                        # comparison from the current `alt` each time — not
+                        # a latch — means nose-up resumes the moment the
+                        # aircraft is genuinely back below target, which is
+                        # exactly when it is needed most.
+                        if not (alt is not None and alt >= exit_alt):
+                            pitch_held = NOSE_UP_KEY
                     elif (self._climb_max_rate is not None
                             and last_rate > float(self._climb_max_rate)):
                         pitch_held = NOSE_DOWN_KEY
@@ -3630,7 +3949,31 @@ class Controller:
             # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE
             # going neutral. Burner off first (above), so the push is not
             # fighting thrust — the ADR 083 d3 finding.
-            self._climb_exit_push()
+            #
+            # Operator-caught live (crash at 14:36:02, nose oscillating
+            # +90/-90/+90 until impact): this hold's own exit_above_alt can
+            # be reached while a broader emergency floor (Phase 1's altitude
+            # floor) is still below — the tree re-selects Climb and a fresh
+            # hold starts pushing NOSE_UP again within one tick. The
+            # unconditional push here ran anyway, so the very next hold
+            # immediately fought its own nose-down with a fresh nose-up —
+            # logged as a swing from +10deg to -24deg in 1.5s, then
+            # continued oscillating for ~24s while speed bled to 9-12 KPH
+            # near the ground, ending in a crash. `self.
+            # _climb_emergency_requested` is still fresh here — `self.
+            # _climbing` (this hold's own is_running_fn) is not cleared
+            # until AFTER this whole function returns (climb_mode's `_run()`
+            # wrapper), so BehaviorTreeHandler._update_climb keeps
+            # refreshing it every tick right up to this point. If it is
+            # still true, a new hold is about to start regardless of what
+            # this push does — skip it rather than fight the hold that is
+            # seconds (often one tick) from undoing it.
+            if self._climb_emergency_requested:
+                logger.info(
+                    "Controller: climb exit push skipped — emergency still "
+                    "active, a fresh hold is about to restart (2026-09-19)")
+            else:
+                self._climb_exit_push()
             self._climb_key(NOSE_DOWN_KEY, press=False)
             _release_span = time.time() - _release_started
             for _key in guarded_keys:
@@ -3661,7 +4004,7 @@ class Controller:
             return False   # a diagnostic read must never break the climb loop
 
     def _climb_exit_push(self) -> str:
-        """Nose down into the flyable band before the climb releases (ADR 086 d1).
+        """Nose into the flyable band before the climb releases (ADR 086 d1).
 
         Bounded exactly as ADR 069 bounds the eject rotation — impulse plus
         observation gap, a pulse budget — because that ADR established that a
@@ -3672,6 +4015,18 @@ class Controller:
         and returns. An unverified small nose-down is safer than an unverified
         ballistic climb, which is what the pre-ADR-086 exit left behind.
 
+        Operator-caught live (screenshot_20260919_002537 and later): the
+        original check was `angle <= target`, satisfied by ANY angle at or
+        below the band — including a steep NEGATIVE angle, i.e. an actual
+        dive, not the intended "gentle nose-down to a moderate climb angle"
+        landing. Measured: two nose-down pulses swung the aircraft from a
+        steep climb straight through level into a real -38deg dive in about
+        a second; the old check accepted -38 <= +20 as success and released
+        control right as the aircraft was diving. The flyable band is
+        `[0, target]`, not "anything at or below target" — an angle below
+        zero is an overshoot, and this now corrects it with nose-up instead
+        of reporting success.
+
         Returns the exit reason, for the caller's log line.
 
         @relation(SAF-010, scope=function)
@@ -3681,21 +4036,28 @@ class Controller:
             return "disabled"
         target = float(target)
         pulses = 0
+        pitch_key = NOSE_DOWN_KEY
         while pulses < max(1, self._climb_exit_max_pulses):
             snap = self._eject_telemetry()
             angle = None
             if snap is not None:
                 fn = getattr(snap, "pitch_angle_deg", None)
                 angle = fn() if callable(fn) else None
-            if angle is not None and angle <= target:
+            if angle is not None and 0.0 <= angle <= target:
                 if pulses:
                     logger.info("Controller: climb exit — nose at %+.0fdeg "
                                 "(band %+.0f) after %d pulse(s)",
                                 angle, target, pulses)
                 return "in_band"
-            self._climb_key(NOSE_DOWN_KEY, press=True)
+            if angle is not None and angle < 0.0 and pitch_key == NOSE_DOWN_KEY:
+                # Overshot past level into a dive — never push further down.
+                pitch_key = NOSE_UP_KEY
+                logger.warning(
+                    "Controller: climb exit — overshot into a dive "
+                    "(%+.0fdeg) — correcting with nose-up", angle)
+            self._climb_key(pitch_key, press=True)
             interrupted = self._climb_stop.wait(timeout=self._climb_exit_pulse_s)
-            self._climb_key(NOSE_DOWN_KEY, press=False)
+            self._climb_key(pitch_key, press=False)
             pulses += 1
             if interrupted or (self._exit_event is not None
                                and self._exit_event.is_set()):
@@ -4644,6 +5006,12 @@ class Controller:
         # at trigger_eject_and_dive(), so it could read stale-True for an
         # entire following life with no further eject in it.
         self._eject_weapon_switched = False
+        # ADR 140 D2: same reasoning applies to padlock state — a respawn
+        # (this method's every real caller, tick_handlers.py) restores a
+        # forward/chase camera, the highest-confidence signal this design
+        # has, needing no visual confirmation.
+        self._padlock_engaged = False
+        self._padlock_dot_streak_since = None
 
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:

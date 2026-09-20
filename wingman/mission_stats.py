@@ -96,9 +96,21 @@ class MissionStatsTracker:
         self._total_missile_evades = 0
         # ADR 137: respawns where the aircraft was NOT in a deliberate eject
         # dive (ADR 069's "trade an empty airframe for a rearmed one") and
-        # still had primary missiles — i.e. it crashed into terrain while
-        # armed, not by design. Tracked toward zero.
+        # still had primary missiles — an unintended death with ordnance
+        # still aboard, not by design. Tracked toward zero. NOT specifically
+        # a terrain metric despite the original framing: ADR 137's seventh
+        # live trial measured 36 telemetry-confirmed occurrences across two
+        # sessions and found only 11% in a steep dive consistent with a
+        # ground impact — 89% read level or climbing, consistent with
+        # getting shot down rather than flying into anything.
         self._total_crashes_with_missiles = 0
+
+        # Operator directive: confirmed map-boundary crossings (the RETURN
+        # TO BATTLE banner, BoundaryPerceptionHandler._on_rtb_confirmed)
+        # where the aircraft still had primary missiles aboard — same "still
+        # armed" shape as _total_crashes_with_missiles above, applied to
+        # flying out of bounds instead of dying.
+        self._total_rtb_with_missiles = 0
 
         # ADR 070 V5: per-ENGAGEMENT survival, the measure a per-mission death
         # rate cannot give. Missions mix engagements the tactic touched with
@@ -164,6 +176,9 @@ class MissionStatsTracker:
 
         elif event_name == "crash_with_missiles":
             self._total_crashes_with_missiles += 1
+
+        elif event_name == "return_to_battle_with_missiles":
+            self._total_rtb_with_missiles += 1
 
         elif event_name == "restart_last_mission":
             self._last_restart_ts = ts
@@ -303,6 +318,7 @@ class MissionStatsTracker:
             "total_manual_takeovers": self._total_manual_takeovers,
             "total_missile_evades": self._total_missile_evades,
             "total_crashes_with_missiles": self._total_crashes_with_missiles,
+            "total_rtb_with_missiles": self._total_rtb_with_missiles,
             "spawn_crashes": {
                 "window_s": _SPAWN_CRASH_WINDOW_S,
                 "min_s": _SPAWN_CRASH_MIN_S,
@@ -365,7 +381,11 @@ class MissionStatsTracker:
             f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
             f"Crash w/ missiles : {s.get('total_crashes_with_missiles', 0)}  "
-            f"(dove into terrain while armed — track toward 0)",
+            f"(died with missiles unused — mostly enemy fire, not"
+            f" necessarily terrain; ADR 137 seventh trial)",
+            f"RTB w/ missiles   : {s.get('total_rtb_with_missiles', 0)}  "
+            f"(confirmed map-boundary crossings with primary missiles"
+            f" still aboard)",
         ]
 
         sc = s.get("spawn_crashes") or {}

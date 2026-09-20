@@ -996,8 +996,13 @@ class BoundaryPerceptionHandler:
     how `BehaviorTreeHandler` itself is written).
     """
 
-    def __init__(self, analyzer, minimap_cfg=None):
+    def __init__(self, analyzer, minimap_cfg=None, stats_tracker=None):
         self._analyzer = analyzer
+        # Same seam ADR 070's evade-entry event uses (BehaviorTreeHandler
+        # docstring, "the Controller holds no stats tracker") — optional, so
+        # every existing test construction (__new__ + hand-set attributes)
+        # is unaffected.
+        self._stats = stats_tracker
         minimap_cfg = minimap_cfg or {}
         # ADR 028 revision 4 / Design 010 instrumentation.
         self._rtb_active = False
@@ -1177,7 +1182,8 @@ class BoundaryPerceptionHandler:
                          reading[0], filtered[0])
         return filtered
 
-    def instrument_boundary(self, frame, now, snap=None, selection=None):
+    def instrument_boundary(self, frame, now, snap=None, selection=None,
+                            had_secondary_weapon_active=False):
         """Count map-boundary approaches and crossings. Design 010.
 
         INSTRUMENTATION ONLY — nothing steers on this. It exists because the
@@ -1237,12 +1243,20 @@ class BoundaryPerceptionHandler:
                 # records per trigger would put ~180 unnecessary multi-KB
                 # WARNING lines into a three-hour soak.
                 pending = list(self._boundary_trace)
+                # Captured HERE, on the main tick thread, from THIS tick's
+                # snap — not read fresh inside _on_rtb_confirmed, which runs
+                # later on an OCR pool thread and would see whatever the
+                # background ammo-OCR happens to have written by then
+                # (possibly after a respawn cleared it), not the count at
+                # the moment of the actual crossing.
+                _missiles = None if snap is None else snap.missiles
                 self._analyzer.confirm_return_to_battle_async(
                     frame,
-                    # _f binds THIS frame rather than whatever the name refers
-                    # to when the pool thread eventually runs the callback.
-                    lambda ok, text, _f=frame:
-                        self._on_rtb_confirmed(ok, text, pending, _f))
+                    # _f/_m/_hs bind THIS frame/missile-count/secondary-
+                    # weapon-flag rather than whatever the names refer to
+                    # when the pool thread eventually runs the callback.
+                    lambda ok, text, _f=frame, _m=_missiles, _hs=had_secondary_weapon_active:
+                        self._on_rtb_confirmed(ok, text, pending, _f, _m, _hs))
             elif not crossed and self._rtb_active:
                 if self._rtb_confirmed:
                     logger.info("🗺  MAP BOUNDARY: back inside")
@@ -1383,7 +1397,8 @@ class BoundaryPerceptionHandler:
         self._capture_boundary_frame(frame, "rtb",
                                      f"crossing{self._boundary_crossings}")
 
-    def _on_rtb_confirmed(self, detected, text, trace=None, frame=None):
+    def _on_rtb_confirmed(self, detected, text, trace=None, frame=None,
+                          missiles=None, had_secondary_weapon_active=False):
         """OCR verdict on the banner. The colour test is the cheap trigger; this
         is the arbiter of the COUNT, so a false positive does not silently
         inflate the crossings figure the tuning depends on.
@@ -1404,6 +1419,30 @@ class BoundaryPerceptionHandler:
                         "🗺  MAP BOUNDARY trace (last %d ticks before the "
                         "crossing): %s", len(trace), json.dumps(trace))
                 self._capture_rtb_frame(frame)
+                # Operator directive: track how many of these crossings
+                # happen with primary missiles still aboard — same "still
+                # armed, not an ammo-exhaustion story" shape as
+                # crash_with_missiles (RespawnHandler.tick_detect above).
+                # `missiles is None` (OCR never resolved that tick) counts
+                # the same as `> 0`, matching crash_with_missiles' own
+                # treatment of an unknown read as not-empty. But
+                # `had_secondary_weapon_active` is a HARD exclusion, not
+                # folded into the missiles value: once ADR 136 heatdive has
+                # switched weapons, AMMO_MISSILE reads the secondary
+                # (heatseeker) rack, not the primary one
+                # (Controller.is_secondary_weapon_active's own docstring) —
+                # a known-wrong reading, not an unknown one, so it must not
+                # fall through to the "unknown counts as armed" rule above.
+                if (self._stats is not None
+                        and not had_secondary_weapon_active
+                        and (missiles is None or missiles > 0)):
+                    try:
+                        self._stats.on_event(
+                            "return_to_battle_with_missiles", time.time())
+                    except Exception:
+                        logger.debug(
+                            "stats.on_event(return_to_battle_with_missiles) "
+                            "failed", exc_info=True)
                 return
             # Nothing to retract any more — the count was never incremented.
             self._rtb_false_positives += 1
@@ -1527,7 +1566,8 @@ class BehaviorTreeHandler:
         # filtering, blind-frame capture, and crossing/approach/turn
         # instrumentation all live on this collaborator now — see
         # BoundaryPerceptionHandler above.
-        self._boundary = BoundaryPerceptionHandler(analyzer, minimap_cfg)
+        self._boundary = BoundaryPerceptionHandler(
+            analyzer, minimap_cfg, stats_tracker=stats_tracker)
         self._last_selection = "none"
         self._ammo_events = ammo_events
         # ADR 070: the evade entry event is emitted from the actuator wrapper —
@@ -1555,7 +1595,31 @@ class BehaviorTreeHandler:
         climb_cfg = bt_cfg.get("climb", {}) or {}
         self._climb_shadow = None
         self._climb_emergency_fn = None
+        self._climb_hard_emergency_fn = None
         self._climb_emergency_update_fn = None
+        self._climb_terrain_ahead_fn = None
+        self._terrain_ahead_prev = False
+        # HLDD 001 Phase 1: evidence capture on the FALSE->TRUE edge of the
+        # terrain-ahead trigger, same shape as _capture_crash_frame — cap-
+        # gated rather than a separate enabled flag, since capture is a
+        # no-op anyway whenever terrain_avoidance.enabled is false (the
+        # trigger itself never flips terrain_ahead_active in that case).
+        # Live trial 2026-09-16: a 20-frame budget with no cooldown emptied
+        # in 42 minutes, then a single ~5-minute dogfight (banked/rolling
+        # near real terrain, re-triggering the edge every 10-25s as cloud
+        # and attitude fluctuated) burned most of what was left — a session
+        # can now run 6+ hours. capture_cooldown_s bounds how often ONE
+        # episode can spend the budget; capture_max is raised alongside it
+        # so a long session still has budget left for a LATER, different
+        # occurrence instead of exhausting on the first cluster.
+        _terrain_capture_cfg = climb_cfg.get("terrain_avoidance", {}) or {}
+        self._terrain_capture_max = int(_terrain_capture_cfg.get("capture_max", 40))
+        self._terrain_capture_cooldown_s = float(
+            _terrain_capture_cfg.get("capture_cooldown_s", 20.0))
+        self._terrain_last_capture_ts = 0.0
+        self._terrain_capture_dir = str(
+            _terrain_capture_cfg.get("capture_dir", "test_screenshots/terrain_ahead"))
+        self._terrain_captures = 0
         self._climb_shadow_active = False
         self._climb_shadow_since = 0.0
         self._climb_band = (climb_cfg.get("enter_below_alt"),
@@ -1612,8 +1676,61 @@ class BehaviorTreeHandler:
                 regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
             self._writer = make_snapshot_writer()
             self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
+            self._climb_hard_emergency_fn = getattr(
+                self._tree, "climb_hard_emergency_fn", None)
             self._climb_emergency_update_fn = getattr(
                 self._tree, "climb_emergency_update_fn", None)
+            self._climb_terrain_ahead_fn = getattr(
+                self._tree, "climb_terrain_ahead_fn", None)
+
+    def _capture_terrain_frame(self, frame, now: "float | None" = None) -> None:
+        """Save the tick's frame at a terrain-ahead FALSE->TRUE edge.
+
+        HLDD 001 Phase 1's own Testing/Evidence-capture plan called for this
+        from the start, so a live shadow trial's firings could be inspected
+        rather than judged from log text and timing correlation alone — the
+        same reasoning ADR 137 D5 already gave for crash_with_missiles
+        (`_capture_crash_frame`), whose shape this mirrors: capped per
+        session, never raises, logs cap-reached explicitly rather than
+        going silently quiet.
+
+        `capture_cooldown_s` (added after the first live trial): one
+        maneuvering episode can re-cross the FALSE->TRUE edge many times in
+        a few minutes as attitude/cloud cover fluctuates — measured
+        2026-09-16, 5 captures in one ~5-minute dogfight. The cooldown
+        bounds how much of the session budget one episode can spend, so a
+        LATER, different occurrence later in a long session still has room.
+        Checked before the cap, not after: a capture inside the cooldown
+        should not consume budget it doesn't need to.
+        """
+        if frame is None or self._terrain_capture_max <= 0:
+            return
+        if now is None:
+            now = time.time()
+        since_last = now - self._terrain_last_capture_ts
+        if since_last < self._terrain_capture_cooldown_s:
+            logger.debug("Terrain capture: cooldown (%.0fs of %.0fs) — not saving",
+                         since_last, self._terrain_capture_cooldown_s)
+            return
+        if self._terrain_captures >= self._terrain_capture_max:
+            logger.debug("Terrain capture: session cap (%d) reached — not saving",
+                         self._terrain_capture_max)
+            return
+        try:
+            import cv2
+            from pathlib import Path
+            out_dir = Path(self._terrain_capture_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            path = out_dir / f"terrain_{stamp}_{self._terrain_captures}.png"
+            if not cv2.imwrite(str(path), frame):
+                logger.warning("Terrain capture: write failed: %s", path)
+                return
+            self._terrain_captures += 1
+            self._terrain_last_capture_ts = now
+            logger.info("🏔  Terrain capture: frame saved to %s", path)
+        except Exception as e:
+            logger.warning("Terrain capture: failed: %s: %s", type(e).__name__, e)
 
     def _start_boundary_turn(self) -> None:
         """BoundaryTurn start_fn. ADR 122: tell the turn which side the edge is
@@ -1639,10 +1756,25 @@ class BehaviorTreeHandler:
         it: climb to the operating altitude with the evade fuel reserve
         honoured, so the burner is released once fuel drops to the reserve.
 
-        Also reads THIS tick's ADR 086 emergency verdict (the same closure
-        BoundaryTurn's yields_to_fn already reads) and passes it through —
-        the emergency case gets a more aggressive actuation (airbrake, no
-        pulse/observe gap) inside climb_mode/_run_climb_hold.
+        Also reads THIS tick's ADR 086 emergency verdict — but the HARD
+        variant (``climb_hard_emergency_fn``: ttg or terrain only), not the
+        broad one BoundaryTurn's yields_to_fn also reads. Live 2026-09-20,
+        first session after the altitude floor shipped: a fresh respawn at
+        1109m (well below the 4000m floor, no dive or terrain in progress —
+        alt_rate was `n/a` at the moment emergency latched) triggered the
+        aggressive actuation (airbrake held, afterburner suppressed —
+        correct for "recovering from a 807 m/s dive," ADR 137's original
+        case) with nothing to brake from. Climbing at max pitch with no
+        thrust bled speed to a stall, the nose fell through to -82 degrees,
+        and the aircraft spent the next ~40s in a repeated stall/dive/
+        recover cycle (screenshot
+        test_screenshots/terrain_ahead/terrain_20260920_064104_6.png;
+        one recovery bottomed out at 431m with ttg=5s). See ADR 141 D2 for
+        the same hard-vs-broad split already applied to BoundaryTurn's
+        yield, and D6 for this incident — the floor should win selection
+        (still the broad signal, via ClimbCondition itself) but climb like
+        an ordinary sustain-band climb, afterburner and all, unless a real
+        dive or terrain hazard is also present.
         """
         alt = self._last_altitude
         emergency_enter = self._climb_band[0]
@@ -1650,7 +1782,8 @@ class BehaviorTreeHandler:
                       and self._sustain_exit_alt is not None
                       and alt is not None
                       and (emergency_enter is None or alt >= float(emergency_enter)))
-        emergency = bool(self._climb_emergency_fn()) if self._climb_emergency_fn is not None else False
+        emergency = (bool(self._climb_hard_emergency_fn())
+                    if self._climb_hard_emergency_fn is not None else False)
         if is_sustain:
             self._ctrl.climb_mode(target_alt=float(self._sustain_exit_alt),
                                   max_s=self._sustain_max_s,
@@ -1667,9 +1800,15 @@ class BehaviorTreeHandler:
         tick's emergency verdict into the running actuator thread so a
         mid-hold escalation or de-escalation is no longer stuck at whatever
         value was true when the hold started (ADR 137 "Third Live Trial").
+
+        Reads the same HARD signal ``_start_climb`` now uses (ADR 141 D6) —
+        a mid-hold escalation must mean "a dive or terrain hazard just
+        appeared," not "the broad floor flag happened to still be set,"
+        or a hold that started calmly (floor-only) would suddenly cut its
+        own afterburner and pull the airbrake mid-climb for no new reason.
         """
-        if self._climb_emergency_fn is not None:
-            self._ctrl.set_climb_emergency(bool(self._climb_emergency_fn()))
+        if self._climb_hard_emergency_fn is not None:
+            self._ctrl.set_climb_emergency(bool(self._climb_hard_emergency_fn()))
 
     def _start_disengage(self) -> None:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence
@@ -1767,12 +1906,64 @@ class BehaviorTreeHandler:
                 current_game_state, self._ctrl.is_mission_running())
         except Exception:
             logger.debug("note_afterburner_cruise failed", exc_info=True)
+        # Phase 1 (operator directive): stall prevention. Same
+        # tree-independent shape as note_afterburner_cruise above.
+        try:
+            self._ctrl.note_stall_prevention(current_game_state)
+        except Exception:
+            logger.debug("note_stall_prevention failed", exc_info=True)
         # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
         # control loop, so it needs the reading rather than the tactic.
         try:
             self._ctrl.note_boundary(_b_dist, _b_fwd)
         except Exception:
             logger.debug("note_boundary failed", exc_info=True)
+        # ADR 140 D4/D6: drives Controller's padlock_state() tri-state.
+        # Run BEFORE the terrain read below (reordered by ADR 142) so
+        # padlock_state() reflects THIS tick's frame, not the previous
+        # one, when the terrain gate consults it. Same battle-state gate
+        # as the terrain reading, same reason: the center-dot crop would
+        # read whatever a lobby/loading screen happens to show otherwise.
+        if current_game_state in _BATTLE_STATES:
+            try:
+                self._ctrl.note_padlock_center_dot(
+                    frame, is_respawning=bool(is_respawning), now=now)
+            except Exception:
+                logger.debug("note_padlock_center_dot failed", exc_info=True)
+        # HLDD 001 Phase 1: forward sky-occlusion reading, same "perceive
+        # before the snapshot" placement as boundary perception above.
+        # Unlike the boundary/minimap detectors, this one has no natural
+        # "not present here" signal of its own — TERRAIN_FORWARD crops
+        # whatever is on screen, menu chrome included, and would read a
+        # confident low sky-fraction off a lobby popup exactly as it would
+        # off a real cliff face. Gated to the battle states (matching the
+        # tracker/HUD sensing gate above) so shadow-mode logging and any
+        # eventual live false-positive-rate measurement reflect actual
+        # flight, not menu noise. Cheap no-op whenever TERRAIN_FORWARD
+        # isn't configured. Whether the reading actually forces a climb is
+        # gated separately, inside ClimbCondition
+        # (behavior_tree.climb.terrain_avoidance.enabled).
+        #
+        # ADR 142: also skipped whenever padlock_state() is not confirmed
+        # False (True = engaged, None = unconfirmed) — the padlock camera
+        # re-points the capture away from forward-looking on its own ~6s
+        # cadence (ADR 136's _padlock_loop), which would otherwise feed a
+        # reading aimed at an enemy, not the terrain ahead, straight into
+        # ClimbCondition. Gates on `is not False`, not `is True`: an
+        # unconfirmed camera state is exactly the case this exists to
+        # distrust, not to assume forward-looking. `None` already means
+        # the right thing downstream — ClimbCondition.update_emergency's
+        # terrain block resets its confirm-reads streak on a missing
+        # reading, the same conservative handling an ordinary OCR gap
+        # already gets — so no change is needed there.
+        _terrain_sky_frac = None
+        if (current_game_state in _BATTLE_STATES
+                and self._ctrl.padlock_state() is False):
+            try:
+                _terrain_sky_frac = self._analyzer.detect_terrain_ahead(frame)
+            except Exception:
+                logger.debug("detect_terrain_ahead failed", exc_info=True)
+                _terrain_sky_frac = None
         snap = AnalyzerSnapshot(
             health=game_state.get("health"),
             missiles=self._analyzer.get_ammo_missiles(),
@@ -1796,6 +1987,7 @@ class BehaviorTreeHandler:
             boundary_lateral=_b_lat,
             boundary_forward=_b_fwd,
             has_padlock=self._has_padlock,
+            terrain_sky_frac=_terrain_sky_frac,
         )
         self._writer.set("snapshot", snap)
         # Anomaly 007: refresh Climb's ttg emergency verdict unconditionally,
@@ -1808,6 +2000,17 @@ class BehaviorTreeHandler:
                 self._climb_emergency_update_fn(snap, now)
             except Exception:
                 logger.debug("climb_emergency_update_fn failed", exc_info=True)
+        # HLDD 001 Phase 1: capture evidence on the FALSE->TRUE edge, right
+        # after the update above refreshes terrain_ahead_active for THIS
+        # tick and before the tree consumes it — mirrors the emergency
+        # update's own "perceive before select" placement. Edge-detected
+        # (not "while true") so one occurrence saves one frame, not one per
+        # tick it stays latched.
+        if self._climb_terrain_ahead_fn is not None:
+            terrain_ahead_now = bool(self._climb_terrain_ahead_fn())
+            if terrain_ahead_now and not self._terrain_ahead_prev:
+                self._capture_terrain_frame(frame, now)
+            self._terrain_ahead_prev = terrain_ahead_now
         self._tree.tick()
         selection = selected_tactic(self._tree)
         if selection != self._last_selection:
@@ -1825,11 +2028,11 @@ class BehaviorTreeHandler:
             self._last_selection = selection
         logger.debug(
             "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
-            "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s",
+            "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s padlock=%s",
             self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
             snap.ring_long, absent_s, snap.is_respawning, altitude,
             _fmt_rate(altitude_rate), _fmt_ttg(altitude, altitude_rate),
-            snap.fuel_pct, snap.mission_running,
+            snap.fuel_pct, snap.mission_running, self._ctrl.padlock_state(),
         )
         if self._climb_shadow is not None:
             # Outside GAME_BATTLE the Idle leaf would own selection, and the
@@ -1859,7 +2062,20 @@ class BehaviorTreeHandler:
         # After the selection, so each buffered record carries the tactic that
         # was actually chosen on that tick — the question a crossing trace has
         # to answer is what wingman was doing on the way out.
-        self._boundary.instrument_boundary(frame, now, snap, selection)
+        #
+        # Operator directive: same "AMMO_MISSILE reads the secondary
+        # (heatseeker) rack once heatdive has switched weapons" concern
+        # RespawnHandler.tick_detect already guards crash_with_missiles
+        # with (ctrl.is_secondary_weapon_active(), read there before
+        # stop_eject_sequence() clears it). instrument_boundary's own
+        # `flying` gate already excludes TACTIC_EJECT/is_respawning, but
+        # not the narrower window where an eject aborted (Anomaly 003) and
+        # a later tactic was already selected while the flag had not yet
+        # been cleared — so this is read explicitly here too, not assumed
+        # covered by that gate.
+        self._boundary.instrument_boundary(
+            frame, now, snap, selection,
+            had_secondary_weapon_active=self._ctrl.is_secondary_weapon_active())
         # SAF-001: never command flight outside GAME_BATTLE. In
         # GAME_BATTLE_MANUAL the selector already yields Idle, but the gate is
         # stated here too so a future leaf cannot reintroduce commanded flight

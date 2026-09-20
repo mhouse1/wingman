@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-09-16 | 1.8.9           |
+| Active | 2026-09-20 | 1.8.9           |
 
 ## Redesign note (2026-09-16)
 
@@ -155,10 +155,13 @@ convention of plain, single-line node labels.
 Crop one forward-center region — not five sectors — biased toward where
 sky belongs during safe level/climbing flight (roughly the upper-middle of
 the frame, excluding the bottom band where ground is normally visible even
-when safe, and excluding known HUD regions at top/top-right/bottom; exact
-fractional bounds need the same pixel-measurement calibration this
-project already does for every other crop, not a guess from one reference
-frame).
+when safe, and excluding known HUD regions at top/top-right/bottom).
+Implemented as `TERRAIN_FORWARD`: `x: 0.3-0.7, y: 0.1-0.55` — measured, not
+guessed, the same pixel-measurement discipline this project already uses
+for every other crop. The first candidate bounds/HSV range (see below)
+would have FAILED to detect either reference incident — direct
+measurement against both reference frames caught this before it shipped,
+not after a live session did.
 
 For each tick, classify pixels in that crop as sky-like (broad blue hues,
 or high-value/low-saturation white for cloud) via `cv2.inRange` on an HSV
@@ -190,53 +193,223 @@ behind it (Anomaly 007). This is deliberate: a second emergency source
 sharing the first one's already-proven pipeline is a much smaller, safer
 change than a second pipeline next to it.
 
-### Evidence capture
+### Evidence capture (done)
 
-On the first tick a terrain-ahead emergency fires, save a frame using the
-exact same shape as `UnknownAnomalyRecorder`/`HealthDropoutRecorder`/
-`BoundaryPerceptionHandler._capture_boundary_frame` (ADR 074/080/087/106/108):
-`test_screenshots/terrain_blackout_<timestamp>_stuck<n>s.png` — the
-reference file's own name is that convention, applied in advance. Capped
-per-session like its siblings; never raises (wrapped, logs a warning on
-failure per the established pattern).
+Implemented as `BehaviorTreeHandler._capture_terrain_frame`, same
+cap-and-never-raise shape as ADR 137 D5's `_capture_crash_frame`: saves the
+tick's frame on the FALSE→TRUE edge of `terrain_ahead_active` (via a new
+`tree.climb_terrain_ahead_fn` exposure, mirroring `climb_emergency_fn`), not
+on every tick the trigger stays latched. Filename convention deviates from
+the original design sketch above — `test_screenshots/terrain_ahead/
+terrain_<timestamp>_<seq>.png`, matching the actual established
+per-feature-subdirectory convention (`unknown_anomalies/`,
+`crash_with_missiles/`) rather than the flat `terrain_blackout_..._stuck<n>s`
+name, which was really the ad hoc naming of the one manually-saved reference
+screenshot, not a designed convention. Capped via
+`behavior_tree.climb.terrain_avoidance.capture_max` (40 in config.yaml; 0
+disables) — no separate enabled flag, since capture is already a no-op
+whenever the trigger itself is disabled.
+
+Added after the first live shadow trial (2026-09-16) produced firings that
+could only be judged from log text and altitude/weapon-fire timing
+correlation — inferred, not measured, which is exactly the gap this section
+originally called out and then shipped Phase 1 without.
+
+**`capture_cooldown_s` (added same day, after watching that trial run).**
+The 20-frame starting budget emptied in 42 minutes of real flight, then a
+single ~5-minute dogfight — banked and rolling near real canyon terrain,
+re-crossing the FALSE→TRUE edge every 10-25s as cloud cover and attitude
+fluctuated — burned most of what was left, leaving the remaining ~5+ hours
+of that session with no capture budget for whatever happened later
+(including at least one more genuine spawn-into-terrain firing with no
+photo to show for it). `capture_cooldown_s` (20.0s in config.yaml) bounds
+how much budget one episode can spend, checked before the cap so a
+cooldown-blocked attempt doesn't consume it either; `capture_max` was
+raised to 40 alongside it. Both are diagnostic tuning, not safety
+parameters — shrinking the evidence trail never changes what the trigger
+itself does.
 
 ### Config
 
+Split across two blocks, mirroring the existing `minimap.boundary_hsv` (top
+level, read by `analyzer.py`, which has full top-level config access) vs
+`behavior_tree.boundary.*` (trigger tuning, read by `_build_climb_slot`,
+which only sees `bt_cfg`) precedent:
+
 ```yaml
+# Top level — detection config: crop and sky-color range.
 terrain_avoidance:
-  enabled: false                  # master switch — Phase 1 ships off
-  sky_min_frac: 0.55              # below this, sky is considered occluded
-  confirm_reads: 2                # same debounce shape as climb.confirm_reads
-  crop: TERRAIN_FORWARD           # new crop key, coordinates via calibration
+  crop: TERRAIN_FORWARD
   sky_hsv:
-    lower: [90, 0, 120]           # placeholder — needs corpus measurement
-    upper: [140, 60, 255]
+    lower: [98, 20, 180]    # measured against both reference frames —
+    upper: [115, 100, 255]  # see "The problem, measured" above
+
+# behavior_tree.climb.terrain_avoidance — trigger/debounce tuning, next to
+# the ttg emergency trigger this is an OR-term beside.
+behavior_tree:
+  climb:
+    terrain_avoidance:
+      enabled: false          # master switch — Phase 1's own shipped default
+                              # is off; live config.yaml has run with this
+                              # flipped true since the first live trial,
+                              # 2026-09-16 (see "Live trial results" above)
+      shadow: true             # UN-GRADUATED 2026-09-17 — see below
+      sky_min_frac: 0.55       # below this, sky is considered occluded
+      confirm_reads: 2         # same debounce shape as climb.confirm_reads
+      capture_max: 40          # evidence-capture budget, this session
+      capture_cooldown_s: 20.0 # bounds how much one episode can spend
 ```
 
-`TERRAIN_FORWARD` added to `crops:` via the existing calibration tool, not
-guessed — matching this project's own convention (the STALL_PARTS_CRATE
-crops shipped this session were pixel-measured from a reference frame, not
-estimated).
+`TERRAIN_FORWARD` added to `crops:` via the existing calibration tool
+conventions. The HSV range was deliberately narrowed past the first
+candidate: a wider range needed to accept frame 2's hazy sky also absorbed
+too much of frame 2's ice-wall terrain, so the shipped range is biased
+toward correctly rejecting terrain over accepting every hazy sky —
+validated against sampled crops from both reference frames plus sampled
+clear-sky patches before landing in config, not just the one frame that
+prompted the feature.
+
+`shadow: true` shipped in production config.yaml throughout Phase 1's
+initial live trials, regardless of `enabled`: the terrain OR-term computed
+and logged (`TERRAIN AHEAD`) every tick but did not fold into `emergency`
+until a live session validated the false-positive rate on hazy skies — the
+same shadow-first discipline ADR 073 used for the climb tactic itself.
+**Flipped to `shadow: false` on 2026-09-16** after ~16 hours/four sessions
+of shadow-mode validation (see "Live trial results" below) — an operator
+decision, made after reviewing the full true/false-positive breakdown, not
+something this document or the agent that ran the trial decided on its
+own.
+
+**Flipped back to `shadow: true` on 2026-09-17**, also an operator
+decision. The padlock camera (`Controller._start_search_and_destroy_locked`'s
+`_padlock_loop`, ADR 136) re-points the capture away from forward-looking
+whenever it engages — roughly every ~6s during ordinary search-and-destroy
+operation, not just around respawn — which can corrupt this trigger's
+sky-occlusion read in either direction: a false "terrain ahead" while
+padlocked onto an enemy against a background that happens to read as
+non-sky, or a missed real terrain-ahead while padlock happens to be looking
+somewhere safe. There is no reliable padlock-engaged signal today —
+`TargetTracker.detect_padlock_off` is confirmed broken (ADR 136 D4: it
+tracks a flight-path/velocity marker, not the padlock ring, and must not be
+reused) — so there is currently no way to gate this trigger on camera state.
+Graduation is deferred again until a padlock-engaged detector exists and is
+itself validated; the false-positive taxonomy in "Live trial results" below
+was gathered without controlling for padlock state at all, so it should not
+be read as having already accounted for this.
 
 ### Testing plan
 
-- Unit: a synthetic sky-blue frame never triggers; a synthetic frame with
-  the lower crop region replaced by rock-toned pixels (built from real
-  HSV ranges sampled off the reference frame, not invented) does, after
-  `confirm_reads` ticks, not one; a single-tick sky dropout (e.g., a UI
-  flash) does not trigger — mirrors `TestTimeToGroundRecovery`'s existing
-  shape in `test_behavior_tree.py`.
-- Integration: extend `test_reproduces_the_incident_without_the_pre_tick_update`
-  /`test_yields_to_climb_when_the_pre_tick_update_runs`'s pattern (Anomaly
-  007) with a terrain-triggered case using the real tree, confirming
-  `BoundaryTurn` yields to a terrain emergency exactly as it does to a ttg
-  one — same shared `_emergency_active` flag, so this should require no new
-  yield-path code, only a new test proving it.
-- Live: shadow-first (ADR 073's own precedent) — log `TERRAIN AHEAD` and
-  capture evidence without actuating for the first live sessions, so false
-  positive rate is measured against real gameplay before the emergency
-  climb is allowed to fire. Graduate to active once a session shows the
-  detector agrees with operator judgment on captured frames.
+- Unit (done, `TestTerrainAheadTrigger` in `test_behavior_tree.py`): clear
+  sky never triggers; a low sky fraction triggers only after
+  `terrain_confirm_reads` consecutive ticks, not one; a single-tick
+  dropout (one low read bracketed by high reads) does not trigger; a
+  missing reading resets the streak rather than freezing it (a
+  deliberately different policy from the ttg trigger's blind-read memory —
+  a perception gap here is not evidence of danger the way a stale descent
+  reading is); `shadow: true` sets `terrain_ahead_active` without setting
+  `emergency_active`; disabled by default. Plus `detect_terrain_ahead`
+  itself (done, `test_analyzer.py`): a synthetic frame filled with a color
+  inside the real production `terrain_avoidance.sky_hsv` range reads high,
+  one filled with a rock-toned color outside it reads low, a missing
+  `TERRAIN_FORWARD` crop returns `None` — run against the real
+  `GameStateAnalyzer` and its real config.yaml values, not a
+  re-implementation.
+- Integration (done): `test_boundary_turn_yields_to_a_terrain_emergency`
+  and `test_boundary_turn_keeps_selection_when_terrain_is_shadowed` in
+  `test_behavior_tree.py`, extending the Anomaly 007
+  `test_reproduces_the_incident_without_the_pre_tick_update`
+  /`test_yields_to_climb_when_the_pre_tick_update_runs` pattern with a
+  terrain-triggered case on the real tree — confirms `BoundaryTurn` yields
+  to a terrain emergency through the same `climb_emergency_update_fn`
+  pre-tick pipeline the ttg trigger uses, and that shadow mode does not
+  actuate.
+- Live (done — see "Live trial results" below): shadow-first (ADR 073's own
+  precedent) — with `enabled: true, shadow: true`, logged `TERRAIN AHEAD`
+  and captured evidence without actuating across four sessions spanning
+  ~16 hours on 2026-09-16. **Graduated to active (`shadow: false`) the same
+  day**, operator decision, after reviewing the full live trial results
+  below — every true positive inspected was real terrain on a collision
+  course, every false positive failed in the safe direction.
+  **Un-graduated back to `shadow: true` on 2026-09-17** — see "Config"
+  above. The one session this trigger actually held the controls surfaced
+  a real actuation-layer bug (fixed same day: an emergency escalation
+  mid-hold could keep pulsing nose-up after altitude already confirmed
+  above target, see `docs/adr/137-emergency-climb-airbrake-and-crash-
+  instrument.md`), plus the padlock-interference gap below — both needed
+  a live actuation session to surface, which is exactly what shadow-mode
+  testing cannot do. Re-graduation needs its own fresh live trial once a
+  padlock-engaged detector exists.
+
+### Live trial results (2026-09-16)
+
+Four sessions, shadow mode throughout (`enabled: true, shadow: true`),
+zero actuation: Trial A (03:58-04:21, ~23 min, pre-evidence-capture, 32
+firings logged, 0 frames saved — the capture mechanism below didn't exist
+yet); Trial B (04:31-10:45, 6h14m, 311 firings, 20 frames saved before the
+original 20-frame budget emptied at 42 minutes in); Trial C (10:50-11:03,
+~13 min, ended by a genuine Xwayland `XIO: fatal IO error 110` crash —
+infrastructure, not a code fault, confirmed by no orphaned processes and a
+clean relaunch); Trial D (11:20-20:39, 9h25m, 559 firings, 40 frames saved
+under the raised budget and cooldown from "Evidence capture" above). Roughly
+900 `TERRAIN AHEAD` log lines and 62 saved evidence frames total, reviewed
+by eye against the actual saved PNGs, not inferred from log text alone —
+several early conclusions drawn from log timing/altitude correlation before
+evidence capture existed turned out wrong once a real frame was available
+(see below).
+
+**True positives — real terrain, level or climbing flight, genuine
+collision course.** Confirmed across at least four visually distinct
+maps: a dark misty karst-spire map (the same recurring spawn point hit
+repeatedly across many respawns — this map's default spawn heading points
+the aircraft directly at a rock-spire cluster essentially every mission
+start), a dusk coastal map (tall rock towers over water), a bright daytime
+volcanic-island map (aircraft level at 824 m, targeting reticle centered
+directly on the peak — as clean an example as the two original reference
+screenshots), and a low-altitude (872 m) real-mountain-plus-sea-stack
+catch during active combat. No confirmed miss found in any frame
+inspected — every case where the forward view showed real terrain on a
+level or climbing flight path produced a `TERRAIN AHEAD` firing.
+
+**False positives — four distinct causes, all failing in the safe
+direction (a wasted climb, never a missed hazard):**
+1. **Clouds/haze** — a dense cumulus bank, and separately a hazy dusk sky
+   with jet contrails. Anticipated in "Explicitly not attempted in Phase
+   1" above and in Open Question 3 below.
+2. **Attitude during hard maneuvering** — a near-vertical zoom climb and a
+   banked/rolled dogfighting turn both pointed the fixed forward-center
+   crop at real terrain or ocean far below purely because of aircraft
+   attitude, not an actual collision course. Not anticipated by name in
+   the original Open Questions; the closest was "steep intentional dives"
+   under Question 3 — rolls and zoom climbs are the same underlying gap
+   (the crop assumes roughly level flight) but weren't named specifically.
+3. **Post-match cutscenes** — the "MVP"/"Top 3" results-screen camera
+   shows someone else's aircraft near mountains in a scripted replay
+   angle; the player isn't flying at that moment. Not anticipated at all
+   in the original Open Questions.
+4. **Eject sequence** — the view during/after bailing out reads as
+   terrain-occluded at altitude with no real hazard, since the mission has
+   already ended. Not anticipated at all in the original Open Questions.
+
+**Cross-check against real crashes.** Separately, this session's
+`crash_with_missiles` investigation (ADR 137's seventh live trial) reviewed
+30+ real crash frames across two of the same four sessions. The two
+crashes confirmed as genuine ground impacts (steep, fast dives — -588 and
+-782 m/s) did **not** correlate with a `TERRAIN AHEAD` firing nearby — as
+designed: Phase 1 targets level/climbing flight into an obstacle, not a
+dive too fast to recover from, which is the pre-existing ttg trigger's
+job (ADR 086/137). No case was found where a Phase-1-shaped hazard (level
+flight into terrain) went undetected.
+
+**What this does and doesn't answer.** The false-positive taxonomy above
+is now measured, not guessed (closes most of Open Question 3's original
+uncertainty). Open Question 4 — whether Phase 1 measurably reduces the
+1.25% spawn-crash rate — remains genuinely open: shadow mode never
+actuated, so there is no live data yet on outcomes with the climb
+actually firing, only on whether the detector's own judgment matches what
+a human reviewing the frame would call dangerous. Today's evidence
+supports that it does, consistently, across every true positive
+inspected — that is the case for graduating to active, not proof of the
+downstream crash-rate effect, which can only be measured after.
 
 ## Phase 2+ (not designed here, explicitly deferred)
 
@@ -296,6 +469,44 @@ semantic segmentation model (e.g. MobileNetV3 + DeepLabV3).
 | `wingman/config_schema.py` | Validate the new block, same shape as `eject_stuck_detector` |
 | No FSM change | Terrain-ahead is a per-tick reading, not a state; it feeds an existing condition, not a new transition |
 
+### Addendum (2026-09-20): companion work bundled into the Phase 1 reintroduction
+
+The terrain-ahead trigger above shipped and was live-trialled on a branch
+(`test1`) alongside three unrelated operator-directed mechanisms and two
+actuator bug fixes, all sharing the same `ClimbCondition`
+(`wingman/behavior_tree.py`) and climb-hold actuator
+(`wingman/controller.py`) this document already covers. The operator
+reverted that entire branch as a "major regression" after six distinct
+live-caught bugs stacked on the same hot code path faster than any one of
+them could soak. The terrain-ahead trigger itself was not the cause (it
+shipped `shadow: true` throughout and never actuated), but it was reverted
+along with everything else and had to be reintroduced from the clean base
+this document already describes.
+
+**[ADR 141](../adr/141-phase1-altitude-floor-stall-prevention-and-emergency-yields.md)
+is the full record** of that reintroduction. In terms of this document's own
+scope, the two load-bearing changes are:
+
+- `ClimbCondition` gained a fourth, sibling OR-term (`alt_floor_m`, a hard
+  4000 m mission_j20 floor — unrelated to terrain detection, but living in
+  the same condition object) and a `hard_emergency_active` property that is
+  `ttg or terrain_ahead`, deliberately **excluding** the floor. This
+  document's own `emergency = ttg_emergency or terrain_ahead` (see
+  "Actuation" above) is what `BoundaryTurn` used to yield to; it now yields
+  to the narrower `hard_emergency_active` instead, so a long-running
+  altitude-floor climb cannot lock `BoundaryTurn` out of the map edge for
+  its duration. Terrain-ahead is unaffected by this split — it was already
+  part of the hard signal and still is.
+- The climb-hold actuator (`_run_climb_hold`) picked up two oscillation-
+  crash fixes (exit-push overshoot correction; a blind-pulse observe gap)
+  that apply to every emergency climb this trigger can cause, not something
+  specific to terrain detection — see ADR 141 D5 for the live incidents.
+
+Terrain-ahead's own status is unchanged by this addendum: still
+`enabled: true, shadow: true` in production `config.yaml`, still not
+actuating, still gated on Open Question 6's padlock-interference concern
+below.
+
 ## Open Questions
 
 1. **Sky HSV range calibration, now a two-map problem, not a one-map
@@ -308,12 +519,24 @@ semantic segmentation model (e.g. MobileNetV3 + DeepLabV3).
    pushes this toward needing a wider tolerance, a per-map profile, or a
    different signal entirely (e.g. brightness/texture variance instead of
    hue) — do not guess the answer before the corpus measurement exists.
+   **Largely answered by the live trial results above**: the single
+   shipped range correctly triggered true positives and correctly stayed
+   quiet on ordinary sky across at least four visually distinct maps
+   (karst, coastal, volcanic, desert canyon) with no per-map tuning — no
+   evidence yet that this needs to be a per-map profile. Not fully closed:
+   none of those four is the ice/snow map the second reference frame came
+   from, so that specific hard case is still unconfirmed live.
 2. **Crop geometry**: the forward-center band's exact fractional bounds
    need calibration against actual HUD layout (top kill-counter, top-right
    minimap, bottom weapon/fuel readouts) so the detector never reads HUD
    chrome as "not sky" — confirmed necessary on both reference frames,
    which have different HUD element positions/content (enemy nameplates
-   visible in the ice-map reference, absent in the rock-map one).
+   visible in the ice-map reference, absent in the rock-map one). **No
+   HUD-chrome false positive found in ~900 live firings across four
+   sessions** — every false positive traced to a real cause (cloud,
+   attitude, cutscene, eject), not a HUD element misread as terrain. Not
+   proof the geometry is perfectly tuned, only that it hasn't produced
+   this specific failure yet.
 3. **False-positive rate over ordinary gameplay**: clouds, other aircraft,
    smoke/tracer effects, falling snow (visible in the ice-map reference —
    a texture the rock-map reference doesn't have at all), and steep
@@ -321,14 +544,81 @@ semantic segmentation model (e.g. MobileNetV3 + DeepLabV3).
    risk. The shadow-first live trial (Testing plan, above) exists
    specifically to measure this before actuation is enabled — do not
    assume the answer, and do not assume the two reference maps bound the
-   full range of conditions this will see live.
+   full range of conditions this will see live. **Measured by the live
+   trial results above**: four real causes found (clouds/haze, hard-
+   maneuvering attitude, post-match cutscenes, eject sequences), none of
+   them terrain-colored objects or falling snow specifically — this
+   session's maps didn't include the ice/snow reference map, so that
+   specific risk is still unconfirmed live. All four found causes fail in
+   the safe direction (wasted climb, not a missed hazard). **Correction,
+   2026-09-17**: "wasted climb" was an incomplete characterization — it
+   assumed shadow mode's "logs but never actuates" cost, not what an
+   actual live actuation costs. The one session this trigger held the
+   controls surfaced a real actuation-layer bug where a false-positive
+   escalation mid-hold could keep pulsing nose-up well past the target
+   altitude and (measured) drop the aircraft ~5900m in ~6s — see the
+   "Config" section's 2026-09-17 note and ADR 137. Fixed the same day, but
+   the general point stands: "fails safe" claims drawn from shadow-mode
+   data describe the detector's judgment, not the actuator's behavior once
+   that judgment is wired to the controls — the two need separate
+   validation, not an assumption that one implies the other.
 4. **Whether Phase 1 alone measurably reduces the 1.25% spawn-crash rate**
    is itself unverified until live data exists — this document proposes a
-   plausible mechanism, not a proven fix.
+   plausible mechanism, not a proven fix. **Still open after the live
+   trial**: shadow mode never actuates, so today's data confirms the
+   detector's judgment matches a human's on captured frames, not that
+   flipping it active actually reduces crashes — that can only be
+   measured after graduation.
 5. **Design 004 and Design 011's dependency on this document**: both should
    be revisited once Phase 1 ships (Design 004's currently-unsatisfiable
    hard gate, Design 011's open fork question) — not done as part of this
    redesign, which is scoped to Design 001 itself.
+6. **Padlock camera interference — new 2026-09-17, unresolved.** The
+   padlock camera (`Controller._start_search_and_destroy_locked`'s
+   `_padlock_loop`, ADR 136) re-points the capture away from
+   forward-looking whenever it engages — roughly every ~6s during ordinary
+   search-and-destroy operation, well beyond just the respawn window the
+   operator first flagged this under. This can corrupt the sky-occlusion
+   read in either direction: a false "terrain ahead" while padlocked onto
+   an enemy against a background that happens to read as non-sky, or a
+   missed real terrain-ahead while padlock happens to be looking somewhere
+   safe. No reliable padlock-engaged signal exists today —
+   `Controller._padlock_engaged` is write-only-false and never set true;
+   `TargetTracker.detect_padlock_off` is confirmed broken (ADR 136 D4: it
+   tracks a flight-path/velocity marker, not the padlock ring). A
+   promising but unvalidated lead exists — the reticle renders solid with
+   the target's name/distance/type/health when padlocked, dashed and
+   empty when not — spotted by comparing real captured frames, but not yet
+   confirmed by a controlled experiment (the auto-padlock loop's own
+   periodic press has so far confounded every manual before/after test).
+   **Correction, 2026-09-17 (later the same day)**: this specific lead did
+   not hold up against a wider set of real frames — a confirmed padlock-off
+   capture showed the reticle staying dashed while a named enemy
+   ("[RCMP] Darksy 4.7km Su-47") was displayed near it, contradicting
+   "solid = locked." A different, more promising signal was found instead
+   (a small solid green dot fixed at exact screen center, distinct from
+   this moving reticle) and is now specified in
+   `docs/adr/140-padlock-camera-state-detection.md`, with real HSV
+   measurements from 8 captured frames — not shipped yet, still needs the
+   padlock-ON comparison that ADR's own Open Question 1 calls out.
+   **Operator decision, 2026-09-17: `terrain_avoidance.shadow` reverted to
+   `true` (see "Config" above) until this is resolved** — Phase 1 keeps
+   observing and capturing evidence, but no longer actuates, so a padlock-
+   confused false positive cannot force a climb in the meantime. The
+   ttg/`recover_below_time_s` emergency trigger is telemetry-only and
+   unaffected by camera view; this does not touch it. Re-graduation is
+   gated on ADR 140 landing and being live-validated first.
+   **Update, 2026-09-20**: ADR 140 has landed (D1-D6 implemented) and been
+   live-validated across several sessions, including throughout the
+   [ADR 141](../adr/141-phase1-altitude-floor-stall-prevention-and-emergency-yields.md)
+   soak session — `padlock_state()` logged correctly the whole 1h 36m run.
+   It remains purely observational everywhere, including here: nothing in
+   `BehaviorTreeHandler.tick()` reads it yet, so this trigger's
+   sky-occlusion reading is still taken regardless of camera state, exactly
+   as this Open Question describes. Wiring `padlock_state()` into this
+   trigger — not flipping `shadow` back — is the concrete next step,
+   proposed in
+   [ADR 142](../adr/142-gate-terrain-ahead-on-padlock-state.md).
 
 ## References
 

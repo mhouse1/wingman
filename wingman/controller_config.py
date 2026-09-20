@@ -56,12 +56,18 @@ class ControllerConfig:
     missile_evade: dict = field(default_factory=dict)
     climb: dict = field(default_factory=dict)
     afterburner_cruise: dict = field(default_factory=dict)
+    stall_prevention: dict = field(default_factory=dict)
     fuel: dict = field(default_factory=dict)
     # ADR 116: mission_loiter's block. It was read with
     # `config.get("loiter_mission")` guarded by `isinstance(config, dict)`,
     # and `config` is this dataclass — so the guard was always False and the
     # whole section of config.yaml was dead.
     loiter: dict = field(default_factory=dict)
+    # ADR 140: only `confirm_seconds` is read here — the vision fields
+    # (region_pct/green_lower/green_upper/min_pixels) belong to
+    # TargetTracker, which is constructed directly from the raw config dict
+    # in main.py, not through this dataclass.
+    padlock_center_indicator: dict = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, cfg: dict | None, **overrides) -> "ControllerConfig":
@@ -91,8 +97,10 @@ class ControllerConfig:
             missile_evade=bt.get("missile_evade", {}) or {},
             climb=bt.get("climb", {}) or {},
             afterburner_cruise=bt.get("afterburner_cruise", {}) or {},
+            stall_prevention=bt.get("stall_prevention", {}) or {},
             fuel=cfg.get("fuel", {}) or {},
             loiter=cfg.get("loiter_mission", {}) or {},
+            padlock_center_indicator=cfg.get("padlock_center_indicator", {}) or {},
         )
         if not overrides:
             return base

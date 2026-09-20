@@ -570,7 +570,12 @@ wait-game:
 	       exit 1; }
 	@echo "Metalstorm.exe detected — waiting $(GAME_LOBBY_WAIT_S) s for game window to appear…"
 	@sleep $(GAME_LOBBY_WAIT_S)
-	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)"
+	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)" \
+	  || { echo "ERROR: game window never appeared after $(GAME_LOBBY_WAIT_S) s — the launch did not complete"; \
+	       echo "       launch log: /tmp/wingman-game-launch.log"; \
+	       echo "Closing the nested display it would have been hosted on (ADR 105)…"; \
+	       $(PYTHON_RUN) scripts/nested-display.py stop || true; \
+	       exit 1; }
 
 # Capture one native-resolution frame via PipeWire and save to /tmp/wingman_native.png.
 # Run with the game on screen to verify the window capture region.
@@ -593,8 +598,17 @@ move-game-window:
 # Strip the Wine virtual desktop window's title bar so there is no drag handle to
 # grab — eliminates the interactive-drag freeze vector at the source. Run
 # automatically by wait-game on every `make r` / `make rd`. See ADR 054.
+#
+# Deliberately propagates a real failure here (no `|| true`): "window not
+# found" doesn't just mean the cosmetic undecorate step was skipped, it means
+# the launch itself never produced a window — wait-game's own caller relies
+# on this exit code to know the difference and clean up the nested display it
+# started, the same way it already does for "Metalstorm.exe never started"
+# (2026-09-18: swallowing this here left an orphaned, wedged :3 that then
+# blocked every subsequent launch attempt, `make` and manual alike, until
+# manually SIGKILLed).
 undecorate-game-window:
-	@$(NESTED_ENV) $(PYTHON_RUN) -m wingman.move_game_window --undecorate || true
+	@$(NESTED_ENV) $(PYTHON_RUN) -m wingman.move_game_window --undecorate
 
 # Capture a frame with MetalStorm on screen and overlay a coordinate grid.
 # Open /tmp/wingman_grid.png to find the game window's top-left (x,y) offset,

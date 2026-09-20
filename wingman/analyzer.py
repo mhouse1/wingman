@@ -943,6 +943,11 @@ class GameStateAnalyzer:
             tracker: Optional PerformanceTracker instance (ADR 031)
         """
         self._tracker = tracker
+        # ADR 140: set once from main.py after both objects exist (the same
+        # late-bound wiring shape as Controller.set_target_tracker) — needed
+        # only to read Controller.padlock_state() for the telemetry log line
+        # below, not a general dependency in either direction.
+        self._controller = None
         startup_cfg = config.get("startup_state_detection", {})
         # Respawn detection config
         respawn_cfg = config.get("respawn_detection", {})
@@ -1024,6 +1029,17 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
+        # HLDD 001 Phase 1: forward sky-occlusion terrain-ahead detector.
+        # Detection config (crop, sky HSV) lives here, top-level, mirroring
+        # minimap.boundary_hsv — the trigger threshold/debounce that
+        # CONSUMES this reading lives under behavior_tree.climb.terrain_avoidance
+        # instead, next to the ttg emergency trigger it's an OR-term beside.
+        _terrain_cfg = config.get("terrain_avoidance", {}) or {}
+        _t_hsv = _terrain_cfg.get("sky_hsv", {}) or {}
+        self._terrain_sky_hsv_lower = np.array(
+            _t_hsv.get("lower", [98, 20, 180]), dtype=np.uint8)
+        self._terrain_sky_hsv_upper = np.array(
+            _t_hsv.get("upper", [115, 100, 255]), dtype=np.uint8)
         # ADR 123: nose direction, maintained from every telemetry update.
         self._nose_direction = NOSE_UNKNOWN
         self._nose_direction_deadband_mps = float(
@@ -1503,6 +1519,14 @@ class GameStateAnalyzer:
         """
         self.subscribe(GameEvent.RESPAWN_DETECTED, callback, name="legacy", replace=True)
 
+    def set_controller(self, controller) -> None:
+        """ADR 140: wire a Controller reference in, late-bound from main.py
+        after both objects exist — mirrors Controller.set_target_tracker's
+        shape. Only used to read padlock_state() for the telemetry log line
+        in _harvest_telemetry_future; not a general two-way dependency.
+        """
+        self._controller = controller
+
     def trigger_event(self, name: str) -> bool:
         """Dispatch an FSM trigger via the thread-safe trigger wrapper."""
         return self._trigger(name)
@@ -1610,8 +1634,17 @@ class GameStateAnalyzer:
                 nose = f"{angle:+.0f}\N{DEGREE SIGN} ({band})"
             else:
                 nose = "n/a"
-            logger.info("Altitude: %s | Speed: %s | Nose: %s",
-                        altitude_value, speed_value, nose)
+            # ADR 140: padlock_state() is Controller-owned tri-state — None
+            # means Unknown (no positive "on" detector exists yet, D4/
+            # Non-Goal 1), so it must print distinctly from both ON and OFF
+            # rather than being coerced into one of them.
+            padlock_state = (self._controller.padlock_state()
+                             if self._controller is not None else None)
+            padlock_label = ("ON" if padlock_state is True
+                             else "OFF" if padlock_state is False
+                             else "UNKNOWN")
+            logger.info("\033[93mPADLOCK: %s | Altitude: %s | Speed: %s | Nose: %s\033[0m",
+                        padlock_label, altitude_value, speed_value, nose)
             self._update_nose_direction(snap)
         return telemetry_ocr_time
 
@@ -3128,6 +3161,17 @@ class GameStateAnalyzer:
             return False
         return time.time() - self._exit_dialog_seen_ts <= stale_after_s
 
+    def _lobby_recheck_crops(self):
+        """Return the crop names a stale lobby re-check may legitimately use.
+
+        A match can be genuinely starting while some lobby prompts remain on the
+        screen briefly, but the only safe fallback is to detect the lobby is
+        still present and walk back to GAME_LOBBY. READY may persist on the
+        lobby screen while the FSM already entered GAME_STARTING, so it must be
+        considered equivalent evidence to PLAY for this guard.
+        """
+        return [crop for crop in ("PLAY", "READY") if crop in self.crops]
+
     def _stall_recovery_targets(self, state):
         """Return the stall-recovery crops eligible to act right now (ADR 084).
 
@@ -3275,11 +3319,12 @@ class GameStateAnalyzer:
                 elif state == GameState.GAME_WAITING:
                     crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
                 elif state in LOBBY_RECHECK_STATES:
-                    # ADR 102: PLAY only. Nothing is clicked from here — the
-                    # detection walks the state back and the ordinary lobby
-                    # path does the clicking, so this cannot click PLAY into a
-                    # match that is genuinely starting.
-                    crops_to_scan = [c for c in ("PLAY",) if c in self.crops]
+                    # ADR 102: a stale lobby prompt can still be visible while the FSM
+                    # has already entered GAME_STARTING. Scan the same lobby crops the
+                    # lobby itself uses for evidence, but do not click from here — the
+                    # recheck walks the state back and the ordinary lobby path does the
+                    # actual click once the FSM is back in GAME_LOBBY.
+                    crops_to_scan = self._lobby_recheck_crops()
                 else:
                     # GAME_UNKNOWN / GAME_STARTING_STALLED: popup batch only
                     # (ADR 074) — no lobby-crop clicking from those states.
@@ -3350,22 +3395,28 @@ class GameStateAnalyzer:
 
                 if not handled and state in LOBBY_RECHECK_STATES:
                     detected = False
-                    if "PLAY" in lobby_futures:
+                    detected_crop = None
+                    for crop in self._lobby_recheck_crops():
+                        if crop not in lobby_futures:
+                            continue
                         try:
-                            detected, _, text = lobby_futures["PLAY"].result(timeout=20)
+                            detected, _, text = lobby_futures[crop].result(timeout=20)
                         except Exception as e:
                             logger.warning(
-                                "Lobby quick-scan: PLAY result failed in %s: %s",
-                                state.name, e)
+                                "Lobby quick-scan: %s result failed in %s: %s",
+                                crop, state.name, e)
                             detected = False
+                        if detected:
+                            detected_crop = crop
+                            break
                     if detected:
                         self._starting_play_streak += 1
                         if self._starting_play_streak >= STARTING_PLAY_CONFIRM_READS:
                             logger.warning(
-                                "\033[93m📋 Lobby quick-scan: PLAY still visible after "
+                                "\033[93m📋 Lobby quick-scan: %s still visible after "
                                 "%d reads in %s — the match never started, "
                                 "returning to GAME_LOBBY (ADR 102)\033[0m",
-                                self._starting_play_streak, state.name)
+                                detected_crop, self._starting_play_streak, state.name)
                             # The suppression exists to stop a second click on a
                             # PLAY that worked. This is the proof it did not, so
                             # clearing it is the point — otherwise the lobby is
@@ -3376,12 +3427,12 @@ class GameStateAnalyzer:
                             self._trigger("starting_play_visible")
                         else:
                             logger.info(
-                                "Lobby quick-scan: PLAY visible in %s (%d/%d reads)",
-                                state.name, self._starting_play_streak,
+                                "Lobby quick-scan: %s visible in %s (%d/%d reads)",
+                                detected_crop, state.name, self._starting_play_streak,
                                 STARTING_PLAY_CONFIRM_READS)
                     elif self._starting_play_streak:
                         logger.debug(
-                            "Lobby quick-scan: PLAY no longer visible in %s — "
+                            "Lobby quick-scan: stale lobby crop no longer visible in %s — "
                             "streak reset", state.name)
                         self._starting_play_streak = 0
                     handled = True
@@ -3935,6 +3986,40 @@ class GameStateAnalyzer:
                     float(dx[i] / radius))
         except Exception as e:
             logger.warning("Analyzer: detect_map_boundary failed: %s", e)
+            return None
+
+    def detect_terrain_ahead(self, frame) -> "float | None":
+        """Sky fraction in the TERRAIN_FORWARD crop, or None if unreadable.
+
+        HLDD 001 Phase 1 — instrumentation and (config-gated) emergency-climb
+        trigger. Detects the ABSENCE of sky rather than the presence of any
+        particular terrain color: terrain composition (rock, ice, grass,
+        buildings) varies per map, so a positive per-color match doesn't
+        generalize the way `detect_map_boundary`'s fixed-hue HUD stroke does
+        — see docs/hldd/001-terrain-avoidance-hldd.md, "Why the original
+        design doesn't fit."
+
+        Returns the fraction of pixels classified as sky-like (broad blue
+        hues or bright low-saturation cloud-white, `terrain_avoidance.sky_hsv`).
+        A LOW fraction means the forward view is occluded by *something* —
+        deliberately not classified further; see the HLDD's "Explicitly not
+        attempted in Phase 1" note. The confirm-reads debounce and the
+        sky_min_frac threshold live in `ClimbCondition.update_emergency`,
+        not here — this method is instrumentation only, same division of
+        responsibility as `detect_map_boundary`.
+        """
+        if self.crops is None or "TERRAIN_FORWARD" not in self.crops:
+            return None
+        try:
+            crop = get_crop(frame, *self.crops["TERRAIN_FORWARD"][:4])
+            if crop.size == 0:
+                return None
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(
+                hsv, self._terrain_sky_hsv_lower, self._terrain_sky_hsv_upper)
+            return float(np.count_nonzero(mask)) / float(mask.size)
+        except Exception as e:
+            logger.warning("Analyzer: detect_terrain_ahead failed: %s", e)
             return None
 
     def detect_return_to_battle(self, frame) -> bool:

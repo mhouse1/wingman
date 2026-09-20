@@ -1797,10 +1797,15 @@ class TestRespawnHealthStallRecorder:
 class _FakeBoundaryAnalyzer:
     """Analyzer stub exposing only what _instrument_boundary touches."""
 
-    def __init__(self, crossed_seq, reading=(0.5, -0.5)):
+    def __init__(self, crossed_seq, reading=(0.5, -0.5), auto_confirm=None):
         self._crossed = list(crossed_seq)
         self._reading = reading
         self.ocr_calls = 0
+        # (ok, text) to invoke the callback with immediately, synchronously
+        # — real OCR is async, but a same-thread invocation is enough to
+        # prove what instrument_boundary's closure actually captured and
+        # passed through, without needing a real thread pool in a test.
+        self._auto_confirm = auto_confirm
 
     def detect_return_to_battle(self, _frame):
         return self._crossed.pop(0) if self._crossed else False
@@ -1810,13 +1815,24 @@ class _FakeBoundaryAnalyzer:
 
     def confirm_return_to_battle_async(self, _frame, _cb):
         self.ocr_calls += 1
+        if self._auto_confirm is not None:
+            _cb(*self._auto_confirm)
 
 
-def _boundary_handler(analyzer):
+class _StatsStub:
+    def __init__(self):
+        self.events = []
+
+    def on_event(self, event_name, ts):
+        self.events.append(event_name)
+
+
+def _boundary_handler(analyzer, stats=None):
     import collections
     from wingman.tick_handlers import BoundaryPerceptionHandler
     h = BoundaryPerceptionHandler.__new__(BoundaryPerceptionHandler)
     h._analyzer = analyzer
+    h._stats = stats
     h._rtb_false_positives = 0
     h._rtb_active = False
     h._boundary_crossings = 0
@@ -1828,6 +1844,15 @@ def _boundary_handler(analyzer):
     h._rtb_confirmed = False
     h._boundary_reading = None
     h._boundary_turn_min_dist = 1.0
+    # _on_rtb_confirmed's success path calls _capture_rtb_frame ->
+    # _capture_boundary_frame, which reads _rtb_capture_max before its own
+    # `frame is None` check — 0 disables capture (no real file I/O in a
+    # test) and short-circuits before _captures/_rtb_capture_dir are ever
+    # touched. Previously missing here; silently swallowed by
+    # _on_rtb_confirmed's outer `except Exception: pass` because no
+    # existing test asserted anything past that call.
+    h._rtb_capture_max = 0
+    h._captures = {}
     return h
 
 
@@ -1913,6 +1938,92 @@ def test_a_confirmed_crossing_is_kept():
     h._on_rtb_confirmed(True, "RETURNTOBATTLE:5")
     assert h._boundary_crossings == 1
     assert h._rtb_false_positives == 0
+
+
+# --- Operator directive: RTB crossings with primary missiles still aboard,
+# same "still armed" shape as crash_with_missiles. -------------------------
+
+def test_a_confirmed_crossing_with_missiles_emits_the_stats_event():
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=3)
+    assert stats.events == ["return_to_battle_with_missiles"]
+
+
+def test_a_confirmed_crossing_with_zero_missiles_does_not_emit():
+    """Crossed back in with an empty rack — not the 'still armed' story
+    this stat tracks."""
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=0)
+    assert stats.events == []
+
+
+def test_an_unknown_missile_count_still_emits():
+    """Same treatment crash_with_missiles gives an unresolved OCR read
+    (`missiles is None or missiles > 0`) — unknown counts as not-empty,
+    not as a reason to stay silent."""
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=None)
+    assert stats.events == ["return_to_battle_with_missiles"]
+
+
+def test_a_secondary_weapon_active_crossing_does_not_emit_even_with_missiles():
+    """Same reason RespawnHandler.tick_detect excludes crash_with_missiles
+    during heatdive: once ADR 136 has switched weapons, AMMO_MISSILE reads
+    the secondary (heatseeker) rack, not the primary one — `missiles=3`
+    here is a real but WRONG-rack reading, not an unknown one, so it must
+    not fall through the 'unknown counts as armed' rule."""
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=3,
+                        had_secondary_weapon_active=True)
+    assert stats.events == []
+
+
+def test_the_secondary_weapon_flag_is_captured_at_trigger_time_and_threaded_through():
+    """Wiring test, same shape as the missiles-threading test below: the
+    flag must come from THIS tick's read, carried through the async
+    closure, not re-read when OCR resolves."""
+    stats = _StatsStub()
+    analyzer = _FakeBoundaryAnalyzer([True], auto_confirm=(True, "RETURNTOBATTLE"))
+    h = _boundary_handler(analyzer, stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(missiles=7),
+                          selection="Engage", had_secondary_weapon_active=True)
+    assert stats.events == []
+
+
+def test_an_unconfirmed_crossing_does_not_emit_the_stats_event():
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(False, None, missiles=3)
+    assert stats.events == []
+
+
+def test_missing_stats_tracker_does_not_raise():
+    """`stats_tracker` is optional (ADR 070's evade-entry seam) — every
+    existing construction that never set it must keep working."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]))  # stats=None, default
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=3)  # must not raise
+    assert h._boundary_crossings == 1
+
+
+def test_missiles_is_captured_at_trigger_time_and_threaded_through():
+    """The count must come from THIS tick's snap, not read fresh when OCR
+    resolves — instrument_boundary's own docstring reasoning for why
+    `frame` is bound the same way."""
+    stats = _StatsStub()
+    analyzer = _FakeBoundaryAnalyzer([True], auto_confirm=(True, "RETURNTOBATTLE"))
+    h = _boundary_handler(analyzer, stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(missiles=7), selection="Engage")
+    assert stats.events == ["return_to_battle_with_missiles"]
 
 
 def test_ocr_confirmation_is_one_shot_per_crossing():
@@ -2075,6 +2186,60 @@ def test_boundary_readings_are_suppressed_after_a_respawn():
     # the least trustworthy frame there is — passed straight through. Measured
     # 2026-09-04 02:13:26: respawn=True with dist=0.093 on the same tick.
     assert "is_respawning or now < self._respawn_settle_until" in src
+
+
+def test_terrain_detection_is_gated_to_battle_states():
+    """HLDD 001 Phase 1: TERRAIN_FORWARD has no natural 'not present here'
+    signal the way the boundary/minimap detectors do — it reads whatever is
+    on screen, menu chrome included. Confirmed live 2026-09-16: the very
+    first shadow-mode trial fired 'TERRAIN AHEAD sky fraction 0.00' from a
+    lobby popup before a single round had started. Without this gate, a
+    live false-positive-rate measurement would be measuring menu noise, not
+    flight."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "if current_game_state in _BATTLE_STATES:" in src
+    assert "self._analyzer.detect_terrain_ahead(frame)" in src
+
+
+def test_terrain_detection_is_gated_to_a_confirmed_off_padlock_state():
+    """ADR 142: the padlock camera re-points the capture away from
+    forward-looking on its own ~6s cadence (ADR 136's _padlock_loop),
+    which would otherwise feed a reading aimed at an enemy, not the
+    terrain ahead, straight into ClimbCondition. Gated on `is False`
+    specifically (skip on True OR None) — an unconfirmed camera state is
+    exactly the case this exists to distrust, not a reason to assume
+    forward-looking and proceed."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "and self._ctrl.padlock_state() is False):" in src
+
+
+def test_padlock_center_dot_runs_before_the_terrain_gate_consults_it():
+    """The gate must read THIS tick's padlock_state(), not last tick's —
+    note_padlock_center_dot (which updates padlock_state()) must appear
+    earlier in tick()'s source than the terrain gate that consults it."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    note_pos = src.index("self._ctrl.note_padlock_center_dot(")
+    gate_pos = src.index("self._ctrl.padlock_state() is False")
+    assert note_pos < gate_pos, \
+        "padlock_state() must be refreshed before the terrain gate reads it"
+
+
+def test_terrain_capture_fires_only_on_the_false_to_true_edge():
+    """One occurrence saves one frame, not one per tick the trigger stays
+    latched — the same edge-detected shape as every other rare-event capture
+    in this file, confirmed structurally since no full BehaviorTreeHandler
+    construction fixture exists to tick twice against."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "if terrain_ahead_now and not self._terrain_ahead_prev:" in src
+    assert "self._terrain_ahead_prev = terrain_ahead_now" in src
 
 
 def test_approach_captures_cannot_crowd_out_crossings(tmp_path):
@@ -2300,6 +2465,80 @@ class TestBlindFrameCapture:
         h._capture_boundary_frame(None, "blind", "1")
 
 
+class TestTerrainAheadCapture:
+    """HLDD 001 Phase 1: evidence capture on the terrain-ahead trigger, same
+    cap-and-never-raise shape as ADR 137 D5's _capture_crash_frame — added
+    2026-09-16 after a live shadow trial's first firings could only be
+    judged from log text and timing correlation, not an actual frame."""
+
+    @staticmethod
+    def _h(cap=20, cooldown_s=0.0):
+        from wingman.tick_handlers import BehaviorTreeHandler
+        h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+        h._terrain_capture_max = cap
+        h._terrain_capture_cooldown_s = cooldown_s
+        h._terrain_last_capture_ts = 0.0
+        h._terrain_capture_dir = "/nonexistent-on-purpose"
+        h._terrain_captures = 0
+        return h
+
+    def test_a_zero_cap_disables_capture_entirely(self):
+        """It is a diagnostic, not a permanent disk cost."""
+        h = self._h(cap=0)
+        h._capture_terrain_frame(object())
+        assert h._terrain_captures == 0
+
+    def test_capture_stops_at_the_cap(self):
+        h = self._h(cap=2)
+        h._terrain_captures = 2
+        h._capture_terrain_frame(object())
+        assert h._terrain_captures == 2, "wrote past the cap"
+
+    def test_capture_never_raises_on_a_bad_frame(self):
+        """It runs on the tick path; losing evidence must not cost anything."""
+        h = self._h()
+        h._capture_terrain_frame(object())  # not an image
+        h._capture_terrain_frame(None)
+
+    def test_cooldown_blocks_a_capture_too_soon_after_the_last_one(self, tmp_path):
+        """2026-09-16: one ~5-minute dogfight re-crossed the edge every
+        10-25s and burned most of a session's budget. The cooldown bounds
+        how much of it one episode can spend."""
+        h = self._h(cap=20, cooldown_s=20.0)
+        h._terrain_capture_dir = str(tmp_path)
+        h._capture_terrain_frame(_frame(), now=1000.0)
+        assert h._terrain_captures == 1
+        h._capture_terrain_frame(_frame(), now=1010.0)   # 10s later, inside cooldown
+        assert h._terrain_captures == 1, "wrote inside the cooldown window"
+
+    def test_capture_after_cooldown_elapses_succeeds(self, tmp_path):
+        h = self._h(cap=20, cooldown_s=20.0)
+        h._terrain_capture_dir = str(tmp_path)
+        h._capture_terrain_frame(_frame(), now=1000.0)
+        assert h._terrain_captures == 1
+        h._capture_terrain_frame(_frame(), now=1025.0)   # 25s later, past cooldown
+        assert h._terrain_captures == 2, "did not capture once the cooldown had elapsed"
+
+    def test_zero_cooldown_never_blocks(self, tmp_path):
+        """The default before this change — every existing test above relies
+        on it — must still be available as an explicit opt-out."""
+        h = self._h(cap=20, cooldown_s=0.0)
+        h._terrain_capture_dir = str(tmp_path)
+        h._capture_terrain_frame(_frame(), now=1000.0)
+        h._capture_terrain_frame(_frame(), now=1000.001)
+        assert h._terrain_captures == 2
+
+    def test_a_failed_write_does_not_start_the_cooldown(self, tmp_path):
+        """A cooldown armed by a write that never landed would silently
+        suppress the NEXT real occurrence too."""
+        h = self._h(cap=20, cooldown_s=20.0)
+        h._terrain_capture_dir = str(tmp_path)
+        h._capture_terrain_frame(object(), now=1000.0)   # not an image — write fails
+        assert h._terrain_captures == 0
+        h._capture_terrain_frame(_frame(), now=1000.5)
+        assert h._terrain_captures == 1, "the failed write armed the cooldown"
+
+
 class TestTurnBearingTracking:
     """ADR 125. A turn's job is to change HEADING, and nothing measured it.
 
@@ -2438,3 +2677,99 @@ class TestBoundaryInstrumentationSurvivesReadingWidth:
             all_errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert len(first_errors) == 1, "first failure was not reported at ERROR"
         assert len(all_errors) == 1, "repeat failures must not flood at ERROR"
+
+
+# ---------------------------------------------------------------------------
+# ADR 141 D6: _start_climb / _update_climb must read the HARD emergency
+# signal, not the broad one.
+#
+# Live 2026-09-20, first live session after the altitude floor shipped: a
+# fresh respawn at 1109m (well below the 4000m floor, no dive or terrain in
+# progress) escalated the running hold to "emergency" actuation (airbrake
+# held, afterburner suppressed) purely because the BROAD signal — which
+# includes the floor — was what both functions read. That actuation mode
+# exists for "recovering from a fast, dangerous dive" (ADR 137's original
+# case), where braking is correct. Applied to a calm floor-triggered climb
+# instead, it starved the climb of thrust: nose pitched to the ceiling with
+# no afterburner, speed bled off, and the aircraft fell into a repeated
+# stall/dive/recover cycle for about 40 seconds (screenshot
+# test_screenshots/terrain_ahead/terrain_20260920_064104_6.png), one
+# recovery bottoming out at 431m with 5s to ground. Fix: both functions now
+# read ``climb_hard_emergency_fn`` (ttg or terrain only — the same signal
+# BoundaryTurn's yield already uses, ADR 141 D2) instead of the broad
+# ``climb_emergency_fn``.
+# ---------------------------------------------------------------------------
+
+class _ClimbCtrlStub:
+    def __init__(self):
+        self.climb_calls = []
+        self.emergency_calls = []
+
+    def climb_mode(self, **kw):
+        self.climb_calls.append(kw)
+
+    def set_climb_emergency(self, value):
+        self.emergency_calls.append(bool(value))
+
+
+def _climb_handler(*, altitude=1109.0, hard_emergency=False, broad_emergency=None,
+                   sustain_enabled=True, sustain_exit_alt=5000.0,
+                   emergency_enter=500.0):
+    from wingman.tick_handlers import BehaviorTreeHandler
+    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    h._last_altitude = altitude
+    h._climb_band = (emergency_enter, 1000.0)
+    h._sustain_enabled = sustain_enabled
+    h._sustain_exit_alt = sustain_exit_alt
+    h._sustain_max_s = 90.0
+    h._climb_fuel_reserve = 10.0
+    h._climb_exit_lead_s = 0.0
+    h._climb_hard_emergency_fn = lambda: hard_emergency
+    # A default opposite of hard_emergency, so a test that accidentally
+    # reads the broad signal instead of the hard one is caught immediately
+    # rather than passing by coincidence.
+    h._climb_emergency_fn = (
+        (lambda: not hard_emergency) if broad_emergency is None
+        else (lambda: broad_emergency))
+    h._ctrl = _ClimbCtrlStub()
+    return h
+
+
+class TestClimbEmergencyActuationUsesTheHardSignal:
+    def test_a_floor_only_emergency_starts_a_normal_climb(self):
+        """The exact live incident: broad=True (floor), hard=False (no dive,
+        no terrain) — the actuator must not brake."""
+        h = _climb_handler(hard_emergency=False, broad_emergency=True)
+        h._start_climb()
+        assert len(h._ctrl.climb_calls) == 1
+        assert h._ctrl.climb_calls[0]["emergency"] is False
+
+    def test_a_hard_emergency_still_starts_an_emergency_climb(self):
+        h = _climb_handler(hard_emergency=True, broad_emergency=True)
+        h._start_climb()
+        assert h._ctrl.climb_calls[0]["emergency"] is True
+
+    def test_update_climb_reads_the_hard_signal_too(self):
+        h = _climb_handler(hard_emergency=False, broad_emergency=True)
+        h._update_climb(object())
+        assert h._ctrl.emergency_calls == [False]
+
+    def test_update_climb_escalates_on_a_real_hard_emergency(self):
+        h = _climb_handler(hard_emergency=True, broad_emergency=True)
+        h._update_climb(object())
+        assert h._ctrl.emergency_calls == [True]
+
+    def test_missing_hard_emergency_fn_defaults_to_non_emergency(self):
+        h = _climb_handler(hard_emergency=False)
+        h._climb_hard_emergency_fn = None
+        h._start_climb()
+        assert h._ctrl.climb_calls[0]["emergency"] is False
+
+    def test_non_sustain_branch_also_uses_the_hard_signal(self):
+        """Below the emergency band (terrain-avoidance climb, not sustain) —
+        the other call site inside _start_climb."""
+        h = _climb_handler(altitude=100.0, hard_emergency=False,
+                           broad_emergency=True, emergency_enter=500.0)
+        h._start_climb()
+        assert "target_alt" not in h._ctrl.climb_calls[0]   # took the non-sustain branch
+        assert h._ctrl.climb_calls[0]["emergency"] is False

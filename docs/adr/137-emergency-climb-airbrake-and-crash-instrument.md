@@ -923,6 +923,51 @@ Cross-referenced here because any future live trial of D9's own mid-hold
 escalation should also watch for this: does the tree even reach Climb in
 the first place when something else is selected at the critical moment.
 
+## Seventh live trial (2026-09-16, two sessions, directly answers Open
+Question 3)
+
+Two back-to-back sessions during the HLDD 001 Phase 1 (terrain-avoidance)
+live trial: Session A, 6h14m ended cleanly (`GAME_LOBBY`, click-to
+finish, `logs/wingman_20260916_043131_ended_6h14m_session.log`), 61
+missions, 207 respawns, 33 `crash_with_missiles`. Session B, ongoing at
+this writing, 40 `crash_with_missiles` so far. Investigated well over a
+dozen individually by eye (the captured frame where one existed, or the
+logged `alt`/`rate` where it didn't) while reviewing HLDD 001's own
+findings — not a dedicated pass, but enough of one to measure rather than
+sample-of-one guess.
+
+**Measured** (both sessions combined, `alt`/`rate` parsed straight from the
+`CRASH WITH MISSILES` log lines): 73 total, 36 with usable telemetry (the
+other 37 logged `None`/`None` — D5's own finding above, that the capture
+fires after the death overlay has already replaced the HUD, still holds
+tonight). Of the 36 with a real descent rate, only **4 (11%)** were in a
+steep dive (`rate` below -300 m/s — both of tonight's two visually-
+confirmed real ground impacts, at -588 and -782 m/s, sit well inside this
+band); the remaining **32 (89%)** read level or climbing — physically
+impossible to read as "dove into terrain." Every captured frame actually
+inspected this session that showed a clean mid-air explosion (open sky or
+clouds, aircraft still largely intact, a visible missile smoke trail) came
+from this level-or-climbing group; both dives at the "genuinely a ground
+impact" end (07:00:38, 08:45:54, Session A) showed aircraft debris and
+terrain filling the frame, not a fireball hanging in open air.
+
+**Reading this plainly**: this is exactly the classifier gap Open Question
+3 already named — a death from enemy fire while level or climbing gets
+counted identically to an actual uncontrolled dive into the ground, because
+the classifier's only exclusion is a deliberate eject. Tonight's numbers
+put a size on it: roughly 9 in 10 telemetry-confirmed occurrences this
+session were NOT a terrain event by any reading of the descent rate. The
+session-summary label ("dove into terrain while armed — track toward 0")
+overstates what the metric actually shows for the large majority of its
+own occurrences; an operator reading the summary alone has no way to tell
+the 11% from the 89%. Not resolving Open Question 3's classifier question
+here (D6-style gating on descent rate before counting is a bigger,
+separate change to a `Draft` metric that already has four ADRs' worth of
+callers depending on its current shape) — but the session-summary label
+in `wingman/mission_stats.py` is being corrected in the same change that
+adds this trial, since a wrong label is worse than an unlabeled one and
+costs nothing else to fix.
+
 ## Open Questions
 
 1. ~~Does holding `AIRBRAKE_KEY` while `AFTERBURNER_KEY` is also held
@@ -965,7 +1010,13 @@ the first place when something else is selected at the critical moment.
    and held that exact reading for 3+ seconds while every OCR channel went
    blind, then respawned — same total-blackout signature as the evade
    pattern below, but with no `Afterburner evade released` line anywhere
-   nearby, so it is not the same mechanism.
+   nearby, so it is not the same mechanism. **Measured directly by the
+   seventh trial**: of 36 telemetry-confirmed `crash_with_missiles`
+   occurrences across two sessions, only 11% were in a steep dive; 89% read
+   level or climbing. The gate this question asks about would reclassify
+   the large majority of the metric's own occurrences — still not
+   implemented (a bigger change than this trial's scope), but no longer a
+   guess about how much it would matter.
 
    **A fourth context, live, 2026-09-10 10:52:01-04**, same session: plain
    combat, no evade, no stall — `Engage → AttackSupport` transition during
@@ -1136,11 +1187,25 @@ the first place when something else is selected at the critical moment.
    rate-limited capture-to-`test_screenshots/unknown_anomalies/` pattern),
    triggered off `_start_afterburner_evade`'s release, before attempting
    any behavioral fix.
+
+   ~~Unambiguously the top priority for the next session: build the
+   frame-capture instrument...~~ **Resolved by the eighth trial**: that
+   instrument turned out not to be needed. A 76-instance sample (vs. the
+   seven spot-checked here across three sessions) plus two directly
+   inspected `crash_with_missiles` frames — both unambiguous enemy kills,
+   zero perception-gap frames — settles this in favor of the explanation
+   D3's sixth instance already proposed: the evade's own duration is
+   calibrated to expected missile flight time, so a failed evade's failure
+   becomes visible right around when the hold was always going to end
+   anyway. No fix needed; no instrument needed. Full measurement in the
+   "Eighth live trial" section below.
 5. What causes a death mid-BoundaryTurn with no urgent descent-rate reading
    (2 of session B's 7, one with a very high nearby-enemy ring count)? Not
    diagnosed. Possibly enemy fire during the turn rather than anything the
    turn itself does wrong — the ring-count field (rings=16) in one case is
-   suggestive but not confirmed as causal.
+   suggestive but not confirmed as causal. **Zero recurrence in the eighth
+   trial's 275 deaths** — see below; not closed, but the priority drops
+   relative to when this was 2 instances in one short session.
 6. Does `RespawnHealthStallRecorder` (D7) fire on a post-match results
    screen? Its one fire in the fourth live trial (2026-09-11 08:52:28,
    gap=31s) captured a `2ND`/`MVP`/`3RD` leaderboard, not an in-flight
@@ -1158,6 +1223,16 @@ the first place when something else is selected at the critical moment.
    this is cheap to leave as-is for now, but it means D7's future fires
    need the same "is this really a stall, or a mundane state" visual check
    this one got, not an assumption that every fire is the target failure.
+   **Checked directly by the eighth trial**: D7 didn't fire at all this
+   session (zero occurrences), and the FSM's own transition log shows
+   `GAME_BATTLE → GAME_END_B → GAME_LOBBY` completing correctly in 5
+   seconds at 15:31:21 — the state did not stay stuck at `GAME_BATTLE`
+   this time, so D7's gate correctly never evaluated true. Not proof the
+   stale-state failure mode is gone (it wasn't re-triggered, just not
+   reproduced), but no evidence tonight that D7 is currently misfiring.
+   A genuinely new, different stuck-screen gap surfaced in this same
+   session instead — see "A related but distinct incident" in the eighth
+   trial section below; it is not this question's failure mode.
 
 ## D5 code review (2026-09-11)
 
@@ -1240,6 +1315,166 @@ Deliberately **not** fixed this pass, with reasoning:
   knowing whether the write actually succeeded, directly undoing the
   imwrite-check fix above. Correctness won over this bounded, low-severity
   performance concern.
+
+## Eighth live trial (2026-09-16, 9h25m, session
+`run_20260916_112040_acct1`) — targeted re-examination of Open Questions
+2, 4, 5, 6
+
+Run alongside the HLDD 001 Phase 1 live trial; this section covers what it
+measured specifically for this ADR's own open items, using a session an
+order of magnitude larger than most prior trials (300 dive-recovery
+episodes, 275 deaths, 181 missile-evade releases — enough to move several
+of these from "a few spot-checked instances" to real sample sizes).
+
+**Question 2** (does the widened `recover_below_time_s: 30.0` cause
+false-positive Climb selections). Measured: 300 `DIVE RECOVERY` episodes
+(deduplicated — consecutive firings under 5s apart within the same episode
+counted once), 11 followed by a `CRASH WITH MISSILES` within 20s —
+**4%**, below the Fifth trial's 17% and Sixth trial's 13%. Consistent with
+30.0 continuing to hold; still not a close per this ADR's own repeated
+"small samples mislead" caution — one more session in the same range is
+supporting evidence, not proof the question is done.
+
+**Question 4** (deaths within 1-2s of a missile-evade release — perception
+gap, or the missile simply connecting?). This is the one item where tonight's
+sample size changes the answer, not just adds a data point. Measured: 181
+`Afterburner evade released` events; **76 (42%)** were followed by a death
+within 3s, at a strikingly tight, consistent delay — **0.45-0.50s** across
+the full sample, not the spread of values a genuine perception-gap-then-
+unrelated-death mechanism would produce. That tightness is itself evidence:
+a fixed OCR-confirmation delay between "evade timer expired" and "death
+confirmed" is what you'd expect if both are downstream of the *same* real
+event (the missile connecting right as the evade's own designed cutoff
+arrives), not two independent processes that happen to correlate.
+
+Checked the code path directly rather than trusting the correlation alone:
+`_start_afterburner_evade`'s hold loop (`controller.py:2940-2972`) exits
+only on its own duration/cap, or on the *global process-exit* event — not
+on anything respawn-triggered. So the tight delay isn't an artifact of
+shared cleanup code; the two events are genuinely close in real time.
+
+Went further than a timing argument: of the 43 evade-then-death instances
+that also produced a `crash_with_missiles` capture, spot-checked two
+directly —
+`test_screenshots/crash_with_missiles/crash_20260916_112355_0.png`
+(fresh explosion at the aircraft's own tailpipe, airframe still visibly
+intact, open sky in frame — a missile impact, not terrain, not a blank
+perception-gap frame) and `crash_20260916_121444_3.png` (a `KILLED BY`-
+style kill-feed panel naming two enemy pilots, `[HNRG] Steve` and
+`method`, attributing the kill directly). Two for two, both unambiguous
+combat kills, same signature as every prior spot-check this ADR has done
+for other `crash_with_missiles` instances (Q3's D5 investigation, mostly
+combat losses).
+
+**Reading this plainly: Question 4 is answered, not just narrowed.** The
+"vulnerability window" is not a perception gap and does not need the
+dedicated evade-release capture instrument the prior trials proposed
+building. It is the ordinary, expected outcome for the fraction of evades
+that fail: the evade holds defensive speed for its designed duration, and
+if the missile is still going to connect, it connects right around when
+that duration was always going to end, because the duration itself is
+calibrated to the missile's expected flight time. 42% of releases ending
+in a nearby death sounds high in isolation, but this session's own
+`Missile engagements` line (177 engagements, 82% survival with evade vs.
+61% without) already shows evade is a large net positive — this finding
+says *when* the minority of failures happen, not that evade doesn't work.
+
+**Question 5** (deaths mid-`BoundaryTurn` with no urgent descent rate).
+Measured: of 275 deaths this session, **zero** were preceded by
+`BoundaryTurn` as the selected tactic in the 2 seconds before. The pattern
+that produced 2 instances in an earlier, much shorter session did not
+recur once in a 9h25m session with more BoundaryTurn activity than most
+prior trials. Not proof it can't happen — 275 is a real sample but this
+ADR's own standard elsewhere in this document is that small samples
+mislead in both directions — but it is real evidence the pattern is rare
+rather than a systemic gap, and does not raise this item's priority.
+
+**Question 6** (does D7 false-fire on a post-match results screen because
+`current_game_state` stays stale at `GAME_BATTLE`). D7
+(`ADR137 respawn stall`) did not fire even once this session — zero
+occurrences of its log line across 9h25m. Checked why directly against
+the FSM's own transition log: at 15:31:21 tonight, `GAME_BATTLE →
+GAME_END_B → GAME_LOBBY` transitioned correctly and promptly (5 seconds
+total) — unlike the fourth live trial's case, the state did **not** stay
+stuck at `GAME_BATTLE` through the results screen this time, so D7's own
+gate (`GAME_BATTLE and not is_mission_running()`) correctly never
+evaluated true. This doesn't resolve Question 6 (the specific stale-state
+concern wasn't re-tested, just not reproduced), but it rules out "D7 is
+now firing wrongly on every results screen" as a live concern tonight.
+
+**A related but distinct incident, same session, same rough time window**:
+a genuinely new stuck-screen sequence — a "Top 3" results screen, then a
+"Choose Rewards" token picker, then a mystery-crate reveal — none
+recognized by wingman's popup-click library, causing a real stall from
+~15:31 to ~15:41 (operator/agent manually clicked through it; see the
+session's own record for the full trace). This is adjacent to Question 6
+but a different mechanism: it happened *after* the FSM correctly reached
+`GAME_LOBBY` (confirmed above), so it's a gap in lobby-state popup
+handling, not a D7 gate condition — caught by ADR 093's liveness guard
+(the generic "no progress for 300s" watchdog), not by D7 or any
+results-screen-specific instrument. Flagged as a new, real, reproducible
+gap; not fixed here — out of scope for this ADR, which owns the emergency-
+climb/crash-instrument mechanisms, not the lobby popup-click library.
+
+## Ninth live trial (2026-09-18, short session, real crash directly
+attributable to a regression this session introduced)
+
+**Found via the operator's own diagnostic question** ("why did it fly into
+the ground with missiles still available?") against a fresh short session
+(`wingman.log`, 06:48-06:54), not proactively — worth recording plainly.
+
+Three `crash_with_missiles` events in six minutes. Two were confirmed by
+directly viewing the saved crash frames: one a hard-banked impact into a
+canyon wall during an Engage turn (unrelated to this finding — telemetry
+had gone blind 3s before impact, consistent with a fast, close-range kill
+during combat maneuvering, not a Climb-mechanism failure), one a genuine,
+unambiguous rock-face impact. The **second** of the three is what matters
+here: telemetry showed a clean, textbook unrecovered dive — 6025m to 294m
+in about 12 seconds, nose pinned between -68 and -90 degrees the entire
+way down, speed 1746-2546 KPH, `EMERGENCY` Climb correctly selected and
+airbrake correctly held from the very start (`target alt 5000`).
+
+Grepping `Controller: climb pitch pulse` across that entire 12-second
+window found exactly **one** pulse logged, at the very start, before the
+first telemetry sample even arrived. None fired again — all the way to
+impact — despite telemetry clearly reporting severe, worsening negative
+rates (-300, -570, -640, -449 m/s) the whole time.
+
+**Root cause: a regression in this session's own earlier fix.** The
+2026-09-17 fix documented in HLDD 001 / this ADR's context (suppress the
+pitch-pulse loop's "rate unknown defaults to nose-up" behavior once a
+climb hold has already reached its target, to stop a terrain-ahead false
+positive from over-rotating an already-safe aircraft) gated that
+suppression on `above_target` — the SAME one-way latch `_run_climb_hold`
+already uses to permanently cut the afterburner once a target is reached
+(ADR 083 d3, correct there: "removing the energy source is the physical
+fix for a zoom climb," and the burner should never relight after that).
+Reusing that latch for the pitch gate was the bug: this hold's very first
+telemetry sample read fractionally above the 5000m target (consistent
+with the dive having only just begun), latched `above_target = True`
+immediately, and then — because the latch never resets — suppressed every
+subsequent nose-up pulse for the rest of the hold, exactly while the
+aircraft plunged 5700+ meters in the opposite direction. The fix that
+was supposed to stop an unnecessary climb ended up disabling the real one.
+
+**Fix**: the pitch-pulse gate now re-derives "is the aircraft currently at
+or above target" from the freshest altitude sample on every check, instead
+of the sticky `above_target` latch. The afterburner cut above is
+unchanged and still correctly one-way — a burner that relights fighting
+the pitch ceiling is a different, already-solved problem (ADR 086 d6) with
+a different correct answer than the pitch axis has here. A new regression
+test, `test_emergency_resumes_nose_up_after_falling_back_below_target`
+(`tests/test_climb_mode.py`), reproduces the exact measured shape (start
+above target, fall back below it, unknown rate throughout) and was
+confirmed to fail against the pre-fix logic before being confirmed to pass
+against the fix.
+
+**Not yet live-validated** — this was diagnosed and fixed from log/frame
+evidence and a unit regression test, not yet watched live. A tenth trial
+should watch specifically for: pitch-pulse activity resuming correctly
+after a hold's `above_target` latches while genuinely still diving, and
+confirm no recurrence of a single-pulse-then-silence pattern during a real
+emergency climb.
 
 ## Related Documents
 
