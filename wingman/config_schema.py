@@ -340,6 +340,13 @@ SCHEMA = Section(
                 "rearm_fuel_pct": _num(0, 100),
                 "confirm_reads": _int(1),
             }),
+            # Phase 1 (operator directive): release the airbrake and hold
+            # the afterburner whenever speed drops below the floor.
+            "stall_prevention": Section(children={
+                "enabled": BOOL,
+                "min_speed_kph": _num(0),
+                "confirm_reads": _int(1),
+            }),
             "boundary": Section(children={
                 "turn_frac": FRACTION,
                 "recede_frac": FRACTION,
@@ -370,6 +377,7 @@ SCHEMA = Section(
                 "boundary_turn_max_s": _num(0),
                 "exit_lead_s": SECONDS,
                 "fuel_reserve_pct": _num(0, 100),
+                "alt_floor_m": Leaf(types=NUMBER, allow_none=True),
                 "spawn_guard": Section(children={
                     "enabled": BOOL,
                     "max_hold_s": SECONDS,

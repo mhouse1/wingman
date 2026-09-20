@@ -38,6 +38,19 @@ def test_from_config_reads_each_block_from_its_real_home(shipped_cfg):
     assert cc.fuel == shipped_cfg["fuel"]
 
 
+def test_mission_j20_altitude_doctrine_is_4000m_everywhere(shipped_cfg):
+    """ADR 081 d2's armed sustain floor and Phase 1's hard altitude floor
+    (operator directive: "during mission_j20 we're supposed to stay above
+    4000 m") are two independent config values that must agree — they were
+    caught drifting apart once already (alt_floor_m shipped at 3000 while
+    ADR 081's own sustain band was already 4000), which is exactly the kind
+    of doctrine mismatch a value-equality assertion in code catches for free
+    and a docs cross-reference does not."""
+    climb = shipped_cfg["behavior_tree"]["climb"]
+    assert climb["alt_floor_m"] == 4000
+    assert climb["sustain"]["enter_below_alt"] == 4000
+
+
 def test_overrides_apply_without_touching_the_rest(shipped_cfg):
     base = ControllerConfig.from_config(shipped_cfg)
     overridden = ControllerConfig.from_config(

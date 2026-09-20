@@ -2539,3 +2539,99 @@ class TestBoundaryInstrumentationSurvivesReadingWidth:
             all_errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert len(first_errors) == 1, "first failure was not reported at ERROR"
         assert len(all_errors) == 1, "repeat failures must not flood at ERROR"
+
+
+# ---------------------------------------------------------------------------
+# ADR 141 D6: _start_climb / _update_climb must read the HARD emergency
+# signal, not the broad one.
+#
+# Live 2026-09-20, first live session after the altitude floor shipped: a
+# fresh respawn at 1109m (well below the 4000m floor, no dive or terrain in
+# progress) escalated the running hold to "emergency" actuation (airbrake
+# held, afterburner suppressed) purely because the BROAD signal — which
+# includes the floor — was what both functions read. That actuation mode
+# exists for "recovering from a fast, dangerous dive" (ADR 137's original
+# case), where braking is correct. Applied to a calm floor-triggered climb
+# instead, it starved the climb of thrust: nose pitched to the ceiling with
+# no afterburner, speed bled off, and the aircraft fell into a repeated
+# stall/dive/recover cycle for about 40 seconds (screenshot
+# test_screenshots/terrain_ahead/terrain_20260920_064104_6.png), one
+# recovery bottoming out at 431m with 5s to ground. Fix: both functions now
+# read ``climb_hard_emergency_fn`` (ttg or terrain only — the same signal
+# BoundaryTurn's yield already uses, ADR 141 D2) instead of the broad
+# ``climb_emergency_fn``.
+# ---------------------------------------------------------------------------
+
+class _ClimbCtrlStub:
+    def __init__(self):
+        self.climb_calls = []
+        self.emergency_calls = []
+
+    def climb_mode(self, **kw):
+        self.climb_calls.append(kw)
+
+    def set_climb_emergency(self, value):
+        self.emergency_calls.append(bool(value))
+
+
+def _climb_handler(*, altitude=1109.0, hard_emergency=False, broad_emergency=None,
+                   sustain_enabled=True, sustain_exit_alt=5000.0,
+                   emergency_enter=500.0):
+    from wingman.tick_handlers import BehaviorTreeHandler
+    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    h._last_altitude = altitude
+    h._climb_band = (emergency_enter, 1000.0)
+    h._sustain_enabled = sustain_enabled
+    h._sustain_exit_alt = sustain_exit_alt
+    h._sustain_max_s = 90.0
+    h._climb_fuel_reserve = 10.0
+    h._climb_exit_lead_s = 0.0
+    h._climb_hard_emergency_fn = lambda: hard_emergency
+    # A default opposite of hard_emergency, so a test that accidentally
+    # reads the broad signal instead of the hard one is caught immediately
+    # rather than passing by coincidence.
+    h._climb_emergency_fn = (
+        (lambda: not hard_emergency) if broad_emergency is None
+        else (lambda: broad_emergency))
+    h._ctrl = _ClimbCtrlStub()
+    return h
+
+
+class TestClimbEmergencyActuationUsesTheHardSignal:
+    def test_a_floor_only_emergency_starts_a_normal_climb(self):
+        """The exact live incident: broad=True (floor), hard=False (no dive,
+        no terrain) — the actuator must not brake."""
+        h = _climb_handler(hard_emergency=False, broad_emergency=True)
+        h._start_climb()
+        assert len(h._ctrl.climb_calls) == 1
+        assert h._ctrl.climb_calls[0]["emergency"] is False
+
+    def test_a_hard_emergency_still_starts_an_emergency_climb(self):
+        h = _climb_handler(hard_emergency=True, broad_emergency=True)
+        h._start_climb()
+        assert h._ctrl.climb_calls[0]["emergency"] is True
+
+    def test_update_climb_reads_the_hard_signal_too(self):
+        h = _climb_handler(hard_emergency=False, broad_emergency=True)
+        h._update_climb(object())
+        assert h._ctrl.emergency_calls == [False]
+
+    def test_update_climb_escalates_on_a_real_hard_emergency(self):
+        h = _climb_handler(hard_emergency=True, broad_emergency=True)
+        h._update_climb(object())
+        assert h._ctrl.emergency_calls == [True]
+
+    def test_missing_hard_emergency_fn_defaults_to_non_emergency(self):
+        h = _climb_handler(hard_emergency=False)
+        h._climb_hard_emergency_fn = None
+        h._start_climb()
+        assert h._ctrl.climb_calls[0]["emergency"] is False
+
+    def test_non_sustain_branch_also_uses_the_hard_signal(self):
+        """Below the emergency band (terrain-avoidance climb, not sustain) —
+        the other call site inside _start_climb."""
+        h = _climb_handler(altitude=100.0, hard_emergency=False,
+                           broad_emergency=True, emergency_enter=500.0)
+        h._start_climb()
+        assert "target_alt" not in h._ctrl.climb_calls[0]   # took the non-sustain branch
+        assert h._ctrl.climb_calls[0]["emergency"] is False

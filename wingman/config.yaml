@@ -494,6 +494,13 @@ behavior_tree:
   # key — climb and evade keep their own smaller reserves for what cruise
   # leaves behind.
   afterburner_cruise: {enabled: true, min_fuel_pct: 40, rearm_fuel_pct: 90, confirm_reads: 2}
+  # Phase 1 (operator directive): "if speed below 300KPH it should
+  # deactivate break and activate afterburner". Tree-independent watchdog
+  # (note_stall_prevention), same shape as afterburner_cruise above — runs
+  # regardless of which tactic currently owns the airframe, including
+  # Climb's own emergency airbrake hold (a near-stall is a physical fact,
+  # not a tactical decision).
+  stall_prevention: {enabled: true, min_speed_kph: 300, confirm_reads: 2}
   climb:
     enabled: true
     enter_below_alt: 500
@@ -544,6 +551,18 @@ behavior_tree:
     recover_below_time_s: 30.0
     confirm_bypass_time_s: 15.0   # below this, fire on a single read (d3)
     descent_memory_s: 5.0         # hold a known descent across rejected reads (d4)
+    # Phase 1 (operator directive): hard altitude floor, independent of
+    # rate — catches a near-stall the ttg trigger's rate requirement cannot.
+    # Also the backstop MissileEvade and Idle now yield to (see
+    # behavior_tree.py's make_missile_evade_condition / make_idle_condition).
+    # 4000, not a rounder number: matches ADR 081 d2's already-accepted
+    # "armed sustain floor" doctrine below ("the tactical requirement is
+    # only that an armed aircraft stays above 4000 m") — this floor is the
+    # unconditional backstop for the cases that band (armed-only) cannot
+    # cover. See tests/test_controller_config.py::
+    # test_mission_j20_altitude_doctrine_is_4000m_everywhere, which pins
+    # both numbers to agree.
+    alt_floor_m: 4000
     fuel_reserve_pct: 10
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}

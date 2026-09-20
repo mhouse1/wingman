@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Active | 2026-09-16 | 1.8.9           |
+| Active | 2026-09-20 | 1.8.9           |
 
 ## Redesign note (2026-09-16)
 
@@ -468,6 +468,44 @@ semantic segmentation model (e.g. MobileNetV3 + DeepLabV3).
 | `wingman/config.yaml` | Add `terrain_avoidance` block and `TERRAIN_FORWARD` crop |
 | `wingman/config_schema.py` | Validate the new block, same shape as `eject_stuck_detector` |
 | No FSM change | Terrain-ahead is a per-tick reading, not a state; it feeds an existing condition, not a new transition |
+
+### Addendum (2026-09-20): companion work bundled into the Phase 1 reintroduction
+
+The terrain-ahead trigger above shipped and was live-trialled on a branch
+(`test1`) alongside three unrelated operator-directed mechanisms and two
+actuator bug fixes, all sharing the same `ClimbCondition`
+(`wingman/behavior_tree.py`) and climb-hold actuator
+(`wingman/controller.py`) this document already covers. The operator
+reverted that entire branch as a "major regression" after six distinct
+live-caught bugs stacked on the same hot code path faster than any one of
+them could soak. The terrain-ahead trigger itself was not the cause (it
+shipped `shadow: true` throughout and never actuated), but it was reverted
+along with everything else and had to be reintroduced from the clean base
+this document already describes.
+
+**[ADR 141](../adr/141-phase1-altitude-floor-stall-prevention-and-emergency-yields.md)
+is the full record** of that reintroduction. In terms of this document's own
+scope, the two load-bearing changes are:
+
+- `ClimbCondition` gained a fourth, sibling OR-term (`alt_floor_m`, a hard
+  4000 m mission_j20 floor — unrelated to terrain detection, but living in
+  the same condition object) and a `hard_emergency_active` property that is
+  `ttg or terrain_ahead`, deliberately **excluding** the floor. This
+  document's own `emergency = ttg_emergency or terrain_ahead` (see
+  "Actuation" above) is what `BoundaryTurn` used to yield to; it now yields
+  to the narrower `hard_emergency_active` instead, so a long-running
+  altitude-floor climb cannot lock `BoundaryTurn` out of the map edge for
+  its duration. Terrain-ahead is unaffected by this split — it was already
+  part of the hard signal and still is.
+- The climb-hold actuator (`_run_climb_hold`) picked up two oscillation-
+  crash fixes (exit-push overshoot correction; a blind-pulse observe gap)
+  that apply to every emergency climb this trigger can cause, not something
+  specific to terrain detection — see ADR 141 D5 for the live incidents.
+
+Terrain-ahead's own status is unchanged by this addendum: still
+`enabled: true, shadow: true` in production `config.yaml`, still not
+actuating, still gated on Open Question 6's padlock-interference concern
+below.
 
 ## Open Questions
 

@@ -1555,6 +1555,7 @@ class BehaviorTreeHandler:
         climb_cfg = bt_cfg.get("climb", {}) or {}
         self._climb_shadow = None
         self._climb_emergency_fn = None
+        self._climb_hard_emergency_fn = None
         self._climb_emergency_update_fn = None
         self._climb_terrain_ahead_fn = None
         self._terrain_ahead_prev = False
@@ -1635,6 +1636,8 @@ class BehaviorTreeHandler:
                 regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
             self._writer = make_snapshot_writer()
             self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
+            self._climb_hard_emergency_fn = getattr(
+                self._tree, "climb_hard_emergency_fn", None)
             self._climb_emergency_update_fn = getattr(
                 self._tree, "climb_emergency_update_fn", None)
             self._climb_terrain_ahead_fn = getattr(
@@ -1713,10 +1716,25 @@ class BehaviorTreeHandler:
         it: climb to the operating altitude with the evade fuel reserve
         honoured, so the burner is released once fuel drops to the reserve.
 
-        Also reads THIS tick's ADR 086 emergency verdict (the same closure
-        BoundaryTurn's yields_to_fn already reads) and passes it through —
-        the emergency case gets a more aggressive actuation (airbrake, no
-        pulse/observe gap) inside climb_mode/_run_climb_hold.
+        Also reads THIS tick's ADR 086 emergency verdict — but the HARD
+        variant (``climb_hard_emergency_fn``: ttg or terrain only), not the
+        broad one BoundaryTurn's yields_to_fn also reads. Live 2026-09-20,
+        first session after the altitude floor shipped: a fresh respawn at
+        1109m (well below the 4000m floor, no dive or terrain in progress —
+        alt_rate was `n/a` at the moment emergency latched) triggered the
+        aggressive actuation (airbrake held, afterburner suppressed —
+        correct for "recovering from a 807 m/s dive," ADR 137's original
+        case) with nothing to brake from. Climbing at max pitch with no
+        thrust bled speed to a stall, the nose fell through to -82 degrees,
+        and the aircraft spent the next ~40s in a repeated stall/dive/
+        recover cycle (screenshot
+        test_screenshots/terrain_ahead/terrain_20260920_064104_6.png;
+        one recovery bottomed out at 431m with ttg=5s). See ADR 141 D2 for
+        the same hard-vs-broad split already applied to BoundaryTurn's
+        yield, and D6 for this incident — the floor should win selection
+        (still the broad signal, via ClimbCondition itself) but climb like
+        an ordinary sustain-band climb, afterburner and all, unless a real
+        dive or terrain hazard is also present.
         """
         alt = self._last_altitude
         emergency_enter = self._climb_band[0]
@@ -1724,7 +1742,8 @@ class BehaviorTreeHandler:
                       and self._sustain_exit_alt is not None
                       and alt is not None
                       and (emergency_enter is None or alt >= float(emergency_enter)))
-        emergency = bool(self._climb_emergency_fn()) if self._climb_emergency_fn is not None else False
+        emergency = (bool(self._climb_hard_emergency_fn())
+                    if self._climb_hard_emergency_fn is not None else False)
         if is_sustain:
             self._ctrl.climb_mode(target_alt=float(self._sustain_exit_alt),
                                   max_s=self._sustain_max_s,
@@ -1741,9 +1760,15 @@ class BehaviorTreeHandler:
         tick's emergency verdict into the running actuator thread so a
         mid-hold escalation or de-escalation is no longer stuck at whatever
         value was true when the hold started (ADR 137 "Third Live Trial").
+
+        Reads the same HARD signal ``_start_climb`` now uses (ADR 141 D6) —
+        a mid-hold escalation must mean "a dive or terrain hazard just
+        appeared," not "the broad floor flag happened to still be set,"
+        or a hold that started calmly (floor-only) would suddenly cut its
+        own afterburner and pull the airbrake mid-climb for no new reason.
         """
-        if self._climb_emergency_fn is not None:
-            self._ctrl.set_climb_emergency(bool(self._climb_emergency_fn()))
+        if self._climb_hard_emergency_fn is not None:
+            self._ctrl.set_climb_emergency(bool(self._climb_hard_emergency_fn()))
 
     def _start_disengage(self) -> None:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence
@@ -1841,6 +1866,12 @@ class BehaviorTreeHandler:
                 current_game_state, self._ctrl.is_mission_running())
         except Exception:
             logger.debug("note_afterburner_cruise failed", exc_info=True)
+        # Phase 1 (operator directive): stall prevention. Same
+        # tree-independent shape as note_afterburner_cruise above.
+        try:
+            self._ctrl.note_stall_prevention(current_game_state)
+        except Exception:
+            logger.debug("note_stall_prevention failed", exc_info=True)
         # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
         # control loop, so it needs the reading rather than the tactic.
         try:
