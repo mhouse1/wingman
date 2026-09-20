@@ -1878,6 +1878,18 @@ class BehaviorTreeHandler:
             self._ctrl.note_boundary(_b_dist, _b_fwd)
         except Exception:
             logger.debug("note_boundary failed", exc_info=True)
+        # ADR 140 D4/D6: drives Controller's padlock_state() tri-state.
+        # Run BEFORE the terrain read below (reordered by ADR 142) so
+        # padlock_state() reflects THIS tick's frame, not the previous
+        # one, when the terrain gate consults it. Same battle-state gate
+        # as the terrain reading, same reason: the center-dot crop would
+        # read whatever a lobby/loading screen happens to show otherwise.
+        if current_game_state in _BATTLE_STATES:
+            try:
+                self._ctrl.note_padlock_center_dot(
+                    frame, is_respawning=bool(is_respawning), now=now)
+            except Exception:
+                logger.debug("note_padlock_center_dot failed", exc_info=True)
         # HLDD 001 Phase 1: forward sky-occlusion reading, same "perceive
         # before the snapshot" placement as boundary perception above.
         # Unlike the boundary/minimap detectors, this one has no natural
@@ -1891,24 +1903,27 @@ class BehaviorTreeHandler:
         # isn't configured. Whether the reading actually forces a climb is
         # gated separately, inside ClimbCondition
         # (behavior_tree.climb.terrain_avoidance.enabled).
+        #
+        # ADR 142: also skipped whenever padlock_state() is not confirmed
+        # False (True = engaged, None = unconfirmed) — the padlock camera
+        # re-points the capture away from forward-looking on its own ~6s
+        # cadence (ADR 136's _padlock_loop), which would otherwise feed a
+        # reading aimed at an enemy, not the terrain ahead, straight into
+        # ClimbCondition. Gates on `is not False`, not `is True`: an
+        # unconfirmed camera state is exactly the case this exists to
+        # distrust, not to assume forward-looking. `None` already means
+        # the right thing downstream — ClimbCondition.update_emergency's
+        # terrain block resets its confirm-reads streak on a missing
+        # reading, the same conservative handling an ordinary OCR gap
+        # already gets — so no change is needed there.
         _terrain_sky_frac = None
-        if current_game_state in _BATTLE_STATES:
+        if (current_game_state in _BATTLE_STATES
+                and self._ctrl.padlock_state() is False):
             try:
                 _terrain_sky_frac = self._analyzer.detect_terrain_ahead(frame)
             except Exception:
                 logger.debug("detect_terrain_ahead failed", exc_info=True)
                 _terrain_sky_frac = None
-        # ADR 140 D4: shadow/observational only — drives Controller's
-        # padlock_state() tri-state but nothing yet reads that state for
-        # actuation or gating (Non-Goal 2). Same battle-state gate as the
-        # terrain reading above, same reason: the center-dot crop would
-        # read whatever a lobby/loading screen happens to show otherwise.
-        if current_game_state in _BATTLE_STATES:
-            try:
-                self._ctrl.note_padlock_center_dot(
-                    frame, is_respawning=bool(is_respawning), now=now)
-            except Exception:
-                logger.debug("note_padlock_center_dot failed", exc_info=True)
         snap = AnalyzerSnapshot(
             health=game_state.get("health"),
             missiles=self._analyzer.get_ammo_missiles(),

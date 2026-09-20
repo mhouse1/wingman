@@ -2092,6 +2092,33 @@ def test_terrain_detection_is_gated_to_battle_states():
     assert "self._analyzer.detect_terrain_ahead(frame)" in src
 
 
+def test_terrain_detection_is_gated_to_a_confirmed_off_padlock_state():
+    """ADR 142: the padlock camera re-points the capture away from
+    forward-looking on its own ~6s cadence (ADR 136's _padlock_loop),
+    which would otherwise feed a reading aimed at an enemy, not the
+    terrain ahead, straight into ClimbCondition. Gated on `is False`
+    specifically (skip on True OR None) — an unconfirmed camera state is
+    exactly the case this exists to distrust, not a reason to assume
+    forward-looking and proceed."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    assert "and self._ctrl.padlock_state() is False):" in src
+
+
+def test_padlock_center_dot_runs_before_the_terrain_gate_consults_it():
+    """The gate must read THIS tick's padlock_state(), not last tick's —
+    note_padlock_center_dot (which updates padlock_state()) must appear
+    earlier in tick()'s source than the terrain gate that consults it."""
+    import inspect
+    from wingman.tick_handlers import BehaviorTreeHandler
+    src = inspect.getsource(BehaviorTreeHandler)
+    note_pos = src.index("self._ctrl.note_padlock_center_dot(")
+    gate_pos = src.index("self._ctrl.padlock_state() is False")
+    assert note_pos < gate_pos, \
+        "padlock_state() must be refreshed before the terrain gate reads it"
+
+
 def test_terrain_capture_fires_only_on_the_false_to_true_edge():
     """One occurrence saves one frame, not one per tick the trigger stays
     latched — the same edge-detected shape as every other rare-event capture
