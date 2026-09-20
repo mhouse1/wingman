@@ -3161,6 +3161,17 @@ class GameStateAnalyzer:
             return False
         return time.time() - self._exit_dialog_seen_ts <= stale_after_s
 
+    def _lobby_recheck_crops(self):
+        """Return the crop names a stale lobby re-check may legitimately use.
+
+        A match can be genuinely starting while some lobby prompts remain on the
+        screen briefly, but the only safe fallback is to detect the lobby is
+        still present and walk back to GAME_LOBBY. READY may persist on the
+        lobby screen while the FSM already entered GAME_STARTING, so it must be
+        considered equivalent evidence to PLAY for this guard.
+        """
+        return [crop for crop in ("PLAY", "READY") if crop in self.crops]
+
     def _stall_recovery_targets(self, state):
         """Return the stall-recovery crops eligible to act right now (ADR 084).
 
@@ -3308,11 +3319,12 @@ class GameStateAnalyzer:
                 elif state == GameState.GAME_WAITING:
                     crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
                 elif state in LOBBY_RECHECK_STATES:
-                    # ADR 102: PLAY only. Nothing is clicked from here — the
-                    # detection walks the state back and the ordinary lobby
-                    # path does the clicking, so this cannot click PLAY into a
-                    # match that is genuinely starting.
-                    crops_to_scan = [c for c in ("PLAY",) if c in self.crops]
+                    # ADR 102: a stale lobby prompt can still be visible while the FSM
+                    # has already entered GAME_STARTING. Scan the same lobby crops the
+                    # lobby itself uses for evidence, but do not click from here — the
+                    # recheck walks the state back and the ordinary lobby path does the
+                    # actual click once the FSM is back in GAME_LOBBY.
+                    crops_to_scan = self._lobby_recheck_crops()
                 else:
                     # GAME_UNKNOWN / GAME_STARTING_STALLED: popup batch only
                     # (ADR 074) — no lobby-crop clicking from those states.
@@ -3383,22 +3395,28 @@ class GameStateAnalyzer:
 
                 if not handled and state in LOBBY_RECHECK_STATES:
                     detected = False
-                    if "PLAY" in lobby_futures:
+                    detected_crop = None
+                    for crop in self._lobby_recheck_crops():
+                        if crop not in lobby_futures:
+                            continue
                         try:
-                            detected, _, text = lobby_futures["PLAY"].result(timeout=20)
+                            detected, _, text = lobby_futures[crop].result(timeout=20)
                         except Exception as e:
                             logger.warning(
-                                "Lobby quick-scan: PLAY result failed in %s: %s",
-                                state.name, e)
+                                "Lobby quick-scan: %s result failed in %s: %s",
+                                crop, state.name, e)
                             detected = False
+                        if detected:
+                            detected_crop = crop
+                            break
                     if detected:
                         self._starting_play_streak += 1
                         if self._starting_play_streak >= STARTING_PLAY_CONFIRM_READS:
                             logger.warning(
-                                "\033[93m📋 Lobby quick-scan: PLAY still visible after "
+                                "\033[93m📋 Lobby quick-scan: %s still visible after "
                                 "%d reads in %s — the match never started, "
                                 "returning to GAME_LOBBY (ADR 102)\033[0m",
-                                self._starting_play_streak, state.name)
+                                detected_crop, self._starting_play_streak, state.name)
                             # The suppression exists to stop a second click on a
                             # PLAY that worked. This is the proof it did not, so
                             # clearing it is the point — otherwise the lobby is
@@ -3409,12 +3427,12 @@ class GameStateAnalyzer:
                             self._trigger("starting_play_visible")
                         else:
                             logger.info(
-                                "Lobby quick-scan: PLAY visible in %s (%d/%d reads)",
-                                state.name, self._starting_play_streak,
+                                "Lobby quick-scan: %s visible in %s (%d/%d reads)",
+                                detected_crop, state.name, self._starting_play_streak,
                                 STARTING_PLAY_CONFIRM_READS)
                     elif self._starting_play_streak:
                         logger.debug(
-                            "Lobby quick-scan: PLAY no longer visible in %s — "
+                            "Lobby quick-scan: stale lobby crop no longer visible in %s — "
                             "streak reset", state.name)
                         self._starting_play_streak = 0
                     handled = True

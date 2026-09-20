@@ -1,108 +1,54 @@
 {
-  "timestamp": "2026-09-20T09:53:46.195484",
+  "timestamp": "2026-09-20T10:05:49.727459",
   "version": "1.8.9",
   "tests": {
-    "test_a_healthy_shutdown_is_not_forced": {
-      "duration": 0.20099861011840403,
+    "test_there_is_a_way_back_to_the_lobby_from_starting": {
+      "duration": 8.179499127436429e-05,
       "runs": 1,
-      "min": 0.20099861011840403,
-      "max": 0.20099861011840403
+      "min": 8.179499127436429e-05,
+      "max": 8.179499127436429e-05
     },
-    "test_a_stalled_shutdown_is_forced": {
-      "duration": 0.601050429046154,
+    "test_the_walk_back_is_not_a_wildcard": {
+      "duration": 5.9385987697169185e-05,
       "runs": 1,
-      "min": 0.601050429046154,
-      "max": 0.601050429046154
+      "min": 5.9385987697169185e-05,
+      "max": 5.9385987697169185e-05
     },
-    "test_the_stall_dumps_thread_stacks_before_exiting": {
-      "duration": 0.6007693270221353,
+    "test_only_game_starting_rechecks_the_lobby": {
+      "duration": 5.155800317879766e-05,
       "runs": 1,
-      "min": 0.6007693270221353,
-      "max": 0.6007693270221353
+      "min": 5.155800317879766e-05,
+      "max": 5.155800317879766e-05
     },
-    "test_the_timer_is_a_daemon": {
-      "duration": 0.0006516438443213701,
+    "test_the_recheck_does_not_grant_popup_dismissal": {
+      "duration": 4.988600267097354e-05,
       "runs": 1,
-      "min": 0.0006516438443213701,
-      "max": 0.0006516438443213701
+      "min": 4.988600267097354e-05,
+      "max": 4.988600267097354e-05
     },
-    "test_the_dump_goes_to_the_log_file_not_only_stderr": {
-      "duration": 0.6005605389364064,
+    "test_battle_states_are_never_rechecked": {
+      "duration": 5.3737006965093315e-05,
       "runs": 1,
-      "min": 0.6005605389364064,
-      "max": 0.6005605389364064
+      "min": 5.3737006965093315e-05,
+      "max": 5.3737006965093315e-05
     },
-    "test_the_watchdog_can_be_cancelled": {
-      "duration": 0.6007970969658345,
+    "test_starting_recheck_checks_ready_and_play": {
+      "duration": 5.501499981619418e-05,
       "runs": 1,
-      "min": 0.6007970969658345,
-      "max": 0.6007970969658345
+      "min": 5.501499981619418e-05,
+      "max": 5.501499981619418e-05
     },
-    "test_cancelling_twice_is_harmless": {
-      "duration": 0.00012840889394283295,
+    "test_a_single_read_cannot_abort_a_starting_match": {
+      "duration": 5.1189010264351964e-05,
       "runs": 1,
-      "min": 0.00012840889394283295,
-      "max": 0.00012840889394283295
+      "min": 5.1189010264351964e-05,
+      "max": 5.1189010264351964e-05
     },
-    "test_arming_replaces_a_previous_watchdog": {
-      "duration": 0.0010109089780598879,
+    "test_the_debounce_is_far_cheaper_than_the_timeout_it_replaces": {
+      "duration": 4.8165995394811034e-05,
       "runs": 1,
-      "min": 0.0010109089780598879,
-      "max": 0.0010109089780598879
-    },
-    "test_signal_ack_watchdog_fires_when_nothing_cancels_it": {
-      "duration": 0.6007112690713257,
-      "runs": 1,
-      "min": 0.6007112690713257,
-      "max": 0.6007112690713257
-    },
-    "test_signal_ack_watchdog_names_the_signal_and_bound_in_the_log": {
-      "duration": 0.6018584889825433,
-      "runs": 1,
-      "min": 0.6018584889825433,
-      "max": 0.6018584889825433
-    },
-    "test_signal_ack_watchdog_dumps_thread_stacks_before_exiting": {
-      "duration": 0.6015508708078414,
-      "runs": 1,
-      "min": 0.6015508708078414,
-      "max": 0.6015508708078414
-    },
-    "test_signal_ack_watchdog_is_a_daemon": {
-      "duration": 0.0008359800558537245,
-      "runs": 1,
-      "min": 0.0008359800558537245,
-      "max": 0.0008359800558537245
-    },
-    "test_signal_ack_watchdog_can_be_cancelled_directly": {
-      "duration": 0.6007488837931305,
-      "runs": 1,
-      "min": 0.6007488837931305,
-      "max": 0.6007488837931305
-    },
-    "test_cancelling_signal_ack_watchdog_twice_is_harmless": {
-      "duration": 0.00013612699694931507,
-      "runs": 1,
-      "min": 0.00013612699694931507,
-      "max": 0.00013612699694931507
-    },
-    "test_arming_the_shutdown_watchdog_cancels_a_pending_signal_ack_watchdog": {
-      "duration": 0.601653799880296,
-      "runs": 1,
-      "min": 0.601653799880296,
-      "max": 0.601653799880296
-    },
-    "test_arming_signal_ack_watchdog_replaces_a_previous_one": {
-      "duration": 0.0011046088766306639,
-      "runs": 1,
-      "min": 0.0011046088766306639,
-      "max": 0.0011046088766306639
-    },
-    "test_signal_ack_watchdog_does_not_fire_after_cleanup_supersedes_it": {
-      "duration": 0.5014186501502991,
-      "runs": 1,
-      "min": 0.5014186501502991,
-      "max": 0.5014186501502991
+      "min": 4.8165995394811034e-05,
+      "max": 4.8165995394811034e-05
     }
   }
 }
