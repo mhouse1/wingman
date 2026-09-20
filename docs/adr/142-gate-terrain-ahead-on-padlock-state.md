@@ -4,6 +4,30 @@
 |--------|------------|-----------------|
 | Draft  | 2026-09-20 | 1.8.9           |
 
+## Implementation status (2026-09-20)
+
+D1 implemented in `wingman/tick_handlers.py::BehaviorTreeHandler.tick()`:
+the `note_padlock_center_dot` call was moved to run immediately before the
+terrain-ahead read (so `padlock_state()` reflects the current tick, not the
+previous one), and the terrain read is now additionally gated on
+`self._ctrl.padlock_state() is False`. No change to `wingman/behavior_tree.py`
+— confirmed unnecessary, per D1's own reasoning about `None` already
+resetting the confirm-reads streak.
+
+Tested structurally (`tests/test_tick_handlers.py`,
+`test_terrain_detection_is_gated_to_a_confirmed_off_padlock_state`,
+`test_padlock_center_dot_runs_before_the_terrain_gate_consults_it`), matching
+this exact function's own established precedent
+(`test_terrain_detection_is_gated_to_battle_states`) for a code path with no
+full `BehaviorTreeHandler` construction fixture. Full gate green
+(`make lint && make test`): 1667 passed, 2 skipped.
+
+D2 unchanged: `terrain_avoidance.shadow` stays `true` in `config.yaml` — this
+change is zero additional actuation risk. **Not yet live-validated** — next
+step is a shadow-mode session per the Testing plan below, measuring Open
+Question 1 (how often the gate actually suppresses a reading) before this
+ADR is marked Accepted.
+
 ## Context
 
 HLDD 001's forward sky-occlusion terrain-ahead trigger
@@ -109,18 +133,15 @@ prevent elsewhere (ADR 073, HLDD 001's own original graduation).
 
 ## Testing plan
 
-Not yet implemented — this ADR documents the design ahead of the change,
-per this project's shadow-first discipline.
-
-- **Unit**: `BehaviorTreeHandler.tick()`'s terrain-read call site skips
-  `detect_terrain_ahead` when `padlock_state()` returns `True` or `None`,
-  and calls it normally when `False` — same shape as the existing
-  `_BATTLE_STATES` gate's own tests.
-- **Live**: a new shadow-mode session — zero additional actuation risk,
-  since the trigger still never actuates under D2 — comparing the resulting
-  false-positive taxonomy against HLDD 001's existing "Live trial results"
-  baseline, and directly measuring Open Question 1 above (what fraction of
-  ticks end up gated out).
+- **Unit** (done): `BehaviorTreeHandler.tick()`'s terrain-read call site
+  now gates on `padlock_state() is False`, and `note_padlock_center_dot`
+  runs first so the gate reads the current tick's value — see
+  "Implementation status" above.
+- **Live** (not yet done): a new shadow-mode session — zero additional
+  actuation risk, since the trigger still never actuates under D2 —
+  comparing the resulting false-positive taxonomy against HLDD 001's
+  existing "Live trial results" baseline, and directly measuring Open
+  Question 1 above (what fraction of ticks end up gated out).
 
 ## References
 
