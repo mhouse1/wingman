@@ -987,6 +987,50 @@ class TestHardEmergencyExcludesTheAltitudeFloor:
         assert cond.alt_floor_active is True
 
 
+class TestLastHardEmergencyActiveTs:
+    """ADR 143: a timestamp of the last hard emergency, so a consumer
+    (RespawnHandler's died-armed classifier) can ask "was this recently
+    true", not just "is this true right now" — a death is detected a tick
+    or two after the dive itself, by which point emergency_active may
+    already have cleared (e.g. the aircraft respawned)."""
+
+    def test_starts_at_zero(self):
+        cond = make_climb_condition(500, 1000, confirm_reads=1)
+        assert cond.last_hard_emergency_active_ts == 0.0
+
+    def test_set_when_ttg_trips_hard_emergency(self):
+        clock = FakeClock()
+        cond = make_climb_condition(500, 1000, recover_below_time_s=30.0,
+                                    confirm_bypass_time_s=15.0,
+                                    confirm_reads=1, clock=clock)
+        cond.update_emergency(make_snap(altitude=9000.0, altitude_rate=-500.0))
+        assert cond.last_hard_emergency_active_ts == clock.now
+
+    def test_not_set_by_the_altitude_floor_alone(self):
+        """The floor is the softer, preventive backstop excluded from
+        hard_emergency_active — must not update this timestamp either."""
+        clock = FakeClock()
+        cond = make_climb_condition(500, 1000, alt_floor_m=4000.0,
+                                    confirm_reads=1, clock=clock)
+        cond.update_emergency(make_snap(altitude=3000.0, altitude_rate=0.0))
+        assert cond.hard_emergency_active is False
+        assert cond.last_hard_emergency_active_ts == 0.0
+
+    def test_holds_the_last_value_after_emergency_clears(self):
+        clock = FakeClock()
+        cond = make_climb_condition(500, 1000, recover_below_time_s=30.0,
+                                    confirm_bypass_time_s=15.0,
+                                    confirm_reads=1, clock=clock)
+        cond.update_emergency(make_snap(altitude=9000.0, altitude_rate=-500.0))
+        tripped_at = clock.now
+        # Past _descent_memory_s (default 5.0) so the held-over ttg from the
+        # dive above has genuinely expired, not just the raw rate going positive.
+        clock.advance(10.0)
+        cond.update_emergency(make_snap(altitude=9500.0, altitude_rate=+200.0))
+        assert cond.hard_emergency_active is False
+        assert cond.last_hard_emergency_active_ts == tripped_at
+
+
 # --- ADR 028 revision 4: the Regroup leaf ------------------------------------
 #
 # The revision-4 change was first wired inside _actuate_engage only, which is

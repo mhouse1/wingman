@@ -282,6 +282,16 @@ class Controller:
         # detected) started, or None while any leg is false.
         self._padlock_dot_streak_since: "float | None" = None
         self._padlock_dot_confirm_s = float(padlock_center_cfg.get("confirm_seconds", 2.0))
+        # Operator directive, 2026-09-20: a real dive (16:03:56-16:04:19)
+        # pressed this correction 13 times in a row, once per tick, for the
+        # whole rest of the dive — the toggle is a fixed-cost action (either
+        # it worked or camera state is genuinely stuck some other way), not
+        # something that gets more likely to succeed by repeating it
+        # forever. Capped per dive, reset alongside _eject_weapon_switched
+        # (both the dive-start and stop_eject_sequence reset sites).
+        self._padlock_unknown_correction_max = int(
+            padlock_center_cfg.get("max_correction_attempts", 3))
+        self._padlock_unknown_correction_attempts = 0
 
         # Target tracking: timestamp of last orient_nose_to_target command
         self._last_orient_ts: float = 0.0
@@ -2067,9 +2077,26 @@ class Controller:
             return
         if self._padlock_dot_streak_since is not None:
             return   # a streak is actively building — let it be checked, not interrupted
+        if self._padlock_unknown_correction_attempts >= self._padlock_unknown_correction_max:
+            if self._padlock_unknown_correction_attempts == self._padlock_unknown_correction_max:
+                # Logged exactly once per dive (bumped past max right below,
+                # so this branch cannot fire again until the next reset) —
+                # operator directive 2026-09-20: a press that never confirms
+                # after this many tries is not going to on the next one
+                # either, and silently going quiet must not read as "it
+                # worked," the same reasoning ADR 137 D5 already gave for
+                # crash_with_missiles' own capture cap.
+                logger.warning(
+                    "Controller: padlock still unknown after %d correction "
+                    "attempt(s) — giving up for this dive (ADR 140 D6)",
+                    self._padlock_unknown_correction_max)
+                self._padlock_unknown_correction_attempts += 1
+            return
+        self._padlock_unknown_correction_attempts += 1
         logger.info(
             "Controller: padlock unknown during secondary-weapon use — "
-            "pressing to correct (ADR 140 D6)")
+            "pressing to correct (%d/%d, ADR 140 D6)",
+            self._padlock_unknown_correction_attempts, self._padlock_unknown_correction_max)
         self.padlock_camera(hold_seconds=0.1, block=True, ignore_cancel=True)
 
     def _eject_heatdive_loop(self, stop_event: threading.Event) -> None:
@@ -2145,6 +2172,8 @@ class Controller:
         # dive so a stale True from a previous eject can't suppress a real
         # ADR 088 rearm-abort next time.
         self._eject_weapon_switched = False
+        # ADR 140 D6: fresh correction budget for this dive.
+        self._padlock_unknown_correction_attempts = 0
         # Opens nose-hold accounting for this sequence (None = not in an eject).
         # The rotation-evidence flag is NOT reset here — the descent controller
         # owns its scoping (CR-014-13).
@@ -5012,6 +5041,9 @@ class Controller:
         # has, needing no visual confirmation.
         self._padlock_engaged = False
         self._padlock_dot_streak_since = None
+        # ADR 140 D6: same reasoning — a respawn or match end also ends
+        # whatever dive was accumulating correction attempts.
+        self._padlock_unknown_correction_attempts = 0
 
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:

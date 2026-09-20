@@ -1029,6 +1029,12 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
+        # ADR 117 D2: raw (pre-shape-filter) boundary-hue pixel count from the
+        # last detect_map_boundary() call — lets a caller (the blind-frame
+        # capture) tell "no boundary-colored pixels at all" apart from "some
+        # exist but didn't pass the line-likeness filter" without redoing the
+        # crop/HSV/mask work itself. 0 until the first real call.
+        self._last_boundary_raw_px: int = 0
         # HLDD 001 Phase 1: forward sky-occlusion terrain-ahead detector.
         # Detection config (crop, sky HSV) lives here, top-level, mirroring
         # minimap.boundary_hsv — the trigger threshold/debounce that
@@ -3880,6 +3886,16 @@ class GameStateAnalyzer:
             logger.debug("Analyzer: minimap_present failed: %s", e)
             return True
 
+    def get_last_boundary_raw_px(self) -> int:
+        """Raw (pre-shape-filter) boundary-hue pixel count from the last
+        detect_map_boundary() call. ADR 117 D2: distinguishes a tick with no
+        boundary-colored pixels at all (nothing to see — the aircraft isn't
+        near an edge) from one where some exist but didn't pass the
+        line-likeness filter (a possible detector miss on a real, if
+        fragmented, line) — both read as `None` from detect_map_boundary()
+        alone."""
+        return self._last_boundary_raw_px
+
     def detect_map_boundary(self, frame) -> "tuple | None":
         """Nearest map-boundary point on the minimap, or None.
 
@@ -3897,12 +3913,14 @@ class GameStateAnalyzer:
         loaded.
         """
         if self.crops is None or "MINIMAP" not in self.crops:
+            self._last_boundary_raw_px = 0
             return None
         try:
             crop = get_crop(frame, *self.crops["MINIMAP"][:4])
             height, width = crop.shape[:2]
             radius = min(width, height) / 2.0
             if radius <= 0:
+                self._last_boundary_raw_px = 0
                 return None
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, self._boundary_hsv_lower, self._boundary_hsv_upper)
@@ -3912,6 +3930,7 @@ class GameStateAnalyzer:
                 cache = (width, height, _minimap_circle_mask(width, height, r_px))
                 self._minimap_circle_cache = cache
             mask &= cache[2]
+            self._last_boundary_raw_px = int((mask > 0).sum())
             # ADR 108: reconnect the line before measuring it. The mask finds
             # the boundary — 550 to 1400 px of it on the nine 2026-09-03
             # crossing frames — but MetalStorm's minimap update left it thin and
@@ -3986,6 +4005,7 @@ class GameStateAnalyzer:
                     float(dx[i] / radius))
         except Exception as e:
             logger.warning("Analyzer: detect_map_boundary failed: %s", e)
+            self._last_boundary_raw_px = 0
             return None
 
     def detect_terrain_ahead(self, frame) -> "float | None":

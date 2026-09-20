@@ -287,6 +287,19 @@ class RespawnHandler:
         self._pre_crash_lookback_s = float(5.0 if _raw_lookback is None else _raw_lookback)
         self._pre_crash_buffer: "collections.deque" = collections.deque()
 
+        # ADR 143: classifies each crash_with_missiles occurrence as enemy
+        # fire or terrain using two signals that don't depend on this tick's
+        # (or the pre-crash buffer's) OCR — see _classify_died_armed.
+        # Defaults comfortably above the 5.7-7.0s enemy-fire gap measured in
+        # the session that motivated this (2026-09-20); terrain_lookback_s
+        # has no live example yet to tune against.
+        _raw_enemy_fire_lookback = _cc_cfg.get("enemy_fire_lookback_s", 10.0)
+        self._enemy_fire_lookback_s = float(
+            10.0 if _raw_enemy_fire_lookback is None else _raw_enemy_fire_lookback)
+        _raw_terrain_lookback = _cc_cfg.get("terrain_lookback_s", 10.0)
+        self._terrain_lookback_s = float(
+            10.0 if _raw_terrain_lookback is None else _raw_terrain_lookback)
+
     # -- state --------------------------------------------------------------
 
     @property
@@ -404,6 +417,36 @@ class RespawnHandler:
         ctrl.restart_last_mission()
         self._emit_capture_event("restart_last_mission")
         self._state = self._RespawnState.IDLE
+
+    # -- died-armed classification ---------------------------------------------
+
+    def _classify_died_armed(self, now: float) -> "tuple[str, float]":
+        """ADR 143: enemy_fire / terrain / unclassified for one
+        crash_with_missiles occurrence, plus the incoming-alert age (for the
+        per-occurrence log line).
+
+        Deliberately does not use the pre-crash buffer's alt/rate: the
+        2026-09-20 investigation that motivated this ADR found 0/5
+        occurrences had a readable value there despite good telemetry
+        1.5-3.0s earlier via the BT tactic's own log lines — a single-tick
+        OCR sample inherits OCR's ordinary miss rate, unlike the two signals
+        used here (a confirmed detection event; a computed, already-live-
+        validated verdict). `terrain` is checked first: an active hard
+        emergency (ttg/terrain — "hitting the ground is certain") is direct,
+        mechanism-level evidence a crash was already in progress, stronger
+        than inferring enemy fire from the mere absence of a recent missile
+        alert.
+        """
+        since_incoming = now - self._ammo_events.last_incoming_alert_ts
+        last_hard_emergency_ts = (
+            self._behavior_tree.climb_last_hard_emergency_ts()
+            if self._behavior_tree is not None else 0.0)
+        since_terrain = now - last_hard_emergency_ts
+        if since_terrain <= self._terrain_lookback_s:
+            return "terrain", since_incoming
+        if since_incoming <= self._enemy_fire_lookback_s:
+            return "enemy_fire", since_incoming
+        return "unclassified", since_incoming
 
     # -- crash capture --------------------------------------------------------
 
@@ -622,17 +665,23 @@ class RespawnHandler:
                         if pre is not None:
                             capture_frame, missiles, alt, rate, pre_ts = pre
                             age_s = self._clock() - pre_ts
-                            logger.warning(
-                                "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
-                                "alt=%s rate=%s (pre-crash frame, %.1fs old)\033[0m",
-                                missiles, alt, rate, age_s)
+                            age_str = f"pre-crash frame, {age_s:.1f}s old"
                         else:
-                            logger.warning(
-                                "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
-                                "alt=%s rate=%s (no pre-crash frame buffered)\033[0m",
-                                missiles, alt, rate)
+                            age_str = "no pre-crash frame buffered"
+
+                        # ADR 143: enemy-fire vs. terrain classification,
+                        # replacing the misleading "CRASH" framing for what
+                        # ADR 137's own seventh trial already found was
+                        # mostly enemy fire, not terrain.
+                        now = self._clock()
+                        cause, since_incoming = self._classify_died_armed(now)
+                        logger.warning(
+                            "\033[91m💥 DIED ARMED — %s missile(s), cause=%s "
+                            "(incoming %.1fs ago), alt=%s rate=%s (%s)\033[0m",
+                            missiles, cause, since_incoming, alt, rate, age_str)
                         self._capture_crash_frame(capture_frame)
                         self._emit_capture_event("crash_with_missiles")
+                        self._emit_capture_event(f"died_armed_{cause}")
                 self._emit_capture_event("respawn_detected")
                 # Live capture for the respawn frame itself rides the
                 # RESPAWN_DETECTED event, which fires from the background OCR
@@ -765,6 +814,13 @@ class AmmoEventsHandler:
     @property
     def battle_started_ts(self) -> float:
         return self._battle_started_ts
+
+    @property
+    def last_incoming_alert_ts(self) -> float:
+        """ADR 143: read by RespawnHandler to classify a died-armed death
+        as a likely enemy-fire kill — was there a confirmed incoming-missile
+        alert recently, not just historically this life."""
+        return self._last_incoming_alert_ts
 
     # -- tick ---------------------------------------------------------------
 
@@ -1044,6 +1100,17 @@ class BoundaryPerceptionHandler:
         # than silently dropped — if this dominates, the capture is being asked
         # for during a screen that has no minimap and the gate above is the bug.
         self._blind_no_minimap_skips = 0
+        # ADR 117 D2, operator review 2026-09-20: three real blind captures
+        # that session all showed a minimap with terrain but no boundary-hue
+        # pixels forming anything more than scattered noise (183-309 raw px,
+        # measured) — the aircraft simply wasn't near an edge, not a detector
+        # miss. ADR 108's own corpus measured a REAL (if fragmented) line at
+        # 550-1400 raw px even when the shape filter rejected every fragment.
+        # 400 sits in that gap, same reasoning as minimap_present_min_px.
+        # Below it: nothing worth spending the capture budget on to explain.
+        self._blind_capture_min_raw_px = int(
+            minimap_cfg.get("blind_capture_min_raw_px", 400))
+        self._blind_no_boundary_line_skips = 0
         self._boundary_near_frac = float(minimap_cfg.get("boundary_near_frac", 0.25))
         self._boundary_turn_min_dist = 1.0
         # ~30 s of lead-up at a 1.5 s tick. Bounded: a session must not grow a
@@ -1335,6 +1402,21 @@ class BoundaryPerceptionHandler:
                 logger.debug("MAP BOUNDARY: blind capture skipped — no minimap "
                              "drawn (%d so far)", self._blind_no_minimap_skips)
             return False
+        # ADR 117 D2: a minimap is present but carries no meaningful amount of
+        # boundary-hue color — genuinely no boundary line on screen (the
+        # aircraft isn't near an edge), not a detector miss. Same
+        # not-a-timer-advance reasoning as the no-minimap skip above: this is
+        # the common case, and must not spend the interval a genuine
+        # fragmented-line miss would need.
+        raw_px = self._analyzer.get_last_boundary_raw_px()
+        if raw_px < self._blind_capture_min_raw_px:
+            self._blind_no_boundary_line_skips += 1
+            if (self._blind_no_boundary_line_skips in (1, 10, 100)
+                    or self._blind_no_boundary_line_skips % 500 == 0):
+                logger.debug(
+                    "MAP BOUNDARY: blind capture skipped — no boundary line "
+                    "(%d raw px, %d so far)", raw_px, self._blind_no_boundary_line_skips)
+            return False
         self._blind_capture_next_ts = now + self._blind_capture_interval_s
         self._capture_boundary_frame(
             frame, "blind", f"{self._captures.get('blind', 0) + 1}")
@@ -1596,6 +1678,7 @@ class BehaviorTreeHandler:
         self._climb_shadow = None
         self._climb_emergency_fn = None
         self._climb_hard_emergency_fn = None
+        self._climb_last_hard_emergency_ts_fn = None
         self._climb_emergency_update_fn = None
         self._climb_terrain_ahead_fn = None
         self._terrain_ahead_prev = False
@@ -1678,6 +1761,8 @@ class BehaviorTreeHandler:
             self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
             self._climb_hard_emergency_fn = getattr(
                 self._tree, "climb_hard_emergency_fn", None)
+            self._climb_last_hard_emergency_ts_fn = getattr(
+                self._tree, "climb_last_hard_emergency_ts_fn", None)
             self._climb_emergency_update_fn = getattr(
                 self._tree, "climb_emergency_update_fn", None)
             self._climb_terrain_ahead_fn = getattr(
@@ -1839,6 +1924,15 @@ class BehaviorTreeHandler:
         """Restart the enemy-absence clock — called by the respawn flow, the
         3.1b analogue of EnemyPresenceHandler.arm()."""
         self._enemy_last_seen_ts = time.time()
+
+    def climb_last_hard_emergency_ts(self) -> float:
+        """ADR 143: last time the hard (ttg/terrain) climb emergency was
+        active — 0.0 if Climb isn't wired (tactic disabled) or has never
+        fired. Read by RespawnHandler to classify a died-armed death as a
+        likely terrain crash rather than enemy fire."""
+        if self._climb_last_hard_emergency_ts_fn is None:
+            return 0.0
+        return float(self._climb_last_hard_emergency_ts_fn())
 
     @property
     def enabled(self) -> bool:

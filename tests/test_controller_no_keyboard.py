@@ -681,6 +681,80 @@ def test_padlock_correction_presses_every_tick_with_no_streak_building(monkeypat
     assert len(presses) == 2, "no streak building — must press on the very next check too"
 
 
+def test_padlock_correction_stops_after_max_attempts(monkeypatch):
+    """Operator directive 2026-09-20: a real dive pressed this 13 times over
+    ~20s with no effect — a press that never confirms is not more likely to
+    on the next try, so the retry budget is capped, not unlimited."""
+    ctrl, tracker = _fusion_ctrl(monkeypatch)
+    monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: True)
+    presses = []
+    monkeypatch.setattr(ctrl, "padlock_camera",
+                        lambda **kw: presses.append(kw))
+    tracker.dot_present = False   # never confirms — no streak ever builds
+    t0 = 1000.0
+
+    for i in range(6):
+        ctrl.note_padlock_center_dot(frame=None, now=t0 + i * 0.1)
+
+    assert len(presses) == 3, "must stop pressing once the cap is reached"
+
+    ctrl.note_padlock_center_dot(frame=None, now=t0 + 10.0)
+    assert len(presses) == 3, "must stay stopped, not resume on a later tick"
+
+
+def test_padlock_correction_cap_is_configurable(monkeypatch):
+    cfg = _load_config()
+    region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
+    ctrl = Controller(
+        region, analyzer=_AnalyzerStub(GameState.GAME_BATTLE),
+        config=ControllerConfig(
+            padlock_center_indicator={"confirm_seconds": 2.0,
+                                      "max_correction_attempts": 1}),
+    )
+    tracker = _FakeCenterDotTracker()
+    ctrl.set_target_tracker(tracker)
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: True)
+    presses = []
+    monkeypatch.setattr(ctrl, "padlock_camera",
+                        lambda **kw: presses.append(kw))
+    tracker.dot_present = False
+
+    ctrl.note_padlock_center_dot(frame=None, now=1000.0)
+    ctrl.note_padlock_center_dot(frame=None, now=1000.1)
+    assert len(presses) == 1
+
+
+def test_padlock_correction_gives_up_log_fires_exactly_once(monkeypatch, caplog):
+    ctrl, tracker = _fusion_ctrl(monkeypatch)
+    monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: True)
+    monkeypatch.setattr(ctrl, "padlock_camera", lambda **kw: None)
+    tracker.dot_present = False
+    t0 = 1000.0
+
+    with caplog.at_level("WARNING"):
+        for i in range(6):
+            ctrl.note_padlock_center_dot(frame=None, now=t0 + i * 0.1)
+
+    give_up_logs = [r for r in caplog.records if "giving up for this dive" in r.message]
+    assert len(give_up_logs) == 1
+
+
+def test_padlock_correction_budget_resets_on_stop_eject_sequence(monkeypatch):
+    """A respawn or match end (stop_eject_sequence's every real caller) ends
+    whatever dive was accumulating correction attempts — the cap is
+    per-episode, not a lifetime limit. Checked directly on the attribute
+    rather than through a full press cycle: stop_eject_sequence also
+    confirms padlock_state() False (ADR 140 D2), which correctly blocks
+    further pressing on its own — a separate gate this test isn't about."""
+    ctrl, tracker = _fusion_ctrl(monkeypatch)
+    ctrl._padlock_unknown_correction_attempts = 3
+
+    ctrl.stop_eject_sequence()
+
+    assert ctrl._padlock_unknown_correction_attempts == 0
+
+
 def test_padlock_correction_does_not_interrupt_a_building_streak(monkeypatch):
     """Live 2026-09-18 (operator-caught): the old confirm_seconds cooldown
     let D6 press again while a real streak was already accumulating toward

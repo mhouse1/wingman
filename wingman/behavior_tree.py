@@ -570,6 +570,11 @@ class ClimbCondition:
         self._post_respawn = _SETTLED
         self._emergency_active = False
         self._pending_reevaluation = False
+        # ADR 143: last time hard_emergency_active (below) went True — 0.0
+        # if it never has. Lets a consumer ask "was a genuine dive/terrain
+        # emergency active recently", not just "is it active this instant",
+        # to classify a died-armed death as a likely terrain crash.
+        self._last_hard_emergency_active_ts = 0.0
         # HLDD 001 Phase 1: forward sky-occlusion terrain-ahead trigger, a
         # second OR-term alongside the ttg emergency above. Own debounce
         # streak, same confirm-reads shape as ttg's, deliberately separate
@@ -617,6 +622,11 @@ class ClimbCondition:
         BoundaryTurn's yields_to_fn reads (operator directive); see the
         __init__ comment for why."""
         return self._hard_emergency_active
+
+    @property
+    def last_hard_emergency_active_ts(self) -> float:
+        """ADR 143: 0.0 if never — see the __init__ comment."""
+        return self._last_hard_emergency_active_ts
 
     @property
     def streak(self) -> int:
@@ -753,6 +763,14 @@ class ClimbCondition:
         # ttg or terrain only, captured BEFORE the altitude floor below is
         # folded in — see hard_emergency_active's docstring.
         self._hard_emergency_active = bool(emergency)
+        if self._hard_emergency_active:
+            # ADR 143: deliberately the hard signal, not the broader
+            # emergency_active below — "hitting the ground is certain" is
+            # the terrain-crash evidence this exists for; the softer
+            # altitude-floor case (folded into emergency_active only) is a
+            # preventive backstop, not that (see hard_emergency_active's
+            # own docstring).
+            self._last_hard_emergency_active_ts = now
 
         # Phase 1 (operator directive): hard altitude floor, no rate
         # involved. Deliberately the simplest possible check — snapshot.
@@ -947,6 +965,11 @@ class _BuildContext:
     # altitude floor too). Only BoundaryTurn reads this one. See
     # _build_boundary_slot's docstring for why.
     climb_hard_emergency_fn: "Callable[[], bool] | None" = None
+    # ADR 143: RespawnHandler reads this to classify a died-armed death as a
+    # likely terrain crash — was the hard emergency active recently, not
+    # just this instant (a death detected a tick or two after the dive
+    # itself would otherwise always read False here).
+    climb_last_hard_emergency_ts_fn: "Callable[[], float] | None" = None
 
 
 def climb_tactic_enabled(bt_cfg: dict) -> bool:
@@ -1123,6 +1146,11 @@ def _build_climb_slot(ctx: "_BuildContext"):
         return bool(getattr(_e, "hard_emergency_active", False))
     ctx.climb_hard_emergency_fn = _climb_hard_emergency_fn
 
+    # ADR 143: exposed the same way — a property read, not a re-derivation.
+    def _climb_last_hard_emergency_ts_fn(_e=emergency):
+        return float(getattr(_e, "last_hard_emergency_active_ts", 0.0))
+    ctx.climb_last_hard_emergency_ts_fn = _climb_last_hard_emergency_ts_fn
+
     def _climb_emergency_update_fn(snapshot, now=None, _e=emergency):
         return _e.update_emergency(snapshot, now)
     ctx.climb_emergency_update_fn = _climb_emergency_update_fn
@@ -1262,6 +1290,8 @@ def build_tree(bt_cfg: dict, clock=time.time,
     tree.climb_emergency_fn = ctx.climb_emergency_fn
     # Phase 1: the narrower ttg-or-terrain-only signal BoundaryTurn reads.
     tree.climb_hard_emergency_fn = ctx.climb_hard_emergency_fn
+    # ADR 143: RespawnHandler's died-armed classifier reads this.
+    tree.climb_last_hard_emergency_ts_fn = ctx.climb_last_hard_emergency_ts_fn
     # Anomaly 007: called once per tick, BEFORE tree.tick(), so the emergency
     # verdict above is never stale when a higher-priority tactic (chiefly
     # BoundaryTurn) is the one winning selection.

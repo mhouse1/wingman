@@ -418,6 +418,15 @@ class TestFlares:
         assert h.deploy_flares_on_new_incoming() is True
         assert h.deploy_flares_on_new_incoming() is False   # same timestamp
 
+    def test_last_incoming_alert_ts_is_readable(self):
+        """ADR 143: RespawnHandler's died-armed classifier reads this
+        publicly — must reflect the same value the private field holds."""
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, _ = _ammo(a)
+        assert h.last_incoming_alert_ts == 0.0   # nothing deployed yet
+        h.deploy_flares_on_new_incoming()
+        assert h.last_incoming_alert_ts == 100.0
+
     def test_incoming_suppressed_after_respawn(self):
         a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
         h, _, _ = _ammo(a)
@@ -509,19 +518,24 @@ class _RespawnCtrlStub:
 
 
 def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None,
-             emit_capture_event=None, crash_capture=None, clock=None):
+             emit_capture_event=None, crash_capture=None, clock=None,
+             behavior_tree=None):
     from wingman.main import RespawnState, _alive_transition_disposition
     from wingman.tick_handlers import RespawnHandler
     a = analyzer or _RespawnAnalyzerStub()
     c = ctrl or _RespawnCtrlStub()
     enemy = enemy or SimpleNamespace(arm=lambda: None)
-    ammo = ammo or SimpleNamespace(suppress_after_respawn=lambda s: None)
+    # last_incoming_alert_ts: ADR 143's classifier reads this — 0.0 (never)
+    # is the fail-open default for a stub that isn't exercising it.
+    ammo = ammo or SimpleNamespace(suppress_after_respawn=lambda s: None,
+                                   last_incoming_alert_ts=0.0)
     # Real capture disabled by default — no test should write to disk
     # unless it is specifically exercising ADR 137 D5's capture behavior.
     mission_cfg = {"respawn_clear_stability_s": stability_s,
                    "crash_capture": {"enabled": False} if crash_capture is None else crash_capture}
     h = RespawnHandler(a, c, mission_cfg,
                        enemy_presence=enemy, ammo_events=ammo,
+                       behavior_tree=behavior_tree,
                        disposition_fn=_alive_transition_disposition,
                        respawn_state_enum=RespawnState,
                        emit_capture_event=emit_capture_event,
@@ -695,7 +709,8 @@ class TestRespawnDetection:
         """ADR 060 rule 2: cross-concern effects are named calls."""
         armed, suppressed = [], []
         h, a, c = _respawn(enemy=SimpleNamespace(arm=lambda: armed.append(1)),
-                           ammo=SimpleNamespace(suppress_after_respawn=suppressed.append))
+                           ammo=SimpleNamespace(suppress_after_respawn=suppressed.append,
+                                                last_incoming_alert_ts=0.0))
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
         assert armed == [1]
         assert suppressed == [10.0]
@@ -769,7 +784,10 @@ class TestCrashWithMissilesInstrument:
         h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
                            emit_capture_event=events.append)
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
-        assert events == ["crash_with_missiles", "respawn_detected"]
+        # ADR 143: no recent incoming alert or hard emergency in this stub
+        # (both default timestamps are 0.0, i.e. "never") — unclassified.
+        assert events == ["crash_with_missiles", "died_armed_unclassified",
+                          "respawn_detected"]
 
     def test_logs_the_raw_altitude_not_the_smoothed_one(self, caplog):
         """ADR 137 D4, code-review finding 2026-09-11: stable_value lags real
@@ -783,7 +801,7 @@ class TestCrashWithMissilesInstrument:
                            emit_capture_event=lambda _n: None)
         with caplog.at_level("WARNING"):
             h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
-        [msg] = [r.getMessage() for r in caplog.records if "CRASH WITH MISSILES" in r.getMessage()]
+        [msg] = [r.getMessage() for r in caplog.records if "DIED ARMED" in r.getMessage()]
         assert "alt=317" in msg, msg
         assert "1820" not in msg, msg
         assert "rate=-602.0" in msg, msg
@@ -797,7 +815,125 @@ class TestCrashWithMissilesInstrument:
         events = []
         h, a, c = _respawn(_BoomAnalyzer(missiles=2), emit_capture_event=events.append)
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)   # must not raise
-        assert events == ["crash_with_missiles", "respawn_detected"]
+        assert events == ["crash_with_missiles", "died_armed_unclassified",
+                          "respawn_detected"]
+
+
+class _BehaviorTreeStub:
+    """Minimal stand-in for BehaviorTreeHandler — just the two calls
+    RespawnHandler makes on it: arm_absence_clock() (unrelated to ADR 143,
+    called unconditionally) and climb_last_hard_emergency_ts() (ADR 143's
+    terrain signal)."""
+
+    def __init__(self, last_hard_emergency_ts=0.0):
+        self._ts = last_hard_emergency_ts
+
+    def arm_absence_clock(self):
+        pass
+
+    def climb_last_hard_emergency_ts(self):
+        return self._ts
+
+
+class TestDiedArmedClassification:
+    """ADR 143: enemy_fire / terrain / unclassified, computed from a recent
+    incoming-missile alert vs. a recent hard climb emergency — replacing the
+    misleading "it's all a crash" framing ADR 137's own seventh trial found
+    was mostly wrong (89% level-or-climbing, consistent with getting shot
+    down rather than flying into anything)."""
+
+    def _gs(self, respawning=True):
+        return {"is_respawning": respawning, "respawn_confidence": 1.0}
+
+    def test_enemy_fire_when_incoming_alert_recent(self):
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=994.0)   # 6s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_enemy_fire" in events
+
+    def test_enemy_fire_lookback_is_configurable(self):
+        """An alert just outside the configured window must not classify as
+        enemy fire — the default is a starting point, not load-bearing."""
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=989.0)   # 11s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, emit_capture_event=events.append,
+                           crash_capture={"enabled": False,
+                                          "enemy_fire_lookback_s": 10.0})
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_unclassified" in events
+        assert "died_armed_enemy_fire" not in events
+
+    def test_terrain_when_hard_emergency_recent(self):
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=0.0)   # never
+        bt = _BehaviorTreeStub(last_hard_emergency_ts=997.0)   # 3s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, behavior_tree=bt,
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_terrain" in events
+
+    def test_terrain_wins_when_both_signals_are_recent(self):
+        """An active hard emergency is direct, mechanism-level evidence a
+        crash was in progress — stronger than inferring enemy fire from an
+        unrelated missile alert earlier in the same life."""
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=996.0)   # 4s ago
+        bt = _BehaviorTreeStub(last_hard_emergency_ts=998.0)   # 2s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, behavior_tree=bt,
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_terrain" in events
+        assert "died_armed_enemy_fire" not in events
+
+    def test_unclassified_when_neither_signal_is_recent(self):
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=0.0)
+        bt = _BehaviorTreeStub(last_hard_emergency_ts=0.0)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, behavior_tree=bt,
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_unclassified" in events
+
+    def test_no_behavior_tree_wired_falls_back_to_incoming_only(self):
+        """replay mode / a minimal harness: behavior_tree=None must not
+        raise, and must simply never contribute a terrain verdict."""
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=995.0)   # 5s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, behavior_tree=None,
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_enemy_fire" in events
+
+    def test_log_line_names_the_cause_and_incoming_age(self, caplog):
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=994.0)   # 6s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock)
+        with caplog.at_level("WARNING"):
+            h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        [msg] = [r.getMessage() for r in caplog.records if "DIED ARMED" in r.getMessage()]
+        assert "cause=enemy_fire" in msg, msg
+        assert "incoming 6.0s ago" in msg, msg
 
 
 class TestCrashCapture:
@@ -928,7 +1064,8 @@ class TestCrashCapture:
         h = RespawnHandler(
             _RespawnAnalyzerStub(missiles=2), _RespawnCtrlStub(), {},  # no crash_capture key at all
             enemy_presence=SimpleNamespace(arm=lambda: None),
-            ammo_events=SimpleNamespace(suppress_after_respawn=lambda s: None),
+            ammo_events=SimpleNamespace(suppress_after_respawn=lambda s: None,
+                                        last_incoming_alert_ts=0.0),
             disposition_fn=_alive_transition_disposition,
             respawn_state_enum=RespawnState)
         h.tick_detect("a_frame", self._gs(True), GameState.GAME_BATTLE)
@@ -1195,7 +1332,7 @@ class TestPreCrashBuffer:
         clock.advance(0.1)
         with caplog.at_level("WARNING"):
             h.tick_detect(_FakeFrame("death_screen"), self._gs(True), GameState.GAME_BATTLE)
-        [msg] = [r.getMessage() for r in caplog.records if "CRASH WITH MISSILES" in r.getMessage()]
+        [msg] = [r.getMessage() for r in caplog.records if "DIED ARMED" in r.getMessage()]
         assert "3 missile" in msg, msg
         assert "alt=1500" in msg, msg
         assert "rate=-400.0" in msg, msg
@@ -1224,7 +1361,7 @@ class TestPreCrashBuffer:
             crash_capture={"enabled": True, "pre_crash_buffer_s": 8.0})
         with caplog.at_level("WARNING"):
             h.tick_detect(_FakeFrame("only_frame"), self._gs(True), GameState.GAME_BATTLE)
-        [msg] = [r.getMessage() for r in caplog.records if "CRASH WITH MISSILES" in r.getMessage()]
+        [msg] = [r.getMessage() for r in caplog.records if "DIED ARMED" in r.getMessage()]
         assert "no pre-crash frame buffered" in msg, msg
 
 

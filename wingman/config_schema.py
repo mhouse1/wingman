@@ -269,6 +269,9 @@ SCHEMA = Section(
                 "pre_crash_buffer_s": SECONDS,
                 "pre_crash_freshness_s": SECONDS,
                 "pre_crash_lookback_s": SECONDS,
+                # ADR 143: enemy_fire_lookback_s/terrain_lookback_s
+                "enemy_fire_lookback_s": SECONDS,
+                "terrain_lookback_s": SECONDS,
                 "dir": STR,
             }),
             # ADR 047 waiting-state fallback (read in tick_handlers.py)
@@ -413,6 +416,7 @@ SCHEMA = Section(
             "blind_capture_max": _int(0),       # ADR 117
             "blind_capture_interval_s": _num(0),
             "minimap_present_min_px": _int(0),  # ADR 117: minimap drawn at all
+            "blind_capture_min_raw_px": _int(0),  # ADR 117 D2: a real line, not noise
             "mask_radius_frac": FRACTION,
             "min_blob_px": _int(0),
             "max_blob_px": _int(0),
@@ -494,6 +498,7 @@ SCHEMA = Section(
             "green_upper": _HSV,
             "min_pixels": _int(1),
             "confirm_seconds": _num(0),
+            "max_correction_attempts": _int(1),   # ADR 140 D6
         }),
 
         "hud": Section(children={
