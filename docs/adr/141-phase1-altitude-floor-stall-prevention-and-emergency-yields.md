@@ -1,8 +1,8 @@
 # ADR 141 — Phase 1 Reintroduction: Altitude Floor, Stall Prevention, and the Emergency-Yield Companion Fixes
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Draft  | 2026-09-20 | 1.8.9           |
+| Status   | Date       | Wingman Version |
+|----------|------------|-----------------|
+| Accepted | 2026-09-20 | 1.8.9           |
 
 ## Context
 
@@ -255,6 +255,58 @@ the aircraft recovered on its own each time — but this is exactly the
 oscillation signature D5a/b/c were written to eliminate, from a third,
 previously-unseen cause.
 
+D6 was fixed and gated on disk before this same session's process was
+launched, so the fix was live in this run from the start. D7 (the alt-floor
+freeze) was written and gated mid-session, after this run's `wingman.main`
+process had already started — Python does not hot-reload source, so D7 was
+**not** exercised by this particular process; the spurious re-log it fixes
+was still cosmetically present throughout. D7 needs its own live
+confirmation on a session started after it landed.
+
+### Second live trial (2026-09-20, same session continued, 1h 36m total, ended by operator)
+
+The session above did not end at the D6 incident — it continued
+unattended (operator watched intermittently via a live log Monitor) for a
+further ~1.5 hours, ended deliberately by the operator (STANDBY, then a
+second stop to close the game), not by a crash or hang. Final `Wingman
+Session Summary`:
+
+| Metric | Value |
+|---|---|
+| Duration | 1h 36m 11s |
+| Missions started / clean finish | 16 / 16 (100%) |
+| Total respawns | 51 |
+| Spawn crashes (death 3-10s after restart) | 1 (about 2%) |
+| Crash w/ missiles (mostly enemy fire) | 9 |
+| Missile evades | 13 |
+| Manual takeovers | 1 |
+
+Every `Controller: climb complete (...)` exit across the session, tallied
+directly from the log (89 total climb holds): 66 `altitude_recovered`
+(clean), 7 `eject_preempt`, 2 `evade_preempt`, 7 `state_exit`, 5 `stopped`,
+2 `max_climb` — all designed exit paths, none of them a repeat of the D6
+oscillation signature. All 9 crash-w/-missiles occurrences were individually
+traced against the surrounding telemetry: every one happened at or near
+cruise altitude during ordinary `Engage`/`BoundaryTurn`/`MissileEvade`
+combat, several with the pre-crash frame's telemetry blank entirely
+(the already-diagnosed death-cinematic-camera pattern), one with a genuine
+severe dive (-660 to -974 m/s, telemetry readings at the edge of the
+plausibility gate) that correctly triggered the D6 hard-emergency path
+(airbrake held, afterburner suppressed, continuous nose-up) within one
+tick of selection — the aircraft still went down, consistent with the
+damage having already been critical rather than a software failure. No
+occurrence traced back to the altitude floor, stall prevention, or either
+yield added in this ADR.
+
+Spawn-crash rate this session (1/51, about 2%) is in the same range as the
+1.25% baseline HLDD 001 cites, on a single 1.6h sample — not proof of an
+improvement (too small a sample per this project's own "small samples
+mislead" discipline), but no regression either.
+
+Resource growth (`RESOURCE SUMMARY`: wingman +115 MB/h, game +265 MB/h) is
+the pre-existing, separately-tracked Performance 008 leak — unrelated to
+this ADR, not new, not investigated further here.
+
 ## Consequences
 
 - The aircraft should not observably descend below 4000 m during
@@ -296,13 +348,16 @@ previously-unseen cause.
   6 tests) — pins `_start_climb`/`_update_climb` to the hard signal, including a
   direct regression test for the exact broad-true/hard-false shape the live
   trial hit.
-- Full gate (`make lint && make test`) green: 1663 passed, 2 skipped.
-- **Not yet done**: a dedicated, quiet, long-duration live-validation
-  session on `test2` for Phase 1 alone, deliberately before adding anything
-  further — the lesson taken from the `test1` regression itself. D6 was
-  found in the first ~7 minutes of the first attempt at exactly that
-  session, which is itself the process working as intended — see the
-  "First live trial" section above.
+- `tests/test_behavior_tree.py::TestAltitudeFloor::test_a_blind_tick_freezes_rather_than_clears_an_active_floor`
+  and `test_a_blind_tick_does_not_spuriously_relog` (D7, new, 2 tests).
+- Full gate (`make lint && make test`) green: 1665 passed, 2 skipped (D6+D7);
+  1663 passed at D6 alone.
+- Dedicated, quiet, long-duration live-validation session on `test2` for
+  Phase 1 alone: **done** — see "First live trial" (D6, found in the first
+  ~7 minutes) and "Second live trial" (the same session continued
+  unattended to 1h 36m, ended by the operator) above. D7 still needs its
+  own live confirmation, since it landed after this run's process had
+  already started.
 
 ## Deferred, explicitly out of scope for this ADR
 

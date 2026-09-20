@@ -608,6 +608,17 @@ below.
    ttg/`recover_below_time_s` emergency trigger is telemetry-only and
    unaffected by camera view; this does not touch it. Re-graduation is
    gated on ADR 140 landing and being live-validated first.
+   **Update, 2026-09-20**: ADR 140 has landed (D1-D6 implemented) and been
+   live-validated across several sessions, including throughout the
+   [ADR 141](../adr/141-phase1-altitude-floor-stall-prevention-and-emergency-yields.md)
+   soak session — `padlock_state()` logged correctly the whole 1h 36m run.
+   It remains purely observational everywhere, including here: nothing in
+   `BehaviorTreeHandler.tick()` reads it yet, so this trigger's
+   sky-occlusion reading is still taken regardless of camera state, exactly
+   as this Open Question describes. Wiring `padlock_state()` into this
+   trigger — not flipping `shadow` back — is the concrete next step,
+   proposed in
+   [ADR 142](../adr/142-gate-terrain-ahead-on-padlock-state.md).
 
 ## References
 
