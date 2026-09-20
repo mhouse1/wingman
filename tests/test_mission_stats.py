@@ -217,6 +217,26 @@ class TestEventCounting:
             t.print_summary()
         assert "Crash w/ missiles : 0" in caplog.text
 
+    def test_return_to_battle_with_missiles_counted(self, tmp_path):
+        """Operator directive: confirmed map-boundary crossings with primary
+        missiles still aboard — same 'still armed' shape as
+        crash_with_missiles, tracked in the session summary."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_event("return_to_battle_with_missiles", 5.0)
+        _leave_battle(t, ts=10.0)
+        result = t.finalize()
+        assert result["total_rtb_with_missiles"] == 1
+
+    def test_return_to_battle_with_missiles_printed_even_at_zero(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert "RTB w/ missiles   : 0" in caplog.text
+
     def test_manual_takeover_counted(self, tmp_path):
         t = _tracker(tmp_path)
         t._startup_done = True

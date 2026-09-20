@@ -996,8 +996,13 @@ class BoundaryPerceptionHandler:
     how `BehaviorTreeHandler` itself is written).
     """
 
-    def __init__(self, analyzer, minimap_cfg=None):
+    def __init__(self, analyzer, minimap_cfg=None, stats_tracker=None):
         self._analyzer = analyzer
+        # Same seam ADR 070's evade-entry event uses (BehaviorTreeHandler
+        # docstring, "the Controller holds no stats tracker") — optional, so
+        # every existing test construction (__new__ + hand-set attributes)
+        # is unaffected.
+        self._stats = stats_tracker
         minimap_cfg = minimap_cfg or {}
         # ADR 028 revision 4 / Design 010 instrumentation.
         self._rtb_active = False
@@ -1177,7 +1182,8 @@ class BoundaryPerceptionHandler:
                          reading[0], filtered[0])
         return filtered
 
-    def instrument_boundary(self, frame, now, snap=None, selection=None):
+    def instrument_boundary(self, frame, now, snap=None, selection=None,
+                            had_secondary_weapon_active=False):
         """Count map-boundary approaches and crossings. Design 010.
 
         INSTRUMENTATION ONLY — nothing steers on this. It exists because the
@@ -1237,12 +1243,20 @@ class BoundaryPerceptionHandler:
                 # records per trigger would put ~180 unnecessary multi-KB
                 # WARNING lines into a three-hour soak.
                 pending = list(self._boundary_trace)
+                # Captured HERE, on the main tick thread, from THIS tick's
+                # snap — not read fresh inside _on_rtb_confirmed, which runs
+                # later on an OCR pool thread and would see whatever the
+                # background ammo-OCR happens to have written by then
+                # (possibly after a respawn cleared it), not the count at
+                # the moment of the actual crossing.
+                _missiles = None if snap is None else snap.missiles
                 self._analyzer.confirm_return_to_battle_async(
                     frame,
-                    # _f binds THIS frame rather than whatever the name refers
-                    # to when the pool thread eventually runs the callback.
-                    lambda ok, text, _f=frame:
-                        self._on_rtb_confirmed(ok, text, pending, _f))
+                    # _f/_m/_hs bind THIS frame/missile-count/secondary-
+                    # weapon-flag rather than whatever the names refer to
+                    # when the pool thread eventually runs the callback.
+                    lambda ok, text, _f=frame, _m=_missiles, _hs=had_secondary_weapon_active:
+                        self._on_rtb_confirmed(ok, text, pending, _f, _m, _hs))
             elif not crossed and self._rtb_active:
                 if self._rtb_confirmed:
                     logger.info("🗺  MAP BOUNDARY: back inside")
@@ -1383,7 +1397,8 @@ class BoundaryPerceptionHandler:
         self._capture_boundary_frame(frame, "rtb",
                                      f"crossing{self._boundary_crossings}")
 
-    def _on_rtb_confirmed(self, detected, text, trace=None, frame=None):
+    def _on_rtb_confirmed(self, detected, text, trace=None, frame=None,
+                          missiles=None, had_secondary_weapon_active=False):
         """OCR verdict on the banner. The colour test is the cheap trigger; this
         is the arbiter of the COUNT, so a false positive does not silently
         inflate the crossings figure the tuning depends on.
@@ -1404,6 +1419,30 @@ class BoundaryPerceptionHandler:
                         "🗺  MAP BOUNDARY trace (last %d ticks before the "
                         "crossing): %s", len(trace), json.dumps(trace))
                 self._capture_rtb_frame(frame)
+                # Operator directive: track how many of these crossings
+                # happen with primary missiles still aboard — same "still
+                # armed, not an ammo-exhaustion story" shape as
+                # crash_with_missiles (RespawnHandler.tick_detect above).
+                # `missiles is None` (OCR never resolved that tick) counts
+                # the same as `> 0`, matching crash_with_missiles' own
+                # treatment of an unknown read as not-empty. But
+                # `had_secondary_weapon_active` is a HARD exclusion, not
+                # folded into the missiles value: once ADR 136 heatdive has
+                # switched weapons, AMMO_MISSILE reads the secondary
+                # (heatseeker) rack, not the primary one
+                # (Controller.is_secondary_weapon_active's own docstring) —
+                # a known-wrong reading, not an unknown one, so it must not
+                # fall through to the "unknown counts as armed" rule above.
+                if (self._stats is not None
+                        and not had_secondary_weapon_active
+                        and (missiles is None or missiles > 0)):
+                    try:
+                        self._stats.on_event(
+                            "return_to_battle_with_missiles", time.time())
+                    except Exception:
+                        logger.debug(
+                            "stats.on_event(return_to_battle_with_missiles) "
+                            "failed", exc_info=True)
                 return
             # Nothing to retract any more — the count was never incremented.
             self._rtb_false_positives += 1
@@ -1527,7 +1566,8 @@ class BehaviorTreeHandler:
         # filtering, blind-frame capture, and crossing/approach/turn
         # instrumentation all live on this collaborator now — see
         # BoundaryPerceptionHandler above.
-        self._boundary = BoundaryPerceptionHandler(analyzer, minimap_cfg)
+        self._boundary = BoundaryPerceptionHandler(
+            analyzer, minimap_cfg, stats_tracker=stats_tracker)
         self._last_selection = "none"
         self._ammo_events = ammo_events
         # ADR 070: the evade entry event is emitted from the actuator wrapper —
@@ -2022,7 +2062,20 @@ class BehaviorTreeHandler:
         # After the selection, so each buffered record carries the tactic that
         # was actually chosen on that tick — the question a crossing trace has
         # to answer is what wingman was doing on the way out.
-        self._boundary.instrument_boundary(frame, now, snap, selection)
+        #
+        # Operator directive: same "AMMO_MISSILE reads the secondary
+        # (heatseeker) rack once heatdive has switched weapons" concern
+        # RespawnHandler.tick_detect already guards crash_with_missiles
+        # with (ctrl.is_secondary_weapon_active(), read there before
+        # stop_eject_sequence() clears it). instrument_boundary's own
+        # `flying` gate already excludes TACTIC_EJECT/is_respawning, but
+        # not the narrower window where an eject aborted (Anomaly 003) and
+        # a later tactic was already selected while the flag had not yet
+        # been cleared — so this is read explicitly here too, not assumed
+        # covered by that gate.
+        self._boundary.instrument_boundary(
+            frame, now, snap, selection,
+            had_secondary_weapon_active=self._ctrl.is_secondary_weapon_active())
         # SAF-001: never command flight outside GAME_BATTLE. In
         # GAME_BATTLE_MANUAL the selector already yields Idle, but the gate is
         # stated here too so a future leaf cannot reintroduce commanded flight

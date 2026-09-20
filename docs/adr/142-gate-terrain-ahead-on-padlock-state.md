@@ -23,10 +23,16 @@ full `BehaviorTreeHandler` construction fixture. Full gate green
 (`make lint && make test`): 1667 passed, 2 skipped.
 
 D2 unchanged: `terrain_avoidance.shadow` stays `true` in `config.yaml` — this
-change is zero additional actuation risk. **Not yet live-validated** — next
-step is a shadow-mode session per the Testing plan below, measuring Open
-Question 1 (how often the gate actually suppresses a reading) before this
-ADR is marked Accepted.
+change is zero additional actuation risk.
+
+**Live-validated the same day** — see "First live trial" below. 285/286
+terrain-ahead firings correlated directly with a confirmed-`False` padlock
+state; the one apparent exception traced to a same-tick logging artifact,
+not a gate error. Zero exceptions from either consumer. Open Question 1
+answered with real numbers. Not yet done: comparing the resulting
+false-positive taxonomy against HLDD 001's own baseline (a separate,
+later analysis of firing *rate*, not required to confirm the gate itself
+is functioning).
 
 ## Context
 
@@ -112,6 +118,42 @@ claims — "the gate reduces corruption" and "the trigger is now safe to
 actuate" — the same mistake this project's shadow-first discipline exists to
 prevent elsewhere (ADR 073, HLDD 001's own original graduation).
 
+### First live trial (2026-09-20, 1h 56m session, run immediately after implementation)
+
+`wingman.log` 10:08:34-12:04:12, ended cleanly (Session Summary printed, not
+a crash-loop). Measured directly from the log, not inferred:
+
+- **Zero exceptions** from either `note_padlock_center_dot` or
+  `detect_terrain_ahead` the entire run.
+- **286 "TERRAIN AHEAD" triggers.** Correlated each against the same-tick
+  `padlock=` field on the following `BT[active]: selected=...` debug line:
+  **285/286 show `padlock=False`** — the gate only ever let the read
+  through when padlock was confirmed off.
+- **The one apparent exception is not a contradiction.** Traced line-by-line
+  (10:10:00.864-.954): the gate read a valid confirmed-`False` state and
+  allowed the trigger at .876; `padlock_camera()`'s own routine ~6s press
+  (ADR 136's `_padlock_loop`, unrelated to this gate) fired at .898 — 22ms
+  later, same tick — and reset `padlock_state()` to `None` per ADR 140's own
+  "any-press resets to Unknown" rule, before that tick's own end-of-tick
+  debug line printed at .954. The gate's decision was correct at the moment
+  it was made; the log field this analysis compares it against changed
+  afterward, for a reason unrelated to the gate.
+- **Open Question 1, answered.** Across 4690 in-battle ticks,
+  `padlock_state()` was `False` on 3725 (79%) and `None` on 965 (21%).
+  `True` never appeared even once this session — confirmed by code read
+  that nothing in the codebase ever assigns it; in practice the tri-state is
+  effectively binary (`False`/`None`) today. The gate suppresses roughly a
+  fifth of ticks, not the majority-starving scenario the question worried
+  about — `terrain_confirm_reads` (2) has ample room to accumulate on a
+  real hazard.
+
+This satisfies the Testing plan's live-validation step for the gate
+mechanism itself. Still not done: comparing the resulting false-positive
+*taxonomy* against HLDD 001's "Live trial results" baseline — a judgment
+call about whether the firing rate changed in a way attributable to fewer
+padlock-confused reads, which is a separate, later analysis, not required
+to confirm D1/D2 are functioning as designed.
+
 ## Open Questions
 
 1. **How often does `padlock_state() is not False` actually hold during
@@ -121,7 +163,9 @@ prevent elsewhere (ADR 073, HLDD 001's own original graduation).
    rarely accumulate even during a genuine hazard, and the trigger could
    end up structurally starved of clean reads rather than merely protected
    from corrupted ones. Worth measuring directly in the live trial below,
-   not assumed either way.
+   not assumed either way. **Measured by the first live trial below**: 21%
+   of in-battle ticks (`False` 79%, `None` 21%, `True` never observed) —
+   not the majority-starving case this question worried about.
 2. **ADR 140 Open Question 1 (padlock-ON ground truth) is "quantified but
    not closed."** This decision only needs `padlock_state()` to be a
    reasonable *coarse* signal for "don't trust the forward view right now,"
@@ -137,11 +181,13 @@ prevent elsewhere (ADR 073, HLDD 001's own original graduation).
   now gates on `padlock_state() is False`, and `note_padlock_center_dot`
   runs first so the gate reads the current tick's value — see
   "Implementation status" above.
-- **Live** (not yet done): a new shadow-mode session — zero additional
-  actuation risk, since the trigger still never actuates under D2 —
-  comparing the resulting false-positive taxonomy against HLDD 001's
-  existing "Live trial results" baseline, and directly measuring Open
-  Question 1 above (what fraction of ticks end up gated out).
+- **Live** (gate mechanism confirmed, taxonomy comparison still open): a
+  shadow-mode session ran immediately after implementation — zero
+  additional actuation risk, since the trigger still never actuates under
+  D2 — see "First live trial" above for the gate-correctness measurement
+  and Open Question 1's answer. Still open: comparing the resulting
+  false-positive taxonomy against HLDD 001's existing "Live trial results"
+  baseline.
 
 ## References
 

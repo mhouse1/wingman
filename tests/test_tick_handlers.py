@@ -1797,10 +1797,15 @@ class TestRespawnHealthStallRecorder:
 class _FakeBoundaryAnalyzer:
     """Analyzer stub exposing only what _instrument_boundary touches."""
 
-    def __init__(self, crossed_seq, reading=(0.5, -0.5)):
+    def __init__(self, crossed_seq, reading=(0.5, -0.5), auto_confirm=None):
         self._crossed = list(crossed_seq)
         self._reading = reading
         self.ocr_calls = 0
+        # (ok, text) to invoke the callback with immediately, synchronously
+        # — real OCR is async, but a same-thread invocation is enough to
+        # prove what instrument_boundary's closure actually captured and
+        # passed through, without needing a real thread pool in a test.
+        self._auto_confirm = auto_confirm
 
     def detect_return_to_battle(self, _frame):
         return self._crossed.pop(0) if self._crossed else False
@@ -1810,13 +1815,24 @@ class _FakeBoundaryAnalyzer:
 
     def confirm_return_to_battle_async(self, _frame, _cb):
         self.ocr_calls += 1
+        if self._auto_confirm is not None:
+            _cb(*self._auto_confirm)
 
 
-def _boundary_handler(analyzer):
+class _StatsStub:
+    def __init__(self):
+        self.events = []
+
+    def on_event(self, event_name, ts):
+        self.events.append(event_name)
+
+
+def _boundary_handler(analyzer, stats=None):
     import collections
     from wingman.tick_handlers import BoundaryPerceptionHandler
     h = BoundaryPerceptionHandler.__new__(BoundaryPerceptionHandler)
     h._analyzer = analyzer
+    h._stats = stats
     h._rtb_false_positives = 0
     h._rtb_active = False
     h._boundary_crossings = 0
@@ -1828,6 +1844,15 @@ def _boundary_handler(analyzer):
     h._rtb_confirmed = False
     h._boundary_reading = None
     h._boundary_turn_min_dist = 1.0
+    # _on_rtb_confirmed's success path calls _capture_rtb_frame ->
+    # _capture_boundary_frame, which reads _rtb_capture_max before its own
+    # `frame is None` check — 0 disables capture (no real file I/O in a
+    # test) and short-circuits before _captures/_rtb_capture_dir are ever
+    # touched. Previously missing here; silently swallowed by
+    # _on_rtb_confirmed's outer `except Exception: pass` because no
+    # existing test asserted anything past that call.
+    h._rtb_capture_max = 0
+    h._captures = {}
     return h
 
 
@@ -1913,6 +1938,92 @@ def test_a_confirmed_crossing_is_kept():
     h._on_rtb_confirmed(True, "RETURNTOBATTLE:5")
     assert h._boundary_crossings == 1
     assert h._rtb_false_positives == 0
+
+
+# --- Operator directive: RTB crossings with primary missiles still aboard,
+# same "still armed" shape as crash_with_missiles. -------------------------
+
+def test_a_confirmed_crossing_with_missiles_emits_the_stats_event():
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=3)
+    assert stats.events == ["return_to_battle_with_missiles"]
+
+
+def test_a_confirmed_crossing_with_zero_missiles_does_not_emit():
+    """Crossed back in with an empty rack — not the 'still armed' story
+    this stat tracks."""
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=0)
+    assert stats.events == []
+
+
+def test_an_unknown_missile_count_still_emits():
+    """Same treatment crash_with_missiles gives an unresolved OCR read
+    (`missiles is None or missiles > 0`) — unknown counts as not-empty,
+    not as a reason to stay silent."""
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=None)
+    assert stats.events == ["return_to_battle_with_missiles"]
+
+
+def test_a_secondary_weapon_active_crossing_does_not_emit_even_with_missiles():
+    """Same reason RespawnHandler.tick_detect excludes crash_with_missiles
+    during heatdive: once ADR 136 has switched weapons, AMMO_MISSILE reads
+    the secondary (heatseeker) rack, not the primary one — `missiles=3`
+    here is a real but WRONG-rack reading, not an unknown one, so it must
+    not fall through the 'unknown counts as armed' rule."""
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=3,
+                        had_secondary_weapon_active=True)
+    assert stats.events == []
+
+
+def test_the_secondary_weapon_flag_is_captured_at_trigger_time_and_threaded_through():
+    """Wiring test, same shape as the missiles-threading test below: the
+    flag must come from THIS tick's read, carried through the async
+    closure, not re-read when OCR resolves."""
+    stats = _StatsStub()
+    analyzer = _FakeBoundaryAnalyzer([True], auto_confirm=(True, "RETURNTOBATTLE"))
+    h = _boundary_handler(analyzer, stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(missiles=7),
+                          selection="Engage", had_secondary_weapon_active=True)
+    assert stats.events == []
+
+
+def test_an_unconfirmed_crossing_does_not_emit_the_stats_event():
+    stats = _StatsStub()
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]), stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(False, None, missiles=3)
+    assert stats.events == []
+
+
+def test_missing_stats_tracker_does_not_raise():
+    """`stats_tracker` is optional (ADR 070's evade-entry seam) — every
+    existing construction that never set it must keep working."""
+    h = _boundary_handler(_FakeBoundaryAnalyzer([True]))  # stats=None, default
+    h.instrument_boundary(None, 0.0, snap=_flying(), selection="Engage")
+    h._on_rtb_confirmed(True, "RETURNTOBATTLE", missiles=3)  # must not raise
+    assert h._boundary_crossings == 1
+
+
+def test_missiles_is_captured_at_trigger_time_and_threaded_through():
+    """The count must come from THIS tick's snap, not read fresh when OCR
+    resolves — instrument_boundary's own docstring reasoning for why
+    `frame` is bound the same way."""
+    stats = _StatsStub()
+    analyzer = _FakeBoundaryAnalyzer([True], auto_confirm=(True, "RETURNTOBATTLE"))
+    h = _boundary_handler(analyzer, stats=stats)
+    h.instrument_boundary(None, 0.0, snap=_flying(missiles=7), selection="Engage")
+    assert stats.events == ["return_to_battle_with_missiles"]
 
 
 def test_ocr_confirmation_is_one_shot_per_crossing():
