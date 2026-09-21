@@ -768,7 +768,7 @@ return_to_battle: {region: [0.36, 0.32, 0.64, 0.378], min_red_frac: 0.10,
   ocr_region: [0.44, 0.32, 0.56, 0.378],
   text: [RETURNTO, TOBATTLE, NTOBAT, RNTOBAT, TOBAT]}
 tracking:
-  enabled: false
+  enabled: true
   # Design 005 dry-run/live split. enabled:true + actuate:false is pure
   # sensing and logging — feeds the HUD in both GAME_BATTLE and
   # GAME_BATTLE_MANUAL, never presses a key — the "Live dry-run logging

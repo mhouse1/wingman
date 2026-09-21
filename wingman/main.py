@@ -788,6 +788,12 @@ def main():
     # Controller cannot construct its own, TargetTracker is owned/configured
     # alongside HudRenderer above.
     ctrl.set_target_tracker(target_tracker)
+    # HLDD 005 fix (2026-09-21): same wiring, same reason, for the renderer —
+    # lets the heatdive loop write to live_hud.png too, instead of leaving it
+    # frozen for the whole dive (TrackingHudHandler.tick() only renders in
+    # GAME_BATTLE/GAME_BATTLE_MANUAL; the dive runs in GAME_BATTLE_EJECT).
+    if hud_renderer is not None:
+        ctrl.set_hud_renderer(hud_renderer)
     # ADR 140: analyzer needs padlock_state() for the telemetry log line —
     # same late-bound wiring shape, reverse direction.
     analyzer.set_controller(ctrl)

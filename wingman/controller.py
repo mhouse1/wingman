@@ -306,6 +306,13 @@ class Controller:
         # None until set_target_tracker() is called; the eject heatdive loop
         # no-ops when it is None.
         self._target_tracker = None
+        # HLDD 005 fix (2026-09-21): HudRenderer reference, wired in from
+        # main.py alongside set_target_tracker — same reason (Controller
+        # doesn't own or construct it; TrackingHudHandler does). None until
+        # set_hud_renderer() is called; the eject heatdive loop simply skips
+        # HUD rendering when it is None, same fail-open shape as a missing
+        # target tracker.
+        self._hud_renderer = None
         # ADR 136: True once switch_weapon() has fired for the current eject —
         # the shared AMMO_MISSILE crop then reads the secondary loadout, not
         # the primary rack, so ADR 088's rearm-abort check must stop trusting
@@ -1388,6 +1395,21 @@ class Controller:
         """
         self._target_tracker = tracker
 
+    def set_hud_renderer(self, hud_renderer) -> None:
+        """Wire in the HudRenderer instance (HLDD 005 fix, 2026-09-21).
+
+        Called once from main.py, same pattern and same call site as
+        set_target_tracker — Controller doesn't own or construct the
+        renderer either (TrackingHudHandler does). Lets the eject heatdive
+        loop write to the same live_hud.png the ambient tracking path uses,
+        instead of leaving it frozen for the whole dive: TrackingHudHandler
+        .tick() — the only other caller of maybe_render — is gated to
+        GAME_BATTLE/GAME_BATTLE_MANUAL, and the dive runs entirely inside
+        GAME_BATTLE_EJECT, which that gate excludes. Until this is called,
+        the heatdive loop simply skips HUD rendering.
+        """
+        self._hud_renderer = hud_renderer
+
     def roll_left(self, hold_seconds: float = 0.3, block: bool = True, ignore_cancel: bool = False):
         """Roll left by holding the configured roll-left key."""
         if self._turn_blocked("roll_left"):
@@ -2192,17 +2214,42 @@ class Controller:
                         # 2026-09-09: 0-11ms instead of the requested hold).
                         self.orient_nose_to_target(obs["error_norm"], ignore_cancel=True)
                     ammo = None
+                    flares = None
+                    health = None
                     if self._analyzer is not None:
                         try:
                             ammo = self._analyzer.get_ammo_missiles()
                         except Exception:
                             ammo = None
+                        try:
+                            flares = self._analyzer.get_ammo_flares()
+                        except Exception:
+                            flares = None
+                        try:
+                            health = self._analyzer.get_health()
+                        except Exception:
+                            health = None
                     # Fire whenever ammo is unreadable (fail open, matching
                     # the pre-ADR-136 default of just firing) or still > 0.
                     # ADR 136 D1 step 4: no lock/tone detection — the game
                     # decides when a held trigger actually releases a shot.
                     if ammo is None or ammo > 0:
                         self.fire_active_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                    # HLDD 005 fix (2026-09-21): otherwise live_hud.png goes
+                    # dark for the whole dive — TrackingHudHandler.tick(), the
+                    # only other caller of maybe_render, is gated to
+                    # GAME_BATTLE/GAME_BATTLE_MANUAL and this loop only ever
+                    # runs during GAME_BATTLE_EJECT. State name is hardcoded,
+                    # not read from the FSM: this loop cannot run in any other
+                    # state by construction (started after eject_started,
+                    # stopped before eject_complete). maybe_render's own lock
+                    # already makes concurrent calls from two threads safe,
+                    # and in practice the two callers never overlap anyway —
+                    # GAME_BATTLE and GAME_BATTLE_EJECT are mutually exclusive
+                    # FSM states.
+                    if self._hud_renderer is not None:
+                        self._hud_renderer.maybe_render(
+                            frame, obs, "GAME_BATTLE_EJECT", health, ammo, flares)
                 except Exception:
                     logger.exception("Controller: eject heatdive loop cycle failed")
                 if stop_event.wait(timeout=0.2) or self._eject_stop.is_set():

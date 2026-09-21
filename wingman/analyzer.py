@@ -1649,6 +1649,18 @@ class GameStateAnalyzer:
             if self._ammo_lock.locked():
                 self._ammo_lock.release()
 
+    def get_health(self):
+        """Return the latest health snapshot (HLDD 005 fix, 2026-09-21).
+
+        Added so Controller's eject heatdive loop can feed HudRenderer the
+        same health figure TrackingHudHandler.tick() already reads via
+        game_state.get("health") — that dict isn't available inside
+        Controller, so this is a direct accessor instead, matching
+        get_ammo_missiles/get_ammo_flares's own shape and lock.
+        """
+        with self._health_lock:
+            return self._health
+
     def _process_fuel_reading(self, value: "int | None"):
         """Range-gate and store one afterburner-fuel OCR reading (ADR 075).
 
