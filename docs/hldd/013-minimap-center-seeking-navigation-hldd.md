@@ -106,52 +106,130 @@ diagnostic already consume today.
 
 ### Actuation: roll-only, through the existing primitive, gated to true idle
 
-Add an `elif _may_fly and selection == TACTIC_ATTACK_SUPPORT:` branch beside
-the existing `TACTIC_ENGAGE`/`TACTIC_REGROUP`/`TACTIC_CLIMB` branches in
-`BehaviorTreeHandler.tick()`. On a tick where:
+Add an `elif _may_fly and not snap.survival_hold and selection ==
+TACTIC_ATTACK_SUPPORT:` branch beside the existing
+`TACTIC_ENGAGE`/`TACTIC_REGROUP`/`TACTIC_CLIMB` branches in
+`BehaviorTreeHandler.tick()`, calling a new `_actuate_seek_center` method.
+Uses the `_b_dist, _b_fwd, _b_lat` locals `tick()` already destructures from
+`self._boundary.perceive(...)` earlier in the same call — not a fresh
+`self._boundary.reading` property fetch, which would redo the None/2-tuple
+handling `perceive()` already resolved for this tick.
 
-1. the boundary reading is not `None`, and
-2. `dist <= seek_center_trigger_frac` (a new, deliberately *wider-than-BoundaryTurn* config threshold — see Config below),
+**The survival-hold exclusion is not optional here — every existing
+roll-axis consumer already has it, one of them because a live bug required
+it.** `TACTIC_ATTACK_SUPPORT` is lower priority than `TACTIC_CLIMB`, and the
+`TACTIC_CLIMB` branch's own comment documents exactly this failure mode
+already occurring live: "9 EngageNav commands reached a loitering aircraft
+on 2026-09-04 15:31 because loiter climbs, so Climb is the selection for
+most of a hold" (ADR 110). During a hold where altitude is already stable
+and no contacts are visible — a large fraction of any real hold —
+`TACTIC_ATTACK_SUPPORT`'s `always` condition would win by elimination the
+same way `TACTIC_CLIMB` did before that fix. Using bare `_may_fly` here
+(matching only `TACTIC_CLIMB`'s outer condition, not its own inner `if not
+snap.survival_hold:` guard) would silently reopen that exact bug — a second,
+uncoordinated writer on the roll axis the hold's own orbit logic already
+owns. `not snap.survival_hold` belongs in this branch's own condition, not
+as a separate inner check, since (unlike Climb) this branch has no other
+reason to run during a hold at all.
 
-compute `error_norm` from the reading's `forward`/`lateral` components
-rotated 180° (steer away from the boundary bearing, not toward it) and call
-`self._ctrl.orient_nose_to_target(error_norm, **self._ctl_cfg)` — the
-identical roll-only primitive `_actuate_engage` already calls for Engage and
-Regroup. No new actuator, no new key binding, no new `Controller` method.
+On a tick where:
 
-A small deadzone (`seek_center_deadzone_deg`, mirroring
-`EngageNavigator.bearing_deadzone_deg`) suppresses correction when the
-aircraft is already headed away from the boundary, so this does not hunt on
-noise once it has done its job — same shape as the existing engage deadzone,
-new instance of it, not new logic.
+1. `_b_lat is not None` (a 2-tuple reading — `lateral is None` — is treated
+   exactly like no reading at all: skip the tick. This is already a rare,
+   degenerate case per ADR 122's own comment, and doing nothing is the safe
+   default rather than importing `BoundaryTurn`'s fixed-direction fallback
+   into a second consumer), and
+2. `_b_dist <= seek_center_trigger_frac` (a new, deliberately
+   *wider-than-BoundaryTurn* config threshold — see Config below),
+
+compute the reciprocal steering error directly in vector space — negate
+both components, then `atan2`, rather than computing a bearing and adding
+180° with manual wrap-around handling (the same reason `MinimapEma` smooths
+in `(x, y)` space rather than on the angle: "a bearing cannot be averaged
+across the ±180° wrap"):
+
+```python
+error_norm = max(-1.0, min(1.0,
+    math.degrees(math.atan2(-_b_lat, -_b_fwd)) / 90.0))
+```
+
+**Rear-sector commitment, reused, not reinvented.** The reciprocal bearing
+sits near ±180° exactly when the aircraft is already heading toward the
+edge — the single most important case for this feature to handle well, and
+the exact unstable-sign condition `EngageNavigator._steer_intent`'s
+`rear_commit_deg`/`rear_release_deg` commitment already exists to solve
+(discovered live, 2026-08-08: flipping roll direction every sample never
+brings a rear-sector target forward). `_actuate_seek_center` carries its own
+instance of the same commit/release state machine — copied, not shared with
+`EngageNavigator`'s, since the two must not reset each other on an
+unrelated mode switch.
+
+**Own tuning, not `self._ctl_cfg`.** `self._ctl_cfg["deadband"]` is
+hardcoded to `self._nav.deadband_norm` (`EngageNavigator`'s own combat-tuned
+12° deadzone) — splatting `**self._ctl_cfg` into `orient_nose_to_target`
+would silently ignore a new `seek_center_deadzone_deg` config value
+entirely. `_actuate_seek_center` builds its own config dict
+(`seek_center_deadzone_deg`, `seek_center_kp`, `seek_center_min_hold_s`,
+`seek_center_max_hold_s`, `seek_center_cooldown_s` — see Config) and passes
+that to `orient_nose_to_target` instead. This is a deliberately gentler,
+independently-tunable maneuver, not combat steering wearing a different
+name.
+
+**No new temporal smoothing in Phase 1.** `EngageNavigator` smooths twice
+(ADR 113's median filter upstream, then its own `MinimapEma` over time) —
+whether the median filter alone is enough for a steering consumer, as
+opposed to `BoundaryTurn`'s threshold-crossing consumer which cares less
+about smoothness, is unmeasured. Phase 1 adds no second smoothing layer;
+the shadow log (below) already records the commanded direction every
+qualifying tick, which is exactly the evidence needed to decide whether an
+EMA is warranted before spending the effort — matching how ADR 117 D8-D11
+measured each heuristic before adding it, this same week. See Open Question
+4.
 
 **Shadow first.** Matching this codebase's standing convention (ADR 070's
 missile-evade shadow trial, HLDD 001 Phase 1's terrain-ahead shadow, ADR 028
 revision 4's own "off unless config turns it on" framing for Regroup): Phase
 1 ships with `seek_center_enabled: false` and, while disabled, logs what it
-*would* command (`SEEK CENTER[shadow]: would roll err=%.2f dist=%.2f`) on
-every tick where the trigger condition is met but actuation is suppressed —
-the same `self._dry_run`-style branch `_actuate_engage` already has for
-Engage. A live session's shadow log is what decides whether Phase 1 goes
-live, not a guess.
+*would* command — rate-limited the same way every other diagnostic added
+this week is (ADR 117 D9's `_blind_no_boundary_line_skips` pattern: log at
+the 1st, 10th, 100th occurrence, then every 500th) rather than once per
+qualifying tick, which could otherwise log continuously for as long as the
+aircraft sits idle near an edge:
 
-### Priority and safety — nothing to add, only to confirm
+```python
+logger.info("SEEK CENTER[shadow]: would roll err=%.2f dist=%.2f (%d so far)",
+            error_norm, _b_dist, self._seek_center_shadow_count)
+```
+
+A live session's shadow log is what decides whether Phase 1 goes live, not
+a guess.
+
+### Priority and safety — one gate to add, confirmed by precedent
 
 `TACTIC_ATTACK_SUPPORT` is already last in `_PRIORITY_ORDER`. Every existing
 higher-priority tactic — most importantly `TACTIC_BOUNDARY_TURN` itself,
 `TACTIC_MISSILE_EVADE`, `TACTIC_EJECT`, `TACTIC_CLIMB` — continues to
 pre-empt this one exactly as it pre-empts Engage and Regroup today. This
 design adds no new priority comparison and cannot introduce a conflict
-`_PRIORITY_ORDER` does not already resolve. The `_combat_ok` /
-`snap.survival_hold` gate `_actuate_engage`'s callers already apply to
-Engage/Regroup/Climb applies here identically — a survival hold still owns
-the flight path uncontested.
+`_PRIORITY_ORDER` does not already resolve.
+
+The survival-hold exclusion, however, is a real gate this branch must carry
+itself — not something it inherits for free. `TACTIC_ENGAGE`/`TACTIC_REGROUP`
+get it via `_combat_ok = _may_fly and not snap.survival_hold`;
+`TACTIC_CLIMB` gets it via its own explicit inner check, added after a live
+incident (ADR 110, 2026-09-04: "9 EngageNav commands reached a loitering
+aircraft... because loiter climbs"). `TACTIC_ATTACK_SUPPORT` needs the same
+treatment for the same reason — see Actuation above for why bare `_may_fly`
+would reopen that exact bug for a lower-priority tactic than the one it was
+first found on.
 
 ### Config
 
 Proposed, under a new `behavior_tree.attack_support` block (mirroring
 `behavior_tree.climb.terrain_avoidance`'s pattern of nesting a sub-feature
-under its owning tactic):
+under its owning tactic). Own gain/hold-time knobs, independent of
+`j20_mission`'s `coarse_kp`/`coarse_min_hold_s`/etc. — see Actuation above
+for why this must not resolve to `self._ctl_cfg`'s combat tuning:
 
 ```yaml
 behavior_tree:
@@ -162,29 +240,70 @@ behavior_tree:
     # last-resort emergency layer with its own, tighter threshold.
     seek_center_trigger_frac: 0.55
     seek_center_deadzone_deg: 15.0
+    # Deliberately gentler than j20_mission's coarse_kp (0.5) / hold-time
+    # defaults — a background bias should correct less aggressively than
+    # active target tracking. Starting values, not measured; the shadow
+    # trial validates the trigger and direction, not roll aggressiveness
+    # (Phase 1 never actuates), so these three specifically stay a named
+    # guess into the live trial.
+    seek_center_kp: 0.3
+    seek_center_min_hold_s: 0.15
+    seek_center_max_hold_s: 0.6
+    seek_center_cooldown_s: 2.0
 ```
 
 `seek_center_trigger_frac` starting above `boundary_near_frac` (0.35) is a
 deliberate, named guess — Phase 1's shadow log is what should confirm or
 correct it, not this document.
 
+`config_schema.py` additions (no new `Leaf` patterns — every type below
+already exists for a sibling key elsewhere in the schema):
+
+```python
+"attack_support": Section(children={
+    "seek_center_enabled": BOOL,
+    "seek_center_trigger_frac": FRACTION,       # matches boundary_near_frac
+    "seek_center_deadzone_deg": _num(0, 90),    # matches bearing_deadzone_deg's range
+    "seek_center_kp": _num(0),
+    "seek_center_min_hold_s": SECONDS,
+    "seek_center_max_hold_s": SECONDS,
+    "seek_center_cooldown_s": SECONDS,
+}),
+```
+
 ### Testing plan
 
 - Unit: a pure-logic test analogous to `EngageNavigator`'s own tests —
   given a boundary reading and existing selection state, does the new branch
-  compute the correct reciprocal `error_norm`, respect the deadzone, and
-  leave every other tactic's actuation untouched? No frames, no analyzer,
-  same style as `tests/test_engage_nav.py`.
+  compute the correct reciprocal `error_norm` (vector-negate-then-`atan2`,
+  not bearing-plus-180), respect its own deadzone/gain (not
+  `self._ctl_cfg`'s), and leave every other tactic's actuation untouched?
+  No frames, no analyzer, same style as `tests/test_engage_nav.py`.
+- Unit: `lateral is None` (a 2-tuple reading) is treated as no reading at
+  all — the branch must not call `atan2(None, ...)` or otherwise raise.
+- Unit: the rear-sector commit/release state machine, ported directly from
+  `EngageNavigator._steer_intent`'s own test shape — a reciprocal bearing
+  crossing `rear_commit_deg` latches a sign, a later read below
+  `rear_release_deg` releases it, matching the existing tests for the
+  mechanism this reuses.
 - Unit: confirm the new branch never fires when `selection !=
-  TACTIC_ATTACK_SUPPORT`, when `_combat_ok` is false, or when the boundary
-  reading is `None` — mirrors the existing `_may_fly`/`survival_hold` gate
-  tests already covering Engage/Regroup/Climb.
+  TACTIC_ATTACK_SUPPORT`, when `_may_fly` is false, or when the boundary
+  reading is `None` — mirrors the existing gate tests already covering
+  Engage/Regroup/Climb.
+- Unit: confirm the new branch never fires when `snap.survival_hold` is
+  true, even when `selection == TACTIC_ATTACK_SUPPORT` and a triggering
+  boundary reading is present — this is the specific regression class ADR
+  110 already fixed once for `TACTIC_CLIMB`; the test should exist for the
+  same reason that fix has its own test coverage.
 - Shadow live trial (required before `seek_center_enabled: true` ships):
-  one full session, `seek_center_enabled: false`, reading the `SEEK
-  CENTER[shadow]` log line count and the commanded direction against the
-  actual boundary trace already recorded by
-  `BoundaryPerceptionHandler._boundary_trace` — same evidence class ADR 117
-  and ADR 108 both used to validate detection changes before trusting them.
+  one full session, `seek_center_enabled: false`, reading the rate-limited
+  `SEEK CENTER[shadow]` log line count and the commanded direction
+  directly — not `BoundaryPerceptionHandler._boundary_trace`, which is a
+  20-tick (~30s) rolling lookback window built for context around one
+  specific event, not session-long aggregation. Cross-check the logged
+  direction against the same session's `BOUNDARY: dist=...` lines for
+  sanity, and use this same log to answer Open Question 4 (temporal
+  smoothing) before deciding whether it needs an answer.
 - Live trial (after shadow validates): compare `total_rtb_with_missiles`,
   confirmed-crossing rate, and `BoundaryTurn` trigger frequency
   session-over-session with the feature on vs. off — this design's success
@@ -213,8 +332,10 @@ correct it, not this document.
 
 - `wingman/tick_handlers.py` — `BehaviorTreeHandler.tick()` (new `elif`
   branch beside the existing `TACTIC_ENGAGE`/`TACTIC_REGROUP`/`TACTIC_CLIMB`
-  actuation dispatch), reads `self._boundary.reading`
-  (`BoundaryPerceptionHandler`, already constructed and ticked every cycle).
+  actuation dispatch, calling a new `_actuate_seek_center` method), reading
+  the `_b_dist`/`_b_fwd`/`_b_lat` locals `tick()` already destructures from
+  `self._boundary.perceive(...)` earlier in the same call — not a fresh
+  `self._boundary.reading` property fetch (see Detection/Actuation above).
 - `wingman/controller.py` — `orient_nose_to_target` (existing, unmodified;
   same call signature `_actuate_engage` already uses).
 - `wingman/config.yaml` / `wingman/config_schema.py` — new
@@ -244,6 +365,12 @@ correct it, not this document.
    is not guaranteed to be "toward the center" for a non-convex arena
    shape — no evidence either way exists yet on whether MetalStorm's arenas
    are ever non-convex enough for this to matter in practice.
+4. **Temporal smoothing.** Deliberately not added in Phase 1 (see
+   Actuation) — the shadow trial's per-tick logged direction is the
+   evidence that decides whether the existing ADR 113 median filter alone
+   is enough, or whether a dedicated `MinimapEma` instance is needed the
+   way `EngageNavigator` already has one. Resolved by the first shadow
+   trial's data, not by this document.
 
 ## References
 

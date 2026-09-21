@@ -409,6 +409,19 @@ SCHEMA = Section(
                     "capture_dir": STR,
                 }),
             }),
+            # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own
+            # gain/hold-time knobs, independent of j20_mission's coarse_kp/
+            # coarse_min_hold_s/etc (see the HLDD's Actuation section for why
+            # this must not resolve to self._ctl_cfg's combat tuning).
+            "attack_support": Section(children={
+                "seek_center_enabled": BOOL,
+                "seek_center_trigger_frac": FRACTION,       # matches boundary_near_frac
+                "seek_center_deadzone_deg": _num(0, 180),   # matches bearing_deadzone_deg's range
+                "seek_center_kp": _num(0),
+                "seek_center_min_hold_s": SECONDS,
+                "seek_center_max_hold_s": SECONDS,
+                "seek_center_cooldown_s": SECONDS,
+            }),
         }),
 
         "minimap": Section(children={

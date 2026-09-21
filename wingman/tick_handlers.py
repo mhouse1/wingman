@@ -27,6 +27,7 @@ import time
 
 from .analyzer import GameState, BATTLE_STATES
 from .behavior_tree import (
+    TACTIC_ATTACK_SUPPORT,
     TACTIC_CLIMB,
     TACTIC_DISENGAGE,
     TACTIC_ENGAGE,
@@ -1670,6 +1671,31 @@ class BehaviorTreeHandler:
         self._orbit_interval_s = float(j20_cfg.get("orbit_roll_interval_s", 2.0))
         self._last_orbit_roll_ts = 0.0
         self._last_nav_mode = self._nav.mode
+        # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own tuning,
+        # not self._ctl_cfg, since that dict is EngageNavigator's combat gain
+        # and splatting it here would silently ignore these config keys.
+        attack_support_cfg = bt_cfg.get("attack_support", {}) or {}
+        self._seek_center_enabled = bool(
+            attack_support_cfg.get("seek_center_enabled", False))
+        self._seek_center_trigger_frac = float(
+            attack_support_cfg.get("seek_center_trigger_frac", 0.55))
+        self._seek_center_cfg = {
+            "deadband": float(
+                attack_support_cfg.get("seek_center_deadzone_deg", 15.0)) / 90.0,
+            "kp": float(attack_support_cfg.get("seek_center_kp", 0.3)),
+            "min_hold_sec": float(
+                attack_support_cfg.get("seek_center_min_hold_s", 0.15)),
+            "max_hold_sec": float(
+                attack_support_cfg.get("seek_center_max_hold_s", 0.6)),
+            "cooldown_sec": float(
+                attack_support_cfg.get("seek_center_cooldown_s", 2.0)),
+        }
+        # Rear-sector commit state (HLDD 013 Actuation): its own instance,
+        # copied from EngageNavigator._steer_intent's mechanism rather than
+        # shared with self._nav's, so an unrelated mode switch on one cannot
+        # reset the other.
+        self._seek_center_committed_sign: "float | None" = None
+        self._seek_center_shadow_count = 0
         # ADR 073 Phase 3.2a: while the Climb leaf is disabled it stays OUT of
         # the selector (a selection-only leaf would pre-empt Engage actuation —
         # not shadow). Instead an independent instance of the same condition is
@@ -2231,6 +2257,15 @@ class BehaviorTreeHandler:
             # Climb is the selection for most of a hold.
             if not snap.survival_hold:
                 self._actuate_engage(components, altitude, now, steer_only=True)
+        elif (_may_fly and not snap.survival_hold
+                and selection == TACTIC_ATTACK_SUPPORT):
+            # HLDD 013 Phase 1: the fallback slot every other tactic already
+            # outranks — nothing else is steering at all on this tick. The
+            # survival-hold exclusion is this branch's own condition, not an
+            # inner check, since (unlike Climb) it has no other reason to
+            # run during a hold at all — see ADR 110's "9 EngageNav commands
+            # reached a loitering aircraft" and HLDD 013's Actuation section.
+            self._actuate_seek_center(_b_dist, _b_fwd, _b_lat)
         return False
 
     def _actuate_engage(self, components, altitude, now, steer_only: bool = False):
@@ -2279,6 +2314,49 @@ class BehaviorTreeHandler:
                 else:
                     self._ctrl.roll_right(hold_seconds=self._orbit_hold_s, block=False)
                     logger.debug("EngageNav: orbit roll_right")
+
+    def _seek_center_error_norm(self, bearing_deg: float) -> float:
+        """Rear-sector commit/release for the reciprocal boundary bearing
+        (HLDD 013 Actuation), ported from EngageNavigator._steer_intent —
+        its own instance (self._seek_center_committed_sign), reusing only
+        self._nav's configured thresholds, not its state, since the two must
+        not reset each other on an unrelated mode switch.
+        """
+        abs_bearing = abs(bearing_deg)
+        if self._seek_center_committed_sign is not None:
+            if abs_bearing < self._nav.rear_release_deg:
+                self._seek_center_committed_sign = None
+            else:
+                return self._seek_center_committed_sign
+        if abs_bearing >= self._nav.rear_commit_deg:
+            self._seek_center_committed_sign = 1.0 if bearing_deg >= 0 else -1.0
+            return self._seek_center_committed_sign
+        return max(-1.0, min(1.0, bearing_deg / 90.0))
+
+    def _actuate_seek_center(self, dist, fwd, lat):
+        """TACTIC_ATTACK_SUPPORT actuation (HLDD 013 Phase 1): roll away from
+        the nearest map-boundary point on a tick where nothing else steers at
+        all. Shadow-only until seek_center_enabled — logs what it would
+        command instead, rate-limited like ADR 117 D9's blind-skip counters.
+        """
+        if lat is None or dist is None or dist > self._seek_center_trigger_frac:
+            return
+        # Reciprocal steering error in vector space — negate both components
+        # before atan2, not bearing-plus-180 with manual wrap handling (same
+        # reason MinimapEma smooths in (x, y) rather than on the angle).
+        bearing_deg = math.degrees(math.atan2(-lat, -fwd))
+        error_norm = self._seek_center_error_norm(bearing_deg)
+        if not self._seek_center_enabled:
+            self._seek_center_shadow_count += 1
+            n = self._seek_center_shadow_count
+            if n in (1, 10, 100) or n % 500 == 0:
+                logger.info(
+                    "SEEK CENTER[shadow]: would roll err=%.2f dist=%.2f (%d so far)",
+                    error_norm, dist, n)
+            return
+        cmd = self._ctrl.orient_nose_to_target(error_norm, **self._seek_center_cfg)
+        if cmd is not None:
+            logger.debug("SEEK CENTER: roll_%s err=%.2f dist=%.2f", cmd, error_norm, dist)
 
 
 class WaitingFallbackHandler:

@@ -614,6 +614,28 @@ behavior_tree:
     # this reversion.
     terrain_avoidance: {enabled: true, shadow: true, sky_min_frac: 0.55,
       confirm_reads: 2, capture_max: 40, capture_cooldown_s: 20.0}
+  # HLDD 013 Phase 1: wires the existing, already-selected TACTIC_ATTACK_SUPPORT
+  # fallback slot to the existing boundary reading — roll away from the nearest
+  # map edge on ticks where nothing else steers at all. Ships shadow-only
+  # (seek_center_enabled: false); a live session's shadow log decides whether
+  # Phase 1 goes live, not a guess.
+  attack_support:
+    seek_center_enabled: false       # Phase 1 default — shadow only
+    # Deliberately wider than boundary_near_frac (0.35, BoundaryTurn's own
+    # trigger) — this is the gentle, early bias; BoundaryTurn stays the
+    # last-resort emergency layer with its own, tighter threshold.
+    seek_center_trigger_frac: 0.55
+    seek_center_deadzone_deg: 15.0
+    # Deliberately gentler than j20_mission's coarse_kp (0.5) / hold-time
+    # defaults — a background bias should correct less aggressively than
+    # active target tracking. Starting values, not measured: the shadow
+    # trial validates the trigger and direction, not roll aggressiveness
+    # (Phase 1 never actuates), so these three specifically stay a named
+    # guess into the live trial.
+    seek_center_kp: 0.3
+    seek_center_min_hold_s: 0.15
+    seek_center_max_hold_s: 0.6
+    seek_center_cooldown_s: 2.0
 # ADR 028 revision 4: `regroup_enabled` gives the navigator a command on the
 # ticks where no enemy is on the minimap — 57% of battle ticks measured over an
 # 11,383-tick session, during which it previously issued nothing and the

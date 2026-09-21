@@ -89,6 +89,17 @@ From live gameplay frames (`P2_050_RESPAWN_CLEAR_HEALTH_ALIVE_MISSILES_4.png` an
 - **Blue edge indicators**: thin blue horizontal lines at screen edges indicate enemies outside
   the FOV. Not useful for screen-space tracking but signal that reacquire should be attempted.
 
+**Reference frame for the centrality principle** (`test_screenshots/ALTITUDE_SPEED.png`, 1920x1200):
+captured at match end (`MATCH OVER` banner), so it shows the post-match nametag/health-bar overlay,
+not the tall-bar marker system described above — it is not itself a frame the live tracker consumes.
+It is kept here because it states this design's own ranking goal in the clearest available terms: of
+the two visible contacts, `[TIG] ManuTheRed`'s Su-25 (0.25km, rendered roughly 250px left and 45px
+above frame center) sits far closer to center than `[SD] demonslayer`'s F-14 (1.3km, rendered at the
+right-edge indicator rail, 330-770px off-center depending on which of its two rendered elements is
+measured). A tracker faithful to this design's selection goal should prefer the Su-25. See Selection
+Hardening (below) for a code-level gap between that goal and the current implementation that this
+frame motivated flagging.
+
 Contour selection implications:
 - Contour aspect ratio filter (tall/thin) eliminates the dashed circle and HUD noise.
   A contour with height >= 3x width and minimum area of 12 px² is characteristic of the bar.
@@ -127,6 +138,16 @@ When multiple centroids are present:
 1. Prefer red target marker set over green marker set.
 2. Pick centroid closest to previous tracked centroid (`last_x`) for temporal consistency.
 3. If no previous target, pick centroid closest to crop center.
+
+**Known gap (2026-09-21, see Selection Hardening below):** rule 1 is implemented as a mask-level
+switch (`TargetTracker._detect_targets`, `wingman/tracker.py:317`), not a per-candidate tie-break —
+any red pixel anywhere in the acquisition crop discards the *entire* green candidate set before rules
+2/3 ever run. A locked contact far from center, or even at the frame edge, currently always outranks
+an unlocked contact dead-center. Rules 2/3 only ever choose among candidates of whichever single color
+survived rule 1, never across colors. Also worth stating plainly: "closest" in rules 2/3 is horizontal
+pixel distance only (`abs(cx - ref)`, `wingman/tracker.py:339`), never full 2D distance to center —
+consistent with this design's roll-only Non-Goal 2, but easy to misjudge from a screenshot where the
+eye reads 2D closeness. Not yet changed — see the phased validation plan below for why.
 
 Lost-target behavior:
 
@@ -458,6 +479,104 @@ under Validation Strategy have not been run against a real match yet —
 
 ---
 
+## Selection Hardening — Color-Class Priority vs. Centrality (2026-09-21)
+
+### Finding
+
+`TargetTracker._detect_targets` (`wingman/tracker.py:295-329`) does not rank red and green candidates
+against each other — it excludes one color class entirely before ranking begins:
+
+```python
+mask = mask_red if (self._prefer_red and bool(np.any(mask_red))) else mask_green
+```
+
+If any red pixel exists anywhere in the acquisition crop, every green contour is dropped before
+`_select_target` (`tracker.py:331-340`) ever runs. `_select_target` then ranks the survivors by
+horizontal distance only — `abs(cx - ref)`, where `ref` is `self._last_x` once a target has ever been
+locked, or the frame's horizontal center on first acquisition (`tracker.py:338-339`). Both of these
+are correct in isolation and match this design's own stated rules (Target Selection and Persistence,
+above) — the gap is that color (rule 1) is evaluated as a hard pre-filter, never as one input alongside
+distance (rules 2/3). A locked contact anywhere in frame, including at the extreme edge, always
+outranks every unlocked contact, however close to center, as long as it produces even one qualifying
+red pixel.
+
+`test_screenshots/ALTITUDE_SPEED.png` prompted flagging this: it isn't itself a frame the tracker
+consumes (see the note under Target marker visual characteristics, above), but its layout is exactly
+the shape that would trigger this gap in a live frame — a distant, edge-adjacent contact (F-14, this
+document's stand-in for "reads as locked/red") next to a much closer, more central contact (Su-25,
+"reads as unlocked/green"). No live capture has yet confirmed this actually firing during a real
+heatdive — this is a code-reading finding, not a reproduced live bug.
+
+### Why this matters now, not hypothetically
+
+This design's own sensing/actuation split (Safety and Gating Rules, above) keeps the *ambient* path
+inert by default (`tracking.enabled: false`, `tracking.actuate: false`, `wingman/config.yaml:749,757`).
+But ADR 136's heatdive addition bypasses that gate entirely and is live today:
+`telemetry.eject_closed_loop.heatdive_enabled: true` (`wingman/config.yaml:845`) means this exact
+selection code already steers a real airframe on every missiles-empty eject. This is precisely the
+"throwaway aircraft, already committed to crashing" moment identified as a safe place to extend
+tracking — which is also, unavoidably, the one path where this selection code is not shadow-only
+today. A hardening change here changes live behavior on the very next dive it ships in, unlike a
+change to the ambient path (which would ship inert by default). That asymmetry is the reason for the
+phased plan below rather than a direct fix.
+
+### Phased Rollout — Shadow Session Validation
+
+Matching this codebase's standing convention (ADR 070's missile-evade shadow trial, HLDD 013 Phase 1's
+shadow-first bring-up, ADR 136 D4's own hard lesson from toggling a real key against an unverified
+signal): no ranking change reaches the live heatdive path without a shadow session confirming it first.
+
+**Phase 1 — measure, change nothing.** Add rationale logging to `_detect_targets`/`_select_target`:
+whenever red pixels are present *and* at least one green contour would otherwise have qualified, log
+the mask that won, the discarded green candidate(s)' position and horizontal distance from `ref`, and
+the eventually-selected target's own distance from `ref` — rate-limited the same way ADR 117 D9's
+`_blind_no_boundary_line_skips` logs (1st, 10th, 100th occurrence, then every 500th), not once per
+qualifying tick. This is a pure logging addition — no behavior change, safe to ship immediately on the
+already-live heatdive path, since it touches neither `mask` nor `_select_target`'s return value.
+Purpose: learn, from real dive sessions, how often color-exclusion actually overrides a materially
+more central or closer-to-last-position green candidate, and by how much — the Su-25/F-14 contrast is
+a plausible shape, not yet a measured frequency.
+
+**Phase 2 — shadow the candidate fix, still without acting on it.** Only if Phase 1's logs show the
+gap firing often enough to matter: replace the hard mask exclusion with a single ranked candidate pool
+(red and green contours merged, each carrying its color) and a bounded preference for red — e.g. red
+wins ties within a configurable centrality tolerance, but a green candidate meaningfully closer to
+`ref` still wins outright — gated behind a new flag defaulted `false` (e.g.
+`tracking.ranked_lock_priority`, alongside the existing `tracking`/`tracking_hsv` blocks). While the
+flag is `false`, run the new ranking function in parallel with the existing one and log wherever they
+would disagree (`"SELECT[shadow]: old=... new=... would change"`), without changing `_select_target`'s
+actual return value — the same "compute both, log the difference, act on neither yet" shape Phase 1
+already establishes, one level up.
+
+**Phase 3 — enable live, on the heatdive path first.** Flip `tracking.ranked_lock_priority: true` only
+after a live session's Phase 2 shadow log shows the new ranking agrees with the old one whenever they
+would pick the same target, and demonstrably prefers the nearer/more-central candidate in every
+disagreement case observed — the same bar ADR 136 D5 already set for its own fix ("live-measured...
+not a guess"). Validate specifically through the heatdive path first, since it is the only consumer
+currently actuating on this code at all; only extend to the ambient `tracking.enabled`/
+`tracking.actuate` path afterward, once both the sensing-quality and the ranking-quality questions have
+independent live evidence. Record the outcome as a dated revision inside ADR 136 (its heatdive
+consumer owns the live-trial history for this code path), cross-referenced from here — not by
+rewriting this section after the fact.
+
+### Testing plan
+
+- Unit: once Phase 2's ranked pool replaces the hard mask switch, `_detect_targets` returns the full
+  merged, color-tagged candidate list; a synthetic frame with one red contour at the edge and one
+  green contour at center exercises exactly the disagreement case this section exists to catch.
+- Unit: with `tracking.ranked_lock_priority: false` (default), confirm the new ranking function's
+  output is computed and logged but `_select_target`'s actual return value is provably unchanged from
+  today's mask-switch behavior, across both the agreement and disagreement cases above.
+- Shadow live trial (required before Phase 2 ships as anything but inert logging): one full session
+  with real dives, reading the rate-limited Phase 1 log to answer "how often, and by how much" before
+  writing Phase 2's ranking function at all — if the gap essentially never fires in practice, Phase 2
+  may not be worth building.
+- Live trial (required before Phase 3): compare selected-target identity and resulting roll direction,
+  Phase 2 shadow log vs. actual `_select_target` output, across a full heatdive session, before
+  flipping `tracking.ranked_lock_priority` to `true`.
+
+---
+
 ## Adaptive Optimization (Future, Non-V1)
 
 This capability is a follow-on optimization phase and is **not required** for initial delivery.
@@ -495,11 +614,17 @@ Suggested reward/objective components for future work:
 
 ## Open Questions
 
-1. Should red lock be mandatory for control, or allow green fallback by default?
+1. Should red lock be mandatory for control, or allow green fallback by default? See Selection
+   Hardening (above) for a concrete related gap: today red lock isn't just preferred, it hard-excludes
+   green candidates regardless of position.
 2. Should tracking be active during all J-20 mission phases or only attack sub-phase?
 3. Is altitude guard required in v1 or deferred behind a config flag?
 4. Should target-tracking output feed future behavior-tree blackboard inputs directly?
 5. Should adaptive optimization start as offline replay-only before any live tuning mode?
+6. Should color priority (Selection Hardening, above) be capped to a maximum off-center/off-last-
+   position distance, or dropped entirely in favor of ranking red and green candidates in one pool
+   with only a soft tie-break preference for red? Deferred to that section's Phase 1 shadow log
+   rather than decided here.
 
 ---
 
@@ -518,4 +643,11 @@ Suggested reward/objective components for future work:
 - `docs/hldd/011-acs-mode-hldd.md` — extends this design's sensing/roll
   core with a pitch channel and a lock-confirmation state for boresight
   engagement.
+- `docs/hldd/013-minimap-center-seeking-navigation-hldd.md` — source of the shadow-first,
+  phase-gated rollout style Selection Hardening (above) follows.
+- `wingman/tracker.py` — `TargetTracker._detect_targets`/`_select_target`, the color-exclusion-
+  before-centrality gap Selection Hardening documents.
+- `test_screenshots/ALTITUDE_SPEED.png` — reference frame motivating Selection Hardening (see
+  Target marker visual characteristics and Selection Hardening, above); a post-match nametag
+  overlay, not a frame the live tracker consumes.
 - `docs/architecture.md`
