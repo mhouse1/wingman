@@ -9,22 +9,36 @@
 This HLDD defines a closed-loop target tracking capability for J-20 attack behavior:
 
 - detect a moving target marker in the HUD,
-- estimate its position relative to screen center,
-- apply roll input (`ROLL_LEFT_KEY` / `ROLL_RIGHT_KEY`) until the target is centered.
+- estimate its position relative to screen center, both horizontally and vertically,
+- apply roll input (`ROLL_LEFT_KEY` / `ROLL_RIGHT_KEY`) to close the horizontal error and pitch
+  input (`NOSE_UP_KEY` / `NOSE_DOWN_KEY`) to close the vertical error, until the target is centered
+  on both axes.
 
 Unlike quadrant-only logic, this design uses continuous screen-space error and a feedback controller.
+
+**Revision note (2026-09-21):** this design was originally roll-only, with pitch explicitly
+out of scope (see the superseded Non-Goal text preserved as a comment below) and delegated to a
+future consumer (HLDD-011's planned `BoresightEngage`). Operator direction: fold pitch into this
+design directly — the tracker should be able to command "any flight control key," not just roll —
+since the underlying goal (steer the nose onto whichever enemy is nearest screen center) is
+inherently two-axis: the ALTITUDE_SPEED.png reference frame (Selection Hardening, below) shows a
+target that is both left *and* above center, which a roll-only controller cannot close. See Two-Axis
+Rollout (below) for how this is being validated, and Open Question 7 for the resulting overlap with
+HLDD-011 that this change surfaces and does not itself resolve.
 
 ---
 
 ## Problem Statement
 
-Current behavior can detect enemy presence and perform coarse directional responses, but it does not maintain continuous alignment with a moving target on-screen.
+Current behavior can detect enemy presence and perform coarse directional responses, but it does not maintain continuous alignment with a moving target on-screen, and — before this revision — could only ever correct in one axis.
 
 Desired behavior:
 
 - if target drifts left of screen center, roll left,
 - if target drifts right of screen center, roll right,
-- stop rolling inside a center deadband,
+- if target drifts above screen center, pitch up,
+- if target drifts below screen center, pitch down,
+- stop correcting inside a center deadband, independently per axis,
 - keep tracking as target moves frame-to-frame.
 
 ---
@@ -32,21 +46,33 @@ Desired behavior:
 ## Goals
 
 1. Track one target marker continuously in screen space.
-2. Convert target position into a normalized horizontal error signal.
-3. Apply stable, non-jittery roll correction using existing controller key helpers.
+2. Convert target position into normalized horizontal **and vertical** error signals.
+3. Apply stable, non-jittery roll **and pitch** correction using existing controller key helpers.
 4. Respect existing safety and manual-takeover constraints.
 5. Provide low-overhead single-window visual telemetry via periodic annotated screenshots.
+6. Gate the new pitch axis independently from the already-validated roll axis, so extending this
+   design cannot regress roll's own live-validation status (see Two-Axis Rollout, below).
 
 ## Non-Goals
 
-1. Full 3D interception guidance.
-2. Pitch/yaw control loops. Still true for *this* design — the roll
-   controller stays roll-only. Where a consumer needs pitch alongside it
-   (ADR 136's dive-and-track mode, HLDD-011's future `BoresightEngage`),
-   pitch is driven by a separate, already-existing primitive
-   (`eject_and_dive`'s `NOSE_DOWN` impulse rotation, ADR 069) called
-   alongside this tracker's roll controller, not folded into it.
-3. Multi-target tactical prioritization beyond single-target lock persistence.
+1. Full 3D interception guidance (lead prediction, closing-rate compensation). Screen-space
+   centering on both axes is not intercept geometry.
+2. **Superseded 2026-09-21 — kept for history, not current guidance:** ~~Pitch/yaw control loops.
+   Still true for *this* design — the roll controller stays roll-only. Where a consumer needs pitch
+   alongside it (ADR 136's dive-and-track mode, HLDD-011's future `BoresightEngage`), pitch is driven
+   by a separate, already-existing primitive (`eject_and_dive`'s `NOSE_DOWN` impulse rotation, ADR
+   069) called alongside this tracker's roll controller, not folded into it.~~ Replaced by: this
+   design now owns a pitch channel directly (Functional Design 5, below) — see the Revision note
+   above for why, and Safety and Gating Rules for the one place the old separation still holds by
+   necessity (the ADR 136 heatdive consumer, which must keep using the dive's own `NOSE_DOWN`
+   primitive for pitch and must not also invoke this design's new pitch channel — two independent
+   writers on the same key during the same dive is a correctness hazard, not a style choice; see
+   below).
+3. A symmetric yaw axis. `YAW_LEFT` (`wingman/keybindings.py:21`, ADR 070) is a one-directional
+   rudder kick already owned by `MissileEvade`'s break-turn, with no `YAW_RIGHT` counterpart to pair
+   it with — there is no continuous, bidirectional yaw control surface for this design to drive even
+   if it wanted to.
+4. Multi-target tactical prioritization beyond single-target lock persistence.
 
 ---
 
@@ -154,34 +180,88 @@ Lost-target behavior:
 - keep last target for `lost_timeout_sec` (short grace window),
 - if not reacquired within timeout, clear tracking state.
 
-### 3. Error Signal
+### 3. Error Signals
 
-Horizontal error is measured relative to active scan center:
+Horizontal and vertical error are each measured relative to active scan center, independently:
 
-- `error_px = target_x - center_x`
-- `error_norm = error_px / (active_width / 2)`
+- `error_px_x = target_x - center_x`
+- `error_norm_x = error_px_x / (active_width / 2)`
+- `error_px_y = target_y - center_y`
+- `error_norm_y = error_px_y / (active_height / 2)`
 
 Where:
 
-- `error_norm < 0` means target is left of center,
-- `error_norm > 0` means target is right of center,
-- `error_norm = 0` means centered.
+- `error_norm_x < 0` means target is left of center, `> 0` means right, `= 0` means centered
+  (this is the pre-2026-09-21 `error_norm`, unrenamed at the call sites that only ever wanted
+  horizontal — `error_norm_x` is additive, not a breaking rename).
+- `error_norm_y < 0` means target is above center, `> 0` means below, `= 0` means centered — sign
+  follows screen-pixel-y convention (down is positive), matching how `centroid_y` already reports
+  position (`wingman/tracker.py`'s `update()`).
 
-### 4. Roll Controller
+`error_norm_y` is new: `centroid_y` was already computed and returned by `TargetTracker.update()`
+(`wingman/tracker.py:198`) for local-ROI centering, but nothing before this revision turned it into
+a control signal. No new sensing work is required for this — only the arithmetic above and a
+second controller to act on it.
+
+### 4. Roll Controller (horizontal axis)
 
 Use proportional control with deadband and clamped hold duration:
 
-- if `abs(error_norm) <= deadband`: no roll,
-- else compute `hold = clamp(kp * abs(error_norm), min_hold, max_hold)`.
+- if `abs(error_norm_x) <= deadband`: no roll,
+- else compute `hold = clamp(kp * abs(error_norm_x), min_hold, max_hold)`.
 
 Actuation mapping:
 
-- `error_norm < -deadband` -> `roll_left(hold_seconds=hold)`
-- `error_norm > +deadband` -> `roll_right(hold_seconds=hold)`
+- `error_norm_x < -deadband` -> `roll_left(hold_seconds=hold)`
+- `error_norm_x > +deadband` -> `roll_right(hold_seconds=hold)`
 
 Rate limiting:
 
 - enforce `command_cooldown_sec` between roll commands.
+
+This axis is unchanged by this revision — same law, same config keys, same
+`Controller.orient_nose_to_target()` entry point. It is the axis with a live-validated track record
+(ADR 136 D1-D3, D5); the pitch axis added below inherits its shape but not its validation status.
+
+### 5. Pitch Controller (vertical axis, new 2026-09-21)
+
+Identical control law, independent instance, independent tuning — this is a second copy of the
+proportional-with-deadband controller, not a shared one, for the same reason `_actuate_seek_center`
+(HLDD 013) carries its own commit/release state rather than sharing `EngageNavigator`'s: roll and
+pitch dynamics are not required to share a gain just because the math is the same shape.
+
+- if `abs(error_norm_y) <= pitch_deadband`: no pitch input,
+- else compute `pitch_hold = clamp(pitch_kp * abs(error_norm_y), pitch_min_hold, pitch_max_hold)`.
+
+Actuation mapping:
+
+- `error_norm_y < -pitch_deadband` -> `nose_up(hold_seconds=pitch_hold)` (target above center)
+- `error_norm_y > +pitch_deadband` -> `nose_down(hold_seconds=pitch_hold)` (target below center)
+
+Rate limiting:
+
+- enforce `pitch_command_cooldown_sec` between pitch commands — tracked independently from the roll
+  axis's own `_last_orient_ts`, so a roll command in flight never delays a pitch command or vice
+  versa (the two axes are commanded via different keys and can overlap in real time; the game
+  accepts simultaneous key holds on independent controls, same as a human player holding two flight
+  keys at once).
+
+**`nose_up`/`nose_down` need one change to be usable here.** Both currently take only
+`hold_seconds`/`block` (`controller.py:1177-1193`) — neither has the `ignore_cancel` parameter
+`roll_left`/`roll_right`/`fire_active_weapon`/`switch_weapon`/`orient_nose_to_target` already gained
+under ADR 136, for the exact reason ADR 136 documents: a caller running after
+`self._mission_cancel` is already set for the call's duration (as any eject-adjacent caller would
+be) gets its hold cut to near-zero on the first cancellation poll. Since this design's own ambient
+path runs in `GAME_BATTLE` with `_mission_cancel` *not* pre-set, `ignore_cancel` defaults `False`
+and changes nothing for that caller — the parameter only matters to a future caller inside an
+already-cancelled sequence, and per Safety and Gating Rules (below) no such caller exists yet for
+this axis.
+
+A new `Controller.orient_pitch_to_target(error_norm_y, ...)` mirrors `orient_nose_to_target`'s
+signature exactly (`deadband` → `pitch_deadband`, `kp` → `pitch_kp`, etc.), rather than overloading
+`orient_nose_to_target` itself with a second error argument — keeping the two call sites independent
+means either axis can be gated, tuned, or disabled without touching the other's signature or its
+existing call sites (`_actuate_engage`, ADR 136's heatdive loop).
 
 ---
 
@@ -196,16 +276,27 @@ flowchart TD
     LCL --> AN
     AN --> SEL[Select/Persist Target]
     SEL --> ROI[Update/expand local ROI]
-    SEL --> ERR[Compute error_norm]
-    ERR --> DEC{error outside deadband}
-    DEC -->|No| HOLD[No roll command]
-    DEC -->|Yes| CTRL[Compute hold_seconds]
-    CTRL --> DIR{error direction}
-    DIR -->|Negative| RL[Controller.roll_left]
-    DIR -->|Positive| RR[Controller.roll_right]
+    SEL --> ERRX[Compute error_norm_x]
+    SEL --> ERRY[Compute error_norm_y]
+    ERRX --> DECX{horizontal error outside deadband}
+    DECX -->|No| HOLDX[No roll command]
+    DECX -->|Yes| CTRLX[Compute roll hold_seconds]
+    CTRLX --> DIRX{error direction}
+    DIRX -->|Negative| RL[Controller.roll_left]
+    DIRX -->|Positive| RR[Controller.roll_right]
+    ERRY --> DECY{vertical error outside pitch_deadband}
+    DECY -->|No| HOLDY[No pitch command]
+    DECY -->|Yes| CTRLY[Compute pitch hold_seconds]
+    CTRLY --> DIRY{error direction}
+    DIRY -->|Negative, target above| NU[Controller.nose_up]
+    DIRY -->|Positive, target below| ND[Controller.nose_down]
     CAP --> HUD[HUD Renderer: draw telemetry]
     HUD --> OUT[Atomic write to static screenshot path]
 ```
+
+Roll and pitch are drawn as two independent branches off the same selected target, deliberately —
+they share sensing (one `SEL` box) but not actuation gating, cooldown state, or config, matching
+Functional Design 4/5's "independent instance, independent tuning" framing above.
 
 Integration points:
 
@@ -316,14 +407,60 @@ is absolute, not merely a default.
 validation.** ADR 136 (`docs/adr/136-heatseeker-dive-invokable-mode.md`)
 calls `TargetTracker.update()` and `Controller.orient_nose_to_target()`
 directly from inside `eject_and_dive`'s existing closed-loop thread, gated
-by its own new flag (`eject.heatdive_enabled`, default `false`) rather than
-a separate mode or mission. That caller does **not** go through
+by its own new flag (`telemetry.eject_closed_loop.heatdive_enabled`, default
+`false`, currently shipped `true` — `wingman/config.yaml:845` — i.e. this is
+the one consumer of this design's roll channel already actuating live today)
+rather than a separate mode or mission. That caller does **not** go through
 `tracking.enabled` / `tracking.actuate` at all — those flags gate only the
 ambient, tick-driven path described in this document. Manual-takeover
 cancellation is inherited for free: `eject_and_dive` is already covered by
 `release_for_manual_takeover()`/`cancel_mission()`, and ADR 136's addition
 shares `eject_and_dive`'s own `self._eject_stop` event as its stop signal
 rather than adding a second one.
+
+### Pitch actuation gate (new 2026-09-21) — independent of, and stricter than, roll's
+
+The pitch channel (Functional Design 5, above) is gated by its own flag,
+`tracking.actuate_pitch` (default `false`), checked in addition to every
+existing roll gate above, not instead of them — enabling pitch can never
+imply roll is also enabled, and vice versa. Rationale for a separate flag
+rather than reusing `tracking.actuate`: roll already has a live-validated
+track record (ADR 136 D1-D3, D5); pitch has none. Folding pitch under the
+same flag would mean the *next* person who flips `tracking.actuate: true`
+for roll — already-justified by roll's own history — silently also gets an
+entirely unvalidated pitch channel with no independent decision point. See
+Two-Axis Rollout (below) for the shadow plan this flag exists to support.
+
+**The ADR 136 heatdive consumer must never set `tracking.actuate_pitch` —
+this is a hard exclusion, not a default to revisit.** `eject_and_dive`'s own
+`_eject_descent_control` (ADR 069) already holds exclusive ownership of
+`NOSE_DOWN_KEY`/`NOSE_UP_KEY` for the whole dive: it alternates bounded
+`NOSE_DOWN` pulses with a hands-off ballistic phase to reach and hold a
+target dive angle, and ADR 058's dive-confirmation criterion depends on
+`_eject_nose_held_total_s`, a *cumulative* real-hold-time measurement
+(`controller.py:1582-1610`) that assumes it is the only thing pressing that
+key. A second, uncoordinated writer — this design's new pitch channel,
+correcting toward a target's vertical position rather than toward a dive
+angle — pressing or releasing `NOSE_DOWN_KEY`/`NOSE_UP_KEY` mid-dive would:
+corrupt that cumulative-hold accounting (a release this design issues while
+the descent controller believes the key is still down desyncs
+`_eject_nose_down_since`), fight the descent controller's own attitude
+target with an unrelated one (aim vs. dive angle are different objectives
+that do not average safely), and reproduce exactly the "second,
+uncoordinated writer on an axis" failure class this codebase has already
+paid to learn about on the roll axis (ADR 110's `TACTIC_CLIMB` loitering
+fix, HLDD 013's explicit `survival_hold` exclusion citing that same
+incident). ADR 136's own Non-Goal 2 already states pitch stays on
+`eject_and_dive`'s existing `NOSE_DOWN` primitive "unmodified" — this
+design's pitch addition does not change that; it only adds a channel for a
+*different* consumer (the ambient path) to use. Enforcement: this design's
+own actuation gate list for pitch above (game state `GAME_BATTLE`, never
+inside an eject sequence) already excludes the heatdive caller by
+construction, since `eject_and_dive` runs after `cancel_mission()` and
+outside the ambient tick loop entirely — no additional code guard is
+required *if* `tracking.actuate_pitch` is never wired into ADR 136's own
+call sites, which is the discipline this note exists to name explicitly, not
+something the config schema can enforce by itself.
 
 ---
 
@@ -337,11 +474,22 @@ tracking:
   acquisition_region_pct: [0.20, 0.18, 0.60, 0.50]  # x, y, w, h normalized
   use_relative_anchor: true
   anchor_text_offset_pct: [0.50, 0.50]
+  actuate: false               # roll axis — live-validated (ADR 136), still shadow by default here
   deadband: 0.05
   kp: 0.30
   min_hold_sec: 0.08
   max_hold_sec: 0.35
   command_cooldown_sec: 0.15
+  # Pitch axis (new 2026-09-21) — own flag, own gains. Deliberately NOT reusing
+  # tracking.actuate/deadband/kp/etc: pitch has zero live-validation history and
+  # must be independently enable-able and independently tunable. Never wired
+  # into ADR 136's heatdive consumer — see Safety and Gating Rules above.
+  actuate_pitch: false
+  pitch_deadband: 0.05
+  pitch_kp: 0.30
+  pitch_min_hold_sec: 0.08
+  pitch_max_hold_sec: 0.35
+  pitch_command_cooldown_sec: 0.15
   lost_timeout_sec: 0.70
   prefer_red_lock: true
   local_roi_enabled: true
@@ -577,6 +725,60 @@ rewriting this section after the fact.
 
 ---
 
+## Two-Axis Rollout — Shadow Session Validation (2026-09-21)
+
+Folding pitch into this design (see the Revision note under Overview) is a bigger behavioral change
+than Selection Hardening above — it's a brand-new actuation axis with zero live history, added to a
+design whose roll axis already has one (ADR 136 D1-D3, D5). It gets the same shadow-first treatment,
+scoped to just this axis so roll's existing validated status is never put at risk by it.
+
+**Phase 0 (today).** Roll axis: sensing live in `GAME_BATTLE`/`GAME_BATTLE_MANUAL`, actuation gated
+by `tracking.actuate` (ambient, default `false`) and separately live via ADR 136's heatdive consumer
+(`telemetry.eject_closed_loop.heatdive_enabled: true` today). Pitch axis: does not exist yet.
+
+**Phase 1 — sense and log, actuate nothing.** Ship `error_norm_y` (Functional Design 3) and the
+`orient_pitch_to_target` computation (Functional Design 5) with `tracking.actuate_pitch: false`. While
+disabled, log what pitch command *would* fire — direction and hold-seconds — every qualifying tick,
+rate-limited the same way HLDD 013 Phase 1 and Selection Hardening Phase 1 both already log (1st,
+10th, 100th occurrence, then every 500th):
+
+```python
+logger.info("PITCH[shadow]: would %s hold=%.2fs err_y=%.2f (%d so far)",
+            "nose_up" if error_norm_y < 0 else "nose_down", pitch_hold, error_norm_y,
+            self._pitch_shadow_count)
+```
+
+This is pure sensing/logging — no key press, so it is safe to enable in the exact same sessions
+already flying with `tracking.enabled: true` for horizontal shadow validation, at zero incremental
+actuation risk. Purpose: confirm `centroid_y`/`error_norm_y` tracks real vertical target motion
+sensibly (not just that the horizontal signal already does) before any key is ever pressed on this
+axis.
+
+**Phase 2 — controlled live flight, roll and pitch together, ambient path only.** Enable
+`tracking.actuate_pitch: true` only after Phase 1's shadow log shows sensible vertical tracking,
+and only ever on the ambient `tracking.enabled`/`tracking.actuate` path — never for the ADR 136
+heatdive consumer (Safety and Gating Rules, above, is the hard rule; this phase does not revisit
+it). Start with conservative gains (the defaults above are named guesses, same status as Selection
+Hardening's `seek_center_*` starting values — the live trial corrects them, not this document).
+Validate the same way Validation Strategy step 3 already validates roll: reduced oscillation,
+improved two-axis center hold, no fighting between the two independent controllers (they should
+never need to, since they act on different keys, but a live session is what actually confirms that
+rather than the reasoning above).
+
+**Phase 3 — revisit HLDD-011's `BoresightEngage` overlap.** HLDD-011's Refinement Backlog item 4 and
+its `acs_mode.boresight.pitch_deadband`/`pitch_kp`/`pitch_min_hold_sec`/`pitch_max_hold_sec` config
+(`docs/hldd/011-acs-mode-hldd.md:415-418`) were written on the premise that Design 005 stays
+roll-only and `BoresightEngage`'s own `NoseTrack` state would add pitch itself. That premise no
+longer holds once Phase 2 above ships. Once this design's pitch channel is live-validated,
+`BoresightEngage.NoseTrack` should consume `TargetTracker`'s `error_norm_x`/`error_norm_y` and
+`Controller.orient_nose_to_target`/`orient_pitch_to_target` directly instead of building a second,
+parallel pitch loop — but that is HLDD-011's own document to update, not decided here (see Open
+Question 7). Nothing in HLDD-011's separate concerns (lock cone, `ToneWait`/`LockConfirmed`, target
+prioritization) depends on which document owns the pitch math, so this reconciliation is additive
+cleanup, not a redesign of either document.
+
+---
+
 ## Adaptive Optimization (Future, Non-V1)
 
 This capability is a follow-on optimization phase and is **not required** for initial delivery.
@@ -625,6 +827,14 @@ Suggested reward/objective components for future work:
    position distance, or dropped entirely in favor of ranking red and green candidates in one pool
    with only a soft tie-break preference for red? Deferred to that section's Phase 1 shadow log
    rather than decided here.
+7. **Resolved 2026-09-21 (operator go-ahead).** Now that this design owns a pitch channel directly,
+   HLDD-011's `BoresightEngage.NoseTrack` has been updated to consume it directly
+   (`error_norm_x`/`error_norm_y`, `orient_nose_to_target`/`orient_pitch_to_target`) instead of
+   building its own separate pitch loop — HLDD-011's `acs_mode.boresight.pitch_*` config keys were
+   removed in the same pass; only `lock_cone_x`/`lock_cone_y` (its own concept) remain there. See
+   `docs/hldd/011-acs-mode-hldd.md`'s Relationship table and Refinement Backlog item 4 for the
+   reconciled text. Note this only settles *who owns the pitch math* — Two-Axis Rollout's own Phase
+   1/2/3 live-validation sequence above is unaffected and still gates when pitch may actuate at all.
 
 ---
 
@@ -633,16 +843,21 @@ Suggested reward/objective components for future work:
 - `docs/adr/027-j20-target-painting-mode.md`
 - `docs/adr/028-enemy-quadrant-detection-and-nose-orientation.md`
 - `docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md` — the
-  `NOSE_DOWN` pitch primitive a pitch-needing consumer of this design
-  reuses (see Non-Goal 2).
+  `NOSE_DOWN` pitch primitive `eject_and_dive`'s own descent control uses
+  and continues to use exclusively during the dive, unmodified by this
+  design's new pitch channel (see Safety and Gating Rules' pitch gate).
 - `docs/adr/136-heatseeker-dive-invokable-mode.md` — second, direct
   consumer of this tracker's sensing and roll controller, outside the
   `tracking.enabled`/`tracking.actuate` ambient path (see Safety and
-  Gating Rules).
+  Gating Rules); must never enable this design's pitch channel (same
+  section).
 - `docs/hldd/003-enemy-quadrant-detection-hldd.md`
-- `docs/hldd/011-acs-mode-hldd.md` — extends this design's sensing/roll
-  core with a pitch channel and a lock-confirmation state for boresight
-  engagement.
+- `docs/hldd/011-acs-mode-hldd.md` — planned, ahead of this revision, to add
+  its own pitch channel on top of this design's then-roll-only sensing/roll
+  core for `BoresightEngage.NoseTrack`. That premise is now stale (this
+  design owns pitch directly as of 2026-09-21) — see Two-Axis Rollout Phase
+  3 and Open Question 7 for the reconciliation this surfaces but does not
+  itself make.
 - `docs/hldd/013-minimap-center-seeking-navigation-hldd.md` — source of the shadow-first,
   phase-gated rollout style Selection Hardening (above) follows.
 - `wingman/tracker.py` — `TargetTracker._detect_targets`/`_select_target`, the color-exclusion-

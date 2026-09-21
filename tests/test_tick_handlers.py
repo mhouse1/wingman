@@ -2910,3 +2910,198 @@ class TestClimbEmergencyActuationUsesTheHardSignal:
         h._start_climb()
         assert "target_alt" not in h._ctrl.climb_calls[0]   # took the non-sustain branch
         assert h._ctrl.climb_calls[0]["emergency"] is False
+
+
+# --- HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT wired to the boundary reading ---
+
+class _SeekCenterCtrlStub:
+    def __init__(self):
+        self.orient_calls = []
+
+    def orient_nose_to_target(self, error_norm, **kw):
+        self.orient_calls.append((error_norm, kw))
+        if abs(error_norm) <= kw.get("deadband", 0.0):
+            return None
+        return "left" if error_norm < 0 else "right"
+
+
+def _seek_center_handler(*, enabled=False, trigger_frac=0.55,
+                         rear_commit_deg=150.0, rear_release_deg=90.0):
+    from wingman.tick_handlers import BehaviorTreeHandler
+    from wingman.engage_nav import EngageNavigator
+    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    # Own EngageNavigator instance, at the real defaults — _seek_center_error_norm
+    # reuses its rear_commit_deg/rear_release_deg (config, not state).
+    h._nav = EngageNavigator(
+        {"rear_commit_deg": rear_commit_deg, "rear_release_deg": rear_release_deg}, {})
+    h._seek_center_enabled = enabled
+    h._seek_center_trigger_frac = trigger_frac
+    h._seek_center_cfg = {
+        "deadband": 15.0 / 90.0, "kp": 0.3,
+        "min_hold_sec": 0.15, "max_hold_sec": 0.6, "cooldown_sec": 2.0,
+    }
+    h._seek_center_committed_sign = None
+    h._seek_center_shadow_count = 0
+    h._ctrl = _SeekCenterCtrlStub()
+    return h
+
+
+def test_seek_center_error_is_the_reciprocal_bearing_not_bearing_plus_180():
+    """Vector-negate-then-atan2 (HLDD 013 Actuation), not bearing+180 with
+    manual wrap-around — a boundary point at bearing 120deg (fwd=-0.5,
+    lat=+0.866) reciprocates to -60deg, not +300 or any wrapped equivalent."""
+    h = _seek_center_handler(enabled=True)
+    h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+    assert len(h._ctrl.orient_calls) == 1
+    err, _ = h._ctrl.orient_calls[0]
+    assert abs(err - (-60.0 / 90.0)) < 1e-6
+
+
+def test_seek_center_steers_away_from_the_edge_not_toward_it():
+    """A boundary point to the right-rear (bearing +120deg) must roll LEFT to
+    escape; mirrored on the left-rear (bearing -120deg) must roll RIGHT."""
+    right = _seek_center_handler(enabled=True)
+    right._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+    err_right, _ = right._ctrl.orient_calls[0]
+    assert err_right < 0
+
+    left = _seek_center_handler(enabled=True)
+    left._actuate_seek_center(dist=0.2, fwd=-0.5, lat=-0.8660254037844386)
+    err_left, _ = left._ctrl.orient_calls[0]
+    assert err_left > 0
+
+
+def test_seek_center_does_nothing_without_a_lateral_component():
+    """A 2-tuple reading (lateral is None) is treated exactly like no
+    reading at all — must not call atan2(None, ...) or otherwise raise."""
+    h = _seek_center_handler(enabled=True)
+    h._actuate_seek_center(dist=0.2, fwd=0.9, lat=None)
+    assert h._ctrl.orient_calls == []
+
+
+def test_seek_center_does_nothing_with_no_reading_at_all():
+    h = _seek_center_handler(enabled=True)
+    h._actuate_seek_center(dist=None, fwd=None, lat=None)
+    assert h._ctrl.orient_calls == []
+
+
+def test_seek_center_does_not_fire_beyond_the_trigger_radius():
+    h = _seek_center_handler(enabled=True, trigger_frac=0.55)
+    h._actuate_seek_center(dist=0.56, fwd=-0.5, lat=0.8660254037844386)
+    assert h._ctrl.orient_calls == []
+
+
+def test_seek_center_fires_at_the_trigger_radius():
+    h = _seek_center_handler(enabled=True, trigger_frac=0.55)
+    h._actuate_seek_center(dist=0.55, fwd=-0.5, lat=0.8660254037844386)
+    assert len(h._ctrl.orient_calls) == 1
+
+
+def test_seek_center_uses_its_own_config_not_the_combat_deadband():
+    """`self._ctl_cfg['deadband']` is EngageNavigator's combat-tuned bearing
+    deadzone — splatting it here would silently ignore seek_center_deadzone_deg."""
+    h = _seek_center_handler(enabled=True)
+    h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+    _, kw = h._ctrl.orient_calls[0]
+    assert abs(kw["deadband"] - 15.0 / 90.0) < 1e-9
+    assert abs(kw["deadband"] - h._nav.deadband_norm) > 1e-9
+
+
+def test_seek_center_rear_commit_no_reversal_on_dead_ahead_sign_flip():
+    """HLDD 013: the reciprocal bearing sits near +/-180deg exactly when the
+    boundary is dead ahead — the single most important case to handle well.
+    A tiny lateral jitter flips its raw sign every sample; committed, the
+    direction must hold (ported from EngageNavigator._steer_intent's own
+    rear-commit regression, live 2026-08-08 15:01)."""
+    h = _seek_center_handler()
+    first = h._seek_center_error_norm(-178.85)
+    assert first == -1.0
+    second = h._seek_center_error_norm(178.85)
+    assert second == -1.0            # no reversal
+    third = h._seek_center_error_norm(-178.28)
+    assert third == -1.0
+
+
+def test_seek_center_rear_commit_releases_as_the_edge_sweeps_forward():
+    h = _seek_center_handler()
+    bearings = [170, 135, 95, 60, 30]
+    errors = [h._seek_center_error_norm(b) for b in bearings]
+    assert all(e > 0 for e in errors), errors
+    assert errors[0] == 1.0          # still committed
+    assert errors[-1] < 1.0          # released, proportional again
+    assert abs(errors[-1] - 30.0 / 90.0) < 1e-9
+
+
+def test_seek_center_rear_commit_holds_through_the_release_band_boundary():
+    """Release only strictly below rear_release_deg — at or above it the
+    commitment must still hold (mirrors EngageNav's own off-by-one shape)."""
+    h = _seek_center_handler(rear_release_deg=90.0)
+    h._seek_center_error_norm(-178.0)          # commits negative
+    held = h._seek_center_error_norm(-90.0)    # exactly at the release band edge
+    assert held == -1.0
+    released = h._seek_center_error_norm(-89.9)
+    assert released < 0 and released > -1.0
+
+
+def test_seek_center_shadow_mode_never_actuates():
+    h = _seek_center_handler(enabled=False)
+    h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+    assert h._ctrl.orient_calls == []
+    assert h._seek_center_shadow_count == 1
+
+
+def test_seek_center_shadow_log_is_rate_limited():
+    """ADR 117 D9's blind-skip pattern: log at the 1st, 10th, 100th
+    occurrence, then every 500th — not once per qualifying tick, which
+    could otherwise log continuously for as long as the aircraft idles
+    near an edge."""
+    import wingman.tick_handlers as th
+    h = _seek_center_handler(enabled=False)
+    logged = []
+    real_info = th.logger.info
+    th.logger.info = lambda fmt, *a: logged.append(fmt % a if a else fmt)
+    try:
+        for _ in range(12):
+            h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+        assert len(logged) == 2, logged     # the 1st and the 10th
+        for _ in range(89):                 # advance to the 101st occurrence
+            h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+        assert len(logged) == 3, logged     # + the 100th
+        assert "SEEK CENTER[shadow]" in logged[0]
+    finally:
+        th.logger.info = real_info
+
+
+def test_seek_center_branch_carries_its_own_survival_hold_gate():
+    """HLDD 013: unlike Climb, TACTIC_ATTACK_SUPPORT has no other reason to
+    run during a hold, so the exclusion belongs in this branch's own
+    condition rather than a separate inner check — the same regression
+    class ADR 110 already fixed once for Climb (9 EngageNav commands
+    reaching a loitering aircraft, 2026-09-04)."""
+    import pathlib
+    src = pathlib.Path("wingman/tick_handlers.py").read_text()
+    marker = "and selection == TACTIC_ATTACK_SUPPORT):"
+    assert marker in src
+    branch_start = src.index("elif (_may_fly and not snap.survival_hold")
+    condition = src[branch_start:src.index(marker) + len(marker)]
+    assert "not snap.survival_hold" in condition
+    branch = src[branch_start:src.index("return False", branch_start)]
+    assert "self._actuate_seek_center(_b_dist, _b_fwd, _b_lat)" in branch
+
+
+def test_seek_center_reuses_this_ticks_destructured_boundary_locals():
+    """HLDD 013: must reuse the _b_dist/_b_fwd/_b_lat locals tick() already
+    destructured from self._boundary.perceive() this tick, not redo the
+    None/2-tuple handling perceive() already resolved via a fresh
+    self._boundary.reading property fetch."""
+    import pathlib
+    src = pathlib.Path("wingman/tick_handlers.py").read_text()
+    assert "self._actuate_seek_center(_b_dist, _b_fwd, _b_lat)" in src
+
+
+def test_seek_center_ships_disabled_in_the_shipped_config():
+    """Shadow first (HLDD 013 / ADR 070 / ADR 028 rev 4 precedent): a live
+    session's shadow log decides whether Phase 1 goes live, not a guess."""
+    import yaml
+    cfg = yaml.safe_load(open("wingman/config.yaml"))
+    assert cfg["behavior_tree"]["attack_support"]["seek_center_enabled"] is False

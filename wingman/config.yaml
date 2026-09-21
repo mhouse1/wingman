@@ -783,6 +783,17 @@ tracking:
   min_hold_sec: 0.08
   max_hold_sec: 0.35
   command_cooldown_sec: 0.15
+  # Pitch axis (HLDD 005 Two-Axis Rollout Phase 1, 2026-09-21): shadow-only
+  # for now — actuate_pitch stays false while this ships, so nothing here
+  # presses a key yet. Logs what it would command (PITCH[shadow] lines)
+  # instead. Own flag, own gains, deliberately independent from roll's
+  # actuate/deadband/kp/etc above — see HLDD 005 Safety and Gating Rules.
+  actuate_pitch: false
+  pitch_deadband: 0.05
+  pitch_kp: 0.3
+  pitch_min_hold_sec: 0.08
+  pitch_max_hold_sec: 0.35
+  pitch_command_cooldown_sec: 0.15
   lost_timeout_sec: 0.7
   prefer_red_lock: true
   local_roi_enabled: true

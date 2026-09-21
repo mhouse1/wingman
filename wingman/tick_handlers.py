@@ -154,6 +154,24 @@ class TrackingHudHandler:
             "max_hold_sec": float(tracking_cfg.get("max_hold_sec", 0.35)),
             "cooldown_sec": float(tracking_cfg.get("command_cooldown_sec", 0.15)),
         }
+        # HLDD 005 pitch axis (2026-09-21): independent gate from roll's
+        # tracking.actuate above — deliberately its own flag, not reused,
+        # since roll already has a live-validation history (ADR 136) and
+        # pitch has none yet (Two-Axis Rollout). Never wired into ADR 136's
+        # heatdive consumer — see HLDD 005 Safety and Gating Rules.
+        self._actuate_pitch = bool(tracking_cfg.get("actuate_pitch", False))
+        self._pitch_cfg = {
+            "deadband": float(tracking_cfg.get("pitch_deadband", 0.05)),
+            "kp": float(tracking_cfg.get("pitch_kp", 0.30)),
+            "min_hold_sec": float(tracking_cfg.get("pitch_min_hold_sec", 0.08)),
+            "max_hold_sec": float(tracking_cfg.get("pitch_max_hold_sec", 0.35)),
+            "cooldown_sec": float(tracking_cfg.get("pitch_command_cooldown_sec", 0.15)),
+        }
+        # Two-Axis Rollout Phase 1 shadow counter — same rate-limited shape
+        # as every other shadow counter in this codebase (ADR 117 D9 /
+        # HLDD 013 Phase 1): log the 1st/10th/100th occurrence, then every
+        # 500th, rather than once per qualifying tick.
+        self._pitch_shadow_count = 0
 
     def on_state_change(self, new_state, prev_state=None):
         """Reset tracking when leaving the battle states entirely."""
@@ -185,6 +203,34 @@ class TrackingHudHandler:
                         "Tracker: roll_%s  err=%.2f  mode=%s",
                         cmd, err, tracking_obs["mode"],
                     )
+
+            # Pitch axis (HLDD 005, 2026-09-21): same GAME_BATTLE/mission-
+            # running gate roll already requires, plus its own independent
+            # tracking.actuate_pitch flag on top of it (never instead of it).
+            err_y = tracking_obs.get("error_norm_y")
+            if (err_y is not None and tracking_obs.get("visible")
+                    and current_game_state == GameState.GAME_BATTLE
+                    and self._ctrl.is_mission_running()):
+                if self._actuate_pitch:
+                    pcmd = self._ctrl.orient_pitch_to_target(err_y, **self._pitch_cfg)
+                    if pcmd is not None:
+                        logger.debug(
+                            "Tracker: pitch_%s  err_y=%.2f  mode=%s",
+                            pcmd, err_y, tracking_obs["mode"],
+                        )
+                elif abs(err_y) > self._pitch_cfg["deadband"]:
+                    # Two-Axis Rollout Phase 1: shadow only until
+                    # tracking.actuate_pitch flips — log what would fire,
+                    # press nothing.
+                    pitch_hold = float(min(max(
+                        self._pitch_cfg["kp"] * abs(err_y), self._pitch_cfg["min_hold_sec"]),
+                        self._pitch_cfg["max_hold_sec"]))
+                    self._pitch_shadow_count += 1
+                    n = self._pitch_shadow_count
+                    if n in (1, 10, 100) or n % 500 == 0:
+                        logger.info(
+                            "PITCH[shadow]: would %s hold=%.2fs err_y=%.2f (%d so far)",
+                            "nose_up" if err_y < 0 else "nose_down", pitch_hold, err_y, n)
 
         # HUD renderer — annotated snapshot; always runs in GAME_BATTLE when enabled.
         if self._hud is not None and current_game_state in (

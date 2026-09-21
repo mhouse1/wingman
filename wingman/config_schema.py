@@ -477,6 +477,16 @@ SCHEMA = Section(
             "min_hold_sec": SECONDS,
             "max_hold_sec": SECONDS,
             "command_cooldown_sec": SECONDS,
+            # Pitch axis (HLDD 005, 2026-09-21) — own flag, own gains,
+            # deliberately not reusing actuate/deadband/kp/etc above. See
+            # HLDD 005 Safety and Gating Rules for why pitch needs an
+            # independent actuation gate from roll's.
+            "actuate_pitch": BOOL,
+            "pitch_deadband": FRACTION,
+            "pitch_kp": _num(0),
+            "pitch_min_hold_sec": SECONDS,
+            "pitch_max_hold_sec": SECONDS,
+            "pitch_command_cooldown_sec": SECONDS,
             "lost_timeout_sec": SECONDS,
             "prefer_red_lock": BOOL,
             "local_roi_enabled": BOOL,

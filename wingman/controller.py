@@ -295,6 +295,11 @@ class Controller:
 
         # Target tracking: timestamp of last orient_nose_to_target command
         self._last_orient_ts: float = 0.0
+        # HLDD 005 pitch axis (2026-09-21): independent cooldown timestamp,
+        # separate from roll's _last_orient_ts above — a roll command in
+        # flight must never delay a pitch command or vice versa, since the
+        # two act on different keys and can legitimately overlap.
+        self._last_pitch_orient_ts: float = 0.0
         # ADR 136: TargetTracker reference, wired in from main.py after both
         # objects exist (Controller cannot construct it — it needs the
         # Analyzer-independent HSV/contour config TrackingHudHandler owns).
@@ -1174,23 +1179,31 @@ class Controller:
         return True
 
 
-    def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
+    def nose_up(self, hold_seconds: float = 2.5, block: bool = True, ignore_cancel: bool = False):
         """Nose-up maneuver: presses and holds the configured nose-up key.
 
         Args:
             hold_seconds: How long to hold the key (default 2.5 seconds)
+            ignore_cancel: Pass True for callers running after self._mission_cancel
+                            is already set for the whole call's duration — same
+                            rationale as roll_left/roll_right's own parameter
+                            (ADR 136 precedent). Default False changes nothing
+                            for the ambient tracking caller (HLDD 005).
         """
         # Use generic executor to perform the key press
-        self._execute_key_press(NOSE_UP_KEY, hold_seconds=hold_seconds, block=block, action_name='nose_up')
+        self._execute_key_press(NOSE_UP_KEY, hold_seconds=hold_seconds, block=block,
+                                 action_name='nose_up', ignore_cancel=ignore_cancel)
 
-    def nose_down(self, hold_seconds: float = 2.5, block: bool = True):
+    def nose_down(self, hold_seconds: float = 2.5, block: bool = True, ignore_cancel: bool = False):
         """Nose-down maneuver: presses and holds the configured nose-down key.
 
         Args:
             hold_seconds: How long to hold the key (default 2.5 seconds)
+            ignore_cancel: See nose_up's own docstring.
         """
         # Use generic executor to perform the key press
-        self._execute_key_press(NOSE_DOWN_KEY, hold_seconds=hold_seconds, block=block, action_name='nose_down')
+        self._execute_key_press(NOSE_DOWN_KEY, hold_seconds=hold_seconds, block=block,
+                                 action_name='nose_down', ignore_cancel=ignore_cancel)
 
     def afterburner(self, hold_seconds: float = 2.5, block: bool = True):
         """Afterburner: presses and holds the configured afterburner key.
@@ -1432,6 +1445,60 @@ class Controller:
             return "left"
         self.roll_right(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
         return "right"
+
+    def orient_pitch_to_target(
+        self,
+        error_norm_y: float,
+        *,
+        deadband: float = 0.05,
+        kp: float = 0.30,
+        min_hold_sec: float = 0.08,
+        max_hold_sec: float = 0.35,
+        cooldown_sec: float = 0.15,
+        ignore_cancel: bool = False,
+    ) -> "str | None":
+        """Apply proportional pitch correction toward a target (HLDD 005, 2026-09-21).
+
+        Independent instance of orient_nose_to_target's control law, on the
+        vertical axis: own cooldown timestamp (_last_pitch_orient_ts, not
+        _last_orient_ts), own keys (NOSE_UP_KEY/NOSE_DOWN_KEY) — a roll
+        command in flight never delays a pitch command or vice versa.
+
+        Must never be called by the ADR 136 heatdive consumer.
+        `eject_and_dive`'s own descent control (`_eject_descent_control`,
+        ADR 069) already holds exclusive ownership of NOSE_UP_KEY/
+        NOSE_DOWN_KEY for the whole dive, and ADR 058's dive-confirmation
+        criterion depends on a cumulative real-hold-time measurement that
+        assumes it is the only thing pressing that key — see HLDD 005's
+        Safety and Gating Rules for the full reasoning. This method exists
+        for the ambient tracking path only.
+
+        Args:
+            error_norm_y: Normalized vertical error in [-1, 1].
+                          Negative = target above center → nose up.
+                          Positive = target below center → nose down.
+            deadband:   No-action zone around zero.
+            kp:         Proportional gain; hold_sec = kp * abs(error_norm_y).
+            min_hold_sec / max_hold_sec: Clamp bounds on the pitch hold duration.
+            cooldown_sec: Minimum interval between consecutive pitch commands.
+            ignore_cancel: See orient_nose_to_target's own docstring — same
+                            rationale, independent of that method's own flag.
+
+        Returns:
+            'up', 'down', or None if suppressed by deadband or cooldown.
+        """
+        if abs(error_norm_y) <= deadband:
+            return None
+        now = time.time()
+        if now - self._last_pitch_orient_ts < cooldown_sec:
+            return None
+        hold = float(min(max(kp * abs(error_norm_y), min_hold_sec), max_hold_sec))
+        self._last_pitch_orient_ts = now
+        if error_norm_y < 0:
+            self.nose_up(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
+            return "up"
+        self.nose_down(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
+        return "down"
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""

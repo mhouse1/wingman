@@ -110,6 +110,11 @@ class TargetTracker:
         self._current_roi_scale: float = 0.0
         self._roi_rect: "tuple[int, int, int, int] | None" = None
         self._roi_miss_count: int = 0
+        # HLDD 005 Selection Hardening (2026-09-21): rate-limited rationale
+        # logging counter, same shape as every other shadow counter in this
+        # codebase (ADR 117 D9 / HLDD 013 Phase 1) — 1st/10th/100th, then
+        # every 500th. Pure logging; never changes what gets selected.
+        self._selection_shadow_count: int = 0
 
     @property
     def enabled(self) -> bool:
@@ -139,6 +144,11 @@ class TargetTracker:
             centroid_x  — frame-absolute x of selected target (or last known)
             centroid_y  — frame-absolute y of selected target (or last known)
             error_norm  — horizontal error in [-1, 1]; positive = target right of center
+                          (this is "error_norm_x" in HLDD 005's 2026-09-21 revision;
+                          the dict key is kept as-is so existing callers are unaffected)
+            error_norm_y — vertical error in [-1, 1]; positive = target below center.
+                          New (HLDD 005 Two-Axis Rollout Phase 1) — sensing only, no
+                          consumer presses a key from this yet.
             n_detections — raw contour count found in scan region
             roi_rect    — active local ROI as (x, y, w, h) in frame coords, or None
         """
@@ -169,9 +179,13 @@ class TargetTracker:
             crop = frame[ay1:ay2, ax1:ax2]
             ox, oy = ax1, ay1
 
-        local_hits = self._detect_targets(crop)
+        local_hits, local_discarded_green = self._detect_targets(crop)
         abs_hits = [(ox + lx, oy + ly, a) for lx, ly, a in local_hits]
         selected = self._select_target(abs_hits, w)
+
+        if local_discarded_green:
+            ref = self._last_x if self._last_x is not None else w / 2.0
+            self._log_selection_rationale(ox, oy, local_discarded_green, selected, ref)
 
         if selected is not None:
             abs_x, abs_y = selected
@@ -188,8 +202,10 @@ class TargetTracker:
             self._handle_miss(ts, w, h)
 
         error_norm: "float | None" = None
+        error_norm_y: "float | None" = None
         if self._last_x is not None and self._mode != TrackMode.SEARCHING:
             error_norm = float(np.clip((self._last_x - w / 2.0) / (w / 2.0), -1.0, 1.0))
+            error_norm_y = float(np.clip((self._last_y - h / 2.0) / (h / 2.0), -1.0, 1.0))
 
         return {
             "mode": self._mode.name,
@@ -197,6 +213,7 @@ class TargetTracker:
             "centroid_x": self._last_x,
             "centroid_y": self._last_y,
             "error_norm": error_norm,
+            "error_norm_y": error_norm_y,
             "n_detections": len(local_hits),
             "roi_rect": self._roi_rect,
         }
@@ -292,14 +309,42 @@ class TargetTracker:
                     logger.debug("TargetTracker: ROI at max scale — falling back to ACQUIRING")
                     self._mode = TrackMode.ACQUIRING
 
-    def _detect_targets(self, crop: np.ndarray) -> "list[tuple[float, float, float]]":
-        """Return (cx, cy, area) in crop-local coords for each valid target bar."""
+    def _contours_to_hits(self, mask: np.ndarray) -> "list[tuple[float, float, float]]":
+        """Return (cx, cy, area) in crop-local coords for each valid target bar in `mask`."""
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        results: "list[tuple[float, float, float]]" = []
+        for c in contours:
+            area = float(cv2.contourArea(c))
+            if area < self._min_area:
+                continue
+            x, y, cw, ch = cv2.boundingRect(c)
+            if cw == 0 or ch / cw < self._min_aspect:
+                continue
+            results.append((float(x + cw / 2), float(y + ch / 2), area))
+        return results
+
+    def _detect_targets(
+        self, crop: np.ndarray
+    ) -> "tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]":
+        """Return (hits, discarded_green) in crop-local coords.
+
+        `hits` is exactly what this method always returned — the winning
+        color class's valid target bars, unchanged by HLDD 005 Selection
+        Hardening below. `discarded_green` is new (2026-09-21, logging only):
+        the green candidates that were excluded *because* red won, so the
+        caller can log how often — and by how much — that exclusion
+        discarded something closer to the tracked/centered position than
+        the surviving red candidate. Only ever non-empty when red actually
+        won (rule 1 can only discard candidates in that one direction); when
+        green wins there is nothing red to have discarded, so no extra
+        contour pass is spent computing an always-empty list.
+        """
         if crop is None or crop.size == 0:
-            return []
+            return [], []
         try:
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         except Exception:
-            return []
+            return [], []
 
         # Red: locked target — hue wraps; check primary + wrap-around range
         red_wrap_lower = np.array(
@@ -314,19 +359,48 @@ class TargetTracker:
         )
         mask_green = cv2.inRange(hsv, self._green_lower, self._green_upper)
 
-        mask = mask_red if (self._prefer_red and bool(np.any(mask_red))) else mask_green
+        red_won = self._prefer_red and bool(np.any(mask_red))
+        mask = mask_red if red_won else mask_green
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        results: "list[tuple[float, float, float]]" = []
-        for c in contours:
-            area = float(cv2.contourArea(c))
-            if area < self._min_area:
-                continue
-            x, y, cw, ch = cv2.boundingRect(c)
-            if cw == 0 or ch / cw < self._min_aspect:
-                continue
-            results.append((float(x + cw / 2), float(y + ch / 2), area))
-        return results
+        hits = self._contours_to_hits(mask)
+        discarded_green = self._contours_to_hits(mask_green) if red_won else []
+        return hits, discarded_green
+
+    def _log_selection_rationale(
+        self,
+        ox: int,
+        oy: int,
+        local_discarded_green: "list[tuple[float, float, float]]",
+        selected: "tuple[float, float] | None",
+        ref: float,
+    ) -> None:
+        """HLDD 005 Selection Hardening Phase 1: rate-limited rationale log.
+
+        Pure logging — never changes `selected`. Fires only on the tick
+        `_detect_targets` found at least one green candidate that rule 1
+        (color priority) discarded in favor of red. Reports how far the
+        discarded candidate(s) sat from `ref` compared to the target that
+        was actually selected, which is exactly the evidence Selection
+        Hardening's Phase 1 needs before Phase 2's ranked-pool change is
+        worth writing at all.
+        """
+        self._selection_shadow_count += 1
+        n = self._selection_shadow_count
+        if n not in (1, 10, 100) and n % 500 != 0:
+            return
+        discarded_abs = [(ox + lx, oy + ly) for lx, ly, _area in local_discarded_green]
+        discarded_desc = ", ".join(
+            f"(x={dx:.0f} dist={abs(dx - ref):.0f})" for dx, _dy in discarded_abs
+        )
+        if selected is not None:
+            selected_desc = f"x={selected[0]:.0f} dist={abs(selected[0] - ref):.0f}"
+        else:
+            selected_desc = "none"
+        logger.info(
+            "SELECT[shadow]: red won, discarded %d green candidate(s) [%s]; "
+            "selected %s (%d so far)",
+            len(discarded_abs), discarded_desc, selected_desc, n,
+        )
 
     def _select_target(
         self,

@@ -557,7 +557,7 @@ class TestReferenceFrame:
         # suspiciously small (a real bar is taller than it is wide).
         if obs["centroid_x"] is not None:
             # Re-run internal detect to inspect raw contours
-            raw = t._detect_targets(frame)
+            raw, _discarded_green = t._detect_targets(frame)
             for _cx, _cy, area in raw:
                 # All accepted contours must have passed the aspect-ratio filter —
                 # they were accepted, so aspect ratio >= 2.5. Just sanity-check area.
