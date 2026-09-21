@@ -825,6 +825,47 @@ def _minimap_circle_mask(width: int, height: int, radius_px: float) -> np.ndarra
     return ((dist_sq <= radius_px ** 2) * 255).astype(np.uint8)
 
 
+def _circle_fit_quality(xs: np.ndarray, ys: np.ndarray, span: float) -> "tuple[float, float]":
+    """ADR 117 D10/D11: fits a circle through (xs, ys) (Kasa algebraic fit:
+    x^2+y^2 = 2ax + 2by + c is linear in (a, b, c), solved by least squares;
+    center=(a,b), radius=sqrt(c+a^2+b^2)) and returns
+    ``(residual_frac, fit_radius_px)``:
+
+    - ``residual_frac``: RMS deviation from the fitted circle, as a fraction
+      of the component's own span — how ARC-LIKE a shape is, independent of
+      where its (possibly far-off-crop) center of curvature sits.
+    - ``fit_radius_px``: the fitted circle's own radius — how BIG a circle
+      the shape is a piece of. A real boundary line is a small arc of the
+      much larger arena edge (52-287 px fitted, measured on this crop size);
+      a circular UI marker icon's rim is a small circle in its own right
+      (9-13 px fitted, measured the same night) — geometrically as clean an
+      arc as a real line by curvature alone, distinguished only by scale.
+
+    Returns ``(float("inf"), 0.0)`` on a degenerate fit (too few points, or a
+    least-squares failure) — fails both checks closed rather than crashing
+    or asserting bogus passing values.
+    """
+    if len(xs) < 3 or span <= 0:
+        return float("inf"), 0.0
+    try:
+        design = np.column_stack([2 * xs, 2 * ys, np.ones(len(xs))])
+        target = xs.astype(np.float64) ** 2 + ys.astype(np.float64) ** 2
+        (a, b, c), *_ = np.linalg.lstsq(design, target, rcond=None)
+        fit_r_sq = c + a * a + b * b
+        if not np.isfinite(fit_r_sq) or fit_r_sq < 0:
+            return float("inf"), 0.0
+        fit_r = np.sqrt(fit_r_sq)
+        if not np.isfinite(fit_r):
+            return float("inf"), 0.0
+        dists = np.hypot(xs - a, ys - b)
+        residual = float(np.sqrt(np.mean((dists - fit_r) ** 2)))
+        if not np.isfinite(residual):
+            return float("inf"), 0.0
+        return residual / span, float(fit_r)
+    except np.linalg.LinAlgError:
+        return float("inf"), 0.0
+
+
 def _scan_minimap_components(
     crop,
     hsv_lower,
@@ -1010,7 +1051,7 @@ class GameStateAnalyzer:
             (minimap_cfg or {}).get("boundary_max_thickness_frac", 0.10))
         self._boundary_min_span_frac = float(
             minimap_cfg.get("boundary_min_span_frac", 0.5))
-        # ADR 117 D3: how far from center a component's centroid may sit and
+        # ADR 117 D9: how far from center a component's centroid may sit and
         # still count toward get_last_boundary_had_thin_component(). Measured
         # 2026-09-20 on 3 real blind frames: every compass-letter stroke
         # fragment that passed the thickness+area check (a false positive for
@@ -1022,7 +1063,7 @@ class GameStateAnalyzer:
         # acceptance below, which already excludes letters on span alone.
         self._boundary_thin_component_max_radial_frac = float(
             minimap_cfg.get("boundary_thin_component_max_radial_frac", 0.75))
-        # ADR 117 D3: a compact UI marker (a target/waypoint ring, say) is
+        # ADR 117 D9: a compact UI marker (a target/waypoint ring, say) is
         # also thin by the distance-transform test — a ring's stroke has the
         # same small local thickness a line does — but its bounding box is
         # roughly square, unlike even a short real line fragment. Measured
@@ -1031,6 +1072,30 @@ class GameStateAnalyzer:
         # aspect ratio 1.06. Requires elongation, not just thinness.
         self._boundary_thin_component_min_elongation = float(
             minimap_cfg.get("boundary_thin_component_min_elongation", 1.8))
+        # ADR 117 D10: an aircraft flight-path trail is also thin, elongated,
+        # and not near the rim — none of the checks above catch it. Measured
+        # 2026-09-20: a real boundary line's own curvature fits a circle
+        # tightly (RMS residual / span 0.003-0.006 on 2 confirmed detections,
+        # even though the fitted center sits 0.4-2.2 minimap-radii away —
+        # it is a small arc of the much larger arena edge, NOT a circle
+        # centered on the minimap). A trail traces the aircraft's actual
+        # maneuvering and fits no single circle well: 0.063-0.115 measured
+        # across 5 fragments from 3 real trail-contaminated captures the
+        # same night. 0.03 sits in that roughly 10x gap.
+        self._boundary_thin_component_max_arc_residual_frac = float(
+            minimap_cfg.get("boundary_thin_component_max_arc_residual_frac", 0.03))
+        # ADR 117 D11: a circular UI marker's rim (e.g. a leader/MVP crown
+        # badge) fits a circle just as tightly as a real line — it IS one —
+        # so residual alone cannot tell them apart. What differs is SCALE: a
+        # real boundary line is a small arc of the much larger arena edge
+        # (fitted radius 52-287 px, measured on this crop size, D10 and
+        # live validation), while a marker icon's rim is a small circle in
+        # its own right. Measured 2026-09-20/21: a confirmed icon-rim
+        # fragment fitted at 9.1 px radius; a second, unconfirmed-but-
+        # suspect capture fitted at 12.9 px (both far below the real-line
+        # floor). 0.15 (about 24 px on this crop) sits in that gap.
+        self._boundary_thin_component_min_arc_radius_frac = float(
+            minimap_cfg.get("boundary_thin_component_min_arc_radius_frac", 0.15))
         # ADR 133: the corroborated span and the void that corroborates it.
         self._boundary_relaxed_span_frac = float(
             minimap_cfg.get("boundary_relaxed_span_frac", 0.0))
@@ -1050,10 +1115,10 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
-        # ADR 117 D3: whether the last detect_map_boundary() call found ANY
+        # ADR 117 D9: whether the last detect_map_boundary() call found ANY
         # component thin enough to plausibly be a real (if fragmented or
         # too-short) boundary line, independent of whether that component
-        # also passed the full span+pixel-count acceptance. Superseded D2's
+        # also passed the full span+pixel-count acceptance. Superseded D8's
         # raw pixel COUNT — measured live 2026-09-20: a rocky/dirt map's
         # terrain trivially clears any pixel-count floor (terrain hue falls
         # in the same HSV range) while still being unambiguously too THICK
@@ -3914,12 +3979,12 @@ class GameStateAnalyzer:
     def get_last_boundary_had_thin_component(self) -> bool:
         """Did the last detect_map_boundary() call find any component thin
         enough to plausibly be a real (if fragmented or too-short) boundary
-        line? ADR 117 D3: distinguishes a tick with nothing line-like on
+        line? ADR 117 D9: distinguishes a tick with nothing line-like on
         screen at all (nothing to see — the aircraft isn't near an edge, or
         only thick terrain shares the boundary hue) from one where a
         plausible line fragment exists but didn't pass the full span+pixel-
         count acceptance — both read as `None` from detect_map_boundary()
-        alone. A raw pixel COUNT (D2, superseded) could not make this
+        alone. A raw pixel COUNT (D8, superseded) could not make this
         distinction: rocky/dirt terrain trivially clears any count floor
         while never being thin enough to pass this shape check."""
         return self._last_boundary_had_thin_component
@@ -4002,7 +4067,7 @@ class GameStateAnalyzer:
                 if void_frac > self._boundary_void_min_frac:
                     min_span = min(min_span,
                                    self._boundary_relaxed_span_frac * radius)
-            # ADR 117 D3: a shape-aware "is anything line-LIKE on screen at
+            # ADR 117 D9: a shape-aware "is anything line-LIKE on screen at
             # all" signal, independent of whether it passes the full
             # acceptance below (span + total pixel count). Computed for
             # EVERY component, not just ones already past the span filter —
@@ -4023,7 +4088,7 @@ class GameStateAnalyzer:
                 comp = (labels == i).astype(np.uint8)
                 thickness = cv2.distanceTransform(comp, cv2.DIST_L2, 3).max()
                 if area >= self._boundary_min_px and thickness <= max_thick_px:
-                    # ADR 117 D3: a thin, reasonably-sized component near the
+                    # ADR 117 D9: a thin, reasonably-sized component near the
                     # rim is very likely a compass-letter stroke fragment —
                     # letters are thin by construction, same as a real line —
                     # not evidence of one. See the radial-limit comment above.
@@ -4033,7 +4098,25 @@ class GameStateAnalyzer:
                     elongation = max(w_i, h_i) / max(1, min(w_i, h_i))
                     if (np.hypot(cx_i - cx_full, cy_i - cy_full) <= thin_radial_limit
                             and elongation >= self._boundary_thin_component_min_elongation):
-                        had_thin_component = True
+                        # ADR 117 D10: an aircraft flight-path trail is also
+                        # thin, elongated, and can sit anywhere on the disc —
+                        # none of the checks above catch it. A real boundary
+                        # line curves smoothly (it is an arc of the arena
+                        # edge, however far its true center of curvature
+                        # sits); a trail traces the aircraft's actual
+                        # maneuvering and fits no single circle well. See the
+                        # residual-fraction comment on the config attribute.
+                        comp_ys, comp_xs = np.nonzero(comp)
+                        residual_frac, fit_r = _circle_fit_quality(
+                            comp_xs, comp_ys, max(w_i, h_i))
+                        # ADR 117 D11: a circular UI marker's rim is also a
+                        # clean arc by curvature alone — it just belongs to a
+                        # small circle (the icon itself), not the much larger
+                        # arena edge. See the min-radius comment on the
+                        # config attribute.
+                        if (residual_frac <= self._boundary_thin_component_max_arc_residual_frac
+                                and fit_r >= self._boundary_thin_component_min_arc_radius_frac * radius):
+                            had_thin_component = True
                 span = max(stats[i, cv2.CC_STAT_WIDTH],
                            stats[i, cv2.CC_STAT_HEIGHT])
                 if span < min_span or span <= 0:

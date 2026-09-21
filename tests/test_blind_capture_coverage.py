@@ -31,7 +31,7 @@ NO_MINIMAP = ["blind_20260905_220822_7.png", "blind_20260905_221500_12.png",
               "blind_20260905_222526_19.png", "blind_20260905_223558_27.png"]
 WITH_MINIMAP = ["blind_20260905_220722_6.png", "blind_20260905_221239_10.png",
                 "blind_20260905_223440_26.png", "rtb_20260905_230545_crossing1.png"]
-# ADR 117 D2/D3, operator review 2026-09-20: a minimap is drawn (passes
+# ADR 117 D8/D9, operator review 2026-09-20: a minimap is drawn (passes
 # minimap_present) but carries no real boundary line — visually confirmed
 # by inspection, and by visualizing the matched pixels directly: they sit
 # either on the compass rim's decorative band or scattered across brown/dirt
@@ -95,7 +95,7 @@ def test_an_unreadable_frame_fails_OPEN(analyzer):
     assert analyzer.minimap_present(object()) is True
 
 
-# --- ADR 117 D3: a minimap with no boundary line is not worth capturing -----
+# --- ADR 117 D9: a minimap with no boundary line is not worth capturing -----
 
 @pytest.mark.parametrize("name", NO_BOUNDARY_LINE)
 def test_a_minimap_with_no_boundary_line_is_still_present(analyzer, name):
@@ -108,7 +108,7 @@ def test_a_minimap_with_no_boundary_line_is_still_present(analyzer, name):
 @pytest.mark.parametrize("name", NO_BOUNDARY_LINE)
 def test_a_minimap_with_no_boundary_line_has_no_thin_component(analyzer, name):
     """Real evidence, not a threshold picked in the abstract: three actual
-    blind captures. A first cut (D2) used a raw pixel-count floor and
+    blind captures. A first cut (D8) used a raw pixel-count floor and
     called these "below the real-line range" — but visualizing the matched
     pixels directly (same day) found a raw count is not reliable evidence
     either way: rocky/dirt terrain shares the boundary hue and can produce
@@ -120,7 +120,57 @@ def test_a_minimap_with_no_boundary_line_has_no_thin_component(analyzer, name):
     assert analyzer.get_last_boundary_had_thin_component() is False
 
 
-# --- ADR 117 D3: synthetic geometry for the shape-aware signal --------------
+# --- ADR 117 D10: a flight-path trail is not a boundary line ---------------
+#
+# D9 alone (radial exclusion + elongation) still fired on these live, the
+# same night: an aircraft's movement trail is thin, elongated, and not near
+# the rim, same as a real fragmented line. Visualizing the matched pixels
+# found a distinct trail squiggle in each. D10's arc-curvature check is what
+# correctly rejects them.
+TRAIL_NOT_BOUNDARY = ["blind_20260920_192204_1.png", "blind_20260920_192713_2.png",
+                     "blind_20260920_193227_3.png"]
+# Confirmed detections (detect_map_boundary returned non-None) from the same
+# night — the positive control: D10 must not reject what D9 already
+# correctly accepted.
+CONFIRMED_BOUNDARY = ["approach_20260920_192949_1.png", "approach_20260920_193512_2.png"]
+
+
+@pytest.mark.parametrize("name", TRAIL_NOT_BOUNDARY)
+def test_a_flight_trail_has_no_thin_component(analyzer, name):
+    frame = _frame(name)
+    analyzer.detect_map_boundary(frame)
+    assert analyzer.get_last_boundary_had_thin_component() is False
+
+
+@pytest.mark.parametrize("name", CONFIRMED_BOUNDARY)
+def test_a_confirmed_boundary_still_has_a_thin_component(analyzer, name):
+    """The positive control for D10 — it must not have fixed the trail
+    false-positive by breaking real detection."""
+    frame = _frame(name)
+    assert analyzer.detect_map_boundary(frame) is not None
+    assert analyzer.get_last_boundary_had_thin_component() is True
+
+
+# --- ADR 117 D11: a circular UI marker's rim is not a boundary line --------
+#
+# D10's arc-residual check alone still fired on this live: a fragment of a
+# leader/MVP crown badge's yellow ring is a genuine circular arc — it fits a
+# circle just as tightly as a real line, because it IS one. Confirmed by
+# cropping tightly around the flagged component: the highlighted pixels sit
+# exactly on the badge's own rim. D11's minimum fitted-radius check is what
+# correctly rejects it — the badge's rim fits a ~9 px circle, nowhere near
+# the 52-287 px real boundary-line range measured the same night.
+ICON_RIM_NOT_BOUNDARY = ["blind_20260920_220226_2.png"]
+
+
+@pytest.mark.parametrize("name", ICON_RIM_NOT_BOUNDARY)
+def test_a_marker_icon_rim_has_no_thin_component(analyzer, name):
+    frame = _frame(name)
+    analyzer.detect_map_boundary(frame)
+    assert analyzer.get_last_boundary_had_thin_component() is False
+
+
+# --- ADR 117 D9: synthetic geometry for the shape-aware signal --------------
 #
 # detect_map_boundary otherwise only has archived-corpus coverage, skipped
 # whenever that corpus isn't present (as it isn't here — see NO_MINIMAP/
@@ -133,27 +183,72 @@ def _hsv_swatch_bgr(h=18, s=180, v=200):
 
 
 def _synthetic_frame(analyzer, draw_fn):
-    """A 1920x1200 frame, blank except for the MINIMAP crop, which draw_fn
-    paints into (crop-local pixel coordinates)."""
+    """A 1920x1200 frame, neutral gray except for the MINIMAP crop, which
+    draw_fn paints into (crop-local pixel coordinates). Gray, not black —
+    an all-black background reads as the out-of-bounds VOID (ADR 133), which
+    corroborates a short span and can make detect_map_boundary accept
+    something these tests don't intend to test."""
     frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
     x1, y1, x2, y2 = analyzer.crops["MINIMAP"][:4]
     h, w = frame.shape[:2]
     px1, py1 = int(w * x1), int(h * y1)
     px2, py2 = int(w * x2), int(h * y2)
-    draw_fn(frame[py1:py2, px1:px2])
+    crop = frame[py1:py2, px1:px2]
+    crop[:] = (90, 90, 90)
+    draw_fn(crop)
     return frame
 
 
+def _draw_arc(crop, color, radius, angle_span_deg, thickness=2):
+    """A genuine circular arc of the given radius — mimics a real boundary
+    line, which ADR 117 D10 measured as a small, gently-curved arc of a much
+    larger circle (fitted radius 52-287 px on a ~316 px crop; the center of
+    curvature sits 0.4-2.2 crop-radii away, off-crop). Placed so the arc's
+    apex sits near the crop's own center."""
+    h, w = crop.shape[:2]
+    cx, cy = w / 2.0, h / 2.0 + radius - 20
+    angles = np.linspace(-angle_span_deg / 2, angle_span_deg / 2, 300)
+    pts = []
+    for ang in angles:
+        theta = np.radians(90 + ang)
+        pts.append((int(round(cx + radius * np.cos(theta))),
+                    int(round(cy - radius * np.sin(theta)))))
+    cv2.polylines(crop, [np.array(pts, dtype=np.int32).reshape(-1, 1, 2)],
+                  False, color, thickness)
+
+
+def _draw_small_circle_arc(crop, color, radius=20, angle_span_deg=140, thickness=1):
+    """A small circle's rim — mimics a circular UI marker icon (a leader/MVP
+    badge, ADR 117 D11's live-confirmed confound). Fits a circle just as
+    tightly as a real line (residual/span ~0.009, well under the D10
+    threshold) — it IS one — but the fitted circle itself is tiny (~20 px,
+    vs. 52-287 px measured for real boundary lines), which is the only thing
+    D11's minimum-radius check needs to tell them apart."""
+    _draw_arc(crop, color, radius, angle_span_deg, thickness)
+
+
+def _draw_zigzag(crop, color, thickness=2):
+    """A sinuous, multiple-direction-change path — mimics an aircraft
+    flight-path trail (ADR 117 D10's live-confirmed confound). Thin,
+    elongated (4:1), and centered, same as a real short line fragment would
+    be — only its curvature differs."""
+    h, w = crop.shape[:2]
+    pts = [(w // 2 - 35, h // 2 + 8), (w // 2 - 20, h // 2 - 8),
+           (w // 2 - 5, h // 2 + 8), (w // 2 + 10, h // 2 - 8),
+           (w // 2 + 25, h // 2 + 8), (w // 2 + 38, h // 2 - 6)]
+    cv2.polylines(crop, [np.array(pts, dtype=np.int32).reshape(-1, 1, 2)],
+                  False, color, thickness)
+
+
 class TestThinComponentShapeCheck:
-    def test_a_thin_line_sets_had_thin_component(self, analyzer):
+    def test_a_real_arc_sets_had_thin_component(self, analyzer):
+        """A long enough arc is formally detected too, not just flagged as
+        'worth a look' — the shape check must not reject the thing it
+        exists to recognize."""
         color = _hsv_swatch_bgr()
-
-        def draw(crop):
-            h, w = crop.shape[:2]
-            cv2.line(crop, (w // 2, 5), (w // 2, h - 5), color, 2)
-
-        frame = _synthetic_frame(analyzer, draw)
-        analyzer.detect_map_boundary(frame)
+        frame = _synthetic_frame(
+            analyzer, lambda crop: _draw_arc(crop, color, radius=300, angle_span_deg=60))
+        assert analyzer.detect_map_boundary(frame) is not None
         assert analyzer.get_last_boundary_had_thin_component() is True
 
     def test_a_thick_blob_does_not_set_had_thin_component(self, analyzer):
@@ -173,21 +268,42 @@ class TestThinComponentShapeCheck:
         assert analyzer.detect_map_boundary(frame) is None
         assert analyzer.get_last_boundary_had_thin_component() is False
 
-    def test_a_thin_but_too_short_line_still_sets_had_thin_component(self, analyzer):
-        """The exact ADR 108 fragmentation case: thin enough to be a real
-        line, too short to pass the span gate and be formally detected —
-        this is what D3 exists to keep as 'worth a look', unlike a raw
-        pixel-count floor which cannot see the difference between this and
-        a solid terrain blob of the same total size."""
+    def test_a_thin_but_too_short_arc_still_sets_had_thin_component(self, analyzer):
+        """The exact ADR 108 fragmentation case: thin and curved enough to
+        be a real line, too short to pass the span gate and be formally
+        detected — this is what D9 exists to keep as 'worth a look', unlike
+        a raw pixel-count floor which cannot see the difference between
+        this and a solid terrain blob of the same total size."""
         color = _hsv_swatch_bgr()
-
-        def draw(crop):
-            h, w = crop.shape[:2]
-            cv2.line(crop, (w // 2 - 10, h // 2), (w // 2 + 10, h // 2), color, 2)
-
-        frame = _synthetic_frame(analyzer, draw)
+        frame = _synthetic_frame(
+            analyzer, lambda crop: _draw_arc(crop, color, radius=300, angle_span_deg=13))
         assert analyzer.detect_map_boundary(frame) is None   # too short to formally detect
         assert analyzer.get_last_boundary_had_thin_component() is True
+
+    def test_a_sinuous_trail_does_not_set_had_thin_component(self, analyzer):
+        """ADR 117 D10: live-confirmed confound, 2026-09-20 — a flight-path
+        trail passes every other gate (thin, area 352 >= 20, elongation 4.0
+        >= 1.8, radial fraction 0.01) and is excluded only by this check:
+        its points do not fit any single circle well (residual/span 0.136,
+        vs. 0.003-0.006 measured on real confirmed boundary detections the
+        same night)."""
+        color = _hsv_swatch_bgr()
+        frame = _synthetic_frame(analyzer, lambda crop: _draw_zigzag(crop, color))
+        analyzer.detect_map_boundary(frame)
+        assert analyzer.get_last_boundary_had_thin_component() is False
+
+    def test_a_small_circle_arc_does_not_set_had_thin_component(self, analyzer):
+        """ADR 117 D11: live-confirmed confound, 2026-09-20/21 — a fragment
+        of a circular UI marker's rim passes every gate through D10 (thin,
+        area 63 >= 20, elongation 2.79 >= 1.8, radial fraction 0.09, and a
+        clean arc fit — residual/span 0.009, comfortably under D10's 0.03).
+        It is excluded only by D11: the fitted circle itself is tiny (~20 px
+        radius), nowhere near the 52-287 px range measured for real
+        boundary lines."""
+        color = _hsv_swatch_bgr()
+        frame = _synthetic_frame(analyzer, lambda crop: _draw_small_circle_arc(crop, color))
+        analyzer.detect_map_boundary(frame)
+        assert analyzer.get_last_boundary_had_thin_component() is False
 
 
 # --- the capture gate --------------------------------------------------------
@@ -266,7 +382,7 @@ def test_the_existing_gates_still_apply(kw):
     assert h._analyzer.calls == 0, "minimap_present should not be reached"
 
 
-# --- ADR 117 D3: skip when nothing on the minimap is thin enough to be a line
+# --- ADR 117 D9: skip when nothing on the minimap is thin enough to be a line
 
 def test_a_minimap_with_no_thin_component_is_skipped():
     h = _handler(present=True, had_thin_component=False)

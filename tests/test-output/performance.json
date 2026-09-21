@@ -1,12 +1,162 @@
 {
-  "timestamp": "2026-09-20T18:39:18.140397",
+  "timestamp": "2026-09-21T02:16:29.518609",
   "version": "1.8.11",
   "tests": {
-    "test_repeated_key_events_open_exactly_one_display": {
-      "duration": 0.0007298868149518967,
+    "test_empty_crop_returns_none": {
+      "duration": 0.0033242132049053907,
       "runs": 1,
-      "min": 0.0007298868149518967,
-      "max": 0.0007298868149518967
+      "min": 0.0033242132049053907,
+      "max": 0.0033242132049053907
+    },
+    "test_single_dot_bearing": {
+      "duration": 0.0005981101130601019,
+      "runs": 8,
+      "min": 0.0005029421299695969,
+      "max": 0.0006756789516657591
+    },
+    "test_single_dot_radius": {
+      "duration": 0.0005674219379822413,
+      "runs": 3,
+      "min": 0.0005157419946044683,
+      "max": 0.0006172789726406336
+    },
+    "test_two_dots_area_weighted_centroid": {
+      "duration": 0.0005080250557512045,
+      "runs": 1,
+      "min": 0.0005080250557512045,
+      "max": 0.0005080250557512045
+    },
+    "test_red_outside_circle_mask_is_ignored": {
+      "duration": 0.0005473489873111248,
+      "runs": 1,
+      "min": 0.0005473489873111248,
+      "max": 0.0005473489873111248
+    },
+    "test_oversized_component_rejected": {
+      "duration": 0.0005501529667526484,
+      "runs": 1,
+      "min": 0.0005501529667526484,
+      "max": 0.0005501529667526484
+    },
+    "test_undersized_component_rejected": {
+      "duration": 0.0005307490937411785,
+      "runs": 1,
+      "min": 0.0005307490937411785,
+      "max": 0.0005307490937411785
+    },
+    "test_wraparound_red_hue_detected": {
+      "duration": 0.0005698488093912601,
+      "runs": 1,
+      "min": 0.0005698488093912601,
+      "max": 0.0005698488093912601
+    },
+    "test_reference_frame_cluster_bearing": {
+      "duration": 0.057533765910193324,
+      "runs": 1,
+      "min": 0.057533765910193324,
+      "max": 0.057533765910193324
+    },
+    "test_reference_frame_rejects_lock_ring_and_route_line": {
+      "duration": 0.08770486386492848,
+      "runs": 1,
+      "min": 0.08770486386492848,
+      "max": 0.08770486386492848
+    },
+    "test_desert_cluster_bearing": {
+      "duration": 0.050724148051813245,
+      "runs": 1,
+      "min": 0.050724148051813245,
+      "max": 0.050724148051813245
+    },
+    "test_rim_merged_output_well_formed": {
+      "duration": 0.05291360896080732,
+      "runs": 1,
+      "min": 0.05291360896080732,
+      "max": 0.05291360896080732
+    },
+    "test_method_matches_pure_function_and_caches": {
+      "duration": 0.0858165118843317,
+      "runs": 1,
+      "min": 0.0858165118843317,
+      "max": 0.0858165118843317
+    },
+    "test_method_failsafe_without_minimap_crop": {
+      "duration": 0.00010628905147314072,
+      "runs": 1,
+      "min": 0.00010628905147314072,
+      "max": 0.00010628905147314072
+    },
+    "test_components_synthetic_dot_polar": {
+      "duration": 0.001183230895549059,
+      "runs": 1,
+      "min": 0.001183230895549059,
+      "max": 0.001183230895549059
+    },
+    "test_aggregate_matches_components": {
+      "duration": 0.0013069137930870056,
+      "runs": 1,
+      "min": 0.0013069137930870056,
+      "max": 0.0013069137930870056
+    },
+    "test_reference_frame_ring_occupancy": {
+      "duration": 0.05183926783502102,
+      "runs": 1,
+      "min": 0.05183926783502102,
+      "max": 0.05183926783502102
+    },
+    "test_desert_ring_occupancy": {
+      "duration": 0.0507385958917439,
+      "runs": 1,
+      "min": 0.0507385958917439,
+      "max": 0.0507385958917439
+    },
+    "test_rim_merged_ring_occupancy": {
+      "duration": 0.05351002002134919,
+      "runs": 1,
+      "min": 0.05351002002134919,
+      "max": 0.05351002002134919
+    },
+    "test_components_method_matches_pure_function": {
+      "duration": 0.08533471799455583,
+      "runs": 1,
+      "min": 0.08533471799455583,
+      "max": 0.08533471799455583
+    },
+    "test_components_method_empty_on_black_frame": {
+      "duration": 0.0011059511452913284,
+      "runs": 1,
+      "min": 0.0011059511452913284,
+      "max": 0.0011059511452913284
+    },
+    "test_the_boundary_is_found_at_the_centre_on_crossing_frames": {
+      "duration": 0.1516260530333966,
+      "runs": 1,
+      "min": 0.1516260530333966,
+      "max": 0.1516260530333966
+    },
+    "test_island_terrain_is_not_read_as_a_boundary": {
+      "duration": 0.06805205787532032,
+      "runs": 1,
+      "min": 0.06805205787532032,
+      "max": 0.06805205787532032
+    },
+    "test_the_detector_reports_which_side_the_boundary_is_on": {
+      "duration": 0.001297208946198225,
+      "runs": 1,
+      "min": 0.001297208946198225,
+      "max": 0.001297208946198225
+    },
+    "test_the_turn_rolls_away_from_the_boundary": {
+      "duration": 0.7573527367785573,
+      "runs": 1,
+      "min": 0.7573527367785573,
+      "max": 0.7573527367785573
+    },
+    "test_the_turn_cap_is_not_shortened_without_new_evidence": {
+      "duration": 0.021332733100280166,
+      "runs": 1,
+      "min": 0.021332733100280166,
+      "max": 0.021332733100280166
     }
   }
 }

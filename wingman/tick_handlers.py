@@ -1100,15 +1100,16 @@ class BoundaryPerceptionHandler:
         # than silently dropped — if this dominates, the capture is being asked
         # for during a screen that has no minimap and the gate above is the bug.
         self._blind_no_minimap_skips = 0
-        # ADR 117 D2 (2026-09-20): three real blind captures that session all
-        # showed a minimap with terrain but no real boundary line — a raw
-        # pixel-count floor was tried first, but visualizing the actual
-        # matched pixels (same day) found rocky/dirt terrain trivially
-        # clears any pixel-count floor, since terrain hue falls in the same
-        # HSV range as the boundary. D3 replaced the count with a
-        # shape-aware check (Analyzer.get_last_boundary_had_thin_component):
-        # terrain is unambiguously too THICK (34.5-50.2 px) to pass, where a
-        # real fragmented line is thin (1.4-9.2 px) even when too short to
+        # ADR 117 D8 (2026-09-20, superseded same day by D9): three real
+        # blind captures that session all showed a minimap with terrain but
+        # no real boundary line — a raw pixel-count floor was tried first,
+        # but visualizing the actual matched pixels (same day) found
+        # rocky/dirt terrain trivially clears any pixel-count floor, since
+        # terrain hue falls in the same HSV range as the boundary. D9
+        # replaced the count with a shape-aware check
+        # (Analyzer.get_last_boundary_had_thin_component): terrain is
+        # unambiguously too THICK (34.5-50.2 px) to pass, where a real
+        # fragmented line is thin (1.4-9.2 px) even when too short to
         # be formally detected.
         self._blind_no_boundary_line_skips = 0
         self._boundary_near_frac = float(minimap_cfg.get("boundary_near_frac", 0.25))
@@ -1402,7 +1403,7 @@ class BoundaryPerceptionHandler:
                 logger.debug("MAP BOUNDARY: blind capture skipped — no minimap "
                              "drawn (%d so far)", self._blind_no_minimap_skips)
             return False
-        # ADR 117 D3: a minimap is present but nothing on it is thin enough
+        # ADR 117 D9: a minimap is present but nothing on it is thin enough
         # to plausibly be a boundary line — genuinely no line on screen (the
         # aircraft isn't near an edge, or only thick terrain shares the
         # boundary hue), not a detector miss. Same not-a-timer-advance
