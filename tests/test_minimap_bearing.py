@@ -467,6 +467,10 @@ def test_the_detector_reports_which_side_the_boundary_is_on():
         a._boundary_void_s_max = 35
         a._boundary_void_radius_frac = 0.78
         a._minimap_void_cache = None
+        # ADR 117 D3: shape-aware blind-capture signal, read unconditionally
+        # by detect_map_boundary regardless of whether a test cares about it.
+        a._boundary_thin_component_max_radial_frac = 0.75
+        a._boundary_thin_component_min_elongation = 1.8
         return a.detect_map_boundary(img)
 
     right = _reading(150)

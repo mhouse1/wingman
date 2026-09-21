@@ -1010,6 +1010,27 @@ class GameStateAnalyzer:
             (minimap_cfg or {}).get("boundary_max_thickness_frac", 0.10))
         self._boundary_min_span_frac = float(
             minimap_cfg.get("boundary_min_span_frac", 0.5))
+        # ADR 117 D3: how far from center a component's centroid may sit and
+        # still count toward get_last_boundary_had_thin_component(). Measured
+        # 2026-09-20 on 3 real blind frames: every compass-letter stroke
+        # fragment that passed the thickness+area check (a false positive for
+        # this diagnostic — letters are thin by construction, same as a real
+        # line) had its centroid at radial fraction 0.86-0.91, while every
+        # documented real detection (this file's own detect_map_boundary
+        # docstring) sits at 0.10-0.62. 0.75 sits in that gap. Scoped to this
+        # diagnostic signal only — does NOT affect the min_span/max_thickness
+        # acceptance below, which already excludes letters on span alone.
+        self._boundary_thin_component_max_radial_frac = float(
+            minimap_cfg.get("boundary_thin_component_max_radial_frac", 0.75))
+        # ADR 117 D3: a compact UI marker (a target/waypoint ring, say) is
+        # also thin by the distance-transform test — a ring's stroke has the
+        # same small local thickness a line does — but its bounding box is
+        # roughly square, unlike even a short real line fragment. Measured
+        # 2026-09-20: a yellow objective-ring icon at radial fraction 0.71-
+        # 0.73 (inside the radial limit above) had a 16x17 bounding box,
+        # aspect ratio 1.06. Requires elongation, not just thinness.
+        self._boundary_thin_component_min_elongation = float(
+            minimap_cfg.get("boundary_thin_component_min_elongation", 1.8))
         # ADR 133: the corroborated span and the void that corroborates it.
         self._boundary_relaxed_span_frac = float(
             minimap_cfg.get("boundary_relaxed_span_frac", 0.0))
@@ -1029,12 +1050,16 @@ class GameStateAnalyzer:
         self._minimap_min_blob_px = int(minimap_cfg.get("min_blob_px", 4))
         self._minimap_max_blob_px = int(minimap_cfg.get("max_blob_px", 120))
         self._minimap_circle_cache: "tuple[int, int, np.ndarray] | None" = None
-        # ADR 117 D2: raw (pre-shape-filter) boundary-hue pixel count from the
-        # last detect_map_boundary() call — lets a caller (the blind-frame
-        # capture) tell "no boundary-colored pixels at all" apart from "some
-        # exist but didn't pass the line-likeness filter" without redoing the
-        # crop/HSV/mask work itself. 0 until the first real call.
-        self._last_boundary_raw_px: int = 0
+        # ADR 117 D3: whether the last detect_map_boundary() call found ANY
+        # component thin enough to plausibly be a real (if fragmented or
+        # too-short) boundary line, independent of whether that component
+        # also passed the full span+pixel-count acceptance. Superseded D2's
+        # raw pixel COUNT — measured live 2026-09-20: a rocky/dirt map's
+        # terrain trivially clears any pixel-count floor (terrain hue falls
+        # in the same HSV range) while still being unambiguously too THICK
+        # (34.5-50.2 px) to be mistaken for a line by this shape check.
+        # False until the first real call.
+        self._last_boundary_had_thin_component: bool = False
         # HLDD 001 Phase 1: forward sky-occlusion terrain-ahead detector.
         # Detection config (crop, sky HSV) lives here, top-level, mirroring
         # minimap.boundary_hsv — the trigger threshold/debounce that
@@ -3886,15 +3911,18 @@ class GameStateAnalyzer:
             logger.debug("Analyzer: minimap_present failed: %s", e)
             return True
 
-    def get_last_boundary_raw_px(self) -> int:
-        """Raw (pre-shape-filter) boundary-hue pixel count from the last
-        detect_map_boundary() call. ADR 117 D2: distinguishes a tick with no
-        boundary-colored pixels at all (nothing to see — the aircraft isn't
-        near an edge) from one where some exist but didn't pass the
-        line-likeness filter (a possible detector miss on a real, if
-        fragmented, line) — both read as `None` from detect_map_boundary()
-        alone."""
-        return self._last_boundary_raw_px
+    def get_last_boundary_had_thin_component(self) -> bool:
+        """Did the last detect_map_boundary() call find any component thin
+        enough to plausibly be a real (if fragmented or too-short) boundary
+        line? ADR 117 D3: distinguishes a tick with nothing line-like on
+        screen at all (nothing to see — the aircraft isn't near an edge, or
+        only thick terrain shares the boundary hue) from one where a
+        plausible line fragment exists but didn't pass the full span+pixel-
+        count acceptance — both read as `None` from detect_map_boundary()
+        alone. A raw pixel COUNT (D2, superseded) could not make this
+        distinction: rocky/dirt terrain trivially clears any count floor
+        while never being thin enough to pass this shape check."""
+        return self._last_boundary_had_thin_component
 
     def detect_map_boundary(self, frame) -> "tuple | None":
         """Nearest map-boundary point on the minimap, or None.
@@ -3913,14 +3941,14 @@ class GameStateAnalyzer:
         loaded.
         """
         if self.crops is None or "MINIMAP" not in self.crops:
-            self._last_boundary_raw_px = 0
+            self._last_boundary_had_thin_component = False
             return None
         try:
             crop = get_crop(frame, *self.crops["MINIMAP"][:4])
             height, width = crop.shape[:2]
             radius = min(width, height) / 2.0
             if radius <= 0:
-                self._last_boundary_raw_px = 0
+                self._last_boundary_had_thin_component = False
                 return None
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, self._boundary_hsv_lower, self._boundary_hsv_upper)
@@ -3930,7 +3958,6 @@ class GameStateAnalyzer:
                 cache = (width, height, _minimap_circle_mask(width, height, r_px))
                 self._minimap_circle_cache = cache
             mask &= cache[2]
-            self._last_boundary_raw_px = int((mask > 0).sum())
             # ADR 108: reconnect the line before measuring it. The mask finds
             # the boundary — 550 to 1400 px of it on the nine 2026-09-03
             # crossing frames — but MetalStorm's minimap update left it thin and
@@ -3942,7 +3969,7 @@ class GameStateAnalyzer:
                 (mask > 0).astype(np.uint8) * 255, cv2.MORPH_CLOSE,
                 self._boundary_close_kernel,
                 iterations=self._boundary_close_iters)
-            n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
                 (mask > 0).astype(np.uint8), connectivity=8)
             # Pick the most line-LIKE component, not the largest. Spatial
             # coherence alone is satisfied by a big terrain blob, and on the new
@@ -3975,17 +4002,47 @@ class GameStateAnalyzer:
                 if void_frac > self._boundary_void_min_frac:
                     min_span = min(min_span,
                                    self._boundary_relaxed_span_frac * radius)
+            # ADR 117 D3: a shape-aware "is anything line-LIKE on screen at
+            # all" signal, independent of whether it passes the full
+            # acceptance below (span + total pixel count). Computed for
+            # EVERY component, not just ones already past the span filter —
+            # a real line fragment can be thin but too short to span-qualify,
+            # which is exactly the case the blind-frame capture wants to
+            # keep as "worth a look," while a thick terrain blob (34.5-50.2
+            # px, comment above) never qualifies regardless of its span or
+            # total pixel count. Gated on the same _boundary_min_px floor
+            # used below for the winning component, so a 1-2px noise speck
+            # cannot masquerade as a "thin component."
+            had_thin_component = False
             best = None
+            cx_full = (width - 1) / 2.0
+            cy_full = (height - 1) / 2.0
+            thin_radial_limit = self._boundary_thin_component_max_radial_frac * radius
             for i in range(1, n_labels):
+                area = int(stats[i, cv2.CC_STAT_AREA])
+                comp = (labels == i).astype(np.uint8)
+                thickness = cv2.distanceTransform(comp, cv2.DIST_L2, 3).max()
+                if area >= self._boundary_min_px and thickness <= max_thick_px:
+                    # ADR 117 D3: a thin, reasonably-sized component near the
+                    # rim is very likely a compass-letter stroke fragment —
+                    # letters are thin by construction, same as a real line —
+                    # not evidence of one. See the radial-limit comment above.
+                    cx_i, cy_i = centroids[i]
+                    w_i = int(stats[i, cv2.CC_STAT_WIDTH])
+                    h_i = int(stats[i, cv2.CC_STAT_HEIGHT])
+                    elongation = max(w_i, h_i) / max(1, min(w_i, h_i))
+                    if (np.hypot(cx_i - cx_full, cy_i - cy_full) <= thin_radial_limit
+                            and elongation >= self._boundary_thin_component_min_elongation):
+                        had_thin_component = True
                 span = max(stats[i, cv2.CC_STAT_WIDTH],
                            stats[i, cv2.CC_STAT_HEIGHT])
                 if span < min_span or span <= 0:
                     continue
-                comp = (labels == i).astype(np.uint8)
-                if cv2.distanceTransform(comp, cv2.DIST_L2, 3).max() > max_thick_px:
+                if thickness > max_thick_px:
                     continue
                 if best is None or span > best[0]:
                     best = (span, i)
+            self._last_boundary_had_thin_component = had_thin_component
             if best is None:
                 return None
             ys, xs = np.nonzero(labels == best[1])
@@ -4005,7 +4062,7 @@ class GameStateAnalyzer:
                     float(dx[i] / radius))
         except Exception as e:
             logger.warning("Analyzer: detect_map_boundary failed: %s", e)
-            self._last_boundary_raw_px = 0
+            self._last_boundary_had_thin_component = False
             return None
 
     def detect_terrain_ahead(self, frame) -> "float | None":

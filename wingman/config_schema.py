@@ -416,7 +416,6 @@ SCHEMA = Section(
             "blind_capture_max": _int(0),       # ADR 117
             "blind_capture_interval_s": _num(0),
             "minimap_present_min_px": _int(0),  # ADR 117: minimap drawn at all
-            "blind_capture_min_raw_px": _int(0),  # ADR 117 D2: a real line, not noise
             "mask_radius_frac": FRACTION,
             "min_blob_px": _int(0),
             "max_blob_px": _int(0),
@@ -429,6 +428,8 @@ SCHEMA = Section(
             "boundary_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
             "boundary_min_px": _int(0),
             "boundary_min_span_frac": FRACTION,
+            "boundary_thin_component_max_radial_frac": FRACTION,  # ADR 117 D3
+            "boundary_thin_component_min_elongation": _num(1),  # ADR 117 D3
             "boundary_relaxed_span_frac": _num(0),   # ADR 133
             "boundary_void_min_frac": _num(0),
             "boundary_void_v_max": _int(0),

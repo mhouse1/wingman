@@ -15,6 +15,7 @@ import collections
 from pathlib import Path
 
 import cv2
+import numpy as np
 import pytest
 import yaml
 
@@ -30,11 +31,12 @@ NO_MINIMAP = ["blind_20260905_220822_7.png", "blind_20260905_221500_12.png",
               "blind_20260905_222526_19.png", "blind_20260905_223558_27.png"]
 WITH_MINIMAP = ["blind_20260905_220722_6.png", "blind_20260905_221239_10.png",
                 "blind_20260905_223440_26.png", "rtb_20260905_230545_crossing1.png"]
-# ADR 117 D2, operator review 2026-09-20: a minimap is drawn (passes
-# minimap_present) but carries no meaningful boundary-hue color — visually
-# no line anywhere on the disc, the aircraft simply wasn't near an edge.
-# Measured raw boundary-hue pixel counts: 183, 297, 309 — all well under
-# ADR 108's documented 550-1400 px for a real (if fragmented) line.
+# ADR 117 D2/D3, operator review 2026-09-20: a minimap is drawn (passes
+# minimap_present) but carries no real boundary line — visually confirmed
+# by inspection, and by visualizing the matched pixels directly: they sit
+# either on the compass rim's decorative band or scattered across brown/dirt
+# terrain (which shares the boundary hue), never forming anything thin
+# enough to be a plausible line fragment.
 NO_BOUNDARY_LINE = ["blind_20260920_161546_1.png", "blind_20260920_162157_2.png",
                     "blind_20260920_162742_3.png"]
 
@@ -93,61 +95,125 @@ def test_an_unreadable_frame_fails_OPEN(analyzer):
     assert analyzer.minimap_present(object()) is True
 
 
-# --- ADR 117 D2: a minimap with no boundary line is not worth capturing -----
+# --- ADR 117 D3: a minimap with no boundary line is not worth capturing -----
 
 @pytest.mark.parametrize("name", NO_BOUNDARY_LINE)
 def test_a_minimap_with_no_boundary_line_is_still_present(analyzer, name):
     """minimap_present() alone can't tell these apart from a fragmented-but-
     real line — both pass its low (50 px) bar. That distinction needs the
-    raw pixel MASS, checked separately below."""
+    shape-aware check, verified separately below."""
     assert analyzer.minimap_present(_frame(name)) is True
 
 
 @pytest.mark.parametrize("name", NO_BOUNDARY_LINE)
-def test_a_minimap_with_no_boundary_line_reads_below_the_real_line_floor(analyzer, name):
+def test_a_minimap_with_no_boundary_line_has_no_thin_component(analyzer, name):
     """Real evidence, not a threshold picked in the abstract: three actual
-    blind captures, all showing terrain but no boundary color on inspection,
-    all measuring well under ADR 108's documented 550-1400 px real-line
-    range."""
+    blind captures. A first cut (D2) used a raw pixel-count floor and
+    called these "below the real-line range" — but visualizing the matched
+    pixels directly (same day) found a raw count is not reliable evidence
+    either way: rocky/dirt terrain shares the boundary hue and can produce
+    hundreds to thousands of matching pixels with no line present. The
+    shape check (is anything actually THIN, not just present) is what
+    correctly rejects all three."""
     frame = _frame(name)
     assert analyzer.detect_map_boundary(frame) is None   # still "blind" today
-    raw_px = analyzer.get_last_boundary_raw_px()
-    assert raw_px < _cfg()["minimap"]["blind_capture_min_raw_px"]
+    assert analyzer.get_last_boundary_had_thin_component() is False
 
 
-def test_the_raw_px_threshold_sits_in_the_measured_gap():
-    """This session's noise ceiling (309 px) vs. ADR 108's documented real-
-    line floor (550 px) — the same 'sits in the gap' reasoning already used
-    for minimap_present_min_px."""
-    threshold = _cfg()["minimap"]["blind_capture_min_raw_px"]
-    assert 309 < threshold < 550
+# --- ADR 117 D3: synthetic geometry for the shape-aware signal --------------
+#
+# detect_map_boundary otherwise only has archived-corpus coverage, skipped
+# whenever that corpus isn't present (as it isn't here — see NO_MINIMAP/
+# WITH_MINIMAP above). A thin line and a thick blob, both in the exact
+# boundary hue, are the two cases the shape check exists to tell apart.
+
+def _hsv_swatch_bgr(h=18, s=180, v=200):
+    hsv = np.uint8([[[h, s, v]]])
+    return tuple(int(c) for c in cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0])
+
+
+def _synthetic_frame(analyzer, draw_fn):
+    """A 1920x1200 frame, blank except for the MINIMAP crop, which draw_fn
+    paints into (crop-local pixel coordinates)."""
+    frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
+    x1, y1, x2, y2 = analyzer.crops["MINIMAP"][:4]
+    h, w = frame.shape[:2]
+    px1, py1 = int(w * x1), int(h * y1)
+    px2, py2 = int(w * x2), int(h * y2)
+    draw_fn(frame[py1:py2, px1:px2])
+    return frame
+
+
+class TestThinComponentShapeCheck:
+    def test_a_thin_line_sets_had_thin_component(self, analyzer):
+        color = _hsv_swatch_bgr()
+
+        def draw(crop):
+            h, w = crop.shape[:2]
+            cv2.line(crop, (w // 2, 5), (w // 2, h - 5), color, 2)
+
+        frame = _synthetic_frame(analyzer, draw)
+        analyzer.detect_map_boundary(frame)
+        assert analyzer.get_last_boundary_had_thin_component() is True
+
+    def test_a_thick_blob_does_not_set_had_thin_component(self, analyzer):
+        """The terrain case: plenty of matching pixels, none of them thin."""
+        color = _hsv_swatch_bgr()
+
+        def draw(crop):
+            h, w = crop.shape[:2]
+            cv2.circle(crop, (w // 2, h // 2), min(w, h) // 4, color, -1)
+
+        frame = _synthetic_frame(analyzer, draw)
+        analyzer.detect_map_boundary(frame)
+        assert analyzer.get_last_boundary_had_thin_component() is False
+
+    def test_nothing_drawn_reads_no_thin_component(self, analyzer):
+        frame = _synthetic_frame(analyzer, lambda crop: None)
+        assert analyzer.detect_map_boundary(frame) is None
+        assert analyzer.get_last_boundary_had_thin_component() is False
+
+    def test_a_thin_but_too_short_line_still_sets_had_thin_component(self, analyzer):
+        """The exact ADR 108 fragmentation case: thin enough to be a real
+        line, too short to pass the span gate and be formally detected —
+        this is what D3 exists to keep as 'worth a look', unlike a raw
+        pixel-count floor which cannot see the difference between this and
+        a solid terrain blob of the same total size."""
+        color = _hsv_swatch_bgr()
+
+        def draw(crop):
+            h, w = crop.shape[:2]
+            cv2.line(crop, (w // 2 - 10, h // 2), (w // 2 + 10, h // 2), color, 2)
+
+        frame = _synthetic_frame(analyzer, draw)
+        assert analyzer.detect_map_boundary(frame) is None   # too short to formally detect
+        assert analyzer.get_last_boundary_had_thin_component() is True
 
 
 # --- the capture gate --------------------------------------------------------
 
 class _AnalyzerStub:
-    def __init__(self, present, raw_px=1000):
+    def __init__(self, present, had_thin_component=True):
         self.present = present
-        self.raw_px = raw_px
+        self.had_thin_component = had_thin_component
         self.calls = 0
 
     def minimap_present(self, frame):
         self.calls += 1
         return self.present
 
-    def get_last_boundary_raw_px(self):
-        return self.raw_px
+    def get_last_boundary_had_thin_component(self):
+        return self.had_thin_component
 
 
-def _handler(present=True, interval=300.0, cap=120, raw_px=1000, min_raw_px=400):
+def _handler(present=True, interval=300.0, cap=120, had_thin_component=True):
     h = BoundaryPerceptionHandler.__new__(BoundaryPerceptionHandler)
-    h._analyzer = _AnalyzerStub(present, raw_px)
+    h._analyzer = _AnalyzerStub(present, had_thin_component)
     h._boundary_recent = collections.deque(maxlen=3)
     h._blind_capture_max = cap
     h._blind_capture_interval_s = interval
     h._blind_capture_next_ts = 0.0
     h._blind_no_minimap_skips = 0
-    h._blind_capture_min_raw_px = min_raw_px
     h._blind_no_boundary_line_skips = 0
     h._rtb_capture_max = 5
     h._approach_capture_max = 5
@@ -200,27 +266,27 @@ def test_the_existing_gates_still_apply(kw):
     assert h._analyzer.calls == 0, "minimap_present should not be reached"
 
 
-# --- ADR 117 D2: skip when the minimap has no meaningful boundary color -----
+# --- ADR 117 D3: skip when nothing on the minimap is thin enough to be a line
 
-def test_a_minimap_with_no_boundary_color_is_skipped():
-    h = _handler(present=True, raw_px=200, min_raw_px=400)
+def test_a_minimap_with_no_thin_component_is_skipped():
+    h = _handler(present=True, had_thin_component=False)
     assert h.maybe_capture_blind(object(), 100.0, None, True, False) is False
     assert h._blind_no_boundary_line_skips == 1
 
 
-def test_a_minimap_at_or_above_the_floor_is_captured():
-    h = _handler(present=True, raw_px=400, min_raw_px=400)
+def test_a_minimap_with_a_thin_component_is_captured():
+    h = _handler(present=True, had_thin_component=True)
     assert h.maybe_capture_blind(object(), 100.0, None, True, False) is True
 
 
-def test_a_no_boundary_color_skip_does_not_spend_the_interval():
+def test_a_no_thin_component_skip_does_not_spend_the_interval():
     """Same reasoning as the no-minimap skip: a tick with nothing to see must
     not burn the interval a genuine fragmented-line miss would need."""
-    h = _handler(present=True, raw_px=200, min_raw_px=400)
+    h = _handler(present=True, had_thin_component=False)
     h.maybe_capture_blind(object(), 100.0, None, True, False)
     assert h._blind_capture_next_ts == 0.0
 
-    h._analyzer.raw_px = 1000
+    h._analyzer.had_thin_component = True
     assert h.maybe_capture_blind(object(), 100.0, None, True, False) is True
     assert h._blind_capture_next_ts == pytest.approx(400.0)
 

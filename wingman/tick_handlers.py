@@ -1100,16 +1100,16 @@ class BoundaryPerceptionHandler:
         # than silently dropped — if this dominates, the capture is being asked
         # for during a screen that has no minimap and the gate above is the bug.
         self._blind_no_minimap_skips = 0
-        # ADR 117 D2, operator review 2026-09-20: three real blind captures
-        # that session all showed a minimap with terrain but no boundary-hue
-        # pixels forming anything more than scattered noise (183-309 raw px,
-        # measured) — the aircraft simply wasn't near an edge, not a detector
-        # miss. ADR 108's own corpus measured a REAL (if fragmented) line at
-        # 550-1400 raw px even when the shape filter rejected every fragment.
-        # 400 sits in that gap, same reasoning as minimap_present_min_px.
-        # Below it: nothing worth spending the capture budget on to explain.
-        self._blind_capture_min_raw_px = int(
-            minimap_cfg.get("blind_capture_min_raw_px", 400))
+        # ADR 117 D2 (2026-09-20): three real blind captures that session all
+        # showed a minimap with terrain but no real boundary line — a raw
+        # pixel-count floor was tried first, but visualizing the actual
+        # matched pixels (same day) found rocky/dirt terrain trivially
+        # clears any pixel-count floor, since terrain hue falls in the same
+        # HSV range as the boundary. D3 replaced the count with a
+        # shape-aware check (Analyzer.get_last_boundary_had_thin_component):
+        # terrain is unambiguously too THICK (34.5-50.2 px) to pass, where a
+        # real fragmented line is thin (1.4-9.2 px) even when too short to
+        # be formally detected.
         self._blind_no_boundary_line_skips = 0
         self._boundary_near_frac = float(minimap_cfg.get("boundary_near_frac", 0.25))
         self._boundary_turn_min_dist = 1.0
@@ -1402,20 +1402,20 @@ class BoundaryPerceptionHandler:
                 logger.debug("MAP BOUNDARY: blind capture skipped — no minimap "
                              "drawn (%d so far)", self._blind_no_minimap_skips)
             return False
-        # ADR 117 D2: a minimap is present but carries no meaningful amount of
-        # boundary-hue color — genuinely no boundary line on screen (the
-        # aircraft isn't near an edge), not a detector miss. Same
-        # not-a-timer-advance reasoning as the no-minimap skip above: this is
-        # the common case, and must not spend the interval a genuine
-        # fragmented-line miss would need.
-        raw_px = self._analyzer.get_last_boundary_raw_px()
-        if raw_px < self._blind_capture_min_raw_px:
+        # ADR 117 D3: a minimap is present but nothing on it is thin enough
+        # to plausibly be a boundary line — genuinely no line on screen (the
+        # aircraft isn't near an edge, or only thick terrain shares the
+        # boundary hue), not a detector miss. Same not-a-timer-advance
+        # reasoning as the no-minimap skip above: this is the common case,
+        # and must not spend the interval a genuine fragmented-line miss
+        # would need.
+        if not self._analyzer.get_last_boundary_had_thin_component():
             self._blind_no_boundary_line_skips += 1
             if (self._blind_no_boundary_line_skips in (1, 10, 100)
                     or self._blind_no_boundary_line_skips % 500 == 0):
                 logger.debug(
                     "MAP BOUNDARY: blind capture skipped — no boundary line "
-                    "(%d raw px, %d so far)", raw_px, self._blind_no_boundary_line_skips)
+                    "(%d so far)", self._blind_no_boundary_line_skips)
             return False
         self._blind_capture_next_ts = now + self._blind_capture_interval_s
         self._capture_boundary_frame(

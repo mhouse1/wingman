@@ -490,6 +490,10 @@ def _boundary_analyzer():
     a._boundary_close_kernel = _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (5, 5))
     a._boundary_close_iters = 1
     a._boundary_max_thickness_frac = 0.10
+    # ADR 117 D3: shape-aware blind-capture signal, read unconditionally by
+    # detect_map_boundary regardless of whether a test cares about it.
+    a._boundary_thin_component_max_radial_frac = 0.75
+    a._boundary_thin_component_min_elongation = 1.8
     return a
 
 

@@ -636,12 +636,6 @@ behavior_tree:
 # is now a disk guard rather than the thing that ends sampling.
 minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   minimap_present_min_px: 50,
-  # ADR 117 D2, operator review 2026-09-20: 3 real blind captures that
-  # session all measured 183-309 raw boundary-hue px and showed no line on
-  # inspection — the aircraft simply wasn't near an edge. ADR 108's corpus
-  # measured a real (if fragmented) line at 550-1400 raw px even when every
-  # fragment failed the shape filter. 400 sits in that gap.
-  blind_capture_min_raw_px: 400,
   boundary_median_age_s: 5.0, mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
   ema_reset_after_s: 5.0, regroup_enabled: true,
   friendly_hsv: {lower: [40, 90, 90], upper: [85, 255, 255]},
@@ -659,6 +653,20 @@ minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   # Aggregate ratios were tried first and let a ragged landmass straight through.
   boundary_close_iters: 1, boundary_max_thickness_frac: 0.10,
   boundary_min_px: 20, boundary_min_span_frac: 0.5,
+  # ADR 117 D3: how far from center a component may sit and still count as
+  # "a plausible line fragment" for the blind-capture diagnostic. Measured
+  # 2026-09-20: compass-letter stroke fragments (thin by construction, same
+  # as a real line) sat at radial fraction 0.86-0.91 in 3 real blind frames;
+  # every documented real detection (see detect_map_boundary's own
+  # docstring) sits at 0.10-0.62. 0.75 sits in that gap. Does not affect the
+  # main detection acceptance above (min_span already excludes letters).
+  boundary_thin_component_max_radial_frac: 0.75,
+  # ADR 117 D3: a compact UI marker (e.g. a target/waypoint ring) is thin by
+  # the distance-transform test too, but roughly square, unlike even a short
+  # real line fragment. Measured 2026-09-20: a yellow objective-ring icon
+  # had a 16x17 bounding box (aspect ratio 1.06) at radial fraction 0.71-0.73
+  # — inside the radial limit above, only excluded by requiring elongation.
+  boundary_thin_component_min_elongation: 1.8,
   # ADR 133: the corroborated span. The strict gate above needs the boundary to
   # arrive as ONE connected component of 0.5R, and the post-2026-09-02 minimap
   # does not reliably draw it that way — measured on 447 blind frames, EVERY
