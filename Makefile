@@ -485,6 +485,14 @@ r1-probe:
 turn-outcome:
 	$(PYTHON_RUN) scripts/turn-outcome.py $(or $(LOG),wingman.log)
 
+# HLDD 005's SELECT[shadow]/PITCH[shadow] evidence, summed across every
+# session (both shadow logs are rate-limited, so a raw grep -c under-reports
+# past the 10th occurrence — this reads each line's own "(N so far)" instead).
+#   make shadow-report                   # logs/*.log + wingman.log
+#   make shadow-report LOG=logs/<session>.log
+shadow-report:
+	$(PYTHON_RUN) scripts/shadow-report.py $(if $(LOG),$(LOG),)
+
 # Design 012: make frame VIDEO=logs/session_<run_id>.mp4 AT=1842.3 [OUT=/tmp/frame.png]
 frame:
 	$(PYTHON_RUN) scripts/extract-frame.py --video "$(VIDEO)" --at "$(AT)" --out "$(or $(OUT),/tmp/frame.png)"

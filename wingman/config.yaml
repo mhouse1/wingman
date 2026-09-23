@@ -311,8 +311,15 @@ stall_recovery:
   leave_click_delay_s: 1.0    # after clicking LEAVE (squad-leave confirmation), before re-scanning PLAY/READY
   cooldown_s: 20.0            # per-crop minimum between recovery actions
 
-unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 5,
+unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 0,
   dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies,
+  # max_per_episode: 0 (2026-09-21, operator request): stop writing PNGs for
+  # disk growth during long target-tracking sessions — UnknownAnomalyRecorder
+  # .tick()'s own `self._captured >= self._max_per_episode` guard makes this
+  # a clean no-op (0 >= 0 immediately), and per ADR 093 the WARNING log line
+  # keeps firing on its doubling interval regardless, so a real GAME_UNKNOWN
+  # stranding still gets noticed — it just won't have a screenshot attached
+  # until this is raised again.
   # ADR 093: keep warning after the capture cap — silence must mean healthy.
   stuck_warn_interval_s: 300.0, stuck_warn_max_interval_s: 1800.0}
 respawn_detection:
@@ -612,8 +619,15 @@ behavior_tree:
     # detected reliably. The ttg/recover_below_time_s OR-term above is
     # telemetry-only and unaffected by camera view; it is NOT part of
     # this reversion.
+    # capture_max: 0 (2026-09-21, operator request): stop writing PNGs —
+    # long sessions focused on target-tracking work don't need this stream's
+    # disk growth right now. enabled/shadow stay as-is: detection and the
+    # "TERRAIN AHEAD" shadow log this section's own history depends on keep
+    # running unchanged (_capture_terrain_frame's own guard, `capture_max <=
+    # 0: return`, is what makes this a clean no-op rather than a behavior
+    # change). Raise it again for a future live-actuation trial.
     terrain_avoidance: {enabled: true, shadow: true, sky_min_frac: 0.55,
-      confirm_reads: 2, capture_max: 40, capture_cooldown_s: 20.0}
+      confirm_reads: 2, capture_max: 0, capture_cooldown_s: 20.0}
   # HLDD 013 Phase 1: wires the existing, already-selected TACTIC_ATTACK_SUPPORT
   # fallback slot to the existing boundary reading — roll away from the nearest
   # map edge on ticks where nothing else steers at all. Ships shadow-only
@@ -657,6 +671,14 @@ behavior_tree:
 # could not reach past the first map. 300 s x 120 spans a 10 h session; the cap
 # is now a disk guard rather than the thing that ends sampling.
 minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
+  # NOT disabled alongside boundary_capture_max/boundary_approach_capture_max
+  # (2026-09-21 disk-growth pass): test_blind_capture_coverage.py asserts
+  # blind_capture_max * blind_capture_interval_s spans >= 8 hours, by design
+  # ("asserted so a future edit that shrinks coverage fails here rather than
+  # in a session nobody re-reads") — this is ADR 117's "capture what the
+  # other 77% looks like" budget, not disk-hygiene config, and shrinking it
+  # is exactly the regression that test exists to catch. Left alone; ask
+  # explicitly if this one should also come down.
   minimap_present_min_px: 50,
   boundary_median_age_s: 5.0, mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
   ema_reset_after_s: 5.0, regroup_enabled: true,
@@ -735,11 +757,20 @@ minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   # trigger firing on the same frame. Nothing respawns 0.07R from an edge.
   boundary_respawn_settle_s: 5.0,
   boundary_capture_dir: test_screenshots/unknown_anomalies,
-  boundary_capture_max: 20,
+  # Both caps 0 (2026-09-21, operator request): stop writing PNGs to control
+  # disk growth during long target-tracking-focused sessions — see
+  # _capture_boundary_frame's own `cap <= 0: return` guard. The underlying
+  # boundary-reading detection, median filter, and BOUNDARY TURN logging are
+  # unaffected; only this evidence stream (ADR 106's map-clustering
+  # question) pauses. Note: test_minimap_bearing.py's crossing-frame
+  # corpus stops growing too as a direct consequence — that test already
+  # fails independently of this change (see its own docstring) and this
+  # does not fix or worsen it, just freezes the corpus at its current size.
+  boundary_capture_max: 0,
   # Approaches get their OWN budget. A single shared counter gave priority
   # to whichever event arrived first — the frequent one — and cost every
   # crossing frame of the 2026-09-04 session.
-  boundary_approach_capture_max: 10}
+  boundary_approach_capture_max: 0}
 # HLDD 001 phase 1: forward sky-occlusion terrain detection. Detects the
 # ABSENCE of sky (not terrain colour, which varies per map) in a
 # forward-center crop. Range measured directly against two reference
@@ -794,6 +825,14 @@ tracking:
   pitch_min_hold_sec: 0.08
   pitch_max_hold_sec: 0.35
   pitch_command_cooldown_sec: 0.15
+  # Selection Hardening Phase 2 (2026-09-21): shadow only — ranked_lock_priority
+  # stays false here. While false, the ranked candidate pool below is computed
+  # and compared against the real selection every tick, logging only where
+  # they'd disagree (SELECT[shadow]: old=... new=... would change), never
+  # changing what actually gets selected. tolerance is a named guess, not
+  # measured — the shadow log is what should correct it.
+  ranked_lock_priority: false
+  ranked_priority_tolerance_px: 40.0
   lost_timeout_sec: 0.7
   prefer_red_lock: true
   local_roi_enabled: true
@@ -842,7 +881,37 @@ padlock_center_indicator:
   # ADR 140 D6, operator directive 2026-09-20: a real dive pressed this
   # correction 13 times over ~20s with no effect — capped per dive.
   max_correction_attempts: 3
-hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
+hud:
+  # Back on (2026-09-21): the roll_right convergence investigation exhausted
+  # what wingman.log alone can show (episode trace confirmed roll_right
+  # makes no net progress even across sustained 3+ tick streaks, but not
+  # *why*) — next step needs eyes on an actual right-drifting heatdive, and
+  # this plus target_tracking_archive below is what captures that. Off by
+  # default otherwise (see git history / prior comment here) since long
+  # unattended sessions aren't watched live and normally cost nothing to
+  # leave on: sensing/shadow logging (error_norm_y, SELECT[shadow],
+  # PITCH[shadow]) comes from TargetTracker.update() directly, not from this
+  # renderer, so tracking.enabled: true below was never the reason this was
+  # off. Turn back off (hud.enabled: false is a hard override, regardless of
+  # tracking.enabled) once the roll_right question is answered.
+  enabled: false
+  output_path: tests/test-output/live_hud.png
+  interval_sec: 1.0
+  # Timestamped archive of the same annotated frame while target tracking is
+  # active during a secondary-missile encounter (ADR 136 heatdive loop, or a
+  # future HLDD 015 pursuit-mode consumer) -- live_hud.png itself is
+  # overwritten every render, so this is what actually lets a saved frame be
+  # lined up against a wingman.log timestamp for debugging. Capped per
+  # session, same shape as crash_capture's max_per_session (ADR 137 D5).
+  # Back on (2026-09-21): HEATDIVE[roll] confirmed a real, unexplained
+  # roll_right weakness (episode trace: median net progress +0.0145 for
+  # sustained roll_left streaks vs exactly +0.0000 for roll_right) but the
+  # log can't say *why* -- these frames are the next piece of evidence.
+  # Turn back off once that's answered; it isn't needed continuously.
+  target_tracking_archive:
+    enabled: false
+    dir: tests/test-output/target_tracking
+    max_files: 200
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
 # "make rd v"), never the default — a multi-hour session's file size and CPU
 # cost scale with fps. Low by design: this is reviewed at tactic-selection

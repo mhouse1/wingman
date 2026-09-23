@@ -2200,19 +2200,43 @@ class Controller:
         belongs to.
         """
         logger.info("Controller: eject heatdive loop started")
+        # Convergence telemetry (2026-09-21): the ambient path already logs
+        # "Tracker: roll_%s err=..." whenever it actually issues a command,
+        # but this loop — the one axis actually live today — logged nothing
+        # about its own outcome at all, which is exactly the data tuning
+        # kp/deadband/hold needs. `last_err`/`last_cmd` carry the previous
+        # cycle's reading and the command it produced forward one iteration,
+        # so this cycle's fresh reading can be reported against it: did that
+        # roll pulse actually shrink |error|, or not. Reset per dive — no
+        # carry-over from a previous encounter.
+        last_err: "float | None" = None
+        last_cmd: "str | None" = None
         try:
             while not stop_event.is_set() and not self._eject_stop.is_set():
                 try:
                     frame = self._capture.grab_from_thread()
                     obs = self._target_tracker.update(frame)
-                    if obs.get("visible") and obs.get("error_norm") is not None:
+                    err = obs.get("error_norm")
+                    cmd = None
+                    if obs.get("visible") and err is not None:
                         # ignore_cancel: eject_and_dive already called
                         # cancel_mission() before this loop ever started, so
                         # self._mission_cancel stays set for the whole dive —
                         # without this every hold is cut to near-zero on the
                         # first _mission_cancel.wait() poll (measured live,
                         # 2026-09-09: 0-11ms instead of the requested hold).
-                        self.orient_nose_to_target(obs["error_norm"], ignore_cancel=True)
+                        cmd = self.orient_nose_to_target(err, ignore_cancel=True)
+                    if err is not None:
+                        if last_err is not None:
+                            converging = abs(err) < abs(last_err)
+                            logger.debug(
+                                "HEATDIVE[roll]: err=%+.3f (was %+.3f after roll_%s, %s) mode=%s",
+                                err, last_err, last_cmd or "none",
+                                "converging" if converging else "diverging",
+                                obs.get("mode"),
+                            )
+                        last_err = err
+                        last_cmd = cmd
                     ammo = None
                     flares = None
                     health = None

@@ -557,7 +557,7 @@ class TestReferenceFrame:
         # suspiciously small (a real bar is taller than it is wide).
         if obs["centroid_x"] is not None:
             # Re-run internal detect to inspect raw contours
-            raw, _discarded_green = t._detect_targets(frame)
+            raw, _red_hits, _green_hits, _red_won = t._detect_targets(frame)
             for _cx, _cy, area in raw:
                 # All accepted contours must have passed the aspect-ratio filter —
                 # they were accepted, so aspect ratio >= 2.5. Just sanity-check area.
@@ -610,17 +610,19 @@ class TestHudRenderer:
         renderer = HudRenderer.from_config(cfg)
         assert renderer is not None
 
-    def test_from_config_tracking_enabled_activates_hud(self, tmp_path):
-        """tracking.enabled=True must activate HudRenderer even if hud.enabled=False."""
+    def test_from_config_hud_disabled_overrides_tracking_enabled(self, tmp_path):
+        """hud.enabled=False is a hard override (2026-09-21): no renderer is
+        built even with tracking.enabled=True — long unattended sessions can
+        keep sensing/shadow-logging on without paying for a debug view
+        nobody is watching. Inverts this suite's old contract, which
+        required the opposite (tracking.enabled alone used to be enough)."""
         from wingman.hud import HudRenderer
         out = str(tmp_path / "out.png")
         cfg = {
             "hud": {"enabled": False, "output_path": out, "interval_sec": 0.0},
             "tracking": {"enabled": True},
         }
-        with patch("wingman.hud.HudRenderer._launch_feh"):
-            renderer = HudRenderer.from_config(cfg)
-        assert renderer is not None
+        assert HudRenderer.from_config(cfg) is None
 
     def test_from_config_feh_not_launched_when_tracking_disabled(self, tmp_path):
         """feh must not launch when tracking.enabled=False."""
@@ -676,3 +678,70 @@ class TestHudRenderer:
         thread.join(timeout=5)
         tmp_file = output.with_suffix(".tmp.png")
         assert not tmp_file.exists(), "tmp file should be consumed by os.replace"
+
+
+# ---------------------------------------------------------------------------
+# HudRenderer — target-tracking archive (secondary-missile debugging trail)
+# ---------------------------------------------------------------------------
+
+class TestHudRendererArchive:
+    def test_archives_during_game_battle_eject(self, tmp_path):
+        """GAME_BATTLE_EJECT is ADR 136's live heatdive state — must archive."""
+        from wingman.hud import HudRenderer
+        archive_dir = tmp_path / "archive"
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                archive_enabled=True, archive_dir=str(archive_dir))
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        thread = renderer.maybe_render(frame, None, "GAME_BATTLE_EJECT", None, None, None)
+        thread.join(timeout=5)
+        saved = list(archive_dir.glob("*.png"))
+        assert len(saved) == 1
+        assert saved[0].name.startswith("game_battle_eject_")
+
+    def test_does_not_archive_during_ordinary_game_battle(self, tmp_path):
+        """Ordinary GAME_BATTLE is not a secondary-missile encounter — no archive."""
+        from wingman.hud import HudRenderer
+        archive_dir = tmp_path / "archive"
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                archive_enabled=True, archive_dir=str(archive_dir))
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        thread = renderer.maybe_render(frame, None, "GAME_BATTLE", None, None, None)
+        thread.join(timeout=5)
+        assert not archive_dir.exists() or not list(archive_dir.glob("*.png"))
+
+    def test_archive_disabled_by_default(self, tmp_path):
+        """archive_enabled defaults False — no files even during GAME_BATTLE_EJECT."""
+        from wingman.hud import HudRenderer
+        archive_dir = tmp_path / "archive"
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                archive_dir=str(archive_dir))
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        thread = renderer.maybe_render(frame, None, "GAME_BATTLE_EJECT", None, None, None)
+        thread.join(timeout=5)
+        assert not archive_dir.exists() or not list(archive_dir.glob("*.png"))
+
+    def test_archive_capped_per_session(self, tmp_path):
+        """max_files stops new saves without erroring once the cap is hit."""
+        from wingman.hud import HudRenderer
+        archive_dir = tmp_path / "archive"
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                archive_enabled=True, archive_dir=str(archive_dir),
+                                archive_max_files=2)
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        for _ in range(4):
+            thread = renderer.maybe_render(frame, None, "GAME_BATTLE_EJECT", None, None, None)
+            thread.join(timeout=5)
+        assert len(list(archive_dir.glob("*.png"))) == 2
+
+    def test_from_config_reads_archive_block(self, tmp_path):
+        from wingman.hud import HudRenderer
+        out = str(tmp_path / "out.png")
+        archive_dir = str(tmp_path / "archive")
+        cfg = {"hud": {"enabled": True, "output_path": out, "interval_sec": 0.0,
+                        "target_tracking_archive": {"enabled": True, "dir": archive_dir,
+                                                     "max_files": 5}}}
+        renderer = HudRenderer.from_config(cfg)
+        assert renderer is not None
+        assert renderer._archive_enabled is True
+        assert str(renderer._archive_dir) == archive_dir
+        assert renderer._archive_max == 5

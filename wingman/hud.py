@@ -29,6 +29,20 @@ _CYAN = (220, 210, 0)
 _WHITE = (240, 240, 240)
 _DARK = (10, 10, 10)
 _GREY = (140, 140, 140)
+# Reserved exclusively for the pursued-target highlight below — must not
+# collide with a color already meaningful in-frame: the game's own HUD uses
+# green (unlocked enemy marker), red/orange (locked marker), yellow
+# (proximity dot), and blue (edge indicator), and this overlay already uses
+# green/yellow/cyan/grey for other elements above. Magenta is the one color
+# neither palette claims.
+_PURSUIT = (255, 60, 220)
+
+# game_state_name values that mean "target tracking is running during a
+# secondary-missile encounter" — the archive below exists specifically for
+# this window. GAME_BATTLE_EJECT is ADR 136's live heatdive loop; PURSUIT_MODE
+# is HLDD 015's not-yet-built alternative, named here so the archive needs no
+# further change if that ever ships.
+_TARGET_TRACKING_ARCHIVE_STATES = frozenset({"GAME_BATTLE_EJECT", "PURSUIT_MODE"})
 
 
 def _txt(canvas: np.ndarray, text: str, x: int, y: int,
@@ -42,12 +56,26 @@ class HudRenderer:
 
     def __init__(self, output_path: str, interval_sec: float = 1.0,
                  feh_geometry: str = "",
-                 acquisition_region_pct: "tuple[float, float, float, float]" = (0.20, 0.18, 0.80, 0.68)) -> None:
+                 acquisition_region_pct: "tuple[float, float, float, float]" = (0.20, 0.18, 0.80, 0.68),
+                 archive_enabled: bool = False,
+                 archive_dir: str = "tests/test-output/target_tracking",
+                 archive_max_files: int = 200) -> None:
         self._output = Path(output_path)
         self._interval = float(interval_sec)
         self._last_ts: float = 0.0
         self._acq_pct = tuple(float(v) for v in acquisition_region_pct)
         self._render_lock = threading.Lock()
+        # Timestamped archive of the annotated frame while target tracking
+        # runs during a secondary-missile encounter (see
+        # _TARGET_TRACKING_ARCHIVE_STATES) — live_hud.png itself is
+        # overwritten every render, so this is what actually lets a saved
+        # frame be lined up against a wingman.log timestamp for debugging.
+        # Capped per session, same shape as AmmoEventsHandler
+        # ._capture_crash_frame's max_per_session (ADR 137 D5).
+        self._archive_enabled = bool(archive_enabled)
+        self._archive_dir = Path(archive_dir)
+        self._archive_max = int(archive_max_files)
+        self._archive_count = 0
         if feh_geometry:
             self._launch_feh(feh_geometry)
 
@@ -64,11 +92,22 @@ class HudRenderer:
 
     @classmethod
     def from_config(cls, config: dict) -> "HudRenderer | None":
-        """Return a HudRenderer when either tracking.enabled or hud.enabled is true."""
+        """Return a HudRenderer unless hud.enabled is explicitly false.
+
+        hud.enabled is the sole authority (2026-09-21) — tracking.enabled no
+        longer implies a renderer gets built on its own. This decouples
+        rendering from sensing: a long unattended session can keep
+        tracking.enabled: true (needed for error_norm_y/SELECT[shadow]/
+        PITCH[shadow] logging, which comes from TargetTracker.update()
+        directly, not from this renderer) while paying zero per-tick
+        render/disk-write cost for a debug view nobody is watching. Before
+        this, tracking.enabled alone was enough to build a renderer even
+        with hud.enabled: false — exactly the coupling this removes.
+        """
         hud_cfg = config.get("hud", {})
         tracking_enabled = bool(config.get("tracking", {}).get("enabled", False))
         hud_enabled = bool(hud_cfg.get("enabled", True))
-        if not tracking_enabled and not hud_enabled:
+        if not hud_enabled:
             return None
         region = config.get("region", {})
         r_left = int(region.get("left", 0))
@@ -77,11 +116,15 @@ class HudRenderer:
         r_h = int(region.get("height", 1200))
         feh_geometry = f"{r_w // 2}x{r_h // 2}+{r_left + r_w}+{r_top}" if tracking_enabled else ""
         acq_pct = config.get("tracking", {}).get("acquisition_region_pct", (0.20, 0.18, 0.80, 0.68))
+        archive_cfg = hud_cfg.get("target_tracking_archive", {}) or {}
         return cls(
             output_path=hud_cfg.get("output_path", "tests/test-output/live_hud.png"),
             interval_sec=float(hud_cfg.get("interval_sec", 1.0)),
             feh_geometry=feh_geometry,
             acquisition_region_pct=acq_pct,
+            archive_enabled=bool(archive_cfg.get("enabled", False)),
+            archive_dir=str(archive_cfg.get("dir", "tests/test-output/target_tracking")),
+            archive_max_files=int(archive_cfg.get("max_files", 200)),
         )
 
     def maybe_render(
@@ -174,11 +217,26 @@ class HudRenderer:
             err_tag = f"{err:+.3f}" if err is not None else "  n/a"
             _txt(canvas, f"Track:{mode}  {vis_tag}  err={err_tag}  det={n_det}", 8, 66, track_color)
 
-            # Centroid crosshair
+            # Pursued-target highlight — the one target this loop is actually
+            # rolling/pitching toward, called out in a color reserved for
+            # exactly this (see _PURSUIT above) so it reads unambiguously
+            # against the game's own same-frame enemy markers and this HUD's
+            # other overlay elements, especially when several contacts are
+            # visible at once (this is the exact ambiguity the ALTITUDE_SPEED
+            # reference frame in HLDD 005's Selection Hardening raised).
+            # Black outline drawn first so the ring/cross reads against any
+            # background brightness. Solid when confirmed this frame; a
+            # thinner ring plus a "(lost)" label when coasting on the last
+            # known position during LOST_GRACE, so the HUD doesn't imply a
+            # fresh detection that didn't happen.
             if cx is not None and cy_ is not None:
                 px, py = int(cx), int(cy_)
-                cv2.drawMarker(canvas, (px, py), _GREEN, cv2.MARKER_CROSS, 22, 2, cv2.LINE_AA)
-                cv2.circle(canvas, (px, py), 10, _GREEN, 1, cv2.LINE_AA)
+                thick = 2 if visible else 1
+                cv2.circle(canvas, (px, py), 16, _DARK, thick + 2, cv2.LINE_AA)
+                cv2.circle(canvas, (px, py), 16, _PURSUIT, thick, cv2.LINE_AA)
+                cv2.drawMarker(canvas, (px, py), _PURSUIT, cv2.MARKER_CROSS, 26, thick, cv2.LINE_AA)
+                label = "PURSUING" if visible else "PURSUING (lost)"
+                _txt(canvas, label, px + 20, py - 14, _PURSUIT, scale=0.42)
 
             # Local ROI rectangle
             if roi is not None:
@@ -211,6 +269,11 @@ class HudRenderer:
         cv2.line(canvas, (scx - 18, scy), (scx + 18, scy), _GREY, 1)
         cv2.line(canvas, (scx, scy - 18), (scx, scy + 18), _GREY, 1)
 
+        # ── Target-tracking archive (full resolution, before the live_hud
+        # resize below) ───────────────────────────────────────────────────
+        if state in _TARGET_TRACKING_ARCHIVE_STATES:
+            self._archive_frame(canvas, state, ts)
+
         # ── Atomic write ─────────────────────────────────────────────────
         canvas = cv2.resize(canvas, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
         self._output.parent.mkdir(parents=True, exist_ok=True)
@@ -218,3 +281,41 @@ class HudRenderer:
         cv2.imwrite(str(tmp), canvas)
         os.replace(str(tmp), str(self._output))
         logger.debug("HudRenderer: wrote %s", self._output)
+
+    def _archive_frame(self, canvas: np.ndarray, state: str, ts: float) -> None:
+        """Save a timestamped copy of the annotated frame while target
+        tracking is active during a secondary-missile encounter.
+
+        `live_hud.png` is overwritten every render — there is no history to
+        look back at once a session has moved on. This gives a session a
+        persistent trail of frames, named so they can be lined up directly
+        against a `wingman.log` timestamp for debugging (same
+        `time.strftime` precision the log itself uses). Capped per session
+        (`_archive_max`), same shape as `AmmoEventsHandler
+        ._capture_crash_frame` (ADR 137 D5): a silent cap-out would look
+        identical to "nothing else happened," so it is logged explicitly
+        either way, not swallowed.
+        """
+        if not self._archive_enabled:
+            return
+        if self._archive_count >= self._archive_max:
+            logger.debug("HudRenderer archive: session cap (%d) reached — not saving",
+                         self._archive_max)
+            return
+        try:
+            self._archive_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(ts))
+            # Sequence suffix, not just the timestamp: two renders landing in
+            # the same wall-clock second would otherwise silently overwrite
+            # one PNG with the other while the counter still claims both
+            # were saved (same reasoning _capture_crash_frame documents).
+            path = self._archive_dir / f"{state.lower()}_{stamp}_{self._archive_count}.png"
+            if not cv2.imwrite(str(path), canvas):
+                logger.warning("HudRenderer archive: write failed: %s", path)
+                return
+            self._archive_count += 1
+            logger.info("HudRenderer archive: saved %s (%d/%d this session)",
+                        path, self._archive_count, self._archive_max)
+        except Exception as e:
+            logger.warning("HudRenderer archive: failed to save frame: %s: %s",
+                           type(e).__name__, e)

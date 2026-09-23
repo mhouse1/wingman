@@ -48,6 +48,16 @@ class TargetTracker:
 
         self._lost_timeout = float(cfg.get("lost_timeout_sec", 0.70))
         self._prefer_red = bool(cfg.get("prefer_red_lock", True))
+        # HLDD 005 Selection Hardening Phase 2 (2026-09-21): shadow-only —
+        # ranked_lock_priority stays false in shipped config; while false,
+        # the ranked-pool rule below is computed and compared every tick but
+        # never changes what _select_target actually returns (Phase 3, not
+        # built here, is what would consume `true`).
+        self._ranked_lock_priority = bool(cfg.get("ranked_lock_priority", False))
+        # Named guess, not measured — the shadow log this gates is what
+        # should correct it, same status as HLDD 013's seek_center_* starts.
+        self._ranked_priority_tolerance_px = float(
+            cfg.get("ranked_priority_tolerance_px", 40.0))
 
         self._local_roi_enabled = bool(cfg.get("local_roi_enabled", True))
         self._roi_scale = float(cfg.get("local_roi_scale", 0.22))
@@ -115,6 +125,10 @@ class TargetTracker:
         # codebase (ADR 117 D9 / HLDD 013 Phase 1) — 1st/10th/100th, then
         # every 500th. Pure logging; never changes what gets selected.
         self._selection_shadow_count: int = 0
+        # Phase 2's own counter — separate from the one above so each
+        # shadow log's "N so far" reflects its own occurrence count, not a
+        # shared one two different conditions would otherwise both bump.
+        self._ranked_shadow_count: int = 0
 
     @property
     def enabled(self) -> bool:
@@ -179,13 +193,30 @@ class TargetTracker:
             crop = frame[ay1:ay2, ax1:ax2]
             ox, oy = ax1, ay1
 
-        local_hits, local_discarded_green = self._detect_targets(crop)
+        local_hits, local_red_hits, local_green_hits, red_won = self._detect_targets(crop)
         abs_hits = [(ox + lx, oy + ly, a) for lx, ly, a in local_hits]
         selected = self._select_target(abs_hits, w)
+        ref = self._last_x if self._last_x is not None else w / 2.0
 
+        local_discarded_green = local_green_hits if red_won else []
         if local_discarded_green:
-            ref = self._last_x if self._last_x is not None else w / 2.0
             self._log_selection_rationale(ox, oy, local_discarded_green, selected, ref)
+
+        # Selection Hardening Phase 2 (2026-09-21): shadow the ranked-pool
+        # fix, still without acting on it. Computed every tick regardless of
+        # red_won, since the point is to see whenever the two rules would
+        # disagree — never only on the ticks the old rule already flagged as
+        # interesting. See _select_target_ranked's own docstring for the
+        # rule; see _log_ranked_priority_shadow for why only disagreements
+        # are logged.
+        abs_red_hits = [(ox + lx, oy + ly, a) for lx, ly, a in local_red_hits]
+        abs_green_hits = [(ox + lx, oy + ly, a) for lx, ly, a in local_green_hits]
+        ranked_selected = self._select_target_ranked(abs_red_hits, abs_green_hits, ref)
+        if not self._ranked_lock_priority:
+            self._log_ranked_priority_shadow(selected, ranked_selected, ref)
+        # Phase 3 (not built here) is what would branch on
+        # self._ranked_lock_priority being True and actually use
+        # ranked_selected — see HLDD 005 Selection Hardening.
 
         if selected is not None:
             abs_x, abs_y = selected
@@ -325,26 +356,32 @@ class TargetTracker:
 
     def _detect_targets(
         self, crop: np.ndarray
-    ) -> "tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]":
-        """Return (hits, discarded_green) in crop-local coords.
+    ) -> "tuple[list[tuple[float, float, float]], list[tuple[float, float, float]], list[tuple[float, float, float]], bool]":
+        """Return (hits, red_hits, green_hits, red_won) in crop-local coords.
 
         `hits` is exactly what this method always returned — the winning
-        color class's valid target bars, unchanged by HLDD 005 Selection
-        Hardening below. `discarded_green` is new (2026-09-21, logging only):
-        the green candidates that were excluded *because* red won, so the
-        caller can log how often — and by how much — that exclusion
-        discarded something closer to the tracked/centered position than
-        the surviving red candidate. Only ever non-empty when red actually
-        won (rule 1 can only discard candidates in that one direction); when
-        green wins there is nothing red to have discarded, so no extra
-        contour pass is spent computing an always-empty list.
+        color class's valid target bars, unchanged by either HLDD 005
+        Selection Hardening Phase 1 (rationale logging) or Phase 2 (ranked-
+        pool shadow) below. `red_hits`/`green_hits` are the full, ungated
+        candidate pools for both colors, always computed (Phase 2 needs both
+        regardless of which one the existing rule would have picked, to know
+        whether its ranked alternative would ever disagree) — a small,
+        deliberate extra cost over the original single-mask contour pass,
+        accepted the same way Phase 1's conditional extra pass already was.
+        `red_won` is rule 1's own color-exclusion decision (`_prefer_red` and
+        any red pixel present, *before* area/aspect filtering) — kept
+        explicit because it can diverge from "`red_hits` is non-empty": red
+        can win the mask-level exclusion and still filter down to zero valid
+        bars, discarding every green candidate for nothing (observed live,
+        2026-09-21: `SELECT[shadow]` logged "selected none" against a
+        discarded green candidate in exactly this situation).
         """
         if crop is None or crop.size == 0:
-            return [], []
+            return [], [], [], False
         try:
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         except Exception:
-            return [], []
+            return [], [], [], False
 
         # Red: locked target — hue wraps; check primary + wrap-around range
         red_wrap_lower = np.array(
@@ -360,11 +397,11 @@ class TargetTracker:
         mask_green = cv2.inRange(hsv, self._green_lower, self._green_upper)
 
         red_won = self._prefer_red and bool(np.any(mask_red))
-        mask = mask_red if red_won else mask_green
 
-        hits = self._contours_to_hits(mask)
-        discarded_green = self._contours_to_hits(mask_green) if red_won else []
-        return hits, discarded_green
+        red_hits = self._contours_to_hits(mask_red)
+        green_hits = self._contours_to_hits(mask_green)
+        hits = red_hits if red_won else green_hits
+        return hits, red_hits, green_hits, red_won
 
     def _log_selection_rationale(
         self,
@@ -412,6 +449,64 @@ class TargetTracker:
         ref = self._last_x if self._last_x is not None else frame_w / 2.0
         best = min(abs_hits, key=lambda d: abs(d[0] - ref))
         return (best[0], best[1])
+
+    def _select_target_ranked(
+        self,
+        red_abs_hits: "list[tuple[float, float, float]]",
+        green_abs_hits: "list[tuple[float, float, float]]",
+        ref: float,
+    ) -> "tuple[float, float] | None":
+        """HLDD 005 Selection Hardening Phase 2 (2026-09-21): shadow-only
+        ranked candidate pool. Never called by the real selection path
+        (_select_target) — only compared against it, gated by
+        self._ranked_lock_priority, to log where the two would disagree.
+
+        Merges red and green candidates into one pool instead of excluding
+        green outright whenever any red pixel is present. Red keeps a
+        bounded preference — it wins ties within
+        self._ranked_priority_tolerance_px — but a green candidate
+        meaningfully closer to `ref` wins outright instead of being
+        discarded regardless of position, which is today's rule (see
+        _detect_targets's red_won).
+        """
+        best_red = min(red_abs_hits, key=lambda d: abs(d[0] - ref)) if red_abs_hits else None
+        best_green = min(green_abs_hits, key=lambda d: abs(d[0] - ref)) if green_abs_hits else None
+        if best_red is None:
+            return (best_green[0], best_green[1]) if best_green is not None else None
+        if best_green is None:
+            return (best_red[0], best_red[1])
+        red_dist = abs(best_red[0] - ref)
+        green_dist = abs(best_green[0] - ref)
+        if green_dist < red_dist - self._ranked_priority_tolerance_px:
+            return (best_green[0], best_green[1])
+        return (best_red[0], best_red[1])
+
+    def _log_ranked_priority_shadow(
+        self,
+        selected: "tuple[float, float] | None",
+        ranked_selected: "tuple[float, float] | None",
+        ref: float,
+    ) -> None:
+        """Log only on disagreement between the real selection and Phase 2's
+        ranked-pool alternative, rate-limited the same way every other
+        shadow counter in this codebase is (1st/10th/100th, then every
+        500th) — logging every tick the two happen to differ could log
+        continuously for as long as a disagreement persists.
+        """
+        old_x = selected[0] if selected is not None else None
+        new_x = ranked_selected[0] if ranked_selected is not None else None
+        if old_x == new_x:
+            return
+        self._ranked_shadow_count += 1
+        n = self._ranked_shadow_count
+        if n not in (1, 10, 100) and n % 500 != 0:
+            return
+        old_desc = f"x={old_x:.0f} dist={abs(old_x - ref):.0f}" if old_x is not None else "none"
+        new_desc = f"x={new_x:.0f} dist={abs(new_x - ref):.0f}" if new_x is not None else "none"
+        logger.info(
+            "SELECT[shadow]: old=%s new=%s would change (%d so far)",
+            old_desc, new_desc, n,
+        )
 
     def _compute_roi(self, cx: float, cy: float, fw: int, fh: int) -> "tuple[int, int, int, int]":
         rw = max(self._roi_min_w, int(fw * self._current_roi_scale))

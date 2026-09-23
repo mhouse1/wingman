@@ -263,13 +263,17 @@ already exists for a sibling key elsewhere in the schema):
 "attack_support": Section(children={
     "seek_center_enabled": BOOL,
     "seek_center_trigger_frac": FRACTION,       # matches boundary_near_frac
-    "seek_center_deadzone_deg": _num(0, 90),    # matches bearing_deadzone_deg's range
+    "seek_center_deadzone_deg": _num(0, 180),   # matches bearing_deadzone_deg's ACTUAL range
     "seek_center_kp": _num(0),
     "seek_center_min_hold_s": SECONDS,
     "seek_center_max_hold_s": SECONDS,
     "seek_center_cooldown_s": SECONDS,
 }),
 ```
+
+(As shipped: `bearing_deadzone_deg` itself is `_num(0, 180)` in `config_schema.py`,
+not the 90 this document originally guessed — corrected to actually match the
+sibling key it cites.)
 
 ### Testing plan
 
@@ -304,11 +308,62 @@ already exists for a sibling key elsewhere in the schema):
   direction against the same session's `BOUNDARY: dist=...` lines for
   sanity, and use this same log to answer Open Question 4 (temporal
   smoothing) before deciding whether it needs an answer.
+  **Run 2026-09-21 — see Shadow trial results below.**
 - Live trial (after shadow validates): compare `total_rtb_with_missiles`,
   confirmed-crossing rate, and `BoundaryTurn` trigger frequency
   session-over-session with the feature on vs. off — this design's success
   criterion is fewer ticks reaching `BoundaryTurn`'s emergency threshold at
-  all, not a new metric of its own.
+  all, not a new metric of its own. **Blocked on the shadow trial actually
+  firing — see below.**
+
+### Shadow trial results (2026-09-21)
+
+Phase 1 shipped 2026-09-21 (`seek_center_enabled: false`) and was checked
+against six sessions the same day (04:32-09:11, roughly 4.5h combined
+play). The actuation-side code is confirmed safe: the new branch executed
+on every one of 70 ticks across 13 separate `TACTIC_ATTACK_SUPPORT`
+selection windows, with zero crashes and zero spurious actuation,
+correctly no-op'ing whenever `_b_lat` was `None`. But `SEEK
+CENTER[shadow]` — the line that means "a qualifying boundary reading
+existed and the branch computed a command" — fired **zero times** across
+all six sessions.
+
+That is not a small-sample gap. Cross-referencing the boundary detector's
+own instrumentation (`MAP BOUNDARY: ahead at %.2fR (approach N this
+session)`, from `instrument_boundary`, which runs unconditionally every
+tick regardless of the selected tactic) against what was actually selected
+at each of those moments shows the near-boundary condition itself is
+common — 44-54 occurrences in a single session — but a *higher-priority*
+tactic claimed the tick every single time: mostly `BoundaryTurn` and
+`TACTIC_CLIMB`, with the remainder outside `_may_fly` entirely
+(`mission_running=False`, e.g. a killcam/spectate minimap). Zero of
+roughly 120 real near-boundary observations across the six sessions
+coincided with `TACTIC_ATTACK_SUPPORT` specifically. Open Question 1's
+original "readability ceiling" framing undersold the actual bottleneck —
+the reading exists often enough; it is the *tactic-selection* coincidence
+that turns out to be rare.
+
+Because the live gate has not fired even once, the reciprocal-bearing
+formula itself was validated offline instead, against real sensor data
+rather than only the synthetic vectors in `tests/test_tick_handlers.py`:
+`detect_map_boundary` was re-run against the 10 archived `approach_*.png`
+frames from one session (`test_screenshots/unknown_anomalies/`, each
+already inside `boundary_near_frac` at capture time — ADR 108's approach
+capture, unconditional on tactic), and each recovered `(dist, forward,
+lateral)` was fed through the exact reciprocal-`atan2` and rear-commit
+formula this design specifies. All 10 produced a direction-correct escape
+command (steer away from the recovered edge bearing), and the rear-commit
+state machine correctly held its prior sign on the one case whose raw
+bearing would otherwise have flipped it — the anti-thrash behavior working
+as designed, on real captured frames, independent of the live gate ever
+having exercised it.
+
+**Conclusion:** the code is correct and safe, and the formula is
+directionally sound on real data. The design's trigger condition — fire
+only when `TACTIC_ATTACK_SUPPORT` is selected — is too narrow to exercise
+under this operator's normal play. Open Question 2 (extend to
+`TACTIC_CLIMB`) is now the load-bearing next step, not a deferred
+nice-to-have; see below.
 
 ## Phase 2+ (not designed here, explicitly deferred)
 
@@ -346,21 +401,29 @@ already exists for a sibling key elsewhere in the schema):
 
 ## Open Questions
 
-1. **Readability ceiling.** ADR 117 measured in-battle boundary readability
-   at 56%; ADR 133's corroborated-span fix and this week's D8-D11 shape
-   checks improve the diagnostic's precision but do not by themselves raise
-   how often a reading exists at all. This design can only correct on the
-   ticks a reading exists — on the rest, it is exactly as idle as
-   `TACTIC_ATTACK_SUPPORT` is today. Not a blocker (BoundaryTurn has the
-   same ceiling and is still worth having), but the shadow trial should
-   report what fraction of true-idle ticks actually got a reading to act on.
-2. **Should this also actuate during `TACTIC_CLIMB`**, the way Engage and
-   Regroup already do via `_actuate_engage(..., steer_only=True)` (ADR 028
-   revision 5)? Climb takes roughly 43% of battle ticks per that ADR's own
-   measurement, and an idle-roll-axis climb is exactly the kind of tick this
-   design exists for. Leaning yes, deferred to the shadow trial rather than
-   decided here, since Climb's own pitch-axis emergency logic (ADR 137) has
-   not been evaluated against a concurrent roll correction.
+1. **Readability ceiling — measured, and not actually the bottleneck.**
+   ADR 117 measured in-battle boundary readability at 56%; ADR 133's
+   corroborated-span fix and D8-D11 shape checks improve the diagnostic's
+   precision but do not by themselves raise how often a reading exists at
+   all. **Resolved differently than expected by the 2026-09-21 shadow trial
+   (see Shadow trial results above): readability was never the limiting
+   factor** — 44-54 real readings occurred in a single session alone. The
+   actual bottleneck is that those readings consistently coincide with a
+   higher-priority tactic (`BoundaryTurn`, `TACTIC_CLIMB`) rather than with
+   `TACTIC_ATTACK_SUPPORT`'s own selection window — confirmed directly by
+   zero `SEEK CENTER[shadow]` lines across six full sessions.
+2. **Should this also actuate during `TACTIC_CLIMB`** — now the recommended
+   next step, not just a lean. Climb takes roughly 43% of battle ticks per
+   ADR 028's own measurement, the way Engage and Regroup already do via
+   `_actuate_engage(..., steer_only=True)` (ADR 028 revision 5), and the
+   2026-09-21 shadow trial's corpus check found real near-boundary readings
+   landing under Climb specifically (3 of 10 archived approach frames from
+   one session). Combined with zero `SEEK CENTER[shadow]` firings under
+   AttackSupport across six sessions, Climb is where this design's target
+   ticks are actually occurring in practice. Still needs Climb's own
+   pitch-axis emergency logic (ADR 137) evaluated against a concurrent roll
+   correction before wiring it — the same open concern as before — but the
+   evidence for prioritizing this now exists where it previously didn't.
 3. **Non-convex arenas.** Steering away from the single nearest edge point
    is not guaranteed to be "toward the center" for a non-convex arena
    shape — no evidence either way exists yet on whether MetalStorm's arenas

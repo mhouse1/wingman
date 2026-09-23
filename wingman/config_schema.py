@@ -487,6 +487,12 @@ SCHEMA = Section(
             "pitch_min_hold_sec": SECONDS,
             "pitch_max_hold_sec": SECONDS,
             "pitch_command_cooldown_sec": SECONDS,
+            # Selection Hardening Phase 2 (HLDD 005, 2026-09-21) — shadow
+            # only. ranked_lock_priority stays false in shipped config; see
+            # HLDD 005's Selection Hardening section for what flipping it
+            # would eventually do (Phase 3, not built yet).
+            "ranked_lock_priority": BOOL,
+            "ranked_priority_tolerance_px": _num(0),
             "lost_timeout_sec": SECONDS,
             "prefer_red_lock": BOOL,
             "local_roi_enabled": BOOL,
@@ -531,6 +537,16 @@ SCHEMA = Section(
             "enabled": BOOL,
             "output_path": STR,
             "interval_sec": SECONDS,
+            # Timestamped archive of the annotated frame while target
+            # tracking runs during a secondary-missile encounter (ADR 136
+            # heatdive loop) — live_hud.png itself is overwritten every
+            # render, so this is what lets a saved frame be lined up
+            # against a wingman.log timestamp for debugging.
+            "target_tracking_archive": Section(children={
+                "enabled": BOOL,
+                "dir": STR,
+                "max_files": _int(0),
+            }),
         }),
 
         # Design 012: opt-in session video, paired with the BT JSONL trace.
