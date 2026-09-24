@@ -1017,20 +1017,29 @@ class AmmoEventsHandler:
         return confirmed
 
     def fire_eject(self) -> None:
-        """Actuate the eject sequence: capture event, FSM transition, dive.
+        """Actuate the missiles-empty response: capture event, FSM transition,
+        then either dive (eject_and_dive) or pursue (pursue_and_engage,
+        HLDD 015) depending on pursuit_mode.enabled.
 
         One implementation for both callers — the legacy no-missiles path and
-        the behavior tree's Eject leaf (ADR 024 3.1b).
+        the behavior tree's Eject leaf (ADR 024 3.1b) — and the single
+        branch point both strategies share, so there is exactly one place to
+        keep them mutually exclusive rather than two independent triggers
+        that could race. Both still transition through the same
+        GAME_BATTLE_EJECT state; pursue_and_engage is a different behavior
+        inside that state, not a different FSM state (HLDD 015 D1).
         """
         self._emit_capture_event("missiles_empty")
         self._analyzer.trigger_event("eject_started")
-        self._ctrl.eject_and_dive(
-            on_complete=lambda: (
+
+        def _on_complete():
+            if self._analyzer.game_state == GameState.GAME_BATTLE_EJECT:
                 self._analyzer.trigger_event("eject_complete")
-                if self._analyzer.game_state == GameState.GAME_BATTLE_EJECT
-                else None
-            )
-        )
+
+        if self._ctrl.pursuit_mode_enabled():
+            self._ctrl.pursue_and_engage(on_complete=_on_complete)
+        else:
+            self._ctrl.eject_and_dive(on_complete=_on_complete)
 
     def tick_events(self) -> None:
         """Fire the ammo event handlers whose analyzer events are set."""
@@ -1801,7 +1810,14 @@ class BehaviorTreeHandler:
             actuators = {}
             if self.active and ammo_events is not None:
                 actuators.update({
-                    TACTIC_EJECT: (ammo_events.fire_eject, ctrl.is_ejecting),
+                    # HLDD 015: is_running must cover whichever strategy
+                    # fire_eject actually started — ctrl.is_ejecting alone
+                    # would read as "not running" for the whole duration of
+                    # a pursue_and_engage encounter (a separate flag), which
+                    # would let the tree re-invoke fire_eject every tick
+                    # instead of recognizing the leaf as already active.
+                    TACTIC_EJECT: (ammo_events.fire_eject,
+                                   lambda: ctrl.is_ejecting() or ctrl.is_pursuing()),
                     TACTIC_DISENGAGE: (self._start_disengage,
                                        ctrl.is_disengage_running),
                 })

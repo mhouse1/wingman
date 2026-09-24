@@ -2,7 +2,7 @@
 
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -74,6 +74,13 @@ def _draw_circle(frame: np.ndarray, cx: int, cy: int, r: int = 25,
     return out
 
 
+def _bgr_from_hue(h: int, s: int = 255, v: int = 255) -> tuple:
+    """OpenCV-HSV-exact BGR for a given hue, so tests can construct pixels
+    that land at a known hue rather than approximating via raw BGR guesses
+    — needed for red_mass_hue_max, which discriminates purely on hue."""
+    return tuple(int(c) for c in cv2.cvtColor(np.uint8([[[h, s, v]]]), cv2.COLOR_HSV2BGR)[0, 0])
+
+
 def _draw_dashed_ring(frame: np.ndarray, cx: int, cy: int, radius: int = 25,
                       n_dashes: int = 12, dash_r: int = 2,
                       hsv=(55, 90, 200)) -> np.ndarray:
@@ -114,6 +121,37 @@ class TestStateMachine:
         obs = t.update(frame)
         assert obs["visible"] is True
         assert t.mode == TrackMode.TRACKING
+
+    def test_first_acquisition_tick_reports_no_local_roi(self):
+        """The tick that transitions ACQUIRING -> TRACKING scans the global
+        acquisition region (self._roi_rect is still None going in) — it must
+        not report the local ROI computed for *next* tick as if it had just
+        been scanned. Regression for the frame-141 anomaly (HLDD 005): the
+        archived HUD showed a "TRACKING, 2 detections" tick whose drawn ROI
+        box, faithfully re-scanned, contained neither detection."""
+        t = _tracker()
+        frame = _draw_bar(_black_frame(), cx=200, cy=150)
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert t.mode == TrackMode.TRACKING
+        assert obs["roi_rect"] is None
+
+    def test_subsequent_tracking_tick_reports_the_roi_it_actually_scanned(self):
+        """Once a local ROI exists, obs["roi_rect"] must match the rect this
+        tick actually cropped from — not the rect update() recomputes at the
+        end of the same call for *next* tick's use, which differs whenever
+        the target moves between ticks (every tick in a real dive)."""
+        t = _tracker()
+        frame = _draw_bar(_black_frame(), cx=200, cy=150)
+        t.update(frame)  # ACQUIRING -> TRACKING; sets self._roi_rect for next tick
+        roi_about_to_be_scanned = t._roi_rect
+        assert roi_about_to_be_scanned is not None
+
+        frame2 = _draw_bar(_black_frame(), cx=230, cy=150)  # moved, still inside that ROI
+        obs2 = t.update(frame2)
+
+        assert obs2["roi_rect"] == roi_about_to_be_scanned
+        assert obs2["roi_rect"] != t._roi_rect  # next tick's freshly-recomputed ROI differs
 
     def test_miss_after_tracking_enters_lost_grace(self):
         t = _tracker(local_roi_enabled=False)
@@ -179,6 +217,258 @@ class TestAspectRatioFilter:
         frame[140:160, 160:240] = (0, 200, 50)  # 20px tall × 80px wide → aspect 0.25
         obs = t.update(frame)
         assert obs["visible"] is False
+
+
+# ---------------------------------------------------------------------------
+# red_mass_steering (direct operator instruction, 2026-09-23): steer toward
+# the centroid of all red pixels, bypassing the aspect/area filter above
+# entirely. Default False — these tests exercise the override explicitly;
+# TestAspectRatioFilter above (which never sets this key) is the regression
+# guard proving the default leaves that filter's behavior untouched.
+# ---------------------------------------------------------------------------
+
+class TestRedMassSteering:
+    _RED_BGR = (0, 0, 255)  # H=0,S=255,V=255 — well inside red_lower/red_upper
+
+    def test_disabled_by_default(self):
+        t = _tracker(local_roi_enabled=False)
+        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25,
+                              bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is False
+
+    def test_enabled_tracks_a_shape_the_aspect_filter_would_reject(self):
+        """A filled red circle fails min_aspect_ratio (it's ~1:1, not >=2.5) —
+        exactly the shape TestAspectRatioFilter.test_circle_is_rejected
+        exists to reject for the tall-bar path. With red_mass_steering on,
+        it must be tracked anyway, centered on the circle's own centroid."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True)
+        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25,
+                              bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(200, abs=2)
+        assert obs["centroid_y"] == pytest.approx(150, abs=2)
+
+    def test_n_detections_still_reports_the_tall_bar_count_not_red_mass(self):
+        """n_detections must keep meaning "tall-bar contours found" even
+        while centroid_x/y follow the red-mass override — otherwise the HUD's
+        det= readout stops matching what it has meant everywhere else."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True)
+        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25,
+                              bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is True       # red-mass override fired
+        assert obs["n_detections"] == 0     # no tall-bar contour qualified
+
+    def test_enabled_transitions_to_tracking(self):
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True)
+        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25,
+                              bgr=self._RED_BGR)
+        t.update(frame)
+        assert t.mode == TrackMode.TRACKING
+
+    def test_no_red_at_all_falls_back_to_the_tall_bar_pick(self):
+        """When red_mass_steering is on but there is no red pixel anywhere,
+        _red_mass_centroid returns None and the existing tall-bar pick (a
+        green bar here) still governs — the override only overrides when it
+        actually finds something."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True)
+        frame = _draw_bar(_black_frame(400, 300), cx=200, cy=150)  # green
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(200, abs=2)
+
+    def test_exclusion_region_ignores_fixed_hud_chrome(self):
+        """Regression for the "NO LOCK" text false-positive (2026-09-23,
+        game_battle_eject_20260923_094830_187.png): that text is fixed,
+        boresight-relative HUD chrome, always red, always inside the acq/
+        ROI crop — without exclusion it wins the centroid outright and the
+        local ROI then narrows onto it forever. A large red blob inside the
+        configured exclusion region must not pull the centroid at all, even
+        though it is much bigger than the real target elsewhere in frame."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                      red_mass_exclude_pct=[0.7, 0.7, 1.0, 1.0])
+        frame = _black_frame(400, 300)
+        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=self._RED_BGR)   # real target
+        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=self._RED_BGR)  # HUD-chrome stand-in
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(100, abs=3)
+        assert obs["centroid_y"] == pytest.approx(100, abs=3)
+
+    def test_without_exclusion_configured_the_big_blob_still_wins(self):
+        """Regression guard: red_mass_exclude_pct defaults to None (no
+        exclusion) — proves the fix above is opt-in via its own config key,
+        not a change to red_mass_steering's baseline behavior."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True)
+        frame = _black_frame(400, 300)
+        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=self._RED_BGR)
+        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        # Mass-weighted centroid is pulled well away from the small blob
+        # toward the much larger one — not on the small blob alone.
+        assert obs["centroid_x"] > 250
+
+    def test_hue_max_ignores_afterburner_colored_orange(self):
+        """Regression for the afterburner false-positive (2026-09-23,
+        game_battle_eject_20260923_123703_35.png and 2 others): the
+        afterburner glow is orange (measured hue 7-10), the real target icon
+        is pure red (measured hue 3-5) — per-blob pixel area was checked
+        first and rejected as a discriminator (270 vs 271, 222 vs 309 px in
+        those same frames). A bigger orange blob (hue 9, afterburner
+        stand-in) must not pull the centroid once red_mass_hue_max excludes
+        its hue, even though it is much bigger than the real target icon
+        (hue 3) elsewhere in frame."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True, red_mass_hue_max=6)
+        frame = _black_frame(400, 300)
+        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=_bgr_from_hue(3))   # real target
+        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=_bgr_from_hue(9))  # afterburner stand-in
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(100, abs=3)
+        assert obs["centroid_y"] == pytest.approx(100, abs=3)
+
+    def test_without_hue_max_configured_the_orange_blob_still_counts(self):
+        """Regression guard: red_mass_hue_max defaults to None (falls back
+        to tracking_hsv.red_upper's own hue, 10 — no behavior change)."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True)
+        frame = _black_frame(400, 300)
+        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=_bgr_from_hue(3))
+        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=_bgr_from_hue(9))
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] > 250
+
+    def test_value_min_ignores_the_afterburners_fading_rim(self):
+        """Regression for a second afterburner false-positive (2026-09-23,
+        game_battle_eject_20260923_171137/38/39_0/1/2.png), found after the
+        hue_max fix above was already in place: the flame's outer rim fades
+        through the *same* red hue band the real target uses (hue 3-6, not
+        the flame's own orange bulk), so hue can't separate them. Per-blob
+        pixel area was checked again and rejected again too (bad-frame rim
+        blobs measured 328-652px, bigger than the good frame's own 79px
+        fragments — backwards from what a minimum-area rule would need).
+        Brightness is the real discriminator: the target is a flat-shaded
+        icon (value approx 255 on 86% of its qualifying pixels); the fading
+        rim only reaches value >=245 on 9-11% of its. A bigger same-hue but
+        dim blob (rim stand-in) must not pull the centroid once
+        red_mass_value_min excludes it, even though it is much bigger than
+        the real, fully-bright target icon elsewhere in frame."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True, red_mass_value_min=245)
+        frame = _black_frame(400, 300)
+        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=_bgr_from_hue(3, v=255))  # real target
+        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=_bgr_from_hue(3, v=200))  # fading rim stand-in
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(100, abs=3)
+        assert obs["centroid_y"] == pytest.approx(100, abs=3)
+
+    def test_without_value_min_configured_the_dim_blob_still_counts(self):
+        """Regression guard: red_mass_value_min defaults to None (falls back
+        to tracking_hsv.red_lower's own value, 150 — no behavior change)."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True)
+        frame = _black_frame(400, 300)
+        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=_bgr_from_hue(3, v=255))
+        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=_bgr_from_hue(3, v=200))
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] > 250
+
+
+def _draw_glyphs(frame: np.ndarray, cx: int, cy: int, n: int,
+                  glyph_w: int = 4, glyph_h: int = 8, gap: int = 2,
+                  bgr=(0, 0, 255)) -> np.ndarray:
+    """Paint n small, separated glyph-sized rectangles in a row centered on
+    (cx, cy), simulating the letter/digit fragments of a HUD nameplate
+    (name/distance/type) — each becomes its own connected component, sized
+    to fall inside the default red_mass_nameplate_glyph_area/max_dim
+    bounds (10-200px, <=25px per side)."""
+    out = frame.copy()
+    total_w = n * glyph_w + (n - 1) * gap
+    x0 = cx - total_w // 2
+    y1, y2 = cy - glyph_h // 2, cy + glyph_h // 2
+    for i in range(n):
+        x1 = x0 + i * (glyph_w + gap)
+        out[y1:y2, x1:x1 + glyph_w] = bgr
+    return out
+
+
+# ---------------------------------------------------------------------------
+# HLDD 005 nameplate gate (2026-09-23)
+# ---------------------------------------------------------------------------
+
+class TestNameplateGate:
+    """Regression for pursuit_mode_20260923_195448/50/53_81/83/85.png: 81
+    (correct lock, real target) measured 33 glyph-sized components nearby;
+    83 (locked onto an enemy flare effect) and 85 (locked onto the player's
+    own engine exhaust) measured 8 and 9 respectively — no nameplate renders
+    near either false positive. See TargetTracker._count_nameplate_glyphs."""
+
+    _RED_BGR = (0, 0, 255)
+
+    def test_disabled_by_default(self):
+        """Gate must do nothing unless red_mass_nameplate_gate_enabled is
+        set — a lone blob with no nameplate nearby still wins, exactly like
+        red_mass_steering's own existing baseline behavior."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True)
+        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
+                              bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(200, abs=2)
+
+    def test_enabled_rejects_a_lone_blob_with_no_nameplate(self):
+        """A lone red blob with no glyph cluster nearby (the flare/exhaust
+        shape) must be rejected outright — no tall-bar candidate exists in
+        this scene either, so the tick reports no target at all rather than
+        locking onto the blob."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                      red_mass_nameplate_gate_enabled=True)
+        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
+                              bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is False
+
+    def test_enabled_accepts_a_blob_with_a_nearby_nameplate(self):
+        """A blob with a glyph cluster at least as large as the measured
+        real-target count (33) must still be tracked."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                      red_mass_nameplate_gate_enabled=True,
+                      red_mass_nameplate_min_glyphs=20)
+        frame = _black_frame(400, 300)
+        frame = _draw_circle(frame, cx=200, cy=150, r=15, bgr=self._RED_BGR)
+        frame = _draw_glyphs(frame, cx=200, cy=110, n=25, bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(200, abs=5)
+
+    def test_glyph_count_below_threshold_is_rejected(self):
+        """A handful of stray glyph-sized fragments — the size of what was
+        actually measured on both false positives (8, 9) — must not clear a
+        threshold set above that count."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                      red_mass_nameplate_gate_enabled=True,
+                      red_mass_nameplate_min_glyphs=20)
+        frame = _black_frame(400, 300)
+        frame = _draw_circle(frame, cx=200, cy=150, r=15, bgr=self._RED_BGR)
+        frame = _draw_glyphs(frame, cx=200, cy=110, n=5, bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is False
+
+    def test_count_nameplate_glyphs_default_bounds(self):
+        """Direct unit test of the glyph-shape filter, independent of the
+        tracker's state machine: a big blob (own-exhaust/flare stand-in)
+        must not count as a glyph, using the shipped defaults (10-200 area,
+        <=25px per side)."""
+        t = _tracker(local_roi_enabled=False)
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[10:40, 10:40] = 255       # 30x30 = 900px, too big to be a glyph
+        for i in range(5):
+            x = 10 + i * 10
+            mask[60:68, x:x + 4] = 255  # 4x8 = 32px, glyph-sized, gapped
+        assert t._count_nameplate_glyphs(mask) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +970,54 @@ class TestHudRenderer:
         assert not tmp_file.exists(), "tmp file should be consumed by os.replace"
 
 
+class TestHudRendererFehClose:
+    """Regression (2026-09-23): the feh window HudRenderer launches to
+    display live_hud.png used to survive wingman exiting — _launch_feh()
+    discarded the Popen handle immediately, so nothing could ever terminate
+    it later. close() is the fix; these tests exercise it directly rather
+    than spawning a real feh process, which may not even be installed in a
+    test environment."""
+
+    def test_close_without_feh_launched_is_a_noop(self, tmp_path):
+        from wingman.hud import HudRenderer
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0)  # no feh_geometry
+        renderer.close()  # must not raise
+
+    def test_close_terminates_a_running_feh_process(self, tmp_path):
+        from wingman.hud import HudRenderer
+        fake_proc = Mock()
+        fake_proc.poll.return_value = None  # still running
+        with patch("wingman.hud.subprocess.Popen", return_value=fake_proc):
+            renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                    feh_geometry="800x600+0+0")
+        renderer.close()
+        fake_proc.terminate.assert_called_once()
+        fake_proc.kill.assert_not_called()
+
+    def test_close_kills_if_terminate_times_out(self, tmp_path):
+        from wingman.hud import HudRenderer
+        import subprocess as sp
+        fake_proc = Mock()
+        fake_proc.poll.return_value = None
+        fake_proc.wait.side_effect = [sp.TimeoutExpired(cmd="feh", timeout=2.0), None]
+        with patch("wingman.hud.subprocess.Popen", return_value=fake_proc):
+            renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                    feh_geometry="800x600+0+0")
+        renderer.close()
+        fake_proc.terminate.assert_called_once()
+        fake_proc.kill.assert_called_once()
+
+    def test_close_is_a_noop_when_feh_already_exited(self, tmp_path):
+        from wingman.hud import HudRenderer
+        fake_proc = Mock()
+        fake_proc.poll.return_value = 0  # already exited on its own
+        with patch("wingman.hud.subprocess.Popen", return_value=fake_proc):
+            renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                    feh_geometry="800x600+0+0")
+        renderer.close()
+        fake_proc.terminate.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # HudRenderer — target-tracking archive (secondary-missile debugging trail)
 # ---------------------------------------------------------------------------
@@ -745,3 +1083,58 @@ class TestHudRendererArchive:
         assert renderer._archive_enabled is True
         assert str(renderer._archive_dir) == archive_dir
         assert renderer._archive_max == 5
+
+
+# ---------------------------------------------------------------------------
+# HudRenderer — steering vector line (direct operator instruction, 2026-09-23)
+# ---------------------------------------------------------------------------
+
+class TestHudRendererSteeringLine:
+    def test_line_drawn_from_screen_center_to_steer_target(self, tmp_path):
+        """A line from screen center to the current steer target, so the HUD
+        shows where the aircraft is being commanded to point regardless of
+        which detection mode (tall-bar or red_mass_steering) produced it.
+        Checked against the full-res archived frame (pre-resize) so pixel
+        coordinates are exact, not resize-interpolated."""
+        from wingman.hud import HudRenderer
+        archive_dir = tmp_path / "archive"
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                archive_enabled=True, archive_dir=str(archive_dir))
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)  # center = (200, 150)
+        obs = {
+            "mode": "TRACKING", "visible": True,
+            "centroid_x": 350.0, "centroid_y": 150.0,  # same y as center -> horizontal line
+            "error_norm": 0.9, "error_norm_y": 0.0,
+            "n_detections": 1, "roi_rect": None,
+        }
+        thread = renderer.maybe_render(frame, obs, "GAME_BATTLE_EJECT", None, None, None)
+        thread.join(timeout=5)
+        saved = list(archive_dir.glob("*.png"))
+        assert len(saved) == 1
+        canvas = cv2.imread(str(saved[0]))
+        # Midpoint of the line (275, 150) is well clear of the marker drawn
+        # at the target end (350, 150) and of the center crosshair.
+        midpoint = tuple(int(c) for c in canvas[150, 275])
+        pursuit_bgr = (255, 60, 220)
+        # LINE_AA blends even a solid horizontal line slightly against the
+        # background — tolerance wide enough to absorb that blend but far
+        # below a near-black background pixel's own distance (~535).
+        dist = sum(abs(a - b) for a, b in zip(midpoint, pursuit_bgr, strict=True))
+        assert dist < 100, f"expected pursuit-colored line at midpoint, got {midpoint}"
+
+    def test_no_line_without_a_steer_target(self, tmp_path):
+        from wingman.hud import HudRenderer
+        archive_dir = tmp_path / "archive"
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                archive_enabled=True, archive_dir=str(archive_dir))
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        obs = {"mode": "ACQUIRING", "visible": False, "centroid_x": None,
+               "centroid_y": None, "error_norm": None, "n_detections": 0,
+               "roi_rect": None}
+        thread = renderer.maybe_render(frame, obs, "GAME_BATTLE_EJECT", None, None, None)
+        thread.join(timeout=5)
+        canvas = cv2.imread(str(next((tmp_path / "archive").glob("*.png"))))
+        midpoint = tuple(int(c) for c in canvas[150, 275])
+        pursuit_bgr = (255, 60, 220)
+        dist = sum(abs(a - b) for a, b in zip(midpoint, pursuit_bgr, strict=True))
+        assert dist >= 100, "no steer target -> no line should be drawn"

@@ -257,10 +257,12 @@ class _EventStub:
 
 
 class _AmmoCtrlStub:
-    def __init__(self, mission_running=True):
+    def __init__(self, mission_running=True, pursuit_mode=False):
         self._running = mission_running
+        self._pursuit_mode = pursuit_mode
         self.reloads = 0
         self.ejects = 0
+        self.pursuits = 0
         self.padlock_switches = 0
 
     def is_mission_running(self):
@@ -271,6 +273,12 @@ class _AmmoCtrlStub:
 
     def eject_and_dive(self, on_complete=None):
         self.ejects += 1
+
+    def pursuit_mode_enabled(self):
+        return self._pursuit_mode
+
+    def pursue_and_engage(self, on_complete=None):
+        self.pursuits += 1
 
     def padlock_target_switch(self):
         self.padlock_switches += 1

@@ -234,6 +234,16 @@ separate them if it goes wrong. `pursuit_mode.enabled` must stay `false` in
 shipped config until that precondition is met and recorded (a dated note in
 this document, not a silent flip).
 
+**2026-09-23 — enabled anyway, precondition not met.** `pursuit_mode.enabled`
+was flipped `true` in shipped config by explicit, repeated direct operator
+instruction, given after this precondition and the specific risk above were
+raised in conversation. Two-Axis Rollout was, at the time, still at Phase 1:
+`tracking.actuate_pitch` remained `false`, and no session log to date
+contained a single `nose_up`/`nose_down`/`orient_pitch` call from tracking.
+This note exists so that fact stays visible here rather than being implied
+false by a silent flag flip — the precondition itself is unchanged and still
+describes the risk this decision accepted, not a standard that was met.
+
 **Pursuit mode is the one caller allowed to use the pitch channel without
 restriction — this is not a special case, it is why the axis conflict
 disappears.** `orient_pitch_to_target` is barred from `eject_and_dive`

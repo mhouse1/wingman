@@ -709,6 +709,11 @@ def main():
     # just re-record pre-recorded screenshots.
     video_recorder = None
     bt_trace_writer = None
+    # Pre-declared for the same reason as the two above: the finally block
+    # far below checks `hud_renderer is not None` unconditionally, which
+    # would raise NameError instead of running the rest of cleanup if an
+    # exception hit before HudRenderer.from_config() runs.
+    hud_renderer = None
     if args.record_session and not replay_mode and not capture_mode:
         from .session_recording import BtTraceWriter, VideoRecorder
         Path("logs").mkdir(exist_ok=True)
@@ -1736,6 +1741,15 @@ def main():
                 bt_trace_writer.close()
             except Exception as e:
                 logger.warning("Design 012: trace writer close failed: %s", e)
+        # 2026-09-23: the feh window HudRenderer launches to display
+        # live_hud.png used to survive wingman exiting — nothing held a
+        # reference to it to close. Same defensive posture as the two
+        # cleanup steps above: never let this block a normal shutdown.
+        if hud_renderer is not None:
+            try:
+                hud_renderer.close()
+            except Exception as e:
+                logger.warning("HudRenderer: close failed: %s", e)
         ctrl.cleanup(keep_hotkeys=standby_armed)
         # ADR 095: the run file is written from inside analyzer.cleanup(), via
         # on_session_end() once the OCR pool has joined. load_end has to be taken

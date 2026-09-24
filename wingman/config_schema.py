@@ -495,12 +495,34 @@ SCHEMA = Section(
             "ranked_priority_tolerance_px": _num(0),
             "lost_timeout_sec": SECONDS,
             "prefer_red_lock": BOOL,
+            # Direct operator instruction (2026-09-23) — see config.yaml's
+            # own comment on this key for what it overrides and why.
+            "red_mass_steering": BOOL,
+            # Optional: absent/None means no exclusion (existing tests that
+            # never set this key are unaffected). See config.yaml's comment
+            # on this key for what it targets and how it was measured.
+            "red_mass_exclude_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
+            # Optional: None means "same as tracking_hsv.red_upper's hue" (no
+            # behavior change). See config.yaml's own comment on this key.
+            "red_mass_hue_max": _int(0, 179),
+            # Optional: None means "same as tracking_hsv.red_lower's value"
+            # (no behavior change). See config.yaml's own comment.
+            "red_mass_value_min": _int(0, 255),
+            # HLDD 005 nameplate gate (2026-09-23) — see config.yaml's own
+            # comment on this key for what it targets and how it was measured.
+            "red_mass_nameplate_gate_enabled": BOOL,
+            "red_mass_nameplate_min_glyphs": _int(0),
+            "red_mass_nameplate_glyph_area": Leaf(types=(list,), item_types=(int,), length=2),
+            "red_mass_nameplate_glyph_max_dim": _int(0),
             "local_roi_enabled": BOOL,
             "local_roi_scale": FRACTION,
             "local_roi_min_px": Leaf(types=(list,), item_types=(int,), length=2),
             "local_roi_expand_factor": _num(1.0),
             "local_roi_max_scale": FRACTION,
             "local_roi_reacquire_cycles": _int(0),
+            # HLDD 005 Sustained-Hold Actuation (2026-09-23) — see
+            # config.yaml's own comment on this key for the phased rollout.
+            "sustained_hold_enabled": BOOL,
         }),
 
         "tracking_hsv": Section(children={
@@ -531,6 +553,18 @@ SCHEMA = Section(
             "min_pixels": _int(1),
             "confirm_seconds": _num(0),
             "max_correction_attempts": _int(1),   # ADR 140 D6
+        }),
+
+        # HLDD 015: missiles-empty alternative to eject_and_dive — switch to
+        # secondary weapons and pursue with both tracking axes instead of
+        # diving. Hard-gated: enabled must stay false until Design 005's
+        # Two-Axis Rollout has a live-validated pitch channel on the ambient
+        # path (see pursue_and_engage's own docstring, controller.py).
+        "pursuit_mode": Section(children={
+            "enabled": BOOL,
+            "pursuit_max_duration_s": SECONDS,
+            "pursuit_padlock_verify": BOOL,
+            "ammo_zero_grace_s": SECONDS,
         }),
 
         "hud": Section(children={

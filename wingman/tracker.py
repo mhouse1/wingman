@@ -48,6 +48,85 @@ class TargetTracker:
 
         self._lost_timeout = float(cfg.get("lost_timeout_sec", 0.70))
         self._prefer_red = bool(cfg.get("prefer_red_lock", True))
+        # Direct operator instruction (2026-09-23): steer toward the centroid
+        # of all red pixels in the scanned crop, overriding the tall-bar
+        # contour pick below whenever any red pixel is present. Default
+        # False here (not in shipped config.yaml, where it is True) purely so
+        # the many synthetic single-shape tests in test_target_tracking.py
+        # that construct a bare {"tracking": {...}} dict without this key —
+        # several of them deliberately exercising the aspect-ratio/area
+        # filter this override bypasses — keep testing that filter
+        # unaffected by this flag's existence.
+        self._red_mass_steering = bool(cfg.get("red_mass_steering", False))
+        # Fixed-position HUD chrome exclusion for the above (2026-09-23):
+        # the "NO LOCK" / lock-status text is bright red and boresight-
+        # relative, not world content — measured at the identical fractional
+        # bbox, (0.474-0.526, 0.762-0.777), across 4 frames from different
+        # sessions, camera zoom, and terrain (game_battle_eject_20260923_
+        # 094830_187.png and 3 others). Because it is always present and
+        # always inside the acq/ROI crop, red_mass_steering would otherwise
+        # lock onto it and never escape: the local ROI narrows around it,
+        # which finds it again next tick, indefinitely. [x1,y1,x2,y2],
+        # fractional, with margin over the measured bbox; None disables
+        # exclusion entirely (default — existing tests never set this key).
+        red_mass_exclude = cfg.get("red_mass_exclude_pct")
+        self._red_mass_exclude_pct = (
+            [float(v) for v in red_mass_exclude] if red_mass_exclude else None
+        )
+        # Own-afterburner exclusion for the above (2026-09-23): unlike "NO
+        # LOCK" above, the afterburner glow is not fixed screen position (it
+        # moves with the airframe's on-screen attitude), so a region-based
+        # exclusion doesn't work here — but its color reliably does. Measured
+        # directly (game_battle_eject_20260923_123703-05_35/36/37.png):
+        # afterburner glow sits at hue 7-10 (orange, bordering true orange),
+        # the real target icon at hue 3-5 (pure red) — non-overlapping in
+        # bulk, unlike per-blob pixel area, which was checked first and
+        # rejected (270 vs 271, 222 vs 309 px in these same frames — no
+        # reliable size threshold exists). Narrows red_mass_centroid's own
+        # upper hue bound only; _detect_targets' tracking_hsv.red_upper is
+        # untouched, since its aspect-ratio filter already guards it against
+        # this specific confusion. None (default) keeps the same upper bound
+        # as tracking_hsv.red_upper — no behavior change unless configured.
+        red_mass_hue_max = cfg.get("red_mass_hue_max")
+        self._red_mass_hue_max = int(red_mass_hue_max) if red_mass_hue_max is not None else None
+        # Afterburner-rim exclusion for the above (2026-09-23): the hue cutoff
+        # above targets the flame's orange bulk, but its outer rim fades
+        # through the same red hue band the real target uses (measured:
+        # game_battle_eject_20260923_171137-39_0/1/2.png) — hue alone can't
+        # separate a gradient's edge from a flat color. Brightness can: the
+        # real target is a flat-shaded icon (value ~255 on ~86% of its
+        # qualifying pixels); the flame's fading rim only reaches value
+        # >=245 on 9-11% of its qualifying pixels, the rest being visibly
+        # dimmer as it fades to background. Raises red_mass_centroid's own
+        # value floor only — tracking_hsv's shared 150 floor (and
+        # _detect_targets' use of it) is untouched. None (default) keeps
+        # that same 150 floor — no behavior change unless configured.
+        red_mass_value_min = cfg.get("red_mass_value_min")
+        self._red_mass_value_min = int(red_mass_value_min) if red_mass_value_min is not None else None
+        # HLDD 005 nameplate gate (2026-09-23): hue_max/value_min above each
+        # separate a real target from one specific known false positive
+        # (afterburner bulk, afterburner rim) — this session found a third
+        # and fourth kind in one engagement alone (an enemy flare effect,
+        # then the player's own engine exhaust; pursuit_mode_20260923_
+        # 195448/50/53_81/83/85.png), meaning color/brightness alone will
+        # keep finding new false positives as fast as they're patched. Every
+        # real enemy contact renders a HUD nameplate (name/distance/type)
+        # nearby; neither a flare nor engine exhaust ever does. Counting
+        # small glyph-shaped components in the same mask red_mass_centroid
+        # already computes (no OCR, no new color sample) measured 33 such
+        # components for the real target vs 8-9 for each false positive in
+        # the three frames above — a roughly 4x gap, but from 3 frames in one
+        # engagement, not a tuned threshold. False here — implement and gate
+        # off, the same shape as tracking.sustained_hold_enabled, until more
+        # encounters validate the numbers.
+        self._red_mass_nameplate_gate_enabled = bool(
+            cfg.get("red_mass_nameplate_gate_enabled", False))
+        self._red_mass_nameplate_min_glyphs = int(
+            cfg.get("red_mass_nameplate_min_glyphs", 20))
+        glyph_area = cfg.get("red_mass_nameplate_glyph_area", [10, 200])
+        self._red_mass_nameplate_glyph_area = (int(glyph_area[0]), int(glyph_area[1]))
+        self._red_mass_nameplate_glyph_max_dim = int(
+            cfg.get("red_mass_nameplate_glyph_max_dim", 25))
         # HLDD 005 Selection Hardening Phase 2 (2026-09-21): shadow-only —
         # ranked_lock_priority stays false in shipped config; while false,
         # the ranked-pool rule below is computed and compared every tick but
@@ -163,8 +242,22 @@ class TargetTracker:
             error_norm_y — vertical error in [-1, 1]; positive = target below center.
                           New (HLDD 005 Two-Axis Rollout Phase 1) — sensing only, no
                           consumer presses a key from this yet.
-            n_detections — raw contour count found in scan region
-            roi_rect    — active local ROI as (x, y, w, h) in frame coords, or None
+            n_detections — raw contour count found in scan region (tall-bar
+                          contours only — unaffected by red_mass_steering
+                          below, so it stays a legible signal of what the
+                          original filter found even while that pick is
+                          being overridden for actuation)
+            roi_rect    — the local-ROI rect actually scanned *this tick* to
+                          produce the fields above, as (x, y, w, h) in frame
+                          coords, or None when this tick scanned the wider
+                          global acquisition region instead (see scan-basis
+                          note below).
+
+        When `red_mass_steering` is enabled, `centroid_x`/`centroid_y` (and
+        therefore `error_norm`/`error_norm_y`) report the centroid of *all*
+        red pixels in the scanned crop instead of the tall-bar contour pick
+        — see `_red_mass_centroid`. `visible`/`mode` follow that override too
+        (any red pixel counts), but `n_detections` does not.
         """
         if ts is None:
             ts = time.time()
@@ -185,6 +278,7 @@ class TargetTracker:
             rx, ry, rw, rh = self._roi_rect
             crop = frame[ry:ry + rh, rx:rx + rw]
             ox, oy = rx, ry
+            scanned_rect = (rx, ry, rw, rh)
         else:
             ax1 = int(w * self._acq_x1)
             ay1 = int(h * self._acq_y1)
@@ -192,8 +286,14 @@ class TargetTracker:
             ay2 = int(h * self._acq_y2)
             crop = frame[ay1:ay2, ax1:ax2]
             ox, oy = ax1, ay1
+            scanned_rect = None
 
         local_hits, local_red_hits, local_green_hits, red_won = self._detect_targets(crop)
+        logger.debug(
+            "TargetTracker: scanned %s rect=%s hits=%d",
+            "roi" if use_roi else "acq", scanned_rect or (ox, oy, crop.shape[1], crop.shape[0]),
+            len(local_hits),
+        )
         abs_hits = [(ox + lx, oy + ly, a) for lx, ly, a in local_hits]
         selected = self._select_target(abs_hits, w)
         ref = self._last_x if self._last_x is not None else w / 2.0
@@ -217,6 +317,17 @@ class TargetTracker:
         # Phase 3 (not built here) is what would branch on
         # self._ranked_lock_priority being True and actually use
         # ranked_selected — see HLDD 005 Selection Hardening.
+
+        # Direct operator instruction (2026-09-23): override the tall-bar
+        # pick with the centroid of all red pixels in the scanned crop,
+        # using the same red HSV range _detect_targets already uses (not a
+        # new color sample) — after, not before, the shadow logging above,
+        # so Selection Hardening's own before/after comparison keeps
+        # reflecting the tall-bar algorithm's own decision either way.
+        if self._red_mass_steering:
+            red_mass_local = self._red_mass_centroid(crop, ox, oy, w, h)
+            if red_mass_local is not None:
+                selected = (ox + red_mass_local[0], oy + red_mass_local[1])
 
         if selected is not None:
             abs_x, abs_y = selected
@@ -246,7 +357,7 @@ class TargetTracker:
             "error_norm": error_norm,
             "error_norm_y": error_norm_y,
             "n_detections": len(local_hits),
-            "roi_rect": self._roi_rect,
+            "roi_rect": scanned_rect,
         }
 
     def detect_padlock_off(self, frame: np.ndarray) -> bool:
@@ -353,6 +464,92 @@ class TargetTracker:
                 continue
             results.append((float(x + cw / 2), float(y + ch / 2), area))
         return results
+
+    def _red_mass_centroid(
+        self, crop: np.ndarray, ox: int, oy: int, frame_w: int, frame_h: int
+    ) -> "tuple[float, float] | None":
+        """Direct operator instruction (2026-09-23): crop-local centroid of
+        every pixel matching the same red range _detect_targets uses (main
+        hue band, upper end optionally narrowed by red_mass_hue_max, lower
+        value bound optionally raised by red_mass_value_min, plus the
+        [170,180] wrap-around) — no contour, no area or aspect-ratio gate,
+        so this can and will fire on shapes the tall-bar filter exists
+        specifically to reject (muzzle flash, damage decals, HUD chrome).
+        That tradeoff was raised and set aside by the operator in favor of
+        this simpler rule; see the 2026-09-23 conversation for the
+        false-positive evidence this overrides.
+
+        When `red_mass_nameplate_gate_enabled` is set, a candidate must also
+        clear `_count_nameplate_glyphs`'s threshold or this returns None
+        instead of a centroid — see that method's docstring. Off by default;
+        no effect on the behavior described above until enabled.
+
+        `ox`/`oy` (crop's absolute top-left in the full frame) and
+        `frame_w`/`frame_h` are needed only to translate
+        `red_mass_exclude_pct` (defined in full-frame fractions, since the
+        HUD element it targets is fixed relative to the screen, not to
+        whichever crop happens to be active this tick) into this crop's
+        local coordinates.
+        """
+        if crop is None or crop.size == 0:
+            return None
+        try:
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        except Exception:
+            return None
+        value_min = self._red_mass_value_min if self._red_mass_value_min is not None else int(self._red_lower[2])
+        red_lower = np.array([int(self._red_lower[0]), int(self._red_lower[1]), value_min], dtype=np.uint8)
+        red_wrap_lower = np.array([170, int(self._red_lower[1]), value_min], dtype=np.uint8)
+        red_wrap_upper = np.array(
+            [180, int(self._red_upper[1]), int(self._red_upper[2])], dtype=np.uint8
+        )
+        hue_max = self._red_mass_hue_max if self._red_mass_hue_max is not None else int(self._red_upper[0])
+        red_upper = np.array([hue_max, int(self._red_upper[1]), int(self._red_upper[2])], dtype=np.uint8)
+        mask = (
+            cv2.inRange(hsv, red_lower, red_upper)
+            | cv2.inRange(hsv, red_wrap_lower, red_wrap_upper)
+        )
+        if self._red_mass_exclude_pct is not None:
+            ex1, ey1, ex2, ey2 = self._red_mass_exclude_pct
+            cx1 = max(0, int(frame_w * ex1) - ox)
+            cy1 = max(0, int(frame_h * ey1) - oy)
+            cx2 = min(crop.shape[1], int(frame_w * ex2) - ox)
+            cy2 = min(crop.shape[0], int(frame_h * ey2) - oy)
+            if cx1 < cx2 and cy1 < cy2:
+                mask[cy1:cy2, cx1:cx2] = 0
+        if self._red_mass_nameplate_gate_enabled:
+            if self._count_nameplate_glyphs(mask) < self._red_mass_nameplate_min_glyphs:
+                return None
+        ys, xs = np.nonzero(mask)
+        if xs.size == 0:
+            return None
+        return (float(xs.mean()), float(ys.mean()))
+
+    def _count_nameplate_glyphs(self, mask: np.ndarray) -> int:
+        """HLDD 005 nameplate gate (2026-09-23): count small, glyph-shaped
+        connected components in the same red mask `_red_mass_centroid`
+        already computed for this tick — no OCR, no new color sample.
+
+        A real enemy contact's HUD nameplate (name/distance/type) renders as
+        many small components, one per letter or digit — measured 33 in
+        pursuit_mode_20260923_195448_81.png, the one frame of the three
+        where the lock was actually on the real target. A flare effect or
+        the player's own engine exhaust produced 8 and 9 respectively in the
+        other two (pursuit_mode_20260923_195450_83.png,
+        pursuit_mode_20260923_195453_85.png) — no nameplate renders near
+        either, so only stray fragments of the blob itself happen to fall in
+        the glyph-size range. `red_mass_nameplate_glyph_area`/
+        `_glyph_max_dim` bound what counts as glyph-shaped.
+        """
+        n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        area_min, area_max = self._red_mass_nameplate_glyph_area
+        max_dim = self._red_mass_nameplate_glyph_max_dim
+        count = 0
+        for i in range(1, n):
+            _x, _y, w, h, area = stats[i]
+            if area_min <= area <= area_max and w <= max_dim and h <= max_dim:
+                count += 1
+        return count
 
     def _detect_targets(
         self, crop: np.ndarray

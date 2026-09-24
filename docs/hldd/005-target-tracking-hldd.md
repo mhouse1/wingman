@@ -779,6 +779,183 @@ cleanup, not a redesign of either document.
 
 ---
 
+## Sustained-Hold Actuation — Tap-vs-Hold Correction (2026-09-23)
+
+### Finding
+
+`orient_nose_to_target`/`orient_pitch_to_target` (Functional Design 4/5, above) compute a bounded
+tap — `hold = clamp(kp * abs(error_norm), min_hold_sec, max_hold_sec)`, 0.08-0.35s by default —
+press the key for that duration, release, then wait out `command_cooldown_sec` before evaluating
+again next tick. This is a fundamentally different, and weaker, mechanism than the one this
+codebase's own flight-control tactics already use for turning the aircraft:
+`Controller.boundary_turn_mode`/`climb_mode` press a key **once** and hold it continuously for the
+whole maneuver, releasing only when the maneuver ends:
+
+```python
+self._climb_key(roll_key, press=True, action="boundary")
+self._climb_key(NOSE_UP_KEY, press=True, action="boundary")
+while not self._boundary_turn_stop.wait(timeout=0.25):
+    ...  # key stays held the whole time; nothing re-presses it
+finally:
+    self._climb_key(roll_key, press=False, action="boundary")   # released once, at the end
+```
+
+`boundary_turn_mode`'s own docstring names the reason this codebase moved to that shape: ADR 101's
+briefer, roll-only actuation was "measured inert... a full 8s of held roll left the aircraft at its
+closest approach," and ADR 107 V9 separately found commanded turns that did not move the aircraft
+at all. Target-tracking's roll/pitch controllers were designed independently of that lesson and
+still use the older tap-and-release shape.
+
+### Why this matters now, not hypothetically
+
+This session's own data shows the same symptom that motivated `boundary_turn_mode`'s redesign,
+on this design's controllers specifically:
+
+- The `pursuit_mode_20260923_1849*.png` run (18:49:01-21, `pursue_and_engage`, both axes
+  live) showed `roll_left`/`nose_down` firing continuously and in the correct direction every
+  tick, while the measured error barely moved where the tracked position held steady
+  (error_norm_x crept from -0.127 to -0.109 over 7 seconds of continuous, correctly-directed
+  taps) — consistent with 80ms taps having too little authority to move the flight path, not with
+  the direction or cadence being wrong.
+- The unresolved "roll_right convergence weakness" finding from earlier this session (frames 75/77
+  and before) — roll firing correctly every tick while `HEATDIVE[roll]`'s own telemetry logs
+  "diverging" far more often than "converging" — was investigated for a detection-side or
+  vertical-error explanation each time. It was never checked against the possibility that the
+  *roll axis's own actuation model* is the same "measured inert" shape ADR 101 already found and
+  ADR 107 replaced. That possibility was not available before this section named it.
+
+### Mechanism: hold until the condition changes, not for a computed duration
+
+Replace the compute-a-tap-then-cooldown model with a small state machine per axis, mirroring
+`boundary_turn_mode`'s press-once/release-once shape but driven by the tracker's own per-tick
+error instead of a fixed-duration maneuver:
+
+- New per-axis state: `self._roll_held: "str | None"` (`None`/`"left"`/`"right"`),
+  `self._pitch_held` likewise — own instance each, same reasoning Functional Design 5 already
+  gives for not sharing roll's and pitch's config: independent axes, independent state.
+- A second piece of roll-axis state, `self._roll_hold_reason: "search" | "target" | None`,
+  records *why* the key is held, not just which key — needed so reacquisition (below) can tell
+  "already holding left because that's the search default" apart from "already holding left
+  because that's where the last target was," which the key state alone cannot distinguish.
+- Each call with a fresh `error_norm` (target visible this tick):
+  - `abs(error_norm) <= deadband` → if a key is currently held for this axis, release it once,
+    clear the held state, return `None`. Target is centered; hold nothing.
+  - otherwise, `desired = "left" if error_norm < 0 else "right"` (unchanged sign convention):
+    - `self._roll_held == desired and self._roll_hold_reason == "target"` → already holding the
+      correct key *for this reason*; press nothing new, return `desired`. This is the case that
+      used to re-tap every `cooldown_sec` and now does nothing, because the key never let go.
+    - anything else — different key held, nothing held, or the right key held but for
+      `"search"` — release the old key if one was held, press `desired` once, set
+      `self._roll_hold_reason = "target"`, record it as held, return `desired`. This is what makes
+      reacquisition (search → tracking) a fresh decision even when the physical key does not
+      change: the reason flips from `"search"` to `"target"` and the release-then-press happens
+      regardless, so the transition is never silently skipped as a no-op.
+- Key press/release goes through the same low-level primitive `boundary_turn_mode` uses
+  (`_climb_key`, bracketed with `_inc_programmatic_key`/`_arm_release_grace`/
+  `_dec_programmatic_key`, exactly as that method already does it) rather than through
+  `roll_left`/`roll_right`'s own `hold_seconds`-and-block shape, which is built around a bounded
+  tap and has no "hold indefinitely" mode.
+- `deadband`/`kp`/`min_hold_sec`/`max_hold_sec`/`cooldown_sec` stop applying to this path entirely
+  — there is no computed hold duration or cooldown once a key is simply held until told
+  otherwise. `deadband` is the only survivor, now gating release instead of gating a tap.
+
+### Explicit release paths (the new hazard this model introduces)
+
+A tap-and-release controller could never leave a key stuck down — the old code released
+unconditionally after `hold_seconds`. A hold-until-told-otherwise controller can, if the code path
+that would tell it otherwise never runs. Every caller must release on:
+
+1. **Target not visible — corrected 2026-09-23: hold `ROLL_LEFT_KEY` as a search pattern, not
+   neutral.** Both call sites already gate the call itself on `if visible and err is not None:` —
+   under the old tap model that was enough (the previous tap had already self-released, so a miss
+   tick coasted straight and level). Under this model that would leave the airframe flying straight
+   with nothing scanning for a new contact to reacquire. Operator directive: on a miss, hold
+   `ROLL_LEFT_KEY` continuously (a fixed, deliberate default — not "whatever was last held") so the
+   nose keeps sweeping until `TargetTracker` reports `visible` again, the same reason a search
+   pattern beats flying straight when nothing is currently in view. Concretely: press
+   `ROLL_LEFT_KEY` if not already held, and set `self._roll_hold_reason = "search"` regardless of
+   whether a press was needed — the reason must read `"search"` on every miss tick, not just the
+   first one, or the mechanism above cannot tell a search-hold apart from a target-hold once one
+   happens to match the other. This is roll-axis only, by direct instruction — pitch's own
+   miss-tick behavior stays release-to-neutral pending a comparable instruction, and is flagged as
+   an open question below rather than assumed symmetric.
+   **Reacquisition must not seamlessly continue the search hold.** The moment `visible` goes back
+   to `True`, `self._roll_hold_reason == "search"` forces the mechanism above to release-then-press
+   even when the newly-acquired target's own desired direction also happens to be left — a fresh
+   decision, never a silent continuation across the boundary between "searching" and "tracking a
+   specific target."
+2. **Loop exit, for any reason.** `pursue_and_engage`'s `finally:` block and
+   `_eject_heatdive_loop`'s own cleanup must release both axes' held keys unconditionally, the same
+   way `boundary_turn_mode`'s `finally:` releases regardless of which break condition fired.
+3. **`cancel_mission()`/`release_for_manual_takeover()`.** These already-existing global
+   "let go of everything" paths must also clear `_roll_held`/`_pitch_held` and physically release
+   the keys — a manual takeover or cancellation mid-hold must not leave a tracking-commanded key
+   pinned down under the operator's own input.
+
+### Open question this design does not resolve
+
+Hysteresis at the deadband boundary. A tap naturally self-terminated regardless of jitter; a held
+key does not. An error oscillating across the deadband edge, or across zero, could now toggle
+held/released or left/right every tick instead of settling. This needs either a small dwell
+requirement before switching, or live data showing it is not a problem in practice — not decided
+here, and not something to guess a threshold for without measurement, the same discipline this
+document has already applied to `red_mass_hue_max`/`red_mass_value_min` elsewhere in this
+codebase.
+
+### Phased Rollout — Shadow Session Validation
+
+Same convention as every other change in this document and this codebase: land gated off, shadow
+before switching, validate the least-already-relied-on consumer first.
+
+**Phase 1 — implement, gate off, change nothing live.** New `tracking.sustained_hold_enabled`
+(default `false`). Both `orient_nose_to_target` and `orient_pitch_to_target` keep their current
+tap-and-cooldown behavior when the flag is false — this section's mechanism exists behind the flag,
+not in place of the old path yet. The explicit release paths above ship in this phase too, since
+they are a correctness requirement of the new code, not a behavior change to the old path.
+
+**Phase 2 — shadow on `pursue_and_engage` only.** Enable `sustained_hold_enabled` for pursuit mode
+specifically before touching the heatdive roll axis, since pursuit mode has no "already validated"
+history to protect and is already gated behind its own precondition. The heatdive consumer
+(`_eject_heatdive_loop`) stays on the old tap model through this phase — its roll axis is the one
+path in this document with a live track record (ADR 136 D1-D3, D5), and this redesign must not put
+that at risk while it is still unvalidated itself. Validate the same way the `pursuit_mode_*`
+frame trace above was read: does the tracked position's error actually shrink over a multi-second
+hold, not just fire in the correct direction.
+
+**Phase 3 — heatdive roll axis, only after Phase 2 shows real convergence.** Only once sustained
+holds are shown live to out-perform the tap model on pursuit mode's own data does this extend to
+`_eject_heatdive_loop`. Record the outcome as a dated note in ADR 136 (its own consumer owns that
+history), cross-referenced from here — not by rewriting this section after the fact.
+
+### Testing plan
+
+- Unit: a synthetic error held constant and outside the deadband across several consecutive calls
+  presses the key once, not once per call — the direct behavioral difference from the old model.
+- Unit: error crossing into the deadband releases the held key exactly once; error flipping sign
+  releases the old key and presses the new one, never both held at once.
+- Unit: a miss tick (`visible=False`) on the roll axis presses/holds `ROLL_LEFT_KEY` and sets
+  `_roll_hold_reason = "search"` — corrected 2026-09-23 from an earlier release-to-neutral design;
+  this replaces the "releases any held key" version of this test.
+  Repeated miss ticks must not re-press `ROLL_LEFT_KEY` once already held.
+- Unit: reacquisition after a search hold — `visible=False` (search hold engages, holding left)
+  then `visible=True` with an error whose own desired direction is also `"left"` — must still
+  release and re-press (observable as two separate press intents, or a released-then-pressed
+  intent pair, not zero new intents), and `_roll_hold_reason` must read `"target"` afterward. This
+  is the one case a naive "already holding the right key, no-op" check would get wrong.
+- Unit: reacquisition with a desired direction of `"right"` after a left search hold releases left
+  and presses right, same as any other direction change.
+- Unit: `cancel_mission()`/`release_for_manual_takeover()` clear both axes' held state and
+  physically release the keys, exercised with a key already held going in — including the search
+  hold specifically, not only a target hold.
+- Regression: `sustained_hold_enabled: false` (default) reproduces the exact old tap/cooldown
+  behavior bit-for-bit — every existing `orient_nose_to_target`/`orient_pitch_to_target` test in
+  `tests/test_target_tracking.py` and `tests/test_pursuit_mode.py` must keep passing unchanged.
+- Live trial (required before Phase 3): a `pursuit_mode_*` frame trace, read the same way this
+  section's own evidence was, showing error genuinely converging over consecutive seconds of a
+  held key — not just correct-direction commands firing.
+
+---
+
 ## Adaptive Optimization (Future, Non-V1)
 
 This capability is a follow-on optimization phase and is **not required** for initial delivery.
@@ -860,6 +1037,10 @@ Suggested reward/objective components for future work:
   itself make.
 - `docs/hldd/013-minimap-center-seeking-navigation-hldd.md` — source of the shadow-first,
   phase-gated rollout style Selection Hardening (above) follows.
+- `docs/adr/101-boundary-aware-climb.md`, `docs/adr/107-boundary-turn-tactic.md` — source of the
+  "measured inert" / commanded-turns-that-do-not-move-the-aircraft lessons Sustained-Hold Actuation
+  (above) is built on; `Controller.boundary_turn_mode`/`climb_mode` are this codebase's own working
+  example of the hold-until-condition-changes shape that section adopts.
 - `wingman/tracker.py` — `TargetTracker._detect_targets`/`_select_target`, the color-exclusion-
   before-centrality gap Selection Hardening documents.
 - `test_screenshots/ALTITUDE_SPEED.png` — reference frame motivating Selection Hardening (see

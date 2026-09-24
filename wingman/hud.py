@@ -76,12 +76,17 @@ class HudRenderer:
         self._archive_dir = Path(archive_dir)
         self._archive_max = int(archive_max_files)
         self._archive_count = 0
+        # Handle to the feh child process below, so close() has something to
+        # terminate on shutdown (2026-09-23: previously discarded right after
+        # Popen() returned, which is why the window used to survive wingman
+        # exiting — nothing ever held a reference to kill it).
+        self._feh_process: "subprocess.Popen | None" = None
         if feh_geometry:
             self._launch_feh(feh_geometry)
 
     def _launch_feh(self, geometry: str) -> None:
         try:
-            subprocess.Popen(
+            self._feh_process = subprocess.Popen(
                 ["feh", "--reload", "1", "--zoom", "fill", "--geometry", geometry, str(self._output)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -89,6 +94,30 @@ class HudRenderer:
             logger.info("HudRenderer: feh launched (%s)", geometry)
         except FileNotFoundError:
             logger.warning("HudRenderer: feh not found — install with: sudo apt install feh")
+
+    def close(self) -> None:
+        """Terminate the feh window this renderer launched, if any.
+
+        Call once from the main shutdown sequence — never automatically,
+        since a renderer with no feh_geometry (tracking disabled) never
+        launches one and this is then just a no-op. SIGTERM first, same
+        grace-then-force shape close_game() uses for the game process
+        itself, since feh does not always exit promptly on terminate()
+        alone under Xwayland (observed live, 2026-09-23).
+        """
+        proc = self._feh_process
+        if proc is None or proc.poll() is not None:
+            return  # never launched, or already exited on its own
+        try:
+            proc.terminate()
+            proc.wait(timeout=2.0)
+            logger.info("HudRenderer: feh closed")
+        except subprocess.TimeoutExpired:
+            logger.warning("HudRenderer: feh did not exit within 2.0s — killing")
+            proc.kill()
+            proc.wait(timeout=2.0)
+        except Exception as e:
+            logger.warning("HudRenderer: feh close failed (%s: %s)", type(e).__name__, e)
 
     @classmethod
     def from_config(cls, config: dict) -> "HudRenderer | None":
@@ -193,6 +222,7 @@ class HudRenderer:
     ) -> None:
         canvas = frame.copy()
         h, w = canvas.shape[:2]
+        scx, scy = w // 2, h // 2
 
         # ── Status strip (top-left) ──────────────────────────────────────
         ts_str = time.strftime("%H:%M:%S", time.localtime(ts))
@@ -231,6 +261,12 @@ class HudRenderer:
             # fresh detection that didn't happen.
             if cx is not None and cy_ is not None:
                 px, py = int(cx), int(cy_)
+                # Steering vector (2026-09-23, direct instruction): center of
+                # screen to the current steer target, whatever detection mode
+                # produced it (tall-bar pick or, when tracking.red_mass_steering
+                # is on, the red-mass centroid) — drawn first so the marker
+                # below sits on top of it at the target end.
+                cv2.line(canvas, (scx, scy), (px, py), _PURSUIT, 1, cv2.LINE_AA)
                 thick = 2 if visible else 1
                 cv2.circle(canvas, (px, py), 16, _DARK, thick + 2, cv2.LINE_AA)
                 cv2.circle(canvas, (px, py), 16, _PURSUIT, thick, cv2.LINE_AA)
@@ -265,7 +301,6 @@ class HudRenderer:
         _txt(canvas, "acq", ax1 + 2, ay1 + 14, _CYAN, scale=0.38)
 
         # ── Screen center crosshair ──────────────────────────────────────
-        scx, scy = w // 2, h // 2
         cv2.line(canvas, (scx - 18, scy), (scx + 18, scy), _GREY, 1)
         cv2.line(canvas, (scx, scy - 18), (scx, scy + 18), _GREY, 1)
 

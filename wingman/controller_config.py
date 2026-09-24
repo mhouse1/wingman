@@ -68,6 +68,19 @@ class ControllerConfig:
     # TargetTracker, which is constructed directly from the raw config dict
     # in main.py, not through this dataclass.
     padlock_center_indicator: dict = field(default_factory=dict)
+    # HLDD 015: the missiles-empty alternative to eject_and_dive. Own
+    # top-level block (not nested under telemetry.eject_closed_loop) since
+    # it is a sibling strategy at the same trigger, not a variation of the
+    # dive itself.
+    pursuit_mode: dict = field(default_factory=dict)
+    # HLDD 005 Sustained-Hold Actuation (2026-09-23): Controller only reads
+    # tracking.sustained_hold_enabled from this — every other tracking.* tuning
+    # value (deadband, kp, ...) still flows in per-call from whichever caller
+    # reads it (TrackingHudHandler owns that for the ambient path), not from
+    # here. This field exists solely so the two callers that pass no explicit
+    # kwargs today (_eject_heatdive_loop, pursue_and_engage) have a way to know
+    # the flag at all.
+    tracking: dict = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, cfg: dict | None, **overrides) -> "ControllerConfig":
@@ -101,6 +114,8 @@ class ControllerConfig:
             fuel=cfg.get("fuel", {}) or {},
             loiter=cfg.get("loiter_mission", {}) or {},
             padlock_center_indicator=cfg.get("padlock_center_indicator", {}) or {},
+            pursuit_mode=cfg.get("pursuit_mode", {}) or {},
+            tracking=cfg.get("tracking", {}) or {},
         )
         if not overrides:
             return base

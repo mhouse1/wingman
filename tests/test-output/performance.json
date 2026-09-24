@@ -1,444 +1,66 @@
 {
-  "timestamp": "2026-09-21T14:21:23.527539",
+  "timestamp": "2026-09-23T21:06:35.783444",
   "version": "1.8.11",
   "tests": {
-    "test_initial_mode_is_searching": {
-      "duration": 7.487391121685505e-05,
+    "test_shipped_config_is_valid": {
+      "duration": 0.00034226500429213047,
       "runs": 1,
-      "min": 7.487391121685505e-05,
-      "max": 7.487391121685505e-05
+      "min": 0.00034226500429213047,
+      "max": 0.00034226500429213047
     },
-    "test_first_update_transitions_to_acquiring": {
-      "duration": 0.002174686174839735,
+    "test_americanised_manoeuvre_key_is_rejected": {
+      "duration": 0.0005443980917334557,
       "runs": 1,
-      "min": 0.002174686174839735,
-      "max": 0.002174686174839735
+      "min": 0.0005443980917334557,
+      "max": 0.0005443980917334557
     },
-    "test_target_detected_transitions_to_tracking": {
-      "duration": 0.0005192870739847422,
-      "runs": 1,
-      "min": 0.0005192870739847422,
-      "max": 0.0005192870739847422
-    },
-    "test_miss_after_tracking_enters_lost_grace": {
-      "duration": 0.0008608980569988489,
-      "runs": 1,
-      "min": 0.0008608980569988489,
-      "max": 0.0008608980569988489
-    },
-    "test_reacquire_in_grace_returns_to_tracking": {
-      "duration": 0.0009358660317957401,
-      "runs": 1,
-      "min": 0.0009358660317957401,
-      "max": 0.0009358660317957401
-    },
-    "test_grace_timeout_returns_to_acquiring": {
-      "duration": 0.051941140089184046,
-      "runs": 1,
-      "min": 0.051941140089184046,
-      "max": 0.051941140089184046
-    },
-    "test_reset_clears_state": {
-      "duration": 0.001705526141449809,
-      "runs": 1,
-      "min": 0.001705526141449809,
-      "max": 0.001705526141449809
-    },
-    "test_tall_bar_is_detected": {
-      "duration": 0.0008807589765638113,
-      "runs": 1,
-      "min": 0.0008807589765638113,
-      "max": 0.0008807589765638113
-    },
-    "test_circle_is_rejected": {
-      "duration": 0.0007558548822999001,
-      "runs": 1,
-      "min": 0.0007558548822999001,
-      "max": 0.0007558548822999001
-    },
-    "test_wide_blob_is_rejected": {
-      "duration": 0.000826382078230381,
-      "runs": 1,
-      "min": 0.000826382078230381,
-      "max": 0.000826382078230381
-    },
-    "test_target_at_center_gives_zero_error": {
-      "duration": 0.0007842639461159706,
-      "runs": 1,
-      "min": 0.0007842639461159706,
-      "max": 0.0007842639461159706
-    },
-    "test_target_left_of_center_gives_negative_error": {
-      "duration": 0.00036797812208533287,
-      "runs": 1,
-      "min": 0.00036797812208533287,
-      "max": 0.00036797812208533287
-    },
-    "test_target_right_of_center_gives_positive_error": {
-      "duration": 0.00036155618727207184,
-      "runs": 1,
-      "min": 0.00036155618727207184,
-      "max": 0.00036155618727207184
-    },
-    "test_error_clamped_to_unit_range": {
-      "duration": 0.00037883990444242954,
-      "runs": 1,
-      "min": 0.00037883990444242954,
-      "max": 0.00037883990444242954
-    },
-    "test_no_error_when_no_target": {
-      "duration": 0.00033988594077527523,
-      "runs": 1,
-      "min": 0.00033988594077527523,
-      "max": 0.00033988594077527523
-    },
-    "test_picks_nearer_of_two_targets_on_first_frame": {
-      "duration": 0.0003485260531306267,
-      "runs": 1,
-      "min": 0.0003485260531306267,
-      "max": 0.0003485260531306267
-    },
-    "test_tracks_nearer_target_on_subsequent_frames": {
-      "duration": 0.000680197961628437,
-      "runs": 1,
-      "min": 0.000680197961628437,
-      "max": 0.000680197961628437
-    },
-    "test_prefers_red_when_both_present": {
-      "duration": 0.0003751961048692465,
-      "runs": 1,
-      "min": 0.0003751961048692465,
-      "max": 0.0003751961048692465
-    },
-    "test_falls_back_to_green_when_no_red": {
-      "duration": 0.0003427539486438036,
-      "runs": 1,
-      "min": 0.0003427539486438036,
-      "max": 0.0003427539486438036
-    },
-    "test_detects_dashed_ring_at_center": {
-      "duration": 0.00014356407336890697,
-      "runs": 1,
-      "min": 0.00014356407336890697,
-      "max": 0.00014356407336890697
-    },
-    "test_no_ring_returns_false": {
-      "duration": 6.814301013946533e-05,
-      "runs": 1,
-      "min": 6.814301013946533e-05,
-      "max": 6.814301013946533e-05
-    },
-    "test_too_few_dashes_is_rejected": {
-      "duration": 9.211711585521698e-05,
-      "runs": 1,
-      "min": 9.211711585521698e-05,
-      "max": 9.211711585521698e-05
-    },
-    "test_one_large_blob_is_rejected": {
-      "duration": 7.84571748226881e-05,
-      "runs": 1,
-      "min": 7.84571748226881e-05,
-      "max": 7.84571748226881e-05
-    },
-    "test_ring_outside_center_region_is_ignored": {
-      "duration": 9.103096090257168e-05,
-      "runs": 1,
-      "min": 9.103096090257168e-05,
-      "max": 9.103096090257168e-05
-    },
-    "test_empty_frame_returns_false": {
-      "duration": 4.2315456084907055e-05,
-      "runs": 2,
-      "min": 4.2165862396359444e-05,
-      "max": 4.2465049773454666e-05
-    },
-    "test_detects_dot_at_screen_center": {
-      "duration": 8.033192716538906e-05,
-      "runs": 1,
-      "min": 8.033192716538906e-05,
-      "max": 8.033192716538906e-05
-    },
-    "test_no_dot_returns_false": {
-      "duration": 5.8175064623355865e-05,
-      "runs": 1,
-      "min": 5.8175064623355865e-05,
-      "max": 5.8175064623355865e-05
-    },
-    "test_dot_outside_center_region_is_ignored": {
-      "duration": 6.931507959961891e-05,
-      "runs": 1,
-      "min": 6.931507959961891e-05,
-      "max": 6.931507959961891e-05
-    },
-    "test_too_few_pixels_is_rejected": {
-      "duration": 6.661098450422287e-05,
-      "runs": 1,
-      "min": 6.661098450422287e-05,
-      "max": 6.661098450422287e-05
-    },
-    "test_dashed_ring_alone_is_not_read_as_the_center_dot": {
-      "duration": 8.067884482443333e-05,
-      "runs": 1,
-      "min": 8.067884482443333e-05,
-      "max": 8.067884482443333e-05
-    },
-    "test_center_dot_detected_on_every_real_padlock_off_frame": {
-      "duration": 0.21483193803578615,
-      "runs": 1,
-      "min": 0.21483193803578615,
-      "max": 0.21483193803578615
-    },
-    "test_deadband_suppresses_command": {
-      "duration": 0.0010330441873520613,
-      "runs": 1,
-      "min": 0.0010330441873520613,
-      "max": 0.0010330441873520613
-    },
-    "test_negative_error_rolls_left": {
-      "duration": 0.00022509507834911346,
-      "runs": 1,
-      "min": 0.00022509507834911346,
-      "max": 0.00022509507834911346
-    },
-    "test_positive_error_rolls_right": {
-      "duration": 0.00015877815894782543,
-      "runs": 1,
-      "min": 0.00015877815894782543,
-      "max": 0.00015877815894782543
-    },
-    "test_hold_is_proportional_and_clamped": {
-      "duration": 5.8110104873776436e-05,
-      "runs": 1,
-      "min": 5.8110104873776436e-05,
-      "max": 5.8110104873776436e-05
-    },
-    "test_hold_clamped_to_min": {
-      "duration": 3.974698483943939e-05,
-      "runs": 1,
-      "min": 3.974698483943939e-05,
-      "max": 3.974698483943939e-05
-    },
-    "test_hold_clamped_to_max": {
-      "duration": 3.904290497303009e-05,
-      "runs": 1,
-      "min": 3.904290497303009e-05,
-      "max": 3.904290497303009e-05
-    },
-    "test_cooldown_suppresses_second_call": {
-      "duration": 0.0001903790980577469,
-      "runs": 1,
-      "min": 0.0001903790980577469,
-      "max": 0.0001903790980577469
-    },
-    "test_cooldown_allows_after_elapsed": {
-      "duration": 0.00013629207387566566,
-      "runs": 1,
-      "min": 0.00013629207387566566,
-      "max": 0.00013629207387566566
-    },
-    "test_reference_frame_detects_markers": {
-      "duration": 0.040542625822126865,
-      "runs": 1,
-      "min": 0.040542625822126865,
-      "max": 0.040542625822126865
-    },
-    "test_reference_frame_rejects_reticle": {
-      "duration": 0.04630257887765765,
-      "runs": 1,
-      "min": 0.04630257887765765,
-      "max": 0.04630257887765765
-    },
-    "test_maybe_render_writes_file": {
-      "duration": 0.0020181189756840467,
-      "runs": 1,
-      "min": 0.0020181189756840467,
-      "max": 0.0020181189756840467
-    },
-    "test_maybe_render_respects_interval": {
-      "duration": 0.0011114678345620632,
-      "runs": 1,
-      "min": 0.0011114678345620632,
-      "max": 0.0011114678345620632
-    },
-    "test_from_config_disabled": {
-      "duration": 4.1557010263204575e-05,
-      "runs": 1,
-      "min": 4.1557010263204575e-05,
-      "max": 4.1557010263204575e-05
-    },
-    "test_from_config_enabled": {
-      "duration": 5.353707820177078e-05,
-      "runs": 1,
-      "min": 5.353707820177078e-05,
-      "max": 5.353707820177078e-05
-    },
-    "test_from_config_hud_disabled_overrides_tracking_enabled": {
-      "duration": 4.677497781813145e-05,
-      "runs": 1,
-      "min": 4.677497781813145e-05,
-      "max": 4.677497781813145e-05
-    },
-    "test_from_config_feh_not_launched_when_tracking_disabled": {
-      "duration": 0.0003085089847445488,
-      "runs": 1,
-      "min": 0.0003085089847445488,
-      "max": 0.0003085089847445488
-    },
-    "test_from_config_feh_launched_when_tracking_enabled": {
-      "duration": 0.00027803797274827957,
-      "runs": 1,
-      "min": 0.00027803797274827957,
-      "max": 0.00027803797274827957
-    },
-    "test_render_with_tracking_obs": {
-      "duration": 0.003050584113225341,
-      "runs": 1,
-      "min": 0.003050584113225341,
-      "max": 0.003050584113225341
-    },
-    "test_atomic_write_no_partial_read": {
-      "duration": 0.001050520921126008,
-      "runs": 1,
-      "min": 0.001050520921126008,
-      "max": 0.001050520921126008
-    },
-    "test_archives_during_game_battle_eject": {
-      "duration": 0.002103046979755163,
-      "runs": 1,
-      "min": 0.002103046979755163,
-      "max": 0.002103046979755163
-    },
-    "test_does_not_archive_during_ordinary_game_battle": {
-      "duration": 0.0019099488854408264,
-      "runs": 1,
-      "min": 0.0019099488854408264,
-      "max": 0.0019099488854408264
-    },
-    "test_archive_disabled_by_default": {
-      "duration": 0.001151893986389041,
-      "runs": 1,
-      "min": 0.001151893986389041,
-      "max": 0.001151893986389041
-    },
-    "test_archive_capped_per_session": {
-      "duration": 0.008711104979738593,
-      "runs": 1,
-      "min": 0.008711104979738593,
-      "max": 0.008711104979738593
-    },
-    "test_from_config_reads_archive_block": {
-      "duration": 6.671901792287827e-05,
-      "runs": 1,
-      "min": 6.671901792287827e-05,
-      "max": 6.671901792287827e-05
-    },
-    "test_heatdive_disabled_by_default_presses_no_switch_weapon": {
-      "duration": 1.5508933688979596,
-      "runs": 1,
-      "min": 1.5508933688979596,
-      "max": 1.5508933688979596
-    },
-    "test_heatdive_enabled_without_tracker_is_a_no_op": {
-      "duration": 1.5512095319572836,
-      "runs": 1,
-      "min": 1.5512095319572836,
-      "max": 1.5512095319572836
-    },
-    "test_heatdive_enabled_switches_weapon_and_tracks": {
-      "duration": 1.9025848731398582,
-      "runs": 1,
-      "min": 1.9025848731398582,
-      "max": 1.9025848731398582
-    },
-    "test_heatdive_thread_does_not_outlive_the_dive": {
-      "duration": 2.003224643180147,
-      "runs": 1,
-      "min": 2.003224643180147,
-      "max": 2.003224643180147
-    },
-    "test_heatdive_thread_stops_when_descent_control_ends_not_at_full_dive_completion": {
-      "duration": 2.2063226411119103,
-      "runs": 1,
-      "min": 2.2063226411119103,
-      "max": 2.2063226411119103
-    },
-    "test_heatdive_stops_firing_once_ammo_is_exhausted": {
-      "duration": 0.5042332299053669,
-      "runs": 1,
-      "min": 0.5042332299053669,
-      "max": 0.5042332299053669
-    },
-    "test_rearm_abort_check_skips_secondary_loadout_reading": {
-      "duration": 0.30250458884984255,
-      "runs": 1,
-      "min": 0.30250458884984255,
-      "max": 0.30250458884984255
-    },
-    "test_rearm_abort_check_still_fires_without_a_weapon_switch": {
-      "duration": 0.020592335145920515,
-      "runs": 1,
-      "min": 0.020592335145920515,
-      "max": 0.020592335145920515
-    },
-    "test_eject_and_dive_resets_weapon_switched_flag_per_dive": {
-      "duration": 1.5509529570117593,
-      "runs": 1,
-      "min": 1.5509529570117593,
-      "max": 1.5509529570117593
-    },
-    "test_stop_eject_sequence_also_clears_weapon_switched_flag": {
-      "duration": 0.00019730813801288605,
-      "runs": 1,
-      "min": 0.00019730813801288605,
-      "max": 0.00019730813801288605
-    },
-    "test_is_secondary_weapon_active_reflects_the_flag": {
-      "duration": 0.0001498719211667776,
-      "runs": 1,
-      "min": 0.0001498719211667776,
-      "max": 0.0001498719211667776
+    "test_type_and_range_violations_are_caught": {
+      "duration": 0.0004061331107680287,
+      "runs": 7,
+      "min": 0.00039883796125650406,
+      "max": 0.0004190250765532255
     },
-    "test_ensure_padlock_off_already_off_presses_nothing": {
-      "duration": 0.00017256406135857105,
+    "test_bool_does_not_satisfy_an_int_leaf": {
+      "duration": 0.00040555093437433243,
       "runs": 1,
-      "min": 0.00017256406135857105,
-      "max": 0.00017256406135857105
+      "min": 0.00040555093437433243,
+      "max": 0.00040555093437433243
     },
-    "test_ensure_padlock_off_presses_once_when_on": {
-      "duration": 0.30088537698611617,
+    "test_missing_required_key_is_caught": {
+      "duration": 0.0004048021510243416,
       "runs": 1,
-      "min": 0.30088537698611617,
-      "max": 0.30088537698611617
+      "min": 0.0004048021510243416,
+      "max": 0.0004048021510243416
     },
-    "test_ensure_padlock_off_gives_up_after_max_attempts": {
-      "duration": 0.9016921960283071,
+    "test_null_is_rejected_unless_declared_nullable": {
+      "duration": 0.00040190014988183975,
       "runs": 1,
-      "min": 0.9016921960283071,
-      "max": 0.9016921960283071
+      "min": 0.00040190014988183975,
+      "max": 0.00040190014988183975
     },
-    "test_ensure_padlock_off_without_tracker_is_a_no_op": {
-      "duration": 0.0001947539858520031,
+    "test_crop_names_are_free_but_crop_shape_is_not": {
+      "duration": 0.0005888468585908413,
       "runs": 1,
-      "min": 0.0001947539858520031,
-      "max": 0.0001947539858520031
+      "min": 0.0005888468585908413,
+      "max": 0.0005888468585908413
     },
-    "test_heatdive_padlock_verify_disabled_by_default": {
-      "duration": 1.8023843930568546,
+    "test_all_problems_are_reported_at_once": {
+      "duration": 0.0005895048379898071,
       "runs": 1,
-      "min": 1.8023843930568546,
-      "max": 1.8023843930568546
+      "min": 0.0005895048379898071,
+      "max": 0.0005895048379898071
     },
-    "test_heatdive_checks_padlock_off_at_dive_start_when_verify_enabled": {
-      "duration": 1.8022335229907185,
+    "test_valid_config_does_not_raise": {
+      "duration": 0.00019794492982327938,
       "runs": 1,
-      "min": 1.8022335229907185,
-      "max": 1.8022335229907185
+      "min": 0.00019794492982327938,
+      "max": 0.00019794492982327938
     },
-    "test_heatdive_loop_stops_on_eject_stop_event": {
-      "duration": 0.3017150890082121,
+    "test_no_config_key_is_read_without_being_declared": {
+      "duration": 0.09310027002356946,
       "runs": 1,
-      "min": 0.3017150890082121,
-      "max": 0.3017150890082121
+      "min": 0.09310027002356946,
+      "max": 0.09310027002356946
     }
   }
 }

@@ -833,14 +833,123 @@ tracking:
   # measured — the shadow log is what should correct it.
   ranked_lock_priority: false
   ranked_priority_tolerance_px: 40.0
-  lost_timeout_sec: 0.7
+  # Lowered from 0.7 (2026-09-23): live-frame review found the tracker
+  # confined to a small LOST_GRACE ROI around a stale (often false-positive,
+  # e.g. terrain-color) lock, structurally unable to see a real, valid
+  # candidate sitting outside that window elsewhere in the acquisition
+  # region -- confirmed directly by re-running _detect_targets's own HSV/
+  # contour logic against an archived frame (game_battle_eject_20260923_
+  # 051840_169.png): zero qualifying candidates inside the active ROI that
+  # tick, one real candidate (area 26, aspect 2.83) well outside it.
+  # _handle_miss's own elapsed>=lost_timeout check is checked before, and
+  # therefore always wins over, the ROI-expansion-ladder fallback
+  # (roi_reacquire_cycles/local_roi_expand_factor) at the ADR 136 heatdive
+  # loop's 0.2s cadence -- the ladder never reaches local_roi_max_scale
+  # before this timeout already forces ACQUIRING, so this is the one lever
+  # that actually bounds how long the trap lasts there. Does not change
+  # ambient-path behavior at all: TrackingHudHandler.tick() only runs on the
+  # ~1.5s main-loop cadence, which already exceeds either value on a single
+  # miss. Named guess, not measured -- a live shadow session (watch for
+  # "grace timeout" firing sooner without spurious re-acquisitions on
+  # briefly-occluded real targets) is what should correct it next.
+  lost_timeout_sec: 0.4
   prefer_red_lock: true
+  # Direct operator instruction (2026-09-23): always steer toward the
+  # centroid of every red pixel in the scanned crop (tracking_hsv.red_lower/
+  # upper below — the same range already used for acq-region detection, not
+  # a new sample), overriding the tall-bar contour pick in
+  # TargetTracker._select_target whenever any red pixel is present. This was
+  # raised as a recommendation against, with empirical evidence of red mass
+  # coming from muzzle flash / own-airframe effects rather than enemies in
+  # some frames (2026-09-23 conversation) — shipped true anyway per direct,
+  # repeated operator instruction overriding that recommendation. See
+  # TargetTracker._red_mass_centroid.
+  red_mass_steering: true
+  # Excludes the "NO LOCK" / lock-status HUD text from red_mass_steering's
+  # scan (2026-09-23): that text is bright red and boresight-relative, not
+  # world content, so it was winning the red-mass centroid outright (seen
+  # live: game_battle_eject_20260923_094830_187.png — marker landed on the
+  # text while a real, closer contact sat untouched elsewhere in frame).
+  # Measured at identical fractional bbox (0.474-0.526, 0.762-0.777) across
+  # 4 frames from different sessions/zoom/terrain; bounds below add margin
+  # over that measurement. Applies only to red_mass_steering — the tall-bar
+  # path already rejects this text's short, wide letter-stroke contours via
+  # min_aspect_ratio.
+  red_mass_exclude_pct: [0.46, 0.75, 0.54, 0.79]
+  # Narrows red_mass_steering's own upper hue bound to separate the
+  # airframe's own afterburner glow (hot orange) from a real target icon
+  # (pure red) — position-based exclusion doesn't work here since the
+  # afterburner moves with the airframe's on-screen attitude, unlike NO
+  # LOCK's fixed position above. Measured directly (2026-09-23,
+  # game_battle_eject_20260923_123703/04/05_35/36/37.png): afterburner glow
+  # hue 7-10 (bordering true orange), real target icon hue 3-5 (pure red) —
+  # per-blob pixel area was checked first and rejected as a discriminator
+  # (270 vs 271, 222 vs 309 px in these same frames — no reliable size
+  # threshold exists). 6 sits at the midpoint of the measured gap. Applies
+  # only to red_mass_steering — tracking_hsv.red_upper (10) is untouched,
+  # since _detect_targets' aspect-ratio filter already guards that path
+  # against this confusion.
+  red_mass_hue_max: 6
+  # Raises red_mass_steering's own value (brightness) floor to separate the
+  # afterburner's fading outer rim from a real target icon — hue alone
+  # doesn't: the rim fades through the same red hue band the target uses
+  # (measured 2026-09-23, game_battle_eject_20260923_171137/38/39_0/1/2.png,
+  # after the hue_max fix above was already in place). Per-blob pixel area
+  # was checked first and rejected again here too (bad-frame rim blobs
+  # measured 328-652px, bigger than the good frame's own 79px fragments —
+  # backwards from what a minimum-area rule would need). Brightness is the
+  # real discriminator: the target is a flat-shaded icon (value approx 255
+  # on 86% of its qualifying pixels); the fading rim only reaches value
+  # >=245 on 9-11% of its qualifying pixels. Applies only to
+  # red_mass_steering — tracking_hsv's shared 150 floor (and
+  # _detect_targets' use of it) is untouched.
+  red_mass_value_min: 245
+  # HLDD 005 nameplate gate (2026-09-23): red_mass_hue_max/value_min above
+  # each separate a real target from one specific known false positive
+  # (afterburner bulk, afterburner rim). This session found a third and
+  # fourth kind in a single engagement — an enemy flare effect, then the
+  # player's own engine exhaust (pursuit_mode_20260923_195448/50/53_81/83/
+  # 85.png) — meaning color/brightness alone keeps finding new false
+  # positives as fast as they get patched. Every real enemy contact renders
+  # a HUD nameplate (name/distance/type) nearby; neither a flare nor engine
+  # exhaust ever does. Counting small glyph-shaped components in the same
+  # mask red_mass_centroid already computes (no OCR, no new color sample)
+  # measured 33 such components for the real target vs 8-9 for each false
+  # positive in the three frames above — a roughly 4x gap. That is 3 frames
+  # from one engagement, not a tuned threshold, so this shipped gated off
+  # until more encounters validate the numbers, same shape as
+  # sustained_hold_enabled below. Set true here 2026-09-23 by explicit
+  # operator instruction for a live trial, specifically to get evidence from
+  # a real pursuit/eject encounter (the 2026-09-23 20:52-20:58 session found
+  # no evidence either way — the flag was still false and no pursuit
+  # triggered) — min_glyphs/glyph_area/glyph_max_dim below are still the
+  # untuned, 3-frame values, not yet corrected by live data.
+  red_mass_nameplate_gate_enabled: true
+  red_mass_nameplate_min_glyphs: 20
+  red_mass_nameplate_glyph_area: [10, 200]
+  red_mass_nameplate_glyph_max_dim: 25
   local_roi_enabled: true
   local_roi_scale: 0.22
   local_roi_min_px: [140, 90]
   local_roi_expand_factor: 1.25
   local_roi_max_scale: 0.45
   local_roi_reacquire_cycles: 3
+  # HLDD 005 Sustained-Hold Actuation (2026-09-23): hold ROLL_LEFT_KEY/
+  # ROLL_RIGHT_KEY/NOSE_UP_KEY/NOSE_DOWN_KEY until the tracked condition
+  # changes (Controller.boundary_turn_mode's own shape) instead of computing
+  # a bounded 0.08-0.35s tap and releasing — the tap model was found to have
+  # too little control authority in the error range pursuit_mode actually
+  # operates in (measured live: error_norm_x crept from -0.127 to -0.109
+  # over 7s of continuous, correctly-directed taps, pursuit_mode_20260923_
+  # 1849*.png). One flag drives both call sites (pursue_and_engage and
+  # _eject_heatdive_loop's roll axis) — the HLDD's own Phase 2/3 plan would
+  # have staged them separately (pursuit first, since it has no live history
+  # to protect; heatdive's roll axis only after pursuit proved convergence),
+  # but that staging requires splitting this into two flags, which has not
+  # been done. Set true here 2026-09-23 by explicit operator instruction,
+  # skipping that staging and enabling both call sites at once. See HLDD
+  # 005's own "Sustained-Hold Actuation" section for the full design.
+  sustained_hold_enabled: true
 tracking_hsv:
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
@@ -881,6 +990,40 @@ padlock_center_indicator:
   # ADR 140 D6, operator directive 2026-09-20: a real dive pressed this
   # correction 13 times over ~20s with no effect — capped per dive.
   max_correction_attempts: 3
+# HLDD 015: missiles-empty alternative to eject_and_dive. Switch to secondary
+# weapons and pursue with BOTH tracking axes (roll and pitch) instead of
+# diving, since pursue_and_engage never starts the descent controller that
+# forces eject_and_dive's own heatdive addition to stay roll-only.
+#
+# enabled overridden true 2026-09-23 by explicit, repeated direct operator
+# instruction — NOT because the precondition below was met. Two-Axis
+# Rollout Phase 2 (live pitch actuation validated on the ambient path,
+# tracking.actuate_pitch: true) has NOT happened: actuate_pitch is still
+# false and zero nose_up/nose_down/orient_pitch calls exist in any session
+# log to date. HLDD 015's Safety and Gating Rules section explains the risk
+# this skips: the first live pitch actuation this codebase ever performs
+# now happens inside pursuit mode itself, compounding two unvalidated
+# things (pitch actuation behaving sensibly at all; pursuit as a strategy
+# working) into one trial with no way to separate them if it goes wrong.
+# Flagged to the operator before this edit; they chose to proceed anyway.
+pursuit_mode:
+  enabled: true
+  # Named guess, not measured — a live shadow trial should correct it, same
+  # status as HLDD 015's own Configuration Additions section.
+  pursuit_max_duration_s: 20.0
+  # Inherits ADR 136 D4's disabled default: the padlock-off detector this
+  # gates was found to be tracking a flight-path marker, not padlock state.
+  pursuit_padlock_verify: false
+  # get_ammo_missiles() reads the AMMO_MISSILE HUD region, which does not
+  # update to the post-switch_weapon secondary loadout instantly — measured
+  # live (2026-09-23): 1.79s and 9.1s after switch_weapon completed, across
+  # two separate encounters, before the analyzer's own "Ammo missiles: 2"
+  # first appeared. Without this, pursue_and_engage's own ammo==0 check
+  # trusted the very first reading (always still the pre-switch value) and
+  # fell through to eject_and_dive within ~230ms on every trigger, before
+  # the tracking loop ever ran long enough to matter. Margin over both
+  # measured samples, not a large-N guarantee.
+  ammo_zero_grace_s: 12.0
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right
@@ -894,7 +1037,7 @@ hud:
   # renderer, so tracking.enabled: true below was never the reason this was
   # off. Turn back off (hud.enabled: false is a hard override, regardless of
   # tracking.enabled) once the roll_right question is answered.
-  enabled: false
+  enabled: true
   output_path: tests/test-output/live_hud.png
   interval_sec: 1.0
   # Timestamped archive of the same annotated frame while target tracking is
@@ -909,7 +1052,7 @@ hud:
   # log can't say *why* -- these frames are the next piece of evidence.
   # Turn back off once that's answered; it isn't needed continuously.
   target_tracking_archive:
-    enabled: false
+    enabled: true
     dir: tests/test-output/target_tracking
     max_files: 200
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.

@@ -300,6 +300,26 @@ class Controller:
         # flight must never delay a pitch command or vice versa, since the
         # two act on different keys and can legitimately overlap.
         self._last_pitch_orient_ts: float = 0.0
+        # HLDD 005 Sustained-Hold Actuation (2026-09-23): hold a key until the
+        # tracked condition changes instead of computing a bounded tap —
+        # Controller.boundary_turn_mode's own shape, applied to tracking.
+        # Gated by tracking.sustained_hold_enabled (default False): both
+        # orient_nose_to_target and orient_pitch_to_target keep their exact
+        # existing tap-and-cooldown behavior when this is False, so nothing
+        # here changes anything until a live trial enables it. Held-key state
+        # only, no config value — the config value that matters is the one
+        # flag below.
+        self._sustained_hold_enabled = bool((_c.tracking or {}).get("sustained_hold_enabled", False))
+        self._roll_held: "str | None" = None
+        # Which of "search" (no target — operator directive, hold
+        # ROLL_LEFT_KEY until one reappears) or "target" (holding toward a
+        # real, currently-visible target) the roll hold above is for — needed
+        # so reacquisition after a search hold is always a fresh decision,
+        # never a silent no-op because the physical key already happens to
+        # match. Pitch has no search default (operator specified roll only),
+        # so pitch does not need an equivalent.
+        self._roll_hold_reason: "str | None" = None
+        self._pitch_held: "str | None" = None
         # ADR 136: TargetTracker reference, wired in from main.py after both
         # objects exist (Controller cannot construct it — it needs the
         # Analyzer-independent HSV/contour config TrackingHudHandler owns).
@@ -374,6 +394,14 @@ class Controller:
         # Handle to the current eject thread so cleanup() can join it briefly
         # and let its finally block release keys before the process exits.
         self._eject_thread: "threading.Thread | None" = None
+        # HLDD 015: set while pursue_and_engage's own thread is running,
+        # cleared by its finally block — same shape as self._ejecting, kept
+        # as its own flag rather than reusing self._ejecting since the two
+        # are mutually exclusive alternatives, not variants of one sequence
+        # (pursue_and_engage's own fall-through calls eject_and_dive, which
+        # then sets self._ejecting fresh for that separate, later sequence).
+        self._pursuing = threading.Event()
+        self._pursuing_thread: "threading.Thread | None" = None
         # Handle to the current disengage_roll_right maneuver thread
         # (ADR 024 3.1b — liveness for the Disengage leaf).
         self._disengage_thread: "threading.Thread | None" = None
@@ -447,6 +475,27 @@ class Controller:
         # actually padlock state was worse than doing nothing. D1-D3 (the
         # dive itself) are unaffected either way.
         self._eject_cl_heatdive_padlock_verify = bool(_ecl.get("heatdive_padlock_verify", False))
+        # HLDD 015: missiles-empty alternative to eject_and_dive. Own
+        # top-level config block, not nested under eject_closed_loop — see
+        # ControllerConfig.pursuit_mode. Hard-gated false in shipped config;
+        # see pursue_and_engage's own docstring for the precondition this
+        # flag must not be flipped ahead of.
+        _pm = _c.pursuit_mode or {}
+        self._pursuit_mode_enabled = bool(_pm.get("enabled", False))
+        self._pursuit_max_duration_s = float(_pm.get("pursuit_max_duration_s", 20.0))
+        self._pursuit_padlock_verify = bool(_pm.get("pursuit_padlock_verify", False))
+        # get_ammo_missiles() reads the AMMO_MISSILE HUD region, which does
+        # not update to the post-switch_weapon secondary loadout instantly —
+        # measured live (2026-09-23): 1.79s and 9.1s after switch_weapon
+        # completed, across two separate encounters, before the analyzer's
+        # own "Ammo missiles: 2" log line first appeared. Without this grace
+        # period, pursue_and_engage's own ammo==0 check (below) trusted the
+        # very first reading — always still the pre-switch value at that
+        # point — and fell through to eject_and_dive within ~230ms on every
+        # single trigger, before the tracking loop ever got a real chance to
+        # run. Margin over both measured samples, not a large-N guarantee —
+        # a longer run of live trials should correct it if it proves wrong.
+        self._pursuit_ammo_grace_s = float(_pm.get("ammo_zero_grace_s", 12.0))
         # ADR 068 d1: True once ANY descending sample has been seen during the
         # CURRENT rotation attempt. The over-rotation guard requires it —
         # rotating past vertical means passing THROUGH a dive, so a flight path
@@ -1434,8 +1483,9 @@ class Controller:
         max_hold_sec: float = 0.35,
         cooldown_sec: float = 0.15,
         ignore_cancel: bool = False,
+        sustained_hold: bool = False,
     ) -> "str | None":
-        """Apply proportional roll correction toward a target.
+        """Apply roll correction toward a target.
 
         Args:
             error_norm: Normalized horizontal error in [-1, 1].
@@ -1443,18 +1493,32 @@ class Controller:
                         Positive = target right of center → roll right.
             deadband:   No-action zone around zero.
             kp:         Proportional gain; hold_sec = kp * abs(error_norm).
+                        Ignored when sustained_hold is True.
             min_hold_sec / max_hold_sec: Clamp bounds on the roll hold duration.
+                        Ignored when sustained_hold is True.
             cooldown_sec: Minimum interval between consecutive roll commands.
+                        Ignored when sustained_hold is True.
             ignore_cancel: Pass True for callers running after self._mission_cancel
                             is already set for the whole call's duration (e.g. ADR
                             136's eject heatdive loop) — otherwise the hold is cut
                             to near-zero on the very first _mission_cancel.wait()
                             poll, since the event is already set (measured live,
                             2026-09-09: 0-11ms instead of the requested hold).
+                            Has no effect when sustained_hold is True — see
+                            _sustained_roll_hold's own note on why.
+            sustained_hold: HLDD 005 Sustained-Hold Actuation (2026-09-23).
+                            False (default): the original bounded-tap behavior
+                            below, byte-identical. True: hold the key until
+                            error_norm re-enters the deadband or changes sign,
+                            the same shape Controller.boundary_turn_mode
+                            already uses — see _sustained_roll_hold.
 
         Returns:
-            'left', 'right', or None if suppressed by deadband or cooldown.
+            'left', 'right', or None if suppressed by deadband (both modes)
+            or cooldown (tap mode only).
         """
+        if sustained_hold:
+            return self._sustained_roll_hold(error_norm, deadband)
         if abs(error_norm) <= deadband:
             return None
         now = time.time()
@@ -1478,8 +1542,9 @@ class Controller:
         max_hold_sec: float = 0.35,
         cooldown_sec: float = 0.15,
         ignore_cancel: bool = False,
+        sustained_hold: bool = False,
     ) -> "str | None":
-        """Apply proportional pitch correction toward a target (HLDD 005, 2026-09-21).
+        """Apply pitch correction toward a target (HLDD 005, 2026-09-21).
 
         Independent instance of orient_nose_to_target's control law, on the
         vertical axis: own cooldown timestamp (_last_pitch_orient_ts, not
@@ -1493,7 +1558,10 @@ class Controller:
         criterion depends on a cumulative real-hold-time measurement that
         assumes it is the only thing pressing that key — see HLDD 005's
         Safety and Gating Rules for the full reasoning. This method exists
-        for the ambient tracking path only.
+        for the ambient tracking path and pursue_and_engage only. This
+        restriction applies identically whether sustained_hold is set —
+        holding NOSE_UP_KEY/NOSE_DOWN_KEY indefinitely is a *worse* second
+        writer on that key than a bounded tap ever was, not a better one.
 
         Args:
             error_norm_y: Normalized vertical error in [-1, 1].
@@ -1501,14 +1569,27 @@ class Controller:
                           Positive = target below center → nose down.
             deadband:   No-action zone around zero.
             kp:         Proportional gain; hold_sec = kp * abs(error_norm_y).
+                        Ignored when sustained_hold is True.
             min_hold_sec / max_hold_sec: Clamp bounds on the pitch hold duration.
+                        Ignored when sustained_hold is True.
             cooldown_sec: Minimum interval between consecutive pitch commands.
+                        Ignored when sustained_hold is True.
             ignore_cancel: See orient_nose_to_target's own docstring — same
                             rationale, independent of that method's own flag.
+                            Has no effect when sustained_hold is True.
+            sustained_hold: See orient_nose_to_target's own docstring — same
+                            mechanism, vertical axis. No search default: a
+                            miss tick under sustained hold releases to
+                            neutral here (release_pitch_hold), the operator
+                            directive behind ROLL_LEFT_KEY's search hold was
+                            roll-axis only.
 
         Returns:
-            'up', 'down', or None if suppressed by deadband or cooldown.
+            'up', 'down', or None if suppressed by deadband (both modes)
+            or cooldown (tap mode only).
         """
+        if sustained_hold:
+            return self._sustained_pitch_hold(error_norm_y, deadband)
         if abs(error_norm_y) <= deadband:
             return None
         now = time.time()
@@ -1521,6 +1602,123 @@ class Controller:
             return "up"
         self.nose_down(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
         return "down"
+
+    def _press_tracking_key(self, key: str, action: str) -> None:
+        """Press and hold one tracking key indefinitely (Sustained-Hold
+        Actuation, HLDD 005 2026-09-23) — the same low-level primitive and
+        programmatic-key bracketing `boundary_turn_mode` already uses for
+        its own held roll/pitch keys (`_climb_key` plus
+        `_inc_programmatic_key`), applied here instead of a bounded tap.
+        No `ignore_cancel`: unlike `_execute_key_press` (what `roll_left`/
+        `roll_right`/`nose_up`/`nose_down` use), `_climb_key` never polls
+        `_mission_cancel` at all, so there is nothing to ignore — every
+        caller of this method already runs after `cancel_mission()`, same
+        as `boundary_turn_mode` itself.
+        """
+        if key in _WATCHED_MANEUVER_KEYS:
+            self._inc_programmatic_key(key)
+        self._climb_key(key, press=True, action=action)
+
+    def _release_tracking_key(self, key: str, action: str) -> None:
+        """Release a key `_press_tracking_key` pressed."""
+        self._climb_key(key, press=False, action=action)
+        if key in _WATCHED_MANEUVER_KEYS:
+            self._arm_release_grace(key)
+            self._dec_programmatic_key(key)
+
+    def _sustained_roll_hold(self, error_norm: float, deadband: float) -> "str | None":
+        """Sustained-hold roll state machine (HLDD 005, 2026-09-23) — the
+        `sustained_hold=True` branch of `orient_nose_to_target`. Holds a key
+        until `error_norm` re-enters the deadband or changes sign, instead
+        of computing a bounded tap; see that method's docstring for the
+        public contract and this design's own HLDD section for why.
+        """
+        if abs(error_norm) <= deadband:
+            self.release_roll_hold()
+            return None
+        desired = "left" if error_norm < 0 else "right"
+        if self._roll_held == desired and self._roll_hold_reason == "target":
+            return desired  # already holding the right key for the right reason
+        if self._roll_held is not None:
+            self._release_tracking_key(
+                ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
+                "tracking_roll")
+        self._press_tracking_key(
+            ROLL_LEFT_KEY if desired == "left" else ROLL_RIGHT_KEY, "tracking_roll")
+        self._roll_held = desired
+        self._roll_hold_reason = "target"
+        return desired
+
+    def _sustained_pitch_hold(self, error_norm_y: float, deadband: float) -> "str | None":
+        """Pitch's own instance of `_sustained_roll_hold` — no hold-reason
+        state, since pitch has no search default to distinguish from."""
+        if abs(error_norm_y) <= deadband:
+            self.release_pitch_hold()
+            return None
+        desired = "up" if error_norm_y < 0 else "down"
+        if self._pitch_held == desired:
+            return desired
+        if self._pitch_held is not None:
+            self._release_tracking_key(
+                NOSE_UP_KEY if self._pitch_held == "up" else NOSE_DOWN_KEY,
+                "tracking_pitch")
+        self._press_tracking_key(
+            NOSE_UP_KEY if desired == "up" else NOSE_DOWN_KEY, "tracking_pitch")
+        self._pitch_held = desired
+        return desired
+
+    def engage_roll_search(self) -> None:
+        """No target visible: hold ROLL_LEFT_KEY until one reappears
+        (operator directive, HLDD 005 Sustained-Hold Actuation, 2026-09-23)
+        — a fixed search default, not neutral, so the nose keeps sweeping
+        instead of flying straight with nothing scanning for a new contact.
+        Callers invoke this only when sustained_hold is in use; harmless to
+        call otherwise since it only ever touches roll-hold state this
+        design's own methods manage.
+
+        Relabels rather than re-presses when ROLL_LEFT_KEY is already held
+        for a target — the physical key does not change, only why it is
+        held — but always sets the reason to "search" so a later
+        reacquisition (`_sustained_roll_hold` finding `_roll_hold_reason !=
+        "target"`) is forced to treat the next real target as a fresh
+        decision rather than a silent no-op.
+        """
+        if self._roll_held == "right":
+            self._release_tracking_key(ROLL_RIGHT_KEY, "tracking_roll")
+            self._roll_held = None
+        if self._roll_held is None:
+            self._press_tracking_key(ROLL_LEFT_KEY, "tracking_roll")
+            self._roll_held = "left"
+        self._roll_hold_reason = "search"
+
+    def release_roll_hold(self) -> None:
+        """Release whatever roll key Sustained-Hold Actuation is holding,
+        search or target, for any reason. Safe no-op if nothing is held."""
+        if self._roll_held is None:
+            return
+        self._release_tracking_key(
+            ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
+            "tracking_roll")
+        self._roll_held = None
+        self._roll_hold_reason = None
+
+    def release_pitch_hold(self) -> None:
+        """Release whatever pitch key Sustained-Hold Actuation is holding.
+        Safe no-op if nothing is held."""
+        if self._pitch_held is None:
+            return
+        self._release_tracking_key(
+            NOSE_UP_KEY if self._pitch_held == "up" else NOSE_DOWN_KEY,
+            "tracking_pitch")
+        self._pitch_held = None
+
+    def release_tracking_holds(self) -> None:
+        """Release both axes' Sustained-Hold Actuation keys — called from
+        cancel_mission()/release_for_manual_takeover() so a mid-hold
+        cancellation or manual takeover never leaves a tracking-commanded
+        key pinned down under the operator's own input."""
+        self.release_roll_hold()
+        self.release_pitch_hold()
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
@@ -2225,7 +2423,17 @@ class Controller:
                         # without this every hold is cut to near-zero on the
                         # first _mission_cancel.wait() poll (measured live,
                         # 2026-09-09: 0-11ms instead of the requested hold).
-                        cmd = self.orient_nose_to_target(err, ignore_cancel=True)
+                        cmd = self.orient_nose_to_target(
+                            err, ignore_cancel=True, sustained_hold=self._sustained_hold_enabled)
+                    elif self._sustained_hold_enabled:
+                        # HLDD 005 Sustained-Hold Actuation (2026-09-23): a
+                        # miss tick under the old tap model needed no action —
+                        # the previous tap had already self-released. Under a
+                        # held key, a miss must be handled explicitly or the
+                        # last-commanded key stays down. engage_roll_search
+                        # itself is the operator's search-default behavior
+                        # (hold ROLL_LEFT_KEY), not a plain release.
+                        self.engage_roll_search()
                     if err is not None:
                         if last_err is not None:
                             converging = abs(err) < abs(last_err)
@@ -2279,9 +2487,13 @@ class Controller:
                 if stop_event.wait(timeout=0.2) or self._eject_stop.is_set():
                     break
         finally:
+            # HLDD 005 Sustained-Hold Actuation (2026-09-23): loop exit, for
+            # any reason, must release a held roll key — no-op when
+            # sustained_hold was never enabled (nothing is ever held then).
+            self.release_roll_hold()
             logger.info("Controller: eject heatdive loop stopped")
 
-    def eject_and_dive(self, on_complete=None):
+    def eject_and_dive(self, on_complete=None, weapon_already_switched: bool = False):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
         NOSE_DOWN is held until telemetry confirms a steep dive and then kept
@@ -2291,6 +2503,16 @@ class Controller:
         AFTERBURNER is held until respawn is detected (or a 120s safety timeout);
         a speed trend that fails to rise after engagement triggers a bounded re-press.
         on_complete: optional callable invoked in the finally block after all keys are released.
+        weapon_already_switched: True when the caller (pursue_and_engage, on
+        either of its fall-through paths — HLDD 015 D3) already pressed
+        SWITCH_WEAPON for this encounter. Skips both the reset below and the
+        switch_weapon() call inside _run() (the heatdive tracking/roll/fire
+        thread still starts as usual). Without this, every pursuit-mode
+        fall-through pressed the key a second time ~0.3s after the first —
+        confirmed live, 2026-09-23: every eject cycle that session logged two
+        switch_weapon presses in immediate succession, and the secondary
+        weapon was never observed selected in game, consistent with a
+        toggle-style binding being pressed back to primary.
 
         No-ops (with a debug log) if an eject sequence is already in progress —
         callers should not start a second _run() thread racing the first over the
@@ -2305,11 +2527,13 @@ class Controller:
         self._eject_stop.clear()
         self._eject_held_keys.clear()
         self._eject_phase_exit_reason = ""
-        # ADR 136: once heatdive switches to the secondary loadout, the
-        # AMMO_MISSILE crop no longer reads the primary rack — reset each
-        # dive so a stale True from a previous eject can't suppress a real
-        # ADR 088 rearm-abort next time.
-        self._eject_weapon_switched = False
+        if not weapon_already_switched:
+            # ADR 136: once heatdive switches to the secondary loadout, the
+            # AMMO_MISSILE crop no longer reads the primary rack — reset each
+            # dive so a stale True from a previous eject can't suppress a real
+            # ADR 088 rearm-abort next time. Skipped when weapon_already_switched
+            # is True — see this method's own docstring.
+            self._eject_weapon_switched = False
         # ADR 140 D6: fresh correction budget for this dive.
         self._padlock_unknown_correction_attempts = 0
         # Opens nose-hold accounting for this sequence (None = not in an eject).
@@ -2352,16 +2576,17 @@ class Controller:
                 # roll/fire alongside the descent control below — the pitch
                 # loop itself is completely untouched by this addition.
                 if self._eject_cl_heatdive_enabled and self._target_tracker is not None:
-                    # ignore_cancel: cancel_mission() already ran above, before
-                    # this thread even started (same reason as the heatdive
-                    # loop's own presses — see _eject_heatdive_loop).
-                    self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
-                    # ADR 136: AMMO_MISSILE now reads the secondary loadout,
-                    # not the primary rack — ADR 088's rearm-abort check below
-                    # must not mistake that for a primary rearm (measured
-                    # live, 2026-09-09: false "2 missile(s) rearmed" abort on
-                    # both trials, ~8s into every heatdive-enabled dive).
-                    self._eject_weapon_switched = True
+                    if not weapon_already_switched:
+                        # ignore_cancel: cancel_mission() already ran above,
+                        # before this thread even started (same reason as the
+                        # heatdive loop's own presses — see _eject_heatdive_loop).
+                        self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                        # ADR 136: AMMO_MISSILE now reads the secondary loadout,
+                        # not the primary rack — ADR 088's rearm-abort check below
+                        # must not mistake that for a primary rearm (measured
+                        # live, 2026-09-09: false "2 missile(s) rearmed" abort on
+                        # both trials, ~8s into every heatdive-enabled dive).
+                        self._eject_weapon_switched = True
                     # ADR 136 D4: padlock must be OFF for the roll below to
                     # mean anything — with it on, the camera (and error_norm)
                     # tracks the locked target, not the aircraft's nose. Gated
@@ -2508,6 +2733,196 @@ class Controller:
 
         self._eject_thread = threading.Thread(target=_run, daemon=True)
         self._eject_thread.start()
+
+    def pursuit_mode_enabled(self) -> bool:
+        """True when the missiles-empty trigger should call pursue_and_engage
+        instead of eject_and_dive (HLDD 015). Read by AmmoEventsHandler
+        .fire_eject(), the single choke point both strategies share."""
+        return self._pursuit_mode_enabled
+
+    def is_pursuing(self) -> bool:
+        """True while a pursue_and_engage sequence is in progress (HLDD 015),
+        including the window after it falls through into eject_and_dive —
+        see is_ejecting() for that half. Behavior-tree callers that need
+        "is the missiles-empty response still running, whichever strategy"
+        should check both."""
+        return self._pursuing.is_set()
+
+    def pursue_and_engage(self, on_complete=None):
+        """HLDD 015: switch to secondary weapons and pursue with both
+        tracking axes instead of diving — the missiles-empty alternative to
+        eject_and_dive.
+
+        Why this can use pitch and eject_and_dive's own heatdive addition
+        cannot: nothing here runs _eject_descent_control, so nothing else is
+        contending for NOSE_UP_KEY/NOSE_DOWN_KEY. eject_and_dive's heatdive
+        loop must stay roll-only forever, not just until validated, because
+        the descent controller's cumulative NOSE_DOWN hold-time accounting
+        (ADR 058) assumes it is the only writer of that key; this method
+        avoids the conflict by never starting that controller at all rather
+        than trying to coordinate two writers on the same axis.
+
+        Hard-gated (HLDD 015 Safety and Gating Rules): pursuit_mode.enabled
+        must stay false in shipped config until Design 005's Two-Axis
+        Rollout reaches a live-validated pitch channel on the ambient path.
+        This method is fully wired specifically so it CAN be validated the
+        same shadow-first way as everything else in this codebase, not so
+        it can be flipped on ahead of that precondition. This docstring is
+        not the enforcement mechanism — the config flag defaulting false is.
+
+        Termination (HLDD 015 D3), all via the loop below:
+        - secondary ammo confirmed at 0 -> falls through to eject_and_dive.
+          The airframe is now exactly the "empty, worth trading for a
+          rearmed one" case ADR 106/109 already designed the dive for.
+        - pursuit_max_duration_s elapsed first -> same fall-through, a
+          bounded worst case so a target-never-found encounter cannot fly
+          the empty airframe indefinitely.
+        - respawn / manual takeover / shutdown (self._eject_stop) -> stops
+          immediately, no fall-through — mirrors eject_and_dive's own
+          external-cancellation path exactly, same shared event.
+
+        No-ops (with a debug log) if a pursuit sequence is already running —
+        same reentrancy shape as eject_and_dive's own self._ejecting guard.
+        Falls back to eject_and_dive directly, without ever touching
+        self._pursuing, if no TargetTracker is wired: pursuing with nothing
+        to pursue is not a smaller version of this feature, it is nothing.
+        """
+        if self._pursuing.is_set():
+            logger.debug("Controller: pursue_and_engage already in progress — ignoring duplicate trigger")
+            return
+        if self._target_tracker is None:
+            logger.warning(
+                "Controller: pursue_and_engage — no TargetTracker wired, "
+                "falling back to eject_and_dive")
+            self.eject_and_dive(on_complete=on_complete)
+            return
+        logger.info(
+            "\033[92m🎯 MISSILES EMPTY — pursuing with secondary weapons, "
+            "both axes (HLDD 015)\033[0m")
+        self.cancel_mission()
+        self._eject_stop_reason = ""
+        self._eject_stop.clear()
+        # Shared with eject_and_dive's own reset of the same state — both
+        # strategies switch to the same secondary loadout and must not carry
+        # a stale flag/budget from whichever one ran last.
+        self._eject_weapon_switched = False
+        self._padlock_unknown_correction_attempts = 0
+
+        def _run():
+            self._pursuing.set()
+            fall_through = False
+            try:
+                mission_exit_deadline = time.time() + 2.0
+                while self.is_mission_running() and time.time() < mission_exit_deadline:
+                    time.sleep(0.05)
+
+                # ignore_cancel: cancel_mission() already ran above, before
+                # this thread even started — same reasoning as
+                # eject_and_dive's own heatdive branch and
+                # _eject_heatdive_loop's own presses.
+                self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                self._eject_weapon_switched = True
+                if self._pursuit_padlock_verify:
+                    self.ensure_padlock_off()
+
+                logger.info("Controller: pursue_and_engage — tracking engaged, both axes free")
+                start = time.time()
+                while not self._eject_stop.wait(timeout=0.2):
+                    if time.time() - start >= self._pursuit_max_duration_s:
+                        logger.info(
+                            "Controller: pursue_and_engage — max duration "
+                            "(%.0fs) reached, falling through to eject_and_dive",
+                            self._pursuit_max_duration_s)
+                        fall_through = True
+                        break
+                    try:
+                        frame = self._capture.grab_from_thread()
+                        obs = self._target_tracker.update(frame)
+                        visible = obs.get("visible")
+                        err = obs.get("error_norm")
+                        err_y = obs.get("error_norm_y")
+                        if visible and err is not None:
+                            self.orient_nose_to_target(
+                                err, ignore_cancel=True,
+                                sustained_hold=self._sustained_hold_enabled)
+                        elif self._sustained_hold_enabled:
+                            self.engage_roll_search()
+                        if visible and err_y is not None:
+                            self.orient_pitch_to_target(
+                                err_y, ignore_cancel=True,
+                                sustained_hold=self._sustained_hold_enabled)
+                        elif self._sustained_hold_enabled:
+                            self.release_pitch_hold()
+                        ammo = None
+                        flares = None
+                        health = None
+                        if self._analyzer is not None:
+                            try:
+                                ammo = self._analyzer.get_ammo_missiles()
+                            except Exception:
+                                ammo = None
+                            try:
+                                flares = self._analyzer.get_ammo_flares()
+                            except Exception:
+                                flares = None
+                            try:
+                                health = self._analyzer.get_health()
+                            except Exception:
+                                health = None
+                        if ammo == 0:
+                            if time.time() - start >= self._pursuit_ammo_grace_s:
+                                logger.info(
+                                    "Controller: pursue_and_engage — ammo exhausted, "
+                                    "falling through to eject_and_dive")
+                                fall_through = True
+                                break
+                            # Still inside the post-switch grace period (see
+                            # this class's own __init__ comment on
+                            # _pursuit_ammo_grace_s) — this 0 is likely still
+                            # the pre-switch reading, not a real empty
+                            # secondary loadout. Fall through to the ammo>0
+                            # check below, which already skips firing on 0
+                            # without ending the encounter — same tolerance
+                            # _eject_heatdive_loop already has for this exact
+                            # lag, just never applied here before.
+                        # Fail open on an unreadable count, matching ADR 136
+                        # D1 step 4's own reasoning for the heatdive loop.
+                        if ammo is None or ammo > 0:
+                            self.fire_active_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                        if self._hud_renderer is not None:
+                            self._hud_renderer.maybe_render(
+                                frame, obs, "PURSUIT_MODE", health, ammo, flares)
+                    except Exception:
+                        logger.exception("Controller: pursue_and_engage loop cycle failed")
+            finally:
+                # HLDD 005 Sustained-Hold Actuation (2026-09-23): loop exit,
+                # for any reason, must release both axes — no-op when
+                # sustained_hold was never enabled. Before the fall_through
+                # branch below: eject_and_dive owns the airframe from here
+                # if this pursuit is handing off to it, and must not inherit
+                # a roll/pitch key this loop was holding.
+                self.release_tracking_holds()
+                self._pursuing.clear()
+                if fall_through:
+                    # weapon_already_switched: both fall-through reasons
+                    # (ammo exhausted, max duration) happen only after the
+                    # switch_weapon() call above already ran for this
+                    # encounter — see eject_and_dive's own docstring for why
+                    # this must not press the key a second time.
+                    self.eject_and_dive(on_complete=on_complete, weapon_already_switched=True)
+                else:
+                    logger.info(
+                        "Controller: pursue_and_engage — stopped externally "
+                        "(reason=%s)", self._eject_stop_reason or "unknown")
+                    if on_complete is not None:
+                        try:
+                            on_complete()
+                        except Exception:
+                            logger.exception(
+                                "Controller: pursue_and_engage on_complete callback failed")
+
+        self._pursuing_thread = threading.Thread(target=_run, daemon=True)
+        self._pursuing_thread.start()
 
     def start_search_and_destroy_loop(self):
         """Start background padlock + weapon-fire loops.
@@ -5023,6 +5438,12 @@ class Controller:
         logger.info("\033[91mController: cancel_mission called\033[0m")
         self._mission_cancel.set()
         self.stop_weapon_loop()
+        # HLDD 005 Sustained-Hold Actuation (2026-09-23): a held roll/pitch
+        # key does not self-expire the way a bounded tap did — a
+        # cancellation mid-hold must let go of it explicitly, the same as
+        # every other held-key state this method's callers already expect
+        # cancel_mission() to clean up.
+        self.release_tracking_holds()
 
     def _mission_exit_requested(self) -> bool:
         """True when a mission loop should abort for a real program exit.
@@ -5095,6 +5516,17 @@ class Controller:
             self.cancel_mission()
         except Exception:
             logger.exception("Controller: cancel_mission failed during takeover")
+        try:
+            # Explicit, independent of cancel_mission()'s own call above: the
+            # blanket INJECTABLE_KEYS release below physically lets go of
+            # every key but does not know about _roll_held/_pitch_held/
+            # _roll_hold_reason — without this, a manual takeover could leave
+            # that Python-level state claiming a key is still held after the
+            # X server has already released it (HLDD 005 Sustained-Hold
+            # Actuation, 2026-09-23).
+            self.release_tracking_holds()
+        except Exception:
+            logger.exception("Controller: release_tracking_holds failed during takeover")
         for stop in (self.stop_search_and_destroy_loop,):
             try:
                 stop()

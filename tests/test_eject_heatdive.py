@@ -89,8 +89,8 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, heatdive_enabled=False,
     )
 
 
-def _run_eject_and_wait(ctrl, timeout=3.0):
-    ctrl.eject_and_dive()
+def _run_eject_and_wait(ctrl, timeout=3.0, **eject_kwargs):
+    ctrl.eject_and_dive(**eject_kwargs)
     thread = ctrl._eject_thread
     assert thread is not None
     thread.join(timeout=timeout)
@@ -295,6 +295,42 @@ def test_eject_and_dive_resets_weapon_switched_flag_per_dive(monkeypatch):
     _run_eject_and_wait(ctrl)
 
     assert ctrl._eject_weapon_switched is False
+
+
+def test_weapon_already_switched_skips_the_redundant_press(monkeypatch):
+    """Regression (2026-09-23): pursue_and_engage's fall-through already
+    pressed SWITCH_WEAPON for this encounter before calling eject_and_dive —
+    weapon_already_switched=True must skip the press here (previously
+    unconditional, producing two presses ~0.3s apart every fall-through,
+    live-confirmed to leave the secondary weapon never actually selected).
+    The heatdive tracking/roll/fire thread must still start as usual."""
+    analyzer = _AnalyzerStub(ammo=2)
+    capture = _CaptureStub()
+    tracker = _TrackerStub(visible=True, error_norm=0.5)
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=capture,
+                       heatdive_enabled=True, legacy_nose_hold_s=0.3)
+    ctrl.set_target_tracker(tracker)
+
+    _run_eject_and_wait(ctrl, weapon_already_switched=True)
+
+    keys = _keys(ctrl)
+    assert ("key_press", SWITCH_WEAPON) not in keys
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys, "heatdive should still run"
+    assert tracker.updates > 0
+
+
+def test_weapon_already_switched_does_not_reset_the_flag(monkeypatch):
+    """Companion to test_eject_and_dive_resets_weapon_switched_flag_per_dive:
+    when the caller says the weapon is already switched, the flag it set
+    for that must survive, not just the redundant key press being skipped."""
+    analyzer = _AnalyzerStub(ammo=2)
+    capture = _CaptureStub()
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=capture)
+    ctrl._eject_weapon_switched = True  # simulate pursue_and_engage's own switch
+
+    _run_eject_and_wait(ctrl, weapon_already_switched=True)
+
+    assert ctrl._eject_weapon_switched is True
 
 
 def test_stop_eject_sequence_also_clears_weapon_switched_flag(monkeypatch):
