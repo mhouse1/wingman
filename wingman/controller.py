@@ -984,6 +984,19 @@ class Controller:
                     if now - self._last_j20_key_ts < 0.5:  # debounce: ignore key-repeat
                         return
                     self._last_j20_key_ts = now
+                    # 'u' skips rather than preempts a running mission, and the
+                    # skip must have no side effects: relabelling _last_mission
+                    # before the launch is refused would retag the mission that
+                    # is actually flying (su30's padlock block turns off, the
+                    # next respawn restarts the wrong mission) and reset the
+                    # 2 s takeover grace. A cancelled mission still unwinding
+                    # is not "flying" — that is the resume-from-manual case.
+                    if self.is_mission_running() and not self.is_mission_teardown_in_progress():
+                        with self._last_mission_lock:
+                            flying = self._last_mission
+                        logger.info("Controller: '%s' key pressed - mission %s already "
+                                    "running, ignoring", MISSION_J20_KEY, flying)
+                        return
                     self._auto_respawn_restart = True
                     current_state = self._analyzer.game_state if self._analyzer is not None else None
                     if current_state == GameState.GAME_BATTLE_MANUAL:
@@ -1020,7 +1033,7 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to start the configured mission (%s)",
                             MISSION_J20_KEY, self._default_mission)
             except Exception:
-                logger.exception("Controller: failed to register J20 mission hotkey")
+                logger.exception("Controller: failed to register configured-mission hotkey")
 
             try:
                 def start_loiter_mission(_e):

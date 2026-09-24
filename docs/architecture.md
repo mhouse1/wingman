@@ -201,7 +201,7 @@ the JAS39. The cloak loop is its own pair with its own stop event, thread and
 lifecycle lock, like the boresight loop. It is stopped in the mission's
 `finally`, on manual takeover and in `cleanup()`.
 
-No mission has a hotkey to itself any more except `o` (su30):
+Apart from `o` (su30) and `y` (loiter), no mission has a hotkey to itself:
 `mission.default_mission` picks the mission, and battle entry, the `u` hotkey and
 the no-prior-mission restart all launch it through `_start_default_mission()`.
 

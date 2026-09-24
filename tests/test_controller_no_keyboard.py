@@ -703,6 +703,12 @@ def test_padlock_correction_stops_after_max_attempts(monkeypatch):
 
 
 def test_padlock_correction_cap_is_configurable(monkeypatch):
+    # Before the Controller is built, as in _fusion_ctrl: built with the real
+    # XTest shim, __init__ registers live hotkeys, which starts the XRecord
+    # listener thread. That thread outlives the test, imports the real Xlib
+    # (so test_input_linux's fakes are bypassed later in the run) and, on a
+    # machine with a display, listens to the real keyboard for the rest of it.
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
     cfg = _load_config()
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
     ctrl = Controller(
@@ -713,7 +719,6 @@ def test_padlock_correction_cap_is_configurable(monkeypatch):
     )
     tracker = _FakeCenterDotTracker()
     ctrl.set_target_tracker(tracker)
-    monkeypatch.setattr(controller_module, "keyboard_module", None)
     monkeypatch.setattr(ctrl, "is_secondary_weapon_active", lambda: True)
     presses = []
     monkeypatch.setattr(ctrl, "padlock_camera",

@@ -524,6 +524,44 @@ def test_u_logs_which_mission_it_starts(monkeypatch, caplog):
     assert _ThreadStub.started[0][0] == ctrl.mission_jas39
 
 
+def test_u_while_a_mission_is_flying_changes_nothing(monkeypatch):
+    """Review finding 1: a skipped launch must not relabel the mission that is
+    actually flying. Relabelling su30 as jas39 turned su30's padlock block off,
+    made the next respawn restart the wrong mission, and reset the 2 s
+    takeover grace, so Enter and the arrows were briefly ignored."""
+    ctrl, keyboard, analyzer = _hotkey_ctrl(monkeypatch, GameState.GAME_BATTLE,
+                                            default_mission="jas39")
+    ctrl._set_last_mission("su30")              # su30 started with 'o'
+    battle_since = ctrl._game_battle_since
+    assert ctrl._mission_lock.acquire(blocking=False)   # ...and is flying
+    try:
+        keyboard.handlers[MISSION_J20_KEY](object())
+    finally:
+        ctrl._mission_lock.release()
+
+    assert _ThreadStub.started == []
+    assert ctrl._last_mission == "su30"
+    assert ctrl._game_battle_since == battle_since
+    assert analyzer.trigger_calls == []
+
+
+def test_u_during_a_cancelled_missions_teardown_still_launches(monkeypatch):
+    """The lock can still be held by a cancelled mission that is unwinding,
+    for example straight after a manual takeover. 'u' must not treat that as
+    a mission flying, or resuming from manual would silently do nothing."""
+    ctrl, keyboard, _ = _hotkey_ctrl(monkeypatch, GameState.GAME_BATTLE_MANUAL,
+                                     default_mission="jas39")
+    assert ctrl._mission_lock.acquire(blocking=False)
+    ctrl._mission_cancel.set()                   # tearing down
+    try:
+        keyboard.handlers[MISSION_J20_KEY](object())
+    finally:
+        ctrl._mission_lock.release()
+
+    assert ctrl._last_mission == "jas39"
+    assert _ThreadStub.started[0][0] == ctrl.mission_jas39
+
+
 def test_u_resuming_from_manual_launches_the_configured_mission(monkeypatch):
     ctrl, keyboard, analyzer = _hotkey_ctrl(
         monkeypatch, GameState.GAME_BATTLE_MANUAL, default_mission="jas39")

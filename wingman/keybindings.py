@@ -57,7 +57,8 @@ _WATCHED_MANEUVER_KEYS = (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_
 # keyboard rather than injected, so they must not collide with the game bindings
 # above (test_keybindings.py asserts that).
 TOGGLE_WEAPON_LOOP_KEY = 'x'   # toggle the weapon firing loop
-MISSION_J20_KEY = 'u'          # start J20 mission
+MISSION_J20_KEY = 'u'          # start the configured mission
+                               # (mission.default_mission, ADR 145)
 MISSION_LOITER_KEY = 'y'       # start loiter mission
 MISSION_SU30_KEY = 'o'         # start SU-30 mission (docs/missions/su30.md)
 CANCEL_MISSION_KEY = 'end'     # cancel the active mission
