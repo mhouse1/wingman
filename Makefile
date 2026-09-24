@@ -3,6 +3,8 @@
 #   make test        -> run all tests
 #   make test1       -> run region 33 continue-text OCR test
 #   make test2       -> run region 9 INCO-text OCR test
+#   make docker-test -> run make test in the Docker image (own Xvfb display, no host X needed)
+#   make docker-shell -> interactive shell in that image
 #   make test-perf   -> run tests + generate CSV + chart
 #   make tp              -> run fast preview (tests + ADR044/ADR045 runtime gates + charts)
 #   make tp-full         -> run full preview (tp + ADR037 PATH1/PATH2 OCR lane)
@@ -40,7 +42,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -164,6 +166,46 @@ test1:
 # Run region 9 OCR check for "INCO" on INCOMING screenshots
 test2:
 	$(PYTEST_RUN) tests/test_automated_levels.py -k level4_region9_contains_inco -q
+
+# Containerised test lane (Dockerfile). Without an X server, two tests in
+# test_automated_levels.py fail on mss's "$DISPLAY not set", and without
+# python3-tk collection aborts on tests/calibrate.py's tkinter import. The image
+# supplies both, with Xvfb giving every run its own display, so the suite runs
+# unchanged anywhere Docker runs. It also keeps test key injection off the
+# operator's desktop (see _release_all_injectable_keys in tests/conftest.py).
+#
+#   make docker-test                          # make test, in the container
+#   make docker-test DOCKER_CMD="make lint"   # any other target
+#   make docker-shell                         # interactive shell, same setup
+#
+# The checkout is bind-mounted at /work, so the image rebuilds only when
+# pyproject.toml, uv.lock or .python-version change, and results land in
+# tests/test-output/ as usual. The untracked corpus (ADR 100 D7) comes along
+# wherever it exists, so on veda the corpus-gated tests run instead of skipping.
+# --user keeps files written into the mount owned by you rather than root;
+# HOME=/tmp gives that uid a writable home, since the image has no user for it.
+DOCKER       ?= docker
+DOCKER_IMAGE ?= wingman-test
+DOCKER_CMD   ?= make test
+# e.g. --build-arg BASE_IMAGE=... when Docker Hub rate-limits you (see Dockerfile)
+DOCKER_BUILD_ARGS ?=
+# CA bundle for TLS-intercepting networks, handed to the build as a secret (see
+# Dockerfile). Defaults to whatever the host already trusts via SSL_CERT_FILE,
+# which is how Claude Code cloud sessions and most corporate setups expose it;
+# empty on an ordinary machine, where the build needs none.
+DOCKER_EXTRA_CA ?= $(wildcard $(SSL_CERT_FILE))
+DOCKER_CA_FLAG   = --secret id=extra_ca,src=$(DOCKER_EXTRA_CA)
+DOCKER_RUN    = $(DOCKER) run --rm -v "$(CURDIR)":/work -w /work \
+                --user "$$(id -u):$$(id -g)" -e HOME=/tmp
+
+docker-build:
+	$(DOCKER) build $(if $(DOCKER_EXTRA_CA),$(DOCKER_CA_FLAG)) $(DOCKER_BUILD_ARGS) -t $(DOCKER_IMAGE) .
+
+docker-test: docker-build
+	$(DOCKER_RUN) $(DOCKER_IMAGE) $(DOCKER_CMD)
+
+docker-shell: docker-build
+	$(DOCKER_RUN) -it $(DOCKER_IMAGE) bash
 
 # Generate CSV with performance trends from the local history
 # (tests/perf-history/, untracked - lives on veda only)
