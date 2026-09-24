@@ -713,3 +713,44 @@ Steering"):
 - **Side effects to know:** raw scan crops in `tests/test-output/target_tracking/` are now up to
   full width, so each archived frame is larger (the capture budget's 600 files / 1 GB caps the folder).
   The operator started their own session at 17:26 on this code; its archive is the next evidence.
+
+**2026-09-24 18:17 — Cycle 14: a correction to Cycle 10, the DIED ARMED line fixed, and what the icons
+do over time.**
+
+- **Correction to Cycle 10.** I wrote that the one `cause=terrain` verdict "rests on a telemetry frame
+  117 s old and no incoming warning (by elimination, ADR 143's rule), so it is weak evidence". That was
+  wrong. `RespawnHandler._classify_died_armed` checks terrain **first**, from the behavior tree's
+  hard-emergency timestamp (`climb_last_hard_emergency_ts`: "hitting the ground is certain"), and by
+  design does not use the pre-crash frame's altitude or rate at all. The 12:11 verdict therefore
+  reflects an emergency actually being active, which is direct evidence, not inference. The two odd
+  numbers in that line were unrelated to the verdict.
+- **Fixed:** the line printed an unset last-incoming timestamp as an age (`incoming 1790266284.2s
+  ago`, epoch seconds). `_classify_died_armed` now returns an infinite age when no alert ever
+  fired and the log says `no incoming alert this session`; classification is unchanged (an infinite
+  age is beyond every lookback). `tests/test_died_armed_incoming_age.py`, 7 tests.
+- **Icons over time (measured; three full sessions, 10:51, 12:05 and 17:26, icon-like unlabelled
+  blobs linked across ticks, tracks of at least about 1 s):** 229 tracks. Pursuit: 70 tracks, 1 (1%)
+  became a labelled lock within 350 px in the next 1.2 s (lead 3.9 s), 69 never did (median 4.0 s,
+  90th percentile 14.2 s). Dive: 159 tracks, 22 (14%) became one (median lead 4.2 s, 90th percentile
+  8.4 s), 137 never did (median 3.3 s). 89% of all icon-visible time is in tracks that never became a
+  lock. This is what passive flight gives, and the pursuit does not approach the icons, so it cannot
+  say whether approaching would convert them. It supports an experiment, not a conclusion, and
+  whether to run one (icon steering) is still the operator's decision.
+
+**2026-09-24 18:20 — Cycle 14: `make session-report` (alias `make sr`).** Judging a session used to mean
+hand-grepping or asking for a one-off script, and each comparison recounted slightly differently.
+`scripts/session-report.py` reads a log only (no game, no display, nothing imported from wingman) and
+prints one page: time span, errors (startup classification timeouts counted separately), pursuit and
+dive engagements from the `SUMMARY:` lines (any lock, locked-scan share against the pooled pre-widening
+baseline, fired, end reasons), the tracking block from `TRACKPICK` (lock ticks, acquisitions and how many
+were outside the old acquisition box and on which side, lock ticks in an excluded HUD zone which must
+be 0, `clu=` counts, gate rejections, ROI follows), weapon presses and empty-switches, pursuit caps,
+respawns, `DIED ARMED` by cause, generic close clicks, and the log's own session summary. A log
+without `TRACKPICK` lines (an INFO log) says so instead of printing zeros. Usage: `make sr` for
+`wingman.log`, or `make sr LOG=logs/wingman_<stamp>.log`.
+
+Checked against the 24-minute 17:26 session, whose numbers I had counted by hand with a different
+script: identical on every figure (2,193 ticks, 252 lock ticks, 33 acquisitions of which 24 outside the
+old box with the same sides, `clu` 233/18/1, 111/570 pursuit and 128/1275 dive locked scans, 8
+respawns). `tests/test_session_report.py`, 10 tests, from a synthetic log with known answers; one test
+pins the report's copies of the old box and HUD zones to `config.yaml` so they cannot drift silently.

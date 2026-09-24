@@ -13,6 +13,7 @@
 #   make runtime-perf-release -> generate runtime release chart artifacts
 #   make runtime-perf-preview -> generate runtime preview chart artifacts
 #   make report      -> run tests and generate HTML report
+#   make session-report -> one-page report on wingman.log (or LOG=logs/<file>); alias: make sr
 #   make clean       -> remove test output and screenshots
 #   make wrelease    -> record performance.json locally and commit with current version
 #   make status      -> git status
@@ -40,7 +41,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: session-report sr leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -283,6 +284,14 @@ tp-full: require-veda $(TP_GATES) ocr
 	@echo ""
 
 # Clean test artifacts
+# One-page report on a session log: engagements (PURSUIT/DIVE SUMMARY), acquisitions
+# outside the old acquisition box, HUD-zone locks, weapon switches, deaths. Reads the log
+# only. `make sr LOG=logs/wingman_<stamp>.log` for an archived session.
+session-report:
+	@$(PYTHON_RUN) scripts/session-report.py $(or $(LOG),wingman.log)
+
+sr: session-report
+
 clean:
 	rm -rf tests/test-output
 	rm -f tests/test-output/*.png

@@ -110,6 +110,17 @@ _BATTLE_STATES = BATTLE_STATES
 
 
 
+def _fmt_incoming_age(since_incoming: float) -> str:
+    """The age of the last incoming-missile alert for the DIED ARMED line
+    (ADR 143). An alert that never fired this session is an infinite age, not a
+    number: the line used to print `incoming 1790266284.2s ago` (the epoch, from
+    subtracting an unset 0.0 timestamp from `time.time()`), which read like data
+    and cost an investigation to see through."""
+    if since_incoming == float("inf"):
+        return "no incoming alert this session"
+    return f"incoming {since_incoming:.1f}s ago"
+
+
 def _fmt_rate(rate) -> str:
     """Altitude rate for the BT log line, or why it is missing (ADR 086 d2)."""
     return "n/a" if rate is None else f"{rate:+.0f}m/s"
@@ -485,7 +496,8 @@ class RespawnHandler:
         than inferring enemy fire from the mere absence of a recent missile
         alert.
         """
-        since_incoming = now - self._ammo_events.last_incoming_alert_ts
+        last_incoming_ts = self._ammo_events.last_incoming_alert_ts
+        since_incoming = now - last_incoming_ts if last_incoming_ts else float("inf")
         last_hard_emergency_ts = (
             self._behavior_tree.climb_last_hard_emergency_ts()
             if self._behavior_tree is not None else 0.0)
@@ -727,8 +739,9 @@ class RespawnHandler:
                         cause, since_incoming = self._classify_died_armed(now)
                         logger.warning(
                             "\033[91m💥 DIED ARMED — %s missile(s), cause=%s "
-                            "(incoming %.1fs ago), alt=%s rate=%s (%s)\033[0m",
-                            missiles, cause, since_incoming, alt, rate, age_str)
+                            "(%s), alt=%s rate=%s (%s)\033[0m",
+                            missiles, cause, _fmt_incoming_age(since_incoming),
+                            alt, rate, age_str)
                         self._capture_crash_frame(capture_frame)
                         self._emit_capture_event("crash_with_missiles")
                         self._emit_capture_event(f"died_armed_{cause}")
