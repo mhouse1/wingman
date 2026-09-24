@@ -89,7 +89,9 @@ def analyse(lines) -> dict:
         if m:
             path, sx, sy, gate, glyphs, _px, clu = m.groups()
             r["ticks"] += 1
-            if path == "redmass" and sx is not None:
+            # path=keep (2026-09-24) is a lock held on the looser keep test: a
+            # lock tick, but never an acquisition, since it needs a lock to keep.
+            if path in ("redmass", "keep") and sx is not None:
                 x, y = int(sx), int(sy)
                 r["locks"] += 1
                 if not _inside(OLD_BOX, x, y):
@@ -98,7 +100,8 @@ def analyse(lines) -> dict:
                     r["lock_in_hud_zone"] += 1
                 if clu is not None:
                     r["clu"][clu] += 1
-                if all(k != "redmass" for k in recent) and len(recent) == 3:
+                if (path == "redmass" and len(recent) == 3
+                        and all(k not in ("redmass", "keep") for k in recent)):
                     r["acquisitions"] += 1
                     if not _inside(OLD_BOX, x, y):
                         r["acq_outside_old"] += 1

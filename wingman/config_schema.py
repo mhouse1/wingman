@@ -529,7 +529,6 @@ SCHEMA = Section(
             # would eventually do (Phase 3, not built yet).
             "ranked_lock_priority": BOOL,
             "ranked_priority_tolerance_px": _num(0),
-            "lost_timeout_sec": SECONDS,
             "prefer_red_lock": BOOL,
             # Direct operator instruction (2026-09-23) — see config.yaml's
             # own comment on this key for what it overrides and why.
@@ -543,7 +542,12 @@ SCHEMA = Section(
             "red_mass_exclude_zones_pct": Leaf(types=(list,), item_types=(list,)),
             "red_mass_cluster_select": BOOL,
             "red_mass_cluster_glyph_window_px": Leaf(types=(list,), item_types=(int,), length=2),
-            "red_mass_cluster_pixel_window_px": Leaf(types=(list,), item_types=(int,), length=3),
+            # 2026-09-24: marker steering point and the acquire/keep split —
+            # see config.yaml's own comments on these keys.
+            "red_mass_marker_band_px": Leaf(types=(list,), item_types=(int,), length=3),
+            "red_mass_marker_offset_px": _int(0),
+            "red_mass_keep_min_glyphs": _int(0),
+            "red_mass_keep_box_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
             # Optional: None means "same as tracking_hsv.red_upper's hue" (no
             # behavior change). See config.yaml's own comment on this key.
             "red_mass_hue_max": _int(0, 179),
@@ -559,16 +563,6 @@ SCHEMA = Section(
             # Action item 001 (2026-09-23): False makes a gate rejection final
             # instead of falling back to the tall-bar pick.
             "red_mass_tallbar_fallback": BOOL,
-            "local_roi_enabled": BOOL,
-            "local_roi_scale": FRACTION,
-            "local_roi_min_px": Leaf(types=(list,), item_types=(int,), length=2),
-            "local_roi_expand_factor": _num(1.0),
-            "local_roi_max_scale": FRACTION,
-            "local_roi_reacquire_cycles": _int(0),
-            # Action item 001, Cycle 5 (2026-09-24) — see config.yaml's own
-            # comment on these keys.
-            "local_roi_follow_on_clip": BOOL,
-            "local_roi_follow_min_px": _int(0),
             # HLDD 005 Sustained-Hold Actuation (2026-09-23) — see
             # config.yaml's own comment on this key for the phased rollout.
             "sustained_hold_enabled": BOOL,

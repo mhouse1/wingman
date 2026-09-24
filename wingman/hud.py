@@ -264,7 +264,6 @@ class HudRenderer:
             cy_ = obs.get("centroid_y")
             err = obs.get("error_norm")
             n_det = obs.get("n_detections", 0)
-            roi = obs.get("roi_rect")
 
             track_color = _GREEN if visible else _YELLOW
             vis_tag = "VIS" if visible else "---"
@@ -298,12 +297,6 @@ class HudRenderer:
                 label = "PURSUING" if visible else "PURSUING (lost)"
                 _txt(canvas, label, px + 20, py - 14, _PURSUIT, scale=0.42)
 
-            # Local ROI rectangle
-            if roi is not None:
-                rx, ry, rw, rh = roi
-                cv2.rectangle(canvas, (rx, ry), (rx + rw, ry + rh), _YELLOW, 1)
-                _txt(canvas, "ROI", rx + 2, ry + 14, _YELLOW, scale=0.38)
-
             # Horizontal error bar at bottom of frame
             if err is not None:
                 bar_y = h - 16
@@ -333,7 +326,7 @@ class HudRenderer:
         if state in _TARGET_TRACKING_ARCHIVE_STATES:
             # `frame` is still the raw capture here — every overlay above was
             # drawn on `canvas`, a copy.
-            raw_scan = self._scanned_crop(frame, obs) if self._archive_save_raw_scan else None
+            raw_scan = self._scanned_crop(frame) if self._archive_save_raw_scan else None
             self._archive_frame(canvas, state, ts, raw_scan)
         else:
             self._archive_encounter_count = 0
@@ -346,21 +339,13 @@ class HudRenderer:
         os.replace(str(tmp), str(self._output))
         logger.debug("HudRenderer: wrote %s", self._output)
 
-    def _scanned_crop(
-        self, frame: np.ndarray, obs: "dict | None"
-    ) -> "tuple[np.ndarray, int, int] | None":
-        """The exact region the tracker scanned this tick, as (crop, ox, oy).
-
-        `obs["roi_rect"]` is the local ROI when one was scanned, else None
-        meaning the wider acquisition region — reproduced here with the
-        tracker's own integer math (`int(w * pct)`), so the crop is
+    def _scanned_crop(self, frame: np.ndarray) -> "tuple[np.ndarray, int, int] | None":
+        """The exact region the tracker scanned this tick, as (crop, ox, oy):
+        the acquisition region, which every tick scans, reproduced with the
+        tracker's own integer math (`int(w * pct)`) so the crop is
         byte-for-byte what `TargetTracker.update` handed its detectors.
         """
         h, w = frame.shape[:2]
-        roi = obs.get("roi_rect") if obs is not None else None
-        if roi is not None:
-            rx, ry, rw, rh = roi
-            return frame[ry:ry + rh, rx:rx + rw], int(rx), int(ry)
         x1, y1, x2, y2 = self._acq_pct
         ax1, ay1 = int(w * x1), int(h * y1)
         return frame[ay1:int(h * y2), ax1:int(w * x2)], ax1, ay1

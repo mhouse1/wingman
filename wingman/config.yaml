@@ -910,26 +910,13 @@ tracking:
   # measured — the shadow log is what should correct it.
   ranked_lock_priority: false
   ranked_priority_tolerance_px: 40.0
-  # Lowered from 0.7 (2026-09-23): live-frame review found the tracker
-  # confined to a small LOST_GRACE ROI around a stale (often false-positive,
-  # e.g. terrain-color) lock, structurally unable to see a real, valid
-  # candidate sitting outside that window elsewhere in the acquisition
-  # region -- confirmed directly by re-running _detect_targets's own HSV/
-  # contour logic against an archived frame (game_battle_eject_20260923_
-  # 051840_169.png): zero qualifying candidates inside the active ROI that
-  # tick, one real candidate (area 26, aspect 2.83) well outside it.
-  # _handle_miss's own elapsed>=lost_timeout check is checked before, and
-  # therefore always wins over, the ROI-expansion-ladder fallback
-  # (roi_reacquire_cycles/local_roi_expand_factor) at the ADR 136 heatdive
-  # loop's 0.2s cadence -- the ladder never reaches local_roi_max_scale
-  # before this timeout already forces ACQUIRING, so this is the one lever
-  # that actually bounds how long the trap lasts there. Does not change
-  # ambient-path behavior at all: TrackingHudHandler.tick() only runs on the
-  # ~1.5s main-loop cadence, which already exceeds either value on a single
-  # miss. Named guess, not measured -- a live shadow session (watch for
-  # "grace timeout" firing sooner without spurious re-acquisitions on
-  # briefly-occluded real targets) is what should correct it next.
-  lost_timeout_sec: 0.4
+  # lost_timeout_sec (0.4) was removed 2026-09-24. How long LOST_GRACE remembers
+  # a lost target is now pursuit_mode.search_resume_delay_s (or
+  # search_resume_centre_delay_s near centre), the same wait roll_on_miss holds
+  # the roll axis neutral for, so the tracker no longer forgets a target the
+  # actuation layer is still waiting for. The short timeout existed to escape a
+  # small LOST_GRACE ROI stuck on a stale lock; every tick now scans the whole
+  # acquisition region, so that trap is gone.
   prefer_red_lock: true
   # Direct operator instruction (2026-09-23): always steer toward the
   # centroid of every red pixel in the scanned crop (tracking_hsv.red_lower/
@@ -970,16 +957,32 @@ tracking:
   # the crop (which overrides the 2026-09-23 "centroid of all red" instruction, with the
   # operator's go-ahead). With a wider box two nameplates are often on screen at once, and
   # their mean is a point between them where nothing is. The nameplate gate is then
-  # counted per cluster (glyphs inside a 300 x 170 px window), and the steering point is the
-  # mean of the red pixels within +-150 px sideways, 300 px up and 100 px down of the chosen
-  # cluster (the label, its underline bar and the marker drawn above it, measured 162-287 px
-  # above on a small sample). The cluster nearest the previous lock is chosen, or the screen
-  # centre when there is none. In the local ROI (422 x 264) the window covers the whole
-  # crop, so a single nameplate gives the same point as before. The window sizes are named
-  # guesses. Watch: `clu=` in TRACKPICK (nameplate clusters that passed the gate).
+  # counted per cluster (glyphs inside a 300 x 170 px window). The cluster nearest the
+  # previous lock is chosen, or the screen centre when there is none. The window size is a
+  # named guess. Watch: `clu=` in TRACKPICK (nameplate clusters that passed the gate).
   red_mass_cluster_select: true
   red_mass_cluster_glyph_window_px: [300, 170]
-  red_mass_cluster_pixel_window_px: [150, 300, 100]
+  # 2026-09-24: the steering point is the chosen nameplate's marker, not the label. It was
+  # the mean of the red pixels in a window around the label, which blended label and
+  # marker in the wide scan and settled on the label once the local ROI cut the marker
+  # off, so pitch centred the label, one label-to-marker gap below the aircraft. Now: the
+  # largest red component bigger than a glyph whose centre is within [half width, min px
+  # above, max px above] of the cluster centre (the marker was measured 162-287 px above
+  # the label, on a small sample), else the cluster centre moved up by the offset (225, the
+  # middle of that range). Watch: `aim=marker|offset` in TRACKPICK.
+  red_mass_marker_band_px: [150, 162, 287]
+  red_mass_marker_offset_px: 225
+  # Same date: the gate's threshold below decides acquisition only. A lock is kept on a
+  # looser test near where it was: a cluster of at least keep_min_glyphs glyphs within
+  # keep_box_pct (half width, half height, frame fractions) of the previous lock's
+  # cluster. Measured: 11 of 18 acquisitions were lost on the very next scan; lock ticks
+  # sat at a median 25 glyphs, 46% within 4 of the threshold; cut or partly drawn real
+  # labels read 6-19 glyphs while junk never exceeded 7 (8-9 on two frames). The box is
+  # the reach the 0.22-scale local ROI gave around a lock (+-211 x +-132 px). Watch:
+  # `path=keep` in TRACKPICK is a lock only this looser test held; path=redmass still
+  # means the full gate passed.
+  red_mass_keep_min_glyphs: 8
+  red_mass_keep_box_pct: [0.11, 0.11]
   # Narrows red_mass_steering's own upper hue bound to separate the
   # airframe's own afterburner glow (hot orange) from a real target icon
   # (pure red) — position-based exclusion doesn't work here since the
@@ -1053,29 +1056,9 @@ tracking:
   # 12-18 glyphs (junk topped out at 7) and are now lost rather than falling
   # back — the live glyph counts logged by TRACKPICK are what should settle it.
   red_mass_tallbar_fallback: false
-  local_roi_enabled: true
-  local_roi_scale: 0.22
-  local_roi_min_px: [140, 90]
-  local_roi_expand_factor: 1.25
-  local_roi_max_scale: 0.45
-  local_roi_reacquire_cycles: 3
-  # Action item 001, Cycle 5 (2026-09-24): after a missed tick, move the ROI
-  # toward a red mass the nameplate gate rejected because the crop edge cut
-  # it. Measured in the 07:34-08:56 pursuit and dive logs (3 sessions): 182
-  # lock drops, 125 of them with red pixels present and a gate rejection, and
-  # 46% of all lock ticks sat at 20-24 glyphs, one step above the threshold.
-  # The four drop ticks whose raw crop was archived (replayed through the
-  # real tracker to the logged glyph count 14, 19, 19, 6) each showed a real
-  # nameplate cut by the crop edge, red mean 82-173 px off the crop centre
-  # toward that edge. A rejection never moved the ROI, so the next scan
-  # clipped the same label. Lock decisions, steering and red_mass_nameplate_
-  # min_glyphs are unchanged. min_px is below the smallest measured cut
-  # label (206 px) and above stray red. Watch: `grep ROIFOLLOW wingman.log`
-  # and the ticks-to-relock after a TRACKPICK drop with gate=reject and
-  # rm_px>=150: baseline (112 drops, old logs) relocked at +1 tick 9%, +2
-  # ticks 46%, not within four 42%. Per-tick survival is not the metric.
-  local_roi_follow_on_clip: true
-  local_roi_follow_min_px: 150
+  # The local ROI (local_roi_*), its clipped-nameplate follow (local_roi_follow_*) and
+  # its widening ladder were removed 2026-09-24: every tick scans the whole acquisition
+  # region, and the keep test above holds a lock whose label the ROI edge used to cut.
   # HLDD 005 Sustained-Hold Actuation (2026-09-23): hold ROLL_LEFT_KEY/
   # ROLL_RIGHT_KEY/NOSE_UP_KEY/NOSE_DOWN_KEY until the tracked condition
   # changes (Controller.boundary_turn_mode's own shape) instead of computing

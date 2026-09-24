@@ -95,6 +95,22 @@ def test_locks_acquisitions_and_where_they_are():
     assert r["gate_reject_some_glyphs"] == 1
 
 
+def test_a_keep_tick_is_a_lock_but_never_an_acquisition():
+    """path=keep (2026-09-24) is a lock held on the looser keep test: it counts as a lock
+    tick, and a redmass tick after three of them continues the lock rather than acquiring."""
+    log = [
+        _pick(1, "none"), _pick(2, "none"), _pick(3, "none"),
+        _pick(4, "redmass", (960, 500), "pass", 25, 1) + " aim=marker",   # acquisition
+        _pick(5, "keep", (965, 505), "keep", 12, 0) + " aim=marker",
+        _pick(6, "keep", (970, 505), "keep", 11, 0),
+        _pick(7, "keep", (975, 505), "keep", 10, 0),
+        _pick(8, "redmass", (980, 505), "pass", 24, 1),
+    ]
+    r = R.analyse(log)
+    assert (r["ticks"], r["locks"], r["acquisitions"]) == (8, 5, 1)
+    assert dict(r["clu"]) == {"1": 2, "0": 3}
+
+
 def test_weapon_life_and_recovery_counters():
     r = _r()
     assert (r["weapon_presses"], r["empty_switches"], r["pursuit_caps"]) == (1, 1, 1)

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class TrackMode(Enum):
     SEARCHING = auto()    # not in battle / between missions
     ACQUIRING = auto()    # scanning global acquisition region for first lock
-    TRACKING = auto()     # locked; using local ROI each tick
+    TRACKING = auto()     # locked; the target was seen this tick
     LOST_GRACE = auto()   # target lost; brief hold before reacquire or fallback
 
 
@@ -50,7 +50,19 @@ class TargetTracker:
         self._acq_x2 = float(acq[2])
         self._acq_y2 = float(acq[3])
 
-        self._lost_timeout = float(cfg.get("lost_timeout_sec", 0.70))
+        # How long LOST_GRACE remembers a lost target (2026-09-24): the same
+        # delay Controller.roll_on_miss holds the roll axis neutral for before
+        # it resumes the search — pursuit_mode.search_resume_delay_s, or
+        # search_resume_centre_delay_s when the last visible horizontal error
+        # was within search_resume_centre_err — read from the same keys with
+        # the Controller's own defaults so the two cannot drift apart. It
+        # replaces lost_timeout_sec (0.4 s), which forgot the target, and with
+        # it the anchor the keep test below needs, while the actuation layer
+        # was still waiting 2-6 s for that same target to come back.
+        pm = config.get("pursuit_mode", {}) or {}
+        self._memory_s = float(pm.get("search_resume_delay_s", 2.0))
+        self._memory_centre_err = float(pm.get("search_resume_centre_err", 0.15))
+        self._memory_centre_s = float(pm.get("search_resume_centre_delay_s", 6.0))
         self._prefer_red = bool(cfg.get("prefer_red_lock", True))
         # Direct operator instruction (2026-09-23): steer toward the centroid
         # of all red pixels in the scanned crop, overriding the tall-bar
@@ -94,17 +106,40 @@ class TargetTracker:
         # screen at once (two in the 16:48:21 frame the operator flagged) and
         # their mean is a point between them where nothing is. The glyph gate is
         # then counted per cluster (a label's glyphs inside `glyph_window_px`,
-        # width x height), and the steering point is the mean of the red pixels
-        # in `pixel_window_px` = (half width, reach up, reach down) around the
-        # chosen cluster: the label plus the marker drawn above it (measured
-        # 162-287 px above, on a small sample) and its underline bar. The chosen
-        # cluster is the one nearest the previous lock, or the screen centre when
-        # there is none. False (default) keeps the old whole-crop rule.
+        # width x height). The chosen cluster is the one nearest the previous
+        # lock, or the screen centre when there is none. False (default) keeps
+        # the old whole-crop rule.
         self._cluster_select = bool(cfg.get("red_mass_cluster_select", False))
         _gw = cfg.get("red_mass_cluster_glyph_window_px", [300, 170])
         self._cluster_glyph_window = (int(_gw[0]), int(_gw[1]))
-        _pw = cfg.get("red_mass_cluster_pixel_window_px", [150, 300, 100])
-        self._cluster_pixel_window = (int(_pw[0]), int(_pw[1]), int(_pw[2]))
+        # 2026-09-24: in cluster mode the steering point is the aircraft's own
+        # marker, not its label. It used to be the mean of the red pixels in a
+        # window around the label: a blend of label, underline and marker in the
+        # wide scan that settled on the label once the 264 px tall local ROI cut
+        # the marker off (a stationary synthetic target read error_norm_y +0.21,
+        # +0.32, +0.36 over its first three ticks), so pitch centred the label,
+        # one label-to-marker gap below the aircraft. Now the marker is the
+        # largest red component bigger than a glyph whose centre lies within
+        # `marker_band_px` = (half width, min px above, max px above) of the
+        # cluster centre, the band the marker was measured in (162-287 px above
+        # the label, on a small sample). With none there, the cluster centre
+        # moved up by `marker_offset_px` (225, the middle of that range).
+        _mb = cfg.get("red_mass_marker_band_px", [150, 162, 287])
+        self._marker_band = (int(_mb[0]), int(_mb[1]), int(_mb[2]))
+        self._marker_offset = int(cfg.get("red_mass_marker_offset_px", 225))
+        # Same date: the strict gate (red_mass_nameplate_min_glyphs) decides
+        # acquisition only. A lock is kept on a looser test near where it was:
+        # a cluster of at least `keep_min_glyphs` glyphs within `keep_box_pct`
+        # (half width, half height, frame fractions) of the previous lock's
+        # cluster. Measured (07:34-08:56 logs and after): 11 of 18 acquisitions
+        # were lost on the very next scan, lock ticks sat at a median 25 glyphs
+        # with 46% within 4 of the threshold, and cut or partly drawn real
+        # labels read 6-19 glyphs while junk never exceeded 7 (8-9 on two
+        # frames). The box is the reach the 0.22-scale local ROI gave around a
+        # lock (+-211 x +-132 px at 1920x1200), without an edge to cut the label.
+        self._keep_min_glyphs = int(cfg.get("red_mass_keep_min_glyphs", 8))
+        _kb = cfg.get("red_mass_keep_box_pct", [0.11, 0.11])
+        self._keep_box_pct = (float(_kb[0]), float(_kb[1]))
         # Own-afterburner exclusion for the above (2026-09-23): unlike "NO
         # LOCK" above, the afterburner glow is not fixed screen position (it
         # moves with the airframe's on-screen attitude), so a region-based
@@ -178,24 +213,6 @@ class TargetTracker:
         # unchanged; shipped config.yaml sets it false.
         self._red_mass_tallbar_fallback = bool(
             cfg.get("red_mass_tallbar_fallback", True))
-        # Action item 001, Cycle 5 (2026-09-24): re-centre the local ROI on a
-        # gate-rejected red mass that touches the crop's edge. A real
-        # nameplate plus its aircraft fills much of the local ROI, so when the
-        # target drifts between scans the label is cut by the crop edge, the
-        # glyph count falls under the gate's threshold, and the lock drops
-        # even though the target is right there. Measured over the 07:34-08:56
-        # pursuit and dive logs: 125 of 182 lock drops had red pixels present
-        # and a gate rejection, and the four drop ticks whose raw crop was
-        # archived and replayed to the logged glyph count (14, 19, 19, 6) all
-        # showed a real nameplate cut by the crop edge, the red mean sitting
-        # 82-173 px from the crop centre toward that edge. A rejection never
-        # moved the ROI (only a lock or the miss ladder did), so the next
-        # scan clipped the same label. Lock decisions, steering and the gate's
-        # threshold are all unchanged: only the next tick's scan window
-        # moves. False here means today's behaviour; shipped config.yaml sets
-        # it true.
-        self._roi_follow_enabled = bool(cfg.get("local_roi_follow_on_clip", False))
-        self._roi_follow_min_px = int(cfg.get("local_roi_follow_min_px", 150))
         # HLDD 005 Selection Hardening Phase 2 (2026-09-21): shadow-only —
         # ranked_lock_priority stays false in shipped config; while false,
         # the ranked-pool rule below is computed and compared every tick but
@@ -206,15 +223,6 @@ class TargetTracker:
         # should correct it, same status as HLDD 013's seek_center_* starts.
         self._ranked_priority_tolerance_px = float(
             cfg.get("ranked_priority_tolerance_px", 40.0))
-
-        self._local_roi_enabled = bool(cfg.get("local_roi_enabled", True))
-        self._roi_scale = float(cfg.get("local_roi_scale", 0.22))
-        roi_min = cfg.get("local_roi_min_px", [140, 90])
-        self._roi_min_w = int(roi_min[0])
-        self._roi_min_h = int(roi_min[1])
-        self._roi_expand = float(cfg.get("local_roi_expand_factor", 1.25))
-        self._roi_max_scale = float(cfg.get("local_roi_max_scale", 0.45))
-        self._roi_reacquire_cycles = int(cfg.get("local_roi_reacquire_cycles", 3))
 
         hsv = config.get("tracking_hsv", {})
         self._red_lower = np.array(hsv.get("red_lower", [0, 150, 150]), dtype=np.uint8)
@@ -264,10 +272,11 @@ class TargetTracker:
         self._mode = TrackMode.SEARCHING
         self._last_x: "float | None" = None
         self._last_y: "float | None" = None
+        # Cluster mode only: the locked nameplate cluster's centre (absolute
+        # frame coords), the anchor for keeping and re-choosing the same label.
+        # Kept apart from _last_x/_last_y, which are the marker steered on.
+        self._last_cluster: "tuple[float, float] | None" = None
         self._last_seen_ts: float = 0.0
-        self._current_roi_scale: float = 0.0
-        self._roi_rect: "tuple[int, int, int, int] | None" = None
-        self._roi_miss_count: int = 0
         # HLDD 005 Selection Hardening (2026-09-21): rate-limited rationale
         # logging counter, same shape as every other shadow counter in this
         # codebase (ADR 117 D9 / HLDD 013 Phase 1) — 1st/10th/100th, then
@@ -281,12 +290,6 @@ class TargetTracker:
         # for the INFO-level line in _log_pick_path (same 1st/10th/100th,
         # then every 500th, shape as the two counters above).
         self._suppressed_pick_count: int = 0
-        # Action item 001, Cycle 5: where the last clipped-nameplate follow
-        # centred the ROI (absolute frame coords) — the miss ladder's
-        # expansion re-centres there instead of on the stale last lock, which
-        # would otherwise undo the follow. None whenever no follow is active.
-        self._roi_centre_hint: "tuple[float, float] | None" = None
-        self._roi_follow_count: int = 0
 
     @property
     def enabled(self) -> bool:
@@ -301,11 +304,8 @@ class TargetTracker:
         self._mode = TrackMode.SEARCHING
         self._last_x = None
         self._last_y = None
+        self._last_cluster = None
         self._last_seen_ts = 0.0
-        self._current_roi_scale = 0.0
-        self._roi_rect = None
-        self._roi_miss_count = 0
-        self._roi_centre_hint = None
         logger.debug("TargetTracker: reset to SEARCHING")
 
     def update(self, frame: np.ndarray, ts: "float | None" = None) -> dict:
@@ -327,17 +327,17 @@ class TargetTracker:
                           below, so it stays a legible signal of what the
                           original filter found even while that pick is
                           being overridden for actuation)
-            roi_rect    — the local-ROI rect actually scanned *this tick* to
-                          produce the fields above, as (x, y, w, h) in frame
-                          coords, or None when this tick scanned the wider
-                          global acquisition region instead (see scan-basis
-                          note below).
 
         When `red_mass_steering` is enabled, `centroid_x`/`centroid_y` (and
-        therefore `error_norm`/`error_norm_y`) report the centroid of *all*
-        red pixels in the scanned crop instead of the tall-bar contour pick
-        — see `_red_mass_centroid`. `visible`/`mode` follow that override too
-        (any red pixel counts), but `n_detections` does not.
+        therefore `error_norm`/`error_norm_y`) report the red-mass steering
+        point instead of the tall-bar contour pick: the centroid of all red
+        pixels in the scanned crop, or in cluster mode the chosen nameplate's
+        marker (see `_probe_by_cluster`). `visible`/`mode` follow that override
+        too, but `n_detections` does not.
+
+        Every tick scans the whole acquisition region. A missed target stays in
+        LOST_GRACE, its last position reported, for as long as
+        Controller.roll_on_miss waits for it (see `_memory_s_for`).
         """
         if ts is None:
             ts = time.time()
@@ -346,33 +346,26 @@ class TargetTracker:
         if self._mode == TrackMode.SEARCHING:
             self._mode = TrackMode.ACQUIRING
 
-        # LOST_GRACE keeps scanning the (progressively expanded, see _handle_miss)
-        # local ROI around the last-known position instead of falling back to a
-        # full acquisition-region scan — that expansion has no effect otherwise.
-        use_roi = (
-            self._local_roi_enabled
-            and self._mode in (TrackMode.TRACKING, TrackMode.LOST_GRACE)
-            and self._roi_rect is not None
-        )
-        if use_roi:
-            rx, ry, rw, rh = self._roi_rect
-            crop = frame[ry:ry + rh, rx:rx + rw]
-            ox, oy = rx, ry
-            scanned_rect = (rx, ry, rw, rh)
-        else:
-            ax1 = int(w * self._acq_x1)
-            ay1 = int(h * self._acq_y1)
-            ax2 = int(w * self._acq_x2)
-            ay2 = int(h * self._acq_y2)
-            crop = frame[ay1:ay2, ax1:ax2]
-            ox, oy = ax1, ay1
-            scanned_rect = None
+        # Every tick scans the whole acquisition region (2026-09-24). Once
+        # locked, a 422 x 264 local ROI around the last lock used to be scanned
+        # instead, but that is smaller than a nameplate plus the marker above
+        # it, so a target drifting between scans had its label cut by the ROI
+        # edge and failed the gate: 125 of 182 measured lock drops had red
+        # present and a gate rejection, and every archived drop crop replayed
+        # showed a cut label. Continuity comes from choosing, and keeping, the
+        # cluster nearest the previous lock instead; the wide scan costs about
+        # 9.5 ms against the 0.33 s pursuit loop.
+        ax1 = int(w * self._acq_x1)
+        ay1 = int(h * self._acq_y1)
+        ax2 = int(w * self._acq_x2)
+        ay2 = int(h * self._acq_y2)
+        crop = frame[ay1:ay2, ax1:ax2]
+        ox, oy = ax1, ay1
 
         local_hits, local_red_hits, local_green_hits, red_won = self._detect_targets(crop)
         logger.debug(
-            "TargetTracker: scanned %s rect=%s hits=%d",
-            "roi" if use_roi else "acq", scanned_rect or (ox, oy, crop.shape[1], crop.shape[0]),
-            len(local_hits),
+            "TargetTracker: scanned acq rect=%s hits=%d",
+            (ox, oy, crop.shape[1], crop.shape[0]), len(local_hits),
         )
         abs_hits = [(ox + lx, oy + ly, a) for lx, ly, a in local_hits]
         selected = self._select_target(abs_hits, w)
@@ -408,17 +401,19 @@ class TargetTracker:
         pick_path = "tallbar" if selected is not None else "none"
         rm_probe: "dict | None" = None
         if self._red_mass_steering:
-            # Cluster mode steers on the nameplate nearest the previous lock, or
-            # the screen centre when there is none (`ref=None`).
-            ref = ((self._last_x, self._last_y)
+            # Cluster mode keeps, or re-chooses, the nameplate nearest the
+            # previous lock's cluster while the target is remembered, and picks
+            # the one nearest the screen centre otherwise (`ref=None`). A lock
+            # only the looser keep test allowed is logged as path=keep, so
+            # path=redmass still means the strict gate passed.
+            ref = (self._last_cluster
                    if self._mode in (TrackMode.TRACKING, TrackMode.LOST_GRACE)
-                   and self._last_x is not None and self._last_y is not None
                    else None)
             rm_probe = self._red_mass_probe(crop, ox, oy, w, h, ref=ref)
             red_mass_local = rm_probe["centroid"]
             if red_mass_local is not None:
                 selected = (ox + red_mass_local[0], oy + red_mass_local[1])
-                pick_path = "redmass"
+                pick_path = "keep" if rm_probe["kept"] else "redmass"
             elif rm_probe["gate"] == "reject" and not self._red_mass_tallbar_fallback:
                 # Action item 001: the gate's rejection is final — the
                 # tall-bar pick it used to fall back to was false about nine
@@ -433,17 +428,15 @@ class TargetTracker:
             abs_x, abs_y = selected
             self._last_x = abs_x
             self._last_y = abs_y
+            self._last_cluster = (rm_probe["cluster"]
+                                  if rm_probe is not None and pick_path in ("redmass", "keep")
+                                  else None)
             self._last_seen_ts = ts
-            self._roi_miss_count = 0
-            self._roi_centre_hint = None
             if self._mode in (TrackMode.ACQUIRING, TrackMode.LOST_GRACE):
                 self._mode = TrackMode.TRACKING
-                self._current_roi_scale = self._roi_scale
                 logger.debug("TargetTracker: acquired target at (%.0f, %.0f)", abs_x, abs_y)
-            self._roi_rect = self._compute_roi(abs_x, abs_y, w, h)
         else:
-            self._handle_miss(ts, w, h)
-            self._follow_clipped_nameplate(use_roi, rm_probe, ox, oy, w, h)
+            self._handle_miss(ts, w)
 
         error_norm: "float | None" = None
         error_norm_y: "float | None" = None
@@ -459,7 +452,6 @@ class TargetTracker:
             "error_norm": error_norm,
             "error_norm_y": error_norm_y,
             "n_detections": len(local_hits),
-            "roi_rect": scanned_rect,
         }
 
     def detect_padlock_off(self, frame: np.ndarray) -> bool:
@@ -529,80 +521,28 @@ class TargetTracker:
     # Internal
     # ------------------------------------------------------------------
 
-    def _handle_miss(self, ts: float, w: int, h: int) -> None:
+    def _handle_miss(self, ts: float, w: int) -> None:
         if self._mode == TrackMode.TRACKING:
             self._mode = TrackMode.LOST_GRACE
-            self._roi_miss_count = 1
         elif self._mode == TrackMode.LOST_GRACE:
-            self._roi_miss_count += 1
             elapsed = ts - self._last_seen_ts
-            if elapsed >= self._lost_timeout:
+            if elapsed >= self._memory_s_for(w):
                 logger.debug("TargetTracker: grace timeout after %.2fs — ACQUIRING", elapsed)
                 self._mode = TrackMode.ACQUIRING
                 self._last_x = None
                 self._last_y = None
-                self._roi_rect = None
-                self._roi_miss_count = 0
-                self._roi_centre_hint = None
-            elif self._roi_miss_count >= self._roi_reacquire_cycles:
-                new_scale = min(self._current_roi_scale * self._roi_expand, self._roi_max_scale)
-                self._current_roi_scale = new_scale
-                self._roi_miss_count = 0
-                centre = self._roi_centre_hint
-                if centre is None and self._last_x is not None and self._last_y is not None:
-                    centre = (self._last_x, self._last_y)
-                if centre is not None:
-                    self._roi_rect = self._compute_roi(centre[0], centre[1], w, h)
-                if new_scale >= self._roi_max_scale:
-                    logger.debug("TargetTracker: ROI at max scale — falling back to ACQUIRING")
-                    self._mode = TrackMode.ACQUIRING
+                self._last_cluster = None
 
-    def _follow_clipped_nameplate(
-        self, use_roi: bool, rm_probe: "dict | None",
-        ox: int, oy: int, fw: int, fh: int,
-    ) -> None:
-        """Action item 001, Cycle 5: after a missed tick, move the local ROI
-        toward a red mass the nameplate gate rejected because the crop edge
-        cut it. Never called on a lock and never changes `selected`, the
-        steering point, `_last_x/_last_y` or the gate's threshold — a lock
-        still needs a full nameplate — so it cannot admit a false positive;
-        it only makes the next scan look where the clipped label is.
-
-        Requires, all together: the feature is on, this tick scanned the
-        local ROI (not the wide acquisition region), tracking is still in
-        LOST_GRACE with an ROI (the miss handler may just have ended it), the
-        gate positively rejected the mask, at least `local_roi_follow_min_px`
-        red pixels were present, and the red touches a crop edge — the
-        signature of a cut label rather than of debris or an absent
-        nameplate. The follow is bounded by `lost_timeout_sec`, the same
-        clock that ends every LOST_GRACE ROI.
-        """
-        if not (self._roi_follow_enabled and use_roi and rm_probe is not None):
-            return
-        if self._mode != TrackMode.LOST_GRACE or self._roi_rect is None:
-            return
-        mass = rm_probe.get("mass_centroid")
-        edges = rm_probe.get("clipped_edges")
-        if (rm_probe["gate"] != "reject" or mass is None or not edges
-                or rm_probe["px"] < self._roi_follow_min_px):
-            return
-        cx, cy = ox + mass[0], oy + mass[1]
-        old = self._roi_rect
-        new = self._compute_roi(cx, cy, fw, fh)
-        if new == old:
-            return  # already pinned against the frame edge; nothing to move
-        self._roi_rect = new
-        self._roi_centre_hint = (cx, cy)
-        self._roi_follow_count += 1
-        n = self._roi_follow_count
-        logger.debug(
-            "ROIFOLLOW: gate rejected a red mass cut by the %s crop edge "
-            "(glyphs=%s rm_px=%d) — ROI %s -> %s",
-            "+".join(edges), rm_probe["glyphs"], rm_probe["px"], old, new,
-        )
-        if n in (1, 10, 100) or n % 500 == 0:
-            logger.info("ROIFOLLOW: moved the ROI toward a clipped nameplate "
-                        "(%d so far)", n)
+    def _memory_s_for(self, w: int) -> float:
+        """How long LOST_GRACE remembers the target: Controller.roll_on_miss's
+        own rule, on its own config — the centre delay (when longer) if the
+        last visible horizontal error was within the centre band, else the
+        resume delay."""
+        if self._last_x is not None:
+            last_err = abs((self._last_x - w / 2.0) / (w / 2.0))
+            if last_err <= self._memory_centre_err:
+                return max(self._memory_s, self._memory_centre_s)
+        return self._memory_s
 
     def _contours_to_hits(self, mask: np.ndarray) -> "list[tuple[float, float, float]]":
         """Return (cx, cy, area) in crop-local coords for each valid target bar in `mask`."""
@@ -629,9 +569,12 @@ class TargetTracker:
         n_tall: int,
     ) -> None:
         """Action item 001, Open Question 1: one greppable line per tick
-        saying which path supplied the lock this tick — `redmass`, `tallbar`,
+        saying which path supplied the lock this tick — `redmass`, `keep`
+        (cluster mode: a lock held on the looser keep test only), `tallbar`,
         `suppressed` (the gate vetoed a tall-bar pick) or `none` — plus what
-        the gate saw. Turns "did the gate fire" from a forensic
+        the gate saw and, in cluster mode, whether the steering point is the
+        nameplate's marker or the label moved up by the fallback offset
+        (`aim=marker|offset`). Turns "did the gate fire" from a forensic
         reconstruction into `grep TRACKPICK`. Pure logging; never changes
         `selected`. The DEBUG line follows the existing per-tick "scanned"
         line's cadence; a suppressed pick is also surfaced at INFO,
@@ -646,8 +589,10 @@ class TargetTracker:
             blob = rm_probe.get("blob")
             blob_desc = "(%d,%d,a%d,%dx%d)" % blob if blob is not None else "-"
             clu_desc = rm_probe["clusters"] if rm_probe.get("clusters") is not None else "-"
+            aim_desc = rm_probe.get("aim") or "-"
         else:
-            gate, glyphs, rm_px, edges, blob_desc, clu_desc = "off", "-", 0, "-", "-", "-"
+            gate, glyphs, rm_px, edges, blob_desc, clu_desc, aim_desc = (
+                "off", "-", 0, "-", "-", "-", "-")
         if tall_pick is not None:
             color = "R" if any(
                 abs(rx - tall_pick[0]) < 1e-6 and abs(ry - tall_pick[1]) < 1e-6
@@ -659,9 +604,9 @@ class TargetTracker:
         sel_desc = f"({selected[0]:.0f},{selected[1]:.0f})" if selected is not None else "-"
         logger.debug(
             "TRACKPICK: path=%s sel=%s tall=%s n_tall=%d red_won=%s "
-            "gate=%s glyphs=%s rm_px=%d edges=%s blob=%s clu=%s",
+            "gate=%s glyphs=%s rm_px=%d edges=%s blob=%s clu=%s aim=%s",
             pick_path, sel_desc, tall_desc, n_tall, red_won, gate, glyphs, rm_px,
-            edges, blob_desc, clu_desc,
+            edges, blob_desc, clu_desc, aim_desc,
         )
         if pick_path == "suppressed":
             self._suppressed_pick_count += 1
@@ -705,14 +650,19 @@ class TargetTracker:
         Returns a dict (action item 001) rather than the bare point so the
         caller can tell *why* there is no centroid and log what the gate saw:
         `centroid` — crop-local (x, y) or None; `gate` — "off" (gate not
-        enabled), "pass" or "reject"; `glyphs` — the count the gate compared
-        (None when the gate is off); `px` — pixels in the final red mask.
-        A "reject" is a positive statement that no nameplate was found;
-        "off" with a None centroid only means no red pixels matched.
+        enabled), "pass", "keep" (cluster mode: only the looser keep test
+        passed) or "reject"; `glyphs` — the count the gate compared (None when
+        the gate is off); `px` — pixels in the final red mask. In cluster mode
+        also `cluster` — the chosen nameplate cluster's centre in absolute
+        frame coords, `kept` — True for a "keep", and `aim` — "marker" or
+        "offset", where the steering point came from. A "reject" is a
+        positive statement that no nameplate was found; "off" with a None
+        centroid only means no red pixels matched.
 
-        `ref` (absolute frame coordinates, default the frame centre) is only used
-        when `red_mass_cluster_select` is on, to choose among several nameplate
-        clusters: the one nearest `ref` wins.
+        `ref` (absolute frame coordinates of the previous lock's cluster) is
+        only used when `red_mass_cluster_select` is on: a cluster near it is
+        kept on the looser keep test, and otherwise the strict cluster nearest
+        it, or the frame centre when `ref` is None, wins.
 
         `ox`/`oy` (crop's absolute top-left in the full frame) and
         `frame_w`/`frame_h` are needed only to translate
@@ -723,7 +673,7 @@ class TargetTracker:
         """
         probe: dict = {"centroid": None, "gate": "off", "glyphs": None, "px": 0,
                        "mass_centroid": None, "clipped_edges": (), "blob": None,
-                       "clusters": None}
+                       "clusters": None, "cluster": None, "kept": False, "aim": None}
         if crop is None or crop.size == 0:
             return probe
         try:
@@ -755,9 +705,8 @@ class TargetTracker:
         probe["px"] = int(np.count_nonzero(mask))
         ys, xs = np.nonzero(mask)
         if xs.size:
-            # Reported whether or not the gate passes: a rejected mask that
-            # touches the crop edge is how `_follow_clipped_nameplate` tells a
-            # cut-off label from an absent one. `centroid` stays gate-owned.
+            # Reported whether or not the gate passes (TRACKPICK's `edges=`
+            # field reads clipped_edges). `centroid` stays gate-owned.
             probe["mass_centroid"] = (float(xs.mean()), float(ys.mean()))
             crop_h, crop_w = mask.shape[:2]
             m = self._CLIP_EDGE_MARGIN_PX
@@ -787,46 +736,90 @@ class TargetTracker:
         self, mask: np.ndarray, probe: dict, ox: int, oy: int,
         frame_w: int, frame_h: int, ref: "tuple[float, float] | None",
     ) -> dict:
-        """The gate and steering point of `_red_mass_probe` in cluster mode: the
-        gate counts glyphs per nameplate cluster (the best cluster is what
-        `glyphs` reports, so a rejected tick still says how close it came), and
-        the steering point is the mean of the red pixels around the chosen
-        cluster, not of the whole crop. One eligible cluster in a crop small
-        enough to sit inside the pixel window (the local ROI) gives the same
-        point as the whole-crop mean."""
-        clusters = self._nameplate_clusters(mask)
+        """The gate and steering point of `_red_mass_probe` in cluster mode.
+
+        Acquire strictly, keep loosely: with a previous lock (`ref`, absolute),
+        the cluster nearest it with at least `red_mass_keep_min_glyphs` glyphs
+        inside the keep box holds the lock (gate "keep" when only that looser
+        test passed, "pass" when the strict one did too). Otherwise the strict
+        gate decides, per cluster, and the eligible cluster nearest `ref`, or
+        the screen centre, is acquired. `glyphs` is the chosen cluster's count,
+        or on a rejection the best cluster's, so a rejected tick still says how
+        close it came. The steering point is that nameplate's marker (see
+        `_aim_point`), not the label."""
+        components = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        clusters = self._nameplate_clusters(mask, components=components)
         best = max((c[2] for c in clusters), default=0)
         eligible = [c for c in clusters if c[2] >= self._red_mass_nameplate_min_glyphs]
         probe["glyphs"] = best
         probe["clusters"] = len(eligible)
-        if not eligible:
-            probe["gate"] = "reject"
-            return probe
-        rx, ry = ref if ref is not None else (frame_w / 2.0, frame_h / 2.0)
-        rx, ry = rx - ox, ry - oy
-        cx, cy, n = min(eligible, key=lambda c: (c[0] - rx) ** 2 + (c[1] - ry) ** 2)
-        half_w, up, down = self._cluster_pixel_window
-        h, w = mask.shape[:2]
-        x0, x1 = max(0, int(cx - half_w)), min(w, int(cx + half_w) + 1)
-        y0, y1 = max(0, int(cy - up)), min(h, int(cy + down) + 1)
-        ys, xs = np.nonzero(mask[y0:y1, x0:x1])
-        if xs.size == 0:
-            probe["gate"] = "reject"
-            return probe
-        probe["gate"] = "pass"
+        chosen = None
+        if ref is not None:
+            rx, ry = ref[0] - ox, ref[1] - oy
+            box_x = self._keep_box_pct[0] * frame_w
+            box_y = self._keep_box_pct[1] * frame_h
+            near = [c for c in clusters
+                    if c[2] >= self._keep_min_glyphs
+                    and abs(c[0] - rx) <= box_x and abs(c[1] - ry) <= box_y]
+            if near:
+                chosen = min(near, key=lambda c: (c[0] - rx) ** 2 + (c[1] - ry) ** 2)
+        if chosen is None:
+            if not eligible:
+                probe["gate"] = "reject"
+                return probe
+            rx, ry = ref if ref is not None else (frame_w / 2.0, frame_h / 2.0)
+            rx, ry = rx - ox, ry - oy
+            chosen = min(eligible, key=lambda c: (c[0] - rx) ** 2 + (c[1] - ry) ** 2)
+        cx, cy, n = chosen
+        kept = n < self._red_mass_nameplate_min_glyphs
+        probe["gate"] = "keep" if kept else "pass"
+        probe["kept"] = kept
         probe["glyphs"] = n
-        probe["centroid"] = (float(xs.mean() + x0), float(ys.mean() + y0))
+        probe["cluster"] = (cx + ox, cy + oy)
+        probe["centroid"], probe["aim"] = self._aim_point(components, cx, cy)
         return probe
 
-    def _nameplate_clusters(self, mask: np.ndarray, max_clusters: int = 8
-                            ) -> "list[tuple[float, float, int]]":
+    def _aim_point(self, components, cx: float, cy: float
+                   ) -> "tuple[tuple[float, float], str]":
+        """Where to steer for the nameplate cluster centred on (cx, cy), in crop
+        coordinates, and where that point came from. The aircraft's own marker:
+        the largest red component bigger than a glyph (so not a letter or digit
+        of any label) whose centre lies in `red_mass_marker_band_px` above the
+        cluster centre -> "marker". With none there, the cluster centre moved up
+        by `red_mass_marker_offset_px` -> "offset". The label's own underline
+        sits below the label, outside the band, so it cannot be taken for the
+        marker."""
+        n, _labels, stats, centroids = components
+        if n > 1:
+            s, c = stats[1:], centroids[1:]
+            area = s[:, cv2.CC_STAT_AREA]
+            max_dim = self._red_mass_nameplate_glyph_max_dim
+            bigger_than_glyph = ((area > self._red_mass_nameplate_glyph_area[1])
+                                 | (s[:, cv2.CC_STAT_WIDTH] > max_dim)
+                                 | (s[:, cv2.CC_STAT_HEIGHT] > max_dim))
+            half_w, up_min, up_max = self._marker_band
+            above = cy - c[:, 1]
+            in_band = ((np.abs(c[:, 0] - cx) <= half_w)
+                       & (above >= up_min) & (above <= up_max))
+            candidates = bigger_than_glyph & in_band
+            if candidates.any():
+                i = int(np.argmax(np.where(candidates, area, -1)))
+                return (float(c[i, 0]), float(c[i, 1])), "marker"
+        return (float(cx), float(cy - self._marker_offset)), "offset"
+
+    def _nameplate_clusters(self, mask: np.ndarray, max_clusters: int = 8,
+                            components=None) -> "list[tuple[float, float, int]]":
         """Groups of glyph-sized red components that sit close together, as
         (centre x, centre y, glyph count) in crop coordinates, densest first.
         A nameplate is dozens of small letters and digits in a block of about
         200 x 110 px; two labels on screen are two blocks. Greedy: take the
         window (`red_mass_cluster_glyph_window_px`) holding the most unclaimed
-        glyphs, claim them, repeat. Glyph shape bounds are the gate's own."""
-        n, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        glyphs, claim them, repeat. Glyph shape bounds are the gate's own.
+        `components` is `mask`'s cv2.connectedComponentsWithStats result when
+        the caller already has it."""
+        n, _labels, stats, centroids = (
+            components if components is not None
+            else cv2.connectedComponentsWithStats(mask, connectivity=8))
         area_min, area_max = self._red_mass_nameplate_glyph_area
         max_dim = self._red_mass_nameplate_glyph_max_dim
         idx = [i for i in range(1, n)
@@ -1054,10 +1047,3 @@ class TargetTracker:
             "SELECT[shadow]: old=%s new=%s would change (%d so far)",
             old_desc, new_desc, n,
         )
-
-    def _compute_roi(self, cx: float, cy: float, fw: int, fh: int) -> "tuple[int, int, int, int]":
-        rw = max(self._roi_min_w, int(fw * self._current_roi_scale))
-        rh = max(self._roi_min_h, int(fh * self._current_roi_scale))
-        x = int(max(0, min(cx - rw / 2, fw - rw)))
-        y = int(max(0, min(cy - rh / 2, fh - rh)))
-        return (x, y, rw, rh)
