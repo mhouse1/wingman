@@ -43,7 +43,7 @@ anything in the capture or injection path.
 make test                             # full pytest suite + HTML report
 make test1                            # single OCR check (region 33 / continue)
 make test2                            # single OCR check (region 9 / incoming)
-pytest tests/test_analyzer.py -k foo  # run one test by name
+uv run --active pytest tests/test_analyzer.py -k foo  # run one test by name
 ```
 
 **Validation gates (run before releasing):**
@@ -133,6 +133,28 @@ Always use the project Makefile and bash shell for commands in this repository.
 - Prefer `make <target>` for tests, builds, and project tasks.
 - Use bash as the execution shell for terminal commands.
 - Do not bypass the Makefile with ad-hoc `python`, `pytest`, or shell commands when a Makefile target already covers the task.
+
+## Python Environment — uv, Plus Two System Bindings
+
+uv owns the virtualenv and every PyPI package, on every machine (VEDA, Windows,
+cloud sessions).
+
+- Run project code and tests through uv: `make <target>` first; when no target
+  fits, invoke it the way the Makefile does — `uv run --active pytest …` or
+  `uv run --active python …`. Never run project code with `python`, `python3`,
+  `pip` or `.venv/bin/python` directly.
+- Change dependencies only with `uv add` / `uv remove`, so `pyproject.toml` and
+  `uv.lock` change together, then `uv sync --all-groups`. Never `pip install`.
+- On Linux the venv is built on the **system** Python on purpose. Two compiled
+  bindings have no PyPI wheel and come from apt instead: `python3-tk` (tkinter,
+  which `make test` needs) and `python3-gi` with `gir1.2-gstreamer-1.0` (the
+  PipeWire capture backend), bridged into the venv by a `.pth` file.
+  `scripts/setup-linux.sh` Step 5 and job aid 010 are the reference. These are
+  the only apt-installed Python pieces: do not apt-install any other Python
+  module, and do not rebuild the venv on a uv-managed Python — that breaks the
+  `gi` bridge.
+- System tools uv cannot provide (an X server such as Xvfb) are not Python
+  dependencies. Use them if already present; ask before installing one.
 
 ## Diagrams
 
