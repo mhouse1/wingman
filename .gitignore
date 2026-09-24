@@ -1,5 +1,8 @@
 # Ignore test output directory
 tests/test-output/
+# Test-performance history (performance.json snapshots appended by `make wrelease`).
+# Local to veda; charts are generated from this file, never from git history.
+tests/perf-history/
 # Runtime performance data — accumulates between releases; only release/ is committed
 docs/performance/current/
 # Ignore Python bytecode cache directories and compiled files

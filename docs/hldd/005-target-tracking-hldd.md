@@ -1138,7 +1138,7 @@ has vanished would otherwise be chased open-loop for the whole delay.
 Instrumentation (behavior-neutral): `HOLD[roll]: <held>/<reason> -> <held>/<reason>
 (<why>)`, one DEBUG line per roll-hold state change, never per tick.
 
-### Live-trial verdict criteria (not yet run)
+### Live-trial verdict criteria (verdict in the next section)
 
 - After a `TargetTracker: acquired target` line, a miss shows
   `HOLD[roll]: ... -> None/None (miss within 2.0s of last lock)`. A
@@ -1164,19 +1164,49 @@ Instrumentation (behavior-neutral): `HOLD[roll]: <held>/<reason> -> <held>/<reas
    loss is the grace-window resume and the dropped locks, not continuous rotation
    itself. Revisit if overshoot persists with this fix in place.
 4. **`mission_su30` weapon switching** (do not switch until the current weapon
-   runs out) is a separate change, not started.
+   runs out) was made the same day, ADR 144 D4; its live result is in ADR 144.
+
+### Live trial 1 (2026-09-24 06:51-07:06, wingman 1.8.11)
+
+One 15 m 27 s session, `mission_su30`, both this change and the su30
+weapon-switch change (ADR 144 D4) live — two independent changes with distinct
+log signatures, recorded as separate columns. Full log copy kept outside the
+repo; archived frames under `tests/test-output/target_tracking/`.
+
+| Question | Verdict | Basis |
+|----------|---------|-------|
+| Does a miss after a pursuit lock now hold the roll axis neutral for 2 s? | **no evidence** | Zero locks in all 5 pursuits (06:54:36, 06:56:06, 06:57:09, 07:02:24, 07:04:56), so the miss-after-lock path never ran in pursuit. No `miss within` line and no `left/search` within 2 s of a `/target` hold, in pursuit |
+| Does `HOLD[roll]` show what the roll axis did? | **confirmed** | Search, release, deadband (`deadband err=+0.026`), target and search-to-target relabel transitions all logged with reasons; no per-tick spam |
+| Any errors? | none | 0 `Traceback` / `[ERROR]` |
+
+Measured context for the next cycle:
+
+- **Pursuit found nobody.** 0 locks in 5 pursuits; the scanned crops held at
+  most 4 glyphs (no nameplate in the acquisition region), and 16 tall-bar picks
+  were vetoed in one pursuit. So this run could not show the failure this section
+  targets, only that the search phase rarely sees a target at all. A roll-only
+  search brings targets into the acquisition region only if they are within the
+  roll cone.
+- **Locks are dropped almost at once.** In the dive loop (unchanged behavior:
+  immediate search resume) all 13 target holds ended by the lock being dropped:
+  median 0.36 s, maximum 1.32 s, 11 of 13 under 1 s. None reached the deadband.
+  Together with 11 of 18 acquisitions lost on the very next scan (previous
+  section), this is the dominant defect and the next cycle's target.
+- **Two of five pursuits ended in death**, at 06:54:55 and 06:56:20, with 3 and 4
+  incoming-missile detections in their windows; the three that ran to the 20 s cap
+  had none. The session summary classifies both deaths as enemy fire. Five
+  pursuits, one co-occurrence: not acted on, and not evidence that pursuit's
+  lack of evasion is the cause.
 
 ### Status
 
-Code, tests and config are in the working tree (uncommitted). Targeted tests
-(`test_config_schema`, `test_sustained_hold`, `test_pursuit_mode`) pass, 61 in
-total; `make lint` is clean. Full `make test`: 1,892 passed, 28 skipped, 6
+Code, tests and config are committed by the operator (06:47, "tune target
+tracking, fix mission_su30 weapons switch"). Targeted tests pass; `make lint` is
+clean. Full `make test` on the combined change set: 1,902 passed, 28 skipped, 6
 failed — the same six order-dependent `tests/test_input_linux.py` failures
 recorded in the previous section (identical at a clean HEAD, pass in isolation).
-The live trial has not run yet. It will also exercise the `mission_su30`
-weapon-switch change made the same day (ADR 144 D2/D4), which is independent of
-this one (roll search versus weapon selection, distinct log signatures), so it
-is recorded as a second column rather than a footnote.
+Live trial 1 above: the delay is **unverified live**; the instrumentation is
+confirmed. Another live trial is needed once pursuit actually produces a lock.
 
 ---
 

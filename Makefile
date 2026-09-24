@@ -6,7 +6,7 @@
 #   make test-perf   -> run tests + generate CSV + chart
 #   make tp              -> run fast preview (tests + ADR044/ADR045 runtime gates + charts)
 #   make tp-full         -> run full preview (tp + ADR037 PATH1/PATH2 OCR lane)
-#   make test-perf-csv   -> generate performance CSV from git history
+#   make test-perf-csv   -> generate performance CSV from local history
 #   make test-perf-chart -> generate performance visualization chart
 #   make runtime-perf-csv-release -> generate runtime release aggregate CSV
 #   make runtime-perf-csv-preview -> generate runtime preview aggregate CSV
@@ -14,7 +14,7 @@
 #   make runtime-perf-preview -> generate runtime preview chart artifacts
 #   make report      -> run tests and generate HTML report
 #   make clean       -> remove test output and screenshots
-#   make wrelease    -> force add performance.json and commit with current version
+#   make wrelease    -> record performance.json locally and commit with current version
 #   make status      -> git status
 #   make diff        -> git diff
 #   make commit      -> commit all changes with a default message
@@ -165,7 +165,8 @@ test1:
 test2:
 	$(PYTEST_RUN) tests/test_automated_levels.py -k level4_region9_contains_inco -q
 
-# Generate CSV with performance trends from git history
+# Generate CSV with performance trends from the local history
+# (tests/perf-history/, untracked - lives on veda only)
 test-perf-csv:
 	$(PYTHON_RUN) tests/performance_tracking.py --csv
 
@@ -190,10 +191,8 @@ runtime-perf-preview:
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --all
 
 # Run full workflow: test → CSV → chart
-# after running this: git add -f 'c:/dev-tools/github/wingman/tests/test-output/performance.json'
-# and commit that file to preserve performance history in git: git commit -m "v1.0.0: performance baseline"
-# Note: performance.json is ignored by default, so you need to force add it if you want to keep it in git
-# Then you can view the performance trends in tests/test-output/performance-trends.html and see how your changes affected performance over time
+# performance.json is not tracked in git; `make wrelease` appends it to the local
+# history in tests/perf-history/. View trends in tests/test-output/performance-trends.html
 test-perf: test test-perf-csv test-perf-chart
 	@echo ""
 	@echo "✅ Performance test complete!"
@@ -289,10 +288,10 @@ clean:
 	rm -f tests/test-output/*.png
 	rm -rf test_screenshots
 
-# Force add ignored performance history file and commit with current version, then regenerate chart
-# Assumes you've already updated the version in wingman/main.py and ran make test-perf or make test-perf-preview
-# otherwise the performance.json file won't be updated with the latest performance data and the chart won't reflect the latest changes
-# and there will be no performance history to commit if you haven't generated the performance.json file with the latest data
+# Record performance.json to the local history, commit the version, then regenerate charts
+# Assumes you've already updated the version in wingman/main.py and ran make test-perf or make tp,
+# otherwise performance.json won't reflect the latest changes. The test-performance history is
+# local-only (tests/perf-history/, untracked) - it is never committed.
 # once you ran wrelease you can then run make p to push the commit with the new version and performance data to GitHub
 wrelease:
 	@echo "ADR 092 leak gate (release: insufficient data blocks too)…"
@@ -317,8 +316,8 @@ wrelease:
 			exit 1; \
 		fi; \
 	fi
+	$(PYTHON_RUN) tests/performance_tracking.py --record
 	git add wingman/main.py
-	git add -f tests/test-output/performance.json
 	mkdir -p docs/performance/release
 	cp docs/performance/current/run_*.json docs/performance/release/ 2>/dev/null; true
 	git add docs/performance/release/

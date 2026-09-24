@@ -255,3 +255,30 @@ section "Nameplate Gate Authority — Fallback Suppression". Summary:
   `make r1`, then check `grep TRACKPICK wingman.log` against the verdict criteria
   in the HLDD section. Consider lowering `red_mass_nameplate_min_glyphs` from
   20 once live `glyphs=` values are in.
+
+**2026-09-24, cycles 2 and 3 and live trial 1** — full write-up in
+`docs/hldd/005-target-tracking-hldd.md`, sections "Search-Resume Delay" and its
+"Live trial 1"; the su30 part is in `docs/adr/144-mission-su30-scripted-sequence.md`
+(D4 and its live-trial paragraph). Summary:
+
+- **Cycle 2, done and unit-tested, unverified live.** After a valid lock a miss now
+  holds the roll axis neutral for `pursuit_mode.search_resume_delay_s` (2.0 s)
+  instead of re-pressing ROLL_LEFT. `HOLD[roll]` logs every roll-hold state change,
+  so the roll axis is no longer invisible in the log (confirmed live).
+- **Cycle 3 (operator request), confirmed live for step 2.** `mission_su30` no
+  longer presses SWITCH_WEAPON at the start of a life. The deferred switch in
+  `pursue_and_engage(defer_switch_until_empty=True)` was never exercised live (the
+  spawn weapon never emptied). The dive still switches at the 20 s pursuit cap.
+- **Live trial 1 could not test cycle 2:** 0 locks in 5 pursuits, no nameplate in
+  view in any of them. Do not treat the delay as validated.
+- **Next target, measured twice:** locks are dropped almost immediately. 11 of 18
+  acquisitions were lost on the very next scan (06:01-06:08 log; 6 of those had 7-18
+  glyphs, i.e. a clipped real nameplate), and all 13 dive-loop target holds in the
+  06:51-07:06 log ended by the lock being dropped, median 0.36 s. Suspects, all
+  inferred: the selected point is the mean of every red pixel so it can land on none
+  of them; the next ROI is centred on it and clips the nameplate; the glyph gate's
+  threshold of 20 is too high for a clipped crop (real nameplates at 12-19 glyphs
+  were already seen). Fix the ROI geometry or the gate's crop, not only the number.
+- **Also open:** the search rarely sees a target at all (roll-only search covers a
+  cone), and 2 of 5 pursuits ended in death with 3-4 incoming-missile warnings each
+  (the 3 timed-out pursuits had none). Neither is explained yet.

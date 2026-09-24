@@ -260,6 +260,27 @@ switches and pursues early, and the script's remaining steps are abandoned. Movi
 the `start_boresight_engage_loop()` call to just before the hand-off, or gating it
 on tracker visibility, are the two ways to change this.
 
+**D4 live trial (2026-09-24 06:51-07:06, one 15 m 27 s session, 7 mission
+starts).** Measured from that log:
+
+- *Step 2 pressed nothing.* 5 starts logged "keeping the selected weapon" and 2
+  logged "already selected this life, nothing to do" (a restart after `HEALTH
+  ALIVE` and a resume from manual takeover, each in a life where the flag was
+  already set); 0 logged the old "switching to the secondary weapon". No
+  `switch_weapon` press occurred at any mission start.
+- *The only three presses were `eject_and_dive`'s own,* at the 20 s pursuit cap
+  (06:57:29, 07:02:45, 07:05:17), with the spawn weapon still loaded. That is
+  the boundary written into D4; it is exercised on every timed-out pursuit, so it
+  is not a rare case. Whether the cap should switch is the operator's call.
+- *The spawn weapon did not launch with no lock.* Its `BT[active]` reading never
+  fell below 2 in any life (a reading of 6 appears only after a dive's switch, or
+  stale at the start of a life; not investigated further). This answers the open
+  question above for this weapon.
+- *The deferred switch itself was not exercised:* 0 "selected weapon empty"
+  lines, because the spawn weapon never emptied. Covered by unit tests only.
+- *Pursuit never had a target in view* in any of the 5 pursuits (0 locks), and 2
+  ended in death with incoming-missile warnings before them. Neither bears on D4.
+
 **Disengage can still cancel the script.** The tree's Disengage tactic (30 s
 without a ring contact, above Climb in priority) calls `disengage_roll_right`,
 which cancels the running mission, rolls right for 10 s and restarts the last

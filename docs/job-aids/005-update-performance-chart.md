@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Active | 2026-05-11 | 1.6.6           |
+| Active | 2026-09-24 | 1.8.11          |
 
 ## Two performance systems
 
@@ -10,10 +10,12 @@ Wingman has two complementary performance tracking systems:
 
 | System | What it measures | Where data lives |
 |--------|-----------------|------------------|
-| **Test-based chart** (this doc) | Automated OCR test accuracy and speed across git history | `tests/test-output/performance.json` → `performance-trends.html` |
+| **Test-based chart** (this doc) | Automated OCR test accuracy and speed across releases | `tests/test-output/performance.json` → `tests/perf-history/performance-history.jsonl` (local, untracked) → `performance-trends.html` |
 | **Runtime tracking** (Job Aid 008) | Per-crop OCR timing and reaction latency during live sessions | `docs/performance/current/` → `docs/performance/release/` |
 
 Both are snapshotted by `make wrelease`. This document covers the test-based chart.
+
+The test-based history is **local to veda**. `performance.json` is not tracked in git, and the chart is built only from `tests/perf-history/performance-history.jsonl` on the machine that ran `make wrelease` — never from git history. Other machines have no test-performance history.
 
 ---
 
@@ -33,7 +35,7 @@ This runs all automated tests, updates `tests/test-output/performance.json` with
 make tp
 ```
 
-Runs the test suite and generates the chart with the current (uncommitted) `performance.json` included as a preview point. The preview point is not added to history. Open `tests/test-output/performance-trends.html` to review.
+Runs the test suite and generates the chart with the current (unrecorded) `performance.json` included as a preview point. The preview point is not added to history. Open `tests/test-output/performance-trends.html` to review.
 
 Typical workflow when evaluating a change:
 
@@ -42,16 +44,16 @@ make tp        # check results look right
 make wrelease  # commit to history once satisfied
 ```
 
-### 3. Commit and snapshot
+### 3. Record and commit
 
 ```sh
 make wrelease
 ```
 
 This:
-- Force-adds `tests/test-output/performance.json` to git (it is normally gitignored)
+- Appends `tests/test-output/performance.json` to the local history `tests/perf-history/performance-history.jsonl` (skipped if that snapshot is already recorded; nothing is committed)
 - Copies all `docs/performance/current/run_*.json` files into `docs/performance/release/` as the new runtime baseline
-- Commits both with the current `WINGMAN_VERSION` and `WINGMAN_VERSION_DETAILS`
+- Commits `wingman/main.py` and the runtime baseline with the current `WINGMAN_VERSION` and `WINGMAN_VERSION_DETAILS`
 - Regenerates the chart
 
 ### 4. View the chart
@@ -62,7 +64,7 @@ Open in your browser:
 tests/test-output/performance-trends.html
 ```
 
-The x-axis shows `WINGMAN_VERSION`. Multiple data points for the same version are supported — each `wrelease` commit is stored as a separate entry.
+The x-axis shows `WINGMAN_VERSION`. Multiple data points for the same version are supported — each recorded snapshot is a separate entry.
 
 ---
 
@@ -90,8 +92,13 @@ All points appear under the same version label on the chart.
 - Confirm you ran `make wrelease` (not just `make test-perf`).
 - Refresh the HTML file in your browser — it does not auto-reload.
 
-**`make wrelease` says "No staged changes to commit"?**
-- `performance.json` was not updated. Run `make test-perf` first.
+**Chart is empty on a machine other than veda?**
+- Expected. The history file is local to veda and not in git.
+
+**Want to record a snapshot without releasing?**
+- `uv run python tests/performance_tracking.py --record` appends the current `performance.json` to the local history.
+
+**Do not delete `tests/perf-history/`.** It is the only copy of the test-performance history. `make clean` leaves it alone (it only removes `tests/test-output/`).
 
 ---
 
