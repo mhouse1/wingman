@@ -883,9 +883,13 @@ class AmmoEventsHandler:
         if self._last_missile_count is not None and missiles_snapshot < self._last_missile_count:
             self._fired_since_padlock += self._last_missile_count - missiles_snapshot
             if self._fired_since_padlock >= self._padlock_spread_missiles:
-                logger.info("Controller: %d missiles fired — switching padlock target",
-                            self._fired_since_padlock)
-                self._ctrl.padlock_target_switch()
+                # ADR 144: mission_su30 does not use the padlock camera, so there
+                # is no target to switch. Switching to the secondary rack also
+                # reads as "missiles fired" here (4 -> 2).
+                if not self._ctrl.is_padlock_blocked():
+                    logger.info("Controller: %d missiles fired — switching padlock target",
+                                self._fired_since_padlock)
+                    self._ctrl.padlock_target_switch()
                 self._fired_since_padlock = 0
         if missiles_snapshot > (self._last_missile_count or 0):
             # Missiles reloaded — reset so a pre-reload partial count isn't carried over

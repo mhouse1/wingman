@@ -59,7 +59,8 @@ class HudRenderer:
                  acquisition_region_pct: "tuple[float, float, float, float]" = (0.20, 0.18, 0.80, 0.68),
                  archive_enabled: bool = False,
                  archive_dir: str = "tests/test-output/target_tracking",
-                 archive_max_files: int = 200) -> None:
+                 archive_max_files: int = 200,
+                 archive_save_raw_scan: bool = False) -> None:
         self._output = Path(output_path)
         self._interval = float(interval_sec)
         self._last_ts: float = 0.0
@@ -76,6 +77,13 @@ class HudRenderer:
         self._archive_dir = Path(archive_dir)
         self._archive_max = int(archive_max_files)
         self._archive_count = 0
+        # Action item 001: also save the exact, unannotated crop the tracker
+        # scanned beside each archived frame. The annotated PNG cannot stand
+        # in for it — the PURSUING marker is drawn on the very pixels that
+        # produced the lock — and replaying the real detector against
+        # overwritten pixels is what made earlier static reconstructions
+        # contradict the live log. Off unless configured.
+        self._archive_save_raw_scan = bool(archive_save_raw_scan)
         # Handle to the feh child process below, so close() has something to
         # terminate on shutdown (2026-09-23: previously discarded right after
         # Popen() returned, which is why the window used to survive wingman
@@ -154,6 +162,7 @@ class HudRenderer:
             archive_enabled=bool(archive_cfg.get("enabled", False)),
             archive_dir=str(archive_cfg.get("dir", "tests/test-output/target_tracking")),
             archive_max_files=int(archive_cfg.get("max_files", 200)),
+            archive_save_raw_scan=bool(archive_cfg.get("save_raw_scan", False)),
         )
 
     def maybe_render(
@@ -307,7 +316,10 @@ class HudRenderer:
         # ── Target-tracking archive (full resolution, before the live_hud
         # resize below) ───────────────────────────────────────────────────
         if state in _TARGET_TRACKING_ARCHIVE_STATES:
-            self._archive_frame(canvas, state, ts)
+            # `frame` is still the raw capture here — every overlay above was
+            # drawn on `canvas`, a copy.
+            raw_scan = self._scanned_crop(frame, obs) if self._archive_save_raw_scan else None
+            self._archive_frame(canvas, state, ts, raw_scan)
 
         # ── Atomic write ─────────────────────────────────────────────────
         canvas = cv2.resize(canvas, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
@@ -317,7 +329,29 @@ class HudRenderer:
         os.replace(str(tmp), str(self._output))
         logger.debug("HudRenderer: wrote %s", self._output)
 
-    def _archive_frame(self, canvas: np.ndarray, state: str, ts: float) -> None:
+    def _scanned_crop(
+        self, frame: np.ndarray, obs: "dict | None"
+    ) -> "tuple[np.ndarray, int, int] | None":
+        """The exact region the tracker scanned this tick, as (crop, ox, oy).
+
+        `obs["roi_rect"]` is the local ROI when one was scanned, else None
+        meaning the wider acquisition region — reproduced here with the
+        tracker's own integer math (`int(w * pct)`), so the crop is
+        byte-for-byte what `TargetTracker.update` handed its detectors.
+        """
+        h, w = frame.shape[:2]
+        roi = obs.get("roi_rect") if obs is not None else None
+        if roi is not None:
+            rx, ry, rw, rh = roi
+            return frame[ry:ry + rh, rx:rx + rw], int(rx), int(ry)
+        x1, y1, x2, y2 = self._acq_pct
+        ax1, ay1 = int(w * x1), int(h * y1)
+        return frame[ay1:int(h * y2), ax1:int(w * x2)], ax1, ay1
+
+    def _archive_frame(
+        self, canvas: np.ndarray, state: str, ts: float,
+        raw_scan: "tuple[np.ndarray, int, int] | None" = None,
+    ) -> None:
         """Save a timestamped copy of the annotated frame while target
         tracking is active during a secondary-missile encounter.
 
@@ -351,6 +385,17 @@ class HudRenderer:
             self._archive_count += 1
             logger.info("HudRenderer archive: saved %s (%d/%d this session)",
                         path, self._archive_count, self._archive_max)
+            if raw_scan is not None:
+                crop, ox, oy = raw_scan
+                # Origin and full-frame size in the name: everything a replay
+                # needs to rebuild the tracker's (ox, oy, frame_w, frame_h)
+                # call, with no sidecar file to lose track of.
+                fh, fw = canvas.shape[:2]
+                raw_path = path.with_name(
+                    f"{path.stem}_raw_ox{ox}_oy{oy}_fw{fw}_fh{fh}.png")
+                if not cv2.imwrite(str(raw_path), crop):
+                    logger.warning("HudRenderer archive: raw scan write failed: %s",
+                                   raw_path)
         except Exception as e:
             logger.warning("HudRenderer archive: failed to save frame: %s: %s",
                            type(e).__name__, e)

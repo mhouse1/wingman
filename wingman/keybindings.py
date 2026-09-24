@@ -59,6 +59,7 @@ _WATCHED_MANEUVER_KEYS = (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_
 TOGGLE_WEAPON_LOOP_KEY = 'x'   # toggle the weapon firing loop
 MISSION_J20_KEY = 'u'          # start J20 mission
 MISSION_LOITER_KEY = 'y'       # start loiter mission
+MISSION_SU30_KEY = 'o'         # start SU-30 mission (docs/missions/su30.md)
 CANCEL_MISSION_KEY = 'end'     # cancel the active mission
 CAPTURE_SCREEN_SHOT = 'v'      # capture a screenshot (testing/debugging)
 AUTO_MISSION_KEY = 'm'         # start an automatic mission from the detected

@@ -107,6 +107,7 @@ from .keybindings import (                                          # noqa: F401
     FIRE_MACHINE_GUN,
     MISSION_J20_KEY,
     MISSION_LOITER_KEY,
+    MISSION_SU30_KEY,
     NOSE_DOWN_KEY,
     NOSE_UP_KEY,
     PADLOCK_CAMERA,
@@ -377,6 +378,15 @@ class Controller:
         self._ab_evade_max_s = float(_me.get("afterburner_max_s", 20.0))
         self._sdl_padlock_thread: threading.Thread | None = None
         self._sdl_weapon_thread: threading.Thread | None = None
+        # ADR 144: boresight engagement — the weapon-fire loop without the
+        # padlock camera. Deliberately its OWN state (event, thread, lifecycle
+        # lock) rather than a flag on the search-and-destroy fields above, so
+        # the two engagement modes cannot interfere and either can be started
+        # without touching the other.
+        self._boresight_stop: threading.Event | None = None
+        self._boresight_thread: threading.Thread | None = None
+        self._boresight_lifecycle_lock = threading.Lock()
+        self._boresight_lifecycle_timeout_s = 2.0
         self._target_painting_mode = target_painting_mode
         self._simulate_os_input = bool(simulate_os_input)
         self._disable_hotkeys = bool(disable_hotkeys)
@@ -649,6 +659,24 @@ class Controller:
         self._loiter_boundary_max_age_s = float(
             _lo.get("boundary_max_age_s", 4.0))
         self._loiter_tick_s = float(_lo.get("tick_s", 1.0))
+        # ADR 144: mission_su30's block. Which mission battle entry launches
+        # comes from the same ControllerConfig; unknown names fall back to j20
+        # (the schema already restricts the YAML to j20/su30).
+        self._default_mission = str(getattr(config, "default_mission", "j20"))
+        _su = getattr(config, "su30", None) or {}
+        self._su30_climb_alt_m = float(_su.get("climb_alt_m", 3000))
+        self._su30_climb_max_s = float(_su.get("climb_max_s", 90.0))
+        self._su30_nose_angle_deg = float(_su.get("nose_angle_deg", -10))
+        self._su30_angle_tolerance_deg = float(_su.get("angle_tolerance_deg", 4.0))
+        self._su30_angle_confirm_reads = max(1, int(_su.get("angle_confirm_reads", 2)))
+        self._su30_angle_pulse_s = float(_su.get("angle_pulse_s", 0.6))
+        self._su30_angle_max_s = float(_su.get("angle_max_s", 20.0))
+        self._su30_tick_s = float(_su.get("tick_s", 0.5))
+        self._su30_lock_timeout_s = float(_su.get("lock_timeout_s", 5.0))
+        # The same evade-fuel reserve the tree's sustain climb honours, so the
+        # scripted climb does not burn the afterburner fuel a missile alert
+        # would need (ADR 075). Unset means no reserve, as for the tree.
+        self._su30_fuel_reserve_pct = float(_cl_cfg.get("fuel_reserve_pct", 0.0))
         self._climb_observe_s = float(_cl_cfg.get("pulse_observe_s", 2.5))
         self._climb_min_rate = float(_cl_cfg.get("min_climb_rate", 30.0))
         # ADR 076 d3: over-rotation ceiling. The spawn guard can hand the
@@ -903,6 +931,31 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to start loiter mission", MISSION_LOITER_KEY)
             except Exception:
                 logger.exception("Controller: failed to register loiter mission hotkey")
+
+            try:
+                self._last_su30_key_ts = 0.0
+                def start_su30_mission(_e):
+                    now = time.time()
+                    if now - self._last_su30_key_ts < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_su30_key_ts = now
+                    current_state = self._analyzer.game_state if self._analyzer is not None else None
+                    logger.info("Controller: '%s' key pressed - starting SU-30 mission (state=%s)",
+                                MISSION_SU30_KEY,
+                                current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
+                    # Same as the J20 hotkey: a press means "fly it now", so the
+                    # FSM is forced into GAME_BATTLE (which also resumes from
+                    # GAME_BATTLE_MANUAL) before the mission thread starts.
+                    if self._analyzer is not None and current_state != GameState.GAME_BATTLE:
+                        if not self._analyzer.trigger_event("manual_force_battle"):
+                            logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
+                    self._set_last_mission("su30")
+                    threading.Thread(target=self.mission_su30, kwargs={"preempt": True},
+                                     daemon=True).start()
+                keyboard_module.on_press_key(MISSION_SU30_KEY, start_su30_mission, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to start SU-30 mission", MISSION_SU30_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register SU-30 mission hotkey")
 
             # ADR 094: finish the round, then exit. Deferred, and reversible.
             try:
@@ -1747,9 +1800,25 @@ class Controller:
         padlock_target_switch) presses through — leaves the real in-game
         state unknown until re-confirmed.
         """
+        # ADR 144: mission_su30 never uses the padlock camera. This is the one
+        # place every programmatic press goes through, so it is the backstop;
+        # the two callers that act on their own are gated where they start.
+        if self.is_padlock_blocked():
+            logger.debug("Controller: padlock_camera skipped — mission_su30 does not use padlock")
+            return
         self._padlock_engaged = None
         self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block,
                                  action_name='padlock_camera', ignore_cancel=ignore_cancel)
+
+    def is_padlock_blocked(self) -> bool:
+        """True while mission_su30 is the mission in play (ADR 144).
+
+        That mission engages by boresight and does not use the padlock camera,
+        so none of the padlock logic runs for it. Every other mission is
+        untouched: this is False unless the last-launched mission is su30.
+        """
+        with self._last_mission_lock:
+            return self._last_mission == "su30"
 
     def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
         """Press padlock N times to cycle to a new target, then pause the auto-padlock loop briefly.
@@ -2358,6 +2427,11 @@ class Controller:
         ever runs once per tick, after that tick's own detection), so no
         separate cooldown timer is needed on top of the streak gate.
         """
+        # ADR 144: mission_su30 keeps the secondary weapon selected for its
+        # whole life, which would make this press to "correct" the padlock on
+        # every life. It does not use the padlock camera at all.
+        if self.is_padlock_blocked():
+            return
         if not self.is_secondary_weapon_active():
             return
         if self._padlock_engaged is not None:
@@ -2748,10 +2822,17 @@ class Controller:
         should check both."""
         return self._pursuing.is_set()
 
-    def pursue_and_engage(self, on_complete=None):
+    def pursue_and_engage(self, on_complete=None, weapon_already_switched: bool = False):
         """HLDD 015: switch to secondary weapons and pursue with both
         tracking axes instead of diving — the missiles-empty alternative to
         eject_and_dive.
+
+        weapon_already_switched: True when the caller already pressed
+        SWITCH_WEAPON for this life (mission_su30 does, at its step 2). Skips
+        both the flag reset and the switch_weapon() press below — the key is a
+        toggle, so a second press would put the primary loadout back. Same
+        parameter, same meaning as eject_and_dive's. The default (False) is
+        the missiles-empty path and is unchanged.
 
         Why this can use pitch and eject_and_dive's own heatdive addition
         cannot: nothing here runs _eject_descent_control, so nothing else is
@@ -2804,8 +2885,10 @@ class Controller:
         self._eject_stop.clear()
         # Shared with eject_and_dive's own reset of the same state — both
         # strategies switch to the same secondary loadout and must not carry
-        # a stale flag/budget from whichever one ran last.
-        self._eject_weapon_switched = False
+        # a stale flag/budget from whichever one ran last. Kept as-is when the
+        # caller already switched: that flag is the only record of it.
+        if not weapon_already_switched:
+            self._eject_weapon_switched = False
         self._padlock_unknown_correction_attempts = 0
 
         def _run():
@@ -2820,8 +2903,9 @@ class Controller:
                 # this thread even started — same reasoning as
                 # eject_and_dive's own heatdive branch and
                 # _eject_heatdive_loop's own presses.
-                self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
-                self._eject_weapon_switched = True
+                if not weapon_already_switched:
+                    self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                    self._eject_weapon_switched = True
                 if self._pursuit_padlock_verify:
                     self.ensure_padlock_off()
 
@@ -3031,6 +3115,94 @@ class Controller:
         finally:
             if self._sdl_lifecycle_lock.locked():
                 self._sdl_lifecycle_lock.release()
+
+    def start_boresight_engage_loop(self):
+        """Start the boresight-engage weapon-fire loop (ADR 144).
+
+        The other engagement mode beside search_and_destroy: the same
+        weapon-fire cadence (mission.weapon_loop_interval) with NO padlock
+        loop, so the camera is never toggled and the nose stays the aim point.
+        Which mode runs is the mission's choice — mission_j20 starts
+        search_and_destroy, mission_su30 starts this.
+
+        Independent of search_and_destroy by construction: its own stop event,
+        thread and lifecycle lock, no shared state and no call into it. Both
+        may be started or stopped in either order without one affecting the
+        other. It does not stop a running search_and_destroy loop either — the
+        caller that wants "boresight only" simply never starts that one.
+
+        Not carried over from the search_and_destroy weapon loop: the
+        target_painting_mode fire suppression. That is J20's painting doctrine
+        (hold the last primary missile); this mode fires the loadout it is
+        given.
+
+        Loops stop when either _boresight_stop is set (explicit stop) or
+        _mission_cancel is set (any cancellation signal), whichever comes first.
+        """
+        # ADR 118 discipline, as for search_and_destroy: start and stop are
+        # serialised, with a timeout because this is called from mission
+        # threads and must not wedge one on a busy lock.
+        if not self._boresight_lifecycle_lock.acquire(timeout=self._boresight_lifecycle_timeout_s):
+            logger.warning("Controller: boresight_engage_loop start — lifecycle "
+                           "lock busy, skipping start")
+            return
+        try:
+            self._start_boresight_engage_locked()
+        finally:
+            if self._boresight_lifecycle_lock.locked():
+                self._boresight_lifecycle_lock.release()
+
+    def _start_boresight_engage_locked(self):
+        """The body of the start, with the lifecycle lock already held."""
+        thread = self._boresight_thread
+        if (self._boresight_stop is not None and not self._boresight_stop.is_set()
+                and thread is not None and thread.is_alive()):
+            logger.debug("Controller: boresight_engage_loop already running")
+            return
+
+        self._boresight_stop = threading.Event()
+        stop = self._boresight_stop
+
+        def _weapon_loop():
+            logger.info("Controller: boresight_engage weapon loop started")
+            try:
+                while not stop.is_set() and not self._mission_cancel.is_set():
+                    self.fire_active_weapon(hold_seconds=0.1, block=True)
+                    steps = max(1, int(self._weapon_loop_interval / 0.1))
+                    for _ in range(steps):
+                        if stop.wait(timeout=0.1) or self._mission_cancel.is_set():
+                            break
+            finally:
+                logger.info("Controller: boresight_engage weapon loop stopped")
+
+        self._boresight_thread = threading.Thread(target=_weapon_loop, daemon=True)
+        self._boresight_thread.start()
+        logger.info("Controller: boresight_engage_loop started (no padlock)")
+
+    def stop_boresight_engage_loop(self):
+        """Stop the boresight-engage weapon-fire loop.
+
+        Serialised against the start, and the join is guarded by `is_alive()`,
+        for the reason ADR 118 gives for search_and_destroy: a thread assigned
+        but not yet started cannot be joined.
+        """
+        if not self._boresight_lifecycle_lock.acquire(timeout=self._boresight_lifecycle_timeout_s):
+            logger.warning("Controller: boresight_engage_loop stop — lifecycle "
+                           "lock busy, leaving the loop running")
+            return
+        try:
+            if self._boresight_stop is None or self._boresight_stop.is_set():
+                logger.debug("Controller: boresight_engage_loop not running")
+                return
+            self._boresight_stop.set()
+            t = self._boresight_thread
+            if t is not None and t.is_alive():
+                t.join(timeout=1.0)
+            self._boresight_thread = None
+            logger.info("Controller: boresight_engage_loop stopped")
+        finally:
+            if self._boresight_lifecycle_lock.locked():
+                self._boresight_lifecycle_lock.release()
 
     def disengage_roll_right(self, duration: float = 10.0):
         """Cancel mission maneuvers then hold ROLL_RIGHT_KEY for `duration` seconds.
@@ -5224,6 +5396,329 @@ class Controller:
 
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
+    def mission_su30(self, preempt: bool = False):
+        """Scripted Su-30 mission (ADR 144, docs/missions/su30.md).
+
+        Four steps, run once per life. Battle entry and every respawn restart
+        come through here — the same single entry point mission_j20 has — so
+        "nose up on battle starting or respawn" needs no respawn wiring of its
+        own:
+
+          1. nose up             climb_mode toward ``climb_alt_m``
+          2. secondary weapon    one SWITCH_WEAPON press (skipped when already
+                                 selected this life — the key is a toggle)
+          3. level off           at ``climb_alt_m``, pulse the nose to
+                                 ``nose_angle_deg``
+          4. pursuit mode        pursue_and_engage (HLDD 015)
+
+        Unlike mission_j20 this is a script, not the adaptive doctrine, and its
+        engagement mode is boresight_engage ONLY: the weapon-fire loop without
+        the padlock camera (start_boresight_engage_loop). search_and_destroy is
+        never started by this mission. The loop starts right after the weapon
+        switch, so the only weapon it ever fires is the secondary, and it ends
+        at the pursuit hand-off, where pursue_and_engage fires for itself.
+        The behavior tree still ticks while the mission holds the lock, so its
+        emergency climb can outrank the script — by design (ADR 141 floor).
+
+        Step 4 hands the airframe to pursue_and_engage, which cancels this
+        mission (it must, to own both tracking axes). The mission therefore
+        ENDS at step 4 rather than running until cancelled; pursuit's own
+        end-of-encounter falls through to eject_and_dive (HLDD 015 D3), and the
+        respawn that follows restarts this mission via restart_last_mission.
+
+        ``preempt`` is for the operator's hotkey: a mission already holding the
+        lock is cancelled to take the aircraft, rather than the keypress being
+        a silent no-op (the ADR 111 lesson). Automatic launches leave it False
+        and skip when a mission is running, exactly as mission_j20 does.
+
+        Compatible Jets: Su-30
+        """
+        if preempt and self._mission_lock.locked():
+            logger.info("\033[93mController: mission_su30 - cancelling the "
+                        "running mission to take over\033[0m")
+            self.cancel_mission()
+            acquired = self._mission_lock.acquire(
+                timeout=self._su30_lock_timeout_s)
+        else:
+            acquired = self._mission_lock.acquire(blocking=False)
+        if not acquired:
+            logger.warning("\033[91mController: mission_su30 already in progress, skipping (lock held)\033[0m")
+            return
+
+        logger.info("\033[92mController: mission_su30 - starting mission sequence (lock acquired)\033[0m")
+        # ADR 132: same reasoning as mission_j20 — the aircraft spawns on a
+        # heading that points into the arena, and one arm point at the mission
+        # covers both battle entry and every respawn restart.
+        self.arm_turn_guard()
+        self._mission_complete.clear()
+        self._mission_cancel.clear()
+        handed_off = False
+
+        def _mission_runner():
+            nonlocal handed_off
+            try:
+                handed_off = self._run_su30_sequence()
+                if handed_off:
+                    logger.info("Controller: mission_su30 - pursuit mode has the "
+                                "aircraft, mission ending")
+                else:
+                    # The script could not finish (no tracker, wrong FSM state).
+                    # Holding the lock keeps the mission-running state that the
+                    # tree's flight gates read, and a cancel (respawn, takeover,
+                    # match end) still ends it — the same tail mission_j20 has.
+                    logger.info("Controller: mission_su30 - script ended without "
+                                "pursuit, holding until cancelled")
+                    while not self._mission_cancel.wait(timeout=0.5):
+                        if self._mission_exit_requested():
+                            logger.info("Controller: mission_su30 - exit requested")
+                            break
+                    logger.info("Controller: mission_su30 - cancelled")
+            except Exception:
+                logger.exception("Controller: mission_su30 failed")
+            finally:
+                # Every exit path — cancel, exception, exit request, hand-off —
+                # ends the fire loop with the mission that owns it (as
+                # mission_loiter does for its own loops): one outliving its
+                # mission keeps pressing the fire key into the next life.
+                try:
+                    self.stop_boresight_engage_loop()
+                except Exception:
+                    logger.exception("Controller: mission_su30 - boresight_engage stop failed")
+                if not handed_off:
+                    # The climb may still be holding NOSE_UP. After a hand-off
+                    # it is already stopped, and pursuit owns the airframe, so
+                    # only the abandoned-script exits stop it here (as
+                    # mission_loiter does for the same reason).
+                    self._climb_stop.set()
+                self._mission_complete.set()
+                if self._mission_lock.locked():
+                    self._mission_lock.release()
+                    logger.info("\033[91mController: mission_su30 - lock released\033[0m")
+
+        mission_a = threading.Thread(target=_mission_runner, daemon=True)
+        mission_a.start()
+
+        # Wait for mission to complete or exit requested
+        while not self._mission_complete.wait(timeout=0.05):
+            if self._mission_exit_requested():
+                logger.info("Controller: exit requested, aborting mission wait")
+                self.cancel_mission()
+                break
+
+        mission_a.join(timeout=2.0)
+        time.sleep(0.2)
+        logger.info("\033[91mController: mission_su30 - method exiting\033[0m")
+
+    def _run_su30_sequence(self) -> bool:
+        """The four mission_su30 steps. True when pursuit mode was activated.
+
+        False means the sequence stopped short — cancelled, exit requested, or
+        pursuit could not start — and the caller decides what holding means.
+        """
+        # Step 1: nose up. climb_mode is non-blocking and idempotent, so the
+        # weapon switch below happens while the climb is already under way.
+        logger.info("Controller: mission_su30 - step 1/4: nose up, climbing to %.0f m",
+                    self._su30_climb_alt_m)
+        self._su30_start_climb()
+
+        # Step 2: secondary weapon. The key is a toggle (see eject_and_dive's
+        # weapon_already_switched note), and _eject_weapon_switched — which
+        # is_secondary_weapon_active() reads — is cleared only on respawn or
+        # match end, so a second mission start inside the same life (hotkey
+        # re-press, resume from manual) must not press it again.
+        if self._eject_weapon_switched:
+            logger.info("Controller: mission_su30 - step 2/4: secondary weapon "
+                        "already selected this life, not switching again")
+        else:
+            logger.info("Controller: mission_su30 - step 2/4: switching to the "
+                        "secondary weapon")
+            self.switch_weapon(hold_seconds=0.1, block=True)
+            # AMMO_MISSILE now reads the secondary rack; the flag keeps ADR 088's
+            # rearm-abort and the crash_with_missiles check from misreading it.
+            self._eject_weapon_switched = True
+
+        # Engagement: boresight only. Started AFTER the switch so the fire loop
+        # never fires the primary rack, and never search_and_destroy — that
+        # loop's padlock camera is exactly what this mission does not want.
+        logger.info("Controller: mission_su30 - boresight engage on "
+                    "(weapon-fire loop, no padlock)")
+        self.start_boresight_engage_loop()
+
+        # Step 3: climb to the level-off altitude, then set the nose angle.
+        if not self._su30_wait_for_altitude():
+            return False
+        self._su30_stop_climb()
+        logger.info("Controller: mission_su30 - step 3/4: %.0f m reached, "
+                    "setting nose angle to %+.0f deg",
+                    self._su30_climb_alt_m, self._su30_nose_angle_deg)
+        self._su30_set_nose_angle()
+        if self._mission_cancel.is_set() or self._mission_exit_requested():
+            return False
+
+        # Step 4: pursuit mode.
+        return self._su30_activate_pursuit()
+
+    def _su30_start_climb(self) -> None:
+        self.climb_mode(target_alt=self._su30_climb_alt_m,
+                        max_s=self._su30_climb_max_s,
+                        fuel_floor_pct=self._su30_fuel_reserve_pct)
+
+    def _su30_wait_for_altitude(self) -> bool:
+        """Block until a FRESH altitude reads at or above the level-off target.
+
+        False on cancel or exit request. Never commands on a stale read: an
+        altitude that has aged out says nothing about where the aircraft is
+        (ADR 038), so the wait simply continues — the climb already running
+        keeps its own telemetry-gated cap.
+        """
+        last_state = None
+        while not self._mission_cancel.is_set():
+            if self._mission_exit_requested():
+                return False
+            snap = (self._analyzer.get_telemetry()
+                    if self._analyzer is not None else None)
+            fresh = snap is not None and snap.altitude_fresh()
+            alt = snap.altitude.stable_value if fresh else None
+            if alt is None:
+                if last_state != "blind":
+                    logger.info("Controller: mission_su30 - no fresh altitude, "
+                                "climb continues")
+                    last_state = "blind"
+            elif alt >= self._su30_climb_alt_m:
+                logger.info("Controller: mission_su30 - altitude %.0f m at or "
+                            "above %.0f m", alt, self._su30_climb_alt_m)
+                return True
+            else:
+                if last_state != "climb":
+                    logger.info("Controller: mission_su30 - climbing (%.0f m of "
+                                "%.0f m)", alt, self._su30_climb_alt_m)
+                    last_state = "climb"
+                # Re-issued every tick: idempotent while its thread is alive
+                # (ADR 070 d8), and a climb that hit its cap or was suppressed
+                # by an evade must not be the end of the script.
+                self._su30_start_climb()
+            self._mission_cancel.wait(timeout=self._su30_tick_s)
+        return False
+
+    def _su30_stop_climb(self) -> None:
+        """End whichever climb hold is running — this mission's or the tree's.
+
+        Waits for the hold to release its keys: the nose-angle step must not
+        start pulsing NOSE_DOWN against a hold that is still pressing NOSE_UP.
+        """
+        self._climb_stop.set()
+        deadline = time.time() + 2.0
+        while self._climbing.is_set() and time.time() < deadline:
+            time.sleep(0.05)
+        if self._climbing.is_set():
+            logger.warning("Controller: mission_su30 - climb hold still running "
+                           "2s after the stop request")
+
+    def _su30_set_nose_angle(self) -> bool:
+        """Pulse the nose toward ``nose_angle_deg``. True once within tolerance.
+
+        False on cancel, exit request or the ``angle_max_s`` bound; the caller
+        proceeds to pursuit on a timeout, whose own pitch loop corrects the
+        rest, and stops on a cancel.
+
+        The angle is the flight-path angle (altitude rate over speed), refreshed
+        about every 3 s, so this acts on NEW samples only and pulses instead of
+        holding: a held key on a lagging reading overshoots (ADR 068/069).
+
+        One pitch writer at a time: while any climb hold is running — the
+        ADR 141 altitude-floor emergency in particular — this presses nothing,
+        the same rule the spawn guard follows.
+        """
+        target = self._su30_nose_angle_deg
+        start = time.time()
+        last_ts = None
+        in_band = 0
+        yielded = False
+        while not self._mission_cancel.wait(timeout=self._su30_tick_s):
+            if self._mission_exit_requested():
+                return False
+            if time.time() - start >= self._su30_angle_max_s:
+                logger.warning("Controller: mission_su30 - nose angle %+.0f deg "
+                               "not confirmed within %.0fs, continuing to pursuit",
+                               target, self._su30_angle_max_s)
+                return False
+            if self._climbing.is_set():
+                if not yielded:
+                    logger.info("Controller: mission_su30 - a climb hold owns the "
+                                "pitch axis, nose-angle step waiting")
+                    yielded = True
+                continue
+            yielded = False
+            snap = (self._analyzer.get_telemetry()
+                    if self._analyzer is not None else None)
+            if snap is None or not snap.altitude_fresh():
+                continue
+            ts = snap.altitude.ts
+            if ts is None or ts == last_ts:
+                continue
+            angle = snap.pitch_angle_deg()
+            if angle is None:
+                continue
+            last_ts = ts
+            err = angle - target
+            if abs(err) <= self._su30_angle_tolerance_deg:
+                in_band += 1
+                if in_band >= self._su30_angle_confirm_reads:
+                    logger.info("Controller: mission_su30 - nose angle %+.0f deg "
+                                "(target %+.0f), confirmed over %d reads",
+                                angle, target, in_band)
+                    return True
+                continue
+            in_band = 0
+            direction = "down" if err > 0 else "up"
+            logger.info("Controller: mission_su30 - nose angle %+.0f deg, "
+                        "target %+.0f: pulsing nose %s", angle, target, direction)
+            if err > 0:
+                self.nose_down(hold_seconds=self._su30_angle_pulse_s, block=True)
+            else:
+                self.nose_up(hold_seconds=self._su30_angle_pulse_s, block=True)
+        return False
+
+    def _su30_activate_pursuit(self) -> bool:
+        """Step 4: hand the airframe to pursue_and_engage. True when started.
+
+        Goes through the same FSM seam AmmoEventsHandler.fire_eject does —
+        eject_started on the way in, eject_complete when the encounter ends —
+        because pursuit is a behavior inside GAME_BATTLE_EJECT (HLDD 015 D1):
+        that state is what makes the tree yield the airframe and what routes a
+        respawn to stop_eject_sequence. Starting pursuit from GAME_BATTLE
+        without it would leave the tree steering roll against the tracker.
+        """
+        if self._target_tracker is None:
+            # pursue_and_engage would fall back to eject_and_dive here. A
+            # missing tracker is a wiring fault, and diving an armed aircraft
+            # because of one is not what "activate pursuit mode" asks for.
+            logger.error("\033[91mController: mission_su30 - no TargetTracker "
+                         "wired, pursuit mode cannot start\033[0m")
+            return False
+        analyzer = self._analyzer
+        if analyzer is not None and not analyzer.trigger_event("eject_started"):
+            logger.warning("Controller: mission_su30 - FSM refused eject_started "
+                           "(state %s), pursuit mode not started",
+                           getattr(analyzer, "game_state", None))
+            return False
+
+        def _on_complete():
+            if (analyzer is not None
+                    and analyzer.game_state == GameState.GAME_BATTLE_EJECT):
+                analyzer.trigger_event("eject_complete")
+
+        logger.info("Controller: mission_su30 - step 4/4: activating pursuit mode")
+        # Pursuit fires for itself every cycle. Ending the boresight loop first
+        # leaves exactly one writer on the fire key, rather than doubling its
+        # cadence for the moment the two overlap. Only here, after the FSM has
+        # accepted the hand-off: a mission that could not start pursuit keeps
+        # its engagement loop while it holds.
+        self.stop_boresight_engage_loop()
+        self.pursue_and_engage(on_complete=_on_complete,
+                               weapon_already_switched=True)
+        return True
+
     def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6, region_name: str = None):
         """Move the mouse to the center of a grid region and left-click it.
 
@@ -5527,7 +6022,8 @@ class Controller:
             self.release_tracking_holds()
         except Exception:
             logger.exception("Controller: release_tracking_holds failed during takeover")
-        for stop in (self.stop_search_and_destroy_loop,):
+        for stop in (self.stop_search_and_destroy_loop,
+                     self.stop_boresight_engage_loop):
             try:
                 stop()
             except Exception:
@@ -5723,8 +6219,7 @@ class Controller:
                                 "\033[92mController: game_battle_alive detected in GAME_STARTING "
                                 "— launching mission immediately\033[0m")
                             self._analyzer.trigger_event("good_luck_detected")
-                            self._set_last_mission("j20")
-                            threading.Thread(target=self.mission_j20, daemon=True).start()
+                            self._start_default_mission()
                             return
 
                     if not _in_starting():
@@ -5775,10 +6270,10 @@ class Controller:
                                 "Controller: Good-Luck wait ran the full %ds without a "
                                 "battle-alive signal", good_luck_wait)
                         if _in_starting():
-                            logger.info("Controller: game_starting - launching J20 mission")
+                            logger.info("Controller: game_starting - launching %s mission",
+                                        self._default_mission.upper())
                             self._analyzer.trigger_event("good_luck_detected")
-                            self._set_last_mission("j20")
-                            threading.Thread(target=self.mission_j20, daemon=True).start()
+                            self._start_default_mission()
                         return
             except Exception:
                 logger.exception("Controller: game_starting loop error")
@@ -5789,11 +6284,23 @@ class Controller:
 
         threading.Thread(target=_loop, daemon=True).start()
 
+    def _start_default_mission(self):
+        """Record and launch the configured default mission (mission.default_mission).
+
+        The one place battle entry chooses between missions, so the two
+        GAME_STARTING launch paths and the restart fallback cannot disagree.
+        Resolves the mission method at call time, not import time.
+        """
+        name = "su30" if self._default_mission == "su30" else "j20"
+        self._set_last_mission(name)
+        target = self.mission_su30 if name == "su30" else self.mission_j20
+        threading.Thread(target=target, daemon=True).start()
+
     def restart_last_mission(self):
-        """Restart the most recently started mission, defaulting to J20 when none recorded.
+        """Restart the most recently started mission, defaulting to the configured mission when none recorded.
 
         Returns:
-            True  — mission was successfully restarted (or started as j20 default).
+            True  — mission was successfully restarted (or started as the default).
             False — mission is currently running (lock held); restart skipped.
         """
         if self.is_mission_running():
@@ -5811,12 +6318,17 @@ class Controller:
             logger.info("Controller: restarting last mission (loiter)")
             threading.Thread(target=self.mission_loiter, daemon=True).start()
             return True
+        if mission == "su30":
+            logger.info("Controller: restarting last mission (SU-30)")
+            threading.Thread(target=self.mission_su30, daemon=True).start()
+            return True
 
         # No prior mission recorded — reached GAME_BATTLE via GAME_UNKNOWN (Good Luck
-        # not detected, stalled start). Default to j20 rather than doing nothing.
-        logger.info("Controller: no prior mission recorded — defaulting to J20")
-        self._set_last_mission("j20")
-        threading.Thread(target=self.mission_j20, daemon=True).start()
+        # not detected, stalled start). Default to the configured mission (j20
+        # unless mission.default_mission says otherwise) rather than doing nothing.
+        logger.info("Controller: no prior mission recorded — defaulting to %s",
+                    self._default_mission.upper())
+        self._start_default_mission()
         return True
 
     def cleanup(self, keep_hotkeys: bool = False):
@@ -5859,6 +6371,10 @@ class Controller:
             self.stop_search_and_destroy_loop()
         except Exception:
             logger.exception("Controller: failed to stop search_and_destroy loops")
+        try:
+            self.stop_boresight_engage_loop()
+        except Exception:
+            logger.exception("Controller: failed to stop boresight_engage loop")
         eject_thread = self._eject_thread
         if eject_thread is not None and eject_thread.is_alive():
             eject_thread.join(timeout=1.5)  # let its finally release keys cleanly

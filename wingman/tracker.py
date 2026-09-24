@@ -127,6 +127,25 @@ class TargetTracker:
         self._red_mass_nameplate_glyph_area = (int(glyph_area[0]), int(glyph_area[1]))
         self._red_mass_nameplate_glyph_max_dim = int(
             cfg.get("red_mass_nameplate_glyph_max_dim", 25))
+        # Action item 001 (2026-09-23): whether a nameplate-gate REJECTION
+        # falls back to the tall-bar pick. It always did — `selected` keeps
+        # the _select_target result whenever _red_mass_centroid returns None —
+        # so the gate could narrow the red-mass override but never reject a
+        # lock. Measured on the 66 archived pursuit/eject frames that carry a
+        # PURSUING marker (replay of the real functions + visual
+        # classification, so inferred rather than logged): every lock the gate
+        # accepted sat on a real enemy nameplate (22 of 22); of the 44 the
+        # gate rejected, about 4 were real and about 35 false — the INCOMING
+        # banner's shards, own exhaust, terrain, fireballs. The banner
+        # mechanism itself was reproduced with the real detector on real
+        # banner pixels (a 6x18, area-41 contour), and 779 of 812 historical
+        # acquisitions in the banner's row near an INCOMING event fell inside
+        # its x-extent. False here means "gate rejection is final" and takes
+        # effect only while red_mass_steering AND the gate are both on. Default
+        # True (old behavior) so every scene the existing tests build is
+        # unchanged; shipped config.yaml sets it false.
+        self._red_mass_tallbar_fallback = bool(
+            cfg.get("red_mass_tallbar_fallback", True))
         # HLDD 005 Selection Hardening Phase 2 (2026-09-21): shadow-only —
         # ranked_lock_priority stays false in shipped config; while false,
         # the ranked-pool rule below is computed and compared every tick but
@@ -208,6 +227,10 @@ class TargetTracker:
         # shadow log's "N so far" reflects its own occurrence count, not a
         # shared one two different conditions would otherwise both bump.
         self._ranked_shadow_count: int = 0
+        # Action item 001: counts tall-bar picks the nameplate gate vetoed,
+        # for the INFO-level line in _log_pick_path (same 1st/10th/100th,
+        # then every 500th, shape as the two counters above).
+        self._suppressed_pick_count: int = 0
 
     @property
     def enabled(self) -> bool:
@@ -324,10 +347,24 @@ class TargetTracker:
         # new color sample) — after, not before, the shadow logging above,
         # so Selection Hardening's own before/after comparison keeps
         # reflecting the tall-bar algorithm's own decision either way.
+        tall_pick = selected
+        pick_path = "tallbar" if selected is not None else "none"
+        rm_probe: "dict | None" = None
         if self._red_mass_steering:
-            red_mass_local = self._red_mass_centroid(crop, ox, oy, w, h)
+            rm_probe = self._red_mass_probe(crop, ox, oy, w, h)
+            red_mass_local = rm_probe["centroid"]
             if red_mass_local is not None:
                 selected = (ox + red_mass_local[0], oy + red_mass_local[1])
+                pick_path = "redmass"
+            elif rm_probe["gate"] == "reject" and not self._red_mass_tallbar_fallback:
+                # Action item 001: the gate's rejection is final — the
+                # tall-bar pick it used to fall back to was false about nine
+                # times in ten (see __init__). `tall_pick` is kept only so
+                # _log_pick_path can say what was vetoed.
+                selected = None
+                pick_path = "suppressed" if tall_pick is not None else "none"
+        self._log_pick_path(pick_path, selected, tall_pick, rm_probe,
+                            abs_red_hits, red_won, len(local_hits))
 
         if selected is not None:
             abs_x, abs_y = selected
@@ -465,9 +502,68 @@ class TargetTracker:
             results.append((float(x + cw / 2), float(y + ch / 2), area))
         return results
 
+    def _log_pick_path(
+        self,
+        pick_path: str,
+        selected: "tuple[float, float] | None",
+        tall_pick: "tuple[float, float] | None",
+        rm_probe: "dict | None",
+        abs_red_hits: "list[tuple[float, float, float]]",
+        red_won: bool,
+        n_tall: int,
+    ) -> None:
+        """Action item 001, Open Question 1: one greppable line per tick
+        saying which path supplied the lock this tick — `redmass`, `tallbar`,
+        `suppressed` (the gate vetoed a tall-bar pick) or `none` — plus what
+        the gate saw. Turns "did the gate fire" from a forensic
+        reconstruction into `grep TRACKPICK`. Pure logging; never changes
+        `selected`. The DEBUG line follows the existing per-tick "scanned"
+        line's cadence; a suppressed pick is also surfaced at INFO,
+        rate-limited like every other shadow counter here, since DEBUG lines
+        do not survive into a normal session log.
+        """
+        if rm_probe is not None:
+            gate = rm_probe["gate"]
+            glyphs = rm_probe["glyphs"] if rm_probe["glyphs"] is not None else "-"
+            rm_px = rm_probe["px"]
+        else:
+            gate, glyphs, rm_px = "off", "-", 0
+        if tall_pick is not None:
+            color = "R" if any(
+                abs(rx - tall_pick[0]) < 1e-6 and abs(ry - tall_pick[1]) < 1e-6
+                for rx, ry, _a in abs_red_hits
+            ) else "G"
+            tall_desc = f"({tall_pick[0]:.0f},{tall_pick[1]:.0f},{color})"
+        else:
+            tall_desc = "-"
+        sel_desc = f"({selected[0]:.0f},{selected[1]:.0f})" if selected is not None else "-"
+        logger.debug(
+            "TRACKPICK: path=%s sel=%s tall=%s n_tall=%d red_won=%s "
+            "gate=%s glyphs=%s rm_px=%d",
+            pick_path, sel_desc, tall_desc, n_tall, red_won, gate, glyphs, rm_px,
+        )
+        if pick_path == "suppressed":
+            self._suppressed_pick_count += 1
+            n = self._suppressed_pick_count
+            if n in (1, 10, 100) or n % 500 == 0:
+                logger.info(
+                    "TRACKPICK: tall-bar pick %s vetoed — nameplate gate "
+                    "rejected (glyphs=%s < %d); %d so far",
+                    tall_desc, glyphs, self._red_mass_nameplate_min_glyphs, n,
+                )
+
     def _red_mass_centroid(
         self, crop: np.ndarray, ox: int, oy: int, frame_w: int, frame_h: int
     ) -> "tuple[float, float] | None":
+        """Crop-local centroid of every red-mass pixel, or None — see
+        `_red_mass_probe`, which does the work and also reports the gate's
+        numbers. Kept as its own entry point so callers and tests that only
+        want the point are unchanged."""
+        return self._red_mass_probe(crop, ox, oy, frame_w, frame_h)["centroid"]
+
+    def _red_mass_probe(
+        self, crop: np.ndarray, ox: int, oy: int, frame_w: int, frame_h: int
+    ) -> dict:
         """Direct operator instruction (2026-09-23): crop-local centroid of
         every pixel matching the same red range _detect_targets uses (main
         hue band, upper end optionally narrowed by red_mass_hue_max, lower
@@ -480,9 +576,17 @@ class TargetTracker:
         false-positive evidence this overrides.
 
         When `red_mass_nameplate_gate_enabled` is set, a candidate must also
-        clear `_count_nameplate_glyphs`'s threshold or this returns None
-        instead of a centroid — see that method's docstring. Off by default;
+        clear `_count_nameplate_glyphs`'s threshold or the returned
+        "centroid" is None — see that method's docstring. Off by default;
         no effect on the behavior described above until enabled.
+
+        Returns a dict (action item 001) rather than the bare point so the
+        caller can tell *why* there is no centroid and log what the gate saw:
+        `centroid` — crop-local (x, y) or None; `gate` — "off" (gate not
+        enabled), "pass" or "reject"; `glyphs` — the count the gate compared
+        (None when the gate is off); `px` — pixels in the final red mask.
+        A "reject" is a positive statement that no nameplate was found;
+        "off" with a None centroid only means no red pixels matched.
 
         `ox`/`oy` (crop's absolute top-left in the full frame) and
         `frame_w`/`frame_h` are needed only to translate
@@ -491,12 +595,13 @@ class TargetTracker:
         whichever crop happens to be active this tick) into this crop's
         local coordinates.
         """
+        probe: dict = {"centroid": None, "gate": "off", "glyphs": None, "px": 0}
         if crop is None or crop.size == 0:
-            return None
+            return probe
         try:
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         except Exception:
-            return None
+            return probe
         value_min = self._red_mass_value_min if self._red_mass_value_min is not None else int(self._red_lower[2])
         red_lower = np.array([int(self._red_lower[0]), int(self._red_lower[1]), value_min], dtype=np.uint8)
         red_wrap_lower = np.array([170, int(self._red_lower[1]), value_min], dtype=np.uint8)
@@ -517,13 +622,19 @@ class TargetTracker:
             cy2 = min(crop.shape[0], int(frame_h * ey2) - oy)
             if cx1 < cx2 and cy1 < cy2:
                 mask[cy1:cy2, cx1:cx2] = 0
+        probe["px"] = int(np.count_nonzero(mask))
         if self._red_mass_nameplate_gate_enabled:
-            if self._count_nameplate_glyphs(mask) < self._red_mass_nameplate_min_glyphs:
-                return None
+            glyphs = self._count_nameplate_glyphs(mask)
+            probe["glyphs"] = glyphs
+            if glyphs < self._red_mass_nameplate_min_glyphs:
+                probe["gate"] = "reject"
+                return probe
+            probe["gate"] = "pass"
         ys, xs = np.nonzero(mask)
         if xs.size == 0:
-            return None
-        return (float(xs.mean()), float(ys.mean()))
+            return probe
+        probe["centroid"] = (float(xs.mean()), float(ys.mean()))
+        return probe
 
     def _count_nameplate_glyphs(self, mask: np.ndarray) -> int:
         """HLDD 005 nameplate gate (2026-09-23): count small, glyph-shaped

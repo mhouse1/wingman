@@ -46,6 +46,7 @@ Default hotkeys are defined in `wingman/controller.py`.
 | `m` | Start unattended mode (clicks play, waits for game start, auto-launches J20) |
 | `u` | Start J20 mission manually |
 | `y` | Start loiter mission manually |
+| `o` | Start SU-30 mission manually (takes over from a running mission) |
 | `end` | Cancel current mission |
 | `backspace` | Exit script |
 | `x` | Toggle weapon loop |

@@ -143,7 +143,7 @@ The actuation layer. Holds the mission lock, fires keys/clicks, manages the game
 | `_auto_respawn_restart` | Bool: cleared by `End` key or maneuver key press; restored when a mission starts |
 | `_eject_stop` | Event: set by `End` key or respawn detection to abort `eject_and_dive` early |
 | `_game_battle_since` | Timestamp of last `GAME_BATTLE` entry; 2s maneuver-key grace period suppresses false manual-takeover triggers at mission start |
-| `_last_mission` | String (`"j20"` / `"loiter"`): used by `restart_last_mission()` |
+| `_last_mission` | String (`"j20"` / `"loiter"` / `"su30"`): used by `restart_last_mission()` |
 | `_target_painting_mode` | Bool: when True, J20 mission includes target-lock painting phase |
 
 **Mission execution** (`mission_j20`) — the scripted maneuver script described
@@ -168,6 +168,28 @@ join mission thread (2s timeout), then a short settle sleep
 No scripted maneuver, afterburner schedule, or fixed mission window remains
 in this method — see Cruise Afterburner (ADR 134) below for where afterburner
 scheduling actually lives now, and Behavior Tree for climb/engage/evade/eject.
+
+**Mission execution** (`mission_su30`) — the opposite doctrine: a fixed four-step
+script run once per life (ADR 144, `docs/missions/su30.md`), reusing `climb_mode`,
+`switch_weapon` and `pursue_and_engage`. Its engagement mode is boresight engage,
+`start_boresight_engage_loop()` — the weapon-fire loop *without* the padlock loop,
+a separate pair from `start_search_and_destroy_loop()` that neither shares state
+with nor modifies it, so a mission picks one or the other. While su30 is the
+mission in play `Controller.is_padlock_blocked()` is true and no padlock logic
+runs (the camera press, the ADR 140 auto-correction, the target-spread handler);
+it is false for every other mission. Pursuit cancels the mission, so the mission
+ends at step 4.
+
+```mermaid
+flowchart TD
+    START[Mission start at battle entry or respawn] --> CLIMB[Step 1 nose up and climb]
+    CLIMB --> SWITCH[Step 2 switch to the secondary weapon]
+    SWITCH --> BORE[Start boresight engage loop with no padlock]
+    BORE --> WAIT[Wait for the level off altitude]
+    WAIT --> ANGLE[Step 3 set the nose angle]
+    ANGLE --> PURSUE[Step 4 stop the boresight loop and activate pursuit mode]
+    PURSUE --> DONE[Mission ends and pursuit owns the aircraft]
+```
 
 **Mission execution** (`mission_loiter`) — survival hold, ADR 028-style closed
 loop rather than a script:
@@ -580,6 +602,8 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make rd NESTED=0` |
 | `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
 | `loiter_mission` | Survival hold: `target_alt`, hysteresis, orbit cadence and hold |
+| `su30_mission` | Scripted Su-30 sequence (ADR 144): `climb_alt_m`, `nose_angle_deg`, angle tolerance, pulse and bound |
+| `mission.default_mission` | Which mission battle entry launches: `j20` (default) or `su30` (ADR 144) |
 | `mission.manual_takeover` | `persist_through_respawn` — off by default, so a respawn resumes the last mission |
 | `return_to_battle` | Design 010 instrumentation: colour trigger `region`, narrower `ocr_region` for the once-per-crossing confirmation, and partial `text` tokens |
 | `focus_guard` | Suppress injection when the game lacks focus (ADR 098); follows the nested display automatically |

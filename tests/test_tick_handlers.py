@@ -283,6 +283,9 @@ class _AmmoCtrlStub:
     def padlock_target_switch(self):
         self.padlock_switches += 1
 
+    def is_padlock_blocked(self):
+        return False
+
     def deploy_flares(self, **kw):
         pass
 
@@ -3111,5 +3114,6 @@ def test_seek_center_ships_disabled_in_the_shipped_config():
     """Shadow first (HLDD 013 / ADR 070 / ADR 028 rev 4 precedent): a live
     session's shadow log decides whether Phase 1 goes live, not a guess."""
     import yaml
-    cfg = yaml.safe_load(open("wingman/config.yaml"))
+    with open("wingman/config.yaml") as f:
+        cfg = yaml.safe_load(f)
     assert cfg["behavior_tree"]["attack_support"]["seek_center_enabled"] is False

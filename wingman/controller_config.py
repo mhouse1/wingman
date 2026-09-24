@@ -42,6 +42,9 @@ class ControllerConfig:
     good_luck_bypass_on_alive: bool = True
     capture_stale_inject_s: float = 10.0
     j20_turn_guard_s: float = 10.0      # ADR 132
+    # ADR 144: which mission battle entry launches. "j20" is the pre-existing
+    # behaviour; "su30" selects the scripted Su-30 sequence.
+    default_mission: str = "j20"
 
     # --- Run-mode flags. Not pure config: replay and capture lanes override
     #     these, which is why they are `replace`-able rather than read-only
@@ -63,6 +66,8 @@ class ControllerConfig:
     # and `config` is this dataclass — so the guard was always False and the
     # whole section of config.yaml was dead.
     loiter: dict = field(default_factory=dict)
+    # ADR 144: mission_su30's block (climb altitude, nose angle, pulse timing).
+    su30: dict = field(default_factory=dict)
     # ADR 140: only `confirm_seconds` is read here — the vision fields
     # (region_pct/green_lower/green_upper/min_pixels) belong to
     # TargetTracker, which is constructed directly from the raw config dict
@@ -104,6 +109,7 @@ class ControllerConfig:
             good_luck_bypass_on_alive=bool(mission.get("good_luck_bypass_on_alive", True)),
             capture_stale_inject_s=float(mission.get("capture_stale_inject_s", 10.0)),
             j20_turn_guard_s=float(mission.get("j20_turn_guard_s", 10.0)),
+            default_mission=str(mission.get("default_mission", "j20")),
             target_painting_mode=bool(j20.get("target_painting_mode", False)),
             capture_with_overlay=bool(debug.get("capture_with_overlay", True)),
             telemetry=cfg.get("telemetry", {}) or {},
@@ -113,6 +119,7 @@ class ControllerConfig:
             stall_prevention=bt.get("stall_prevention", {}) or {},
             fuel=cfg.get("fuel", {}) or {},
             loiter=cfg.get("loiter_mission", {}) or {},
+            su30=cfg.get("su30_mission", {}) or {},
             padlock_center_indicator=cfg.get("padlock_center_indicator", {}) or {},
             pursuit_mode=cfg.get("pursuit_mode", {}) or {},
             tracking=cfg.get("tracking", {}) or {},

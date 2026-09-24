@@ -293,6 +293,41 @@ def test_fallthrough_to_eject_and_dive_presses_switch_weapon_only_once(monkeypat
         f"and the eject_and_dive it fell through to, got {len(switch_presses)}")
 
 
+def test_weapon_already_switched_skips_the_switch_and_keeps_the_flag(monkeypatch):
+    """mission_su30 (ADR 144) switches to the secondary weapon at its step 2 and
+    then activates pursuit. SWITCH_WEAPON is a toggle, so pursue_and_engage must
+    not press it again — and must not reset the flag that records the first
+    press, or is_secondary_weapon_active() would read False for the whole
+    pursuit."""
+    analyzer = _AnalyzerStub(ammo=2)
+    capture = _CaptureStub()
+    tracker = _TrackerStub()
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=capture,
+                       pursuit_enabled=True, pursuit_max_duration_s=0.5)
+    ctrl.set_target_tracker(tracker)
+    ctrl._eject_weapon_switched = True
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert ("key_press", SWITCH_WEAPON) not in _keys(ctrl)
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in _keys(ctrl), "pursuit must still fire"
+    assert tracker.updates > 0
+
+
+def test_default_still_switches_weapon(monkeypatch):
+    """The missiles-empty path (no argument) is unchanged by ADR 144."""
+    analyzer = _AnalyzerStub(ammo=2)
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.3)
+    ctrl.set_target_tracker(_TrackerStub())
+
+    ctrl.pursue_and_engage()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert ("key_press", SWITCH_WEAPON) in _keys(ctrl)
+
+
 def test_max_duration_falls_through_to_eject_and_dive(monkeypatch):
     analyzer = _AnalyzerStub(ammo=2)  # never runs out on its own
     capture = _CaptureStub()

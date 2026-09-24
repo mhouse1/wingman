@@ -472,6 +472,215 @@ class TestNameplateGate:
 
 
 # ---------------------------------------------------------------------------
+# Action item 001 (2026-09-23): the nameplate gate must be able to REJECT a lock
+# ---------------------------------------------------------------------------
+
+def _draw_banner_shards(frame: np.ndarray, x: int, y: int, w: int = 260,
+                        h: int = 22, shard_xs=(60, 130, 200)) -> np.ndarray:
+    """The game's "INCOMING" banner as the tall-bar path sees it while it
+    fades: a wide pink-red fill (measured H 165-178, S 139-165, V 109-238 on
+    pursuit_mode_20260923_211425_64.png) whose saturation sits just under
+    the tracker's S>=150 floor almost everywhere, with a few thin vertical
+    strips that cross it. Each strip is a 4x16 tall/narrow red contour —
+    exactly the shape _detect_targets accepts as a target bar (measured: a
+    6x18, area-41 contour on the real banner, frame 60). V stays under
+    red_mass_value_min (245) everywhere, as on the real banner, so the
+    red-mass path never sees any of it."""
+    out = frame.copy()
+    out[y:y + h, x:x + w] = _bgr_from_hue(172, 140, 190)
+    for sx in shard_xs:
+        out[y + 3:y + 19, x + sx:x + sx + 4] = _bgr_from_hue(172, 165, 200)
+    return out
+
+
+class TestTallbarFallbackSuppression:
+    """Measured 2026-09-23 (docs/action-item/001): with the nameplate gate
+    on, a gate rejection used to fall back to the tall-bar pick, so the gate
+    could narrow the red-mass override but never reject a lock. On the
+    archived pursuit/eject frames, every lock the gate accepted sat on a
+    real enemy nameplate (22 of 22) while roughly nine in ten of the
+    fallback locks were false: the INCOMING banner's shards, own exhaust,
+    terrain, fireballs. `red_mass_tallbar_fallback: false` makes the gate
+    authoritative. The default stays true so every pre-existing scenario
+    (and every synthetic single-shape test) is untouched."""
+
+    _RED_BGR = (0, 0, 255)
+
+    def _gated(self, **overrides):
+        return _tracker(local_roi_enabled=False, red_mass_steering=True,
+                        red_mass_nameplate_gate_enabled=True,
+                        red_mass_nameplate_min_glyphs=20, **overrides)
+
+    def test_default_keeps_the_fallback_so_a_rejected_gate_still_locks_a_bar(self):
+        """The old behavior, pinned: gate rejects (no nameplate anywhere) yet
+        a tall red bar exists, and the tick still reports a lock on it."""
+        t = self._gated()
+        frame = _draw_bar(_black_frame(), cx=200, cy=150, bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(200, abs=3)
+
+    def test_fallback_off_gate_rejection_yields_no_lock(self):
+        """The bug itself. Same scene as above; with the fallback off, the
+        gate's rejection is final: nothing to steer toward."""
+        t = self._gated(red_mass_tallbar_fallback=False)
+        frame = _draw_bar(_black_frame(), cx=200, cy=150, bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is False
+        assert t.mode != TrackMode.TRACKING
+        # n_detections stays the raw tall-bar count — the tall-bar path still
+        # ran and found its bar; only its authority to lock was removed.
+        assert obs["n_detections"] == 1
+
+    def test_fallback_off_still_locks_when_the_gate_passes(self):
+        """Suppression must not touch the path that works: a blob with a real
+        nameplate cluster beside it still locks, at the red-mass centroid."""
+        t = self._gated(red_mass_tallbar_fallback=False)
+        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
+                             bgr=self._RED_BGR)
+        frame = _draw_glyphs(frame, cx=200, cy=110, n=25, bgr=self._RED_BGR)
+        obs = t.update(frame)
+        assert obs["visible"] is True
+        assert obs["centroid_x"] == pytest.approx(200, abs=5)
+
+    def test_fallback_off_is_inert_when_the_gate_is_disabled(self):
+        """Only a gate *rejection* suppresses the tall-bar pick. With the
+        gate off there is no rejection to be authoritative about, so a green
+        bar (no red pixels at all, hence no red-mass candidate) still locks."""
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                     red_mass_tallbar_fallback=False)
+        frame = _draw_bar(_black_frame(), cx=200, cy=150)   # default green
+        obs = t.update(frame)
+        assert obs["visible"] is True
+
+    def test_incoming_banner_shards_lock_by_default_and_not_when_suppressed(self):
+        """The mechanism behind the banner's 779 measured acquisitions
+        (docs/action-item/001): shards of the fading banner qualify as tall
+        bars, and — the banner's V being far below the red-mass floor — the
+        gate rejecting the tick changed nothing. Default reproduces the false
+        lock; the fix removes it."""
+        frame = _draw_banner_shards(_black_frame(400, 300), x=70, y=40)
+        legacy = self._gated().update(frame)
+        assert legacy["visible"] is True
+        assert 40 <= legacy["centroid_y"] <= 62        # on the banner row
+        fixed = self._gated(red_mass_tallbar_fallback=False).update(frame)
+        assert fixed["visible"] is False
+
+    def test_suppressed_tick_from_tracking_enters_lost_grace(self):
+        """A real lock followed by a gate-rejected tick is an ordinary miss
+        (LOST_GRACE), not a phantom hold on the tall-bar pick."""
+        t = self._gated(red_mass_tallbar_fallback=False)
+        locked = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
+                              bgr=self._RED_BGR)
+        locked = _draw_glyphs(locked, cx=200, cy=110, n=25, bgr=self._RED_BGR)
+        assert t.update(locked)["visible"] is True
+        assert t.mode == TrackMode.TRACKING
+        bar_only = _draw_bar(_black_frame(400, 300), cx=200, cy=150,
+                             bgr=self._RED_BGR)
+        obs = t.update(bar_only)
+        assert obs["visible"] is False
+        assert t.mode == TrackMode.LOST_GRACE
+
+    def test_config_flag_is_read(self):
+        t = TargetTracker({"tracking": {"red_mass_tallbar_fallback": False}})
+        assert t._red_mass_tallbar_fallback is False
+        assert TargetTracker({"tracking": {}})._red_mass_tallbar_fallback is True
+
+
+class TestPickPathLogging:
+    """The instrumentation action item 001 asked for first: one greppable
+    line per tick saying which path supplied the lock, what the gate saw,
+    and — when the fallback is suppressed — what it would have picked."""
+
+    _RED_BGR = (0, 0, 255)
+
+    def _pick_lines(self, caplog):
+        """The per-tick DEBUG lines only (each carries `path=`); the
+        rate-limited INFO veto line is checked separately."""
+        return [r.getMessage() for r in caplog.records
+                if "TRACKPICK: path=" in r.getMessage()]
+
+    def test_redmass_path_is_attributed_with_glyph_count(self, caplog):
+        import logging
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                     red_mass_nameplate_gate_enabled=True,
+                     red_mass_nameplate_min_glyphs=20)
+        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
+                             bgr=self._RED_BGR)
+        frame = _draw_glyphs(frame, cx=200, cy=110, n=25, bgr=self._RED_BGR)
+        with caplog.at_level(logging.DEBUG, logger="wingman.tracker"):
+            t.update(frame)
+        line = self._pick_lines(caplog)[-1]
+        assert "path=redmass" in line
+        assert "gate=pass" in line
+        assert "glyphs=25" in line
+
+    def test_tallbar_path_is_attributed_when_redmass_is_off(self, caplog):
+        import logging
+        t = _tracker(local_roi_enabled=False)
+        frame = _draw_bar(_black_frame(), cx=200, cy=150)
+        with caplog.at_level(logging.DEBUG, logger="wingman.tracker"):
+            t.update(frame)
+        line = self._pick_lines(caplog)[-1]
+        assert "path=tallbar" in line
+        assert "gate=off" in line
+
+    def test_suppressed_pick_names_what_the_fallback_would_have_locked(self, caplog):
+        import logging
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                     red_mass_nameplate_gate_enabled=True,
+                     red_mass_nameplate_min_glyphs=20,
+                     red_mass_tallbar_fallback=False)
+        frame = _draw_bar(_black_frame(), cx=200, cy=150, bgr=self._RED_BGR)
+        with caplog.at_level(logging.DEBUG, logger="wingman.tracker"):
+            t.update(frame)
+        line = self._pick_lines(caplog)[-1]
+        assert "path=suppressed" in line
+        assert "gate=reject" in line
+        assert "tall=(200," in line
+
+    def test_no_candidate_at_all_is_path_none(self, caplog):
+        import logging
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                     red_mass_nameplate_gate_enabled=True,
+                     red_mass_tallbar_fallback=False)
+        with caplog.at_level(logging.DEBUG, logger="wingman.tracker"):
+            t.update(_black_frame())
+        assert "path=none" in self._pick_lines(caplog)[-1]
+
+    def test_suppression_is_also_reported_at_info_rate_limited(self, caplog):
+        """Debug lines vanish from a normal session log, so the first
+        suppressed pick is also surfaced at INFO — same 1st/10th/100th
+        rate limit every other shadow counter in this module uses."""
+        import logging
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                     red_mass_nameplate_gate_enabled=True,
+                     red_mass_tallbar_fallback=False)
+        frame = _draw_bar(_black_frame(), cx=200, cy=150, bgr=self._RED_BGR)
+        with caplog.at_level(logging.INFO, logger="wingman.tracker"):
+            for _ in range(3):
+                t.update(frame)
+        infos = [r for r in caplog.records
+                 if r.levelno == logging.INFO and "TRACKPICK" in r.getMessage()]
+        assert len(infos) == 1                     # 1st only; 2nd, 3rd suppressed
+        assert "1 so far" in infos[0].getMessage()
+
+    def test_probe_exposes_the_gate_numbers_it_decided_on(self):
+        t = _tracker(local_roi_enabled=False, red_mass_steering=True,
+                     red_mass_nameplate_gate_enabled=True,
+                     red_mass_nameplate_min_glyphs=20)
+        frame = _draw_glyphs(_black_frame(400, 300), cx=200, cy=110, n=7,
+                             bgr=self._RED_BGR)
+        probe = t._red_mass_probe(frame, 0, 0, 400, 300)
+        assert probe["gate"] == "reject"
+        assert probe["glyphs"] == 7
+        assert probe["centroid"] is None
+        assert probe["px"] > 0
+        # The public wrapper is unchanged: same answer, no dict.
+        assert t._red_mass_centroid(frame, 0, 0, 400, 300) is None
+
+
+# ---------------------------------------------------------------------------
 # Error normalization
 # ---------------------------------------------------------------------------
 
@@ -1083,6 +1292,92 @@ class TestHudRendererArchive:
         assert renderer._archive_enabled is True
         assert str(renderer._archive_dir) == archive_dir
         assert renderer._archive_max == 5
+        assert renderer._archive_save_raw_scan is False     # opt-in
+
+    def test_from_config_reads_save_raw_scan(self, tmp_path):
+        from wingman.hud import HudRenderer
+        cfg = {"hud": {"enabled": True, "output_path": str(tmp_path / "o.png"),
+                        "target_tracking_archive": {"enabled": True,
+                                                     "dir": str(tmp_path / "a"),
+                                                     "save_raw_scan": True}}}
+        assert HudRenderer.from_config(cfg)._archive_save_raw_scan is True
+
+
+class TestHudRendererRawScanArchive:
+    """Action item 001: the annotated PNG cannot be replayed faithfully — the
+    PURSUING marker is drawn on the exact pixels that produced the lock —
+    so with save_raw_scan the exact, unannotated crop the tracker scanned is
+    saved beside it."""
+
+    _OBS = {"mode": "TRACKING", "visible": True, "centroid_x": 200,
+            "centroid_y": 150, "error_norm": 0.0, "n_detections": 1}
+
+    def _renderer(self, tmp_path, **kw):
+        from wingman.hud import HudRenderer
+        return HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                            archive_enabled=True,
+                            archive_dir=str(tmp_path / "archive"),
+                            acquisition_region_pct=(0.25, 0.25, 0.75, 0.75), **kw)
+
+    def _frame(self):
+        return np.random.default_rng(0).integers(0, 255, (300, 400, 3), dtype=np.uint8)
+
+    def test_acquisition_scan_saves_the_exact_acq_crop(self, tmp_path):
+        renderer = self._renderer(tmp_path, archive_save_raw_scan=True)
+        frame = self._frame()
+        renderer.maybe_render(frame, {**self._OBS, "roi_rect": None},
+                              "PURSUIT_MODE", None, None, None).join(timeout=5)
+        raws = list((tmp_path / "archive").glob("*_raw_*.png"))
+        assert len(raws) == 1
+        # Same integer math the tracker uses: int(w*.25)=100, int(h*.25)=75, ...
+        assert np.array_equal(cv2.imread(str(raws[0])), frame[75:225, 100:300])
+        assert "_raw_ox100_oy75_fw400_fh300" in raws[0].name
+
+    def test_roi_scan_saves_the_exact_roi_crop(self, tmp_path):
+        renderer = self._renderer(tmp_path, archive_save_raw_scan=True)
+        frame = self._frame()
+        renderer.maybe_render(frame, {**self._OBS, "roi_rect": (50, 40, 120, 80)},
+                              "PURSUIT_MODE", None, None, None).join(timeout=5)
+        raws = list((tmp_path / "archive").glob("*_raw_*.png"))
+        assert len(raws) == 1
+        assert np.array_equal(cv2.imread(str(raws[0])), frame[40:120, 50:170])
+        assert "_raw_ox50_oy40_" in raws[0].name
+
+    def test_raw_crop_carries_no_overlay(self, tmp_path):
+        """The whole point: the marker drawn at the lock must not be in it."""
+        renderer = self._renderer(tmp_path, archive_save_raw_scan=True)
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        renderer.maybe_render(frame, {**self._OBS, "roi_rect": None},
+                              "PURSUIT_MODE", None, None, None).join(timeout=5)
+        raw = cv2.imread(str(next((tmp_path / "archive").glob("*_raw_*.png"))))
+        assert not raw.any()          # annotated copy has marker/lines; this is black
+        annotated = cv2.imread(str(next(
+            p for p in (tmp_path / "archive").glob("*.png") if "_raw_" not in p.name)))
+        assert annotated.any()
+
+    def test_off_by_default_and_annotated_frame_still_saved(self, tmp_path):
+        renderer = self._renderer(tmp_path)
+        renderer.maybe_render(self._frame(), {**self._OBS, "roi_rect": None},
+                              "PURSUIT_MODE", None, None, None).join(timeout=5)
+        names = [p.name for p in (tmp_path / "archive").glob("*.png")]
+        assert len(names) == 1 and "_raw_" not in names[0]
+
+    def test_no_obs_falls_back_to_acq_crop(self, tmp_path):
+        renderer = self._renderer(tmp_path, archive_save_raw_scan=True)
+        frame = self._frame()
+        renderer.maybe_render(frame, None, "PURSUIT_MODE", None, None, None).join(timeout=5)
+        raws = list((tmp_path / "archive").glob("*_raw_*.png"))
+        assert len(raws) == 1
+        assert np.array_equal(cv2.imread(str(raws[0])), frame[75:225, 100:300])
+
+    def test_raw_is_not_saved_past_the_session_cap(self, tmp_path):
+        renderer = self._renderer(tmp_path, archive_save_raw_scan=True,
+                                   archive_max_files=1)
+        for _ in range(3):
+            renderer.maybe_render(self._frame(), {**self._OBS, "roi_rect": None},
+                                  "PURSUIT_MODE", None, None, None).join(timeout=5)
+        names = [p.name for p in (tmp_path / "archive").glob("*.png")]
+        assert len(names) == 2        # one annotated + its raw twin, nothing more
 
 
 # ---------------------------------------------------------------------------

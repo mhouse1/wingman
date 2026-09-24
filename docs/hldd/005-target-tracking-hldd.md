@@ -956,6 +956,132 @@ history), cross-referenced from here — not by rewriting this section after the
 
 ---
 
+## Nameplate Gate Authority — Fallback Suppression (2026-09-23, action item 001)
+
+Wingman 1.8.11. Game UI version not recorded (no in-game version string was
+captured; treat any later game update as a separate column, not a footnote).
+
+### Finding: the gate could never reject a lock
+
+`TargetTracker.update` overrode the tall-bar pick with the red-mass centroid
+only when `_red_mass_centroid` returned a point. A nameplate-gate rejection
+returns `None`, so `selected` kept the tall-bar result. Enabling
+`red_mass_nameplate_gate_enabled` therefore narrowed the override and nothing
+else — which is why the live trial that enabled it "did not fix the problem".
+The existing gate tests only rejected in scenes containing no tall-bar
+candidate, so this was never exercised.
+
+```mermaid
+flowchart TD
+    A[Scan crop] --> B[Tall-bar pick]
+    A --> C[Red-mass probe]
+    C --> D{Gate verdict}
+    D -->|pass| E[Lock on red-mass centroid]
+    D -->|reject| F{Fallback allowed}
+    F -->|yes - old behavior| G[Lock on tall-bar pick]
+    F -->|no - new behavior| H[No lock this tick]
+    D -->|gate off| G
+```
+
+### Evidence (labels follow the iterate skill: measured / inferred)
+
+Archived frames are annotated copies: the PURSUING marker is drawn on the exact
+pixels that produced the lock, so replaying them is **inferred**, never
+measured. That overwrite is also the mechanism behind the earlier
+"hand-reconstructed crop logged 0 hits where the live log said `hits=1`"
+contradiction — in `pursue_and_engage` the same `frame` object feeds
+`update()` and the HUD, so the frames are pixel-identical apart from the
+overlay.
+
+| Claim | Label | Basis |
+|-------|-------|-------|
+| Every gate-accepted lock sits on a real enemy nameplate: 22 of 22 | inferred | Real `_red_mass_centroid` replayed on the overlay ROI/acq crop of the 66 archived frames that carry a marker; centroid matched the marker within 12-18 px in all 22; contact sheet classified by eye |
+| Gate-rejected locks are mostly false: about 36 false, 4 real, 4 coasting ("lost") of 44 | inferred | Same 66 frames, same eye classification (single reviewer) |
+| INCOMING banner is fixed chrome at (710-1210, 318-358) of 1920x1200, identical in two frames | measured | `pursuit_mode_20260923_211420_60.png`, `..._211425_64.png` |
+| Banner shards qualify as tall bars | measured | Real `_detect_targets` on banner pixels of frame 60 returned a 6x18, area-41, aspect-3.0 contour; banner HSV H165-178, S139-165, V109-238 (below the red-mass V floor of 245, so red-mass never sees it) |
+| Three acquisitions on the banner row in 5 s | measured | Log 2026-09-23 21:14:19-21:14:23: (957,336), (862,332), (896,336) |
+| Banner locks are historical, not new | measured | 15 days of logs (42,698 acquisitions): within 4 s of an INCOMING detection 812 of 3,297 (24.6%) land in the banner row vs 1,315 of 39,401 (3.3%) otherwise; 779 of 812 inside x 710-1210, 492 at x 900-999 |
+| The tall-bar path does find "NO LOCK" text, contrary to the comment on `red_mass_exclude_pct` | measured | 339 historical acquisitions in one 8 px cell at (952,920) |
+| Fixed chrome is not the whole story | measured | Today's 2,083 acquisitions: 519 in the own-aircraft box, 193 on the two gauge bars, 59 on the banner |
+
+**Do not add a fixed own-aircraft exclusion zone.** The 519 own-aircraft-box
+acquisitions overstate the false rate: in the frames viewed, locks there were
+frequently real nameplates ("[HARD] Manaconda … F-15",
+"[PG≡] FermundaCh … F-22") that happen to overlap the player's exhaust.
+
+### Change (one behavior change)
+
+`tracking.red_mass_tallbar_fallback` (default `true` in code = old behavior;
+shipped `false`). With the gate enabled, a rejection is final. It applies only
+while `red_mass_steering` and the gate are both on. `n_detections` still
+reports the raw tall-bar count.
+
+Instrumentation (behavior-neutral, both shipped on):
+
+- `TRACKPICK: path=<redmass|tallbar|suppressed|none> sel=… tall=(x,y,R|G)
+  n_tall=… red_won=… gate=<off|pass|reject> glyphs=… rm_px=…` — one DEBUG line
+  per tick; a suppressed pick is also logged at INFO on the 1st/10th/100th,
+  then every 500th occurrence.
+- `hud.target_tracking_archive.save_raw_scan` — saves the exact unannotated
+  crop the tracker scanned as `*_raw_ox<x>_oy<y>_fw<W>_fh<H>.png`; replay with
+  the real methods, passing those four numbers.
+
+### Live-trial verdict criteria (not yet run — see status below)
+
+- `path=tallbar` must be **absent**: with the gate on and the fallback off it
+  is unreachable, so a single line is a bug, not a result.
+- `path=suppressed` lines are the locks removed. `path=redmass` frames, read
+  from the raw crops, should have the marker on a nameplate.
+- A false lock with `path=redmass` would mean the gate passed on something
+  that is not a nameplate. Known weakness to look at first (inferred from the
+  code, not yet observed): the gate counts glyphs *anywhere in the crop* while
+  the centroid averages *every* narrow-red pixel in the crop, so a real
+  nameplate elsewhere in the ROI plus flame near the exhaust would produce a
+  centroid between them.
+
+### Open findings, deliberately not acted on
+
+1. **Gate threshold (20) is probably too high.** Scanned-crop glyph counts over
+   all 137 archived frames: 0-3: 93, 4-7: 18, 8-11: 0, 12-19: 4, 20+: 22. The
+   four in 12-19 (`game_battle_eject_20260923_211245_42`,
+   `pursuit_mode_20260923_195449_82`, `..._205510_4`, `..._205512_6`) are all
+   real nameplates; junk never exceeded 7 here (the earlier HLDD measurement
+   found 8-9 on two other frames). With the fallback gone those four are now
+   dropped rather than rescued. A threshold near 10-11 fits this corpus, but
+   that is 137 frames from one day — wait for the live `glyphs=` values.
+2. **Lock-retention gap (Open Question 4), one data point.** 21:12:20-21:12:41
+   (22 archived frames): the shipped gate would have passed in 1 (frame 20:
+   22 glyphs, nameplate at (1376,329) inside the acquisition region, while
+   the ROI sat on the right fuel-gauge bar at (1099,550,422x264) — a false
+   lock that went stale). Frame 28: a nameplate straddles the acquisition
+   region's bottom edge (y=816), 7 glyphs seen. Frame 29: the JF-17 nameplate
+   is fully outside the region (y≈990). The remaining 19 frames show 0-6
+   glyphs, i.e. no nameplate in the region. Reading: the gap is mostly the
+   target genuinely absent, plus two near-misses caused by the region's
+   bottom edge and one stale-ROI tick. One gap is not a rate — count gaps per
+   mission from the live log before touching `lost_timeout_sec` or the ROI
+   ladder.
+3. **The local ROI is not clipped to the acquisition region.** Frame 64's ROI
+   spans y 667-930 against an acquisition bottom of 816, so a lock can walk to
+   the exhaust area and stay there.
+4. The post-gap acquisition at 21:12:41 (980,790) had 0 glyphs in frame 39 —
+   another own-aircraft false lock that the fallback removal would have
+   prevented.
+
+### Status
+
+Code, tests and config are in the working tree (uncommitted). `make lint` is
+clean; `make test` shows 1,782 passed and 6 failures in
+`tests/test_input_linux.py`, which fail identically at a clean HEAD worktree in
+the same full-suite order and pass in isolation (order-dependent, unrelated to
+this change). One unrelated lint error at HEAD
+(`tests/test_tick_handlers.py:3114`, SIM115) was fixed to let the gate run.
+The live trial has **not** run: `make r1` stopped at `nested-setup` because a
+stale `Xwayland :3` (pid 1837131, started 21:44:45, no clients) accepts
+connections but does not answer; SIGTERM was ignored and SIGKILL was declined.
+
+---
+
 ## Adaptive Optimization (Future, Non-V1)
 
 This capability is a follow-on optimization phase and is **not required** for initial delivery.

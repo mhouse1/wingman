@@ -280,6 +280,7 @@ on your own display, and work bare when the nested game window has focus. See AD
 | `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
 | `u` | Start the J20 mission — and, while in manual, hand control back to wingman |
 | `y` | Start the loiter mission — climb to the hold altitude and orbit to stay alive |
+| `o` | Start the SU-30 mission — nose up, secondary weapon, level off at 3000 m, then pursuit mode (takes the aircraft from a running mission) |
 | `m` | Activate unattended mode (also auto-enabled from config) |
 | `end` | Cancel active mission |
 | `i` / `j` / `k` / `l` | Manual takeover **from your own display** (needs `ctrl+alt` on the nested lane) — see below |
@@ -294,8 +295,13 @@ on your own display, and work bare when the nested game window has focus. See AD
 **Missions.** `u` flies the J20 mission — engage contacts, manage weapons and
 altitude. `y` flies the loiter mission, whose only objective is staying alive:
 climb to the hold altitude and orbit there, deciding from live telemetry rather
-than running a fixed sequence. Flares stay with the incoming-missile detector in
-both, so they fire when something is actually inbound.
+than running a fixed sequence. `o` flies the SU-30 mission, which *is* a fixed
+four-step sequence (`docs/missions/su30.md`, ADR 144) run once per life, engaging
+with boresight engage (the fire loop without the padlock camera); a
+respawn restarts whichever mission ran last. Set `mission.default_mission: su30`
+in `wingman/config.yaml` to have battle entry launch it instead of J20. Flares
+stay with the incoming-missile detector in all of them, so they fire when
+something is actually inbound.
 
 `i/j/k/l` are wingman's own roll and pitch commands, so at the **game window** they
 are indistinguishable from its presses and are ignored there. `enter` and the

@@ -260,6 +260,8 @@ SCHEMA = Section(
             "starting_health_probe_interval_s": SECONDS,
             "capture_stale_inject_s": SECONDS,
             "j20_turn_guard_s": SECONDS,   # ADR 132
+            # ADR 144: which mission battle entry launches
+            "default_mission": Leaf(types=(str,), choices=("j20", "su30")),
             "padlock_spread_missiles": _int(0),
             # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
             # pre_crash_lookback_s added D8
@@ -314,6 +316,19 @@ SCHEMA = Section(
             "coarse_min_hold_s": SECONDS,
             "coarse_max_hold_s": SECONDS,
             "coarse_cooldown_s": SECONDS,
+        }),
+
+        # ADR 144: mission_su30, the scripted Su-30 sequence
+        "su30_mission": Section(children={
+            "climb_alt_m": _num(0),
+            "climb_max_s": SECONDS,
+            "nose_angle_deg": _num(-90, 90),
+            "angle_tolerance_deg": _num(0, 90),
+            "angle_confirm_reads": _int(1),
+            "angle_pulse_s": SECONDS,
+            "angle_max_s": SECONDS,
+            "tick_s": SECONDS,
+            "lock_timeout_s": SECONDS,
         }),
 
         # ADR 024 / 070 / 073 / 076 / 081 / 083
@@ -514,6 +529,9 @@ SCHEMA = Section(
             "red_mass_nameplate_min_glyphs": _int(0),
             "red_mass_nameplate_glyph_area": Leaf(types=(list,), item_types=(int,), length=2),
             "red_mass_nameplate_glyph_max_dim": _int(0),
+            # Action item 001 (2026-09-23): False makes a gate rejection final
+            # instead of falling back to the tall-bar pick.
+            "red_mass_tallbar_fallback": BOOL,
             "local_roi_enabled": BOOL,
             "local_roi_scale": FRACTION,
             "local_roi_min_px": Leaf(types=(list,), item_types=(int,), length=2),
@@ -580,6 +598,11 @@ SCHEMA = Section(
                 "enabled": BOOL,
                 "dir": STR,
                 "max_files": _int(0),
+                # Action item 001: also save the exact, unannotated crop the
+                # tracker scanned beside each archived frame (the annotated
+                # PNG's PURSUING marker overwrites the very pixels that
+                # produced the lock, so it cannot be replayed faithfully).
+                "save_raw_scan": BOOL,
             }),
         }),
 
