@@ -556,6 +556,11 @@ class Controller:
         # flag must not be flipped ahead of.
         _pm = _c.pursuit_mode or {}
         self._pursuit_mode_enabled = bool(_pm.get("enabled", False))
+        # 0 (or negative) means NO time cap (operator, 2026-09-24, after the 20 s
+        # cap had been dropping a working pursuit into a dive on every life): the
+        # pursuit keeps searching and pursuing until the ammo is exhausted or a
+        # respawn, takeover or shutdown stops it. The code default stays 20.0 so
+        # a config that never sets the key behaves as it always did.
         self._pursuit_max_duration_s = float(_pm.get("pursuit_max_duration_s", 20.0))
         self._pursuit_padlock_verify = bool(_pm.get("pursuit_padlock_verify", False))
         # get_ammo_missiles() reads the AMMO_MISSILE HUD region, which does
@@ -3141,9 +3146,14 @@ class Controller:
         - secondary ammo confirmed at 0 -> falls through to eject_and_dive.
           The airframe is now exactly the "empty, worth trading for a
           rearmed one" case ADR 106/109 already designed the dive for.
-        - pursuit_max_duration_s elapsed first -> same fall-through, a
-          bounded worst case so a target-never-found encounter cannot fly
-          the empty airframe indefinitely.
+        - pursuit_max_duration_s elapsed first (only when it is above 0;
+          0 means no cap, the shipped setting since 2026-09-24) -> same
+          fall-through, a bounded worst case so a target-never-found
+          encounter cannot fly the empty airframe indefinitely. With no cap
+          nothing bounds the pursuit in time: it ends on ammo, respawn,
+          takeover or shutdown, and no behavior-tree tactic (boundary turn
+          included) acts inside GAME_BATTLE_EJECT, so a long search is
+          unguarded against the arena edge; see HLDD 015, open question 3.
         - respawn / manual takeover / shutdown (self._eject_stop) -> stops
           immediately, no fall-through — mirrors eject_and_dive's own
           external-cancellation path exactly, same shared event.
@@ -3213,7 +3223,8 @@ class Controller:
                 zero_reads = 0
                 switched_at = None
                 while not self._eject_stop.wait(timeout=0.2):
-                    if time.time() - start >= self._pursuit_max_duration_s:
+                    if (self._pursuit_max_duration_s > 0
+                            and time.time() - start >= self._pursuit_max_duration_s):
                         logger.info(
                             "Controller: pursue_and_engage — max duration "
                             "(%.0fs) reached, falling through to eject_and_dive",
@@ -3738,6 +3749,17 @@ class Controller:
         """True while an eject_and_dive sequence is in progress
         (ADR 024 3.1b — the Eject leaf's is_running_fn)."""
         return self._ejecting.is_set()
+
+    def eject_flight_active(self) -> bool:
+        """True while an eject-state strategy is actually flying the airframe:
+        the descent (`eject_descent_active`) or a pursuit (`is_pursuing`).
+
+        The Anomaly 003 detector reads this, not `eject_descent_active` alone.
+        It ends a recording session when GAME_BATTLE_EJECT has lasted 40 s with
+        nothing flying, and a pursuit has no descent, so once the pursuit lost its
+        20 s cap (2026-09-24) any pursuit over 40 s would have looked "stuck" and
+        ended a `make rd v` session."""
+        return self.eject_descent_active() or self.is_pursuing()
 
     def eject_descent_active(self) -> bool:
         """True only while `_eject_descent_control` is still actively flying

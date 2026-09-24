@@ -109,6 +109,7 @@ def test_the_session_summary_block_is_captured():
 def test_render_names_the_numbers_and_flags_a_hud_lock():
     text = " ".join(R.render(_r(), "x.log").split())          # ignore column spacing
     assert "pursuit 2 engagements any lock 1 (50%)" in text
+    assert "length median 20s, longest 20s" in text            # pursuits of 20.1 s and 6.0 s, sorted, upper median
     assert "locked scans 10/78 (13%; pooled before the widened region 5.8%)" in text
     assert "in an excluded HUD zone 1 (must be 0)" in text
     assert "acquisitions 3 outside the old box 2 (67%)" in text

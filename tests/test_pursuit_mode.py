@@ -722,3 +722,85 @@ def test_pursuit_summary_names_an_external_stop(monkeypatch, caplog):
         _wait_for_pursuit_to_settle(ctrl)
     (line,) = _summary_lines(caplog, "PURSUIT")
     assert "end=external:respawn_detected" in line
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching
+# and pursuing." pursuit_mode.pursuit_max_duration_s = 0 means no time cap.
+# ---------------------------------------------------------------------------
+
+def _start_uncapped(monkeypatch, analyzer, *, tracker=None, **kw):
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0, **kw)
+    ctrl.set_target_tracker(tracker or _TrackerStub())
+    return ctrl
+
+
+def test_a_pursuit_with_no_cap_is_still_pursuing_past_where_a_cap_would_have_fired(monkeypatch):
+    """A 0.5 s cap ends a pursuit inside 0.7 s (see the cap tests above). With 0 it must not."""
+    ctrl = _start_uncapped(monkeypatch, _AnalyzerStub(ammo=2))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(1.3)
+    try:
+        assert ctrl.is_pursuing(), "no cap means no time-based end"
+        assert ctrl._eject_thread is None, "and no fall-through into the dive"
+    finally:
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    assert ctrl._eject_thread is None, "an external stop must still not start a dive"
+
+
+def test_a_pursuit_with_no_cap_still_fires_and_still_ends_on_a_respawn(monkeypatch, caplog):
+    ctrl = _start_uncapped(monkeypatch, _AnalyzerStub(ammo=2))
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(0.8)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in _keys(ctrl)
+    (line,) = _summary_lines(caplog, "PURSUIT")
+    assert "end=external:respawn_detected" in line and "end=cap" not in line
+
+
+def test_no_cap_still_falls_through_to_the_dive_when_the_ammo_is_exhausted(monkeypatch):
+    """The dive is how an empty airframe trades for a rearmed one; only the time cap went."""
+    ctrl = _start_uncapped(monkeypatch, _AnalyzerStub(ammo=0), legacy_nose_hold_s=0.05,
+                            eject_max_s=0.2)
+    ctrl.pursue_and_engage()
+    _wait_for_pursuit_to_settle(ctrl)
+    assert ctrl._eject_thread is not None, "ammo exhausted must still hand over to eject_and_dive"
+
+
+def test_no_cap_keeps_the_deferred_weapon_untouched_however_long_it_runs(monkeypatch):
+    """The 'do not switch until the rack is empty' rule has no timer in it either."""
+    ctrl = _start_uncapped(monkeypatch, _AnalyzerStub(ammo=2))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(1.2)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+    assert _switch_presses(_keys(ctrl)) == []
+
+
+def test_a_positive_cap_still_ends_the_pursuit(monkeypatch):
+    """Setting seconds again restores the old behavior."""
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.5)
+    ctrl.set_target_tracker(_TrackerStub())
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    _wait_for_pursuit_to_settle(ctrl)
+    assert ctrl._eject_thread is not None
+
+
+def test_eject_flight_active_is_true_only_while_a_pursuit_flies(monkeypatch):
+    """Anomaly 003's detector reads this: a pursuit over 40 s must not look 'stuck'."""
+    ctrl = _start_uncapped(monkeypatch, _AnalyzerStub(ammo=2))
+    assert ctrl.eject_flight_active() is False
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.5)
+    try:
+        assert ctrl.eject_flight_active() is True
+        assert ctrl.eject_descent_active() is False, "a pursuit has no descent: that is the trap"
+    finally:
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    assert ctrl.eject_flight_active() is False

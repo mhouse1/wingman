@@ -191,7 +191,7 @@ it, each mapped to what happens next:
 | Condition | Detection | Next action |
 |---|---|---|
 | Secondary ammo exhausted | `get_ammo_missiles() == 0`, same debounced read `_eject_heatdive_loop` already uses | **Fall through to `eject_and_dive`** — the airframe is now in exactly the state ADR 106/109 designed for (empty, no upside left in staying up), so the existing, validated trade-for-rearm strategy takes over rather than leaving the aircraft to fly on unarmed. |
-| `pursuit_max_duration_s` elapsed with no kill confirmed | wall-clock timer, own config key | Same fall-through to `eject_and_dive` — a bounded worst case, so a target-never-found session cannot fly the empty, exposed airframe indefinitely. |
+| `pursuit_max_duration_s` elapsed with no kill confirmed | wall-clock timer, own config key | Same fall-through to `eject_and_dive` — a bounded worst case, so a target-never-found session cannot fly the empty, exposed airframe indefinitely. **Off since 2026-09-24 (shipped value 0 = no cap, operator: "after a 20 second chase do not dive, continue searching and pursuing").** Only a positive value restores it; see "No time cap" below. |
 | Respawn detected / manual takeover / shutdown | same `self._eject_stop` event every other eject-adjacent loop already watches | Stop immediately, identical to `eject_and_dive`'s own external-cancellation path — no fall-through, since the aircraft is already gone or the operator already has it. |
 
 The ammo-exhausted and timeout paths **do not** skip eject-and-dive's own
@@ -317,6 +317,28 @@ same confirmation). This replaced a first version that let the dive make its own
 switch, which switched away from a loaded rack on every capped pursuit (operator,
 2026-09-24). The default form, used by the missiles-empty trigger, is unchanged.
 
+**No time cap (operator decision, 2026-09-24).** `pursuit_mode.pursuit_max_duration_s` ships as `0`,
+which means no cap: the pursuit keeps searching (roll, and pitch once it has a lock) and firing until the
+ammo is exhausted, when it still falls through to `eject_and_dive` to trade for a rearmed airframe, or
+until a respawn, takeover or shutdown stops it. Until then every life ended its pursuit at 20 s and dived
+whether or not a target had been found. Consequences found while making the change:
+
+- **The Anomaly 003 detector would have ended recording sessions.** It treats GAME_BATTLE_EJECT with no
+  descent running for 40 s as stuck, and a pursuit has no descent. `Controller.eject_flight_active()`
+  (descent or pursuit) is now what `main.py` passes it.
+- **Nothing time-limits the eject state otherwise:** an alive-health event ends it only after an observed
+  death (`_alive_transition_disposition`).
+- **Exposure, now open (question 3 below):** no behavior-tree tactic acts inside GAME_BATTLE_EJECT
+  except Climb's terrain emergency, so a long search is guarded against terrain but not against the arena
+  edge, and a search that only rolls flies straight. Measured over 50 pursuits with boundary readings:
+  they started a median 0.37 minimap radii from the boundary (minimum 0.06), 13 of 50 showed the
+  boundary ahead and under 0.3 away at some point, and the worst closing rate (-0.010 per second) would
+  reach a boundary 0.5 away in about 50 s. An out-of-bounds warning has not been seen in a pursuit (the
+  one on record, 17:32 on 2026-09-24, was at a life's start in normal battle, where the boundary turn
+  handled it), but pursuits were at most 20 s.
+- **Recorded numbers change meaning.** The pooled 5.8% (pursuit) and 11.5% (dive) locked-scan baselines
+  were measured with 20 s pursuits; `end=cap` no longer appears in `PURSUIT SUMMARY` lines.
+
 **Engagement summary line (Cycle 7, 2026-09-24).** Each pursuit, and each dive's heatdive
 loop, ends with one INFO line, `PURSUIT SUMMARY:` or `DIVE SUMMARY:`, for example
 `PURSUIT SUMMARY: end=cap dur=20.1s scans=61 locked=9 (15%) first_lock=8.4s ammo=6->2
@@ -397,14 +419,17 @@ one:
 2. Is 20 seconds a reasonable `pursuit_max_duration_s`, or does that need
    tuning against how long the two secondary heat-seekers actually take to
    both fire in practice? Named as a guess in Configuration Additions, not
-   measured.
+   measured. **Answered by the operator, 2026-09-24: no cap (0).**
 3. Does an extended, both-axes-committed pursuit drift toward the arena
    boundary more than a brief dive would, given nothing in `pursue_and_engage`
    watches `BoundaryTurn`'s own signal? HLDD 013 already found
    `TACTIC_ATTACK_SUPPORT` idle in exactly this kind of gap; pursuit mode is
    a different code path but a similar shape of risk. Flagged, not answered
    — the A/B measurement's boundary-turn-frequency metric (Validation
-   Strategy item 4) is what should answer it.
+   Strategy item 4) is what should answer it. **Now live (2026-09-24):** with
+   the time cap removed nothing bounds a pursuit's duration; see "No time
+   cap" in Configuration Additions for the measured exposure and what
+   guards exist.
 4. Should target selection during pursuit mode reuse Design 005's existing
    nearest-to-last/nearest-to-center persistence rule as-is, or would the
    extra time (versus a brief dive window) justify more willingness to

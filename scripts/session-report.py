@@ -155,10 +155,12 @@ def render(r: dict, name: str = "wingman.log") -> str:
         scans = sum(x["scans"] for x in e)
         locked = sum(x["locked"] for x in e)
         ends = collections.Counter(x["end"].split(":")[0] for x in e)
+        durs = sorted(x["dur"] for x in e)
         out.append(f"  {kind.lower():8s} {len(e):3d} engagements   any lock {sum(1 for x in e if x['locked'])}"
                    f" ({_pct(sum(1 for x in e if x['locked']), len(e))})   locked scans {locked}/{scans}"
                    f" ({_pct(locked, scans)}; pooled before the widened region {BASELINE_SHARE[kind]}%)"
-                   f"   fired {sum(1 for x in e if _fired(x['ammo']))}   ends {dict(ends)}")
+                   f"   fired {sum(1 for x in e if _fired(x['ammo']))}"
+                   f"   length median {durs[len(durs) // 2]:.0f}s, longest {durs[-1]:.0f}s   ends {dict(ends)}")
     out.append("")
     out.append("TRACKING (TRACKPICK lines)")
     if not r["ticks"]:

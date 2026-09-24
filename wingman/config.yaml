@@ -1152,7 +1152,16 @@ pursuit_mode:
   enabled: true
   # Named guess, not measured — a live shadow trial should correct it, same
   # status as HLDD 015's own Configuration Additions section.
-  pursuit_max_duration_s: 20.0
+  # Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching and
+  # pursuing." 0 = no cap: the pursuit keeps searching (roll, pitch on a lock) and firing
+  # until the ammo is exhausted (then the dive, to rearm) or a respawn, takeover or shutdown
+  # stops it. Was 20.0, which dropped every life into the dive whether or not it had found
+  # a target. Known exposure, measured 2026-09-24: no behavior-tree tactic acts inside
+  # GAME_BATTLE_EJECT, so a long search flies straight and is unguarded against the arena
+  # edge (pursuits started a median 0.37 minimap radii from it, the worst closing rate
+  # would reach a boundary 0.5 away in about 50 s); terrain is covered by Climb's emergency.
+  # Set a positive number of seconds to restore a cap.
+  pursuit_max_duration_s: 0.0
   # Inherits ADR 136 D4's disabled default: the padlock-off detector this
   # gates was found to be tracking a flight-path marker, not padlock state.
   pursuit_padlock_verify: false

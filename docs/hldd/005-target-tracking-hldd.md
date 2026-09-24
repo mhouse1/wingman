@@ -1525,7 +1525,15 @@ partly wrong. `pursuit_mode_20260924_164821_48.png` shows a complete nameplate a
 So some "icon, no label" ticks are an icon inside the box whose label fell below the crop. See action
 item 001, Cycle 12, for the measurements (41% of nameplates shown lie outside the box).
 
-### Decision for the operator (not made here)
+### Decision (operator, 2026-09-24): ignore the icons
+
+Asked whether the pursuit should fly toward unlabelled red icons, the operator answered: "the icons are
+showing the general direction of the enemy aircraft, we can ignore it." So no icon steering will be built
+and the question is closed. The measurements above stand as the record of why it was asked (icon-like
+masses on 70% of non-locked pursuit ticks; 1% of pursuit icon tracks and 14% of dive icon tracks ever
+became a labelled lock on their own).
+
+### Decision for the operator (superseded by the decision above)
 
 Whether the tracker should ever steer toward an unlabelled icon is a design change, not a
 tuning step, and it sits against the operator's earlier direction to prefer the real,

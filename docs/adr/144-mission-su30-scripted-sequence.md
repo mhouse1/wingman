@@ -143,6 +143,11 @@ empties:
   with its `ammo_zero_grace_s` measured from the switch, since the HUD count lags
   a switch by seconds.
 
+*Update 2026-09-24 (operator): the cap is off.* `pursuit_max_duration_s` now ships as 0 (no cap), so
+this fall-through no longer happens on a timer; the pursuit continues until the ammo is exhausted or a
+respawn, takeover or shutdown stops it. The text below describes the fall-through that still applies if a
+positive cap is set, and the dated live-trial paragraphs record the behavior while the cap was 20 s.
+
 If `pursuit_max_duration_s` ends the encounter before the weapon ran out, the
 fall-through calls `eject_and_dive(defer_switch_until_empty=True)`. The dive
 presses no `SWITCH_WEAPON` at its start and leaves the flag alone; its heatdive
@@ -200,10 +205,11 @@ fault. (`main.py` always wires a tracker, so this is a guard, not a live path.)
 **D7. The mission ends at the hand-off.** `pursue_and_engage` cancels the
 mission to own both tracking axes, so `mission_su30` ends at step 4 rather than
 running until cancelled, and releases the lock so the next respawn's restart is
-not refused. Pursuit's own end (secondary ammo exhausted, or
-`pursuit_max_duration_s`) falls through to `eject_and_dive` (HLDD 015 D3); the
-respawn after that restarts this mission. Each life is therefore
-climb → pursue → dive → respawn. An abandoned script (cancel, exit, no tracker)
+not refused. Pursuit's own end (secondary ammo exhausted, or a positive
+`pursuit_max_duration_s`; the shipped value has been 0, no cap, since 2026-09-24)
+falls through to `eject_and_dive` (HLDD 015 D3); the respawn after that restarts
+this mission. With no cap a life is climb → pursue (until ammo, respawn or
+shutdown) → dive only if the ammo ran out → respawn. An abandoned script (cancel, exit, no tracker)
 stops any climb it left running, as `mission_loiter` does.
 
 ## Consequences

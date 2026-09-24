@@ -1339,7 +1339,7 @@ def main():
             # unflown (that is the anomaly), so waiting for GAME_LOBBY would
             # mean waiting on the same respawn confirmation that never comes.
             if args.record_session and eject_stuck.check(
-                    analyzer.game_state, ctrl.eject_descent_active()):
+                    analyzer.game_state, ctrl.eject_flight_active()):
                 snap = analyzer.get_telemetry()   # context only, not the trigger
                 logger.warning(
                     "\033[93m🛑 ANOMALY 003: ending session — GAME_BATTLE_EJECT "

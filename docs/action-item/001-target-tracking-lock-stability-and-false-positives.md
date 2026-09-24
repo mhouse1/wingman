@@ -754,3 +754,40 @@ script: identical on every figure (2,193 ticks, 252 lock ticks, 33 acquisitions 
 old box with the same sides, `clu` 233/18/1, 111/570 pursuit and 128/1275 dive locked scans, 8
 respawns). `tests/test_session_report.py`, 10 tests, from a synthetic log with known answers; one test
 pins the report's copies of the old box and HUD zones to `config.yaml` so they cannot drift silently.
+
+**2026-09-24 18:45 — Cycle 15: the operator's three decisions, and no time cap on the pursuit.**
+The operator answered the open questions:
+
+1. **Icons: ignore them.** "the icons are showing the general direction of the enemy aircraft, we can
+   ignore it." No icon steering; closed (recorded in HLDD 005).
+2. **Stuck-popup clicks: leave them.** `game_unknown_close.enabled` stays true (ADR 146).
+3. **No dive after the 20 s chase.** "after a 20 second chase do not dive, continue searching and
+   pursuing."
+
+*Change for 3.* `pursuit_mode.pursuit_max_duration_s` ships as `0`, meaning no cap (a positive value
+restores it; the code default stays 20.0 for a config that never sets the key). The loop's cap check is
+`cap > 0 and elapsed >= cap`. The ammo-exhausted fall-through to `eject_and_dive` is unchanged: an
+empty airframe still dives to rearm; only the timer is gone. Consequences handled:
+
+- **Anomaly 003 would have ended recording sessions.** `EjectStuckDetector` fires when GAME_BATTLE_EJECT
+  has had no descent running for 40 s, and a pursuit has no descent, so any pursuit over 40 s tripped it
+  in a `make rd v` run. Added `Controller.eject_flight_active()` (descent or pursuit) and `main.py`
+  passes that. Nothing else in the code time-limits the eject state (a health-alive event ends it only
+  after an observed death).
+- **Tests:** 6 new in `tests/test_pursuit_mode.py`: still pursuing past where a 0.5 s cap fires, no
+  fall-through into the dive, fires and ends on a respawn (`end=external:respawn_detected`), still dives
+  when the ammo is exhausted, the deferred weapon stays untouched however long it runs, a positive cap
+  still works, and `eject_flight_active` is true only while a pursuit flies. 165 related tests pass.
+- **Docs:** HLDD 015 (D3 table, "No time cap", open questions 2 and 3), ADR 144 (Draft, amended in place,
+  the dated live-trial paragraphs left as the record).
+
+*Exposure the operator should know about (measured, not fixed).* No behavior-tree tactic acts inside
+GAME_BATTLE_EJECT except Climb's terrain emergency, so a long pursuit is guarded against terrain but not
+against the arena edge, and the search only rolls, so it flies straight. Over 50 pursuits with boundary
+readings: start distance from the boundary median 0.37 minimap radii (minimum 0.06); 13 of 50 showed the
+boundary ahead and under 0.3 away; the worst closing rate (-0.010 per second) reaches a boundary 0.5
+away in about 50 s. No out-of-bounds warning has been seen during a pursuit, but pursuits were at most
+20 s. The one warning on record (17:32) was at a life's start in normal battle. If lives start ending
+out of bounds, the follow-up is a boundary guard for the pursuit (steer away, or let the existing
+boundary turn act in this state) and, related, a search that turns the nose instead of only rolling.
+`make sr` will show the effect (`DIED ARMED`, respawns, pursuit lengths).
