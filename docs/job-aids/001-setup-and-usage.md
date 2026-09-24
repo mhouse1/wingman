@@ -43,7 +43,7 @@ Default hotkeys are defined in `wingman/controller.py`.
 
 | Key | Action |
 |-----|--------|
-| `m` | Start unattended mode (clicks play, waits for game start, auto-launches J20) |
+| `m` | Start unattended mode (clicks play, waits for game start, auto-launches the default mission: SU-30 as shipped, J20 if `mission.default_mission` is `j20`) |
 | `u` | Start J20 mission manually |
 | `y` | Start loiter mission manually |
 | `o` | Start SU-30 mission manually (takes over from a running mission) |

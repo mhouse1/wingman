@@ -603,7 +603,7 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
 | `loiter_mission` | Survival hold: `target_alt`, hysteresis, orbit cadence and hold |
 | `su30_mission` | Scripted Su-30 sequence (ADR 144): `climb_alt_m`, `nose_angle_deg`, angle tolerance, pulse and bound |
-| `mission.default_mission` | Which mission battle entry launches: `j20` (default) or `su30` (ADR 144) |
+| `mission.default_mission` | Which mission battle entry launches: `su30` (shipped since 2026-09-24) or `j20` (ADR 144) |
 | `mission.manual_takeover` | `persist_through_respawn` — off by default, so a respawn resumes the last mission |
 | `return_to_battle` | Design 010 instrumentation: colour trigger `region`, narrower `ocr_region` for the once-per-crossing confirmation, and partial `text` tokens |
 | `focus_guard` | Suppress injection when the game lacks focus (ADR 098); follows the nested display automatically |
