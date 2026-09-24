@@ -322,6 +322,19 @@ unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per
   # until this is raised again.
   # ADR 093: keep warning after the capture cap — silence must mean healthy.
   stuck_warn_interval_s: 300.0, stuck_warn_max_interval_s: 1800.0}
+# ADR 146 (2026-09-24): click a window's white-cross close button when GAME_UNKNOWN has
+# outlasted every known popup remedy. A full-screen "A-10 Thunderbolt, limited time offer"
+# window covered the lobby at start-up, matched no known popup, and the classifier timed out
+# 47 times over about three minutes (only a hand click cleared it). ESC is not a safe blind key:
+# on a plain lobby it opens "Exit to Desktop" with Exit highlighted (measured live). The game
+# draws every modal's close button with one white-cross sprite (29, 38 and 45 px measured), found
+# by a white-mask template match. Measured over 3,258 archived frames: real close buttons scored
+# 0.951, 0.859 and 0.937 (three genuine examples, a thin sample), the best false match on any
+# non-gameplay frame 0.747 ("Exit to Desktop" dialog). min_stuck_s is well past the 1-2 s a normal
+# classification takes; a search costs about 60 ms. Named guesses: min_stuck_s, retry_interval_s,
+# max_clicks. Watch: `grep GenericCloseRecovery wingman.log`.
+game_unknown_close: {enabled: true, min_stuck_s: 25.0, retry_interval_s: 15.0, max_clicks: 3,
+  min_score: 0.82}
 respawn_detection:
   use_ocr: true
   use_gpu: false
@@ -858,7 +871,21 @@ tracking:
   # zero actuation risk. actuate:true restores real roll correction, still
   # strictly GAME_BATTLE + mission-running only (SAF-001, unchanged).
   actuate: false
-  acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
+  # Widened 2026-09-24 (action item 001, Cycle 12) from [0.2, 0.18, 0.8, 0.68] on the
+  # operator's report (pursuit_mode_20260924_164821_48.png: tracker ACQUIRING, det=0,
+  # with two complete enemy nameplates at 10.3 and 10.5 km on screen below the box, y
+  # 940-1050 of 1200). Measured over 300 archived full-screen frames (glyph clusters in
+  # 300 x 170 px windows): 28 of the 68 nameplate clusters in open screen lay OUTSIDE the
+  # old box (11 below, 7 above, 3 left, 2 right, 5 corners), and a contact sheet of 12
+  # showed real nameplates in all 12. Run through the real tracker, old settings against
+  # these ones: locks 36 -> 54, none lost, steering point unchanged (median 1 px, 64%
+  # within 40 px) on the 36 frames the old box already locked, all 54 within 320 px of an
+  # independently found nameplate; update() 3.7 -> 9.5 ms. x runs edge to edge; y starts
+  # under the scoreboard strip and stops above the bottom bar. The HUD zones below and
+  # red_mass_cluster_select are what make this safe: the same wider box under the old
+  # whole-crop mean moved locked frames' steering point a median 331 px unmasked, 134 px
+  # masked. Revert by restoring the old fractions (and, ideally, leaving the zones on).
+  acquisition_region_pct: [0.0, 0.09, 1.0, 0.95]
   deadband: 0.05
   kp: 0.3
   min_hold_sec: 0.08
@@ -926,6 +953,33 @@ tracking:
   # path already rejects this text's short, wide letter-stroke contours via
   # min_aspect_ratio.
   red_mass_exclude_pct: [0.46, 0.75, 0.54, 0.79]
+  # Action item 001, Cycle 12 (2026-09-24): more fixed-position HUD zones with red in
+  # them, masked out of the red mask exactly like the rectangle above. Fractions of the
+  # 1920 x 1200 frame, from the archived frames: the scoreboard and team rosters (y under
+  # 110 px), the minimap (x over 1590, y under 330), the weapons panel (x over 1440, y over
+  # 1060) and the squad logo (x under 330, y over 1080). Without them the full screen
+  # passed the nameplate gate on 88 of 300 frames against 59 with them, about 29 of the 88
+  # being HUD text. Named guesses at the edges; zones are rectangles, so anything else
+  # red at a fixed screen position needs adding here.
+  red_mass_exclude_zones_pct:
+    - [0.0, 0.0, 1.0, 0.0917]
+    - [0.828, 0.0, 1.0, 0.275]
+    - [0.75, 0.883, 1.0, 1.0]
+    - [0.0, 0.9, 0.172, 1.0]
+  # Same date: steer on ONE nameplate cluster instead of the mean of every red pixel in
+  # the crop (which overrides the 2026-09-23 "centroid of all red" instruction, with the
+  # operator's go-ahead). With a wider box two nameplates are often on screen at once, and
+  # their mean is a point between them where nothing is. The nameplate gate is then
+  # counted per cluster (glyphs inside a 300 x 170 px window), and the steering point is the
+  # mean of the red pixels within +-150 px sideways, 300 px up and 100 px down of the chosen
+  # cluster (the label, its underline bar and the marker drawn above it, measured 162-287 px
+  # above on a small sample). The cluster nearest the previous lock is chosen, or the screen
+  # centre when there is none. In the local ROI (422 x 264) the window covers the whole
+  # crop, so a single nameplate gives the same point as before. The window sizes are named
+  # guesses. Watch: `clu=` in TRACKPICK (nameplate clusters that passed the gate).
+  red_mass_cluster_select: true
+  red_mass_cluster_glyph_window_px: [300, 170]
+  red_mass_cluster_pixel_window_px: [150, 300, 100]
   # Narrows red_mass_steering's own upper hue bound to separate the
   # airframe's own afterburner glow (hot orange) from a real target icon
   # (pure red) — position-based exclusion doesn't work here since the
@@ -1005,6 +1059,23 @@ tracking:
   local_roi_expand_factor: 1.25
   local_roi_max_scale: 0.45
   local_roi_reacquire_cycles: 3
+  # Action item 001, Cycle 5 (2026-09-24): after a missed tick, move the ROI
+  # toward a red mass the nameplate gate rejected because the crop edge cut
+  # it. Measured in the 07:34-08:56 pursuit and dive logs (3 sessions): 182
+  # lock drops, 125 of them with red pixels present and a gate rejection, and
+  # 46% of all lock ticks sat at 20-24 glyphs, one step above the threshold.
+  # The four drop ticks whose raw crop was archived (replayed through the
+  # real tracker to the logged glyph count 14, 19, 19, 6) each showed a real
+  # nameplate cut by the crop edge, red mean 82-173 px off the crop centre
+  # toward that edge. A rejection never moved the ROI, so the next scan
+  # clipped the same label. Lock decisions, steering and red_mass_nameplate_
+  # min_glyphs are unchanged. min_px is below the smallest measured cut
+  # label (206 px) and above stray red. Watch: `grep ROIFOLLOW wingman.log`
+  # and the ticks-to-relock after a TRACKPICK drop with gate=reject and
+  # rm_px>=150: baseline (112 drops, old logs) relocked at +1 tick 9%, +2
+  # ticks 46%, not within four 42%. Per-tick survival is not the metric.
+  local_roi_follow_on_clip: true
+  local_roi_follow_min_px: 150
   # HLDD 005 Sustained-Hold Actuation (2026-09-23): hold ROLL_LEFT_KEY/
   # ROLL_RIGHT_KEY/NOSE_UP_KEY/NOSE_DOWN_KEY until the tracked condition
   # changes (Controller.boundary_turn_mode's own shape) instead of computing
@@ -1105,15 +1176,34 @@ pursuit_mode:
   # the target went from screen centre (err about 0) to err=+0.366 by the next
   # lock. 0 restores the old immediate-resume behavior. Named guess, not
   # measured beyond that one 1.07s reacquisition gap; the HOLD[roll] debug
-  # lines added with it are what should correct it.
+  # lines added with it are what should correct it. Also used by the eject
+  # dive's heatdive roll loop (2026-09-24, operator request): the same
+  # immediate resume showed there, all 13 target holds in the 06:51-07:06
+  # session ending `-> left/search`. Verified live 07:34-08:24: 0 of 51
+  # search resumes (10 pursuit, 41 dive) came sooner than 2.0 s after a
+  # target hold.
   search_resume_delay_s: 2.0
+  # Near-centre extension (operator, 2026-09-24: "it had more than enough time
+  # locked onto target but kept forcing left turn, it should have stopped left
+  # turn and focused on target"). When the last visible target error was within
+  # search_resume_centre_err of screen centre the aircraft is already pointing
+  # at the target, so the neutral hold is search_resume_centre_delay_s instead
+  # (when longer). Measured on that same 07:34-08:24 session, with the 2.0 s
+  # delay in place: the search still resumed with the target last seen within
+  # +-0.15 of centre in 6 of 10 pursuit cases and 23 of 41 dive cases. Both are
+  # named guesses; the HOLD[roll] "target was near centre" lines are what
+  # should correct them. centre_delay_s 0 disables the extension.
+  search_resume_centre_err: 0.15
+  search_resume_centre_delay_s: 6.0
   # mission_su30 no longer presses SWITCH_WEAPON at step 2 (operator,
   # 2026-09-24: "not switch weapons until it runs out"; ADR 144 D4). Its
   # pursuit hand-off defers the switch until the selected weapon's ammo has
   # read 0 this many cycles in a row (about 0.35 s each). SWITCH_WEAPON is a
   # toggle, so a single misread 0 would swap away a rack that still has
-  # missiles and the only undo is a second press. Applies only to that
-  # hand-off; the missiles-empty trigger keeps its own confirmation
+  # missiles and the only undo is a second press. Since 2026-09-24 (operator,
+  # from a 'v' screenshot at 08:20:14 showing the 6/6 primary rack untouched)
+  # the same deferral covers the eject dive that pursuit falls into at its
+  # 20 s cap. The missiles-empty trigger keeps its own confirmation
   # (mission.no_missiles_consecutive_required). Named guess, not measured.
   empty_confirm_reads: 3
 hud:
@@ -1155,11 +1245,34 @@ hud:
     # hits= count. Replay with the real TargetTracker methods, passing the
     # origin and frame size from the filename. ~0.15-1MB each, 200 max.
     save_raw_scan: true
+    # 2026-09-24: every render (1/s) was archived, so a session spent its
+    # whole 200-frame cap in 6-10 minutes (5 sessions = 2.6 GB that morning)
+    # and saved nothing from later encounters. At most one frame per
+    # min_interval_s, and at most max_per_encounter per contiguous
+    # eject/pursuit encounter (0 = no per-encounter cap). Named guesses.
+    min_interval_s: 5.0
+    max_per_encounter: 12
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
 # "make rd v"), never the default — a multi-hour session's file size and CPU
 # cost scale with fps. Low by design: this is reviewed at tactic-selection
 # cadence (seconds), not watched as smooth video.
 session_recording: {fps: 2.0, scale: 0.5}
+# Cross-session disk safety net (wingman/capture_budget.py). Every capture
+# feature above caps itself per SESSION; nothing capped the total or watched
+# free space, and on 2026-09-24 capture folders plus logs/ held about 19 GB.
+# Before each capture write: skip it if free space is below min_free_gb, else
+# delete that folder's oldest images until it fits its budget. Pruning is
+# non-recursive, so subfolders are never touched. 0 = unlimited.
+capture_budget:
+  min_free_gb: 10.0
+  default: {max_files: 1000, max_mb: 2048}
+  dirs:
+    # annotated frame (about 1 MB) plus raw scan (about 0.6 MB) per save
+    tests/test-output/target_tracking: {max_files: 600, max_mb: 1024}
+  # logs/wingman_*.log, deleted oldest-first at startup
+  rotated_logs: {max_files: 200, max_mb: 2048}
+  # logs/session_*.mp4 (make rd v), deleted oldest-first before recording
+  session_video: {max_files: 8, max_mb: 6144}
 telemetry:
   # ADR 123: NOSE_DIRECTION deadband. Level flight jitters around zero altitude
   # rate, and a direction that flips every tick is not a direction — the loiter

@@ -36,6 +36,10 @@ class TargetTracker:
     Thread-safety: not thread-safe; call only from the main loop thread.
     """
 
+    # A red mask pixel this close to a crop border counts as touching it
+    # (anti-aliased glyph edges rarely land exactly on the border column).
+    _CLIP_EDGE_MARGIN_PX = 2
+
     def __init__(self, config: dict) -> None:
         cfg = config.get("tracking", {})
         self._enabled = bool(cfg.get("enabled", False))
@@ -73,6 +77,34 @@ class TargetTracker:
         self._red_mass_exclude_pct = (
             [float(v) for v in red_mass_exclude] if red_mass_exclude else None
         )
+        # Action item 001, Cycle 12 (2026-09-24): more fixed-position HUD zones
+        # to exclude from the red mask, [[x1,y1,x2,y2], ...] in full-frame
+        # fractions, applied exactly like the single rectangle above. A wider
+        # acquisition region reaches the scoreboard and team rosters, the
+        # minimap, the weapons panel and the squad logo, all of which carry red;
+        # measured on 300 archived frames, the unmasked full screen passed the
+        # nameplate gate on 88 frames against 59 with those zones masked, and
+        # moved the steering point of already-locked frames a median 331 px
+        # against 134. Empty (default) changes nothing.
+        self._red_mass_exclude_zones = [
+            [float(v) for v in z] for z in (cfg.get("red_mass_exclude_zones_pct") or [])
+        ]
+        # Same date: steer on ONE nameplate cluster, not on the mean of every red
+        # pixel in the crop. With a wide region two nameplates are often on
+        # screen at once (two in the 16:48:21 frame the operator flagged) and
+        # their mean is a point between them where nothing is. The glyph gate is
+        # then counted per cluster (a label's glyphs inside `glyph_window_px`,
+        # width x height), and the steering point is the mean of the red pixels
+        # in `pixel_window_px` = (half width, reach up, reach down) around the
+        # chosen cluster: the label plus the marker drawn above it (measured
+        # 162-287 px above, on a small sample) and its underline bar. The chosen
+        # cluster is the one nearest the previous lock, or the screen centre when
+        # there is none. False (default) keeps the old whole-crop rule.
+        self._cluster_select = bool(cfg.get("red_mass_cluster_select", False))
+        _gw = cfg.get("red_mass_cluster_glyph_window_px", [300, 170])
+        self._cluster_glyph_window = (int(_gw[0]), int(_gw[1]))
+        _pw = cfg.get("red_mass_cluster_pixel_window_px", [150, 300, 100])
+        self._cluster_pixel_window = (int(_pw[0]), int(_pw[1]), int(_pw[2]))
         # Own-afterburner exclusion for the above (2026-09-23): unlike "NO
         # LOCK" above, the afterburner glow is not fixed screen position (it
         # moves with the airframe's on-screen attitude), so a region-based
@@ -146,6 +178,24 @@ class TargetTracker:
         # unchanged; shipped config.yaml sets it false.
         self._red_mass_tallbar_fallback = bool(
             cfg.get("red_mass_tallbar_fallback", True))
+        # Action item 001, Cycle 5 (2026-09-24): re-centre the local ROI on a
+        # gate-rejected red mass that touches the crop's edge. A real
+        # nameplate plus its aircraft fills much of the local ROI, so when the
+        # target drifts between scans the label is cut by the crop edge, the
+        # glyph count falls under the gate's threshold, and the lock drops
+        # even though the target is right there. Measured over the 07:34-08:56
+        # pursuit and dive logs: 125 of 182 lock drops had red pixels present
+        # and a gate rejection, and the four drop ticks whose raw crop was
+        # archived and replayed to the logged glyph count (14, 19, 19, 6) all
+        # showed a real nameplate cut by the crop edge, the red mean sitting
+        # 82-173 px from the crop centre toward that edge. A rejection never
+        # moved the ROI (only a lock or the miss ladder did), so the next
+        # scan clipped the same label. Lock decisions, steering and the gate's
+        # threshold are all unchanged: only the next tick's scan window
+        # moves. False here means today's behaviour; shipped config.yaml sets
+        # it true.
+        self._roi_follow_enabled = bool(cfg.get("local_roi_follow_on_clip", False))
+        self._roi_follow_min_px = int(cfg.get("local_roi_follow_min_px", 150))
         # HLDD 005 Selection Hardening Phase 2 (2026-09-21): shadow-only —
         # ranked_lock_priority stays false in shipped config; while false,
         # the ranked-pool rule below is computed and compared every tick but
@@ -231,6 +281,12 @@ class TargetTracker:
         # for the INFO-level line in _log_pick_path (same 1st/10th/100th,
         # then every 500th, shape as the two counters above).
         self._suppressed_pick_count: int = 0
+        # Action item 001, Cycle 5: where the last clipped-nameplate follow
+        # centred the ROI (absolute frame coords) — the miss ladder's
+        # expansion re-centres there instead of on the stale last lock, which
+        # would otherwise undo the follow. None whenever no follow is active.
+        self._roi_centre_hint: "tuple[float, float] | None" = None
+        self._roi_follow_count: int = 0
 
     @property
     def enabled(self) -> bool:
@@ -249,6 +305,7 @@ class TargetTracker:
         self._current_roi_scale = 0.0
         self._roi_rect = None
         self._roi_miss_count = 0
+        self._roi_centre_hint = None
         logger.debug("TargetTracker: reset to SEARCHING")
 
     def update(self, frame: np.ndarray, ts: "float | None" = None) -> dict:
@@ -351,7 +408,13 @@ class TargetTracker:
         pick_path = "tallbar" if selected is not None else "none"
         rm_probe: "dict | None" = None
         if self._red_mass_steering:
-            rm_probe = self._red_mass_probe(crop, ox, oy, w, h)
+            # Cluster mode steers on the nameplate nearest the previous lock, or
+            # the screen centre when there is none (`ref=None`).
+            ref = ((self._last_x, self._last_y)
+                   if self._mode in (TrackMode.TRACKING, TrackMode.LOST_GRACE)
+                   and self._last_x is not None and self._last_y is not None
+                   else None)
+            rm_probe = self._red_mass_probe(crop, ox, oy, w, h, ref=ref)
             red_mass_local = rm_probe["centroid"]
             if red_mass_local is not None:
                 selected = (ox + red_mass_local[0], oy + red_mass_local[1])
@@ -372,6 +435,7 @@ class TargetTracker:
             self._last_y = abs_y
             self._last_seen_ts = ts
             self._roi_miss_count = 0
+            self._roi_centre_hint = None
             if self._mode in (TrackMode.ACQUIRING, TrackMode.LOST_GRACE):
                 self._mode = TrackMode.TRACKING
                 self._current_roi_scale = self._roi_scale
@@ -379,6 +443,7 @@ class TargetTracker:
             self._roi_rect = self._compute_roi(abs_x, abs_y, w, h)
         else:
             self._handle_miss(ts, w, h)
+            self._follow_clipped_nameplate(use_roi, rm_probe, ox, oy, w, h)
 
         error_norm: "float | None" = None
         error_norm_y: "float | None" = None
@@ -478,15 +543,66 @@ class TargetTracker:
                 self._last_y = None
                 self._roi_rect = None
                 self._roi_miss_count = 0
+                self._roi_centre_hint = None
             elif self._roi_miss_count >= self._roi_reacquire_cycles:
                 new_scale = min(self._current_roi_scale * self._roi_expand, self._roi_max_scale)
                 self._current_roi_scale = new_scale
                 self._roi_miss_count = 0
-                if self._last_x is not None and self._last_y is not None:
-                    self._roi_rect = self._compute_roi(self._last_x, self._last_y, w, h)
+                centre = self._roi_centre_hint
+                if centre is None and self._last_x is not None and self._last_y is not None:
+                    centre = (self._last_x, self._last_y)
+                if centre is not None:
+                    self._roi_rect = self._compute_roi(centre[0], centre[1], w, h)
                 if new_scale >= self._roi_max_scale:
                     logger.debug("TargetTracker: ROI at max scale — falling back to ACQUIRING")
                     self._mode = TrackMode.ACQUIRING
+
+    def _follow_clipped_nameplate(
+        self, use_roi: bool, rm_probe: "dict | None",
+        ox: int, oy: int, fw: int, fh: int,
+    ) -> None:
+        """Action item 001, Cycle 5: after a missed tick, move the local ROI
+        toward a red mass the nameplate gate rejected because the crop edge
+        cut it. Never called on a lock and never changes `selected`, the
+        steering point, `_last_x/_last_y` or the gate's threshold — a lock
+        still needs a full nameplate — so it cannot admit a false positive;
+        it only makes the next scan look where the clipped label is.
+
+        Requires, all together: the feature is on, this tick scanned the
+        local ROI (not the wide acquisition region), tracking is still in
+        LOST_GRACE with an ROI (the miss handler may just have ended it), the
+        gate positively rejected the mask, at least `local_roi_follow_min_px`
+        red pixels were present, and the red touches a crop edge — the
+        signature of a cut label rather than of debris or an absent
+        nameplate. The follow is bounded by `lost_timeout_sec`, the same
+        clock that ends every LOST_GRACE ROI.
+        """
+        if not (self._roi_follow_enabled and use_roi and rm_probe is not None):
+            return
+        if self._mode != TrackMode.LOST_GRACE or self._roi_rect is None:
+            return
+        mass = rm_probe.get("mass_centroid")
+        edges = rm_probe.get("clipped_edges")
+        if (rm_probe["gate"] != "reject" or mass is None or not edges
+                or rm_probe["px"] < self._roi_follow_min_px):
+            return
+        cx, cy = ox + mass[0], oy + mass[1]
+        old = self._roi_rect
+        new = self._compute_roi(cx, cy, fw, fh)
+        if new == old:
+            return  # already pinned against the frame edge; nothing to move
+        self._roi_rect = new
+        self._roi_centre_hint = (cx, cy)
+        self._roi_follow_count += 1
+        n = self._roi_follow_count
+        logger.debug(
+            "ROIFOLLOW: gate rejected a red mass cut by the %s crop edge "
+            "(glyphs=%s rm_px=%d) — ROI %s -> %s",
+            "+".join(edges), rm_probe["glyphs"], rm_probe["px"], old, new,
+        )
+        if n in (1, 10, 100) or n % 500 == 0:
+            logger.info("ROIFOLLOW: moved the ROI toward a clipped nameplate "
+                        "(%d so far)", n)
 
     def _contours_to_hits(self, mask: np.ndarray) -> "list[tuple[float, float, float]]":
         """Return (cx, cy, area) in crop-local coords for each valid target bar in `mask`."""
@@ -526,8 +642,12 @@ class TargetTracker:
             gate = rm_probe["gate"]
             glyphs = rm_probe["glyphs"] if rm_probe["glyphs"] is not None else "-"
             rm_px = rm_probe["px"]
+            edges = "+".join(rm_probe["clipped_edges"]) or "-"
+            blob = rm_probe.get("blob")
+            blob_desc = "(%d,%d,a%d,%dx%d)" % blob if blob is not None else "-"
+            clu_desc = rm_probe["clusters"] if rm_probe.get("clusters") is not None else "-"
         else:
-            gate, glyphs, rm_px = "off", "-", 0
+            gate, glyphs, rm_px, edges, blob_desc, clu_desc = "off", "-", 0, "-", "-", "-"
         if tall_pick is not None:
             color = "R" if any(
                 abs(rx - tall_pick[0]) < 1e-6 and abs(ry - tall_pick[1]) < 1e-6
@@ -539,8 +659,9 @@ class TargetTracker:
         sel_desc = f"({selected[0]:.0f},{selected[1]:.0f})" if selected is not None else "-"
         logger.debug(
             "TRACKPICK: path=%s sel=%s tall=%s n_tall=%d red_won=%s "
-            "gate=%s glyphs=%s rm_px=%d",
+            "gate=%s glyphs=%s rm_px=%d edges=%s blob=%s clu=%s",
             pick_path, sel_desc, tall_desc, n_tall, red_won, gate, glyphs, rm_px,
+            edges, blob_desc, clu_desc,
         )
         if pick_path == "suppressed":
             self._suppressed_pick_count += 1
@@ -562,7 +683,8 @@ class TargetTracker:
         return self._red_mass_probe(crop, ox, oy, frame_w, frame_h)["centroid"]
 
     def _red_mass_probe(
-        self, crop: np.ndarray, ox: int, oy: int, frame_w: int, frame_h: int
+        self, crop: np.ndarray, ox: int, oy: int, frame_w: int, frame_h: int,
+        ref: "tuple[float, float] | None" = None,
     ) -> dict:
         """Direct operator instruction (2026-09-23): crop-local centroid of
         every pixel matching the same red range _detect_targets uses (main
@@ -588,6 +710,10 @@ class TargetTracker:
         A "reject" is a positive statement that no nameplate was found;
         "off" with a None centroid only means no red pixels matched.
 
+        `ref` (absolute frame coordinates, default the frame centre) is only used
+        when `red_mass_cluster_select` is on, to choose among several nameplate
+        clusters: the one nearest `ref` wins.
+
         `ox`/`oy` (crop's absolute top-left in the full frame) and
         `frame_w`/`frame_h` are needed only to translate
         `red_mass_exclude_pct` (defined in full-frame fractions, since the
@@ -595,7 +721,9 @@ class TargetTracker:
         whichever crop happens to be active this tick) into this crop's
         local coordinates.
         """
-        probe: dict = {"centroid": None, "gate": "off", "glyphs": None, "px": 0}
+        probe: dict = {"centroid": None, "gate": "off", "glyphs": None, "px": 0,
+                       "mass_centroid": None, "clipped_edges": (), "blob": None,
+                       "clusters": None}
         if crop is None or crop.size == 0:
             return probe
         try:
@@ -614,8 +742,10 @@ class TargetTracker:
             cv2.inRange(hsv, red_lower, red_upper)
             | cv2.inRange(hsv, red_wrap_lower, red_wrap_upper)
         )
+        exclusions = list(self._red_mass_exclude_zones)
         if self._red_mass_exclude_pct is not None:
-            ex1, ey1, ex2, ey2 = self._red_mass_exclude_pct
+            exclusions.append(self._red_mass_exclude_pct)
+        for ex1, ey1, ex2, ey2 in exclusions:
             cx1 = max(0, int(frame_w * ex1) - ox)
             cy1 = max(0, int(frame_h * ey1) - oy)
             cx2 = min(crop.shape[1], int(frame_w * ex2) - ox)
@@ -623,6 +753,24 @@ class TargetTracker:
             if cx1 < cx2 and cy1 < cy2:
                 mask[cy1:cy2, cx1:cx2] = 0
         probe["px"] = int(np.count_nonzero(mask))
+        ys, xs = np.nonzero(mask)
+        if xs.size:
+            # Reported whether or not the gate passes: a rejected mask that
+            # touches the crop edge is how `_follow_clipped_nameplate` tells a
+            # cut-off label from an absent one. `centroid` stays gate-owned.
+            probe["mass_centroid"] = (float(xs.mean()), float(ys.mean()))
+            crop_h, crop_w = mask.shape[:2]
+            m = self._CLIP_EDGE_MARGIN_PX
+            probe["clipped_edges"] = tuple(
+                name for name, hit in (
+                    ("left", xs.min() <= m), ("right", xs.max() >= crop_w - 1 - m),
+                    ("top", ys.min() <= m), ("bottom", ys.max() >= crop_h - 1 - m),
+                ) if hit
+            )
+        if xs.size and logger.isEnabledFor(logging.DEBUG):
+            probe["blob"] = self._largest_blob(mask, ox, oy)
+        if self._red_mass_nameplate_gate_enabled and self._cluster_select:
+            return self._probe_by_cluster(mask, probe, ox, oy, frame_w, frame_h, ref)
         if self._red_mass_nameplate_gate_enabled:
             glyphs = self._count_nameplate_glyphs(mask)
             probe["glyphs"] = glyphs
@@ -630,11 +778,102 @@ class TargetTracker:
                 probe["gate"] = "reject"
                 return probe
             probe["gate"] = "pass"
-        ys, xs = np.nonzero(mask)
         if xs.size == 0:
             return probe
-        probe["centroid"] = (float(xs.mean()), float(ys.mean()))
+        probe["centroid"] = probe["mass_centroid"]
         return probe
+
+    def _probe_by_cluster(
+        self, mask: np.ndarray, probe: dict, ox: int, oy: int,
+        frame_w: int, frame_h: int, ref: "tuple[float, float] | None",
+    ) -> dict:
+        """The gate and steering point of `_red_mass_probe` in cluster mode: the
+        gate counts glyphs per nameplate cluster (the best cluster is what
+        `glyphs` reports, so a rejected tick still says how close it came), and
+        the steering point is the mean of the red pixels around the chosen
+        cluster, not of the whole crop. One eligible cluster in a crop small
+        enough to sit inside the pixel window (the local ROI) gives the same
+        point as the whole-crop mean."""
+        clusters = self._nameplate_clusters(mask)
+        best = max((c[2] for c in clusters), default=0)
+        eligible = [c for c in clusters if c[2] >= self._red_mass_nameplate_min_glyphs]
+        probe["glyphs"] = best
+        probe["clusters"] = len(eligible)
+        if not eligible:
+            probe["gate"] = "reject"
+            return probe
+        rx, ry = ref if ref is not None else (frame_w / 2.0, frame_h / 2.0)
+        rx, ry = rx - ox, ry - oy
+        cx, cy, n = min(eligible, key=lambda c: (c[0] - rx) ** 2 + (c[1] - ry) ** 2)
+        half_w, up, down = self._cluster_pixel_window
+        h, w = mask.shape[:2]
+        x0, x1 = max(0, int(cx - half_w)), min(w, int(cx + half_w) + 1)
+        y0, y1 = max(0, int(cy - up)), min(h, int(cy + down) + 1)
+        ys, xs = np.nonzero(mask[y0:y1, x0:x1])
+        if xs.size == 0:
+            probe["gate"] = "reject"
+            return probe
+        probe["gate"] = "pass"
+        probe["glyphs"] = n
+        probe["centroid"] = (float(xs.mean() + x0), float(ys.mean() + y0))
+        return probe
+
+    def _nameplate_clusters(self, mask: np.ndarray, max_clusters: int = 8
+                            ) -> "list[tuple[float, float, int]]":
+        """Groups of glyph-sized red components that sit close together, as
+        (centre x, centre y, glyph count) in crop coordinates, densest first.
+        A nameplate is dozens of small letters and digits in a block of about
+        200 x 110 px; two labels on screen are two blocks. Greedy: take the
+        window (`red_mass_cluster_glyph_window_px`) holding the most unclaimed
+        glyphs, claim them, repeat. Glyph shape bounds are the gate's own."""
+        n, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        area_min, area_max = self._red_mass_nameplate_glyph_area
+        max_dim = self._red_mass_nameplate_glyph_max_dim
+        idx = [i for i in range(1, n)
+               if area_min <= stats[i][cv2.CC_STAT_AREA] <= area_max
+               and stats[i][cv2.CC_STAT_WIDTH] <= max_dim
+               and stats[i][cv2.CC_STAT_HEIGHT] <= max_dim]
+        if not idx:
+            return []
+        pts = centroids[idx][:2000]
+        half_w, half_h = self._cluster_glyph_window[0] / 2.0, self._cluster_glyph_window[1] / 2.0
+        near = ((np.abs(pts[:, 0][:, None] - pts[:, 0][None, :]) <= half_w)
+                & (np.abs(pts[:, 1][:, None] - pts[:, 1][None, :]) <= half_h))
+        used = np.zeros(len(pts), dtype=bool)
+        clusters: "list[tuple[float, float, int]]" = []
+        while len(clusters) < max_clusters:
+            counts = (near & ~used[None, :]).sum(axis=1)
+            counts[used] = 0
+            i = int(np.argmax(counts))
+            if counts[i] < 1:
+                break
+            members = near[i] & ~used
+            cx, cy = pts[members].mean(axis=0)
+            clusters.append((float(cx), float(cy), int(counts[i])))
+            used |= members
+        return clusters
+
+    @staticmethod
+    def _largest_blob(mask: np.ndarray, ox: int, oy: int) -> "tuple[int, int, int, int, int] | None":
+        """Action item 001, Cycle 6 (2026-09-24), logging only: the largest
+        connected red component in `mask` as (x, y, area, w, h), with (x, y)
+        its centre in absolute frame coordinates. Feeds `TRACKPICK`'s `blob=`
+        field so a gate-rejected tick still says *where* the red is and how
+        big it is — a rejected tick has no `sel`. Measured on the archived
+        raw crops of the 09:26-10:13 session: 117 of 129 label-less red
+        crops held exactly one compact component (median 433 px, about
+        39 x 35 px bounding box), the size of a red enemy-aircraft icon, and
+        icon-like masses sat on 76% of non-locked pursuit ticks; where those
+        icons are, and whether a labelled lock later appears there, could not
+        be read from the log. Never changes a pick or a gate decision. Only
+        called while DEBUG logging is on, since nothing else reads it.
+        """
+        n, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if n <= 1:
+            return None
+        i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        _x, _y, w, h, area = (int(v) for v in stats[i])
+        return (int(round(ox + centroids[i][0])), int(round(oy + centroids[i][1])), area, w, h)
 
     def _count_nameplate_glyphs(self, mask: np.ndarray) -> int:
         """HLDD 005 nameplate gate (2026-09-23): count small, glyph-shaped

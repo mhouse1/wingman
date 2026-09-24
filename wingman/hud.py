@@ -19,6 +19,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from . import capture_budget
+
 logger = logging.getLogger(__name__)
 
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -60,7 +62,9 @@ class HudRenderer:
                  archive_enabled: bool = False,
                  archive_dir: str = "tests/test-output/target_tracking",
                  archive_max_files: int = 200,
-                 archive_save_raw_scan: bool = False) -> None:
+                 archive_save_raw_scan: bool = False,
+                 archive_min_interval_s: float = 0.0,
+                 archive_max_per_encounter: int = 0) -> None:
         self._output = Path(output_path)
         self._interval = float(interval_sec)
         self._last_ts: float = 0.0
@@ -84,6 +88,15 @@ class HudRenderer:
         # overwritten pixels is what made earlier static reconstructions
         # contradict the live log. Off unless configured.
         self._archive_save_raw_scan = bool(archive_save_raw_scan)
+        # 2026-09-24: archiving every render spent the whole session cap in
+        # the first 6-10 minutes. Throttle, and cap each contiguous
+        # eject/pursuit encounter (0 = uncapped) so later encounters still
+        # get frames. The encounter counter resets on the first render
+        # outside _TARGET_TRACKING_ARCHIVE_STATES.
+        self._archive_min_interval = float(archive_min_interval_s)
+        self._archive_max_per_encounter = int(archive_max_per_encounter)
+        self._archive_encounter_count = 0
+        self._archive_last_ts: "float | None" = None
         # Handle to the feh child process below, so close() has something to
         # terminate on shutdown (2026-09-23: previously discarded right after
         # Popen() returned, which is why the window used to survive wingman
@@ -163,6 +176,8 @@ class HudRenderer:
             archive_dir=str(archive_cfg.get("dir", "tests/test-output/target_tracking")),
             archive_max_files=int(archive_cfg.get("max_files", 200)),
             archive_save_raw_scan=bool(archive_cfg.get("save_raw_scan", False)),
+            archive_min_interval_s=float(archive_cfg.get("min_interval_s", 0.0)),
+            archive_max_per_encounter=int(archive_cfg.get("max_per_encounter", 0)),
         )
 
     def maybe_render(
@@ -320,6 +335,8 @@ class HudRenderer:
             # drawn on `canvas`, a copy.
             raw_scan = self._scanned_crop(frame, obs) if self._archive_save_raw_scan else None
             self._archive_frame(canvas, state, ts, raw_scan)
+        else:
+            self._archive_encounter_count = 0
 
         # ── Atomic write ─────────────────────────────────────────────────
         canvas = cv2.resize(canvas, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
@@ -371,6 +388,16 @@ class HudRenderer:
             logger.debug("HudRenderer archive: session cap (%d) reached — not saving",
                          self._archive_max)
             return
+        if (self._archive_last_ts is not None
+                and ts - self._archive_last_ts < self._archive_min_interval):
+            return
+        if (self._archive_max_per_encounter > 0
+                and self._archive_encounter_count >= self._archive_max_per_encounter):
+            logger.debug("HudRenderer archive: encounter cap (%d) reached — not saving",
+                         self._archive_max_per_encounter)
+            return
+        if not capture_budget.admit(self._archive_dir, "HUD target-tracking archive"):
+            return
         try:
             self._archive_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(ts))
@@ -383,6 +410,8 @@ class HudRenderer:
                 logger.warning("HudRenderer archive: write failed: %s", path)
                 return
             self._archive_count += 1
+            self._archive_encounter_count += 1
+            self._archive_last_ts = ts
             logger.info("HudRenderer archive: saved %s (%d/%d this session)",
                         path, self._archive_count, self._archive_max)
             if raw_scan is not None:

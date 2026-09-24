@@ -25,6 +25,7 @@ import logging
 import threading
 import time
 
+from . import capture_budget
 from .analyzer import GameState, BATTLE_STATES
 from .behavior_tree import (
     TACTIC_ATTACK_SUPPORT,
@@ -525,6 +526,8 @@ class RespawnHandler:
             import cv2
             from pathlib import Path
             out_dir = Path(self._crash_capture_dir)
+            if not capture_budget.admit(out_dir, "Crash capture"):
+                return
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             # The sequence suffix (not just the timestamp) is required, not
@@ -1515,6 +1518,8 @@ class BoundaryPerceptionHandler:
             from datetime import datetime
             from pathlib import Path
             out_dir = Path(self._rtb_capture_dir)
+            if not capture_budget.admit(out_dir, "Map boundary capture"):
+                return
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = out_dir / f"{kind}_{stamp}_{seq}.png"
@@ -1898,6 +1903,8 @@ class BehaviorTreeHandler:
             import cv2
             from pathlib import Path
             out_dir = Path(self._terrain_capture_dir)
+            if not capture_budget.admit(out_dir, "Terrain capture"):
+                return
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             path = out_dir / f"terrain_{stamp}_{self._terrain_captures}.png"
@@ -2774,6 +2781,8 @@ class UnknownAnomalyRecorder:
             from datetime import datetime
             from pathlib import Path
             out_dir = Path(self._dir)
+            if not capture_budget.admit(out_dir, "ADR074 anomaly capture"):
+                return None
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             slug = "unknown" if episode == "GAME_UNKNOWN" else "blackout"
@@ -2852,6 +2861,8 @@ class HealthDropoutRecorder:
             from datetime import datetime
             from pathlib import Path
             out_dir = Path(self._dir)
+            if not capture_budget.admit(out_dir, "ADR080 dropout capture"):
+                return None
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = out_dir / f"dropout_{stamp}_gap{int(gap)}s.png"
@@ -2931,6 +2942,8 @@ class RespawnHealthStallRecorder:
             import cv2  # heavy import kept local: recorder is constructed once
             from pathlib import Path
             out_dir = Path(self._dir)
+            if not capture_budget.admit(out_dir, "ADR137 respawn stall capture"):
+                return None
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             path = out_dir / f"stall_{stamp}_gap{int(gap)}s.png"

@@ -23,11 +23,14 @@ except ImportError:
 WINGMAN_VERSION = "1.8.11"
 WINGMAN_VERSION_DETAILS = "attack using secondary missile"
 
+from . import capture_budget
 from .capture import Capture
 from .config_schema import assert_valid_config
 from .controller_config import ControllerConfig
 from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON,
                          set_focus_guard)
+from .close_button import GenericCloseRecovery, click_region
+from .crop_region import CropCoords
 from .analyzer import (GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES,
                        BATTLE_STATES)
 from .hud import HudRenderer
@@ -464,6 +467,18 @@ def main():
     cfg = load_config(args.config)
     logger.info("Configuration loaded from %s", args.config)
 
+    # Cross-session disk safety net: capture features cap themselves per
+    # session only, and rotated logs were never deleted (2026-09-24: about
+    # 19 GB across capture folders and logs/). Rotation above runs before the
+    # config exists, so the rotated logs are pruned here.
+    capture_budget.configure(cfg)
+    if args.log_file:
+        _log_path = Path(args.log_file)
+        _files, _bytes = capture_budget.section_budget(
+            cfg, "rotated_logs", (200, 2048 * 1024 ** 2))
+        capture_budget.prune(_log_path.parent / "logs",
+                             f"{_log_path.stem}_*{_log_path.suffix}", _files, _bytes)
+
     # foundry HLDD 001: say which host mode this session is running under.
     # TRIAL latches and nothing restores it, so a session can silently run
     # with Jenkins and Redmine down — worth stating loudly at the top of the
@@ -718,6 +733,9 @@ def main():
         from .session_recording import BtTraceWriter, VideoRecorder
         Path("logs").mkdir(exist_ok=True)
         _rec_cfg = cfg.get("session_recording", {}) or {}
+        _files, _bytes = capture_budget.section_budget(
+            cfg, "session_video", (8, 6144 * 1024 ** 2))
+        capture_budget.prune("logs", "session_*.mp4", _files, _bytes, reserve=1)
         video_recorder = VideoRecorder(
             region, monitor_index, game_window_offset, nested_display,
             out_path=f"logs/session_{tracker.run_id}.mp4",
@@ -865,6 +883,8 @@ def main():
     # attempts to it, and the quick-scan thread now starts while still in
     # GAME_UNKNOWN, so the first popup event can arrive early.
     unknown_anomaly = UnknownAnomalyRecorder(cfg.get("unknown_anomaly", {}))
+    # ADR 146: click a close button when GAME_UNKNOWN outlasts every known popup remedy.
+    close_recovery = GenericCloseRecovery(cfg.get("game_unknown_close", {}))
 
     def _handle_lobby_popup(popup):
         current = analyzer.game_state
@@ -1573,6 +1593,15 @@ def main():
             # ADR 074: archive the screen when GAME_UNKNOWN persists — the
             # evidence future stall handling is built from.
             unknown_anomaly.tick(frame, current_game_state)
+
+            # ADR 146: a window no known-popup template matches (a new promotion)
+            # leaves the classifier stuck; click its white-cross close button.
+            close_hit = close_recovery.tick(
+                frame, current_game_state == GameState.GAME_UNKNOWN)
+            if close_hit is not None:
+                ctrl.click_crop(CropCoords(*click_region(close_hit, frame.shape)),
+                                block=False, count=1, region_name="generic_close")
+                unknown_anomaly.note_dismiss_attempt("generic_close")
 
             # ADR 080: archive the screen when health OCR drops out during
             # live flight — the evidence the perception fix is built from.

@@ -292,8 +292,9 @@ keys elsewhere in the schema.
 
 ### Later additions (2026-09-23 and 2026-09-24)
 
-Three keys were added after this design was written, each documented where its
-evidence lives rather than here:
+Four keys were added after this design was written, each documented where its
+evidence lives rather than here (the extra one is `search_resume_centre_err` /
+`search_resume_centre_delay_s`, a two-key extension of `search_resume_delay_s`):
 
 - `ammo_zero_grace_s` (12.0): the HUD ammo count lags a weapon switch by seconds,
   so a 0 read soon after the switch is not an empty secondary.
@@ -309,9 +310,45 @@ the form `mission_su30` uses (ADR 144 D4, revised 2026-09-24). It presses no
 with whichever weapon is selected, and switches once when that weapon has read
 empty for `empty_confirm_reads` cycles. Only after that switch does the
 ammo-zero fall-through apply, with `ammo_zero_grace_s` measured from the switch.
-If `pursuit_max_duration_s` ends the encounter first, the fall-through passes
-`eject_and_dive` the flag's real value instead of `True`, so the dive makes its own
-switch. The default form, used by the missiles-empty trigger, is unchanged.
+If `pursuit_max_duration_s` ends the encounter first, the fall-through calls
+`eject_and_dive(defer_switch_until_empty=True)`: the dive presses no switch and its
+heatdive loop switches once when the selected weapon is empty (the same rule, the
+same confirmation). This replaced a first version that let the dive make its own
+switch, which switched away from a loaded rack on every capped pursuit (operator,
+2026-09-24). The default form, used by the missiles-empty trigger, is unchanged.
+
+**Engagement summary line (Cycle 7, 2026-09-24).** Each pursuit, and each dive's heatdive
+loop, ends with one INFO line, `PURSUIT SUMMARY:` or `DIVE SUMMARY:`, for example
+`PURSUIT SUMMARY: end=cap dur=20.1s scans=61 locked=9 (15%) first_lock=8.4s ammo=6->2
+switched=no`. `end` is `cap`, `ammo`, `external:<reason>` (pursuit) or `dive-end` or
+`external:<reason>` (dive); `locked` counts scans on which the tracker reported a lock;
+`first_lock` is the time to the first one (`-` for none); `ammo` is the first and last raw
+HUD reading, so across a rack switch the last figure belongs to the other rack, and
+`switched=yes` says this loop pressed the switch. Logging only, nothing reads it. It exists
+because the pursuit's outcome could otherwise only be rebuilt from DEBUG `TRACKPICK` lines
+and `Ammo missiles:` transitions, and that rebuild counts a rack switch as a 6-to-2
+"launch"; the same tracker gave 5% locked scans in one session and 15% in the next, so a
+per-engagement denominator has to be logged, not reconstructed. Tests:
+`tests/test_engagement_summary.py` and the `summary` tests in `test_pursuit_mode.py` and
+`test_eject_heatdive.py`.
+
+Live check (12:05-12:46 run, wingman 1.8.11): the lines appear at INFO from the first
+engagement (12:09:48 pursuit, 12:11:17 dive), with `end=` seen as `cap`, `external:match_ended`
+(4 pursuits, a round ending during the pursuit), `dive-end` and `external:respawn_detected` (10
+dives). Over the run's 20 pursuits and 16 dives: pursuits with any lock 2 (10%), locked scans
+25 of 1,046 (2%), 2 launches by first-to-last raw reading; dives with any lock 13 (81%), locked
+scans 256 of 1,968 (13%), 12 launches by the same measure. No weapon-switch press: no rack emptied.
+
+**A pursuit-versus-dive contrast the lines make visible (measured, cause not established).**
+Pooled over the four sessions since 08:42, locked scans are 200 of 3,454 in pursuit (5.8%) and
+820 of 7,102 in the dive (11.5%). Altitude does not explain it: at equal altitude the dive still
+locks more often (2,500-3,500 m: pursuit 46 of 538, 8.6%, dive 238 of 1,585, 15.0%; 3,500-5,000
+m: pursuit 154 of 2,749, 5.6%, dive 415 of 2,885, 14.4%; scans with an altitude reading within
+4 s). What is left untested: time in the life (the pursuit starts soon after the climb, the dive
+20 s or more later, when fights may have come closer) and attitude (the dive is nose-down with
+afterburner, the pursuit rolls left with no pitch while searching). The two cannot be separated
+from these logs. Launches per 100 locked scans were not clearly different (pursuit 12 launches in
+189 locked scans, dive 25 in 584, in the four sessions), so a lock in the dive is not less useful.
 
 ---
 

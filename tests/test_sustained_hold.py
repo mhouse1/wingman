@@ -305,3 +305,70 @@ class TestRollHoldLogging:
         assert len(lines) == 2
         assert "None/None -> left/search" in lines[0]
         assert "left/search -> None/None (test)" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# Near-centre extension (operator, 2026-09-24: "it had more than enough time
+# locked onto target but kept forcing left turn, it should have stopped left
+# turn and focused on target"). Measured on the 07:34-08:24 session with the
+# 2.0 s delay in place: search resumed with the target last seen within +-0.15
+# of centre in 6 of 10 pursuit and 23 of 41 dive cases.
+# ---------------------------------------------------------------------------
+
+class TestRollOnMissNearCentre:
+    CENTRE = dict(centre_err=0.15, centre_delay_s=6.0)
+
+    def test_near_centre_holds_neutral_past_the_base_delay(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=2.0,
+                          last_err=0.05, **self.CENTRE)
+        assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+        assert ctrl._roll_held is None
+
+    def test_far_from_centre_uses_only_the_base_delay(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=2.0,
+                          last_err=0.4, **self.CENTRE)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_the_sign_of_the_error_does_not_matter(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=2.0,
+                          last_err=-0.05, **self.CENTRE)
+        assert ctrl._roll_held is None
+
+    def test_the_extended_hold_still_ends(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 7.0, resume_delay_s=2.0,
+                          last_err=0.05, **self.CENTRE)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_the_extension_never_shortens_a_longer_base_delay(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=10.0,
+                          last_err=0.05, centre_err=0.15, centre_delay_s=1.0)
+        assert ctrl._roll_held is None
+
+    def test_without_the_extension_arguments_behavior_is_unchanged(self, monkeypatch):
+        """Backward compatible: callers that pass no last_err/centre values get
+        the plain resume-delay rule of the previous change."""
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=2.0)
+        assert ctrl._roll_held == "left"
+
+    def test_the_log_reason_says_when_the_target_was_near_centre(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=2.0,
+                          last_err=0.05, **self.CENTRE)
+        lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("HOLD[roll]")]
+        assert any("target was near centre" in m and "6.0s" in m for m in lines)
+
+    def test_never_seen_still_searches_immediately(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=None, resume_delay_s=2.0, last_err=None, **self.CENTRE)
+        assert ctrl._roll_held == "left"

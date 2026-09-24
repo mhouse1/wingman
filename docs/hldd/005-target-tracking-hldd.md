@@ -1130,10 +1130,27 @@ inferred by eye). The gate refusing it is the gate working as designed.
 restores the old immediate resume). New `Controller.roll_on_miss(last_seen_ts,
 resume_delay_s)`: within the delay of the last visible tick a miss releases the
 roll axis to neutral; otherwise, or if nothing was ever seen, it calls
-`engage_roll_search()` as before. Used only by `pursue_and_engage`.
-`_eject_heatdive_loop` still resumes the search immediately — deliberate, one
-change at a time. Neutral rather than "keep the last direction": a target that
-has vanished would otherwise be chased open-loop for the whole delay.
+`engage_roll_search()` as before. First used only by `pursue_and_engage`;
+`_eject_heatdive_loop` was left on the immediate resume, deliberately, one change
+at a time. Neutral rather than "keep the last direction": a target that has
+vanished would otherwise be chased open-loop for the whole delay.
+
+**Extended the same day (operator request, 2026-09-24).** The operator watched the
+next session and reported "it had more than enough time locked onto target but
+kept forcing left turn, it should have stopped left turn and focused on target".
+Two further changes, both in `roll_on_miss`'s callers:
+
+- The dive's heatdive loop now uses the same rule (the delay is shared; the config
+  key stays under `pursuit_mode`). Measured basis: in the 06:51-07:06 session all 13
+  target holds in that loop ended `-> left/search` the instant the lock dropped,
+  including with the target last seen on the right (err +0.2 to +0.5), i.e. turning
+  away from it.
+- **Near-centre extension.** If the last visible error was within
+  `search_resume_centre_err` (0.15), the neutral hold is
+  `search_resume_centre_delay_s` (6.0) instead, when longer. Measured on the
+  07:34-08:24 session with the 2.0 s delay in place: search still resumed with the
+  target last seen within +-0.15 of centre in 6 of 10 pursuit cases and 23 of 41 dive
+  cases. Both values are named guesses.
 
 Instrumentation (behavior-neutral): `HOLD[roll]: <held>/<reason> -> <held>/<reason>
 (<why>)`, one DEBUG line per roll-hold state change, never per tick.
@@ -1198,15 +1215,482 @@ Measured context for the next cycle:
   pursuits, one co-occurrence: not acted on, and not evidence that pursuit's
   lack of evasion is the cause.
 
+### Live trial 2 (2026-09-24 07:34-08:24+, operator-run, wingman 1.8.11)
+
+A long session the operator ran themselves while this section was being extended;
+log copy taken at 08:23:58 (57,435 lines). It contains the first pursuit locks, so it
+answers what live trial 1 could not. It also ran the dive-loop change below, which
+was in the working tree, unit-untested and uncommitted at launch — a co-change,
+recorded as a column of its own.
+
+| Question | Verdict | Basis |
+|----------|---------|-------|
+| After a pursuit lock, does a miss hold the roll axis neutral for 2 s instead of resuming the left search? | **confirmed** | 22 pursuits, 8 with at least one lock (26 acquisitions in pursuit). 15 `left/target -> None/None (miss within 2.0s of last lock)` lines in pursuit; 10 search resumes after a target hold, the shortest 2.08 s after it began, none under 2.0 s |
+| Does the dive's heatdive loop obey the same rule (the co-change)? | **confirmed** | 85 `miss within` lines in dive windows; 41 search resumes after a target hold, shortest 2.00 s, none under 2.0 s |
+| Is the operator's "still forcing left turn" gone? | **partly** | Not gone: search resumed with the target last seen within +-0.15 of centre in 6 of 10 pursuit cases and 23 of 41 dive cases, i.e. the aircraft was already on the target and turned away 2 s later. That is what the near-centre extension addresses; it is unit-tested, not yet run live |
+| Did any early weapon switch remain? | see ADR 144 | 16 `switch_weapon` presses, all 16 within 1 s after a pursuit cap, none anywhere else (22 caps) |
+
+Other measured points: 0 of 22 pursuits ended in death (all ran to the 20 s cap),
+against 2 of 5 in trial 1; incoming-missile warnings appeared in 2 of the 22 and the
+aircraft survived both, so trial 1's death co-occurrence is not repeated here.
+
+### Live trial 3 (2026-09-24 08:41-08:56, wingman 1.8.11, 14 m 18 s)
+
+One session after the near-centre extension, the dive-loop delay and the deferred dive
+switch were added: 6 pursuits (all ran to the 20 s cap) and 6 dives, 4 respawns, 0
+errors. Co-change, recorded as its own column: another session's uncommitted
+capture-budget work (`capture_budget.py`, `hud.py`, `main.py`, `tick_handlers.py`) was in
+the tree and ran too; it is unrelated to roll or weapon logic.
+
+| Question | Verdict | Basis |
+|----------|---------|-------|
+| After a lock lost near centre, does the roll axis stay neutral 6 s before the search resumes? | **confirmed** (small n) | 3 search resumes followed a lock last seen within +-0.15 of centre: gaps 6.01 s minimum, 6.31 s median, none under 6.0 s. 8 resumes after a far lock: minimum 2.01 s, none under 2.0 s. The log line reads `miss within 6.0s of last lock, target was near centre`: 3 in pursuit, 7 in the dive loop |
+| Does a capped pursuit still press `SWITCH_WEAPON`? | **no, confirmed** | 6 `PURSUIT CAP ... switch deferred until it is empty` lines, 0 `switch_weapon` presses in the whole run, 0 old-style `MISSILES EMPTY` eject lines (the 07:34-08:24 session: 16 presses at 22 caps) |
+| Does the dive fire the primary? | **yes** | the ammo reading went 6 to 5 in the dive at 08:45:59 and stayed on the 6-rack otherwise |
+| Does the deferred switch fire once the primary empties? | **no evidence** | 0 `selected weapon empty` lines; the primary never emptied (one launch in the run). Unit-tested only |
+
+Operational note for the next session: the finish-round key `z` was **not** acknowledged
+when sent as a synthetic press to `:3` (twice, and a `v` probe was not acknowledged
+either), unlike 07:02 the same day; wingman's key observer registered both keys at
+start-up. The run was stopped with SIGTERM (clean exit in about 4 s, summary written) and
+the game and nested display were then closed with `game_shutdown.close_game` and
+`close_nested_display`. Cause not investigated.
+
 ### Status
 
-Code, tests and config are committed by the operator (06:47, "tune target
-tracking, fix mission_su30 weapons switch"). Targeted tests pass; `make lint` is
-clean. Full `make test` on the combined change set: 1,902 passed, 28 skipped, 6
-failed — the same six order-dependent `tests/test_input_linux.py` failures
-recorded in the previous section (identical at a clean HEAD, pass in isolation).
-Live trial 1 above: the delay is **unverified live**; the instrumentation is
-confirmed. Another live trial is needed once pursuit actually produces a lock.
+Code, tests and config for the delay and the su30 weapon switch were committed by the
+operator (06:47). The dive-loop use of the delay, the near-centre extension and the
+deferred dive switch are in the working tree (uncommitted), unit-tested and `make lint`
+is clean. Full `make test` on that change set: 1,939 passed, 28 skipped, 6 failed — the
+same six order-dependent `tests/test_input_linux.py` failures recorded earlier (identical
+at a clean HEAD, pass in isolation). Live status: the delay is **confirmed live** in
+pursuit and the dive (trial 2); the near-centre extension and the no-switch-at-the-cap
+behavior are **confirmed live** on small samples (trial 3); the switch-when-empty step was
+**unverified live** at that point and is **confirmed live** in the 10:51 run (see "Deferred
+weapon switch, verified live" under Cycle 6 below).
+
+---
+
+## Clipped-Nameplate ROI Follow (2026-09-24, action item 001, Cycle 5)
+
+### Finding: most dropped locks are a real nameplate cut by the scan window
+
+Operator hypothesis under test: rotate in 5-second intervals, stop once a target is
+acquired. Stop-on-acquire already exists (the hold releases inside the deadband, and the
+search waits 2 s or 6 s after a lock). The interval part needs a reason to think a paused
+view finds or keeps targets better than a rolling one; the log gives none:
+
+| Measured (labels: measured / inferred) | Result |
+|----------------------------------------|--------|
+| Next-tick lock survival by `|err|`, pursuit and dive together, 538 lock ticks in three logs | 77% at `<=0.05` (roll released), 72% at 0.05-0.10, 65% at 0.10-0.20, 36% at 0.20-0.40, 44% above 0.40. Smooth, no step at the deadband edge, so the turn is not what loses locks (measured). The drop past 0.20 is consistent with targets near the frame edge, not proven |
+| Reacquisition per tick by roll state | 20% in the neutral grace window, 1.5% while searching. Confounded: grace ticks follow a target that was just seen, so this shows a just-lost target tends to return, not that a paused view searches better (inferred) |
+| Overshoot while locked and rolling toward the target, 151 tick pairs | 14 (9%) crossed to the far side beyond the deadband; the target moved 0.039-0.044 of half-width per tick toward centre under the roll against 0.016 with the roll released (measured). Small, not the "still over rotating" the operator reported, which was the search resuming after a lock |
+
+The interval search was **not adopted**: nothing measured supports it, and the effect it
+would have is already produced by the grace hold.
+
+While checking this a first version of the survival script printed 100% in every band. It
+was wrong: the log parser required `sel=(x,y)`, so every scan that found nothing was
+skipped and only survivors were paired. That output was discarded and the numbers above
+come from the corrected parser (7,599 ticks parsed, all `sel=-` ticks included).
+
+What the drops are, from `TRACKPICK` fields (measured, 182 drops after a lock in
+pursuit and dive windows):
+
+| `|err|` of the last lock | drops | red present and gate rejected | no red at all |
+|--------------------------|-------|-------------------------------|---------------|
+| up to 0.10 | 82 | 64 (78%) | 17 (21%) |
+| 0.10-0.30 | 68 | 48 (71%) | 20 (29%) |
+| above 0.30 | 32 | 13 (41%) | 19 (59%) |
+
+Of the 125 drops with red present, glyph counts were 0-5 on 40, 6-9 on 16, 10-14 on 33
+and 15-19 on 36, and only 19 (15%) saw a lock return within 120 px inside four ticks.
+Lock ticks themselves sit at 20 or more glyphs (median 25, 90th percentile 31, 46% within 4
+of the threshold; the floor is by construction, since the gate selects them).
+
+Pixel evidence (measured): four drop ticks had their raw crop archived and reproduced the
+logged glyph count exactly when replayed through the real `_red_mass_probe`:
+
+| Crop | glyphs | red px | what the pixels show |
+|------|--------|--------|----------------------|
+| `pursuit_mode_20260924_073603_16` | 14 | 272 | `[T/G] ZeroPing` cut by the bottom edge, distance and type lines outside |
+| `game_battle_eject_20260924_073615_26` | 19 | 998 | `[AAce] myr...` / `3.3km` / `F-100` cut by the right edge |
+| `game_battle_eject_20260924_085152_43` | 19 | 1241 | `BamBam` / `5.8km` / `A-6` cut by the left edge, red aircraft below |
+| `game_battle_eject_20260924_073747_76` | 6 | 209 | `[SH]...` cut by the right edge |
+
+In all four the red mask touches a crop edge and its mean sits 82-173 px from the crop
+centre toward that edge. Four of four, no counter-example, but the archive samples about
+one frame per second, so this is a small sample.
+
+**Correction to the 07:34 session analysis above.** That analysis recorded "dropped locks
+come from the ROI clipping the nameplate" as disproved. It rested on the exact raw crops of
+8 gate-pass acquisitions (97% predicted survival against 39% observed) and on the median
+red-pixel count of lost acquisitions. Those 8 crops were length-biased (locks that lasted),
+so they could not show a drop, and the per-drop breakdown above, with 4 pixel-verified
+drops, contradicts the verdict. The dive's hard pitching remains a plausible cause of the
+56 drops with no red at all (31% of the 182, 59% of the edge band; inferred, no crop was
+archived for them), so the earlier conclusion was half right; the gate-rejected drops with
+red present are the larger share (125 of 182, measured).
+
+### Mechanism (from the code, not inferred)
+
+`update()` sets `_roi_rect` only on a lock or in the miss ladder, so a gate rejection left
+the ROI where it was. The label and the aircraft it belongs to fill much of the 422 x 264
+ROI (the label text is about 90 px tall in the crops above and sits above or beside the
+aircraft), so a target 80-170 px off the crop centre pushes the label across the border,
+the glyph count falls under 20, and the lock is dropped with the target still in view. The
+next scan reads the same window. With `lost_timeout_sec: 0.4` and the pursuit loop's 0.33 s
+scan cadence LOST_GRACE lasts about one further tick before the wide acquisition scan takes
+over. That scan's steering point is the mean of every red pixel in the wide region, which
+would explain why many relocks land far from the old lock (inferred, not checked).
+
+### Change (one behavior change)
+
+`TargetTracker._follow_clipped_nameplate`, behind `tracking.local_roi_follow_on_clip`
+(default false in code, true in `config.yaml`): on a missed tick that scanned the local
+ROI, where the gate positively rejected the red mask, at least
+`local_roi_follow_min_px` (150) red pixels were present, and the red touches a crop
+border, the ROI is re-centred on that red mass for the next scan. The miss ladder's
+expansion re-centres there too (`_roi_centre_hint`) instead of on the stale lock. The
+probe now reports `mass_centroid` and `clipped_edges` whether or not the gate passes.
+
+Unchanged by design: the gate's threshold and its strictness, what counts as a lock, the
+steering point, `_last_x/_last_y`, and the 0.4 s grace clock. A lock still needs a full
+nameplate, so the change cannot admit a false positive; the worst case is a window that
+looks at debris for at most the remaining grace.
+
+### Live-trial verdict criteria
+
+The metric is **time to relock after an eligible drop**: a lock tick followed by a tick
+with `gate=reject` and at least 150 red pixels (the follow's precondition, less the
+edge test, which the old logs did not record), then how many ticks until `path=redmass`
+returns. Per-tick lock survival is *not* the metric: the follow acts after a drop and cannot
+prevent one, so survival is expected to stay at 66%.
+
+Baseline, the three old logs, pursuit and dive windows, 112 eligible drops (measured):
+relock at +1 tick 9%, +2 ticks 46%, +3-4 ticks 3%, not within four ticks 42%. The +2
+peak is the wide acquisition scan taking over after the 0.4 s grace timeout, while a static
+clipped window almost never relocks by itself.
+
+- `grep ROIFOLLOW wingman.log` shows the follow firing (DEBUG line per move, INFO at the
+  1st, 10th and 100th).
+- Confirmed if the +1-tick share rises well above 9% and the not-within-four share falls
+  below 42%.
+- Falsified if `ROIFOLLOW` fires and the +1-tick share stays near 9%: the label is then not
+  the reason, or the window moves the wrong way.
+- Any `path=redmass` tick with `glyphs` under 20 would mean the gate was loosened; the
+  design says that cannot happen, so it is a bug if seen.
+
+**Correction, 09:38.** The first version of these criteria and a chat comment on the first
+four follows compared "3 of 4 relocked within two ticks" with a 15% baseline. That baseline
+was a stricter definition (relock within 120 px of the old lock inside four ticks) and not
+comparable: on the live definition the old logs already relocked within two ticks 55% of the
+time (62 of 112). The comparison was not like-for-like and is withdrawn.
+
+### Live trial 4 (2026-09-24 09:26-10:12+, wingman 1.8.11, analysed on a 10:08 snapshot)
+
+One session with the follow on, stopped with the finish-round key at 10:09 and exited cleanly
+at the lobby (47 m 15 s, 7 missions, 14 respawns, 21 pursuit caps with 0 `switch_weapon`
+presses, 0 errors, 52 `ROIFOLLOW` moves in all). The analysis below is on a 10:08 snapshot: 44
+`ROIFOLLOW` moves in 27 independent episodes (follows within 3 s of each other counted as one; 8 episodes held
+2-6 follows, the 09:36 burst on consecutive ticks). Co-change, recorded as its own column: the
+other session's uncommitted capture-budget work was in the tree and ran too, unrelated to the
+tracker.
+
+Time to relock after an eligible drop (gate reject, at least 150 red px), same definition on
+both sides (measured):
+
+| | n | +1 tick | +2 ticks | +3-4 ticks | not within four |
+|---|---|---------|----------|------------|-----------------|
+| Baseline, three old logs, no follow | 112 | 10 (9%) | 52 (46%) | 3 (3%) | 47 (42%) |
+| Live, follow on | 62 | 21 (34%) | 16 (26%) | 2 (3%) | 23 (37%) |
+
+| Verdict question | Result |
+|------------------|--------|
+| Does the follow shorten the gap? | **Yes, by one scan.** +1-tick relocks rose 9% to 34%, and the +2 share fell 46% to 26%. Within two ticks: 55% to 60%. By follow: 20 of 44 (45%) at +1; by episode (first follow of each): 12 of 27 (44%) |
+| Does it cut the drops that never come back? | **Not shown.** Not within four ticks 42% to 37%, inside the noise at n=62. An interim read at n=15 showed 27%; it regressed to 37% with more data, which is why interim numbers were not called |
+| Per-tick lock survival | 242 of 339 (71%) against 66%. Not the metric (the follow acts after a drop) and not attributed to it |
+| Was the gate loosened? | **No.** 388 `path=redmass` ticks, 0 with fewer than 20 glyphs |
+| Errors | 0 |
+
+Why the gain is one scan and not more (partly inferred): after a drop the miss handler moves
+to ACQUIRING at the next miss because `lost_timeout_sec` (0.4 s) is shorter than two scan
+periods, so the wide scan takes over on the same tick whether or not the follow helped. A
+failed follow therefore costs nothing against baseline (read from `_handle_miss`, not
+separately measured), and a successful one turns a +2 relock into a +1 relock, keeping the
+steering point from the local ROI instead of the mean of the whole wide region (whether that
+steering point is better was **not measured**).
+
+What the 15 follows that never relocked look like (measured on the four ticks after each): 12
+saw red with almost no label throughout (glyphs under 8), 2 a partly visible label, 1 lost
+the red. So most failures were not a cut nameplate at all, which is the same gap the baseline
+shows. The glyph count at follow time only weakly separates the two groups (successes 5 to
+19, failures 0 to 19), and since a failed follow is free, the precondition was left alone.
+
+By edge cut, relocked within four ticks: left 7 of 7, bottom 5 of 6, right 10 of 13, top 12 of
+23. Top-edge follows do worst and are half of all follows; a post-hoc split on small counts, so
+a lead and not a finding. For follows that relocked at +1, the relocked point sat a further
+80 px (top, n=4), 116 px (left, n=6) and 83 px (right, n=9) beyond the new ROI centre in the cut
+direction, and 19 px back for the bottom (n=5), so the mean of the visible red undershoots the
+needed shift on three axes. Measured on successes only and therefore survivor-biased, and on
+small counts, so not acted on.
+
+Checked and **retracted** during this analysis (kept so it is not repeated): a raw crop that
+looked like a fully visible F-14 label with only 4 glyphs counted was another tick in the same
+second (the real gate counted 30 and passed), and a crop that looked like a HUD bar chased by
+the follow did not reproduce the logged pixel count either (replay 0 px against 462). Only
+crops whose replayed glyph count and pixel count both equal the logged tick are evidence; one
+qualified (`game_battle_eject_20260924_100458_190`: an F-106 label cut by the top of the wide
+acquisition region, 6 glyphs, 564 px), which shows the same cut-label mechanism in the wide
+scan. A frame-top explanation for the top-edge failures was tested and not supported: 1 of 23
+top-edge follows had the ROI at the top of the frame.
+
+### Replication in a second session (10:51 run, analysed on an 11:18 snapshot)
+
+Same definition, an independent session with the follow on (42 `ROIFOLLOW` moves, 56 eligible
+drops; 297 `path=redmass` ticks, none under 20 glyphs, so the gate was again not loosened):
+
+| After an eligible drop | Baseline (n=112) | Session 1 (n=62) | Session 2 (n=56) | Pooled live (n=118) |
+|------------------------|------------------|------------------|------------------|---------------------|
+| Relock at +1 tick | 9% | 34% | 43% | 45 (38%) |
+| Relock at +2 ticks | 46% | 26% | 27% | 31 (26%) |
+| Not within four ticks | 42% | 37% | 27% | 38 (32%) |
+
+The +1-tick gain replicates (9% to 38% pooled, both sessions well above baseline). The drop in
+"never comes back" points the same way in both sessions (42% to 32% pooled) but is about z=1.5
+(p about 0.12), so it is **not established**. Per-tick survival 70% against 66%, again not the
+metric.
+
+### Status
+
+Implemented in the working tree (uncommitted), 15 unit tests in `tests/test_roi_follow.py`,
+`TRACKPICK` gained an `edges=` field for the next run. Live status: **confirmed for what it was
+built to do (one scan sooner relock on gate-rejected cut labels, gate unchanged), not shown to
+reduce the drops that never come back**. Kept on: the measured effect is positive and the
+worst case is neutral.
+
+---
+
+## Unlabelled Red Icons — What "Red Present, No Label" Is (2026-09-24, action item 001, Cycle 6)
+
+### Finding: one constant-size icon, present on most search ticks
+
+Cycle 5 left 12 of 15 non-relocking follows described as "red present, no label". Cycle 6
+looked at what that red is, using the 200 raw crops the 09:26-10:13 session archived,
+replayed through the real `_red_mass_probe`:
+
+| Measured on the archived crops | Result |
+|--------------------------------|--------|
+| Crops with gate reject, at least 150 red px, under 8 glyphs | 129 of 200 (32 had no red, 21 passed the gate, the rest were partial labels) |
+| Components of at least 150 px per such crop | exactly one in 117 of 129 (two in 9, none in 3) |
+| Size of those components (135) | area median 433 px (10th to 90th percentile 318 to 610), bounding box median 39 x 35 px, fill median 0.34; 126 of 135 are 300-2500 px with both sides 20-70 px |
+| What a contact sheet of 12 shows | red jet-silhouette icons (one crop has two) and one red arrowhead, none with a nameplate; a zoom of one crop shows two red jets and a yellow crossed-circle marker on terrain |
+
+Prevalence on the `TRACKPICK` logs of four sessions (measured): an unlabelled icon-like
+mass (at least 150 px, under 8 glyphs) sat on 2,456 of 3,224 non-locked pursuit ticks (76%,
+22% had no red) and on 4,162 of 6,804 non-locked dive ticks (61%, 36% no red).
+
+It is **not** a precursor of the labelled locks that do happen (measured): of 128
+acquisitions (a lock after at least three non-lock ticks, pursuit and dive), 43 (34%) had
+such a mass on the tick just before, with a median of 0.0 s of continuous presence before the
+lock (75th percentile 1.0 s, longest 9.9 s).
+
+What this suggests, labelled as inference: the icons look like enemy contacts drawn without
+a nameplate, presumably beyond the range where the game renders one (the labels seen in the
+crops read 3.3 to 5.8 km). The nameplate gate's premise, that every real contact renders a
+nameplate nearby (written into "Nameplate Gate Authority" above), would then be false for
+distant contacts: the search would see a contact on three ticks in four and ignore it, which
+would explain the earlier open finding that the search rarely sees a target. **Not
+established:** that every such icon is an enemy aircraft, how far away they are, whether they
+are the same aircraft that later gets a label (the 34% and 0.0 s figures point the other
+way), and whether steering toward one brings a nameplate into range. None of these can be
+read from the current log, because a gate-rejected tick records no position.
+
+This also weakens a line in the Cycle 5 write-up: the failures were called "red present, no
+label" with the implication that the target had left. The icon may be the same target, still
+in view, beyond nameplate range. That is unproven either way.
+
+### Change (instrumentation only, no behavior change)
+
+`TRACKPICK` gains `blob=(x,y,aAREA,WxH)`: the largest connected red component in the scanned
+crop, centre in absolute frame coordinates, `-` when there is no red. Computed only while
+DEBUG logging is on, never read by anything but the log, no effect on a pick or the gate. Six
+tests in `tests/test_roi_follow.py` (`TestBlobLogging`).
+
+### Correction (Cycle 12, 2026-09-24)
+
+The inference above that the unlabelled icons are contacts too far to render a nameplate is at least
+partly wrong. `pursuit_mode_20260924_164821_48.png` shows a complete nameplate at 10.5 km, drawn about
+170 px below its marker, outside the acquisition box, while the tracker saw only the icon (glyphs 0).
+So some "icon, no label" ticks are an icon inside the box whose label fell below the crop. See action
+item 001, Cycle 12, for the measurements (41% of nameplates shown lie outside the box).
+
+### Decision for the operator (not made here)
+
+Whether the tracker should ever steer toward an unlabelled icon is a design change, not a
+tuning step, and it sits against the operator's earlier direction to prefer the real,
+labelled aircraft and against the false positives the gate was added for (a solid red
+triangle, own exhaust, an enemy flare effect). The operator can also answer the questions
+above directly, which the logs cannot: what the small red jets are, and at what distance they
+gain a nameplate.
+
+### Verdict criteria for the next run
+
+- `grep "blob=" wingman.log` on rejected ticks; the blob position should be stable from tick
+  to tick if it is a persistent contact.
+- Compare each gate-passing lock's position with the blob position from the ticks in the
+  preceding 3 s: a lock appearing at an icon's location would say the icon was the same
+  aircraft before its nameplate rendered.
+- The icon-like share of search ticks should reproduce near 76% (pursuit).
+
+### Live result (10:51 run, analysed on an 11:18 snapshot; 2,436 `TRACKPICK` ticks with the field, 1,969 with a blob)
+
+The field flowed from the first tick (sizes 285-395 px, about 31-47 px wide, matching the
+icons measured on the archived crops).
+
+| Question | Result (measured) |
+|----------|-------------------|
+| Is the icon-like blob a persistent object? | **Yes.** Over 1,150 consecutive pairs of icon-like non-locked ticks the centre moved a median 12 px (75th percentile 27, 90th 54), 92% within 60 px, area ratio median 1.00 |
+| Does the icon-like share of search ticks reproduce? | **Yes.** 458 of 562 non-locked pursuit ticks (81%, against 76% before) and 788 of 1,154 dive ticks (68%, against 61%); 41% of acquisitions had one on the tick just before (34% before) |
+| Does a labelled lock appear where an icon was? | **Above chance, not tightly.** 32 acquisitions (a lock after at least three non-lock ticks), 26 with an icon-like blob in the preceding 3 s. The lock point lay within 200 px of that icon in 46% (shuffled null 16%) and within 300 px in 65% (null 29%); median distance 216 px against a null median of 395 |
+
+How far to read it: the lock point is the mean of every red pixel in the crop, label included,
+and the label sits roughly 100-200 px from the aircraft, so a lock on the *same* aircraft is
+expected 100-200 px from its icon. That fits about half or more of the acquisitions, and 35%
+landed more than 300 px away (another target, or an icon that moved in those 3 s; not
+separable). This is **consistent with the icon being the same aircraft before its nameplate
+renders, for a good share of acquisitions, not proof**. The earlier figure "34% of acquisitions
+had such a mass on the tick just before" used a one-tick window; on a 3 s window it is 26 of 32
+(81%); both stand, they answer different questions. What still cannot be read from the log:
+the distance to those aircraft, and whether steering toward an icon brings the nameplate in,
+which only an experiment answers, and whether to run one is the operator's decision (above).
+
+### Deferred weapon switch, verified live (side result, 11:07)
+
+The step never exercised before (`pursue_and_engage` and the dive deferring the switch until
+the selected rack is empty) ran end to end in the 10:51 run, on one life (measured from
+`wingman.log`): `Ammo missiles: 6` at 11:05:53; 5, 4, 3, 2 in pursuit (11:06:50 to 11:06:55);
+`PURSUIT CAP ... switch deferred until it is empty` at 11:07:01 with no key press; the dive
+fired 2 to 1 (11:07:20) and 1 to 0 (11:07:22.03); `eject heatdive - selected weapon empty (3
+consecutive zero reads)` at 11:07:22.47, one `switch_weapon` press, and the reading was 2 (the
+secondary) at 11:07:23.5. A second life repeated it: cap at 11:17:36 with no press, the dive
+read 5, 4, 3, 2, 1, 0 (11:17:51 to 11:18:02.25), and one press followed at 11:18:02.86. The
+run ended at 11:20 (28 m 02 s, 5 missions, 12 pursuit caps, 2 presses, both the empty-rack press). The operator's
+rule, not to switch until all six primary missiles are used, held on both lives. Two lives are
+still a small sample of the empty-then-switch path; both readings were steady countdowns, not
+single dropouts. Recorded also in ADR 144 D4.
+
+### Status
+
+Instrumentation only, unit-tested, validated live (the field flows and was used above).
+Behavior unchanged; the operator decision above is open.
+
+---
+
+## Wider Acquisition Region, HUD Zones and Cluster Steering (2026-09-24, action item 001, Cycle 12)
+
+### Trigger and finding
+
+The operator flagged `pursuit_mode_20260924_164821_48.png` (16:48:21): tracker `ACQUIRING`, `det=0`,
+with two complete enemy nameplates ("[LiWo] happylife 10.3km F-5", "[BoP] sillyfella 10.5km A-4") on
+screen at y about 940 to 1050 of 1200, below the acquisition box (`[0.2, 0.18, 0.8, 0.68]`, y 216 to
+816), and asked whether the region should be the full screen.
+
+Measured over 300 archived full-screen frames (11:00 to 16:51 sessions; glyph-sized red components of
+the tracker's own mask, clustered in 300 x 170 px windows, at least 20 per cluster):
+
+| Measured | Result |
+|----------|--------|
+| Frames carrying a nameplate-like cluster | 57 of 300 |
+| Clusters inside the old box / in open screen outside it / in the top HUD strip | 40 / 28 / 3 |
+| Outside clusters by side | 11 below, 7 above, 3 left, 2 right, 5 in corners |
+| Visual check (12 outside clusters) | real enemy nameplates in all 12 (1.6 to 9.3 km; 10.3 and 10.5 km in the trigger frame) |
+
+So about 41% of the nameplates the game draws lay where the tracker did not look.
+
+Run through the real `_red_mass_probe`, three ways, the answer to "full screen" was **not as-is**:
+
+| Region | Frames passing the gate | Steering-point shift on the 36 frames the old box already locks |
+|--------|-------------------------|---------------------------------------------------------------|
+| Old box | 36 | none |
+| Full screen | 88 (about 29 are HUD text) | median 331 px, max 686 |
+| Full screen, HUD zones masked | 59 (23 more than the old box, none lost) | median 134 px, p75 200, max 393 |
+
+The shift is the old rule (the mean of every red pixel in the crop) averaging in other nameplates,
+so a wider box aims between two targets.
+
+### Change (operator go-ahead via /proceed)
+
+1. `tracking.acquisition_region_pct` from `[0.2, 0.18, 0.8, 0.68]` to `[0.0, 0.09, 1.0, 0.95]`.
+2. `tracking.red_mass_exclude_zones_pct`, a list of rectangles masked out of the red mask like the
+   existing `red_mass_exclude_pct`: scoreboard and rosters, minimap, weapons panel, squad logo.
+3. `tracking.red_mass_cluster_select` (code default false, shipped true): the nameplate gate is counted
+   per glyph cluster, and the steering point is the mean of the red pixels within +-150 px sideways,
+   300 up and 100 down of the chosen cluster (the label, its bar and the marker above it). The chosen
+   cluster is the one nearest the previous lock (`TRACKING` or `LOST_GRACE`), else the screen centre.
+   `TRACKPICK` gains `clu=`, the number of clusters that passed the gate. This overrides the 2026-09-23
+   "centroid of every red pixel" instruction, with the operator's go-ahead.
+
+Unchanged: the gate's threshold (20 glyphs) and shape bounds, the local ROI, the ROI follow, the
+tall-bar fallback (off). In the local ROI (422 x 264) the pixel window covers the whole crop, so a
+single nameplate gives the same point as before (unit-tested).
+
+### Validation before the change went live (measured; real tracker, real config, 300 archived frames)
+
+Old settings against the new ones through `TargetTracker.update()`, one fresh tracker per frame:
+
+| | Old | New |
+|--|-----|-----|
+| Frames locked | 36 | **54** (none lost, 18 gained) |
+| Steering-point shift on the 36 locked by both | | median 1 px, 75th percentile 81, max 302; 64% within 40 px |
+| Locks whose steering point is within 320 px of an independently found nameplate cluster | | 54 of 54 (no HUD lock) |
+| `update()` time per frame | 3.7 ms | 9.5 ms |
+
+The trigger frame now locks, steering at (1033, 883): the "[LiWo] happylife" label and the marker
+above it. Drawn on a sample of gained and moved frames, the new steering points sit on nameplates; the
+old ones in the moved frames floated between an aircraft and a distant label or off to one side. The
+36% that move more than 40 px are the frames with several nameplates, which is the intended change.
+
+Caveats: the frames are annotated captures (overlay drawings are not red, so contamination is small,
+not zero) taken during encounters, so they are not a random sample of every tick; the cluster
+window sizes and the zone edges are named guesses; tracking continuity (the nearest cluster to the
+previous lock keeps it) is unit-tested but was not exercised on real frame sequences; raw scan crops
+in the archive are now up to full width, so each is larger (the capture budget caps the folder).
+
+### Live-trial verdict criteria (not yet run)
+
+- `grep "clu=" wingman.log` shows the field; `path=redmass` locks appear with `sel` outside the old
+  box (x under 384 or over 1536, y under 216 or over 816).
+- No lock whose `sel` lies inside an excluded zone; no new errors.
+- Locked-scan share per `PURSUIT SUMMARY` and `DIVE SUMMARY` line. The baseline is 5.8% (pursuit) and
+  11.5% (dive), but the same code has shown 5% to 15% between sessions, so only a large change is
+  visible in one session.
+- Falsified if locks land on the wrong thing (a lock followed by no nameplate at that point), or if
+  steering visibly worsens (`HEATDIVE[roll]` diverging streaks rise).
+
+### Live check 1 (17:13 to 17:20, wingman 1.8.11; ended by the operator's Backspace after 6.5 minutes)
+
+633 `TRACKPICK` ticks, 0 errors, 3 pursuits and 3 dives (measured from the archived log):
+
+| Question | Result |
+|----------|--------|
+| Are locks acquired outside the old box? | **Yes.** 10 of 14 acquisitions (a lock after at least three non-lock ticks) had a steering point outside `[0.2, 0.18, 0.8, 0.68]`: 7 below, 1 above, 2 to the left. 35 of the 105 lock ticks (33%) were outside it |
+| Any lock in an excluded HUD zone? | **No** (0 of 105) |
+| Was the cluster choice exercised? | Barely: `clu=1` on 100 lock ticks, `clu=2` on 5 |
+| Pursuit outcome | 3 of 3 pursuits locked; locked scans 66 of 173 (38%), against the pooled 5.8% before the change; first locks at 10.5, 7.8 and 7.8 s; all three fired (rack 4 to 3, 4 to 3, 4 to 2) |
+| Dive outcome | locked scans 29 of 359 (8.1%), against the pooled 11.5% |
+| Errors | 0 |
+
+How far to read it: the mechanism evidence is direct (most acquisitions were in places the old box
+could not see), but the outcome evidence is three pursuits. Sessions have shown 27% to 58% of
+pursuits with any lock and 5% to 15% locked-scan share with unchanged code, so "3 of 3" and 38% are
+suggestive, not a measured improvement. The dive share did not rise. The operator restarted their own
+session at 17:26 with the same settings; its archived log is the next evidence.
+
+### Status
+
+Implemented, 13 unit tests (`tests/test_acquisition_clusters.py`), validated offline as above,
+config on, one short live check as above. Live status: mechanism confirmed, outcome not yet measured.
 
 ---
 

@@ -89,7 +89,8 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 pursuit_max_duration_s=1.0, legacy_nose_hold_s=0.05,
                 eject_max_s=0.2, heatdive_enabled=False, ammo_zero_grace_s=0.0,
                 sustained_hold_enabled=False, search_resume_delay_s=0.0,
-                empty_confirm_reads=3):
+                empty_confirm_reads=3, search_resume_centre_err=0.15,
+                search_resume_centre_delay_s=0.0):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -123,6 +124,10 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 # 0.0 by default here (not config.yaml's shipped 2.0): the
                 # pre-2026-09-24 behavior. The delay's own tests below set it.
                 "search_resume_delay_s": search_resume_delay_s,
+                # 0.0 delay by default here: the near-centre extension is off
+                # unless a test sets it.
+                "search_resume_centre_err": search_resume_centre_err,
+                "search_resume_centre_delay_s": search_resume_centre_delay_s,
                 "empty_confirm_reads": empty_confirm_reads,
             },
         ),
@@ -595,14 +600,60 @@ def test_deferred_switch_grace_is_measured_from_the_switch(monkeypatch, caplog):
     assert "max duration" in caplog.text
 
 
-def test_max_duration_before_empty_lets_eject_and_dive_switch_for_itself(monkeypatch):
-    """The fall-through must not claim a switch that never happened: the dive's
-    heatdive needs the secondary selected, and it makes its own press when it is
-    told the weapon is not already switched."""
+def test_max_duration_before_empty_does_not_switch_weapons(monkeypatch):
+    """Regression (operator, 2026-09-24, 'v' screenshot 08:20:14): the pursuit
+    cap fell through to eject_and_dive with the primary still loaded (6/6) and
+    the dive pressed SWITCH_WEAPON for its heatdive — five such presses in one
+    log. The dive now inherits the deferral: nothing is pressed while the
+    selected weapon still has ammo, and the flag still says nothing was pressed.
+    (This used to assert exactly one press, eject_and_dive's own.)"""
     ctrl, keys = _run_deferred_pursuit(
         monkeypatch, _AnalyzerStub(ammo=2), max_s=0.5, heatdive=True)
-    assert len(_switch_presses(keys)) == 1, (
-        "one press: eject_and_dive's own, not skipped and not duplicated")
+    assert _switch_presses(keys) == [], "no switch while the primary has ammo"
+    assert not ctrl.is_secondary_weapon_active()
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys, "the dive still fires the loaded weapon"
+
+
+def test_cap_fallthrough_after_the_switch_does_not_press_it_again(monkeypatch):
+    """Once the weapon ran out and pursuit switched, the fall-through must tell
+    the dive the switch is done — the toggle cannot be pressed twice."""
+    ctrl, keys = _run_deferred_pursuit(
+        monkeypatch, _AnalyzerStub(ammo=0), confirm=2, ammo_grace=30.0,
+        max_s=0.9, heatdive=True)
+    assert len(_switch_presses(keys)) == 1
+
+
+def test_a_miss_after_a_near_centre_lock_stays_neutral_past_the_base_delay(monkeypatch):
+    """Operator, 2026-09-24: locked on target, then forced left turn. The base
+    delay here is 0, so only the near-centre extension can keep the roll axis
+    neutral — err 0.05 is well inside search_resume_centre_err."""
+    near = {"visible": True, "error_norm": 0.05, "error_norm_y": 0.0, "mode": "TRACKING"}
+    analyzer = _AnalyzerStub(ammo=2)
+    tracker = _ScriptedTracker([near, _MISS])
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.9,
+                       sustained_hold_enabled=True, search_resume_delay_s=0.0,
+                       search_resume_centre_delay_s=30.0)
+    ctrl.set_target_tracker(tracker)
+    ctrl.pursue_and_engage()
+    _wait_for_pursuit_to_settle(ctrl)
+    assert tracker.updates >= 3
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+
+
+def test_a_miss_after_a_far_from_centre_lock_still_resumes_the_search(monkeypatch):
+    """The extension is for a target the aircraft is already pointing at; one
+    last seen far off to the side does not get the longer hold."""
+    far = {"visible": True, "error_norm": 0.6, "error_norm_y": 0.0, "mode": "TRACKING"}
+    tracker = _ScriptedTracker([far, _MISS])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.9,
+                       sustained_hold_enabled=True, search_resume_delay_s=0.0,
+                       search_resume_centre_delay_s=30.0)
+    ctrl.set_target_tracker(tracker)
+    ctrl.pursue_and_engage()
+    _wait_for_pursuit_to_settle(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
 
 
 def test_default_pursuit_still_switches_at_its_start(monkeypatch):
@@ -615,3 +666,59 @@ def test_default_pursuit_still_switches_at_its_start(monkeypatch):
     _wait_for_pursuit_to_settle(ctrl)
     assert len(_switch_presses(_keys(ctrl))) == 1
     assert ctrl.is_secondary_weapon_active()
+
+
+# ---------------------------------------------------------------------------
+# Action item 001, Cycle 7 (2026-09-24): one INFO summary line per pursuit
+# ---------------------------------------------------------------------------
+
+def _summary_lines(caplog, kind):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith(kind + " SUMMARY:")]
+
+
+def test_pursuit_logs_one_summary_line_at_the_cap(monkeypatch, caplog):
+    """The pursuit's outcome used to be rebuilt from DEBUG TRACKPICK lines and
+    ammo transitions (a rack switch read as a 6-to-2 'launch'). One INFO line
+    now carries end reason, duration, scans, locked scans, time to first lock
+    and the ammo reading at both ends."""
+    tracker = _ScriptedTracker([_MISS, _SEEN])      # one scan is about 0.35 s here
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.9)
+    ctrl.set_target_tracker(tracker)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        _wait_for_pursuit_to_settle(ctrl)
+    lines = _summary_lines(caplog, "PURSUIT")
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "end=cap" in line
+    assert "ammo=2->2" in line
+    assert "switched=no" in line
+    assert "first_lock=-" not in line, "the script is locked from the second scan on"
+    assert "locked=0 " not in line
+
+
+def test_pursuit_summary_says_ammo_when_it_ended_on_an_empty_rack(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=0), capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=5.0)
+    ctrl.set_target_tracker(_TrackerStub())
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.pursue_and_engage()
+        _wait_for_pursuit_to_settle(ctrl)
+    (line,) = _summary_lines(caplog, "PURSUIT")
+    assert "end=ammo" in line
+    assert "ammo=0->0" in line
+    assert "switched=yes" in line, "the non-deferred pursuit pressed the switch itself"
+
+
+def test_pursuit_summary_names_an_external_stop(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=30.0)
+    ctrl.set_target_tracker(_TrackerStub())
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(0.5)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    (line,) = _summary_lines(caplog, "PURSUIT")
+    assert "end=external:respawn_detected" in line

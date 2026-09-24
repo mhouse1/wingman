@@ -103,6 +103,9 @@ _CROP = Section(
 # `crops:`), not fixed schema keys — MapOf, not Section, for the same reason.
 _JET_PROFILE = Section(children={"has_padlock": BOOL})
 
+# capture_budget: 0 = unlimited for that dimension.
+_CAPTURE_BUDGET = Section(children={"max_files": _int(0), "max_mb": _num(0)})
+
 
 SCHEMA = Section(
     # "Required" means the program cannot construct itself without the key, not
@@ -187,6 +190,15 @@ SCHEMA = Section(
             "dir": STR,
             "stuck_warn_interval_s": SECONDS,
             "stuck_warn_max_interval_s": SECONDS,
+        }),
+
+        # ADR 146 (2026-09-24) — see config.yaml's own comment on this block.
+        "game_unknown_close": Section(children={
+            "enabled": BOOL,
+            "min_stuck_s": SECONDS,
+            "retry_interval_s": SECONDS,
+            "max_clicks": _int(0),
+            "min_score": FRACTION,
         }),
 
         "respawn_detection": Section(children={
@@ -526,6 +538,12 @@ SCHEMA = Section(
             # never set this key are unaffected). See config.yaml's comment
             # on this key for what it targets and how it was measured.
             "red_mass_exclude_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
+            # Action item 001, Cycle 12 (2026-09-24) — see config.yaml's own
+            # comments on these keys.
+            "red_mass_exclude_zones_pct": Leaf(types=(list,), item_types=(list,)),
+            "red_mass_cluster_select": BOOL,
+            "red_mass_cluster_glyph_window_px": Leaf(types=(list,), item_types=(int,), length=2),
+            "red_mass_cluster_pixel_window_px": Leaf(types=(list,), item_types=(int,), length=3),
             # Optional: None means "same as tracking_hsv.red_upper's hue" (no
             # behavior change). See config.yaml's own comment on this key.
             "red_mass_hue_max": _int(0, 179),
@@ -547,6 +565,10 @@ SCHEMA = Section(
             "local_roi_expand_factor": _num(1.0),
             "local_roi_max_scale": FRACTION,
             "local_roi_reacquire_cycles": _int(0),
+            # Action item 001, Cycle 5 (2026-09-24) — see config.yaml's own
+            # comment on these keys.
+            "local_roi_follow_on_clip": BOOL,
+            "local_roi_follow_min_px": _int(0),
             # HLDD 005 Sustained-Hold Actuation (2026-09-23) — see
             # config.yaml's own comment on this key for the phased rollout.
             "sustained_hold_enabled": BOOL,
@@ -593,6 +615,8 @@ SCHEMA = Section(
             "pursuit_padlock_verify": BOOL,
             "ammo_zero_grace_s": SECONDS,
             "search_resume_delay_s": SECONDS,
+            "search_resume_centre_err": FRACTION,
+            "search_resume_centre_delay_s": SECONDS,
             "empty_confirm_reads": _int(1),
         }),
 
@@ -614,7 +638,22 @@ SCHEMA = Section(
                 # PNG's PURSUING marker overwrites the very pixels that
                 # produced the lock, so it cannot be replayed faithfully).
                 "save_raw_scan": BOOL,
+                # Seconds between archived frames, and a cap per contiguous
+                # encounter — spreads the per-session budget across the
+                # session instead of spending it in the first minutes.
+                "min_interval_s": SECONDS,
+                "max_per_encounter": _int(0),
             }),
+        }),
+
+        # Cross-session disk safety net shared by every capture write site
+        # (wingman/capture_budget.py). Directory keys are paths.
+        "capture_budget": Section(children={
+            "min_free_gb": _num(0),
+            "default": _CAPTURE_BUDGET,
+            "dirs": MapOf(_CAPTURE_BUDGET),
+            "rotated_logs": _CAPTURE_BUDGET,
+            "session_video": _CAPTURE_BUDGET,
         }),
 
         # Design 012: opt-in session video, paired with the BT JSONL trace.

@@ -10,6 +10,7 @@ from pathlib import Path
 import cv2
 from mss import mss
 
+from . import capture_budget
 from .analyzer import GameState, BATTLE_STATES, NOSE_DOWN
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre, draw_crops
@@ -181,6 +182,56 @@ def _summarise_turn(samples) -> str:
     return ", ".join(parts)
 
 
+class _EngagementTally:
+    """Counters behind the one-line `PURSUIT SUMMARY` / `DIVE SUMMARY` INFO log
+    (action item 001, Cycle 7, 2026-09-24).
+
+    Why: the pursuit's outcome — did it get a lock, how soon, did a missile
+    leave — could only be rebuilt from DEBUG `TRACKPICK` lines plus `Ammo
+    missiles:` transitions, and the rebuild is unreliable (a rack switch reads as
+    a 6-to-2 "launch"; INFO-level sessions carry no `TRACKPICK` at all). One line
+    per engagement, at INFO, makes the metric durable and comparable across
+    sessions. Measured motivation: the same tracker gave 5% locked scans in one
+    session and 15% in the next, so per-session outcomes need a denominator that
+    is logged, not reconstructed.
+
+    `scan()` is called once per loop cycle with the tracker's `visible` and the
+    raw missile-ammo reading. The ammo figures are raw HUD readings, so across a
+    rack switch `ammo_last` belongs to the other rack — the line says whether
+    this loop pressed the switch (a press made by the caller before the loop
+    started is not counted). Logging only: nothing here feeds a decision.
+    """
+
+    def __init__(self, clock=time.time) -> None:
+        self._clock = clock
+        self._t0 = clock()
+        self.scans = 0
+        self.locked = 0
+        self.first_lock_s: "float | None" = None
+        self.ammo_first: "int | None" = None
+        self.ammo_last: "int | None" = None
+
+    def scan(self, visible, ammo) -> None:
+        self.scans += 1
+        if visible:
+            self.locked += 1
+            if self.first_lock_s is None:
+                self.first_lock_s = self._clock() - self._t0
+        if ammo is not None:
+            if self.ammo_first is None:
+                self.ammo_first = ammo
+            self.ammo_last = ammo
+
+    def line(self, kind: str, end: str, switched: bool) -> str:
+        share = 100.0 * self.locked / self.scans if self.scans else 0.0
+        first = "-" if self.first_lock_s is None else "%.1fs" % self.first_lock_s
+        ammo = "-" if self.ammo_first is None else "%d->%d" % (self.ammo_first, self.ammo_last)
+        return ("%s SUMMARY: end=%s dur=%.1fs scans=%d locked=%d (%.0f%%) "
+                "first_lock=%s ammo=%s switched=%s"
+                % (kind, end, self._clock() - self._t0, self.scans, self.locked,
+                   share, first, ammo, "yes" if switched else "no"))
+
+
 class Controller:
     def __init__(
         self,
@@ -339,6 +390,11 @@ class Controller:
         # the primary rack, so ADR 088's rearm-abort check must stop trusting
         # it (see eject_and_dive/_eject_descent_control). Reset every dive.
         self._eject_weapon_switched = False
+        # True only while an eject_and_dive is running with its weapon switch
+        # deliberately deferred (mission_su30's pursuit cap). Set at the start
+        # of every dive, cleared when it ends; the ADR 088 rearm-abort checks
+        # read it because a loaded rack is expected there, not a rearm.
+        self._eject_defer_switch = False
 
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
@@ -522,7 +578,17 @@ class Controller:
         # rotating left while the target crossed screen centre (frame 16,
         # err about 0) and reached err=+0.366 by the next lock (frame 17).
         # Named guess, not measured beyond that one 1.07s reacquisition gap.
+        # Shared by the eject dive's heatdive roll loop since 2026-09-24
+        # (operator request; the same immediate-resume showed there: all 13
+        # target holds in the 06:51-07:06 session ended `-> left/search`).
         self._pursuit_search_resume_delay_s = float(_pm.get("search_resume_delay_s", 2.0))
+        # Near-centre extension of the above (operator, 2026-09-24): when the
+        # last visible target error was within centre_err the aircraft is
+        # already on the target, so the neutral hold is centre_delay_s instead.
+        # Measured basis and rationale: roll_on_miss's docstring. Named guesses.
+        self._pursuit_search_resume_centre_err = float(_pm.get("search_resume_centre_err", 0.15))
+        self._pursuit_search_resume_centre_delay_s = float(
+            _pm.get("search_resume_centre_delay_s", 6.0))
         # mission_su30 defers SWITCH_WEAPON until the selected weapon runs out
         # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
         # consecutive ammo==0 reads are required before pressing it. At the
@@ -1062,6 +1128,11 @@ class Controller:
 
                             # Create output directory if it doesn't exist
                             output_dir = Path("tests/test-output")
+                            # Only screenshot_*.png: this folder is shared
+                            # with live_hud.png, output_grid.png and reports.
+                            if not capture_budget.admit(output_dir, "Screenshot hotkey",
+                                                        patterns="screenshot_*.png"):
+                                return
                             output_dir.mkdir(parents=True, exist_ok=True)
 
                             # Generate timestamp filename
@@ -1782,7 +1853,10 @@ class Controller:
         self._roll_hold_reason = "search"
         self._log_roll_hold(prev, "search")
 
-    def roll_on_miss(self, last_seen_ts: "float | None", resume_delay_s: float) -> None:
+    def roll_on_miss(self, last_seen_ts: "float | None", resume_delay_s: float,
+                     last_err: "float | None" = None,
+                     centre_err: "float | None" = None,
+                     centre_delay_s: "float | None" = None) -> None:
         """No target this tick. Within `resume_delay_s` of the last tick one
         was visible, release the roll axis to neutral instead of resuming the
         ROLL_LEFT search default; only after that long unseen (or if none was
@@ -1796,9 +1870,27 @@ class Controller:
         err=+0.366 by frame 17). Neutral rather than "keep the last
         direction": a target that has vanished would otherwise be chased with
         open-loop roll for the whole delay.
+
+        Near-centre extension (operator, 2026-09-24: "it had more than enough
+        time locked onto target but kept forcing left turn, it should have
+        stopped left turn and focused on target"). When the last visible error
+        was within `centre_err` the aircraft is already pointing at the target,
+        so the wait is `centre_delay_s` (if longer) — spinning left after that
+        only turns it away again. Measured on the 07:34-08:24 session with the
+        2.0 s delay in place: the search resumed with the target last seen
+        within +-0.15 of centre in 6 of 10 pursuit cases and 23 of 41 dive
+        cases. All three of last_err, centre_err and centre_delay_s must be
+        given for it to apply.
         """
-        if last_seen_ts is not None and time.time() - last_seen_ts < resume_delay_s:
-            self.release_roll_hold(why="miss within %.1fs of last lock" % resume_delay_s)
+        delay = resume_delay_s
+        near_centre = (last_err is not None and centre_err is not None
+                       and centre_delay_s is not None and abs(last_err) <= centre_err)
+        if near_centre:
+            delay = max(resume_delay_s, centre_delay_s)
+        if last_seen_ts is not None and time.time() - last_seen_ts < delay:
+            self.release_roll_hold(
+                why="miss within %.1fs of last lock%s"
+                    % (delay, ", target was near centre" if near_centre else ""))
         else:
             self.engage_roll_search()
 
@@ -2163,7 +2255,11 @@ class Controller:
             # ADR 136: once heatdive has switched weapons, AMMO_MISSILE reads
             # the secondary loadout, not the rack this check was written for —
             # skip it rather than false-abort on the heat-seeker count.
+            # Also skipped while a weapon switch is deliberately deferred
+            # (eject_and_dive's defer_switch_until_empty): the rack is loaded
+            # by design there, not rearmed.
             if (self._eject_abort_on_rearm and not self._eject_weapon_switched
+                    and not self._eject_defer_switch
                     and self._analyzer is not None):
                 try:
                     _mis = self._analyzer.get_ammo_missiles()
@@ -2547,7 +2643,8 @@ class Controller:
             self._padlock_unknown_correction_attempts, self._padlock_unknown_correction_max)
         self.padlock_camera(hold_seconds=0.1, block=True, ignore_cancel=True)
 
-    def _eject_heatdive_loop(self, stop_event: threading.Event) -> None:
+    def _eject_heatdive_loop(self, stop_event: threading.Event,
+                             defer_switch_until_empty: bool = False) -> None:
         """ADR 136: roll toward the tracked target and fire heat-seekers.
 
         Runs on its own thread alongside eject_and_dive's existing,
@@ -2557,6 +2654,15 @@ class Controller:
         (set by external cancellation — manual takeover, survival hold,
         shutdown), whichever comes first, so it never outlives the dive it
         belongs to.
+
+        defer_switch_until_empty: eject_and_dive did not press SWITCH_WEAPON
+        (mission_su30's pursuit cap, ADR 144 D4). The dive fires whatever is
+        selected and this loop presses the key once, when that weapon's ammo has
+        read 0 for `pursuit_mode.empty_confirm_reads` consecutive cycles — the
+        same rule pursue_and_engage applies, for the same reason (the key is a
+        toggle, so one misread 0 must not swap away a loaded rack). Until the
+        HUD count catches up with that switch it still shows the old rack's 0,
+        so for `ammo_zero_grace_s` after it the loop fires regardless.
         """
         logger.info("Controller: eject heatdive loop started")
         # Convergence telemetry (2026-09-21): the ambient path already logs
@@ -2570,6 +2676,11 @@ class Controller:
         # carry-over from a previous encounter.
         last_err: "float | None" = None
         last_cmd: "str | None" = None
+        last_seen_ts: "float | None" = None
+        last_visible_err: "float | None" = None
+        zero_reads = 0
+        switched_at: "float | None" = None
+        tally = _EngagementTally()
         try:
             while not stop_event.is_set() and not self._eject_stop.is_set():
                 try:
@@ -2578,6 +2689,8 @@ class Controller:
                     err = obs.get("error_norm")
                     cmd = None
                     if obs.get("visible") and err is not None:
+                        last_seen_ts = time.time()
+                        last_visible_err = err
                         # ignore_cancel: eject_and_dive already called
                         # cancel_mission() before this loop ever started, so
                         # self._mission_cancel stays set for the whole dive —
@@ -2591,10 +2704,23 @@ class Controller:
                         # miss tick under the old tap model needed no action —
                         # the previous tap had already self-released. Under a
                         # held key, a miss must be handled explicitly or the
-                        # last-commanded key stays down. engage_roll_search
-                        # itself is the operator's search-default behavior
-                        # (hold ROLL_LEFT_KEY), not a plain release.
-                        self.engage_roll_search()
+                        # last-commanded key stays down.
+                        #
+                        # 2026-09-24, operator: "it had more than enough time
+                        # locked onto target but kept forcing left turn, it
+                        # should have stopped left turn and focused on target".
+                        # Measured (wingman.log 06:51-07:06, this loop): all 13
+                        # target holds ended with `-> left/search` the instant
+                        # the lock dropped — even with the target last seen on
+                        # the RIGHT (err +0.2 to +0.5), i.e. turning away from
+                        # it. roll_on_miss holds neutral for the resume delay
+                        # after a lock and only then falls back to the ROLL_LEFT
+                        # search default (still immediate if nothing was ever
+                        # seen this dive).
+                        self.roll_on_miss(
+                            last_seen_ts, self._pursuit_search_resume_delay_s,
+                            last_visible_err, self._pursuit_search_resume_centre_err,
+                            self._pursuit_search_resume_centre_delay_s)
                     if err is not None:
                         if last_err is not None:
                             converging = abs(err) < abs(last_err)
@@ -2622,11 +2748,33 @@ class Controller:
                             health = self._analyzer.get_health()
                         except Exception:
                             health = None
+                    tally.scan(obs.get("visible"), ammo)
+                    # Deferred weapon switch (ADR 144 D4, 2026-09-24): see this
+                    # method's docstring and pursue_and_engage's identical rule.
+                    if defer_switch_until_empty and not self._eject_weapon_switched:
+                        if ammo == 0:
+                            zero_reads += 1
+                        elif ammo is not None:
+                            zero_reads = 0
+                        if zero_reads >= self._pursuit_empty_confirm_reads:
+                            logger.info(
+                                "Controller: eject heatdive — selected weapon empty "
+                                "(%d consecutive zero reads), switching to the "
+                                "secondary", zero_reads)
+                            self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                            self._eject_weapon_switched = True
+                            switched_at = time.time()
+                            ammo = None
                     # Fire whenever ammo is unreadable (fail open, matching
                     # the pre-ADR-136 default of just firing) or still > 0.
                     # ADR 136 D1 step 4: no lock/tone detection — the game
                     # decides when a held trigger actually releases a shot.
-                    if ammo is None or ammo > 0:
+                    # Also fire while the count is still the pre-switch rack's
+                    # (a deferred switch just happened): a stale 0 there is not
+                    # an empty secondary.
+                    if (ammo is None or ammo > 0
+                            or (switched_at is not None
+                                and time.time() - switched_at < self._pursuit_ammo_grace_s)):
                         self.fire_active_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
                     # HLDD 005 fix (2026-09-21): otherwise live_hud.png goes
                     # dark for the whole dive — TrackingHudHandler.tick(), the
@@ -2652,9 +2800,15 @@ class Controller:
             # any reason, must release a held roll key — no-op when
             # sustained_hold was never enabled (nothing is ever held then).
             self.release_roll_hold()
+            logger.info(tally.line(
+                "DIVE",
+                ("external:%s" % (self._eject_stop_reason or "unknown"))
+                if self._eject_stop.is_set() else "dive-end",
+                switched_at is not None))
             logger.info("Controller: eject heatdive loop stopped")
 
-    def eject_and_dive(self, on_complete=None, weapon_already_switched: bool = False):
+    def eject_and_dive(self, on_complete=None, weapon_already_switched: bool = False,
+                       defer_switch_until_empty: bool = False):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
         NOSE_DOWN is held until telemetry confirms a steep dive and then kept
@@ -2675,6 +2829,17 @@ class Controller:
         weapon was never observed selected in game, consistent with a
         toggle-style binding being pressed back to primary.
 
+        defer_switch_until_empty: mission_su30's pursuit hit its cap with the
+        original weapon still loaded (ADR 144 D4, revised 2026-09-24 after a
+        'v' screenshot at 08:20:14 showed the dive running on the 2/2
+        secondary with the 6/6 primary untouched). Presses no SWITCH_WEAPON at
+        the start and leaves `_eject_weapon_switched` alone; the heatdive loop
+        fires the selected weapon and switches once when it is empty. The dive
+        itself is unchanged: the two ADR 088 rearm-abort checks, whose premise
+        is an EMPTY rack, are skipped while the switch is deferred — otherwise
+        a loaded rack would read as "rearmed" and abort the dive, which would
+        be a change to what the dive does, not to when the weapon switches.
+
         No-ops (with a debug log) if an eject sequence is already in progress —
         callers should not start a second _run() thread racing the first over the
         same NOSE_DOWN/AFTERBURNER key state.
@@ -2682,13 +2847,18 @@ class Controller:
         if self._ejecting.is_set():
             logger.debug("Controller: eject_and_dive already in progress — ignoring duplicate trigger")
             return
-        logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
+        if defer_switch_until_empty:
+            logger.info("\033[91m🚀 PURSUIT CAP — cancelling mission and ejecting with the "
+                        "current weapon still loaded (switch deferred until it is empty)\033[0m")
+        else:
+            logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
         self._eject_stop_reason = ""
         self._eject_stop.clear()
         self._eject_held_keys.clear()
         self._eject_phase_exit_reason = ""
-        if not weapon_already_switched:
+        self._eject_defer_switch = bool(defer_switch_until_empty)
+        if not weapon_already_switched and not defer_switch_until_empty:
             # ADR 136: once heatdive switches to the secondary loadout, the
             # AMMO_MISSILE crop no longer reads the primary rack — reset each
             # dive so a stale True from a previous eject can't suppress a real
@@ -2737,7 +2907,7 @@ class Controller:
                 # roll/fire alongside the descent control below — the pitch
                 # loop itself is completely untouched by this addition.
                 if self._eject_cl_heatdive_enabled and self._target_tracker is not None:
-                    if not weapon_already_switched:
+                    if not weapon_already_switched and not defer_switch_until_empty:
                         # ignore_cancel: cancel_mission() already ran above,
                         # before this thread even started (same reason as the
                         # heatdive loop's own presses — see _eject_heatdive_loop).
@@ -2757,7 +2927,8 @@ class Controller:
                         self.ensure_padlock_off()
                     heatdive_stop = threading.Event()
                     heatdive_thread = threading.Thread(
-                        target=self._eject_heatdive_loop, args=(heatdive_stop,), daemon=True)
+                        target=self._eject_heatdive_loop,
+                        args=(heatdive_stop, defer_switch_until_empty), daemon=True)
                     heatdive_thread.start()
 
                 # ADR 069: one controller owns the whole descent — rotation
@@ -2847,6 +3018,7 @@ class Controller:
                                 break
                         if not (self._eject_abort_on_rearm
                                 and not self._eject_weapon_switched
+                                and not self._eject_defer_switch
                                 and self._analyzer is not None):
                             continue
                         try:
@@ -2873,6 +3045,7 @@ class Controller:
                     heatdive_stop.set()
                     heatdive_thread.join(timeout=2.0)
                 self._ejecting.clear()
+                self._eject_defer_switch = False
                 self._eject_nose_held_total_s = None
                 self._eject_nose_down_since = None
                 if self._simulate_os_input:
@@ -3000,6 +3173,9 @@ class Controller:
         def _run():
             self._pursuing.set()
             fall_through = False
+            tally: "_EngagementTally | None" = None
+            end_reason = "external"
+            switched_here = False
             try:
                 mission_exit_deadline = time.time() + 2.0
                 while self.is_mission_running() and time.time() < mission_exit_deadline:
@@ -3012,12 +3188,15 @@ class Controller:
                 if not weapon_already_switched and not defer_switch_until_empty:
                     self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
                     self._eject_weapon_switched = True
+                    switched_here = True
                 if self._pursuit_padlock_verify:
                     self.ensure_padlock_off()
 
                 logger.info("Controller: pursue_and_engage — tracking engaged, both axes free")
                 start = time.time()
+                tally = _EngagementTally()
                 last_seen_ts = None
+                last_visible_err = None
                 zero_reads = 0
                 switched_at = None
                 while not self._eject_stop.wait(timeout=0.2):
@@ -3027,6 +3206,7 @@ class Controller:
                             "(%.0fs) reached, falling through to eject_and_dive",
                             self._pursuit_max_duration_s)
                         fall_through = True
+                        end_reason = "cap"
                         break
                     try:
                         frame = self._capture.grab_from_thread()
@@ -3036,12 +3216,15 @@ class Controller:
                         err_y = obs.get("error_norm_y")
                         if visible and err is not None:
                             last_seen_ts = time.time()
+                            last_visible_err = err
                             self.orient_nose_to_target(
                                 err, ignore_cancel=True,
                                 sustained_hold=self._sustained_hold_enabled)
                         elif self._sustained_hold_enabled:
                             self.roll_on_miss(
-                                last_seen_ts, self._pursuit_search_resume_delay_s)
+                                last_seen_ts, self._pursuit_search_resume_delay_s,
+                                last_visible_err, self._pursuit_search_resume_centre_err,
+                                self._pursuit_search_resume_centre_delay_s)
                         if visible and err_y is not None:
                             self.orient_pitch_to_target(
                                 err_y, ignore_cancel=True,
@@ -3064,6 +3247,7 @@ class Controller:
                                 health = self._analyzer.get_health()
                             except Exception:
                                 health = None
+                        tally.scan(visible, ammo)
                         # mission_su30 (ADR 144 D4, 2026-09-24): the switch is
                         # deferred until the selected weapon runs out. Only a
                         # run of consecutive 0 reads counts — SWITCH_WEAPON is
@@ -3086,6 +3270,7 @@ class Controller:
                                     hold_seconds=0.1, block=True, ignore_cancel=True)
                                 self._eject_weapon_switched = True
                                 switched_at = time.time()
+                                switched_here = True
                                 primary_pending = False
                                 # The count just read belongs to the rack that was
                                 # switched away from; the HUD needs a moment to
@@ -3099,6 +3284,7 @@ class Controller:
                                     "Controller: pursue_and_engage — ammo exhausted, "
                                     "falling through to eject_and_dive")
                                 fall_through = True
+                                end_reason = "ammo"
                                 break
                             # Still inside the post-switch grace period (see
                             # this class's own __init__ comment on
@@ -3126,6 +3312,12 @@ class Controller:
                 # if this pursuit is handing off to it, and must not inherit
                 # a roll/pitch key this loop was holding.
                 self.release_tracking_holds()
+                if tally is not None:
+                    logger.info(tally.line(
+                        "PURSUIT",
+                        end_reason if fall_through
+                        else "external:%s" % (self._eject_stop_reason or "unknown"),
+                        switched_here))
                 self._pursuing.clear()
                 if fall_through:
                     # weapon_already_switched: both fall-through reasons
@@ -3134,13 +3326,18 @@ class Controller:
                     # encounter — see eject_and_dive's own docstring for why
                     # this must not press the key a second time. Not so when
                     # the switch was deferred: a max-duration fall-through can
-                    # land while the original weapon is still selected, and
-                    # then eject_and_dive must make its own switch, which is
-                    # what its heatdive expects.
+                    # land while the original weapon is still selected. It used
+                    # to hand eject_and_dive `False` there, so the dive pressed
+                    # SWITCH_WEAPON with the primary still loaded (operator,
+                    # 2026-09-24, 'v' screenshot 08:20:14: 6/6 primary untouched,
+                    # R-74 secondary selected; five such presses in that log).
+                    # Now the dive is told the switch is still deferred, and its
+                    # heatdive loop makes it once the weapon is empty.
+                    _switched = self._eject_weapon_switched
                     self.eject_and_dive(
                         on_complete=on_complete,
-                        weapon_already_switched=(self._eject_weapon_switched
-                                                 if defer_switch_until_empty else True))
+                        weapon_already_switched=(_switched if defer_switch_until_empty else True),
+                        defer_switch_until_empty=(defer_switch_until_empty and not _switched))
                 else:
                     logger.info(
                         "Controller: pursue_and_engage — stopped externally "
@@ -6425,6 +6622,7 @@ class Controller:
         # at trigger_eject_and_dive(), so it could read stale-True for an
         # entire following life with no further eject in it.
         self._eject_weapon_switched = False
+        self._eject_defer_switch = False
         # ADR 140 D2: same reasoning applies to padlock state — a respawn
         # (this method's every real caller, tick_handlers.py) restores a
         # forward/chase camera, the highest-confidence signal this design

@@ -601,6 +601,53 @@ class _XKeyEvent:
         self.state = state
 
 
+# How often a listener reports its tally (see _KeyTally). A named guess.
+_TALLY_INTERVAL_S = 60.0
+
+
+class _KeyTally:
+    """What one hotkey listener has seen since its last report (Cycle 9,
+    2026-09-24). Logging only: nothing reads it but the log.
+
+    Why: synthetic `z` and `v` presses to the nested display were ignored twice
+    in one day (an earlier trial and an ADR 146 replay run) while four other runs
+    acknowledged `z`, and the log could not say whether the listener never
+    received the event or received it and dropped it, because it recorded no
+    received events at all. On the injection display wingman's own injected keys
+    are recorded too (about three a second while it fires), so a listener that is
+    alive shows a non-zero `seen` even when nobody presses a hotkey, and a deaf
+    one shows zero. It is reported from the stop-watcher thread, not the record
+    loop, so it keeps ticking when the record loop stops delivering.
+    """
+
+    def __init__(self, display: str, clock=time.time) -> None:
+        self.display = display
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._since = clock()
+        self._seen = 0
+        self._matched = 0
+        self._delivered = 0
+
+    def note(self, matched: bool, delivered: bool) -> None:
+        with self._lock:
+            self._seen += 1
+            self._matched += bool(matched)
+            self._delivered += bool(delivered)
+
+    def report(self) -> str:
+        """One line for the interval just ended, and start the next interval."""
+        with self._lock:
+            now = self._clock()
+            line = ("XKey[%s]: %d KeyPress events in the last %.0fs "
+                    "(%d matched a registered key, %d delivered)"
+                    % (self.display, self._seen, now - self._since,
+                       self._matched, self._delivered))
+            self._since = now
+            self._seen = self._matched = self._delivered = 0
+        return line
+
+
 class _LinuxXTestKeyboard:
     """Drop-in shim for the `keyboard` module on Linux.
 
@@ -768,10 +815,16 @@ class _LinuxXTestKeyboard:
                 # watcher would go on to disable the *live* record context,
                 # silently killing hotkeys — and with them the SAF-001 manual
                 # takeover path. Found by ruff B023 (Research 006).
-                def _stop_watcher(iter_done=iter_done, d_ctrl=d_ctrl, ctx=ctx):
+                tally = _KeyTally(display_name)
+
+                def _stop_watcher(iter_done=iter_done, d_ctrl=d_ctrl, ctx=ctx, tally=tally):
+                    next_report = time.time() + _TALLY_INTERVAL_S
                     while not self._stop.is_set() and not iter_done.is_set():
                         if self._stop.wait(timeout=0.5):
                             break
+                        if time.time() >= next_report:
+                            logger.debug("%s", tally.report())
+                            next_report += _TALLY_INTERVAL_S
                     if iter_done.is_set() and not self._stop.is_set():
                         return
                     try:
@@ -789,7 +842,8 @@ class _LinuxXTestKeyboard:
                 # actually outlive the iteration — bound explicitly anyway so the
                 # rule holds for every closure in this loop rather than relying on
                 # a call-ordering argument that a later edit could invalidate.
-                def _record_handler(reply, _ef=_ef, d_rec=d_rec, display_name=display_name):
+                def _record_handler(reply, _ef=_ef, d_rec=d_rec, display_name=display_name,
+                                    tally=tally):
                     if reply.category != _record.FromServer:
                         return
                     data = reply.data
@@ -816,12 +870,22 @@ class _LinuxXTestKeyboard:
 
                         entry = self._grabbed.get(event.detail)
                         if not entry:
+                            tally.note(False, False)
                             continue
                         key_name, cb = entry
                         if not should_deliver_hotkey(
                                 display_name, key_name,
                                 getattr(event, "state", 0)):
+                            tally.note(True, False)
+                            # Wingman's own injected keys are filtered on every
+                            # press by design; a registered key that is NOT one of
+                            # them and was still dropped is the case worth a line.
+                            if key_name.lower() not in _injected_keys:
+                                logger.debug(
+                                    "XKey: %r on %s not delivered (state=%#x)",
+                                    key_name, display_name, getattr(event, "state", 0))
                             continue
+                        tally.note(True, True)
                         ev_obj = _XKeyEvent(name=key_name,
                                             is_injected=bool(event.send_event),
                                             display=display_name,

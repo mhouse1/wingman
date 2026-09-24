@@ -144,12 +144,23 @@ empties:
   a switch by seconds.
 
 If `pursuit_max_duration_s` ends the encounter before the weapon ran out, the
-fall-through hands `eject_and_dive` the flag's real value rather than claiming a
-switch happened: the dive's heatdive needs the secondary selected and makes its
-own press when told it is not already switched. So a life that times out with the
-spawn weapon still loaded is switched by the dive, not by this mission — a
-boundary of "until it runs out" that is `eject_and_dive`'s existing rule, not
-changed here.
+fall-through calls `eject_and_dive(defer_switch_until_empty=True)`. The dive
+presses no `SWITCH_WEAPON` at its start and leaves the flag alone; its heatdive
+loop fires the selected weapon and presses the key once, when that weapon has read
+0 for `empty_confirm_reads` consecutive cycles (the same confirmation rule as
+pursuit), then fires regardless for `ammo_zero_grace_s` while the HUD count
+catches up. *Revised 2026-09-24 (operator):* the first version of this paragraph
+let the dive make its own switch at the cap, calling it an existing
+`eject_and_dive` rule. That switched away from a loaded rack on every capped
+pursuit (06:57:29, 07:02:45, 07:05:17, 08:16:24 and 08:19:57), and the last one
+was caught by the operator's `v` screenshot at 08:20:14: the 2/2 secondary
+selected in the dive, the 6/6 primary untouched. The dive itself is unchanged
+otherwise — it still dives. The two ADR 088 rearm-abort checks, whose premise is
+an EMPTY rack, stand down while the switch is deferred (`_eject_defer_switch`);
+without that a loaded rack would read as "rearmed" and abort the dive, which
+would change what the dive does rather than when the weapon switches. Whether a
+capped pursuit should dive at all with missiles left is a separate question this
+ADR does not answer.
 
 `weapon_already_switched` (added earlier for this mission's step 2) stays on
 `pursue_and_engage` with its old meaning; nothing in this mission passes it now.
@@ -269,15 +280,34 @@ starts).** Measured from that log:
   already set); 0 logged the old "switching to the secondary weapon". No
   `switch_weapon` press occurred at any mission start.
 - *The only three presses were `eject_and_dive`'s own,* at the 20 s pursuit cap
-  (06:57:29, 07:02:45, 07:05:17), with the spawn weapon still loaded. That is
-  the boundary written into D4; it is exercised on every timed-out pursuit, so it
-  is not a rare case. Whether the cap should switch is the operator's call.
+  (06:57:29, 07:02:45, 07:05:17), with the spawn weapon still loaded. This was
+  written up here as a boundary and left to the operator; the operator then
+  objected (`v` screenshot 08:20:14, two more such presses at 08:16:24 and
+  08:19:57 in the 07:34-08:24 session) and D4 now defers the dive's switch too.
+  That fix was then run live (2026-09-24 08:41-08:56): 6 capped pursuits, 6 `PURSUIT
+  CAP ... switch deferred until it is empty` lines and 0 `switch_weapon` presses in the
+  whole run; the ammo reading stayed on the 6-rack (one launch, 6 to 5) instead of
+  falling to the 2-rack within 0.4 s of a press. Confirmed.
 - *The spawn weapon did not launch with no lock.* Its `BT[active]` reading never
-  fell below 2 in any life (a reading of 6 appears only after a dive's switch, or
-  stale at the start of a life; not investigated further). This answers the open
-  question above for this weapon.
+  decreased within a life, in this session or in the 07:34-08:24 one. Which rack
+  is selected at spawn differs by session (this session's lives read 2 before the
+  cap's switch; the 08:18-08:19 life read 6 through the whole climb and pursuit and
+  2 within 0.4 s of the cap's `g`), so the reading follows the operator's loadout
+  order and the selected rack. This answers the open question above.
 - *The deferred switch itself was not exercised:* 0 "selected weapon empty"
   lines, because the spawn weapon never emptied. Covered by unit tests only.
+  **Update 2026-09-24 11:10: exercised live, in the next session (the 10:51
+  run).** One complete life on the 6-rack: the reading went 6 (11:05:53), then
+  5, 4, 3, 2 in pursuit (11:06:50 to 11:06:55); the pursuit cap at 11:07:01
+  pressed nothing (`PURSUIT CAP ... switch deferred until it is empty`); the
+  dive kept the same rack and fired 2 to 1 (11:07:20) and 1 to 0 (11:07:22.03);
+  `selected weapon empty (3 consecutive zero reads)` followed at 11:07:22.47
+  with one `switch_weapon` press, and the reading was 2 (the secondary) at
+  11:07:23.5. All six primary missiles were used before the only switch of the
+  life, which is the operator's requirement. A second life repeated it (cap at
+  11:17:36 with no press; the dive read 5, 4, 3, 2, 1, 0; one press at
+  11:18:02.86). By 11:18 the run had 11 pursuit caps and 2 presses, both the
+  empty-rack press.
 - *Pursuit never had a target in view* in any of the 5 pursuits (0 locks), and 2
   ended in death with incoming-missile warnings before them. Neither bears on D4.
 

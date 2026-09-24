@@ -1294,6 +1294,55 @@ class TestHudRendererArchive:
         assert renderer._archive_max == 5
         assert renderer._archive_save_raw_scan is False     # opt-in
 
+    def test_min_interval_throttles_archive(self, tmp_path, monkeypatch):
+        """2026-09-24: one frame per render spent the session cap in minutes."""
+        from wingman import hud
+        archive_dir = tmp_path / "archive"
+        renderer = hud.HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                    archive_enabled=True, archive_dir=str(archive_dir),
+                                    archive_min_interval_s=5.0)
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        clock = iter([100.0, 102.0, 104.9, 105.0, 106.0])
+        monkeypatch.setattr(hud.time, "time", lambda: next(clock))
+        for _ in range(5):
+            renderer.maybe_render(frame, None, "GAME_BATTLE_EJECT",
+                                  None, None, None).join(timeout=5)
+        assert len(list(archive_dir.glob("*.png"))) == 2     # t=100 and t=105
+
+    def test_encounter_cap_resets_when_encounter_ends(self, tmp_path):
+        from wingman.hud import HudRenderer
+        archive_dir = tmp_path / "archive"
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                archive_enabled=True, archive_dir=str(archive_dir),
+                                archive_max_per_encounter=2)
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        states = ["PURSUIT_MODE"] * 4 + ["GAME_BATTLE"] + ["PURSUIT_MODE"] * 3
+        for state in states:
+            renderer.maybe_render(frame, None, state, None, None, None).join(timeout=5)
+        assert len(list(archive_dir.glob("*.png"))) == 4     # 2 per encounter
+
+    def test_archive_skipped_when_budget_refuses(self, tmp_path, monkeypatch):
+        from wingman import capture_budget
+        from wingman.hud import HudRenderer
+        monkeypatch.setattr(capture_budget, "admit", lambda *a, **k: False)
+        archive_dir = tmp_path / "archive"
+        renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                archive_enabled=True, archive_dir=str(archive_dir))
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        renderer.maybe_render(frame, None, "PURSUIT_MODE", None, None, None).join(timeout=5)
+        assert not archive_dir.exists() or not list(archive_dir.glob("*.png"))
+        assert renderer._archive_count == 0
+
+    def test_from_config_reads_throttle_keys(self, tmp_path):
+        from wingman.hud import HudRenderer
+        cfg = {"hud": {"enabled": True, "output_path": str(tmp_path / "o.png"),
+                        "target_tracking_archive": {"enabled": True,
+                                                     "min_interval_s": 5.0,
+                                                     "max_per_encounter": 12}}}
+        r = HudRenderer.from_config(cfg)
+        assert r._archive_min_interval == 5.0
+        assert r._archive_max_per_encounter == 12
+
     def test_from_config_reads_save_raw_scan(self, tmp_path):
         from wingman.hud import HudRenderer
         cfg = {"hud": {"enabled": True, "output_path": str(tmp_path / "o.png"),
