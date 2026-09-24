@@ -1687,10 +1687,33 @@ pursuits with any lock and 5% to 15% locked-scan share with unchanged code, so "
 suggestive, not a measured improvement. The dive share did not rise. The operator restarted their own
 session at 17:26 with the same settings; its archived log is the next evidence.
 
+### Live check 2 (interim: the operator's own session from 17:26, first 17 minutes, read-only copy)
+
+1,565 `TRACKPICK` ticks, 0 errors, 5 respawns, 7 pursuits and 6 dives. An independent sample, taken
+while the session was still running; final numbers to follow from its archive.
+
+| Question | Result |
+|----------|--------|
+| Acquisitions outside the old box | **16 of 22 (73%)**: 7 below, 6 left, 3 in corners (session 1: 10 of 14, 71%) |
+| Lock ticks in an excluded HUD zone | 0 of 161 |
+| Cluster choice exercised | `clu=1` on 152 lock ticks, `2` on 8, `3` on 1 |
+| Pursuits | locked scans 74 of 399 (18.5%); 4 of 7 pursuits had a lock (62%, 9%, 0%, 0%, 32%, 25%, 0% of scans); 2 of 7 fired (4 to 1, 4 to 2) |
+| Dives | locked scans 70 of 770 (9.1%); no rise over the 11.5% baseline |
+
+Pooled with live check 1: 36 acquisitions, 26 outside the old box (72%); pursuits 10, locked scans
+140 of 572 (24.5%) against the pooled 5.8% before the change, 7 of 10 with any lock (before: 18 of
+60, 30%) and 5 of 10 firing (before: 6 of 60, 10%, since 08:42: 0 of 6, 1 of 22, 4 of 12, 1 of 20); dive share unchanged. The pattern
+is the one the geometry predicts: the pursuit flies level and far from the targets, whose nameplates
+sit low and outside the old box, while the dive points the nose down and already brought them into it.
+Still small numbers, and the same code has shown 5% to 15% locked-scan share between sessions, so read
+the pursuit gain as strong evidence for the mechanism and encouraging for the outcome, not as a measured
+effect size.
+
 ### Status
 
 Implemented, 13 unit tests (`tests/test_acquisition_clusters.py`), validated offline as above,
-config on, one short live check as above. Live status: mechanism confirmed, outcome not yet measured.
+config on, two live samples (6.5 min and 17 min so far). Live status: mechanism confirmed twice, pursuit
+outcome encouraging, dive outcome unchanged; the operator's archive will give the final numbers.
 
 ---
 
