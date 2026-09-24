@@ -387,6 +387,14 @@ class Controller:
         self._boresight_thread: threading.Thread | None = None
         self._boresight_lifecycle_lock = threading.Lock()
         self._boresight_lifecycle_timeout_s = 2.0
+        # ADR 145: the JAS39 cloak loop — SPECIAL_ABILITY pressed on a fixed
+        # interval. Its own event, thread and lifecycle lock, for the reason
+        # boresight has them: it runs beside an engagement loop and must share
+        # nothing with it.
+        self._cloak_stop: threading.Event | None = None
+        self._cloak_thread: threading.Thread | None = None
+        self._cloak_lifecycle_lock = threading.Lock()
+        self._cloak_lifecycle_timeout_s = 2.0
         self._target_painting_mode = target_painting_mode
         self._simulate_os_input = bool(simulate_os_input)
         self._disable_hotkeys = bool(disable_hotkeys)
@@ -661,7 +669,7 @@ class Controller:
         self._loiter_tick_s = float(_lo.get("tick_s", 1.0))
         # ADR 144: mission_su30's block. Which mission battle entry launches
         # comes from the same ControllerConfig; unknown names fall back to j20
-        # (the schema already restricts the YAML to j20/su30).
+        # (the schema already restricts the YAML to j20/su30/jas39).
         self._default_mission = str(getattr(config, "default_mission", "j20"))
         _su = getattr(config, "su30", None) or {}
         self._su30_climb_alt_m = float(_su.get("climb_alt_m", 3000))
@@ -677,6 +685,12 @@ class Controller:
         # scripted climb does not burn the afterburner fuel a missile alert
         # would need (ADR 075). Unset means no reserve, as for the tree.
         self._su30_fuel_reserve_pct = float(_cl_cfg.get("fuel_reserve_pct", 0.0))
+        # ADR 145: mission_jas39's block. The turn guard is the same 10 s J20
+        # flies (ADR 132), read from this block so that retuning J20's
+        # mission.j20_turn_guard_s does not silently retune this mission too.
+        _jas = getattr(config, "jas39", None) or {}
+        self._jas39_turn_guard_s = float(_jas.get("turn_guard_s", 10.0))
+        self._jas39_cloak_interval_s = float(_jas.get("cloak_press_interval_s", 3.0))
         self._climb_observe_s = float(_cl_cfg.get("pulse_observe_s", 2.5))
         self._climb_min_rate = float(_cl_cfg.get("min_climb_rate", 30.0))
         # ADR 076 d3: over-rotation ceiling. The spawn guard can hand the
@@ -907,18 +921,24 @@ class Controller:
                         # 'u' here is the player asking for the mission NOW
                         # (e.g. after taking over during the Good-Luck wait) and
                         # must work — the old state-based echo check ate those.
-                        logger.info("Controller: '%s' key pressed - starting J20 mission (state=%s)",
-                                    MISSION_J20_KEY,
+                        logger.info("Controller: '%s' key pressed - starting the configured mission "
+                                    "(%s, state=%s)",
+                                    MISSION_J20_KEY, self._default_mission,
                                     current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
                         # Force FSM into GAME_BATTLE so lobby-only background loops (quick-scan
                         # stall-ESC, GAME_LOBBY escape loop) stop treating this as an idle lobby.
                         if self._analyzer is not None and current_state != GameState.GAME_BATTLE:
                             if not self._analyzer.trigger_event("manual_force_battle"):
                                 logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                    self._set_last_mission("j20")
-                    threading.Thread(target=self.mission_j20, daemon=True).start()
+                    # ADR 145: 'u' starts whichever mission mission.default_mission
+                    # names — the same one battle entry launches — rather than J20
+                    # by name. The config picks the mission, so a new mission needs
+                    # no hotkey of its own. With the default set to j20 this is
+                    # exactly the old behaviour.
+                    self._start_default_mission()
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to start J20 mission", MISSION_J20_KEY)
+                logger.info("Controller: registered hotkey '%s' to start the configured mission (%s)",
+                            MISSION_J20_KEY, self._default_mission)
             except Exception:
                 logger.exception("Controller: failed to register J20 mission hotkey")
 
@@ -1859,6 +1879,23 @@ class Controller:
         """Press SPECIAL_ABILITY to reload flares (triggered when flare count == 2)."""
         logger.info("\033[93m🔥 Reloading flares via SPECIAL_ABILITY key\033[0m")
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
+
+    def activate_special_weapon(self, block: bool = True):
+        """Press SPECIAL_ABILITY once: the JAS39's cloak (ADR 145).
+
+        The same key and the same 0.1 s tap as reload_flares; what the ability
+        does depends on the airframe. The tap length is hard-coded, as it is for
+        every other tap wingman makes (fire, padlock, weapon switch): long
+        enough for the game to register it, and far shorter than the cloak
+        loop's interval, so presses never overlap. There is no log line here —
+        the cloak loop presses every few seconds, and _execute_key_press
+        already logs each press at DEBUG.
+
+        Goes through _execute_key_press, which suppresses every key except
+        flares during manual takeover (SAF-001).
+        """
+        self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block,
+                                action_name='activate_special_weapon')
 
     def _eject_key(self, press: bool, key: str, note: str = "eject_and_dive") -> None:
         """Press or release a key inside the eject sequence, honoring replay simulation.
@@ -3203,6 +3240,87 @@ class Controller:
         finally:
             if self._boresight_lifecycle_lock.locked():
                 self._boresight_lifecycle_lock.release()
+
+    def start_cloak_loop(self):
+        """Start the JAS39 cloak loop (ADR 145, docs/missions/jas39.md).
+
+        Presses SPECIAL_ABILITY at once, then every
+        jas39_mission.cloak_press_interval_s. Wingman has no signal for when
+        the ability is off cooldown, so the loop keeps pressing: a press during
+        the cooldown does nothing in game, and on the JAS39 a press while the
+        cloak is up does not turn it off (operator, 2026-09-24). The cloak
+        therefore comes back within one interval of being available.
+
+        The same shape and discipline as start_boresight_engage_loop: its own
+        stop event, thread and lifecycle lock, start and stop serialised
+        (ADR 118), and it ends on _mission_cancel as well as on its own stop.
+        """
+        if not self._cloak_lifecycle_lock.acquire(timeout=self._cloak_lifecycle_timeout_s):
+            logger.warning("Controller: cloak_loop start — lifecycle lock busy, "
+                           "skipping start")
+            return
+        try:
+            self._start_cloak_locked()
+        finally:
+            if self._cloak_lifecycle_lock.locked():
+                self._cloak_lifecycle_lock.release()
+
+    def _start_cloak_locked(self):
+        """The body of the start, with the lifecycle lock already held."""
+        thread = self._cloak_thread
+        if (self._cloak_stop is not None and not self._cloak_stop.is_set()
+                and thread is not None and thread.is_alive()):
+            logger.debug("Controller: cloak_loop already running")
+            return
+
+        self._cloak_stop = threading.Event()
+        stop = self._cloak_stop
+        interval = self._jas39_cloak_interval_s
+
+        def _cloak_loop():
+            presses = 0
+            logger.info("Controller: cloak loop started (%s every %.1fs)",
+                        SPECIAL_ABILITY, interval)
+            try:
+                while not stop.is_set() and not self._mission_cancel.is_set():
+                    pressed_at = time.monotonic()
+                    self.activate_special_weapon(block=True)
+                    presses += 1
+                    # Wait out the rest of the interval in 0.1 s slices, so a
+                    # stop or a cancel ends the loop within a slice rather than
+                    # a whole interval later.
+                    while time.monotonic() - pressed_at < interval:
+                        if stop.wait(timeout=0.1) or self._mission_cancel.is_set():
+                            break
+            finally:
+                logger.info("Controller: cloak loop stopped after %d press(es)", presses)
+
+        self._cloak_thread = threading.Thread(target=_cloak_loop, daemon=True)
+        self._cloak_thread.start()
+
+    def stop_cloak_loop(self):
+        """Stop the JAS39 cloak loop.
+
+        Serialised against the start, and the join is guarded by `is_alive()`,
+        for the reason ADR 118 gives for search_and_destroy: a thread assigned
+        but not yet started cannot be joined.
+        """
+        if not self._cloak_lifecycle_lock.acquire(timeout=self._cloak_lifecycle_timeout_s):
+            logger.warning("Controller: cloak_loop stop — lifecycle lock busy, "
+                           "leaving the loop running")
+            return
+        try:
+            if self._cloak_stop is None or self._cloak_stop.is_set():
+                logger.debug("Controller: cloak_loop not running")
+                return
+            self._cloak_stop.set()
+            t = self._cloak_thread
+            if t is not None and t.is_alive():
+                t.join(timeout=1.0)
+            self._cloak_thread = None
+        finally:
+            if self._cloak_lifecycle_lock.locked():
+                self._cloak_lifecycle_lock.release()
 
     def disengage_roll_right(self, duration: float = 10.0):
         """Cancel mission maneuvers then hold ROLL_RIGHT_KEY for `duration` seconds.
@@ -5719,6 +5837,93 @@ class Controller:
                                weapon_already_switched=True)
         return True
 
+    def mission_jas39(self):
+        """JAS39 mission (ADR 145, docs/missions/jas39.md): mission_j20 plus
+        the cloak.
+
+        Four steps, one per bullet of the spec:
+
+          1. spawn heading    arm_turn_guard(turn_guard_s), as J20 (ADR 132)
+          2. engage           start_search_and_destroy_loop, as J20
+          3. cloak            start_cloak_loop: SPECIAL_ABILITY every
+                              cloak_press_interval_s, so the cloak comes back
+                              as soon as it is off cooldown
+          4. run until cancelled
+
+        Everything else a JAS39 life does (climbing, engaging, evading, the
+        boundary turn, disengage, the missiles-empty response) is shared
+        behavior, exactly as for J20 (docs/missions/README.md section 3).
+
+        It has no hotkey of its own. Setting mission.default_mission to jas39
+        makes battle entry, the 'u' hotkey and the respawn restart launch it.
+        Like mission_j20, it skips instead of preempting when a mission
+        already holds the lock.
+
+        Compatible Jets: JAS39
+        """
+        acquired = self._mission_lock.acquire(blocking=False)
+        if not acquired:
+            logger.warning("\033[91mController: mission_jas39 already in progress, "
+                           "skipping (lock held)\033[0m")
+            return
+
+        logger.info("\033[92mController: mission_jas39 - starting mission sequence "
+                    "(lock acquired)\033[0m")
+        # Step 1 is armed here, at the mission, for mission_j20's reason:
+        # battle entry and every respawn restart come through this one point.
+        logger.info("Controller: mission_jas39 - step 1/4: %.0fs turn guard, "
+                    "flying the spawn heading", self._jas39_turn_guard_s)
+        self.arm_turn_guard(self._jas39_turn_guard_s)
+        self._mission_complete.clear()
+        self._mission_cancel.clear()
+
+        def _mission_runner():
+            try:
+                logger.info("Controller: mission_jas39 - step 2/4: engaging with "
+                            "search_and_destroy")
+                self.start_search_and_destroy_loop()
+                logger.info("Controller: mission_jas39 - step 3/4: cloak loop on "
+                            "(%s every %.1fs)", SPECIAL_ABILITY,
+                            self._jas39_cloak_interval_s)
+                self.start_cloak_loop()
+                logger.info("Controller: mission_jas39 - step 4/4: running until "
+                            "cancelled")
+                while not self._mission_cancel.wait(timeout=0.5):
+                    if self._mission_exit_requested():
+                        logger.info("Controller: mission_jas39 - exit requested")
+                        break
+                logger.info("Controller: mission_jas39 - cancelled, stopping loops")
+            except Exception:
+                logger.exception("Controller: mission_jas39 failed")
+            finally:
+                # Every exit path ends both loops with the mission that owns
+                # them: a loop that outlives its mission keeps pressing its key
+                # into the next life. Each stop is guarded on its own, so one
+                # that fails can neither skip the other nor keep the lock held.
+                for stop in (self.stop_cloak_loop, self.stop_search_and_destroy_loop):
+                    try:
+                        stop()
+                    except Exception:
+                        logger.exception("Controller: mission_jas39 - loop stop failed")
+                self._mission_complete.set()
+                if self._mission_lock.locked():
+                    self._mission_lock.release()
+                    logger.info("\033[91mController: mission_jas39 - lock released\033[0m")
+
+        mission_a = threading.Thread(target=_mission_runner, daemon=True)
+        mission_a.start()
+
+        # Wait for mission to complete or exit requested
+        while not self._mission_complete.wait(timeout=0.05):
+            if self._mission_exit_requested():
+                logger.info("Controller: exit requested, aborting mission wait")
+                self.cancel_mission()
+                break
+
+        mission_a.join(timeout=2.0)
+        time.sleep(0.2)
+        logger.info("\033[91mController: mission_jas39 - method exiting\033[0m")
+
     def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6, region_name: str = None):
         """Move the mouse to the center of a grid region and left-click it.
 
@@ -6023,7 +6228,8 @@ class Controller:
         except Exception:
             logger.exception("Controller: release_tracking_holds failed during takeover")
         for stop in (self.stop_search_and_destroy_loop,
-                     self.stop_boresight_engage_loop):
+                     self.stop_boresight_engage_loop,
+                     self.stop_cloak_loop):   # ADR 145: a writer on SPECIAL_ABILITY
             try:
                 stop()
             except Exception:
@@ -6288,13 +6494,15 @@ class Controller:
         """Record and launch the configured default mission (mission.default_mission).
 
         The one place battle entry chooses between missions, so the two
-        GAME_STARTING launch paths and the restart fallback cannot disagree.
-        Resolves the mission method at call time, not import time.
+        GAME_STARTING launch paths, the restart fallback and the 'u' hotkey
+        (ADR 145) cannot disagree. Resolves the mission method at call time, not
+        import time. An unknown name falls back to j20.
         """
-        name = "su30" if self._default_mission == "su30" else "j20"
+        missions = {"j20": self.mission_j20, "su30": self.mission_su30,
+                    "jas39": self.mission_jas39}
+        name = self._default_mission if self._default_mission in missions else "j20"
         self._set_last_mission(name)
-        target = self.mission_su30 if name == "su30" else self.mission_j20
-        threading.Thread(target=target, daemon=True).start()
+        threading.Thread(target=missions[name], daemon=True).start()
 
     def restart_last_mission(self):
         """Restart the most recently started mission, defaulting to the configured mission when none recorded.
@@ -6321,6 +6529,10 @@ class Controller:
         if mission == "su30":
             logger.info("Controller: restarting last mission (SU-30)")
             threading.Thread(target=self.mission_su30, daemon=True).start()
+            return True
+        if mission == "jas39":
+            logger.info("Controller: restarting last mission (JAS39)")
+            threading.Thread(target=self.mission_jas39, daemon=True).start()
             return True
 
         # No prior mission recorded — reached GAME_BATTLE via GAME_UNKNOWN (Good Luck
@@ -6375,6 +6587,10 @@ class Controller:
             self.stop_boresight_engage_loop()
         except Exception:
             logger.exception("Controller: failed to stop boresight_engage loop")
+        try:
+            self.stop_cloak_loop()   # ADR 145
+        except Exception:
+            logger.exception("Controller: failed to stop cloak loop")
         eject_thread = self._eject_thread
         if eject_thread is not None and eject_thread.is_alive():
             eject_thread.join(timeout=1.5)  # let its finally release keys cleanly

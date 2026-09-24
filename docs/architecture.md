@@ -143,7 +143,7 @@ The actuation layer. Holds the mission lock, fires keys/clicks, manages the game
 | `_auto_respawn_restart` | Bool: cleared by `End` key or maneuver key press; restored when a mission starts |
 | `_eject_stop` | Event: set by `End` key or respawn detection to abort `eject_and_dive` early |
 | `_game_battle_since` | Timestamp of last `GAME_BATTLE` entry; 2s maneuver-key grace period suppresses false manual-takeover triggers at mission start |
-| `_last_mission` | String (`"j20"` / `"loiter"` / `"su30"`): used by `restart_last_mission()` |
+| `_last_mission` | String (`"j20"` / `"loiter"` / `"su30"` / `"jas39"`): used by `restart_last_mission()` |
 | `_target_painting_mode` | Bool: when True, J20 mission includes target-lock painting phase |
 
 **Mission execution** (`mission_j20`) — the scripted maneuver script described
@@ -190,6 +190,20 @@ flowchart TD
     ANGLE --> PURSUE[Step 4 stop the boresight loop and activate pursuit mode]
     PURSUE --> DONE[Mission ends and pursuit owns the aircraft]
 ```
+
+**Mission execution** (`mission_jas39`) — `mission_j20` plus the JAS39's cloak
+(ADR 145, `docs/missions/jas39.md`). It arms its own turn guard
+(`jas39_mission.turn_guard_s`), starts the search-and-destroy loops, and starts
+the cloak loop, `start_cloak_loop()`. That loop presses `SPECIAL_ABILITY` (`q`)
+at once and then every `cloak_press_interval_s`, because wingman has no signal
+for when the ability is off cooldown and a press while cloaked does not uncloak
+the JAS39. The cloak loop is its own pair with its own stop event, thread and
+lifecycle lock, like the boresight loop. It is stopped in the mission's
+`finally`, on manual takeover and in `cleanup()`.
+
+No mission has a hotkey to itself any more except `o` (su30):
+`mission.default_mission` picks the mission, and battle entry, the `u` hotkey and
+the no-prior-mission restart all launch it through `_start_default_mission()`.
 
 **Mission execution** (`mission_loiter`) — survival hold, ADR 028-style closed
 loop rather than a script:
@@ -603,7 +617,8 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
 | `loiter_mission` | Survival hold: `target_alt`, hysteresis, orbit cadence and hold |
 | `su30_mission` | Scripted Su-30 sequence (ADR 144): `climb_alt_m`, `nose_angle_deg`, angle tolerance, pulse and bound |
-| `mission.default_mission` | Which mission battle entry launches: `su30` (shipped since 2026-09-24) or `j20` (ADR 144) |
+| `jas39_mission` | J20 plus the cloak (ADR 145): `turn_guard_s`, `cloak_press_interval_s` |
+| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `su30` (shipped since 2026-09-24), `j20` or `jas39` (ADR 144, ADR 145) |
 | `mission.manual_takeover` | `persist_through_respawn` — off by default, so a respawn resumes the last mission |
 | `return_to_battle` | Design 010 instrumentation: colour trigger `region`, narrower `ocr_region` for the once-per-crossing confirmation, and partial `text` tokens |
 | `focus_guard` | Suppress injection when the game lacks focus (ADR 098); follows the nested display automatically |

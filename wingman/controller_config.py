@@ -43,7 +43,8 @@ class ControllerConfig:
     capture_stale_inject_s: float = 10.0
     j20_turn_guard_s: float = 10.0      # ADR 132
     # ADR 144: which mission battle entry launches. "j20" is the pre-existing
-    # behaviour; "su30" selects the scripted Su-30 sequence.
+    # behaviour; "su30" selects the scripted Su-30 sequence; "jas39" (ADR 145)
+    # selects J20 plus the cloak loop. The 'u' hotkey launches the same one.
     default_mission: str = "j20"
 
     # --- Run-mode flags. Not pure config: replay and capture lanes override
@@ -68,6 +69,8 @@ class ControllerConfig:
     loiter: dict = field(default_factory=dict)
     # ADR 144: mission_su30's block (climb altitude, nose angle, pulse timing).
     su30: dict = field(default_factory=dict)
+    # ADR 145: mission_jas39's block (turn guard, cloak press interval).
+    jas39: dict = field(default_factory=dict)
     # ADR 140: only `confirm_seconds` is read here — the vision fields
     # (region_pct/green_lower/green_upper/min_pixels) belong to
     # TargetTracker, which is constructed directly from the raw config dict
@@ -120,6 +123,7 @@ class ControllerConfig:
             fuel=cfg.get("fuel", {}) or {},
             loiter=cfg.get("loiter_mission", {}) or {},
             su30=cfg.get("su30_mission", {}) or {},
+            jas39=cfg.get("jas39_mission", {}) or {},
             padlock_center_indicator=cfg.get("padlock_center_indicator", {}) or {},
             pursuit_mode=cfg.get("pursuit_mode", {}) or {},
             tracking=cfg.get("tracking", {}) or {},

@@ -260,8 +260,9 @@ SCHEMA = Section(
             "starting_health_probe_interval_s": SECONDS,
             "capture_stale_inject_s": SECONDS,
             "j20_turn_guard_s": SECONDS,   # ADR 132
-            # ADR 144: which mission battle entry launches
-            "default_mission": Leaf(types=(str,), choices=("j20", "su30")),
+            # ADR 144: which mission battle entry launches; ADR 145 adds jas39
+            # and makes the 'u' hotkey launch it too
+            "default_mission": Leaf(types=(str,), choices=("j20", "su30", "jas39")),
             "padlock_spread_missiles": _int(0),
             # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
             # pre_crash_lookback_s added D8
@@ -329,6 +330,14 @@ SCHEMA = Section(
             "angle_max_s": SECONDS,
             "tick_s": SECONDS,
             "lock_timeout_s": SECONDS,
+        }),
+
+        # ADR 145: mission_jas39, J20 plus the cloak loop
+        "jas39_mission": Section(children={
+            "turn_guard_s": SECONDS,
+            # Floor of 0.5 s: with the 0.1 s tap, anything shorter is holding
+            # the key down rather than retrying it.
+            "cloak_press_interval_s": _num(0.5),
         }),
 
         # ADR 024 / 070 / 073 / 076 / 081 / 083

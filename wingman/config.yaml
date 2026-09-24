@@ -387,8 +387,10 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # ADR 144: which mission battle entry launches (the Good-Luck / battle-alive
   # launch in GAME_STARTING, and the restart default when no mission has been
   # recorded yet). j20 = the adaptive J20 mission, su30 = the scripted Su-30
-  # sequence (su30_mission: below). The 'u' and 'o' hotkeys start their own
-  # mission regardless of this; respawn restarts whichever ran last.
+  # sequence (su30_mission: below), jas39 = J20 plus the cloak loop
+  # (jas39_mission: below). ADR 145: the 'u' hotkey launches this same mission,
+  # so this key is how a mission is chosen; 'o' still starts su30 regardless.
+  # Respawn restarts whichever mission ran last.
   # Set to su30 by the operator on 2026-09-24; set j20 to launch J20 at battle
   # entry again.
   default_mission: su30,
@@ -506,6 +508,18 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
 su30_mission: {climb_alt_m: 3000, climb_max_s: 90.0,
   nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
   angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, lock_timeout_s: 5.0}
+# mission_jas39 (docs/missions/jas39.md, ADR 145): mission_j20 plus the JAS39's
+# special weapon, a cloak on 'q'. Chosen with mission.default_mission: jas39;
+# it has no hotkey of its own, and 'u' launches it.
+# turn_guard_s: the spec's "fly the spawn heading for 10 seconds" (ADR 132).
+#   J20 flies the same 10 s, but reads mission.j20_turn_guard_s; this block has
+#   its own key so retuning one mission does not retune the other. 0 disables.
+# cloak_press_interval_s: wingman has no signal for when the cloak is off
+#   cooldown, so the mission presses 'q' every 3 s and the cloak comes back
+#   within 3 s of being available (operator, 2026-09-24, after first asking for
+#   1 s). Safe only because a 'q' press while the JAS39 is cloaked does not
+#   turn the cloak off (operator, 2026-09-24).
+jas39_mission: {turn_guard_s: 10.0, cloak_press_interval_s: 3.0}
 behavior_tree:
   mode: active
   disengage_after_s: 30

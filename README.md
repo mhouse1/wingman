@@ -278,7 +278,7 @@ on your own display, and work bare when the nested game window has focus. See AD
 | Key | Action |
 |-----|--------|
 | `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
-| `u` | Start the J20 mission — and, while in manual, hand control back to wingman |
+| `u` | Start the configured mission (`mission.default_mission`: `j20`, `su30` or `jas39`) — and, while in manual, hand control back to wingman |
 | `y` | Start the loiter mission — climb to the hold altitude and orbit to stay alive |
 | `o` | Start the SU-30 mission — nose up, secondary weapon, level off at 3000 m, then pursuit mode (takes the aircraft from a running mission) |
 | `m` | Activate unattended mode (also auto-enabled from config) |
@@ -292,17 +292,19 @@ on your own display, and work bare when the nested game window has focus. See AD
 | `backspace` | Stop wingman, leaving MetalStorm up for manual flight; press again to close everything |
 | `z` | Finish the round, then exit and close MetalStorm |
 
-**Missions.** `u` flies the J20 mission — engage contacts, manage weapons and
-altitude. `y` flies the loiter mission, whose only objective is staying alive:
-climb to the hold altitude and orbit there, deciding from live telemetry rather
-than running a fixed sequence. `o` flies the SU-30 mission, which *is* a fixed
-four-step sequence (`docs/missions/su30.md`, ADR 144) run once per life, engaging
-with boresight engage (the fire loop without the padlock camera); a
-respawn restarts whichever mission ran last. Battle entry launches the SU-30
-mission (`mission.default_mission: su30` in `wingman/config.yaml`, set on
-2026-09-24); set it to `j20` to launch J20 there instead, or press `u` for J20. Flares
-stay with the incoming-missile detector in all of them, so they fire when
-something is actually inbound.
+**Missions.** The mission is chosen in `wingman/config.yaml`, not by a key:
+`mission.default_mission` names it, and both battle entry and `u` launch that
+mission (ADR 145). It ships as `su30` (set on 2026-09-24). `j20` flies the J20
+mission — engage contacts, manage weapons and altitude. `jas39` flies the same
+mission plus the JAS39's cloak, pressing `q` every 3 s so the cloak comes back
+as soon as it is off cooldown (`docs/missions/jas39.md`). `su30` flies the SU-30
+mission, a fixed four-step sequence (`docs/missions/su30.md`, ADR 144) run once
+per life, engaging with boresight engage (the fire loop without the padlock
+camera); `o` also starts it directly. `y` flies the loiter mission, whose only
+objective is staying alive: climb to the hold altitude and orbit there, deciding
+from live telemetry rather than running a fixed sequence. A respawn restarts
+whichever mission ran last. Flares stay with the incoming-missile detector in all
+of them, so they fire when something is actually inbound.
 
 `i/j/k/l` are wingman's own roll and pitch commands, so at the **game window** they
 are indistinguishable from its presses and are ignored there. `enter` and the
