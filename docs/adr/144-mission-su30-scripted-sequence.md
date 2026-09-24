@@ -90,10 +90,13 @@ it:
   failure a hotkey can have);
 - `restart_last_mission`, which gained an `"su30"` branch, so a respawn resumes
   whichever mission ran last;
-- `mission.default_mission` (`j20` by default, `su30` to select), read by both
-  GAME_STARTING launch paths and the no-prior-mission fallback through one
-  helper, `_start_default_mission`. The default is `j20`, so nothing changes for
-  an existing setup; a test pins that.
+- `mission.default_mission` (`j20` or `su30`), read by both GAME_STARTING launch
+  paths and the no-prior-mission fallback through one helper,
+  `_start_default_mission`. It shipped as `j20` so that nothing changed for an
+  existing setup, and the operator set it to `su30` on 2026-09-24 after a run
+  showed battle entry still launching J20 (and its search-and-destroy padlock
+  loop). The code-level fallback, used when a config names no mission, stays
+  `j20`. A test pins the shipped value.
 
 Automatic launches use `preempt=False` and skip when a mission holds the lock,
 as J20 does.
@@ -220,8 +223,10 @@ is gated regardless — but the script is disrupted. Not addressed here; suppres
 (as ADR 110 does for the survival hold) is the obvious change if it shows up.
 
 **J20 is untouched by default.** `mission_j20`'s body, its hotkey and its
-turn-guard arming are unchanged, and so is `search_and_destroy`. The three hard-coded J20 launches were replaced
-by `_start_default_mission`, which resolves to J20 unless configured.
+turn-guard arming are unchanged, and so is `search_and_destroy`. The three
+hard-coded J20 launches were replaced by `_start_default_mission`, which resolves
+to whatever `mission.default_mission` names. That is `su30` as shipped, so battle
+entry no longer launches J20 unless the config or the `u` hotkey asks for it.
 
 ## Open Questions
 

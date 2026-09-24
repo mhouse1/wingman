@@ -298,8 +298,9 @@ climb to the hold altitude and orbit there, deciding from live telemetry rather
 than running a fixed sequence. `o` flies the SU-30 mission, which *is* a fixed
 four-step sequence (`docs/missions/su30.md`, ADR 144) run once per life, engaging
 with boresight engage (the fire loop without the padlock camera); a
-respawn restarts whichever mission ran last. Set `mission.default_mission: su30`
-in `wingman/config.yaml` to have battle entry launch it instead of J20. Flares
+respawn restarts whichever mission ran last. Battle entry launches the SU-30
+mission (`mission.default_mission: su30` in `wingman/config.yaml`, set on
+2026-09-24); set it to `j20` to launch J20 there instead, or press `u` for J20. Flares
 stay with the incoming-missile detector in all of them, so they fire when
 something is actually inbound.
 

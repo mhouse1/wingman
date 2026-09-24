@@ -825,8 +825,9 @@ def test_restart_with_no_prior_mission_uses_the_default(monkeypatch):
     assert _wait(lambda: launched == ["su30"])
 
 
-def test_default_mission_is_j20_unless_configured(monkeypatch):
-    """Zero behaviour change for existing setups."""
+def test_the_code_level_default_is_j20_when_the_config_names_none(monkeypatch):
+    """A ControllerConfig built without the key (tests, replay lanes) still
+    launches J20; only the shipped config.yaml selects su30."""
     ctrl, launched = _restart_ctrl(monkeypatch)
 
     ctrl._start_default_mission()
@@ -851,9 +852,10 @@ def test_shipped_su30_block_matches_the_mission_document(shipped_cfg):
     assert su30["nose_angle_deg"] == -10
 
 
-def test_shipped_default_mission_stays_j20(shipped_cfg):
-    """Shipping su30 as the default would change every existing session."""
-    assert shipped_cfg["mission"]["default_mission"] == "j20"
+def test_shipped_default_mission_is_su30(shipped_cfg):
+    """Operator decision, 2026-09-24: battle entry launches mission_su30. Set
+    `mission.default_mission: j20` to get J20 at battle entry again."""
+    assert shipped_cfg["mission"]["default_mission"] == "su30"
 
 
 def test_the_controller_reads_the_shipped_su30_block(shipped_cfg, monkeypatch):
@@ -863,7 +865,7 @@ def test_the_controller_reads_the_shipped_su30_block(shipped_cfg, monkeypatch):
                           shipped_cfg, disable_hotkeys=True))
     assert ctrl._su30_climb_alt_m == 3000.0
     assert ctrl._su30_nose_angle_deg == -10.0
-    assert ctrl._default_mission == "j20"
+    assert ctrl._default_mission == "su30"
 
 
 def test_the_schema_accepts_su30_and_rejects_unknown_missions(shipped_cfg):

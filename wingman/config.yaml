@@ -389,7 +389,9 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # recorded yet). j20 = the adaptive J20 mission, su30 = the scripted Su-30
   # sequence (su30_mission: below). The 'u' and 'o' hotkeys start their own
   # mission regardless of this; respawn restarts whichever ran last.
-  default_mission: j20,
+  # Set to su30 by the operator on 2026-09-24; set j20 to launch J20 at battle
+  # entry again.
+  default_mission: su30,
   # ADR 137 D5: one frame saved at the exact crash_with_missiles tick — the
   # log-only instrument (D4) couldn't tell a genuine perception gap apart
   # from an ordinary death/explosion screen; every OCR channel reads "no
