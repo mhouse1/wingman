@@ -10,7 +10,9 @@ directly, plus the release paths every caller now needs (miss ticks, loop
 exit, cancel_mission/manual takeover) that a self-expiring tap never did.
 """
 
+import logging
 import threading
+import time
 
 import wingman.controller as controller_module
 from wingman.controller_config import ControllerConfig
@@ -213,3 +215,93 @@ class TestReleasePaths:
         assert ctrl._roll_held is None
         assert ctrl._roll_hold_reason is None
         assert ctrl._pitch_held is None
+
+
+# ---------------------------------------------------------------------------
+# Action item 001 (2026-09-24): a miss tick shortly after a lock must not
+# resume the ROLL_LEFT search — wingman.log 2026-09-24 06:03:38-39 measured the
+# aircraft rotating past a target that sat at screen centre in frame 16.
+# ---------------------------------------------------------------------------
+
+class TestRollOnMiss:
+    def test_miss_within_delay_releases_instead_of_searching(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)  # holding right
+        ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=5.0)
+        keys = _keys(ctrl)
+        assert ("key_release", ROLL_RIGHT_KEY) in keys
+        assert ("key_press", ROLL_LEFT_KEY) not in keys
+        assert ctrl._roll_held is None
+
+    def test_repeated_misses_within_delay_stay_neutral(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(-0.3, sustained_hold=True)  # holding left
+        for _ in range(4):
+            ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=5.0)
+        assert ctrl._roll_held is None
+        assert len([k for k in _keys(ctrl) if k == ("key_press", ROLL_LEFT_KEY)]) == 1
+
+    def test_miss_after_delay_engages_the_search_default(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 10.0, resume_delay_s=2.0)
+        assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_never_seen_engages_the_search_default_immediately(self, monkeypatch):
+        """The operator's directive (search-hold from the first tick when
+        nothing has ever been seen) must be unchanged."""
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=None, resume_delay_s=5.0)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_zero_delay_restores_the_old_immediate_resume(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=0.0)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_reacquisition_after_a_neutral_miss_is_a_fresh_press(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=5.0)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        presses = [k for k in _keys(ctrl) if k == ("key_press", ROLL_RIGHT_KEY)]
+        assert len(presses) == 2
+        assert ctrl._roll_hold_reason == "target"
+
+
+class TestRollHoldLogging:
+    def _hold_lines(self, caplog):
+        return [r.getMessage() for r in caplog.records if r.getMessage().startswith("HOLD[roll]")]
+
+    def test_a_state_change_logs_one_line(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        lines = self._hold_lines(caplog)
+        assert len(lines) == 1
+        assert "None/None -> right/target" in lines[0]
+        assert "err=+0.300" in lines[0]
+
+    def test_a_no_op_repeat_logs_nothing(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        before = len(self._hold_lines(caplog))
+        for _ in range(5):
+            ctrl.orient_nose_to_target(0.31, sustained_hold=True)
+        assert len(self._hold_lines(caplog)) == before
+
+    def test_search_and_release_each_log_their_own_transition(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.engage_roll_search()
+        ctrl.engage_roll_search()          # no-op: already searching
+        ctrl.release_roll_hold(why="test")
+        lines = self._hold_lines(caplog)
+        assert len(lines) == 2
+        assert "None/None -> left/search" in lines[0]
+        assert "left/search -> None/None (test)" in lines[1]

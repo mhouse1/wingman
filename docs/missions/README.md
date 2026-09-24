@@ -50,7 +50,7 @@ The spec is the `## name` and `## sequence` of the template, in the layout of
 Bullets run in order. Put numbers and conditions in the bullet ("after reaching
 3000 altitude set nose angle to -10 degrees"); Claude derives the config keys.
 
-* **Engagement is a bullet.** Name `search_and_destroy` (padlock plus fire) or `boresight_engage` (fire only), and put it where it should start. Position matters: `su30.md` lists boresight before the weapon switch, and the code starts it after, so that it fires the secondary. If the order matters to you, say why in the bullet.
+* **Engagement is a bullet.** Name `search_and_destroy` (padlock plus fire) or `boresight_engage` (fire only), and put it where it should start. Position matters: if a bullet switches weapons, the code starts the loop after that switch so it fires the new weapon. `su30.md` used to switch at the start; since 2026-09-24 it defers the switch until the weapon runs out, so its loop fires the spawn weapon. If the order matters to you, say why in the bullet.
 * **Altitude and angle targets respect the floor.** The unconditional altitude floor is 4000 m (`behavior_tree.climb.alt_floor_m`). A scripted flight path below it is overridden by a climb, not held.
 * **A mission that returns early turns off the lock-gated behavior** in section 3.1. A hand-off mission should say what takes over.
 * **A bullet that asks for something shared behavior already does** (climbing, cruise afterburner, evading) is a change to every mission. See default 8.

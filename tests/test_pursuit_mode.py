@@ -63,6 +63,23 @@ class _TrackerStub:
         }
 
 
+class _ScriptedTracker:
+    """Returns one scripted observation per update(), then repeats the last."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.updates = 0
+
+    def update(self, frame):
+        obs = self.script[min(self.updates, len(self.script) - 1)]
+        self.updates += 1
+        return dict(obs)
+
+
+_SEEN = {"visible": True, "error_norm": 0.5, "error_norm_y": 0.0, "mode": "TRACKING"}
+_MISS = {"visible": False, "error_norm": 0.5, "error_norm_y": 0.0, "mode": "LOST_GRACE"}
+
+
 def _keys(ctrl):
     with ctrl._action_intents_lock:
         return [(i["action_type"], i["key"]) for i in ctrl._action_intents]
@@ -70,7 +87,9 @@ def _keys(ctrl):
 
 def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 pursuit_max_duration_s=1.0, legacy_nose_hold_s=0.05,
-                eject_max_s=0.2, heatdive_enabled=False, ammo_zero_grace_s=0.0):
+                eject_max_s=0.2, heatdive_enabled=False, ammo_zero_grace_s=0.0,
+                sustained_hold_enabled=False, search_resume_delay_s=0.0,
+                empty_confirm_reads=3):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -80,6 +99,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
         config=ControllerConfig(
             simulate_os_input=True,
             disable_hotkeys=True,
+            tracking={"sustained_hold_enabled": sustained_hold_enabled},
             telemetry={
                 "eject_closed_loop": {
                     "enabled": False,  # legacy branch — fast, deterministic fallback dive
@@ -100,6 +120,10 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 # test_ammo_zero_within_grace_period_does_not_fall_through
                 # for the grace-period behavior itself.
                 "ammo_zero_grace_s": ammo_zero_grace_s,
+                # 0.0 by default here (not config.yaml's shipped 2.0): the
+                # pre-2026-09-24 behavior. The delay's own tests below set it.
+                "search_resume_delay_s": search_resume_delay_s,
+                "empty_confirm_reads": empty_confirm_reads,
             },
         ),
     )
@@ -111,8 +135,18 @@ def _wait_for_pursuit_to_settle(ctrl, timeout=3.0):
         time.sleep(0.01)
     assert not ctrl.is_pursuing(), "pursue_and_engage did not finish in time"
     # If it fell through, eject_and_dive's own thread needs to finish too.
+    # _pursuing is cleared BEFORE eject_and_dive builds and start()s that
+    # thread, so join() can land on a Thread that exists but has not started
+    # yet (RuntimeError, seen once in a 45-test run) — retry until it has.
     if ctrl._eject_thread is not None:
-        ctrl._eject_thread.join(timeout=timeout)
+        join_deadline = time.time() + timeout
+        while True:
+            try:
+                ctrl._eject_thread.join(timeout=timeout)
+                break
+            except RuntimeError:
+                assert time.time() < join_deadline, "eject thread never started"
+                time.sleep(0.005)
 
 
 # ---------------------------------------------------------------------------
@@ -417,3 +451,167 @@ def test_is_pursuing_reflects_running_state(monkeypatch):
     ctrl._eject_stop.set()
     _wait_for_pursuit_to_settle(ctrl, timeout=3.0)
     assert not ctrl.is_pursuing()
+
+
+# ---------------------------------------------------------------------------
+# Action item 001 (2026-09-24): search rotation must not resume during the
+# grace window after a lock. wingman.log 2026-09-24 06:03:38-39: lock at
+# 38.251, two missed ROI scans, ROLL_LEFT re-pressed on both, target went
+# from screen centre to err=+0.366 before the next lock.
+# ---------------------------------------------------------------------------
+
+def _run_scripted_pursuit(monkeypatch, script, search_resume_delay_s):
+    analyzer = _AnalyzerStub(ammo=2)
+    capture = _CaptureStub()
+    tracker = _ScriptedTracker(script)
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=capture,
+                       pursuit_enabled=True, pursuit_max_duration_s=0.9,
+                       sustained_hold_enabled=True,
+                       search_resume_delay_s=search_resume_delay_s)
+    ctrl.set_target_tracker(tracker)
+    ctrl.pursue_and_engage()
+    _wait_for_pursuit_to_settle(ctrl)
+    assert tracker.updates >= 3, "the script needs at least a lock and two misses"
+    return _keys(ctrl)
+
+
+def test_miss_after_a_lock_does_not_resume_the_left_search(monkeypatch):
+    keys = _run_scripted_pursuit(monkeypatch, [_SEEN, _MISS], search_resume_delay_s=30.0)
+    assert ("key_press", ROLL_RIGHT_KEY) in keys        # the lock itself steered right
+    assert ("key_release", ROLL_RIGHT_KEY) in keys      # the miss released it
+    assert ("key_press", ROLL_LEFT_KEY) not in keys     # and did NOT start searching
+
+
+def test_zero_delay_still_resumes_the_left_search_on_the_first_miss(monkeypatch):
+    keys = _run_scripted_pursuit(monkeypatch, [_SEEN, _MISS], search_resume_delay_s=0.0)
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+
+
+def test_never_seen_still_searches_left_from_the_first_tick(monkeypatch):
+    keys = _run_scripted_pursuit(monkeypatch, [_MISS], search_resume_delay_s=30.0)
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+
+
+# ---------------------------------------------------------------------------
+# mission_su30's deferred weapon switch (ADR 144 D4, 2026-09-24): pursue with
+# whatever is selected, press SWITCH_WEAPON only once it has read empty several
+# cycles running. The key is a toggle, so a misread 0 must never press it.
+# ---------------------------------------------------------------------------
+
+class _SequenceAnalyzer(_AnalyzerStub):
+    """get_ammo_missiles() walks a script, then repeats its last entry."""
+
+    def __init__(self, ammos):
+        super().__init__()
+        self._ammos = list(ammos)
+        self._n = 0
+
+    def get_ammo_missiles(self):
+        v = self._ammos[min(self._n, len(self._ammos) - 1)]
+        self._n += 1
+        return v
+
+
+def _run_deferred_pursuit(monkeypatch, analyzer, *, confirm=2, max_s=0.9,
+                          ammo_grace=30.0, heatdive=False):
+    capture = _CaptureStub()
+    tracker = _TrackerStub()
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=capture,
+                       pursuit_enabled=True, pursuit_max_duration_s=max_s,
+                       ammo_zero_grace_s=ammo_grace, empty_confirm_reads=confirm,
+                       heatdive_enabled=heatdive)
+    ctrl.set_target_tracker(tracker)
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, _keys(ctrl)
+
+
+def _switch_presses(keys):
+    return [k for k in keys if k == ("key_press", SWITCH_WEAPON)]
+
+
+def test_deferred_switch_presses_nothing_while_the_weapon_has_ammo(monkeypatch):
+    ctrl, keys = _run_deferred_pursuit(monkeypatch, _AnalyzerStub(ammo=2))
+    assert _switch_presses(keys) == []
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys
+    assert not ctrl.is_secondary_weapon_active()
+
+
+def test_deferred_switch_presses_once_after_consecutive_zero_reads(monkeypatch):
+    ctrl, keys = _run_deferred_pursuit(monkeypatch, _AnalyzerStub(ammo=0), confirm=2)
+    assert len(_switch_presses(keys)) == 1
+    assert ctrl.is_secondary_weapon_active()
+
+
+def test_deferred_switch_ignores_a_zero_that_is_not_consecutive(monkeypatch):
+    """0, 2, 0, 2 ... never reaches two zeros in a row: a flicker, not an empty
+    rack, and swapping away a rack that still has missiles is the failure."""
+    ctrl, keys = _run_deferred_pursuit(
+        monkeypatch, _SequenceAnalyzer([0, 2, 0, 2, 0, 2]), confirm=2)
+    assert _switch_presses(keys) == []
+    assert not ctrl.is_secondary_weapon_active()
+
+
+def test_deferred_switch_ignores_unreadable_ammo(monkeypatch):
+    """None (OCR found no digits) is not evidence of an empty rack."""
+    ctrl, keys = _run_deferred_pursuit(monkeypatch, _AnalyzerStub(ammo=None), confirm=1)
+    assert _switch_presses(keys) == []
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys, "unreadable must still fail open"
+
+
+def test_deferred_switch_does_not_end_the_encounter_before_the_switch(monkeypatch, caplog):
+    """The ammo==0 fall-through is for the SECONDARY running out. While the
+    original weapon is still selected and being confirmed empty it must not
+    fire, even with no grace period at all."""
+    import logging
+    caplog.set_level(logging.INFO, logger="wingman.controller")
+    _run_deferred_pursuit(monkeypatch, _SequenceAnalyzer([0, 0, 2, 2, 2]),
+                          confirm=3, ammo_grace=0.0)
+    assert "ammo exhausted" not in caplog.text
+
+
+def test_deferred_switch_then_falls_through_only_after_the_switch(monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="wingman.controller")
+    ctrl, keys = _run_deferred_pursuit(
+        monkeypatch, _AnalyzerStub(ammo=0), confirm=2, ammo_grace=0.0, max_s=5.0)
+    text = caplog.text
+    assert "switching to the secondary" in text
+    assert "ammo exhausted, falling through" in text
+    assert text.index("switching to the secondary") < text.index("ammo exhausted")
+    assert len(_switch_presses(keys)) == 1, "eject_and_dive must not press it again"
+
+
+def test_deferred_switch_grace_is_measured_from_the_switch(monkeypatch, caplog):
+    """The HUD count lags a switch by seconds (config.yaml, ammo_zero_grace_s),
+    so the first 0 after the switch is the old rack's, not an empty secondary.
+    A grace longer than the run means the encounter is not ended by it."""
+    import logging
+    caplog.set_level(logging.INFO, logger="wingman.controller")
+    _run_deferred_pursuit(monkeypatch, _AnalyzerStub(ammo=0), confirm=2,
+                          ammo_grace=30.0, max_s=0.9)
+    assert "switching to the secondary" in caplog.text
+    assert "ammo exhausted" not in caplog.text
+    assert "max duration" in caplog.text
+
+
+def test_max_duration_before_empty_lets_eject_and_dive_switch_for_itself(monkeypatch):
+    """The fall-through must not claim a switch that never happened: the dive's
+    heatdive needs the secondary selected, and it makes its own press when it is
+    told the weapon is not already switched."""
+    ctrl, keys = _run_deferred_pursuit(
+        monkeypatch, _AnalyzerStub(ammo=2), max_s=0.5, heatdive=True)
+    assert len(_switch_presses(keys)) == 1, (
+        "one press: eject_and_dive's own, not skipped and not duplicated")
+
+
+def test_default_pursuit_still_switches_at_its_start(monkeypatch):
+    """The missiles-empty path (no deferral) is unchanged."""
+    analyzer = _AnalyzerStub(ammo=2)
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.4)
+    ctrl.set_target_tracker(_TrackerStub())
+    ctrl.pursue_and_engage()
+    _wait_for_pursuit_to_settle(ctrl)
+    assert len(_switch_presses(_keys(ctrl))) == 1
+    assert ctrl.is_secondary_weapon_active()

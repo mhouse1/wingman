@@ -514,6 +514,20 @@ class Controller:
         # run. Margin over both measured samples, not a large-N guarantee —
         # a longer run of live trials should correct it if it proves wrong.
         self._pursuit_ammo_grace_s = float(_pm.get("ammo_zero_grace_s", 12.0))
+        # Action item 001 (2026-09-24): how long a miss tick after a valid
+        # lock holds the roll axis neutral before the ROLL_LEFT search default
+        # resumes. Measured (wingman.log 2026-09-24 06:03:38-39): a lock
+        # acquired at 38.251 was rejected on the next two ROI scans, and each
+        # of those miss ticks re-pressed ROLL_LEFT, so the aircraft kept
+        # rotating left while the target crossed screen centre (frame 16,
+        # err about 0) and reached err=+0.366 by the next lock (frame 17).
+        # Named guess, not measured beyond that one 1.07s reacquisition gap.
+        self._pursuit_search_resume_delay_s = float(_pm.get("search_resume_delay_s", 2.0))
+        # mission_su30 defers SWITCH_WEAPON until the selected weapon runs out
+        # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
+        # consecutive ammo==0 reads are required before pressing it. At the
+        # pursuit loop's ~0.35 s cycle, 3 is about one second. Named guess.
+        self._pursuit_empty_confirm_reads = max(1, int(_pm.get("empty_confirm_reads", 3)))
         # ADR 068 d1: True once ANY descending sample has been seen during the
         # CURRENT rotation attempt. The over-rotation guard requires it —
         # rotating past vertical means passing THROUGH a dive, so a flight path
@@ -1707,11 +1721,12 @@ class Controller:
         public contract and this design's own HLDD section for why.
         """
         if abs(error_norm) <= deadband:
-            self.release_roll_hold()
+            self.release_roll_hold(why="deadband err=%+.3f" % error_norm)
             return None
         desired = "left" if error_norm < 0 else "right"
         if self._roll_held == desired and self._roll_hold_reason == "target":
             return desired  # already holding the right key for the right reason
+        prev = (self._roll_held, self._roll_hold_reason)
         if self._roll_held is not None:
             self._release_tracking_key(
                 ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
@@ -1720,6 +1735,7 @@ class Controller:
             ROLL_LEFT_KEY if desired == "left" else ROLL_RIGHT_KEY, "tracking_roll")
         self._roll_held = desired
         self._roll_hold_reason = "target"
+        self._log_roll_hold(prev, "target err=%+.3f" % error_norm)
         return desired
 
     def _sustained_pitch_hold(self, error_norm_y: float, deadband: float) -> "str | None":
@@ -1756,6 +1772,7 @@ class Controller:
         "target"`) is forced to treat the next real target as a fresh
         decision rather than a silent no-op.
         """
+        prev = (self._roll_held, self._roll_hold_reason)
         if self._roll_held == "right":
             self._release_tracking_key(ROLL_RIGHT_KEY, "tracking_roll")
             self._roll_held = None
@@ -1763,17 +1780,50 @@ class Controller:
             self._press_tracking_key(ROLL_LEFT_KEY, "tracking_roll")
             self._roll_held = "left"
         self._roll_hold_reason = "search"
+        self._log_roll_hold(prev, "search")
 
-    def release_roll_hold(self) -> None:
+    def roll_on_miss(self, last_seen_ts: "float | None", resume_delay_s: float) -> None:
+        """No target this tick. Within `resume_delay_s` of the last tick one
+        was visible, release the roll axis to neutral instead of resuming the
+        ROLL_LEFT search default; only after that long unseen (or if none was
+        ever seen) does `engage_roll_search` take over.
+
+        Action item 001 (2026-09-24). `visible` is False on every
+        TargetTracker LOST_GRACE tick too, and the tracker's own grace window
+        is only ~0.4s, so without this a one-tick detection dropout right
+        after a lock re-pressed ROLL_LEFT immediately (measured: wingman.log
+        2026-09-24 06:03:38-39, target at screen centre in frame 16, at
+        err=+0.366 by frame 17). Neutral rather than "keep the last
+        direction": a target that has vanished would otherwise be chased with
+        open-loop roll for the whole delay.
+        """
+        if last_seen_ts is not None and time.time() - last_seen_ts < resume_delay_s:
+            self.release_roll_hold(why="miss within %.1fs of last lock" % resume_delay_s)
+        else:
+            self.engage_roll_search()
+
+    def release_roll_hold(self, why: str = "release") -> None:
         """Release whatever roll key Sustained-Hold Actuation is holding,
         search or target, for any reason. Safe no-op if nothing is held."""
         if self._roll_held is None:
             return
+        prev = (self._roll_held, self._roll_hold_reason)
         self._release_tracking_key(
             ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
             "tracking_roll")
         self._roll_held = None
         self._roll_hold_reason = None
+        self._log_roll_hold(prev, why)
+
+    def _log_roll_hold(self, prev: "tuple[str | None, str | None]", why: str) -> None:
+        """One debug line per roll-hold state change (never per tick). The
+        press/release path itself logs nothing on success, so before this the
+        log could not say what the roll axis did — 2026-09-24's over-rotation
+        had to be inferred from screenshots."""
+        cur = (self._roll_held, self._roll_hold_reason)
+        if cur != prev:
+            logger.debug("HOLD[roll]: %s/%s -> %s/%s (%s)",
+                         prev[0], prev[1], cur[0], cur[1], why)
 
     def release_pitch_hold(self) -> None:
         """Release whatever pitch key Sustained-Hold Actuation is holding.
@@ -2859,17 +2909,30 @@ class Controller:
         should check both."""
         return self._pursuing.is_set()
 
-    def pursue_and_engage(self, on_complete=None, weapon_already_switched: bool = False):
+    def pursue_and_engage(self, on_complete=None, weapon_already_switched: bool = False,
+                          defer_switch_until_empty: bool = False):
         """HLDD 015: switch to secondary weapons and pursue with both
         tracking axes instead of diving — the missiles-empty alternative to
         eject_and_dive.
 
         weapon_already_switched: True when the caller already pressed
-        SWITCH_WEAPON for this life (mission_su30 does, at its step 2). Skips
-        both the flag reset and the switch_weapon() press below — the key is a
-        toggle, so a second press would put the primary loadout back. Same
-        parameter, same meaning as eject_and_dive's. The default (False) is
-        the missiles-empty path and is unchanged.
+        SWITCH_WEAPON for this life. Skips both the flag reset and the
+        switch_weapon() press below — the key is a toggle, so a second press
+        would put the primary loadout back. Same parameter, same meaning as
+        eject_and_dive's. The default (False) is the missiles-empty path and
+        is unchanged.
+
+        defer_switch_until_empty: mission_su30's hand-off (ADR 144 D4, revised
+        2026-09-24). Pursue with whatever weapon is selected and press
+        SWITCH_WEAPON only once, when its ammo has read 0 for
+        `pursuit_mode.empty_confirm_reads` consecutive cycles. Nothing is
+        pressed at the start and the flag is not reset (it is the only record
+        of whether a switch already happened this life). After that switch
+        the ammo==0 fall-through applies exactly as in the default path, with
+        its grace period measured from the switch rather than from the start,
+        since the HUD count lags a switch (see _pursuit_ammo_grace_s). The
+        toggle is why the confirmation matters: one misread 0 would swap away
+        a rack that still has missiles, and the only undo is a second press.
 
         Why this can use pitch and eject_and_dive's own heatdive addition
         cannot: nothing here runs _eject_descent_control, so nothing else is
@@ -2914,17 +2977,23 @@ class Controller:
                 "falling back to eject_and_dive")
             self.eject_and_dive(on_complete=on_complete)
             return
-        logger.info(
-            "\033[92m🎯 MISSILES EMPTY — pursuing with secondary weapons, "
-            "both axes (HLDD 015)\033[0m")
+        if defer_switch_until_empty:
+            logger.info(
+                "\033[92m🎯 PURSUIT — current weapon stays selected until it "
+                "runs out, both axes (HLDD 015)\033[0m")
+        else:
+            logger.info(
+                "\033[92m🎯 MISSILES EMPTY — pursuing with secondary weapons, "
+                "both axes (HLDD 015)\033[0m")
         self.cancel_mission()
         self._eject_stop_reason = ""
         self._eject_stop.clear()
         # Shared with eject_and_dive's own reset of the same state — both
         # strategies switch to the same secondary loadout and must not carry
         # a stale flag/budget from whichever one ran last. Kept as-is when the
-        # caller already switched: that flag is the only record of it.
-        if not weapon_already_switched:
+        # caller already switched: that flag is the only record of it. Also
+        # kept as-is when the switch is deferred, for the same reason.
+        if not weapon_already_switched and not defer_switch_until_empty:
             self._eject_weapon_switched = False
         self._padlock_unknown_correction_attempts = 0
 
@@ -2940,7 +3009,7 @@ class Controller:
                 # this thread even started — same reasoning as
                 # eject_and_dive's own heatdive branch and
                 # _eject_heatdive_loop's own presses.
-                if not weapon_already_switched:
+                if not weapon_already_switched and not defer_switch_until_empty:
                     self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
                     self._eject_weapon_switched = True
                 if self._pursuit_padlock_verify:
@@ -2948,6 +3017,9 @@ class Controller:
 
                 logger.info("Controller: pursue_and_engage — tracking engaged, both axes free")
                 start = time.time()
+                last_seen_ts = None
+                zero_reads = 0
+                switched_at = None
                 while not self._eject_stop.wait(timeout=0.2):
                     if time.time() - start >= self._pursuit_max_duration_s:
                         logger.info(
@@ -2963,11 +3035,13 @@ class Controller:
                         err = obs.get("error_norm")
                         err_y = obs.get("error_norm_y")
                         if visible and err is not None:
+                            last_seen_ts = time.time()
                             self.orient_nose_to_target(
                                 err, ignore_cancel=True,
                                 sustained_hold=self._sustained_hold_enabled)
                         elif self._sustained_hold_enabled:
-                            self.engage_roll_search()
+                            self.roll_on_miss(
+                                last_seen_ts, self._pursuit_search_resume_delay_s)
                         if visible and err_y is not None:
                             self.orient_pitch_to_target(
                                 err_y, ignore_cancel=True,
@@ -2990,8 +3064,37 @@ class Controller:
                                 health = self._analyzer.get_health()
                             except Exception:
                                 health = None
-                        if ammo == 0:
-                            if time.time() - start >= self._pursuit_ammo_grace_s:
+                        # mission_su30 (ADR 144 D4, 2026-09-24): the switch is
+                        # deferred until the selected weapon runs out. Only a
+                        # run of consecutive 0 reads counts — SWITCH_WEAPON is
+                        # a toggle, so one misread 0 would swap away a rack
+                        # that still has missiles. None (unreadable) leaves the
+                        # run as it is, matching the fail-open fire rule below.
+                        primary_pending = (defer_switch_until_empty
+                                           and not self._eject_weapon_switched)
+                        if primary_pending:
+                            if ammo == 0:
+                                zero_reads += 1
+                            elif ammo is not None:
+                                zero_reads = 0
+                            if zero_reads >= self._pursuit_empty_confirm_reads:
+                                logger.info(
+                                    "Controller: pursue_and_engage — selected weapon "
+                                    "empty (%d consecutive zero reads), switching to "
+                                    "the secondary", zero_reads)
+                                self.switch_weapon(
+                                    hold_seconds=0.1, block=True, ignore_cancel=True)
+                                self._eject_weapon_switched = True
+                                switched_at = time.time()
+                                primary_pending = False
+                                # The count just read belongs to the rack that was
+                                # switched away from; the HUD needs a moment to
+                                # show the new one, so it is not acted on as if it
+                                # were the secondary's.
+                                ammo = None
+                        if ammo == 0 and not primary_pending:
+                            grace_from = switched_at if switched_at is not None else start
+                            if time.time() - grace_from >= self._pursuit_ammo_grace_s:
                                 logger.info(
                                     "Controller: pursue_and_engage — ammo exhausted, "
                                     "falling through to eject_and_dive")
@@ -3029,8 +3132,15 @@ class Controller:
                     # (ammo exhausted, max duration) happen only after the
                     # switch_weapon() call above already ran for this
                     # encounter — see eject_and_dive's own docstring for why
-                    # this must not press the key a second time.
-                    self.eject_and_dive(on_complete=on_complete, weapon_already_switched=True)
+                    # this must not press the key a second time. Not so when
+                    # the switch was deferred: a max-duration fall-through can
+                    # land while the original weapon is still selected, and
+                    # then eject_and_dive must make its own switch, which is
+                    # what its heatdive expects.
+                    self.eject_and_dive(
+                        on_complete=on_complete,
+                        weapon_already_switched=(self._eject_weapon_switched
+                                                 if defer_switch_until_empty else True))
                 else:
                     logger.info(
                         "Controller: pursue_and_engage — stopped externally "
@@ -5523,18 +5633,25 @@ class Controller:
         own:
 
           1. nose up             climb_mode toward ``climb_alt_m``
-          2. secondary weapon    one SWITCH_WEAPON press (skipped when already
-                                 selected this life — the key is a toggle)
+          2. weapon              no press: the weapon selected at spawn stays
+                                 selected until it runs out (operator,
+                                 2026-09-24), then the secondary is switched
+                                 in once — see below
           3. level off           at ``climb_alt_m``, pulse the nose to
                                  ``nose_angle_deg``
-          4. pursuit mode        pursue_and_engage (HLDD 015)
+          4. pursuit mode        pursue_and_engage (HLDD 015), with its switch
+                                 deferred until the selected weapon is empty
 
         Unlike mission_j20 this is a script, not the adaptive doctrine, and its
         engagement mode is boresight_engage ONLY: the weapon-fire loop without
         the padlock camera (start_boresight_engage_loop). search_and_destroy is
-        never started by this mission. The loop starts right after the weapon
-        switch, so the only weapon it ever fires is the secondary, and it ends
-        at the pursuit hand-off, where pursue_and_engage fires for itself.
+        never started by this mission. The loop fires whichever weapon is
+        selected — the spawn weapon, since nothing switches it — and ends at
+        the pursuit hand-off, where pursue_and_engage fires for itself. The
+        SWITCH_WEAPON key is a toggle, so it is pressed at most once per life:
+        by the missiles-empty response (AmmoEventsHandler) if the rack runs
+        dry while this mission still holds the lock, or by pursue_and_engage
+        (defer_switch_until_empty) if it runs dry during pursuit.
         The behavior tree still ticks while the mission holds the lock, so its
         emergency climb can outrank the script — by design (ADR 141 floor).
 
@@ -5634,30 +5751,29 @@ class Controller:
         pursuit could not start — and the caller decides what holding means.
         """
         # Step 1: nose up. climb_mode is non-blocking and idempotent, so the
-        # weapon switch below happens while the climb is already under way.
+        # steps below happen while the climb is already under way.
         logger.info("Controller: mission_su30 - step 1/4: nose up, climbing to %.0f m",
                     self._su30_climb_alt_m)
         self._su30_start_climb()
 
-        # Step 2: secondary weapon. The key is a toggle (see eject_and_dive's
-        # weapon_already_switched note), and _eject_weapon_switched — which
-        # is_secondary_weapon_active() reads — is cleared only on respawn or
-        # match end, so a second mission start inside the same life (hotkey
-        # re-press, resume from manual) must not press it again.
+        # Step 2: NO weapon switch here (operator, 2026-09-24: "not switch
+        # weapons until it runs out"; ADR 144 D4). The weapon selected at spawn
+        # stays selected and the fire loop below fires it. The switch to the
+        # secondary happens once that rack is empty, in whichever path is
+        # running then: AmmoEventsHandler's missiles-empty response while this
+        # mission still holds the lock, or pursue_and_engage's own deferred
+        # switch after step 4. _eject_weapon_switched is left exactly as it is:
+        # False means AMMO_MISSILE still reads the rack that is firing, which is
+        # what ADR 088's rearm-abort and the crash_with_missiles check assume.
         if self._eject_weapon_switched:
             logger.info("Controller: mission_su30 - step 2/4: secondary weapon "
-                        "already selected this life, not switching again")
+                        "already selected this life, nothing to do")
         else:
-            logger.info("Controller: mission_su30 - step 2/4: switching to the "
-                        "secondary weapon")
-            self.switch_weapon(hold_seconds=0.1, block=True)
-            # AMMO_MISSILE now reads the secondary rack; the flag keeps ADR 088's
-            # rearm-abort and the crash_with_missiles check from misreading it.
-            self._eject_weapon_switched = True
+            logger.info("Controller: mission_su30 - step 2/4: keeping the selected "
+                        "weapon, switching to the secondary only when it runs out")
 
-        # Engagement: boresight only. Started AFTER the switch so the fire loop
-        # never fires the primary rack, and never search_and_destroy — that
-        # loop's padlock camera is exactly what this mission does not want.
+        # Engagement: boresight only, never search_and_destroy — that loop's
+        # padlock camera is exactly what this mission does not want.
         logger.info("Controller: mission_su30 - boresight engage on "
                     "(weapon-fire loop, no padlock)")
         self.start_boresight_engage_loop()
@@ -5833,8 +5949,10 @@ class Controller:
         # accepted the hand-off: a mission that could not start pursuit keeps
         # its engagement loop while it holds.
         self.stop_boresight_engage_loop()
+        # The weapon is not switched here (ADR 144 D4, revised 2026-09-24):
+        # pursuit switches once, when the selected weapon has run out.
         self.pursue_and_engage(on_complete=_on_complete,
-                               weapon_already_switched=True)
+                               defer_switch_until_empty=True)
         return True
 
     def mission_jas39(self):

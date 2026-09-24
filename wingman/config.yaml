@@ -1095,6 +1095,27 @@ pursuit_mode:
   # the tracking loop ever ran long enough to matter. Margin over both
   # measured samples, not a large-N guarantee.
   ammo_zero_grace_s: 12.0
+  # Action item 001 (2026-09-24): seconds a miss tick after a valid lock holds
+  # the roll axis NEUTRAL before the ROLL_LEFT search default resumes. Every
+  # LOST_GRACE tick reports visible=False, and the tracker's own grace window
+  # is only ~0.4s, so before this a one-tick detection dropout re-pressed
+  # ROLL_LEFT at once. Measured (wingman.log 2026-09-24 06:03:38-39, frames
+  # pursuit_mode_20260924_060338_16.png and 060339_17.png): lock acquired at
+  # 38.251, rejected on the next two ROI scans, ROLL_LEFT resumed on both, and
+  # the target went from screen centre (err about 0) to err=+0.366 by the next
+  # lock. 0 restores the old immediate-resume behavior. Named guess, not
+  # measured beyond that one 1.07s reacquisition gap; the HOLD[roll] debug
+  # lines added with it are what should correct it.
+  search_resume_delay_s: 2.0
+  # mission_su30 no longer presses SWITCH_WEAPON at step 2 (operator,
+  # 2026-09-24: "not switch weapons until it runs out"; ADR 144 D4). Its
+  # pursuit hand-off defers the switch until the selected weapon's ammo has
+  # read 0 this many cycles in a row (about 0.35 s each). SWITCH_WEAPON is a
+  # toggle, so a single misread 0 would swap away a rack that still has
+  # missiles and the only undo is a second press. Applies only to that
+  # hand-off; the missiles-empty trigger keeps its own confirmation
+  # (mission.no_missiles_consecutive_required). Named guess, not measured.
+  empty_confirm_reads: 3
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right

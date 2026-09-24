@@ -14,6 +14,12 @@ The operator supplied a four-step mission for the Su-30 in
 3. after reaching 3000 altitude, set the nose angle to -10 degrees
 4. activate pursuit mode
 
+**Revised 2026-09-24 (operator): step 2 is not an action at the start of the
+life.** The operator asked that the mission "not switch weapons until it runs
+out". The spawn weapon stays selected and fires; the switch to the secondary
+happens only once that weapon is empty (D4). `docs/missions/su30.md` carries the
+same wording.
+
 `mission_j20` is the structural reference (lock, cancel, runner thread, wait
 loop, single entry point for battle entry and respawn), but its *doctrine* is
 the opposite of this sequence. ADR 075 made J20 fully adaptive: the mission
@@ -26,7 +32,8 @@ borrows J20's shape and none of its content.
 **D1. A scripted mission, built from existing actuators.** `mission_su30`
 (`controller.py`) runs the four steps once per life and reuses what already
 exists rather than adding new flight code: `climb_mode` for step 1,
-`switch_weapon` for step 2, `pursue_and_engage` (HLDD 015) for step 4. Only
+`switch_weapon` for step 2 (deferred until the weapon is empty, D4),
+`pursue_and_engage` (HLDD 015) for step 4. Only
 step 3 is new, because nothing in the codebase flew to a *commanded* flight-path
 angle.
 
@@ -58,8 +65,11 @@ starting `search_and_destroy` was not enough: two shared paths press the padlock
 key on their own, and this mission triggers both.
 
 - ADR 140 D6 (`_maybe_correct_padlock_unknown`) presses to "correct" an Unknown
-  padlock state whenever `is_secondary_weapon_active()` is true. Step 2 leaves it
-  true for the whole life, so it pressed up to three times per life.
+  padlock state whenever `is_secondary_weapon_active()` is true. Step 2 used to
+  leave it true for the whole life, so it pressed up to three times per life.
+  Since the 2026-09-24 revision it is true only from the moment the spawn weapon
+  runs out and is switched away from; the block below applies from then on and
+  is unchanged.
 - The target-spread handler (`AmmoEventsHandler.tick_missile_count`) presses
   padlock twice after two missiles "fire". Switching from a 4-missile primary
   rack to a 2-missile secondary reads as two fired, and so does firing the
@@ -72,8 +82,10 @@ also covers a search-and-destroy loop that `disengage_roll_right` may start), th
 ADR 140 correction, and the spread handler. Every other mission is unaffected
 because the check is false for them; tests pin both directions.
 
-The mission starts the boresight loop **right after the weapon switch** (step 2), so it can only
-ever fire the secondary, and stops it at the pursuit hand-off, where
+The mission starts the boresight loop at step 2, where it fires whichever weapon
+is selected — the spawn weapon, since nothing switches it any more (before the
+2026-09-24 revision it started right after a step-2 switch so that it could only
+fire the secondary) — and stops it at the pursuit hand-off, where
 `pursue_and_engage` fires for itself every cycle and a second writer would only
 double the cadence. Every mission exit path stops it, so a fire loop cannot
 outlive its mission into the next life. If pursuit cannot start (D6) the loop
@@ -101,17 +113,47 @@ it:
 Automatic launches use `preempt=False` and skip when a mission holds the lock,
 as J20 does.
 
-**D4. The weapon switch happens once per life.** `SWITCH_WEAPON` is a toggle
-(ADR 136, and `eject_and_dive`'s `weapon_already_switched` note recording a live
-double-press that left the secondary never selected). Step 2 records itself in
+**D4. The weapon switch is deferred until the weapon runs out, and happens at
+most once per life.** `SWITCH_WEAPON` is a toggle (ADR 136, and
+`eject_and_dive`'s `weapon_already_switched` note recording a live double-press
+that left the secondary never selected). *Revised 2026-09-24 (operator: "not
+switch weapons until it runs out").* Step 2 presses nothing and leaves
 `_eject_weapon_switched` — the flag `is_secondary_weapon_active()` reads and
-`stop_eject_sequence()` clears on respawn — and skips the press when it is
-already set, so a hotkey re-press or a resume from manual takeover inside one
-life does not toggle back to primary.
+`stop_eject_sequence()` clears on respawn — exactly as it found it. The flag is
+the only record of whether the key was pressed this life, so it becomes true only
+when the switch really happens, and a hotkey re-press or a resume from manual
+takeover cannot toggle back to primary.
 
-`pursue_and_engage` presses the key unconditionally, so it gained the same
-`weapon_already_switched` parameter `eject_and_dive` already has. The default is
-`False`, which leaves the missiles-empty path byte-identical.
+The switch itself happens in whichever path is running when the spawn weapon
+empties:
+
+- **Steps 1-3, mission still holding the lock:** the existing missiles-empty
+  response (`AmmoEventsHandler.handle_no_missiles`, gated on
+  `is_mission_running()` and `GAME_BATTLE`) calls `pursue_and_engage` in its
+  default form, which switches at its start and pursues. Unchanged code; it was
+  simply never reached for this mission while step 2 had already switched.
+- **Step 4 onward:** the mission has ended, so `handle_no_missiles` no longer
+  applies and pursuit's own loop must do it. `pursue_and_engage` gained
+  `defer_switch_until_empty`: it presses nothing at its start, leaves the flag
+  alone, and presses `SWITCH_WEAPON` once when the selected weapon's ammo has read
+  0 for `pursuit_mode.empty_confirm_reads` (3) consecutive cycles. One misread 0
+  would swap away a rack that still has missiles, and the only undo is a second
+  press, so an unreadable count (`None`) leaves the run as it is and any positive
+  read resets it. After the switch the existing ammo-zero fall-through applies,
+  with its `ammo_zero_grace_s` measured from the switch, since the HUD count lags
+  a switch by seconds.
+
+If `pursuit_max_duration_s` ends the encounter before the weapon ran out, the
+fall-through hands `eject_and_dive` the flag's real value rather than claiming a
+switch happened: the dive's heatdive needs the secondary selected and makes its
+own press when told it is not already switched. So a life that times out with the
+spawn weapon still loaded is switched by the dive, not by this mission — a
+boundary of "until it runs out" that is `eject_and_dive`'s existing rule, not
+changed here.
+
+`weapon_already_switched` (added earlier for this mission's step 2) stays on
+`pursue_and_engage` with its old meaning; nothing in this mission passes it now.
+The defaults of both parameters leave the missiles-empty path byte-identical.
 
 **D5. Step 3 is a bounded, new-sample, pulsed correction.** After `climb_alt_m`
 the mission stops whichever climb hold is running and pulses NOSE_DOWN or
@@ -201,17 +243,22 @@ Climb tactic is a pitch writer, and D5 covers it.
 MetalStorm binds `o`, pressing it flies that action too. `test_keybindings`
 guards collisions with the keys wingman injects, not with the game's.
 
-**Boresight engagement fires blind, on a timer, from the weapon switch on.**
+**Boresight engagement fires blind, on a timer, from the start of the life.**
 Like search-and-destroy's weapon loop it presses the fire key on
-`weapon_loop_interval` (1.0 s) with no target or lock check, so the two
-heat-seekers are exposed to that cadence for the whole climb to `climb_alt_m`,
-not only once pursuit has a target. Pursuit itself fires on every cycle
-regardless of tracker visibility (HLDD 015 D2), so this matches the codebase's
-existing model, but whether the game launches a heat-seeker with no lock is
-unverified here. If it does, the rack may be empty before step 4; pursuit's
-ammo-zero fall-through (after `ammo_zero_grace_s`) would then dive. Moving the
-`start_boresight_engage_loop()` call to just before the hand-off, or gating it on
-tracker visibility, are the two ways to change this.
+`weapon_loop_interval` (1.0 s) with no target or lock check, so the spawn weapon
+(before the 2026-09-24 revision, the secondary) is exposed to that cadence for the
+whole climb to `climb_alt_m`, not only once pursuit has a target. Pursuit itself
+fires on every cycle regardless of tracker visibility (HLDD 015 D2), so this
+matches the codebase's existing model. Whether the game launches a missile with no
+lock is not established for the spawn weapon. It was observed not to for the
+secondary: in the 2026-09-24 06:01-06:08 run every readable `BT[active]` reading
+between mission start (06:02:41) and 06:03:29 was `missiles=4` (31 readings, 2
+unreadable) across 61 fire-key presses, and the HUD read 4/4 on both racks at
+06:03:35-40. If the spawn weapon does launch
+blind, its rack empties during the climb, the missiles-empty response above
+switches and pursues early, and the script's remaining steps are abandoned. Moving
+the `start_boresight_engage_loop()` call to just before the hand-off, or gating it
+on tracker visibility, are the two ways to change this.
 
 **Disengage can still cancel the script.** The tree's Disengage tactic (30 s
 without a ring contact, above Climb in priority) calls `disengage_roll_right`,

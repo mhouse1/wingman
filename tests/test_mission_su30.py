@@ -1,11 +1,15 @@
 """mission_su30 (ADR 144, docs/missions/su30.md): the scripted Su-30 sequence.
 
-  1. nose up on battle start or respawn   2. switch to the secondary weapon
+  1. nose up on battle start or respawn
+  2. NO weapon switch: the spawn weapon stays selected until it runs out
+     (operator, 2026-09-24; ADR 144 D4). The switch to the secondary happens
+     only then, in pursue_and_engage's deferred switch (tested in
+     test_pursuit_mode.py) or the missiles-empty response.
   3. at 3000 m set the nose angle to -10 deg   4. activate pursuit mode
 
 The mission is deliberately a script, unlike the adaptive mission_j20, so these
 tests pin the ORDER of the steps and the things that make a script dangerous on
-a live aircraft: pressing a toggle key twice, commanding on stale telemetry,
+a live aircraft: pressing a toggle key it should not, commanding on stale telemetry,
 writing the pitch axis while another hold owns it, and diving because of a
 missing collaborator. Its engagement mode is boresight_engage only — the fire
 loop without the padlock camera — and never search_and_destroy, and nothing
@@ -116,9 +120,12 @@ def _record(ctrl, monkeypatch):
                         lambda *a, **k: log.append(("nose_down",)))
     monkeypatch.setattr(ctrl, "nose_up",
                         lambda *a, **k: log.append(("nose_up",)))
+    # The second element is whether the hand-off deferred the weapon switch
+    # (defer_switch_until_empty), so ("pursue", True) still reads as "pursuit
+    # was activated the way step 4 activates it".
     monkeypatch.setattr(
         ctrl, "pursue_and_engage",
-        lambda **kw: log.append(("pursue", kw.get("weapon_already_switched"))))
+        lambda **kw: log.append(("pursue", kw.get("defer_switch_until_empty"))))
     # ADR 144: the engagement loops. The mission may start boresight_engage and
     # must never start search_and_destroy (its padlock camera is the point).
     monkeypatch.setattr(ctrl, "start_boresight_engage_loop",
@@ -161,7 +168,8 @@ def _drain(ctrl, thread):
 # ---------------------------------------------------------------------------
 
 def test_the_four_steps_run_in_the_documented_order(monkeypatch):
-    """climb, weapon, nose angle, pursuit — and only after 3000 m is reached."""
+    """climb, (no weapon press), nose angle, pursuit — and only after 3000 m is
+    reached."""
     analyzer = _Analyzer([
         (1500, 30), (2200, 30),        # still climbing: the wait must not end
         (3100, 30),                     # level-off altitude reached
@@ -177,28 +185,37 @@ def test_the_four_steps_run_in_the_documented_order(monkeypatch):
 
     kinds = [e[0] for e in log]
     assert kinds[0] == "climb", "step 1 (nose up) must come first"
-    assert "switch_weapon" in kinds, "step 2 never pressed the weapon key"
-    assert kinds.index("switch_weapon") < kinds.index("nose_down"), (
-        "the weapon switch is step 2 — before the nose-angle step")
+    assert "switch_weapon" not in kinds, (
+        "the spawn weapon stays selected until it runs out; the mission must "
+        "not press the toggle key at all")
     assert "nose_down" in kinds, "a nose 40 deg high must be pulsed down"
     # Loop teardown is bookkeeping around the steps, not a step itself.
     steps = [k for k in kinds if k != "boresight_stop"]
     assert steps[-1] == "pursue", "pursuit must be the last thing the script does"
-    assert kinds.count("switch_weapon") == 1
     # The level-off climb was aimed at the documented altitude.
     assert ("climb", 3000.0) in log
 
 
-def test_pursuit_is_told_the_weapon_is_already_switched(monkeypatch):
-    """pursue_and_engage presses the toggle key itself unless told otherwise —
-    without this the aircraft is back on the primary weapon at step 4."""
+def test_pursuit_is_told_to_defer_the_weapon_switch(monkeypatch):
+    """pursue_and_engage presses the toggle key at its own start unless told
+    otherwise — without this step 4 would switch weapons the moment pursuit
+    begins, which is exactly what the operator asked not to happen. It must not
+    be told the weapon "is already switched" either: that flag would also
+    suppress the switch when the weapon does run out."""
     analyzer = _Analyzer([(3100, -10)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker())
-    log = _record(ctrl, monkeypatch)
+    captured = {}
+    monkeypatch.setattr(ctrl, "climb_mode", lambda **kw: None)
+    monkeypatch.setattr(ctrl, "nose_down", lambda *a, **k: None)
+    monkeypatch.setattr(ctrl, "nose_up", lambda *a, **k: None)
+    monkeypatch.setattr(ctrl, "start_boresight_engage_loop", lambda: None)
+    monkeypatch.setattr(ctrl, "stop_boresight_engage_loop", lambda: None)
+    monkeypatch.setattr(ctrl, "pursue_and_engage", lambda **kw: captured.update(kw))
 
     _run_mission(ctrl).join(timeout=5.0)
 
-    assert ("pursue", True) in log
+    assert captured.get("defer_switch_until_empty") is True
+    assert not captured.get("weapon_already_switched")
 
 
 def test_pursuit_goes_through_the_eject_fsm_seam(monkeypatch):
@@ -226,21 +243,38 @@ def test_pursuit_goes_through_the_eject_fsm_seam(monkeypatch):
     assert analyzer.events == ["eject_started", "eject_complete"]
 
 
-def test_secondary_weapon_flag_is_set_and_the_key_is_not_pressed_twice(monkeypatch):
-    """SWITCH_WEAPON is a toggle. The flag is cleared only on respawn or match
-    end, so a second mission start inside one life must not press it again."""
+def test_the_mission_never_presses_the_weapon_key_or_sets_the_flag(monkeypatch):
+    """SWITCH_WEAPON is a toggle and the flag is the only record of whether it
+    was pressed this life. The mission does neither: the flag stays False, so
+    AMMO_MISSILE is still understood to read the rack that is firing (ADR 088's
+    rearm-abort and the crash_with_missiles check assume exactly that)."""
     analyzer = _Analyzer([(3100, -10)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker())
     log = _record(ctrl, monkeypatch)
 
     assert not ctrl.is_secondary_weapon_active()
     _run_mission(ctrl).join(timeout=5.0)
-    assert ctrl.is_secondary_weapon_active()
-    assert log.count(("switch_weapon",)) == 1
+    assert not ctrl.is_secondary_weapon_active()
+    assert ("switch_weapon",) not in log
 
     # Same life, mission started again (hotkey re-press / resume from manual).
     log.clear()
     _run_mission(ctrl).join(timeout=5.0)
+    assert ("switch_weapon",) not in log
+    assert not ctrl.is_secondary_weapon_active()
+
+
+def test_a_flag_already_set_this_life_is_left_alone(monkeypatch):
+    """The weapon already ran out and was switched earlier in this life (by the
+    missiles-empty response), then the mission is re-entered: the flag is the
+    record of that press and must survive, and nothing presses the key again."""
+    analyzer = _Analyzer([(3100, -10)])
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker())
+    log = _record(ctrl, monkeypatch)
+    ctrl._eject_weapon_switched = True
+
+    _run_mission(ctrl).join(timeout=5.0)
+
     assert ("switch_weapon",) not in log
     assert ctrl.is_secondary_weapon_active()
 
@@ -434,8 +468,10 @@ def test_engagement_is_boresight_only_and_never_search_and_destroy(monkeypatch):
         "search_and_destroy presses the padlock camera; su30 must never start it"
 
 
-def test_boresight_starts_after_the_weapon_switch(monkeypatch):
-    """Started after step 2 so the loop can only ever fire the secondary."""
+def test_boresight_starts_without_any_weapon_switch_before_it(monkeypatch):
+    """The loop fires whatever is selected — the spawn weapon — so nothing is
+    switched ahead of it. (It used to start after a step-2 switch so it could
+    only fire the secondary; the operator reversed that on 2026-09-24.)"""
     analyzer = _Analyzer([(3100, -10)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker())
     log = _record(ctrl, monkeypatch)
@@ -443,12 +479,13 @@ def test_boresight_starts_after_the_weapon_switch(monkeypatch):
     _run_mission(ctrl).join(timeout=5.0)
 
     kinds = [e[0] for e in log]
-    assert kinds.index("switch_weapon") < kinds.index("boresight_start")
+    assert "boresight_start" in kinds
+    assert "switch_weapon" not in kinds
 
 
 def test_boresight_also_starts_when_the_weapon_was_already_switched(monkeypatch):
-    """A second start inside one life skips the (toggle) switch but must still
-    bring the engagement loop up."""
+    """A second start inside one life, after the weapon has run out and been
+    switched, must still bring the engagement loop up."""
     analyzer = _Analyzer([(3100, -10)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker())
     log = _record(ctrl, monkeypatch)
@@ -520,10 +557,11 @@ def test_a_failing_boresight_stop_does_not_leave_the_lock_held(monkeypatch):
     assert not ctrl.is_mission_running()
 
 
-def test_the_real_loop_fires_the_secondary_and_never_presses_padlock(monkeypatch):
+def test_the_real_loop_fires_without_switching_and_never_presses_padlock(monkeypatch):
     """End to end through the real boresight loop and real key primitives (only
-    the pitch actuators are stubbed): the fire key goes down after the weapon
-    switch, and the padlock camera key never goes down at all."""
+    the pitch actuators are stubbed): the fire key goes down, the weapon toggle
+    never does (the spawn weapon stays selected until it runs out), and the
+    padlock camera key never goes down at all."""
     from wingman.controller import FIRE_ACTIVE_WEAPON, PADLOCK_CAMERA, SWITCH_WEAPON
 
     analyzer = _Analyzer([(1000, 20)])       # holds in the climb, loop running
@@ -543,8 +581,8 @@ def test_the_real_loop_fires_the_secondary_and_never_presses_padlock(monkeypatch
     _drain(ctrl, t)
 
     assert PADLOCK_CAMERA not in keys, "su30 must never toggle the padlock camera"
-    assert keys.index(SWITCH_WEAPON) < keys.index(FIRE_ACTIVE_WEAPON), \
-        "the fire loop must not fire before the secondary is selected"
+    assert SWITCH_WEAPON not in keys, \
+        "the mission must not switch weapons; the spawn weapon fires until empty"
     assert ctrl._boresight_thread is None, "the loop outlived the mission"
 
 
@@ -554,7 +592,8 @@ def test_the_real_loop_fires_the_secondary_and_never_presses_padlock(monkeypatch
 # search_and_destroy is not the only thing that presses the padlock camera. Two
 # shared paths do it on their own, and mission_su30 triggers both:
 #   * ADR 140 D6 presses to "correct" an Unknown padlock state whenever the
-#     secondary weapon is active — and su30 has it active for its whole life;
+#     secondary weapon is active — which su30 has from the moment its spawn
+#     weapon runs out and is switched away from;
 #   * the missile target-spread handler presses twice after two missiles "fire",
 #     and a primary rack of 4 reading 2 after the weapon switch looks like two.
 # The rule is one check: while su30 is the mission in play, none of it runs.
@@ -627,7 +666,7 @@ def test_a_search_and_destroy_loop_under_su30_never_presses_padlock(monkeypatch)
 def test_the_unknown_state_correction_does_not_run_during_su30(monkeypatch):
     """ADR 140 D6 — the first of the two shared paths."""
     ctrl = _plain_ctrl(monkeypatch, "su30")
-    ctrl._eject_weapon_switched = True          # su30 step 2 leaves this set
+    ctrl._eject_weapon_switched = True          # set once the spawn weapon has run out
     ctrl._padlock_engaged = None                # Unknown, as it starts a life
 
     ctrl._maybe_correct_padlock_unknown()

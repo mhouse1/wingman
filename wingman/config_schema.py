@@ -592,6 +592,8 @@ SCHEMA = Section(
             "pursuit_max_duration_s": SECONDS,
             "pursuit_padlock_verify": BOOL,
             "ammo_zero_grace_s": SECONDS,
+            "search_resume_delay_s": SECONDS,
+            "empty_confirm_reads": _int(1),
         }),
 
         "hud": Section(children={

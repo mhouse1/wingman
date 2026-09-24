@@ -280,7 +280,7 @@ on your own display, and work bare when the nested game window has focus. See AD
 | `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
 | `u` | Start the configured mission (`mission.default_mission`: `j20`, `su30` or `jas39`) — and, while in manual, hand control back to wingman |
 | `y` | Start the loiter mission — climb to the hold altitude and orbit to stay alive |
-| `o` | Start the SU-30 mission — nose up, secondary weapon, level off at 3000 m, then pursuit mode (takes the aircraft from a running mission) |
+| `o` | Start the SU-30 mission — nose up, level off at 3000 m, then pursuit mode; the secondary weapon is switched in only once the first one runs out (takes the aircraft from a running mission) |
 | `m` | Activate unattended mode (also auto-enabled from config) |
 | `end` | Cancel active mission |
 | `i` / `j` / `k` / `l` | Manual takeover **from your own display** (needs `ctrl+alt` on the nested lane) — see below |

@@ -290,6 +290,29 @@ BOOL`, `pursuit_max_duration_s: SECONDS`, `pursuit_padlock_verify: BOOL` —
 no new `Leaf` patterns needed, all three types already exist for sibling
 keys elsewhere in the schema.
 
+### Later additions (2026-09-23 and 2026-09-24)
+
+Three keys were added after this design was written, each documented where its
+evidence lives rather than here:
+
+- `ammo_zero_grace_s` (12.0): the HUD ammo count lags a weapon switch by seconds,
+  so a 0 read soon after the switch is not an empty secondary.
+- `search_resume_delay_s` (2.0): how long a miss after a lock holds the roll axis
+  neutral before the ROLL_LEFT search resumes; see Design 005, "Search-Resume
+  Delay".
+- `empty_confirm_reads` (3): consecutive ammo==0 reads before the deferred weapon
+  switch (below) presses the toggle key.
+
+**Deferred weapon switch.** `pursue_and_engage(defer_switch_until_empty=True)` is
+the form `mission_su30` uses (ADR 144 D4, revised 2026-09-24). It presses no
+`SWITCH_WEAPON` at its start and leaves `_eject_weapon_switched` alone, pursues
+with whichever weapon is selected, and switches once when that weapon has read
+empty for `empty_confirm_reads` cycles. Only after that switch does the
+ammo-zero fall-through apply, with `ammo_zero_grace_s` measured from the switch.
+If `pursuit_max_duration_s` ends the encounter first, the fall-through passes
+`eject_and_dive` the flag's real value instead of `True`, so the dive makes its own
+switch. The default form, used by the missiles-empty trigger, is unchanged.
+
 ---
 
 ## Validation Strategy

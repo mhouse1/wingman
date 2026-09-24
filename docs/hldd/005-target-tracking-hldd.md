@@ -1082,6 +1082,104 @@ connections but does not answer; SIGTERM was ignored and SIGKILL was declined.
 
 ---
 
+## Search-Resume Delay — Grace-Window Rotation (2026-09-24, action item 001)
+
+Wingman 1.8.11. Game UI version not recorded.
+
+### Finding: a one-tick dropout after a lock restarted the left spin
+
+`pursue_and_engage` called `engage_roll_search()` on every tick where
+`obs["visible"]` was false. `visible` is false on every `LOST_GRACE` tick too,
+and the tracker's own grace window is about 0.4 s, so a lock that dropped for
+one or two scans re-pressed ROLL_LEFT at once — the operator's "it found the
+target but kept rotating past it".
+
+```mermaid
+flowchart TD
+    A[Tick with no visible target] --> B{Seen a target this pursuit}
+    B -->|no| S[Hold ROLL LEFT as the search default]
+    B -->|yes| C{Seen within the resume delay}
+    C -->|yes - new behavior| N[Release roll to neutral]
+    C -->|no| S
+```
+
+### Evidence (labels: measured / inferred)
+
+Run 2026-09-24 06:01:47-06:08:32 (`su30` mission, pursuit via step 4, frames
+`pursuit_mode_20260924_0603*`). The log was copied out of `wingman.log` before
+the next launch.
+
+| Claim | Label | Basis |
+|-------|-------|-------|
+| Pursuit ran 06:03:21.2-06:03:41.4 (the 20 s cap) and had no lock until 06:03:38.25, about 17 s | measured | 46 consecutive `TRACKPICK path=none` lines, then `pursue_and_engage - max duration (20s) reached` |
+| First lock (1068,779), err +0.113, then two ROI-scan rejects (`glyphs=9`, `glyphs=9`), grace timeout after 0.73 s | measured | `TRACKPICK` and `TargetTracker` lines 06:03:38.251-38.971 |
+| Re-lock 06:03:39.319 at err +0.256, peak +0.366 at 39.681, back to +0.12 by 40.727 | measured | `sel` x converted with (x-960)/960 |
+| The target was at screen centre while the lock was lost | inferred | Nameplate x about 960 read by eye in `pursuit_mode_20260924_060338_16.png`; the stale marker sat at (1067,778) |
+| The two miss ticks re-pressed ROLL_LEFT | inferred | From the code path; a successful press logs nothing, so the log could not show it |
+| The aircraft kept rotating left for about one tick after the RIGHT command | inferred | err grew +0.256 to +0.366 after the first correct-direction tick; actuation lag is the assumed cause |
+| 11 of 18 acquisitions were followed by an ROI-mode gate reject on the very next scored tick | measured | `TRACKPICK` pairing over 657 scored ticks; reject glyph counts 9, 18, 0, 10, 9, 0, 7, 0, 0, 12, 0 |
+| ROI-mode ticks with a red mass: 27 pass, 24 reject (9 of the rejects at 9-19 glyphs) | measured | same pairing |
+
+The persistent 560-620 px red mass with `glyphs=0` at 06:03:30-37 is the game's
+off-screen-enemy aircraft icon over the player's tail (frame `..._060335_13.png`,
+inferred by eye). The gate refusing it is the gate working as designed.
+
+### Change (one behavior change)
+
+`pursuit_mode.search_resume_delay_s` (default 2.0 in code and shipped; 0
+restores the old immediate resume). New `Controller.roll_on_miss(last_seen_ts,
+resume_delay_s)`: within the delay of the last visible tick a miss releases the
+roll axis to neutral; otherwise, or if nothing was ever seen, it calls
+`engage_roll_search()` as before. Used only by `pursue_and_engage`.
+`_eject_heatdive_loop` still resumes the search immediately — deliberate, one
+change at a time. Neutral rather than "keep the last direction": a target that
+has vanished would otherwise be chased open-loop for the whole delay.
+
+Instrumentation (behavior-neutral): `HOLD[roll]: <held>/<reason> -> <held>/<reason>
+(<why>)`, one DEBUG line per roll-hold state change, never per tick.
+
+### Live-trial verdict criteria (not yet run)
+
+- After a `TargetTracker: acquired target` line, a miss shows
+  `HOLD[roll]: ... -> None/None (miss within 2.0s of last lock)`. A
+  `-> left/search` line within 2 s of a `/target` hold is a bug, not a result.
+- Peak error growth in the second after a lock, compared with the +0.11 measured
+  above (one case, so not a rate).
+- Falsified if overshoot after a lock is unchanged with the delay working: then
+  the lag between command and rotation, not the resumed search, dominates.
+
+### Open findings, deliberately not acted on
+
+1. **The bigger cause: locks are dropped one scan after they are made.** The
+   selected point is the mean of every red pixel in the crop, so with several
+   red items it lands on none of them; the next ROI is centred there, clips the
+   nameplate, and the glyph gate (threshold 20) rejects it. Six of the eleven
+   immediate losses had 7-18 glyphs, i.e. a clipped real nameplate. This agrees
+   with the earlier open finding that the threshold is probably too high, and
+   adds that the ROI geometry, not only the threshold, is at fault. Next cycle.
+2. **The 20 s pursuit budget is mostly spent searching.** About 17 s here with
+   no lock. A roll-only search only brings targets within the roll cone into the
+   acquisition region; not addressed.
+3. **The operator's 5-second interval search was not adopted.** The measured
+   loss is the grace-window resume and the dropped locks, not continuous rotation
+   itself. Revisit if overshoot persists with this fix in place.
+4. **`mission_su30` weapon switching** (do not switch until the current weapon
+   runs out) is a separate change, not started.
+
+### Status
+
+Code, tests and config are in the working tree (uncommitted). Targeted tests
+(`test_config_schema`, `test_sustained_hold`, `test_pursuit_mode`) pass, 61 in
+total; `make lint` is clean. Full `make test`: 1,892 passed, 28 skipped, 6
+failed — the same six order-dependent `tests/test_input_linux.py` failures
+recorded in the previous section (identical at a clean HEAD, pass in isolation).
+The live trial has not run yet. It will also exercise the `mission_su30`
+weapon-switch change made the same day (ADR 144 D2/D4), which is independent of
+this one (roll search versus weapon selection, distinct log signatures), so it
+is recorded as a second column rather than a footnote.
+
+---
+
 ## Adaptive Optimization (Future, Non-V1)
 
 This capability is a follow-on optimization phase and is **not required** for initial delivery.
