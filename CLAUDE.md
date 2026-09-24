@@ -41,10 +41,24 @@ anything in the capture or injection path.
 **Tests:**
 ```bash
 make test                             # full pytest suite + HTML report
+make docker-test                      # same suite in the Dockerfile image, on its own Xvfb display
 make test1                            # single OCR check (region 33 / continue)
 make test2                            # single OCR check (region 9 / incoming)
 uv run --active pytest tests/test_analyzer.py -k foo  # run one test by name
 ```
+
+No X display (headless box, CI, a Claude Code cloud session)? Run `make docker-test`
+rather than editing tests to avoid the display. The image carries Xvfb and
+python3-tk inside the container, so the suite runs unchanged without installing
+an X server on the host (see "Python Environment" below). In a Claude Code cloud
+session:
+
+- The Docker daemon is installed but not started. If `docker info` fails, run
+  `nohup dockerd > /tmp/dockerd.log 2>&1 &` first.
+- A cold build needs about 21 GB of free disk, mostly the CUDA torch that `uv.lock`
+  pins. Skip the host `uv sync`, or delete `.venv`, if space is tight.
+- If Docker Hub answers `429 Too Many Requests`, add
+  `DOCKER_BUILD_ARGS="--build-arg BASE_IMAGE=mirror.gcr.io/library/ubuntu:24.04"`.
 
 **Validation gates (run before releasing):**
 ```bash
