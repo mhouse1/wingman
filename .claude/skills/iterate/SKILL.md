@@ -1,6 +1,6 @@
 ---
 name: iterate
-description: Run one live-fix cycle on wingman — review the newest session log, diagnose from measurement, fix with tests, pass the gates, relaunch, and watch for the failure to recur. Use when the operator says "iterate", reports a live misbehaviour, or asks to review a log and act on it. Also supports a self-directed continuous mode — triggered by phrasing like "iterate with your recommendations", "keep looping", or "until I tell you to stop" — that picks its own target each cycle, keeps a running ELI5 changelog, and reschedules itself until the operator stops it or the session ends.
+description: Run one live-fix cycle on wingman — review the newest session log, diagnose from measurement, fix with tests, pass the gates, LAUNCH wingman live, and watch for the failure to recur. Every cycle ends with wingman running (or a named blocker); invoking this skill is the operator's authorization to run it, so never close a cycle by asking whether to. Use when the operator says "iterate", reports a live misbehaviour, or asks to review a log and act on it. Also supports a self-directed continuous mode — triggered by phrasing like "iterate with your recommendations", "keep looping", or "until I tell you to stop" — that picks its own target each cycle, keeps a running ELI5 changelog, and reschedules itself until the operator stops it or the session ends.
 ---
 
 # Iterate
@@ -9,6 +9,24 @@ One cycle: **review → diagnose → fix → gate → run → watch → record.*
 
 Do not skip to the fix. Most of the value is in the diagnosis, and most of the
 mistakes come from acting on inference that looked like measurement.
+
+## A cycle is done when the report can say all of this
+
+1. what the newest log showed, each claim labelled measured / inferred / assumed;
+2. the one change, and the test that would have caught it;
+3. `make lint && make test` green;
+4. **wingman is running**: `pid <n>, started <HH:MM>, log wingman.log` — or a
+   named blocker from step 5, written as `blocked: <reason>`;
+5. a Monitor is armed on the specific failure (step 6);
+6. the tracking document has the row (step 7).
+
+**Invoking `/iterate` is the authorization to run wingman**, in a single cycle
+exactly as in loop mode. Items 4 and 5 are not optional and are not a question
+for the operator. A report that ends "want me to start a live run?" has skipped
+both: on 2026-09-24 a cycle closed that way, with the gates green and the
+documents written, and the operator had to point out that this skill says to
+run. The only time step 5 lets you ask instead of run is the one case it names
+(a session that is not yours is already running).
 
 ## Loop Mode
 
@@ -74,9 +92,9 @@ but the moment one of them is actually new, log it before moving on, not
 "later, once things settle down."
 
 **Keep going without being asked.** Run steps 1-7 exactly as below — don't
-skip Gate or Run to go faster. The standing permission-to-run rule in step 5
-is satisfied once, by the operator's request to loop — don't re-ask "should I
-launch a run?" every cycle. Do stop and ask if a gate fails in a way you can't
+skip Gate or Run to go faster. Permission to run is the invocation itself
+(the contract above, step 5): loop mode only repeats it, so never ask "should I
+launch a run?" in any cycle. Do stop and ask if a gate fails in a way you can't
 diagnose, or a decision genuinely needs the operator (ambiguous requirement,
 destructive action, anything the git rule below reserves to them).
 
@@ -109,8 +127,19 @@ grep -c "BOUNDARY: dist=" <log>; grep -c "BOUNDARY: no reading" <log>
 ```
 
 `wingman.log` is the **live** session; `logs/wingman_<end-stamp>.log` are archived.
-The live file opens with `mode="w"` — a rerun destroys it. If a session matters
-and is not yet archived, copy it before doing anything that could restart wingman.
+A start rotates the previous log into `logs/` (`main.py` renames it, never
+truncates it), so relaunching keeps it — unless the launch prints `could not
+rotate previous log`, in which case copy it first. The live file itself opens
+with `mode="w"`, so never point anything that must survive at it.
+
+**Does the newest log postdate the code you are judging?** Compare its first line
+with `git log -1 --format=%ci` and the mtimes of what `git status --short`
+lists. If not, it is no evidence for that code — on 2026-09-24 three changes sat
+unrun on top of a log that predated all of them, and the review turned into
+offline replay while nothing ran. Say so in the first line of the review, and if
+the diagnosis will need live evidence, **start the run now** (step 5) instead of
+after the fix: a run costs wall-clock time, offline replay does not. Replay on
+archived frames is diagnosis, never the cycle's verdict.
 
 Frames land in `test_screenshots/unknown_anomalies/` — `rtb_*` at confirmed
 crossings, `approach_*` at approaches. Read them; they answer questions the log
@@ -194,32 +223,78 @@ file is picked up automatically.
 
 ## 5. Run
 
-**The gate is step 4 of 7, not the end of the cycle.** An anomaly-detector fix
-landed 2026-09-13: tests went green, and the report to the operator described
-running it live as "worth doing" — advice for later, not a step taken or even
-asked about. The cycle stalled one short of its own stated shape, silently,
-and the operator had to notice and ask why nothing had actually run.
+**The gate is step 4 of 7, not the end of the cycle, and running wingman is not
+a question to put to the operator.** An anomaly-detector fix landed 2026-09-13:
+tests went green and the report called running it live "worth doing" — advice
+for later, not a step taken. On 2026-09-24 the step offered "launch it, or ask"
+and the cycle closed on "want me to start a live run?", with the gates green and
+the documents written; the operator had to point out that the skill says to run.
+The ask branch was the trap, so it is gone: invoking `/iterate` already said
+yes, and a live session on the operator's account is exactly what this skill
+exists to run (an unattended run is the normal case, not a special one).
 
-After the gate passes, do one of these two things **in the same turn** —
-never describe Run as something to consider later:
+**Do all four of these in the same turn the gate passes:**
 
-- **Launch it** — `make r1`/`make rd` below, backgrounded if long.
-- **Ask, explicitly**, if launching now is not your call to make — a live
-  session is a bigger action than a test run: it can run for hours
-  unattended and occupies the operator's own game account, which is reason
-  to confirm before starting it, not reason to omit it as the next step.
-  "Gate's green — want me to start a live run now?" is one sentence.
+1. **Pre-flight, ten seconds.**
+
+   ```bash
+   pgrep -af "[w]ingman.main"        # is a session already running?
+   make nested-status                # the nested display :3 and the game, if any
+   df -h . | tail -1                 # capture budget floor is 10 GB free
+   ```
+
+   - **Nothing running** → launch. Do not confirm.
+   - **A session you started** (this conversation, or the ELI5 changelog says
+     so) → if it started after your last change it already is the run: go to
+     Watch. If it started before, it cannot exercise the change: stop it with
+     `z` (below), wait for it to exit, then launch.
+   - **A session you did not start is the operator's own.** Do not start a
+     second one — both want `:3` and the account, and `make r1` kills and
+     relaunches the game — and do not stop it. Copy its log into your scratchpad
+     and Watch the copy. If it started before your change it cannot exercise
+     it: report `blocked: your session (started HH:MM) predates the fix; stop
+     it with z when a round ends and I will launch`, and Watch it anyway. That
+     is the only situation where you ask instead of run.
+
+2. **Launch**, backgrounded (`run_in_background: true`), never in the foreground:
+
+   ```bash
+   make r1                       # account 1 (r2: account 2). Kills and relaunches the game,
+                                 # then wingman with DEBUG to wingman.log
+   make r1 v                     # the same plus --record-session: session video and BT
+                                 # trace, and the only mode that arms the eject-stuck check
+   make r1 GAME_LAUNCH_DEPS=     # attach to a game that is already up. Never put
+                                 # nested-setup in it: it closes a running game
+   ```
+
+   `make r` writes no log file, so it is no use here. Read a target's recipe
+   before running one you have not used; `make tp`, `tp-full`, `wrelease` and
+   `rr-live-path1-gate` are operator-run and are not launched by this skill.
+
+3. **Verify it came up**, in the same turn:
+
+   ```bash
+   pgrep -af "[w]ingman.main"        # the shim AND python3
+   sleep 45; tail -5 wingman.log | cut -c1-160
+   ls -t logs/*.log | head -2        # the previous log was rotated here
+   ```
+
+   A launch that dies at startup is a finding to report, with the log lines
+   that show it — not a reason to stop the cycle.
+
+4. **Go to Watch (step 6) and arm the Monitor** before you write the report.
+
+**Not launching is legitimate only for these reasons**, and each is reported as
+`blocked: <reason>` in the closing report, never as a question about whether to
+run: the operator's own session is running (above); a gate failed and you cannot
+diagnose it; the operator said in this request not to run; the game or display
+is unavailable (`make nested-status` and the game executable say so).
 
 **A fix for a rare or intermittent failure is not an exception.** "Small
 samples mislead" (above) means a short check afterward cannot prove the fix
 worked — it does not mean skip running. Background a long session anyway;
 Watch (step 6) is what accumulates evidence toward a real verdict, across
 this run and the ones after it, not a single same-turn check.
-
-```bash
-make r1        # account 1; r2 for account 2. Long-running: background it.
-make rd        # attaches to a game that is already up
-```
 
 ### Stopping: finish the round first
 
@@ -254,6 +329,15 @@ a safe point:
 grep -c "FINISH ROUND" wingman.log            # request acknowledged
 until ! pgrep -f "[w]ingman.main" >/dev/null; do sleep 5; done
 ```
+
+Two things seen on 2026-09-24. Check the acknowledgement within about 15 s: 2 of
+7 synthetic `z` presses were never acknowledged (cause not found; `v` was ignored
+in one of them too). Press it once more, and read the once-a-minute DEBUG line
+`XKey[:3]: N KeyPress events in the last 60s` — N of 0 means the events are not
+arriving — before falling back to a signal. And never signal wingman or close the
+game during matchmaking or loading: the server still forms the match, and the next
+launch drops straight into a live round with nobody flying. `z` is deferred to the
+lobby by design; a signal is not.
 
 ### Signals are the fallback, and they cost something
 
@@ -298,6 +382,18 @@ The indicator should be the thing that must not recur, phrased so silence is
 meaningful. Include the failure signatures too — a filter that only matches the
 happy path is silent through a crash, and silence looks like success.
 
+`Monitor` is a deferred tool: fetch its schema with ToolSearch (`select:Monitor`)
+before calling it, or the call fails. Arm it in the same turn as the launch, then
+write the report — the run is up and something is already watching it.
+
+**In a single (non-loop) cycle the report goes out once the run is up and the
+Monitor is armed; it does not wait for the run to end**, which can take hours.
+The report says what the run is expected to show and how you will know. The
+verdict arrives as Monitor notifications and is handled as they land, each new
+finding written to the tracking document (step 7) and, in loop mode, the changelog
+as it is produced. The run stops when the operator says so, or when the failure you
+were watching for has been confirmed or refuted — then stop it with `z`.
+
 ## 7. Record
 
 Add the row to the tracking ADR **before the next run truncates the log**
@@ -310,6 +406,13 @@ looking correct.
 
 ## Standing traps
 
+- **A question is not a step.** Step 5 once offered "launch it, or ask", and the
+  ask branch swallowed the run: the cycle closed on "want me to start a live run?"
+  with the gates green (2026-09-24). Wanting to be careful with the operator's game
+  account is real, and it is already answered — the operator invoked this skill.
+  Check for a session that is not yours, and otherwise launch. Carefulness belongs
+  in the pre-flight and in reading a recipe before you run it, not in withholding
+  the run.
 - **The metric can be the bug.** 94% of boundary colour triggers were false
   positives; counting triggers measured the detector's noise, not the aircraft.
 - **Compare like with like, and check the denominator.** Two numbers that both

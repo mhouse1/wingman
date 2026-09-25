@@ -1525,6 +1525,10 @@ partly wrong. `pursuit_mode_20260924_164821_48.png` shows a complete nameplate a
 So some "icon, no label" ticks are an icon inside the box whose label fell below the crop. See action
 item 001, Cycle 12, for the measurements (41% of nameplates shown lie outside the box).
 
+*Corrected again in Cycle 16 (see "Aim Point" below):* the label is drawn ABOVE its aircraft marker, not
+below it. The "170 px below its marker" pairing paired the label with an icon that belongs to another
+contact (inferred: the frame's own aircraft marker would sit under the bottom HUD).
+
 ### Decision (operator, 2026-09-24): ignore the icons
 
 Asked whether the pursuit should fly toward unlabelled red icons, the operator answered: "the icons are
@@ -1722,6 +1726,88 @@ effect size.
 Implemented, 13 unit tests (`tests/test_acquisition_clusters.py`), validated offline as above,
 config on, two live samples (6.5 min and 17 min so far). Live status: mechanism confirmed twice, pursuit
 outcome encouraging, dive outcome unchanged; the operator's archive will give the final numbers.
+
+---
+
+## Aim Point: the Aircraft Is Below Its Nameplate (2026-09-24, action item 001, Cycle 16)
+
+### Trigger and finding
+
+`/iterate improve the target tracking`. No live session had run since commit `3cb467d` (a rewrite by
+another session: aim at "the marker above the label", keep locks on a looser test, scan the whole region
+every tick), so the review replayed that rewrite's real functions on archived frames instead of waiting
+for a log. It aims about 325 px above the aircraft.
+
+- **The committed rule.** It looked for a red component 162 to 287 px ABOVE the label and otherwise moved
+  the label's centre 225 px up. Across the 300 archived full frames, 54 carry a nameplate that passes the
+  strict gate; the rule found a "marker" on 2 of them and took the 225 px fallback on 52.
+- **Where the aircraft is (measured).** The game draws a diamond bracket around each aircraft (hollow and
+  light green, or red corner arrows; a small red jet icon with a bar on far contacts) at a fixed screen
+  offset BELOW the nameplate. At 0.36 and 1.7 km the aircraft is visible inside it. Ruler read on 2.5x
+  zooms of 8 archived frames, marker centre below the label's glyph centre: 90, 95, 98, 101, 102, 102,
+  106 and 110 px (mean 100.5; targets 0.36 to 6.8 km; x offset -9 to 0). No trend with range worth a
+  correction. Reading error about 3 px.
+- **So the errors were (measured, real function).** On four archived frames the committed rule's steering
+  point was 327, 326, 331 and 335 px above the marker. The mean-of-red rule before it sat about 5 to 20 px
+  below the label's centre in the old `PURSUING` circles, so about 85 px above the aircraft.
+- **Why the marker was never found.** Its pixels are darker than the strict red mask: hue 0 to 2,
+  saturation 123 to 155, value 217 to 230 on the jet icon measured, against the mask's value floor of 245,
+  which admits the label's text. About 2 of the icon's roughly 390 reddish pixels passed.
+- **Where the wrong geometry came from.** My Cycle 12 note ("label 162 to 287 px below the icon", four pairs,
+  dx scattered -5 to +205) paired labels with icons of other contacts; the scatter in dx was the sign of it.
+  The rewrite took that number as measured. Its synthetic tests then drew the marker above the label, so
+  the suite agreed with the code and both disagreed with the game.
+
+### Change
+
+`tracking.red_mass_marker_band_px` and `red_mass_marker_offset_px` are gone; `tracking.red_mass_aim_offset_px`
+(shipped 100, positive is down) moves the chosen cluster's centre down onto the aircraft. `_aim_point` and the
+`aim=` field of `TRACKPICK` are removed (there is no longer a choice to report). Nothing else in the tracker
+changed: the acquire and keep tests, the whole-region scan and the memory are as committed.
+
+Tests: the synthetic frames now draw the marker below the label, and four tests of the marker rule were replaced
+by five that pin the offset, its config key, and that a red shape above or below the label does not move the
+point. New
+`tests/test_nameplate_aim_geometry.py` runs the real probe on four real crops (`tests/fixtures/aim_*.png`,
+targets at 6.8, 6.7, 1.7 and 0.36 km) and requires the point within 15 px of the hand-read marker centre;
+a third test requires the old rule to miss each by more than 75 px, so the fixtures can tell the two apart.
+Mutation check: flipping the sign of the offset fails 8 tests, 4 synthetic and 4 on real frames.
+
+### Validation (measured, real function)
+
+- Four fixtures, steering point minus marker centre: (+7, -2), (+6, -1), (+2, -6), (+7, -10) px, against -327,
+  -326, -331 and -335 px in y for the committed rule.
+- Out of sample: the fixed probe on 12 further archived frames (not among the 8), aim drawn on each. Where
+  the diamond is visible (0.96 km, 1.8 km, 7.7 km and two others) the cross sits within about 12 px of its
+  centre; the others show no marker (hidden behind the player's own aircraft, or too far). Read by eye, not
+  measured.
+- A small systematic +5 px in x (the glyph mean sits right of the diamond) is left as it is: 0.005 of the
+  half-frame against a 0.05 deadband.
+
+### Baseline for the next session (the 18:57 to 19:18 log, old tracker, old aim; `make sr`)
+
+Lock runs (consecutive lock ticks): 116 runs over 305 lock ticks, median 2 ticks, longest 22, 24 runs of 4 or
+more. Steering point off centre on lock ticks: |dx| median 47 px (50% inside the 48 px roll deadband), |dy|
+median 115 px (20% inside the 30 px pitch deadband). Over runs of 4 or more (n=24) the first tick's median
+|dy| was 74 px and the last tick's 106 px, so the pitch axis was not converging inside a lock. Locks are too
+short for a control loop to settle; that, not the aim, is the larger limit, and is what the keep test of
+`3cb467d` targets. The aim point moved with this change, so |dy| is "the aircraft's offset from the
+crosshair" from here on (it was the label's offset before).
+
+### Not verified
+
+No live session has run with this change or with `3cb467d`. Open: whether roll and pitch now converge on the
+aircraft and the game reports a lock more often; the gains (`pitch_kp` 0.3, deadband 0.05) were tuned on the
+old aim; a partly drawn label (a keep tick with 8 to 19 glyphs) shifts the glyph centre and the aim with
+it, by an amount not measured; the game may clamp labels near the screen edge, which would change the offset
+there.
+
+### Live-check criteria
+
+`make sr` prints lock runs and the centring shares. Better than the baseline: median run length above 2 ticks,
+runs of 4 or more above 24 of 116, |dy| median well under 115 px, and the share inside the pitch deadband above
+20%. Archived `pursuit_mode_*.png` frames should show the `PURSUING` mark on the diamond bracket rather than on
+the label. `path=keep` ticks are the new tracker's; their count is its own evidence.
 
 ---
 

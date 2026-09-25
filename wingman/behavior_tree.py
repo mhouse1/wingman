@@ -553,7 +553,8 @@ class ClimbCondition:
                 terrain_shadow: bool = True,
                 terrain_sky_min_frac: float = 0.55,
                 terrain_confirm_reads: int = 2,
-                alt_floor_m: "float | None" = None):
+                alt_floor_m: "float | None" = None,
+                alt_floor_override_fn: "Callable[[], float | None] | None" = None):
         self._enter_below_alt = enter_below_alt
         self._exit_above_alt = exit_above_alt
         self._is_running_fn = is_running_fn
@@ -593,6 +594,9 @@ class ClimbCondition:
         # aircraft can show a near-zero or briefly positive rate while still
         # critically low).
         self._alt_floor_m = alt_floor_m
+        # ADR 147: the floor in force for the mission in play, read every tick.
+        # Returns None for "no mission-specific floor — use alt_floor_m".
+        self._alt_floor_override_fn = alt_floor_override_fn
         self._alt_floor_active = False
         # ttg (dive recovery) and terrain-ahead are what "hitting the
         # ground is certain" (ADR 107 D4's own reasoning for BoundaryTurn's
@@ -607,6 +611,22 @@ class ClimbCondition:
     @property
     def emergency_active(self) -> bool:
         return self._emergency_active
+
+    def _effective_alt_floor_m(self) -> "float | None":
+        """The hard altitude floor in force this tick, or None for no floor.
+
+        ADR 147: a mission may set its own floor (mission_su30 levels off at
+        3000 m, below the tree's 4000 m, and the tree restarted the climb 1.3 s
+        after the script stopped it). The override only REPLACES a floor that
+        exists: ``alt_floor_m`` unset still means no floor for every mission.
+        """
+        if self._alt_floor_m is None:
+            return None
+        if self._alt_floor_override_fn is not None:
+            override = self._alt_floor_override_fn()
+            if override is not None:
+                return float(override)
+        return float(self._alt_floor_m)
 
     @property
     def terrain_ahead_active(self) -> bool:
@@ -795,15 +815,16 @@ class ClimbCondition:
         # WARNING on every gap-then-reading cycle instead of once per
         # genuine crossing. Fixed: only ever write `_alt_floor_active` when
         # this tick actually has an altitude to judge.
-        if self._alt_floor_m is None:
+        floor_m = self._effective_alt_floor_m()
+        if floor_m is None:
             self._alt_floor_active = False
         elif snapshot.altitude is not None:
-            alt_floor = snapshot.altitude < float(self._alt_floor_m)
+            alt_floor = snapshot.altitude < floor_m
             if alt_floor and not self._alt_floor_active:
                 logger.warning(
                     "BT: ALTITUDE FLOOR — %.0fm below %.0fm — climb forced "
                     "(operator directive)",
-                    snapshot.altitude, self._alt_floor_m)
+                    snapshot.altitude, floor_m)
             self._alt_floor_active = alt_floor
         emergency = emergency or self._alt_floor_active
 
@@ -862,7 +883,9 @@ def make_climb_condition(enter_below_alt: "float | None",
                          terrain_shadow: bool = True,
                          terrain_sky_min_frac: float = 0.55,
                          terrain_confirm_reads: int = 2,
-                         alt_floor_m: "float | None" = None) -> ClimbCondition:
+                         alt_floor_m: "float | None" = None,
+                         alt_floor_override_fn: "Callable[[], float | None] | None" = None
+                         ) -> ClimbCondition:
     """ADR 139 D3: thin factory kept so every existing call site — production
     and test — is unchanged. See ``ClimbCondition`` for the logic."""
     return ClimbCondition(enter_below_alt, exit_above_alt,
@@ -875,12 +898,14 @@ def make_climb_condition(enter_below_alt: "float | None",
                           terrain_shadow=terrain_shadow,
                           terrain_sky_min_frac=terrain_sky_min_frac,
                           terrain_confirm_reads=terrain_confirm_reads,
-                          alt_floor_m=alt_floor_m)
+                          alt_floor_m=alt_floor_m,
+                          alt_floor_override_fn=alt_floor_override_fn)
 
 
 def make_sustain_climb_condition(enter_below_alt: "float | None",
                                  exit_above_alt: "float | None",
-                                 confirm_reads: int = 1):
+                                 confirm_reads: int = 1,
+                                 suppressed_fn: "Callable[[], bool] | None" = None):
     """ADR 075: climb-while-armed altitude sustain band.
 
     The adaptive J20 doctrine: as long as the aircraft has missiles and a
@@ -892,6 +917,11 @@ def make_sustain_climb_condition(enter_below_alt: "float | None",
       unreadable count must not command a climb;
     - ``mission_running`` — sustain is mission doctrine, unlike the emergency
       band which fires regardless (terrain outranks everything).
+
+    ``suppressed_fn`` (ADR 147): true while the mission in play flies its own
+    altitude and is not the adaptive doctrine (mission_su30). The band is still
+    evaluated so its hysteresis state tracks the altitude as it always does; only
+    the verdict is withheld.
 
     No is_running stickiness here: the leaf combines this condition with the
     emergency band's, and that one already carries the stickiness for any
@@ -906,7 +936,10 @@ def make_sustain_climb_condition(enter_below_alt: "float | None",
             return False
         if not snapshot.mission_running:
             return False
-        return band(snapshot)
+        climbing = band(snapshot)
+        if suppressed_fn is not None and suppressed_fn():
+            return False
+        return climbing
     return sustain
 
 
@@ -970,6 +1003,11 @@ class _BuildContext:
     # just this instant (a death detected a tick or two after the dive
     # itself would otherwise always read False here).
     climb_last_hard_emergency_ts_fn: "Callable[[], float] | None" = None
+    # ADR 147: the mission in play's own altitude doctrine, read by the Climb
+    # slot. Both default to None — the tree's configured floor and sustain band
+    # apply unchanged — so every mission but mission_su30 is untouched.
+    alt_floor_override_fn: "Callable[[], float | None] | None" = None
+    sustain_suppressed_fn: "Callable[[], bool] | None" = None
 
 
 def climb_tactic_enabled(bt_cfg: dict) -> bool:
@@ -1110,7 +1148,8 @@ def _build_climb_slot(ctx: "_BuildContext"):
         terrain_shadow=bool(_terrain_cfg.get("shadow", True)),
         terrain_sky_min_frac=float(_terrain_cfg.get("sky_min_frac", 0.55)),
         terrain_confirm_reads=int(_terrain_cfg.get("confirm_reads", 2)),
-        alt_floor_m=climb_cfg.get("alt_floor_m"))
+        alt_floor_m=climb_cfg.get("alt_floor_m"),
+        alt_floor_override_fn=ctx.alt_floor_override_fn)
     # ADR 075: the armed altitude-sustain band shares the leaf with the
     # emergency band. Both closures are evaluated EVERY tick (no
     # short-circuit) so neither hysteresis state machine goes stale while
@@ -1120,7 +1159,8 @@ def _build_climb_slot(ctx: "_BuildContext"):
         sustain = make_sustain_climb_condition(
             sustain_cfg.get("enter_below_alt"),
             sustain_cfg.get("exit_above_alt"),
-            confirm_reads=int(climb_cfg.get("confirm_reads", 1)))
+            confirm_reads=int(climb_cfg.get("confirm_reads", 1)),
+            suppressed_fn=ctx.sustain_suppressed_fn)
 
         def climb_condition(snapshot, _e=emergency, _s=sustain):
             e = _e(snapshot)
@@ -1259,7 +1299,10 @@ def _build_slots(ctx: "_BuildContext") -> dict:
 
 def build_tree(bt_cfg: dict, clock=time.time,
                actuators: "dict | None" = None,
-               regroup_enabled: bool = False) -> py_trees.trees.BehaviourTree:
+               regroup_enabled: bool = False,
+               alt_floor_override_fn: "Callable[[], float | None] | None" = None,
+               sustain_suppressed_fn: "Callable[[], bool] | None" = None,
+               ) -> py_trees.trees.BehaviourTree:
     """Construct the ADR 024 selector. Pure construction — no analyzer refs.
 
     ``actuators`` (Phase 3.1b) maps tactic name → ``(start_fn, is_running_fn)``
@@ -1270,11 +1313,18 @@ def build_tree(bt_cfg: dict, clock=time.time,
     Controller tactic exists for it, and its threshold is unset until
     calibrated (ADR 024).
 
+    ``alt_floor_override_fn`` / ``sustain_suppressed_fn`` (ADR 147) are the
+    mission in play's own altitude doctrine: a replacement hard floor and
+    whether the armed sustain band stands aside. Read every tick, so a mission
+    launched after the tree was built takes effect at once.
+
     ADR 139 D1: children are assembled from the declared ``_PRIORITY_ORDER``
     rather than imperative ``list.insert(...)`` calls at named positions.
     """
     ctx = _BuildContext(bt_cfg=bt_cfg, clock=clock, actuators=actuators or {},
-                        regroup_enabled=regroup_enabled)
+                        regroup_enabled=regroup_enabled,
+                        alt_floor_override_fn=alt_floor_override_fn,
+                        sustain_suppressed_fn=sustain_suppressed_fn)
     built = _build_slots(ctx)
     children = [built[name] for name in _PRIORITY_ORDER if name in built]
 

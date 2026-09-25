@@ -241,6 +241,14 @@ above so the descent has room, or lower `alt_floor_m` deliberately. This ADR doe
 neither — the floor is ADR 141 D1's unconditional backstop for near-stall cases,
 reintroduced after a revert.
 
+*Update 2026-09-24 (operator, ADR 147): resolved by lowering the floor for this
+mission.* The 18:57 session measured it: the script stopped its climb at 3192 m,
+the tree started one to 5000 m 1.3 s later, the -10 degree step waited behind it
+for its full 20 s on every pursuit, and the chase then rolled at the 4000 m floor.
+`su30_mission.alt_floor_m` (3000) is now the hard floor while this mission is in
+play, and the armed sustain climb stands aside for it; every other mission keeps
+the 4000 m doctrine. Not yet verified live (ADR 147).
+
 **Pursuit is reached without the HLDD 015 hard gate.** Step 4 calls
 `pursue_and_engage` directly, so it is not gated by `pursuit_mode.enabled`
 (which governs only the missiles-empty trigger). HLDD 015's precondition —
@@ -339,8 +347,9 @@ entry no longer launches J20 unless the config or the `u` hotkey asks for it.
    `pursuit_max_duration_s` carries. A nose 40-50 degrees high at the end of the
    climb may need more pulses than 20 s of 3 s samples allows; the climb's own
    exit push (ADR 086) does part of that work first.
-2. Should `climb_alt_m` sit at or above the floor (or the floor come down)? See
-   Consequences: at 3000 m the nose angle is not held.
+2. ~~Should `climb_alt_m` sit at or above the floor (or the floor come down)?~~
+   Answered 2026-09-24 (operator): the floor comes down, for this mission only
+   (ADR 147). Whether the -10 degree angle is then held is still to be measured.
 3. Should the fall-through to `eject_and_dive` apply to this mission at all, or
    should pursuit end by returning to normal flight? HLDD 015 Open Question 1
    made the same choice for the missiles-empty case; nothing here revisits it.

@@ -100,8 +100,8 @@ def test_a_keep_tick_is_a_lock_but_never_an_acquisition():
     tick, and a redmass tick after three of them continues the lock rather than acquiring."""
     log = [
         _pick(1, "none"), _pick(2, "none"), _pick(3, "none"),
-        _pick(4, "redmass", (960, 500), "pass", 25, 1) + " aim=marker",   # acquisition
-        _pick(5, "keep", (965, 505), "keep", 12, 0) + " aim=marker",
+        _pick(4, "redmass", (960, 500), "pass", 25, 1),                   # acquisition
+        _pick(5, "keep", (965, 505), "keep", 12, 0),
         _pick(6, "keep", (970, 505), "keep", 11, 0),
         _pick(7, "keep", (975, 505), "keep", 10, 0),
         _pick(8, "redmass", (980, 505), "pass", 24, 1),
@@ -150,3 +150,94 @@ def test_the_old_box_and_zones_match_the_shipped_config():
     assert len(zones) == len(R.HUD_ZONES)
     for (x1, y1, x2, y2), zone in zip(R.HUD_ZONES, zones, strict=True):
         assert (x1 / 1920, y1 / 1200, x2 / 1920, y2 / 1200) == pytest.approx(tuple(zone), abs=0.002)
+
+
+# --- ADR 147: the altitude a chase settles at --------------------------------------------
+
+def _alt(n, alt):
+    return f"{_ts(n)} [INFO] PADLOCK: OFF | Altitude: {alt} | Speed: 409 | Nose: -4° (level)"
+
+
+_ALT_LOG = [
+    f"{_ts(1)} [INFO] Controller: mission_su30 - step 4/4: activating pursuit mode",
+    f"{_ts(1)} [WARNING] Controller: mission_su30 - nose angle -10 deg not confirmed within 20s, continuing to pursuit",
+    _alt(5, 5000),                                                   # before the pursuit window
+    _alt(11, 3000), _alt(13, 3100), _alt(15, 3200), _alt(17, 3050), _alt(19, 2950),
+    f"{_ts(20)} [INFO] PURSUIT SUMMARY: end=external:match_ended dur=10.0s scans=30 locked=3 (10%) first_lock=2.0s ammo=4->4 switched=no",
+    _alt(25, 100),                                                   # after it
+    f"{_ts(26)} [WARNING] BT: ALTITUDE FLOOR — 2900m below 3000m — climb forced (operator directive)",
+    f"{_ts(27)} [WARNING] BT: ALTITUDE FLOOR — 2950m below 3000m — climb forced (operator directive)",
+    f"{_ts(28)} [WARNING] BT: ALTITUDE FLOOR — 3990m below 4000m — climb forced (operator directive)",
+]
+
+
+def test_only_altitude_readings_inside_a_pursuit_window_are_kept():
+    r = R.analyse(_ALT_LOG)
+    assert r["pursuit_alts"] == [2950, 3000, 3050, 3100, 3200]
+
+
+def test_floor_events_are_counted_by_the_floor_they_cite():
+    r = R.analyse(_ALT_LOG)
+    assert dict(r["floor_events"]) == {3000: 2, 4000: 1}
+
+
+def test_su30_handoffs_and_the_unconfirmed_nose_angle_are_counted():
+    r = R.analyse(_ALT_LOG)
+    assert (r["su30_handoffs"], r["su30_nose_unconfirmed"]) == (1, 1)
+
+
+def test_the_report_prints_the_altitude_block():
+    text = R.render(R.analyse(_ALT_LOG))
+    assert "pursuit altitude median 3050 m" in text
+    assert "10th to 90th percentile 2950 to 3100 m" in text
+    assert "(5 readings inside pursuit windows)" in text
+    assert "ALTITUDE FLOOR events by floor {3000: 2, 4000: 1}" in text
+    assert "su30 hand-offs 1, nose angle not confirmed 1" in text
+
+
+def test_the_report_says_so_when_no_altitude_falls_in_a_pursuit():
+    text = R.render(R.analyse([_alt(5, 4000)]))
+    assert "no altitude readings inside a pursuit window" in text
+    assert "ALTITUDE FLOOR events by floor none" in text
+
+
+# --- lock runs and how close to centre the steering point sits ----------------------------
+
+_LOCK_LOG = [
+    _pick(1, "redmass", (960, 600), "pass", 25, 1), _pick(2, "keep", (970, 610), "keep", 12, 0),   # run of 2
+    _pick(3, "none"),
+    _pick(4, "redmass", (1000, 700), "pass", 25, 1),                                              # run of 1
+    _pick(5, "none"), _pick(6, "none"),
+    _pick(7, "redmass", (960, 620), "pass", 25, 1), _pick(8, "keep", (960, 640), "keep", 12, 0),
+    _pick(9, "keep", (960, 660), "keep", 12, 0),                                                  # run of 3
+]
+
+
+def test_lock_runs_are_consecutive_lock_ticks():
+    r = R.analyse(_LOCK_LOG)
+    assert r["lock_runs"] == [1, 2, 3]
+
+
+def test_the_steering_point_offsets_are_from_the_frame_centre():
+    r = R.analyse(_LOCK_LOG)
+    assert r["lock_dx"] == [0, 0, 0, 0, 10, 40]
+    assert r["lock_dy"] == [0, 10, 20, 40, 60, 100]
+
+
+def test_a_run_still_open_at_the_end_of_the_log_is_counted():
+    r = R.analyse([_pick(1, "redmass", (960, 600), "pass", 25, 1), _pick(2, "keep", (960, 600), "keep", 12, 0)])
+    assert r["lock_runs"] == [2]
+
+
+def test_the_report_prints_run_lengths_and_centring():
+    text = R.render(R.analyse(_LOCK_LOG))
+    assert "lock runs 3 (median 2 ticks, longest 3, 0 of 4 or more)" in text
+    assert "|dx| median 0 px (100% inside the roll deadband)" in text
+    assert "|dy| median 40 px (50% inside the pitch deadband)" in text
+
+
+def test_the_deadband_constants_match_the_shipped_config():
+    cfg = yaml.safe_load((Path(__file__).resolve().parent.parent / "wingman" / "config.yaml").read_text(encoding="utf-8"))
+    t = cfg["tracking"]
+    expected = (round(t["deadband"] * R.FRAME_CENTRE[0]), round(t["pitch_deadband"] * R.FRAME_CENTRE[1]))
+    assert expected == R.DEADBAND_PX

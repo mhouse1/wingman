@@ -502,23 +502,26 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
 # the pursuit hand-off. search_and_destroy is never started by this mission.
 # Fire cadence is mission.weapon_loop_interval, shared with search_and_destroy.
 #
-# WARNING — climb_alt_m (3000) is BELOW behavior_tree.climb.alt_floor_m (4000,
-# ADR 141). Below the floor the tree's Climb tactic is selected every tick and
-# its leaf restarts a climb hold whenever none is running, so the climb this
-# mission stops at climb_alt_m is restarted by the tree within a tick and runs
-# on toward the tree's own exit altitude. mission_su30 stands aside for any
-# climb hold (it never presses pitch keys while one runs), so the -10 degree
-# step cannot take the axis until the aircraft is above the floor, and is then
-# undone whenever the nose-down flight path sinks back below it. Raise
-# climb_alt_m to the floor or above (or lower alt_floor_m, deliberately) for
-# the nose angle to be held at all.
+# alt_floor_m (ADR 147, operator, 2026-09-24): the hard altitude floor while this
+# mission is in play, instead of behavior_tree.climb.alt_floor_m (4000, ADR 141),
+# which every other mission keeps. It also stands the tree's armed sustain climb
+# (4000 to 5000 m, ADR 075) aside for this mission. Measured 2026-09-24 18:59:
+# the script stopped its climb at 3192 m and the tree restarted one to 5000 m
+# 1.3 s later, the -10 degree step waited behind that climb for its full 20 s,
+# and the chase began at 4750 m and then rolled for minutes at the 4000 m floor
+# (13 ALTITUDE FLOOR events in 20 minutes). With the floor at the level-off
+# altitude the climb is no longer restarted and the chase is expected to hover
+# near 3000 m; the first session after 2026-09-24 has to confirm that.
+# Keep it at or below climb_alt_m: above it the tree undoes the level-off again
+# (tests/test_controller_config.py pins that). Remove the key to restore the
+# tree's own 4000 m floor and sustain band for this mission.
 #
 # The angle-step numbers are named guesses, not measurements — the same status
 # pursuit_mode.pursuit_max_duration_s carries. The angle is the flight-path
 # angle from altitude rate over speed (telemetry.pitch_angle_deg), which lands
 # roughly every 3 s, so the step corrects on NEW samples only and pulses rather
 # than holds (ADR 068/069: a held key overshoots on a lagging reading).
-su30_mission: {climb_alt_m: 3000, climb_max_s: 90.0,
+su30_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
   nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
   angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, lock_timeout_s: 5.0}
 # mission_jas39 (docs/missions/jas39.md, ADR 145): mission_j20 plus the JAS39's
@@ -962,16 +965,18 @@ tracking:
   # named guess. Watch: `clu=` in TRACKPICK (nameplate clusters that passed the gate).
   red_mass_cluster_select: true
   red_mass_cluster_glyph_window_px: [300, 170]
-  # 2026-09-24: the steering point is the chosen nameplate's marker, not the label. It was
-  # the mean of the red pixels in a window around the label, which blended label and
-  # marker in the wide scan and settled on the label once the local ROI cut the marker
-  # off, so pitch centred the label, one label-to-marker gap below the aircraft. Now: the
-  # largest red component bigger than a glyph whose centre is within [half width, min px
-  # above, max px above] of the cluster centre (the marker was measured 162-287 px above
-  # the label, on a small sample), else the cluster centre moved up by the offset (225, the
-  # middle of that range). Watch: `aim=marker|offset` in TRACKPICK.
-  red_mass_marker_band_px: [150, 162, 287]
-  red_mass_marker_offset_px: 225
+  # 2026-09-24 (corrected the same day): the steering point is the AIRCRAFT, which the game
+  # draws below its nameplate: a hollow diamond bracket (a small red jet icon on a far
+  # contact) about 100 px below the label's glyph centre. Measured on 8 archived frames with
+  # a ruler on the frame, ranges 0.36 to 6.8 km: 90, 95, 98, 101, 102, 102, 106 and 110 px
+  # (mean 100.5), no trend with range worth correcting. The marker is darker than the strict
+  # red mask (hue 0-2, value 217-230 against 245), so it cannot be found in the mask and
+  # the point is the cluster centre plus this offset (positive is down, so 100 means 100 px
+  # below). It replaces a rule that looked for a marker 162-287 px ABOVE the label and
+  # otherwise moved the label up 225 px: about 325 px above the aircraft, on a marker
+  # position no archived frame shows (it came from pairing an icon with the wrong label).
+  # The mean-of-red rule before that landed about 85 px above the aircraft.
+  red_mass_aim_offset_px: 100
   # Same date: the gate's threshold below decides acquisition only. A lock is kept on a
   # looser test near where it was: a cluster of at least keep_min_glyphs glyphs within
   # keep_box_pct (half width, half height, frame fractions) of the previous lock's

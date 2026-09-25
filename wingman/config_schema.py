@@ -334,6 +334,9 @@ SCHEMA = Section(
         # ADR 144: mission_su30, the scripted Su-30 sequence
         "su30_mission": Section(children={
             "climb_alt_m": _num(0),
+            # ADR 147: the hard altitude floor while su30 is in play; absent
+            # leaves the tree's own floor and sustain band in charge.
+            "alt_floor_m": _num(0),
             "climb_max_s": SECONDS,
             "nose_angle_deg": _num(-90, 90),
             "angle_tolerance_deg": _num(0, 90),
@@ -542,10 +545,9 @@ SCHEMA = Section(
             "red_mass_exclude_zones_pct": Leaf(types=(list,), item_types=(list,)),
             "red_mass_cluster_select": BOOL,
             "red_mass_cluster_glyph_window_px": Leaf(types=(list,), item_types=(int,), length=2),
-            # 2026-09-24: marker steering point and the acquire/keep split —
-            # see config.yaml's own comments on these keys.
-            "red_mass_marker_band_px": Leaf(types=(list,), item_types=(int,), length=3),
-            "red_mass_marker_offset_px": _int(0),
+            # 2026-09-24: the steering point (the aircraft, below its nameplate) and
+            # the acquire/keep split — see config.yaml's own comments on these keys.
+            "red_mass_aim_offset_px": _int(-300, 300),
             "red_mass_keep_min_glyphs": _int(0),
             "red_mass_keep_box_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
             # Optional: None means "same as tracking_hsv.red_upper's hue" (no

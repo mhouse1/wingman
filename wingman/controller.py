@@ -766,6 +766,14 @@ class Controller:
         self._su30_angle_max_s = float(_su.get("angle_max_s", 20.0))
         self._su30_tick_s = float(_su.get("tick_s", 0.5))
         self._su30_lock_timeout_s = float(_su.get("lock_timeout_s", 5.0))
+        # ADR 147: the altitude doctrine mission_su30 flies. The tree's hard
+        # floor (behavior_tree.climb.alt_floor_m) sits above this mission's
+        # level-off altitude, so the tree restarted the climb the script had
+        # just stopped and the aircraft kept rising. Set, this is the floor
+        # while su30 is in play AND the armed sustain climb stands aside for
+        # it; unset leaves the tree's own doctrine untouched.
+        _su_floor = _su.get("alt_floor_m")
+        self._su30_alt_floor_m = None if _su_floor is None else float(_su_floor)
         # The same evade-fuel reserve the tree's sustain climb honours, so the
         # scripted climb does not burn the afterburner fuel a missile alert
         # would need (ADR 075). Unset means no reserve, as for the tree.
@@ -1999,6 +2007,40 @@ class Controller:
         """
         with self._last_mission_lock:
             return self._last_mission == "su30"
+
+    def _su30_flies_own_altitude(self) -> bool:
+        """True while mission_su30 is in play with its own altitude doctrine.
+
+        Read by the behavior tree once or twice a tick, so the lock is taken with
+        a timeout: no doctrine override for a tick beats a stalled main loop.
+        """
+        if self._su30_alt_floor_m is None:
+            return False
+        if not self._last_mission_lock.acquire(timeout=1.0):
+            logger.warning("Controller: last-mission lock timeout - no su30 altitude "
+                           "override this tick")
+            return False
+        try:
+            return self._last_mission == "su30"
+        finally:
+            self._last_mission_lock.release()
+
+    def altitude_floor_override_m(self) -> "float | None":
+        """The hard altitude floor for the mission in play, or None (ADR 147).
+
+        None means the tree's configured floor stands. Only mission_su30 sets
+        one: it levels off at ``su30_mission.climb_alt_m``, below that floor.
+        """
+        return self._su30_alt_floor_m if self._su30_flies_own_altitude() else None
+
+    def sustain_climb_suppressed(self) -> bool:
+        """True when the armed sustain climb must stand aside (ADR 147).
+
+        The sustain band is the adaptive doctrine's climb toward the operating
+        altitude; mission_su30 is deliberately not that doctrine and flies its
+        own level-off, so the band would only undo it.
+        """
+        return self._su30_flies_own_altitude()
 
     def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
         """Press padlock N times to cycle to a new target, then pause the auto-padlock loop briefly.

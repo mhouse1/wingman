@@ -1865,9 +1865,14 @@ class BehaviorTreeHandler:
             if self.active and boundary_tactic_enabled(bt_cfg):
                 actuators[TACTIC_BOUNDARY_TURN] = (self._start_boundary_turn,
                                                    ctrl.is_boundary_turning)
+            # ADR 147: the mission in play's own altitude doctrine (mission_su30
+            # levels off at 3000 m, below the tree's floor). getattr so a
+            # controller-less handler (mode off, tests) simply has none.
             self._tree = build_tree(
                 bt_cfg, actuators=actuators or None,
-                regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
+                regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)),
+                alt_floor_override_fn=getattr(ctrl, "altitude_floor_override_m", None),
+                sustain_suppressed_fn=getattr(ctrl, "sustain_climb_suppressed", None))
             self._writer = make_snapshot_writer()
             self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
             self._climb_hard_emergency_fn = getattr(

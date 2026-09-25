@@ -268,6 +268,15 @@ tactic. An open question (below) is whether a *long-running* pursuit
 nothing watching for it, the way HLDD 013 found `TACTIC_ATTACK_SUPPORT`
 already could.
 
+**Altitude in the chase (ADR 147, operator, 2026-09-24).** Nothing in pursuit steers altitude except the behavior
+tree's hard altitude floor, and a floor climb is only a nudge in this state: a climb hold releases itself in
+`GAME_BATTLE_EJECT` (136 `state_exit` releases in the 18:57 session, 52 of them after 0.3 s). So the chase settles on
+the floor and bounces there: median chase altitude 3544 to 4609 m across the four sessions of 2026-09-24, with all 31
+`ALTITUDE FLOOR` events citing 4000 m. For `mission_su30` the floor is now 3000 m (`su30_mission.alt_floor_m`) and the armed
+sustain climb stands aside, so the chase is expected to search near 3000 m; every other mission keeps 4000 m. Not yet
+measured after the change: `make sr` prints the chase altitude, the floor values cited and how often the script's
+-10 degree step was not confirmed (24 of 26 hand-offs before).
+
 ---
 
 ## Configuration Additions

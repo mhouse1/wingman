@@ -915,3 +915,58 @@ def test_the_schema_accepts_su30_and_rejects_unknown_missions(shipped_cfg):
     bad = yaml.safe_load(yaml.safe_dump(shipped_cfg))
     bad["su30_mission"]["nose_angel_deg"] = -10        # typo
     assert validate_config(bad), "a misspelt su30_mission key must be caught"
+
+
+# ---------------------------------------------------------------------------
+# ADR 147: su30's own altitude doctrine. The tree's 4000 m floor and armed
+# sustain band sit above this mission's 3000 m level-off, so the tree restarted
+# the climb 1.3 s after the script stopped it (measured 2026-09-24 18:59:27-28).
+# While su30 is the mission in play the Controller answers the tree with its own
+# floor and asks the sustain band to stand aside; every other mission gets None
+# and False, the tree's configured doctrine.
+# ---------------------------------------------------------------------------
+
+def test_the_su30_altitude_doctrine_applies_only_while_su30_is_the_mission(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, su30={"alt_floor_m": 3000})
+    for mission in ("j20", "loiter", "jas39"):
+        ctrl._set_last_mission(mission)
+        assert ctrl.altitude_floor_override_m() is None, mission
+        assert ctrl.sustain_climb_suppressed() is False, mission
+    ctrl._set_last_mission("su30")
+    assert ctrl.altitude_floor_override_m() == 3000.0
+    assert ctrl.sustain_climb_suppressed() is True
+    ctrl._set_last_mission("j20")
+    assert ctrl.altitude_floor_override_m() is None
+
+
+def test_before_any_mission_has_launched_there_is_no_override(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, su30={"alt_floor_m": 3000})
+    assert ctrl._last_mission is None
+    assert ctrl.altitude_floor_override_m() is None
+    assert ctrl.sustain_climb_suppressed() is False
+
+
+def test_without_an_alt_floor_key_su30_leaves_the_trees_doctrine_alone(monkeypatch):
+    """Removing the key is how the operator restores the 4000 m doctrine for su30."""
+    ctrl = _make_ctrl(monkeypatch)
+    assert "alt_floor_m" not in _FAST
+    ctrl._set_last_mission("su30")
+    assert ctrl.altitude_floor_override_m() is None
+    assert ctrl.sustain_climb_suppressed() is False
+
+
+def test_a_stuck_last_mission_lock_costs_the_override_for_a_tick_not_the_tick(monkeypatch, caplog):
+    class _StuckLock:
+        def acquire(self, timeout=None):
+            return False
+
+        def release(self):
+            raise AssertionError("released a lock it never acquired")
+
+    ctrl = _make_ctrl(monkeypatch, su30={"alt_floor_m": 3000})
+    ctrl._set_last_mission("su30")
+    monkeypatch.setattr(ctrl, "_last_mission_lock", _StuckLock())
+    with caplog.at_level("WARNING"):
+        assert ctrl.altitude_floor_override_m() is None
+        assert ctrl.sustain_climb_suppressed() is False
+    assert any("last-mission lock timeout" in r.getMessage() for r in caplog.records)

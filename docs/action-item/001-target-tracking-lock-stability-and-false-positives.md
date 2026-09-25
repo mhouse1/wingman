@@ -791,3 +791,87 @@ away in about 50 s. No out-of-bounds warning has been seen during a pursuit, but
 out of bounds, the follow-up is a boundary guard for the pursuit (steer away, or let the existing
 boundary turn act in this state) and, related, a search that turns the nose instead of only rolling.
 `make sr` will show the effect (`DIED ARMED`, respawns, pursuit lengths).
+
+**2026-09-24 19:44 — Check of the no-cap change, then the operator's chase-altitude request (ADR 147).**
+*Check of Cycle 15 against the 18:57 to 19:18 session (measured).* 6 chases, no `PURSUIT CAP`, every end
+`external:*`, lengths 28 to 181 s (median 157 s); 4 ended when the match ended, 2 in death by enemy fire
+(157 s and 99 s in); the deferred weapon switch worked on a long chase (19:01:17, 90 s in). Locked share 14%,
+inside the session-to-session spread. Two limits: the Anomaly 003 fix was not exercised (the run was not
+`--record-session`), and the boundary reader was blind in chases (1 reading in 486 ticks, against about 90% in the
+two earlier sessions, with the minimap plainly on screen in the archived chase frame), so the boundary exposure I
+quoted last cycle came from readings taken before or early in earlier, capped chases and says nothing about how
+close these chases got to the edge. No crossing was confirmed (`RTB w/ missiles 0`, no `RTB: red_frac` lines).
+The tracker in HEAD (`3cb467d`, another session) is newer than what this run used, so the next session changes two
+things at once.
+
+*The operator's request:* "first fix the issue where it's continuously rotating at 4000 altitude, modify it so it
+rotates at 3000."
+
+*Diagnosis (measured, mechanism from the code).* The chase does not choose its altitude. The tree's hard floor
+(4000 m) and armed sustain band (4000 to 5000 m) are above su30's 3000 m level-off. At 18:59:27 the script stopped
+its climb at 3192 m and the tree started a new one to 5000 m 1.3 s later; the -10 degree step waited behind it for its
+full 20 s and gave up (24 of 26 su30 hand-offs across the day's four sessions), so the chase began at 4750 m, sank to
+the floor and rolled there (median chase altitude 3544, 4609, 4365 and 3923 m in the four sessions; all 31
+`ALTITUDE FLOOR` events cite 4000 m). ADR 144 had recorded this as its open question 2.
+
+*Change (ADR 147, Draft).* New `su30_mission.alt_floor_m: 3000`. While su30 is the mission in play, the hard floor is
+that value and the sustain band stands aside; J20 and JAS39 keep 4000 m. `ClimbCondition` takes an override function,
+`make_sustain_climb_condition` a suppression function, `build_tree` threads both, `Controller.altitude_floor_override_m()`
+and `sustain_climb_suppressed()` answer from "the last launched mission is su30". The dive-recovery and terrain-ahead
+triggers are untouched. Removing the config key restores the old behavior.
+
+*Tests (21 new).* Floor override 6, sustain suppression 3, the 18:59:27 altitude replayed through the real tree and a
+real snapshot 5 (the tree's own doctrine restarts the climb, as measured; the su30 doctrine does not; the floor alone is
+not enough, the band must stand aside too), handler wiring to a real Controller 1, Controller predicates 4, shipped
+config 2 (`alt_floor_m` at or below `climb_alt_m` and below the tree's floor). Mutation checks: ignoring the override
+fails 5, dropping the suppression 4, dropping the wiring 1. `make sr` gained an ALTITUDE block (5 tests): chase altitude
+median and 10th to 90th percentile, `ALTITUDE FLOOR` events by floor, su30 hand-offs and how many ended "nose angle not
+confirmed". Baseline for the after-check: pursuit altitude median 3923 m (10th to 90th percentile 1674 to 4255 m), floor 4000
+on 13 of 13 events, 6 of 6 hand-offs not confirmed.
+
+*Not verified.* No session has run with this change. Success would read: `ALTITUDE FLOOR ... below 3000m`, no
+`target alt 5000` climb after `step 3/4`, chase altitude centred near 3000 m, fewer unconfirmed nose angles.
+Open and named: a floor climb in `GAME_BATTLE` (steps 1 to 3 only) still aims at the sustain exit altitude (5000 m), which
+matters only if the aircraft sinks below 3000 m before the hand-off; and separate from this, the telemetry filter let a
+handful of 1 to 41 m altitude reads through in chases (35 m at 19:00:45 while the HUD read 3060 m started an emergency
+airbrake climb), which is worth its own look.
+
+**2026-09-24 20:22 — Cycle 16 (`/iterate improve the target tracking`): the committed tracker aimed about
+325 px above the aircraft; fixed (write-up and numbers in HLDD 005, "Aim Point").**
+*Review.* No session has run since `3cb467d` (another session's tracker rewrite: aim at "the marker above the
+label", keep locks on a looser test near the previous cluster, whole-region scan every tick). The newest log (18:57
+to 19:18) predates it, so the review replayed the rewrite's real functions on archived frames.
+
+*Diagnosis (measured).* The game draws the aircraft's marker (a diamond bracket, or a small red jet icon on far
+contacts) BELOW its nameplate, about 100 px below the label's glyph centre: 90, 95, 98, 101, 102, 102, 106 and 110 px
+on 8 archived frames read with a ruler (targets 0.36 to 6.8 km, mean 100.5). The rewrite looked for a marker 162 to 287
+px above the label and otherwise moved the label up 225 px, so its steering point was 327, 326, 331 and 335 px above the
+marker on four real frames; it found a "marker" on 2 of 54 nameplates in the 300-frame archive and took the fallback on 52.
+The marker is also darker than the strict red mask (hue 0 to 2, value 217 to 230 against a floor of 245), so it was never
+in the mask to be found. The wrong geometry came from my Cycle 12 note ("label 162 to 287 px below the icon"), which paired
+labels with icons of other contacts; corrected in HLDD 005.
+
+*Change (one).* `tracking.red_mass_aim_offset_px: 100` replaces `red_mass_marker_band_px` and `red_mass_marker_offset_px`; the
+steering point is the chosen nameplate's glyph centre moved 100 px down. `_aim_point` and the `aim=` field of `TRACKPICK`
+are removed. Nothing else in the tracker moved.
+
+*Tests (13 new, 4 replaced).* `tests/test_nameplate_aim_geometry.py` runs the real probe on four real crops
+(`tests/fixtures/aim_*.png`, 580 KB, lossless) and requires the point within 15 px of the hand-read marker, requires the
+marker 85 to 115 px below the label, and requires the old rule to miss by more than 75 px. The synthetic frames in
+`tests/test_acquisition_clusters.py` drew the marker above the label, agreeing with the code and disagreeing with the game,
+so they now draw it below, and four marker-rule tests became five offset tests. Flipping the offset's sign fails 8.
+Result on the fixtures: (+7, -2), (+6, -1), (+2, -6), (+7, -10) px against -327 to -335 px in y before.
+Out of sample: 12 further frames rendered with the new point; on the five with a visible bracket it sits within about 12 px.
+
+*Also added to `make sr` (5 tests).* Lock runs (consecutive lock ticks) and how close to centre the steering point sits.
+Baseline from the last log (old tracker, old aim): 116 runs over 305 lock ticks, median 2 ticks, longest 22, 24 runs of 4
+or more; |dx| median 47 px (50% inside the roll deadband), |dy| median 115 px (20% inside the pitch deadband); over the 24
+runs of 4 or more the first tick's median |dy| was 74 px and the last 106 px, so pitch was not converging inside a lock.
+Locks are too short to settle, which is the larger limit and what the rewrite's keep test is for.
+
+*Gates.* `make lint`, `make test` (2085 passed, 35 skipped, before the report addition; the 5 report tests and lint were
+rerun after), `make reqs-gate`, `make rr-path1-gate`: all PASS.
+
+*Not verified.* No live session with this change or with `3cb467d`. Open: whether roll and pitch now converge and the game
+reports a lock more often; the gains were tuned on the old aim; a partly drawn label shifts the glyph centre and the aim with
+it; labels near the screen edge may be clamped by the game.

@@ -112,21 +112,19 @@ class TargetTracker:
         self._cluster_select = bool(cfg.get("red_mass_cluster_select", False))
         _gw = cfg.get("red_mass_cluster_glyph_window_px", [300, 170])
         self._cluster_glyph_window = (int(_gw[0]), int(_gw[1]))
-        # 2026-09-24: in cluster mode the steering point is the aircraft's own
-        # marker, not its label. It used to be the mean of the red pixels in a
-        # window around the label: a blend of label, underline and marker in the
-        # wide scan that settled on the label once the 264 px tall local ROI cut
-        # the marker off (a stationary synthetic target read error_norm_y +0.21,
-        # +0.32, +0.36 over its first three ticks), so pitch centred the label,
-        # one label-to-marker gap below the aircraft. Now the marker is the
-        # largest red component bigger than a glyph whose centre lies within
-        # `marker_band_px` = (half width, min px above, max px above) of the
-        # cluster centre, the band the marker was measured in (162-287 px above
-        # the label, on a small sample). With none there, the cluster centre
-        # moved up by `marker_offset_px` (225, the middle of that range).
-        _mb = cfg.get("red_mass_marker_band_px", [150, 162, 287])
-        self._marker_band = (int(_mb[0]), int(_mb[1]), int(_mb[2]))
-        self._marker_offset = int(cfg.get("red_mass_marker_offset_px", 225))
+        # 2026-09-24 (corrected the same day): in cluster mode the steering point is the
+        # aircraft, not its label. The game draws the aircraft's own marker (a hollow
+        # diamond bracket, or a small red jet icon on a far contact) BELOW the nameplate,
+        # at a fixed screen offset. Measured on 8 archived frames with a ruler on the
+        # frame (targets from 0.36 to 6.8 km): the marker centre sits 90 to 110 px below
+        # the label's glyph-cluster centre, mean 100.5, at every range. The marker is
+        # darker than the strict red mask admits (hue 0-2, value 217-230 against 245), so
+        # it cannot be found in the mask, and the steering point is the cluster centre
+        # moved down by `red_mass_aim_offset_px`. The rule this replaced looked for a
+        # marker 162-287 px ABOVE the label and otherwise moved the label up 225 px,
+        # which put the point about 325 px above the aircraft (no archived frame has a
+        # marker there); the mean-of-red rule before it landed about 85 px above.
+        self._aim_offset = int(cfg.get("red_mass_aim_offset_px", 100))
         # Same date: the strict gate (red_mass_nameplate_min_glyphs) decides
         # acquisition only. A lock is kept on a looser test near where it was:
         # a cluster of at least `keep_min_glyphs` glyphs within `keep_box_pct`
@@ -274,7 +272,7 @@ class TargetTracker:
         self._last_y: "float | None" = None
         # Cluster mode only: the locked nameplate cluster's centre (absolute
         # frame coords), the anchor for keeping and re-choosing the same label.
-        # Kept apart from _last_x/_last_y, which are the marker steered on.
+        # Kept apart from _last_x/_last_y, which are the point steered on.
         self._last_cluster: "tuple[float, float] | None" = None
         self._last_seen_ts: float = 0.0
         # HLDD 005 Selection Hardening (2026-09-21): rate-limited rationale
@@ -332,7 +330,7 @@ class TargetTracker:
         therefore `error_norm`/`error_norm_y`) report the red-mass steering
         point instead of the tall-bar contour pick: the centroid of all red
         pixels in the scanned crop, or in cluster mode the chosen nameplate's
-        marker (see `_probe_by_cluster`). `visible`/`mode` follow that override
+        aircraft below the chosen nameplate (see `_probe_by_cluster`). `visible`/`mode` follow that override
         too, but `n_detections` does not.
 
         Every tick scans the whole acquisition region. A missed target stays in
@@ -348,7 +346,7 @@ class TargetTracker:
 
         # Every tick scans the whole acquisition region (2026-09-24). Once
         # locked, a 422 x 264 local ROI around the last lock used to be scanned
-        # instead, but that is smaller than a nameplate plus the marker above
+        # instead, but that is smaller than a nameplate plus the marker below
         # it, so a target drifting between scans had its label cut by the ROI
         # edge and failed the gate: 125 of 182 measured lock drops had red
         # present and a gate rejection, and every archived drop crop replayed
@@ -572,9 +570,7 @@ class TargetTracker:
         saying which path supplied the lock this tick — `redmass`, `keep`
         (cluster mode: a lock held on the looser keep test only), `tallbar`,
         `suppressed` (the gate vetoed a tall-bar pick) or `none` — plus what
-        the gate saw and, in cluster mode, whether the steering point is the
-        nameplate's marker or the label moved up by the fallback offset
-        (`aim=marker|offset`). Turns "did the gate fire" from a forensic
+        the gate saw. Turns "did the gate fire" from a forensic
         reconstruction into `grep TRACKPICK`. Pure logging; never changes
         `selected`. The DEBUG line follows the existing per-tick "scanned"
         line's cadence; a suppressed pick is also surfaced at INFO,
@@ -589,10 +585,9 @@ class TargetTracker:
             blob = rm_probe.get("blob")
             blob_desc = "(%d,%d,a%d,%dx%d)" % blob if blob is not None else "-"
             clu_desc = rm_probe["clusters"] if rm_probe.get("clusters") is not None else "-"
-            aim_desc = rm_probe.get("aim") or "-"
         else:
-            gate, glyphs, rm_px, edges, blob_desc, clu_desc, aim_desc = (
-                "off", "-", 0, "-", "-", "-", "-")
+            gate, glyphs, rm_px, edges, blob_desc, clu_desc = (
+                "off", "-", 0, "-", "-", "-")
         if tall_pick is not None:
             color = "R" if any(
                 abs(rx - tall_pick[0]) < 1e-6 and abs(ry - tall_pick[1]) < 1e-6
@@ -604,9 +599,9 @@ class TargetTracker:
         sel_desc = f"({selected[0]:.0f},{selected[1]:.0f})" if selected is not None else "-"
         logger.debug(
             "TRACKPICK: path=%s sel=%s tall=%s n_tall=%d red_won=%s "
-            "gate=%s glyphs=%s rm_px=%d edges=%s blob=%s clu=%s aim=%s",
+            "gate=%s glyphs=%s rm_px=%d edges=%s blob=%s clu=%s",
             pick_path, sel_desc, tall_desc, n_tall, red_won, gate, glyphs, rm_px,
-            edges, blob_desc, clu_desc, aim_desc,
+            edges, blob_desc, clu_desc,
         )
         if pick_path == "suppressed":
             self._suppressed_pick_count += 1
@@ -654,8 +649,8 @@ class TargetTracker:
         passed) or "reject"; `glyphs` — the count the gate compared (None when
         the gate is off); `px` — pixels in the final red mask. In cluster mode
         also `cluster` — the chosen nameplate cluster's centre in absolute
-        frame coords, `kept` — True for a "keep", and `aim` — "marker" or
-        "offset", where the steering point came from. A "reject" is a
+        frame coords and `kept` — True for a "keep"; `centroid` is then that
+        centre moved down by `red_mass_aim_offset_px`, onto the aircraft. A "reject" is a
         positive statement that no nameplate was found; "off" with a None
         centroid only means no red pixels matched.
 
@@ -673,7 +668,7 @@ class TargetTracker:
         """
         probe: dict = {"centroid": None, "gate": "off", "glyphs": None, "px": 0,
                        "mass_centroid": None, "clipped_edges": (), "blob": None,
-                       "clusters": None, "cluster": None, "kept": False, "aim": None}
+                       "clusters": None, "cluster": None, "kept": False}
         if crop is None or crop.size == 0:
             return probe
         try:
@@ -745,10 +740,9 @@ class TargetTracker:
         gate decides, per cluster, and the eligible cluster nearest `ref`, or
         the screen centre, is acquired. `glyphs` is the chosen cluster's count,
         or on a rejection the best cluster's, so a rejected tick still says how
-        close it came. The steering point is that nameplate's marker (see
-        `_aim_point`), not the label."""
-        components = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        clusters = self._nameplate_clusters(mask, components=components)
+        close it came. The steering point is the aircraft, `red_mass_aim_offset_px`
+        below that nameplate's glyph centre (see `__init__`), not the label."""
+        clusters = self._nameplate_clusters(mask)
         best = max((c[2] for c in clusters), default=0)
         eligible = [c for c in clusters if c[2] >= self._red_mass_nameplate_min_glyphs]
         probe["glyphs"] = best
@@ -776,36 +770,8 @@ class TargetTracker:
         probe["kept"] = kept
         probe["glyphs"] = n
         probe["cluster"] = (cx + ox, cy + oy)
-        probe["centroid"], probe["aim"] = self._aim_point(components, cx, cy)
+        probe["centroid"] = (float(cx), float(cy + self._aim_offset))
         return probe
-
-    def _aim_point(self, components, cx: float, cy: float
-                   ) -> "tuple[tuple[float, float], str]":
-        """Where to steer for the nameplate cluster centred on (cx, cy), in crop
-        coordinates, and where that point came from. The aircraft's own marker:
-        the largest red component bigger than a glyph (so not a letter or digit
-        of any label) whose centre lies in `red_mass_marker_band_px` above the
-        cluster centre -> "marker". With none there, the cluster centre moved up
-        by `red_mass_marker_offset_px` -> "offset". The label's own underline
-        sits below the label, outside the band, so it cannot be taken for the
-        marker."""
-        n, _labels, stats, centroids = components
-        if n > 1:
-            s, c = stats[1:], centroids[1:]
-            area = s[:, cv2.CC_STAT_AREA]
-            max_dim = self._red_mass_nameplate_glyph_max_dim
-            bigger_than_glyph = ((area > self._red_mass_nameplate_glyph_area[1])
-                                 | (s[:, cv2.CC_STAT_WIDTH] > max_dim)
-                                 | (s[:, cv2.CC_STAT_HEIGHT] > max_dim))
-            half_w, up_min, up_max = self._marker_band
-            above = cy - c[:, 1]
-            in_band = ((np.abs(c[:, 0] - cx) <= half_w)
-                       & (above >= up_min) & (above <= up_max))
-            candidates = bigger_than_glyph & in_band
-            if candidates.any():
-                i = int(np.argmax(np.where(candidates, area, -1)))
-                return (float(c[i, 0]), float(c[i, 1])), "marker"
-        return (float(cx), float(cy - self._marker_offset)), "offset"
 
     def _nameplate_clusters(self, mask: np.ndarray, max_clusters: int = 8,
                             components=None) -> "list[tuple[float, float, int]]":

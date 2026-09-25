@@ -21,7 +21,7 @@ except ImportError:
     colorama = None
 
 WINGMAN_VERSION = "1.8.11"
-WINGMAN_VERSION_DETAILS = "attack using secondary missile"
+WINGMAN_VERSION_DETAILS = "Find, fix, track , target, engage, Assess, attack using secondary missile"
 
 from . import capture_budget
 from .capture import Capture

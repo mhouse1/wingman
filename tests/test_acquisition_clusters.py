@@ -7,9 +7,10 @@ the nameplates shown lay outside the old box; under the old rule (mean of every 
 pixel) a wider box moved the steering point of already-locked frames a median 134 px even
 with the HUD masked, because other nameplates entered the mean.
 
-2026-09-24: the steering point is the chosen nameplate's marker (the red component above
-the label), not a pixel mean around the label, and a lock is kept on a looser glyph test
-near the previous lock's cluster while the strict gate decides acquisition only.
+2026-09-24: the steering point is the aircraft, drawn by the game below its nameplate (its
+marker centre measured 90 to 110 px below the label's glyph centre, mean 100.5, on 8 frames),
+not a pixel mean around the label, and a lock is kept on a looser glyph test near the
+previous lock's cluster while the strict gate decides acquisition only.
 """
 
 import cv2
@@ -60,8 +61,8 @@ def _frame():
 
 def _nameplate(frame, cx, cy, n_glyphs=28, with_marker=True):
     """A nameplate block centred on (cx, cy): rows of glyph-sized rectangles (about
-    200 x 90 px) and an underline bar, with the target marker (a solid blob) 185 px
-    above, as the game draws it."""
+    200 x 90 px) and an underline bar, with the target marker (a solid blob) 100 px
+    below the label's centre, as the game draws it."""
     out = frame
     per_row = max(1, n_glyphs // 3)
     rows = [per_row, per_row, n_glyphs - 2 * per_row]
@@ -72,7 +73,7 @@ def _nameplate(frame, cx, cy, n_glyphs=28, with_marker=True):
             out[y:y + 12, x0 + i * 8:x0 + i * 8 + 5] = _RED
     out[cy + 48:cy + 52, cx - 40:cx + 40] = _RED
     if with_marker:
-        cv2.circle(out, (cx, cy - 185), 14, _RED, -1)
+        cv2.circle(out, (cx, cy + 100), 14, _RED, -1)
     return out
 
 
@@ -88,7 +89,7 @@ def test_a_nameplate_below_the_old_box_is_invisible_to_the_old_region_and_found_
     obs = _wide().update(frame, ts=0.0)
     assert obs["visible"] is True
     assert obs["centroid_x"] == pytest.approx(1020, abs=3)
-    assert obs["centroid_y"] == pytest.approx(960 - 185, abs=3)   # its marker
+    assert obs["centroid_y"] == pytest.approx(960 + 100, abs=12)  # the aircraft, below the label
 
 
 def test_red_hud_chrome_in_an_excluded_zone_is_ignored():
@@ -137,32 +138,40 @@ def test_the_previous_lock_wins_over_the_screen_centre():
     assert abs(x - 1600) < 60
 
 
-def test_the_steering_point_is_the_marker_not_the_label():
-    frame = _nameplate(_frame(), 960, 700)                 # marker at (960, 515)
-    p = _probe(_wide(), frame)
-    assert p["aim"] == "marker"
-    assert p["centroid"] == pytest.approx((960, 515), abs=1.0)
-
-
-def test_without_a_marker_the_label_is_moved_up_by_the_offset():
-    frame = _nameplate(_frame(), 960, 700, with_marker=False)
+def test_the_steering_point_is_the_aircraft_100_px_below_the_label():
+    frame = _nameplate(_frame(), 960, 700)                 # the marker blob is drawn at y 800
     p = _probe(_wide(), frame)
     cx, cy = p["cluster"]
-    assert p["aim"] == "offset"
-    assert p["centroid"] == pytest.approx((cx, cy - 225), abs=0.5)
+    assert abs(cy - 700) < 12, "the cluster centre is the drawn label"
+    assert p["centroid"] == pytest.approx((cx, cy + 100), abs=0.5)
 
 
-def test_a_red_shape_outside_the_measured_band_is_not_taken_for_the_marker():
+def test_the_offset_comes_from_the_config():
+    p = _probe(_wide(red_mass_aim_offset_px=60), _nameplate(_frame(), 960, 700))
+    cx, cy = p["cluster"]
+    assert p["centroid"] == pytest.approx((cx, cy + 60), abs=0.5)
+
+
+def test_the_default_offset_is_100_px_below():
+    p = _probe(_wide(), _nameplate(_frame(), 960, 700, with_marker=False))
+    cx, cy = p["cluster"]
+    assert p["centroid"] == pytest.approx((cx, cy + 100), abs=0.5)
+
+
+def test_a_red_shape_above_or_beside_the_label_does_not_move_the_steering_point():
+    """The rule this replaced took the largest red shape 162-287 px above the label for the
+    marker. No frame has one there, and a shape there must not pull the point."""
     frame = _nameplate(_frame(), 960, 700, with_marker=False)
-    cv2.circle(frame, (960, 600), 14, _RED, -1)            # about 105 px above the label
-    assert _probe(_wide(), frame)["aim"] == "offset"
+    base = _probe(_wide(), frame)["centroid"]
+    cv2.circle(frame, (960, 480), 16, _RED, -1)            # 220 px above the label
+    cv2.circle(frame, (1080, 520), 14, _RED, -1)
+    assert _probe(_wide(), frame)["centroid"] == pytest.approx(base, abs=0.5)
 
 
-def test_the_largest_shape_in_the_band_is_the_marker():
-    frame = _nameplate(_frame(), 960, 700, with_marker=False)
-    cv2.circle(frame, (900, 500), 8, _RED, -1)             # smaller, but bigger than a glyph
-    cv2.circle(frame, (1010, 520), 16, _RED, -1)
-    assert _probe(_wide(), frame)["centroid"] == pytest.approx((1010, 520), abs=1.0)
+def test_a_marker_below_the_label_does_not_move_the_steering_point_either():
+    with_marker = _probe(_wide(), _nameplate(_frame(), 960, 700))["centroid"]
+    without = _probe(_wide(), _nameplate(_frame(), 960, 700, with_marker=False))["centroid"]
+    assert with_marker == pytest.approx(without, abs=0.5)
 
 
 def test_a_stationary_target_keeps_the_same_steering_point_every_tick():
@@ -259,11 +268,11 @@ def test_a_strict_label_elsewhere_is_acquired_when_the_lock_has_nothing_to_keep(
     assert obs["centroid_x"] == pytest.approx(1500, abs=3)
 
 
-def test_trackpick_names_a_keep_and_where_the_steering_point_came_from(caplog):
+def test_trackpick_names_a_keep_and_the_strict_pass(caplog):
     t = _locked()
     with caplog.at_level("DEBUG", logger="wingman.tracker"):
         t.update(_nameplate(_frame(), 990, 720, n_glyphs=10), ts=0.33)
         t.update(_nameplate(_frame(), 990, 720, with_marker=False), ts=0.66)
     lines = [r.getMessage() for r in caplog.records if "TRACKPICK:" in r.getMessage()]
-    assert "path=keep" in lines[0] and "gate=keep" in lines[0] and "aim=marker" in lines[0]
-    assert "path=redmass" in lines[1] and "gate=pass" in lines[1] and "aim=offset" in lines[1]
+    assert "path=keep" in lines[0] and "gate=keep" in lines[0]
+    assert "path=redmass" in lines[1] and "gate=pass" in lines[1]

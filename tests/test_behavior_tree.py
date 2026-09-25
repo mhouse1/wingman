@@ -1926,3 +1926,177 @@ def test_boundary_condition_state_is_introspectable_via_named_attributes():
     assert cond(_bsnap(0.40, +0.30)) is True
     assert cond.active is True
     assert cond.min_dist == 0.40
+
+
+# --- ADR 147: a mission's own altitude doctrine -------------------------------
+#
+# Measured 2026-09-24 18:59:27-28: mission_su30 stopped its climb at 3192 m
+# ("altitude 3192 m at or above 3000 m", "climb complete") and the tree started
+# a new climb to 5000 m 1.3 s later, because 3192 m is under both the 4000 m
+# floor and the 4000 m armed sustain band. The -10 degree step then waited behind
+# that climb for its whole 20 s. These tests replay that altitude through the real
+# tree and a real AnalyzerSnapshot, with and without the mission's doctrine.
+
+_DOCTRINE_CLIMB = {"enabled": True, "enter_below_alt": 500, "exit_above_alt": 1000,
+                   "confirm_reads": 1, "alt_floor_m": 4000,
+                   "sustain": {"enabled": True, "enter_below_alt": 4000,
+                               "exit_above_alt": 5000}}
+
+
+class _Doctrine:
+    """Stands in for the Controller's two answers; flipped between ticks."""
+
+    def __init__(self, floor=None, suppressed=False):
+        self.floor = floor
+        self.suppressed = suppressed
+
+    def alt_floor_override_m(self):
+        return self.floor
+
+    def sustain_suppressed(self):
+        return self.suppressed
+
+
+def _doctrine_tree(doctrine):
+    tree = build_tree(dict(BT_CFG, climb=dict(_DOCTRINE_CLIMB)), clock=FakeClock(),
+                      alt_floor_override_fn=doctrine.alt_floor_override_m,
+                      sustain_suppressed_fn=doctrine.sustain_suppressed)
+    return tree, make_snapshot_writer()
+
+
+class TestMissionAltitudeFloorOverride:
+    @staticmethod
+    def _cond(override_fn, alt_floor_m=4000.0):
+        return make_climb_condition(500, 1000, alt_floor_m=alt_floor_m, confirm_reads=1,
+                                    clock=FakeClock(), alt_floor_override_fn=override_fn)
+
+    def test_the_override_replaces_the_floor(self):
+        cond = self._cond(lambda: 3000.0)
+        assert cond.update_emergency(make_snap(altitude=3500.0, altitude_rate=0.0)) is False
+        assert cond.alt_floor_active is False
+        assert cond.update_emergency(make_snap(altitude=2999.0, altitude_rate=0.0)) is True
+        assert cond.alt_floor_active is True
+
+    def test_no_override_leaves_the_configured_floor(self):
+        cond = self._cond(lambda: None)
+        assert cond.update_emergency(make_snap(altitude=3500.0, altitude_rate=0.0)) is True
+
+    def test_the_override_is_read_every_tick(self):
+        """A mission launched after the tree was built must take effect at once."""
+        state = {"floor": None}
+        cond = self._cond(lambda: state["floor"])
+        assert cond.update_emergency(make_snap(altitude=3500.0, altitude_rate=0.0)) is True
+        state["floor"] = 3000.0
+        assert cond.update_emergency(make_snap(altitude=3500.0, altitude_rate=0.0)) is False
+        state["floor"] = None
+        assert cond.update_emergency(make_snap(altitude=3500.0, altitude_rate=0.0)) is True
+
+    def test_the_warning_names_the_floor_actually_in_force(self, caplog):
+        cond = self._cond(lambda: 3000.0)
+        with caplog.at_level("WARNING"):
+            cond.update_emergency(make_snap(altitude=2500.0, altitude_rate=0.0))
+        floor_logs = [r.getMessage() for r in caplog.records if "ALTITUDE FLOOR" in r.getMessage()]
+        assert len(floor_logs) == 1
+        assert "below 3000m" in floor_logs[0]
+
+    def test_a_floor_configured_off_stays_off_for_every_mission(self):
+        cond = self._cond(lambda: 3000.0, alt_floor_m=None)
+        assert cond.update_emergency(make_snap(altitude=10.0, altitude_rate=0.0)) is False
+        assert cond.alt_floor_active is False
+
+    def test_the_dive_recovery_trigger_is_not_touched_by_the_override(self):
+        cond = make_climb_condition(500, 1000, alt_floor_m=4000.0,
+                                    recover_below_time_s=30.0, confirm_bypass_time_s=15.0,
+                                    confirm_reads=1, clock=FakeClock(),
+                                    alt_floor_override_fn=lambda: 3000.0)
+        cond.update_emergency(make_snap(altitude=9000.0, altitude_rate=-500.0))
+        assert cond.hard_emergency_active is True
+
+
+class TestSustainSuppression:
+    @staticmethod
+    def _sustain(flag):
+        from wingman.behavior_tree import make_sustain_climb_condition
+        return make_sustain_climb_condition(4000, 5000, confirm_reads=1,
+                                            suppressed_fn=lambda: flag["on"])
+
+    def test_suppression_withholds_the_verdict(self):
+        flag = {"on": True}
+        sustain = self._sustain(flag)
+        assert sustain(make_snap(altitude=3192.0)) is False
+        flag["on"] = False
+        assert sustain(make_snap(altitude=3192.0)) is True
+
+    def test_the_band_keeps_tracking_altitude_while_suppressed(self):
+        """Suppressed at 3192 m the band still latches; released at 4500 m, inside
+        the band, it is exactly where it would have been without the suppression."""
+        flag = {"on": True}
+        sustain = self._sustain(flag)
+        assert sustain(make_snap(altitude=3192.0)) is False
+        flag["on"] = False
+        assert sustain(make_snap(altitude=4500.0)) is True
+
+    def test_default_is_never_suppressed(self):
+        from wingman.behavior_tree import make_sustain_climb_condition
+        sustain = make_sustain_climb_condition(4000, 5000, confirm_reads=1)
+        assert sustain(make_snap(altitude=3192.0)) is True
+
+
+class TestSu30LevelOffIsNotRestartedByTheTree:
+    """The 2026-09-24 18:59:27 altitude (3192 m, armed, mission running)."""
+
+    def test_the_trees_own_doctrine_restarts_the_climb_as_measured(self):
+        tree, writer = _doctrine_tree(_Doctrine())
+        assert tick((tree, writer), make_snap(altitude=3192.0)) == TACTIC_CLIMB
+
+    def test_with_the_su30_doctrine_the_tree_leaves_the_level_off_alone(self):
+        tree, writer = _doctrine_tree(_Doctrine(floor=3000.0, suppressed=True))
+        assert tick((tree, writer), make_snap(altitude=3192.0)) != TACTIC_CLIMB
+
+    def test_the_su30_floor_still_catches_a_low_aircraft(self):
+        tree, writer = _doctrine_tree(_Doctrine(floor=3000.0, suppressed=True))
+        assert tick((tree, writer), make_snap(altitude=2900.0)) == TACTIC_CLIMB
+
+    def test_the_floor_alone_is_not_enough_the_sustain_band_must_stand_aside_too(self):
+        """Why ADR 147 changes both: lowering only the floor leaves the armed
+        sustain band climbing the aircraft from 3192 m toward 5000 m."""
+        tree, writer = _doctrine_tree(_Doctrine(floor=3000.0, suppressed=False))
+        assert tick((tree, writer), make_snap(altitude=3192.0)) == TACTIC_CLIMB
+
+    def test_a_mission_switch_takes_effect_on_the_next_tick(self):
+        doctrine = _Doctrine(floor=3000.0, suppressed=True)
+        tree, writer = _doctrine_tree(doctrine)
+        assert tick((tree, writer), make_snap(altitude=3192.0)) != TACTIC_CLIMB
+        doctrine.floor, doctrine.suppressed = None, False
+        assert tick((tree, writer), make_snap(altitude=3192.0)) == TACTIC_CLIMB
+
+
+def test_the_handler_gives_the_tree_the_controllers_su30_doctrine(monkeypatch):
+    """The wiring, end to end: a real Controller answers the tree's two questions
+    through BehaviorTreeHandler, and the answer follows the mission in play."""
+    import threading
+
+    import wingman.controller as controller_module
+    from wingman.controller import Controller
+    from wingman.controller_config import ControllerConfig
+    from wingman.tick_handlers import BehaviorTreeHandler
+
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    ctrl = Controller(
+        (0, 0, 1920, 1200), exit_event=threading.Event(),
+        config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True,
+                                su30={"alt_floor_m": 3000}))
+    handler = BehaviorTreeHandler(
+        None, ctrl, dict(BT_CFG, mode="shadow", climb=dict(_DOCTRINE_CLIMB)))
+    writer = make_snapshot_writer()
+
+    def selected(snap):
+        writer.set("snapshot", snap)
+        handler._tree.tick()
+        return selected_tactic(handler._tree)
+
+    ctrl._set_last_mission("j20")
+    assert selected(make_snap(altitude=3192.0)) == TACTIC_CLIMB
+    ctrl._set_last_mission("su30")
+    assert selected(make_snap(altitude=3192.0)) != TACTIC_CLIMB
+    assert selected(make_snap(altitude=2900.0)) == TACTIC_CLIMB
