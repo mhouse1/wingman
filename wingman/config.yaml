@@ -90,10 +90,16 @@ crops:
     - [0.8688, 0.8867]
     - [0.9556, 0.94]
     text: [PLAY]
+  # ADR 102 rev 2: the squad lobby's READY button, measured on the 2026-09-25
+  # 09:16:41 screenshot at 1606,1060 to 1863,1138 px (this crop is that box
+  # inset 3 px). The April crop covered only its upper-left corner, so READY was
+  # never read and three lobby dwells of 127 to 194 s ran before the operator
+  # clicked by hand. Not in tests/calibration_map.yaml (no capture path visits
+  # the squad lobby), so `make calibrate` will not move it.
   READY:
     coords:
-    - [0.7993, 0.8656]
-    - [0.9069, 0.9111]
+    - [0.838, 0.8858]
+    - [0.9688, 0.9458]
     text: [READY]
   CANCEL:
     coords:
@@ -1116,6 +1122,14 @@ tracking:
   # skipping that staging and enabling both call sites at once. See HLDD
   # 005's own "Sustained-Hold Actuation" section for the full design.
   sustained_hold_enabled: true
+  # CR-018-01 (review 018): release a sustained pitch hold once the vertical
+  # error, extrapolated this many seconds ahead at its measured rate, is
+  # inside the deadband or past centre. Before: 63% of HOLD[pitch] endings
+  # were a direct reversal and 18% of lock ticks sat inside the deadband
+  # (2026-09-25 00:49 session). The live check is both shares; the early
+  # releases log as `HOLD[pitch]: <dir> -> None (lead ...)`. 0 turns it off.
+  # Named guess: about one steering tick plus the key's lag.
+  pitch_lead_s: 0.15
 tracking_hsv:
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
@@ -1251,6 +1265,15 @@ pursuit_mode:
   # 20 s cap. The missiles-empty trigger keeps its own confirmation
   # (mission.no_missiles_consecutive_required). Named guess, not measured.
   empty_confirm_reads: 3
+  # CR-018-01 (review 018): the chase steers every steer_interval_s and reads
+  # ammo, switches, fires and renders the HUD every engage_interval_s. Before,
+  # one loop did both and steered at about 2.7 Hz (median TRACKPICK interval
+  # 0.353 s, 2026-09-25 00:49 session), and 63% of HOLD[pitch] endings were a
+  # direct up/down reversal. engage_interval_s keeps the old ~0.3 s period so
+  # empty_confirm_reads above still spans about a second. Named guesses; the
+  # live check is the TRACKPICK interval median (target below 0.2 s).
+  steer_interval_s: 0.1
+  engage_interval_s: 0.3
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right

@@ -10,6 +10,7 @@ Pass observation["error_norm"] to Controller.orient_nose_to_target().
 """
 
 import logging
+import threading
 import time
 from enum import Enum, auto
 
@@ -33,8 +34,17 @@ class TargetTracker:
     vertical elements in the MetalStorm HUD.  The lock-on reticle (dashed
     circle) is rejected by the aspect-ratio filter (height/width < 2.5).
 
-    Thread-safety: not thread-safe; call only from the main loop thread.
+    Thread-safety (CR-018-05): `update()` and `reset()` are serialised by an
+    internal lock. Three threads drive this object — the main tick
+    (TrackingHandler, GAME_BATTLE and GAME_BATTLE_MANUAL), the pursuit loop
+    and the eject heatdive loop (both GAME_BATTLE_EJECT). Game state keeps
+    them apart except at transitions; the lock covers those. A caller that
+    cannot take it within `_LOCK_TIMEOUT_S` gets the last observation back
+    instead of blocking, so the main loop never waits on a pursuit tick.
     """
+
+    # A scan measured 3.7 to 9.5 ms (review 018); this is many scans' worth.
+    _LOCK_TIMEOUT_S = 0.25
 
     # A red mask pixel this close to a crop border counts as touching it
     # (anti-aliased glyph edges rarely land exactly on the border column).
@@ -288,6 +298,9 @@ class TargetTracker:
         # for the INFO-level line in _log_pick_path (same 1st/10th/100th,
         # then every 500th, shape as the two counters above).
         self._suppressed_pick_count: int = 0
+        # CR-018-05: serialises update()/reset() across the three callers.
+        self._lock = threading.Lock()
+        self._last_obs: "dict | None" = None
 
     @property
     def enabled(self) -> bool:
@@ -299,6 +312,18 @@ class TargetTracker:
 
     def reset(self) -> None:
         """Clear all tracking state. Call when leaving GAME_BATTLE."""
+        if not self._lock.acquire(timeout=self._LOCK_TIMEOUT_S):
+            logger.warning("TargetTracker: reset skipped — lock busy for %.2fs",
+                           self._LOCK_TIMEOUT_S)
+            return
+        try:
+            self._reset_locked()
+        finally:
+            if self._lock.locked():
+                self._lock.release()
+
+    def _reset_locked(self) -> None:
+        self._last_obs = None
         self._mode = TrackMode.SEARCHING
         self._last_x = None
         self._last_y = None
@@ -307,6 +332,28 @@ class TargetTracker:
         logger.debug("TargetTracker: reset to SEARCHING")
 
     def update(self, frame: np.ndarray, ts: "float | None" = None) -> dict:
+        """Process one frame under the tracker lock; see `_update_locked`.
+
+        On lock timeout (another thread mid-scan) returns a copy of the last
+        observation, or a not-visible one if there is none, and logs a warning.
+        """
+        if not self._lock.acquire(timeout=self._LOCK_TIMEOUT_S):
+            logger.warning("TargetTracker: update skipped — lock busy for %.2fs, "
+                           "returning the last observation", self._LOCK_TIMEOUT_S)
+            if self._last_obs is not None:
+                return dict(self._last_obs)
+            return {"mode": self._mode.name, "visible": False,
+                    "centroid_x": None, "centroid_y": None,
+                    "error_norm": None, "error_norm_y": None, "n_detections": 0}
+        try:
+            obs = self._update_locked(frame, ts)
+            self._last_obs = obs
+            return dict(obs)
+        finally:
+            if self._lock.locked():
+                self._lock.release()
+
+    def _update_locked(self, frame: np.ndarray, ts: "float | None" = None) -> dict:
         """Process one frame; update state machine; return observation dict.
 
         Returns:

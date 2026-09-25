@@ -587,6 +587,7 @@ SCHEMA = Section(
             # HLDD 005 Sustained-Hold Actuation (2026-09-23) — see
             # config.yaml's own comment on this key for the phased rollout.
             "sustained_hold_enabled": BOOL,
+            "pitch_lead_s": SECONDS,   # CR-018-01
         }),
 
         "tracking_hsv": Section(children={
@@ -634,6 +635,8 @@ SCHEMA = Section(
             "search_resume_centre_err": FRACTION,
             "search_resume_centre_delay_s": SECONDS,
             "empty_confirm_reads": _int(1),
+            "steer_interval_s": SECONDS,    # CR-018-01
+            "engage_interval_s": SECONDS,   # CR-018-01
         }),
 
         "hud": Section(children={

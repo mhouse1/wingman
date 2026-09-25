@@ -53,6 +53,15 @@ LOBBY_RECHECK_STATES = (GameState.GAME_STARTING,)
 # visible — enough that a single stray read cannot abort a match that really is
 # starting, and still 50x faster than the 150 s timeout it replaces.
 STARTING_PLAY_CONFIRM_READS = 3
+# ADR 102 rev 2: the lowest health a GAME_STARTING probe may launch a mission
+# on. The probe reads the HEALTH crop before the match has drawn a HUD, so on
+# the lobby and on loading screens it reads digit fragments off other UI (0, 3,
+# 7, 8). ADR 063's recurrence filter accepts two reads within 15 of each other,
+# so 0 and 7 confirmed each other and launched a mission into the lobby
+# (2026-09-25 10:54:29). A spawn starts at its aircraft's full health: of the
+# 1,724 confirmations in the September logs (archive duplicates included),
+# 1,718 read 160 to 312 and the other 6 read 7.
+STARTING_MIN_CONFIRMED_HEALTH = 20
 
 # States where a round is genuinely under way and stopping would abandon an
 # aircraft in flight. ADR 094's deferred exit waits these out; everything else
@@ -424,6 +433,21 @@ def _process_text_region(frame, text_tokens: "list[str]"):
             return (True, time.time() - t_start, text)
 
     return (False, time.time() - t_start, None)
+
+
+def _lobby_crop_verdict(crop: str, text: "str | None") -> str:
+    """What a lobby crop's OCR text means, as the name of the crop it stands for.
+
+    ADR 102 rev 2. The squad lobby's one button toggles READY <-> UNREADY, and
+    'UNREADY' contains 'READY', so a READY crop over the button matches both
+    before the click (it reads READY) and after it (it reads UNREADY). The two
+    mean opposite things to a caller that clicks: READY says "click", UNREADY
+    says "this player already clicked; the squad is not ready yet". Reading
+    UNREADY as READY would click a second time and un-ready the player.
+    """
+    if crop == "READY" and text and "UNREADY" in text:
+        return "UNREADY"
+    return crop
 
 
 # ADR 080: crops whose digits render in the HUD's pale green (the ammo
@@ -1259,6 +1283,10 @@ class GameStateAnalyzer:
         # Trigger methods (play_clicked, cancel_detected, …) are added to this instance
         # by Machine.__init__. All callers use self._trigger() for thread-safe dispatch.
         self._state_lock = threading.Lock()
+        # CR-019-03: events an on_enter_* hook raises while _trigger holds
+        # _state_lock, emitted by _trigger once the lock is released. Per
+        # thread; `deferred` is None outside a _trigger call.
+        self._trigger_ctx = threading.local()
         # ADR 060 Phase 1: orchestration subscribers, {GameEvent: [(name, callback)]}.
         # Registration happens at wiring time; emit() dispatches outside the lock
         # so a slow subscriber cannot block registration or another emit.
@@ -1483,6 +1511,7 @@ class GameStateAnalyzer:
         is released to avoid long critical sections.
         """
         post_callbacks = []
+        hook_events: list = []
         with self._state_lock:
             fn = getattr(self, trigger_name, None)
             if fn is None:
@@ -1490,12 +1519,15 @@ class GameStateAnalyzer:
                 return False
 
             prev_state = self.game_state
+            self._trigger_ctx.deferred = hook_events
             try:
                 transitioned = bool(fn())
             except MachineError as e:
                 logger.warning("FSM: ignored invalid trigger '%s' from state %s: %s",
                                trigger_name, self.game_state, e)
                 return False
+            finally:
+                self._trigger_ctx.deferred = None
 
             next_state = self.game_state
             if transitioned and next_state != prev_state:
@@ -1503,6 +1535,11 @@ class GameStateAnalyzer:
                     post_callbacks.append(GameEvent.CANCEL_MISSION)
                 if next_state == GameState.GAME_STARTING:
                     post_callbacks.append(GameEvent.START_GAME_STARTING_LOOP)
+
+        # CR-019-03: events the on_enter_* hooks raised, now outside the lock
+        # and in the order they were raised — first, as they ran first before.
+        for event in hook_events:
+            self.emit(event)
 
         # Deferred until the state lock is released: side effects must not run
         # inside the critical section (unchanged ADR 039 ordering).
@@ -1987,7 +2024,24 @@ class GameStateAnalyzer:
         # reached. The transition alone leaves tactic holds running in their own
         # threads and keys already pressed still pressed — X holds key state,
         # not this process.
-        self.emit(GameEvent.MANUAL_TAKEOVER)
+        self._emit_from_hook(GameEvent.MANUAL_TAKEOVER)
+
+    def _emit_from_hook(self, event: GameEvent) -> None:
+        """Emit from an on_enter_* hook without holding `_state_lock` (CR-019-03).
+
+        Inside a `_trigger` call the hook runs under the lock, so the event is
+        queued and `_trigger` emits it after releasing the lock. Before this,
+        the takeover's release_for_manual_takeover — which joins four writer
+        threads for up to about 5 s — ran under the lock and stalled every
+        other trigger_event caller, the main loop included. A transition made
+        outside `_trigger` (no queue on this thread) emits at once, so the
+        hook still fires however the state was reached.
+        """
+        deferred = getattr(self._trigger_ctx, "deferred", None)
+        if deferred is None:
+            self.emit(event)
+        else:
+            deferred.append(event)
 
     def on_enter_GAME_BATTLE_EJECT(self):
         logger.info("FSM: entering GAME_BATTLE_EJECT — eject sequence active")
@@ -2058,14 +2112,9 @@ class GameStateAnalyzer:
                 logger.info(
                     "GAME_STARTING health probe #%d (+%.1fs since armed): raw=%s",
                     self._starting_scan_attempts, since_arm, raw)
-                confirmed = self._confirm_health_value(raw)
+                confirmed = self._starting_health_verdict(
+                    raw, self._starting_scan_attempts)
                 if confirmed is None:
-                    logger.info(
-                        "GAME_STARTING health probe #%d: raw=%s UNCONFIRMED "
-                        "(ADR 063 needs a second agreeing read)",
-                        self._starting_scan_attempts, raw)
-                    return
-                if confirmed < 1:
                     return
                 with self._health_lock:
                     prev_alive = self._game_battle_alive
@@ -2098,6 +2147,33 @@ class GameStateAnalyzer:
             # Pool shutting down: drop the probe rather than resurrect a thread.
             self._starting_probe_running = False
             logger.debug("Analyzer: health probe not submitted (%s)", e)
+
+    def _starting_health_verdict(self, raw: int, attempt: int = 0) -> "int | None":
+        """The health a GAME_STARTING probe read may launch a mission on, or None.
+
+        ADR 063's recurrence filter first (two of the last three reads agree),
+        then the ADR 102 rev 2 floor. The filter tolerates 15, which is wide
+        enough for real damage between reads and also for two different lobby
+        digit fragments: 0 and 7 confirmed each other at 2026-09-25 10:54:29 and
+        launched a mission into the lobby. The floor rejects a confirmed value
+        no spawn can have. It is logged rather than silent, because a floor that
+        drops reads without saying so would look like the probe hanging.
+        """
+        confirmed = self._confirm_health_value(raw)
+        if confirmed is None:
+            logger.info(
+                "GAME_STARTING health probe #%d: raw=%s UNCONFIRMED "
+                "(ADR 063 needs a second agreeing read)", attempt, raw)
+            return None
+        if confirmed < 1:
+            return None
+        if confirmed < STARTING_MIN_CONFIRMED_HEALTH:
+            logger.info(
+                "GAME_STARTING health probe #%d: raw=%s confirmed but below the "
+                "%d floor — lobby or loading-screen digits, not a spawn health "
+                "(ADR 102 rev 2)", attempt, raw, STARTING_MIN_CONFIRMED_HEALTH)
+            return None
+        return confirmed
 
     def arm_starting_health_scan(self):
         """Enable the GAME_STARTING health-only probe and reset its instrumentation.
@@ -3556,6 +3632,19 @@ class GameStateAnalyzer:
                             continue
                         if not detected:
                             continue
+                        if _lobby_crop_verdict(crop, text) == "UNREADY":
+                            # ADR 102 rev 2: the READY crop now covers the whole
+                            # button, so it also reads the UNREADY state. Same
+                            # branch as the UNREADY crop above: already ready,
+                            # waiting for the squad, and never a second click.
+                            logger.info(
+                                "\033[93m📋 Lobby quick-scan: READY crop reads "
+                                "UNREADY (text='%s') — already ready, squad not "
+                                "ready yet → GAME_WAITING\033[0m", text)
+                            self._last_lobby_play_click_ts = time.time()
+                            self._trigger("play_clicked")
+                            handled = True
+                            break
                         if time.time() - self._last_lobby_play_click_ts < 60.0:
                             logger.debug(
                                 "Lobby quick-scan: %s visible but click suppressed (%.1fs since last click)",

@@ -372,6 +372,16 @@ class Controller:
         # so pitch does not need an equivalent.
         self._roll_hold_reason: "str | None" = None
         self._pitch_held: "str | None" = None
+        # CR-018-01: lead time for the sustained pitch hold's early release.
+        # A hold is let go when the error, extrapolated this far ahead at its
+        # measured rate, is inside the deadband or past centre — the nose
+        # coasts the rest of the way instead of overshooting. Measured before
+        # (2026-09-25 00:49 session): 63% of HOLD[pitch] endings were a direct
+        # up/down reversal. 0 restores release-only-inside-the-deadband.
+        # Named guess: about one pursuit steering tick plus the key's lag.
+        self._pitch_lead_s = max(0.0, float((_c.tracking or {}).get("pitch_lead_s", 0.15)))
+        # (timestamp, error_norm_y) of the previous pitch sample, for the rate.
+        self._pitch_last_sample: "tuple[float, float] | None" = None
         # ADR 136: TargetTracker reference, wired in from main.py after both
         # objects exist (Controller cannot construct it — it needs the
         # Analyzer-independent HSV/contour config TrackingHudHandler owns).
@@ -616,8 +626,18 @@ class Controller:
         # mission_su30 defers SWITCH_WEAPON until the selected weapon runs out
         # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
         # consecutive ammo==0 reads are required before pressing it. At the
-        # pursuit loop's ~0.35 s cycle, 3 is about one second. Named guess.
+        # pursuit engage cycle (engage_interval_s, ~0.3 s), 3 is about one second. Named guess.
         self._pursuit_empty_confirm_reads = max(1, int(_pm.get("empty_confirm_reads", 3)))
+        # CR-018-01: the pursuit loop steers every steer_interval_s and reads
+        # ammo / fires / renders the HUD every engage_interval_s. Before, one
+        # 0.2 s wait plus a blocking 0.1 s fire press set both, and steering
+        # ran at about 2.7 Hz (median TRACKPICK interval 0.353 s, 00:49
+        # session). The engage cadence keeps the old ~0.3 s so
+        # empty_confirm_reads above still spans about a second — the switch
+        # key is a toggle, and a faster read would confirm a misread sooner.
+        self._pursuit_steer_interval_s = max(0.02, float(_pm.get("steer_interval_s", 0.1)))
+        self._pursuit_engage_interval_s = max(
+            self._pursuit_steer_interval_s, float(_pm.get("engage_interval_s", 0.3)))
         # ADR 068 d1: True once ANY descending sample has been seen during the
         # CURRENT rotation attempt. The over-rotation guard requires it —
         # rotating past vertical means passing THROUGH a dive, so a flight path
@@ -1879,15 +1899,43 @@ class Controller:
         self._log_roll_hold(prev, "target err=%+.3f" % error_norm)
         return desired
 
+    # A pitch sample older than this gives no usable rate (the ambient tick
+    # runs at the main loop's 1.5 s; a pursuit steers every ~0.1 s).
+    _PITCH_RATE_MAX_GAP_S = 0.5
+    # Closer samples than this give a rate dominated by pixel noise.
+    _PITCH_RATE_MIN_GAP_S = 0.02
+
     def _sustained_pitch_hold(self, error_norm_y: float, deadband: float) -> "str | None":
         """Pitch's own instance of `_sustained_roll_hold` — no hold-reason
-        state, since pitch has no search default to distinguish from."""
+        state, since pitch has no search default to distinguish from.
+
+        CR-018-01 lead release: when the previous sample is between
+        _PITCH_RATE_MIN_GAP_S and _PITCH_RATE_MAX_GAP_S old the error rate is
+        known, and a hold is released
+        once the error extrapolated `_pitch_lead_s` ahead is inside the
+        deadband or past centre. No key is pressed in that case either: the
+        error is already closing fast enough on its own."""
+        now = time.time()
+        prev_sample = self._pitch_last_sample
+        self._pitch_last_sample = (now, error_norm_y)
         if abs(error_norm_y) <= deadband:
             if self._pitch_held is not None:
                 logger.debug("HOLD[pitch]: %s -> None (deadband err_y=%+.3f)",
                              self._pitch_held, error_norm_y)
             self.release_pitch_hold()
             return None
+        if self._pitch_lead_s > 0 and prev_sample is not None:
+            dt = now - prev_sample[0]
+            if self._PITCH_RATE_MIN_GAP_S <= dt <= self._PITCH_RATE_MAX_GAP_S:
+                rate = (error_norm_y - prev_sample[1]) / dt
+                predicted = error_norm_y + rate * self._pitch_lead_s
+                if abs(predicted) <= deadband or predicted * error_norm_y < 0:
+                    if self._pitch_held is not None:
+                        logger.debug(
+                            "HOLD[pitch]: %s -> None (lead err_y=%+.3f pred=%+.3f)",
+                            self._pitch_held, error_norm_y, predicted)
+                    self.release_pitch_hold()
+                    return None
         desired = "up" if error_norm_y < 0 else "down"
         if self._pitch_held == desired:
             return desired
@@ -2009,6 +2057,7 @@ class Controller:
         key pinned down under the operator's own input."""
         self.release_roll_hold()
         self.release_pitch_hold()
+        self._pitch_last_sample = None
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
@@ -2969,6 +3018,15 @@ class Controller:
         self.cancel_mission()
         self._eject_stop_reason = ""
         self._eject_stop.clear()
+        # CR-019-02: check AFTER the clear. Standby, exit and takeover each set
+        # their own flag before they set _eject_stop, so either this sees the
+        # flag or their stop lands after the clear — no window between them.
+        blocked = self._airframe_handed_back()
+        if blocked:
+            self._eject_stop_reason = blocked
+            self._eject_stop.set()
+            logger.warning("Controller: eject_and_dive refused — %s", blocked)
+            return
         self._eject_held_keys.clear()
         self._eject_phase_exit_reason = ""
         self._eject_defer_switch = bool(defer_switch_until_empty)
@@ -3286,6 +3344,13 @@ class Controller:
         self.cancel_mission()
         self._eject_stop_reason = ""
         self._eject_stop.clear()
+        # CR-019-02: same check-after-clear as eject_and_dive.
+        blocked = self._airframe_handed_back()
+        if blocked:
+            self._eject_stop_reason = blocked
+            self._eject_stop.set()
+            logger.warning("Controller: pursue_and_engage refused — %s", blocked)
+            return
         # Shared with eject_and_dive's own reset of the same state — both
         # strategies switch to the same secondary loadout and must not carry
         # a stale flag/budget from whichever one ran last. Kept as-is when the
@@ -3325,7 +3390,8 @@ class Controller:
                 zero_reads = 0
                 switched_at = None
                 yielding = False   # ADR 148: a dive-recovery climb owns pitch and roll
-                while not self._eject_stop.wait(timeout=0.2):
+                next_engage_ts = 0.0   # CR-018-01: first cycle engages at once
+                while not self._eject_stop.wait(timeout=self._pursuit_steer_interval_s):
                     if (self._pursuit_max_duration_s > 0
                             and time.time() - start >= self._pursuit_max_duration_s):
                         logger.info(
@@ -3377,6 +3443,11 @@ class Controller:
                                     sustained_hold=self._sustained_hold_enabled)
                         elif self._sustained_hold_enabled and not yielding:
                             self.release_pitch_hold()
+                        # CR-018-01: ammo, weapon switch, fire and HUD run on their own
+                        # ~0.3 s cadence (the old loop period); only steering runs faster.
+                        if time.time() < next_engage_ts:
+                            continue
+                        next_engage_ts = time.time() + self._pursuit_engage_interval_s
                         ammo = None
                         flares = None
                         health = None
@@ -3444,7 +3515,7 @@ class Controller:
                         # Fail open on an unreadable count, matching ADR 136
                         # D1 step 4's own reasoning for the heatdive loop.
                         if ammo is None or ammo > 0:
-                            self.fire_active_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                            self.fire_active_weapon(hold_seconds=0.1, block=False, ignore_cancel=True)
                         if self._hud_renderer is not None:
                             self._hud_renderer.maybe_render(
                                 frame, obs, "PURSUIT_MODE", health, ammo, flares)
@@ -3465,6 +3536,14 @@ class Controller:
                         else "external:%s" % (self._eject_stop_reason or "unknown"),
                         switched_here))
                 self._pursuing.clear()
+                # CR-019-02: a respawn, takeover or shutdown that stopped the
+                # loop after it broke for ammo or the cap wins over the dive.
+                if fall_through and self._eject_stop.is_set():
+                    logger.info(
+                        "Controller: pursue_and_engage — %s arrived as the pursuit "
+                        "ended; not handing off to eject_and_dive",
+                        self._eject_stop_reason or "external stop")
+                    fall_through = False
                 if fall_through:
                     # weapon_already_switched: both fall-through reasons
                     # (ammo exhausted, max duration) happen only after the
@@ -7285,13 +7364,35 @@ class Controller:
         self._set_last_mission(name)
         threading.Thread(target=missions[name], daemon=True).start()
 
+    def _airframe_handed_back(self) -> "str | None":
+        """Why wingman must not start flying on its own right now, or None.
+
+        CR-019-01/02: the automatic starters — the respawn and disengage
+        restarts, eject_and_dive, pursue_and_engage — each run late on their
+        own thread and used to start after Backspace (standby), an exit, or a
+        manual takeover had already stopped everything. Operator hotkeys do
+        not come through here, so restarting by hand still works.
+        """
+        if self._operator_stop_event.is_set():
+            return "operator stop (standby)"
+        if self._exit_event is not None and self._exit_event.is_set():
+            return "exit requested"
+        if self._manual_takeover_active():
+            return "manual takeover"
+        return None
+
     def restart_last_mission(self):
         """Restart the most recently started mission, defaulting to the configured mission when none recorded.
 
         Returns:
             True  — mission was successfully restarted (or started as the default).
-            False — mission is currently running (lock held); restart skipped.
+            False — mission is currently running (lock held), or the airframe
+                    has been handed back (`_airframe_handed_back`); restart skipped.
         """
+        blocked = self._airframe_handed_back()
+        if blocked:
+            logger.warning("Controller: automatic mission restart refused — %s", blocked)
+            return False
         if self.is_mission_running():
             logger.warning("\033[91mController: cannot restart mission - previous mission still in progress (lock held)\033[0m")
             return False
@@ -7383,6 +7484,7 @@ class Controller:
         self._climb_stop.set()  # ADR 073 3.2b: end any climb hold via its own finally
         self._boundary_turn_stop.set()  # ADR 107: end any boundary turn likewise
         self._sg_stop.set()  # ADR 076: end any spawn guard via its own finally
+        self._disengage_stop.set()  # CR-019-04: as release_for_manual_takeover does
         bt_thread = self._boundary_turn_thread
         if bt_thread is not None and bt_thread.is_alive():
             bt_thread.join(timeout=1.5)   # its finally does the SAF-010 push
