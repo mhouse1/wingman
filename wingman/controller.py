@@ -476,6 +476,13 @@ class Controller:
         # then sets self._ejecting fresh for that separate, later sequence).
         self._pursuing = threading.Event()
         self._pursuing_thread: "threading.Thread | None" = None
+        # ADR 148: set while a HARD-emergency climb hold (dive recovery, terrain) is
+        # flying the airframe inside a pursuit. The pursuit lives in
+        # GAME_BATTLE_EJECT, where a climb hold used to release itself after 0.25 s, so
+        # the recovery was a 0.3 s nudge every 1.5 s and both chases in the 2026-09-25
+        # 00:03 session flew into the ground. Read by _run_climb_hold's state check and
+        # by the pursuit loop, which yields pitch and roll while it is set.
+        self._pursuit_recovery = threading.Event()
         # Handle to the current disengage_roll_right maneuver thread
         # (ADR 024 3.1b — liveness for the Disengage leaf).
         self._disengage_thread: "threading.Thread | None" = None
@@ -563,6 +570,12 @@ class Controller:
         # a config that never sets the key behaves as it always did.
         self._pursuit_max_duration_s = float(_pm.get("pursuit_max_duration_s", 20.0))
         self._pursuit_padlock_verify = bool(_pm.get("pursuit_padlock_verify", False))
+        # ADR 148: the longest a dive-recovery climb may keep flying a pursuit before the
+        # chase resumes (the tree starts a new one at once if the emergency is still on).
+        # 0 turns the feature off: a climb hold then releases in GAME_BATTLE_EJECT as it
+        # did before, and the chase never yields. A named guess: the 2026-09-25 dives
+        # needed a pull-out from about 3200 m at 120 to 180 m/s.
+        self._pursuit_recovery_max_s = max(0.0, float(_pm.get("recovery_max_s", 30.0)))
         # get_ammo_missiles() reads the AMMO_MISSILE HUD region, which does
         # not update to the post-switch_weapon secondary loadout instantly —
         # measured live (2026-09-23): 1.79s and 9.1s after switch_weapon
@@ -1839,11 +1852,15 @@ class Controller:
         """Pitch's own instance of `_sustained_roll_hold` — no hold-reason
         state, since pitch has no search default to distinguish from."""
         if abs(error_norm_y) <= deadband:
+            if self._pitch_held is not None:
+                logger.debug("HOLD[pitch]: %s -> None (deadband err_y=%+.3f)",
+                             self._pitch_held, error_norm_y)
             self.release_pitch_hold()
             return None
         desired = "up" if error_norm_y < 0 else "down"
         if self._pitch_held == desired:
             return desired
+        prev = self._pitch_held
         if self._pitch_held is not None:
             self._release_tracking_key(
                 NOSE_UP_KEY if self._pitch_held == "up" else NOSE_DOWN_KEY,
@@ -1851,6 +1868,7 @@ class Controller:
         self._press_tracking_key(
             NOSE_UP_KEY if desired == "up" else NOSE_DOWN_KEY, "tracking_pitch")
         self._pitch_held = desired
+        logger.debug("HOLD[pitch]: %s -> %s (target err_y=%+.3f)", prev, desired, error_norm_y)
         return desired
 
     def engage_roll_search(self) -> None:
@@ -3134,6 +3152,12 @@ class Controller:
         .fire_eject(), the single choke point both strategies share."""
         return self._pursuit_mode_enabled
 
+    def pursuit_recovery_active(self) -> bool:
+        """True while a hard-emergency climb hold is flying the airframe inside a
+        pursuit (ADR 148). The pursuit loop yields pitch and roll for as long as this
+        holds, so the recovery is the only writer of those axes."""
+        return self._pursuit_recovery.is_set() and self._pursuing.is_set()
+
     def is_pursuing(self) -> bool:
         """True while a pursue_and_engage sequence is in progress (HLDD 015),
         including the window after it falls through into eject_and_dive —
@@ -3264,6 +3288,7 @@ class Controller:
                 last_visible_err = None
                 zero_reads = 0
                 switched_at = None
+                yielding = False   # ADR 148: a dive-recovery climb owns pitch and roll
                 while not self._eject_stop.wait(timeout=0.2):
                     if (self._pursuit_max_duration_s > 0
                             and time.time() - start >= self._pursuit_max_duration_s):
@@ -3280,22 +3305,41 @@ class Controller:
                         visible = obs.get("visible")
                         err = obs.get("error_norm")
                         err_y = obs.get("error_norm_y")
+                        # ADR 148: while a hard-emergency climb is flying the airframe
+                        # (a dive the chase followed, or a search roll that spiralled),
+                        # the chase writes neither axis: the recovery is the only writer,
+                        # and the search roll is released so the wings can come level.
+                        # Tracking and firing carry on; steering resumes when it ends.
+                        recovering = self.pursuit_recovery_active()
+                        if recovering != yielding:
+                            yielding = recovering
+                            if yielding:
+                                self.release_tracking_holds()
+                                logger.info(
+                                    "Controller: pursue_and_engage — yielding pitch and "
+                                    "roll to the dive recovery (ADR 148)")
+                            else:
+                                logger.info(
+                                    "Controller: pursue_and_engage — dive recovery over, "
+                                    "steering resumes")
                         if visible and err is not None:
                             last_seen_ts = time.time()
                             last_visible_err = err
-                            self.orient_nose_to_target(
-                                err, ignore_cancel=True,
-                                sustained_hold=self._sustained_hold_enabled)
-                        elif self._sustained_hold_enabled:
+                            if not yielding:
+                                self.orient_nose_to_target(
+                                    err, ignore_cancel=True,
+                                    sustained_hold=self._sustained_hold_enabled)
+                        elif self._sustained_hold_enabled and not yielding:
                             self.roll_on_miss(
                                 last_seen_ts, self._pursuit_search_resume_delay_s,
                                 last_visible_err, self._pursuit_search_resume_centre_err,
                                 self._pursuit_search_resume_centre_delay_s)
                         if visible and err_y is not None:
-                            self.orient_pitch_to_target(
-                                err_y, ignore_cancel=True,
-                                sustained_hold=self._sustained_hold_enabled)
-                        elif self._sustained_hold_enabled:
+                            if not yielding:
+                                self.orient_pitch_to_target(
+                                    err_y, ignore_cancel=True,
+                                    sustained_hold=self._sustained_hold_enabled)
+                        elif self._sustained_hold_enabled and not yielding:
                             self.release_pitch_hold()
                         ammo = None
                         flares = None
@@ -4310,6 +4354,7 @@ class Controller:
                                      exit_lead_s=float(exit_lead_s),
                                      emergency=bool(emergency))
             finally:
+                self._pursuit_recovery.clear()
                 self._climbing.clear()
 
         self._climb_thread = threading.Thread(target=_run, daemon=True)
@@ -4874,6 +4919,13 @@ class Controller:
         # hold stays RUNNING. Before D9 this hold only ever saw the value
         # frozen into the `emergency` parameter at thread start.
         emergency_now = bool(emergency)
+        # ADR 148: when a hard-emergency hold first finds itself in GAME_BATTLE_EJECT
+        # with a pursuit flying, this is the time it started flying through it. None
+        # until then. Once set the hold stays in that mode until it finishes, the
+        # pursuit or the state ends, or recovery_max_s runs out, even if the emergency
+        # itself clears first: releasing the moment the descent stops would hand a
+        # low aircraft straight back to a chase that dives.
+        recovery_since: "float | None" = None
 
         # NOSE_UP and NOSE_DOWN (ADR 076 d3 ceiling) are watched maneuver
         # keys — same programmatic bracket as the evade hold (d4), held
@@ -5026,10 +5078,35 @@ class Controller:
                 if self._analyzer is not None:
                     _st = getattr(self._analyzer, "game_state", None)
                     if isinstance(_st, GameState) and _st != GameState.GAME_BATTLE:
-                        logger.info("Controller: climb — game state %s, releasing keys",
-                                    _st.name)
-                        exit_reason = "state_exit"
-                        break
+                        # ADR 148: a pursuit lives in GAME_BATTLE_EJECT and DOES own
+                        # the airframe, so a dive recovery there is wingman flying
+                        # it, not flying something wingman lost. Only that one case
+                        # is exempt; the operator's takeover moves the state to
+                        # GAME_BATTLE_MANUAL and the pursuit ends, so SAF-001 stands.
+                        _recovering = (_st == GameState.GAME_BATTLE_EJECT
+                                       and self._pursuing.is_set()
+                                       and self._pursuit_recovery_max_s > 0
+                                       and (recovery_since is not None or emergency_now))
+                        if _recovering and recovery_since is None:
+                            recovery_since = time.time()
+                            self._pursuit_recovery.set()
+                            logger.info(
+                                "Controller: climb — hard emergency inside a pursuit: "
+                                "flying through %s and the chase yields (ADR 148, cap %.0fs)",
+                                _st.name, self._pursuit_recovery_max_s)
+                        elif _recovering and (time.time() - recovery_since
+                                              >= self._pursuit_recovery_max_s):
+                            logger.warning(
+                                "Controller: climb — pursuit recovery cap (%.0fs) reached, "
+                                "handing the airframe back to the chase",
+                                self._pursuit_recovery_max_s)
+                            exit_reason = "recovery_cap"
+                            break
+                        if not _recovering:
+                            logger.info("Controller: climb — game state %s, releasing keys",
+                                        _st.name)
+                            exit_reason = "state_exit"
+                            break
                 now = time.time()
                 if now - entry_ts >= cap_s:
                     logger.warning(

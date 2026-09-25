@@ -111,11 +111,33 @@ the level-off again) and below the tree's floor (otherwise it overrides nothing)
   fails 1.
 - Full gate: see the action item entry for this change.
 
+## Live check 1 (2026-09-25 00:18 entry; the operator's session 00:03 to 00:08 on 2026-09-25, two lives)
+
+Measured from the log:
+
+- The floor is wired: `ALTITUDE FLOOR - 721m below 3000m` and 2 more, all citing 3000 m.
+- Step 1 climbed to 3019 m and 3191 m and step 3 began there, as designed, and `mission_su30` handed over to pursuit both times.
+- **The goal was not met.** The -10 degree step was "not confirmed within 20s" on both lives, and the chases began at about 4160 m and
+  3730 m and climbed to 4555 m and 4583 m; nothing settled near 3000 m. `make sr`: pursuit altitude median 3771 m, nose angle not
+  confirmed 2 of 2.
+- **Two mechanisms, neither the floor and neither what this ADR changed:**
+  1. *Life 1, a stale climb latch (real-function repro in the action item).* The floor emergency at 721 m latched the Climb condition; a
+     33 s BoundaryTurn then outranked it, and the band's release check runs only when the condition is evaluated, so the latch
+     survived. When BoundaryTurn ended at 3651 m the first evaluation returned True and `_start_climb` began a climb toward 5000 m
+     (00:04:32.4, "a climb hold owns the pitch axis, nose-angle step waiting"). The same class of staleness Anomaly 007 fixed for the
+     emergency verdict; the band hysteresis needs the same per-tick refresh.
+  2. *Life 2, BoundaryTurn at the spawn.* The aircraft spawns 0.04 to 0.16 of the map radius from the edge; BoundaryTurn's "banking and
+     pulling away" (cap 12 s) ran three times during step 3 and pulled the nose up against the script's nose-down pulses (+46, +32, +13
+     degrees while the script asked for -10).
+- **A larger finding this ADR did not address: both chases ended by flying into the ground** (action item 001, Cycle 16 live result). The
+  3000 m floor gives a chase 1000 m less margin, and the recovery in a chase is a 0.3 s nudge (the climb hold releases on any game state
+  other than `GAME_BATTLE`, and pursuit lives in `GAME_BATTLE_EJECT`). Whether the lower floor contributed is not separable from two
+  lives; the mechanism does not depend on it.
+
 ## Not verified
 
-- **Live behaviour.** No session has run with this change. The check is `make sr` (chase altitude) and the `ALTITUDE FLOOR`
-  warnings: the floor should read `below 3000m`, the su30 log should show no `target alt 5000` climb after
-  `step 3/4`, and the chase altitude should centre near 3000 m.
+- **Live behaviour beyond the two lives above.** Still to show: no `target alt 5000` climb after `step 3/4` (life 1 had one, from the
+  stale latch), the -10 degree step confirmed, and the chase altitude centred near 3000 m.
 - That the -10 degree step is held once the axis is free, and how the pursuit's pitch loop and the floor pulses share the
   axis below 3000 m (the two-writer case ADR 144 recorded).
 - Terrain safety at 3000 m on every map.

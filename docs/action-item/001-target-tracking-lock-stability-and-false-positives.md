@@ -875,3 +875,201 @@ rerun after), `make reqs-gate`, `make rr-path1-gate`: all PASS.
 *Not verified.* No live session with this change or with `3cb467d`. Open: whether roll and pitch now converge and the game
 reports a lock more often; the gains were tuned on the old aim; a partly drawn label shifts the glyph centre and the aim with
 it; labels near the screen edge may be clamped by the game.
+
+**2026-09-25 00:18 - Cycle 16, live result (the operator's own session, 00:03 to 00:08 on 2026-09-25, two lives, stopped with `z`).**
+Code under test: `3cb467d` plus the Cycle 16 aim change and the ADR 147 altitude change (working-tree diff hash 9218f916dd10d64d).
+The session started after my reply and I did not start it: under the pre-flight I added to the iterate skill this turn (the
+operator pointed out that it says to run wingman), an existing operator session is Watched, not duplicated.
+
+*Aim fix: mechanism confirmed, pitch centring not.* No `aim=` in `TRACKPICK`; one lock run of 65 ticks (23 s) against a longest of
+22 before; 64 of those ticks passed the strict gate, 1 the keep test. |dx| median 46 px (57% inside the roll deadband), |dy| median 77 px
+(17% inside the pitch deadband) after the approach, against 115 px and 20% before. Details in HLDD 005, "Aim Point", live check 1.
+
+*ADR 147: floor wired, goal not met.* The floor cites 3000 m; step 3 began at 3019 and 3191 m; the -10 degree step was not confirmed on
+either life and the chases started at about 4160 and 3730 m. Two causes found, neither the floor:
+
+1. **Stale climb latch (measured mechanism, reproduced with the real `ClimbCondition`).** The floor emergency at 721 m sets the band's
+   `_active` latch. BoundaryTurn then held the selector for 33 s (00:03:59 to 00:04:32), and the band's release needs two evaluations of
+   `__call__`, which py-trees never makes while a higher-priority sibling wins. When BoundaryTurn ended at 3651 m the first evaluation
+   returned True and started a climb toward 5000 m; the running hold then kept the leaf selected. Repro: latch at 721 m, 33 s of
+   `update_emergency` only, first evaluation at 3651 m is True, the second False. Anomaly 007 fixed this staleness for the emergency
+   verdict but not for the band. Pre-existing and independent of su30; it defeats the su30 level-off whenever BoundaryTurn follows a
+   floor emergency (at spawn, near the edge, that is usual).
+2. **BoundaryTurn at the spawn (life 2).** Three "banking and pulling away" turns during step 3 pulled the nose up against the nose-down pulses.
+
+*New, serious: both chases ended by flying into the ground.* Measured from the log:
+- Life 1 (00:04:42 to 00:05:36): locked from 00:05:01, the aircraft followed the target down from 4555 m at nose -22 to -42 degrees,
+  speed 488 to 1159 KPH, altitude at 3 s steps 4372, 4172, 3886, 3566, 3205, 2840, 2429, 1974, 1431, respawn at 00:05:36. The steering
+  point stayed within about 80 px of the screen centre on most ticks (the loop was doing its job, into the ground).
+- Life 2 (pursuit from 00:06:25): no lock at all (`path=none`); a steep climb to 4583 m at 234 KPH, then a dive from 00:06:40 at -34 to
+  -46 degrees to 1102 KPH and altitude 2 m at 00:07:07 (search roll spiral after a near-stall; inferred, the log has no attitude trace).
+- In life 2 the tree's emergency selected Climb in time and did nothing useful: the `BT[active]` lines read ttg 25 s (Idle), then 19,
+  15, 11 and 5 s with Climb selected, and each `CLIMB - holding nose up + airbrake (EMERGENCY ...)` ended `climb complete (state_exit,
+  0.3s)` and restarted 1.5 s later. Life 1 shows the same airbrake holds from 00:05:20 (altitude about 3200 m).
+  Cause (code, `_run_climb_hold`): the SAF-001 backstop exits a climb hold on any game state other than `GAME_BATTLE`, and pursuit lives
+  in `GAME_BATTLE_EJECT`, so an emergency recovery in a chase is 0.3 s of nose-up in every 1.5 s (a 20% duty cycle) while the pursuit
+  loop and the search roll keep writing the same axes. ADR 144 recorded the two-writer half; the state exit makes it fatal.
+- Side observations: the crash to the respawn screen took about 26 s, longer than the 10 s terrain lookback, so life 2's death was
+  classified `unclassified`; pitch key holds are not logged, so pitch behaviour cannot be read from a log.
+
+*Proposed next cycle (not started).* (1) Let a hard-emergency climb hold run through `GAME_BATTLE_EJECT` while `is_pursuing()` (still
+ending on eject, evade, respawn or any other state); (2) make the pursuit loop yield pitch and roll, including the search roll, while
+such a hold runs; (3) refresh the Climb band's hysteresis every tick in `update_emergency`; (4) log pitch key holds. Tests for each,
+gate, then run. Not a preventive dive guard: that is a policy choice about how low the chase may go and is the operator's call.
+
+**2026-09-25 00:44 - Cycle 17 (operator: "after it switched to secondary weapons it crashed to the ground, it should have continued pursuit sequence"): a dive recovery flies through a pursuit (ADR 148).**
+*What the log and frames say about the switch (measured).* At 00:05:24.495 the first rack read empty three times and the switch to
+the secondary was pressed; the frame archived at 00:05:26 shows `+100 DESTROYED Gabagool`, so the lock that ended right then was a kill. No
+`eject_and_dive` and no fall-through followed, and the summary is `end=external:respawn_detected dur=54.5s`: the pursuit ran to the
+crash. The dive that crashed it began at 00:05:06 (nose -22 degrees, 4372 m), 18 s before the switch, chasing that target down.
+
+*Cause (code, measured in the log).* `_run_climb_hold` releases a hold on any game state other than `GAME_BATTLE`; a pursuit lives in
+`GAME_BATTLE_EJECT`. The tree's `DIVE RECOVERY` fired at 29 s to ground and its airbrake holds started 24 times, but 38 holds ended
+`state_exit` (33 after 0.3 s), while the chase kept holding roll and pitch. Hence the Cycle 16 finding that both lives flew into the ground.
+
+*Change (one mechanism, three parts; ADR 148, Draft).* (1) A hard-emergency hold (time to ground or terrain, not the floor) keeps flying
+through `GAME_BATTLE_EJECT` while `_pursuing`, latched, capped by the new `pursuit_mode.recovery_max_s` (30 s; 0 restores the old
+behaviour); takeover, respawn, any other state and eject or evade pre-emption still release it, so SAF-001 stands. (2) The chase releases
+its sustained holds (the search roll included) and steers nothing while it flies, then resumes. (3) `HOLD[pitch]` debug lines, because pitch
+holds were not logged at all. Not touched: the stale climb latch and the boundary-turn pull-ups (the su30 level-off, Cycle 18), and any
+preventive dive guard (the operator's policy call).
+
+*Tests and gates.* `tests/test_pursuit_recovery.py`, 19 tests on a real Controller, real hold thread and real `GameState`. Mutation checks:
+a state check that never exempts fails 8, a chase that never yields fails 4, a flag never cleared fails 1. `make lint`, `make test`
+(2112 passed, 35 skipped), `make reqs-gate`, `make rr-path1-gate`: all PASS.
+
+*Run.* `make r1` at 00:40:27, python pid 3080120, log `wingman.log` (the 00:03 session is preserved as `logs/wingman_20260925_000825.log`),
+code state HEAD 3f89442 plus working tree (`git diff HEAD -- wingman` hash b058ced5e8bb4447). The Monitor is armed and proven (its first
+event was `Configuration loaded`). The Monitor on the 00:03 session had delivered nothing because its last stage, `cut`, block-buffers; fixed in the skill.
+
+*First live result, 00:41 to 00:43 (measured, the run's first life).* The chase began at 3597 m and dived at 814 to 1079 KPH, nose -9 to -26
+degrees. `DIVE RECOVERY - 25s to ground (alt=3297m rate=-130m/s)` fired at 00:41:52.0, the hold logged `hard emergency inside a pursuit: flying
+through GAME_BATTLE_EJECT and the chase yields` at 00:41:52.3, and the chase logged `yielding pitch and roll` at 00:41:52.4. The aircraft
+bottomed at about 1930 m (00:41:56), climbed to 3425 m at the cap (00:42:22, `recovery_cap`, 30 s), reached 4110 m at 00:42:32 and the chase
+resumed at 00:42:28. A second recovery began at 00:43:37 from 2372 m and the aircraft was climbing again at 00:43:41. Two dives, two recoveries, no crash so
+far, against two crashes in the two lives of the 00:03 session. Cost noticed: the pull-out ran through a nose +90 degrees at 191 KPH (near a
+stall, at 00:41:59) with the airbrake held, and the cap ended the hold with the aircraft still climbing at nose +63 degrees.
+To read next: hold durations in `climb complete (...)`, `HOLD[pitch]` lines, deaths by cause in `make sr`, how often the chase dives again after a recovery.
+
+*Watch update 2026-09-25 00:45 (the 00:40 run, first life, still alive after 4.5 minutes; measured from a copy of the log).* Three recoveries so far
+(00:41:52, 00:43:37, 00:44:43), each ending at the 30 s cap with the chase resuming a few seconds later. Altitude: 3704 m twelve seconds before the
+first, minimum 1928 m, 4094 m at +43 s; 2926 m, minimum 2304 m, 4380 m; 3900 m, minimum 2778 m for the third. **All three dives followed a locked
+chase** (18 of 27, 51 of 67 and 59 of 68 ticks in the preceding 25 s were lock ticks), so the aircraft is following targets down, not spiralling in a
+search. The recoveries took about a third of the pursuit so far (36 s + 32 s + the third), and 136 of 564 ticks were lock ticks (24%). No death yet,
+against a death within about 1.5 minutes on both lives of the 00:03 session. The open question this raises is the operator's: whether a chase
+should be allowed to follow a target that low at all (a preventive dive guard), or whether break-off at 30 s to ground is the intended limit.
+
+*Watch update 2026-09-25 00:45.* The first life ended with the match, not a crash: `PURSUIT SUMMARY: end=external:match_ended dur=231.7s scans=634
+locked=132 (21%) first_lock=0.3s ammo=4->3 switched=yes`. 232 s with three dive recoveries and no death, against 54 s and about 85 s (both ending in an impact)
+in the 00:03 session. One life is one sample: the next lives are what will say whether it holds.
+
+*Result of the 00:40 run (2026-09-25 00:50 entry; 00:40:27 to 00:49:15, 8 min 45 s, five lives; log `logs/wingman_20260925_004915.log`).* It ended when the
+nested display `:3` was closed under it (`XIO: fatal IO error on X server ":3"`, exit 2): the operator started their own session at 00:49:38, and a
+run target closes a running game and its display. Not a wingman fault, and not a fault of the change. Measured with `make sr` on that log:
+- **Dive recovery, the target of the cycle: worked in the one long chase.** Three `recovery_cap` holds (30 s each) in a 232 s life that ended with the
+  match (`end=external:match_ended`), with altitude minima 1928, 2304 and 2778 m, against two impacts in the two lives of the 00:03 session. `HOLD[pitch]`
+  lines: 55, so the instrumentation works. All three dives followed a locked chase.
+- **Not shown by this run:** whether it holds over more chases. The other four lives never dived: three died to `enemy_fire` (two before the hand-off, at about
+  37 s and 40 s after spawn, one 21.6 s into a chase with no lock), each about 6 s after the incoming warning with 4 missiles unused. Prologue deaths in
+  today's earlier logs: 9 of 153 su30 starts (6%); here 2 of 5. Small sample; not attributed to any change.
+- Tracking numbers, for the record: 7 lock runs, longest 63 ticks, median 1; |dx| median 56 px (46% inside the roll deadband), |dy| median 122 px (17% inside
+  the pitch deadband); 8 `ALTITUDE FLOOR` events all citing 3000 m; the -10 degree step unconfirmed on both hand-offs.
+
+*Watch update 2026-09-25 00:56: where the recoveries actually began (measured; the last BT read before each `hard emergency inside a pursuit` line, and the lowest 3 s altitude read in the following 30 s).*
+
+| Start | Altitude, rate, time to ground at the trigger | Dive before it (3 s reads: altitude, nose) | Lowest read after |
+|-------|-----------------------------------------------|---------------------------------------------|-------------------|
+| 00:41:52 (my run) | 3297 m, -130 m/s, 25 s | 3597 (-9), 3345 (-18), 2948 (-26) | 1928 m |
+| 00:43:37 (my run) | 2598 m, -87 m/s, 30 s | 2795 (-9), 2628 (-12), 2372 (-21) | 2304 m |
+| 00:44:43 (my run) | 3406 m, -115 m/s, 30 s | 3701 (-17), 3432 (-20), 3085 (-24) | 2778 m |
+| 00:52:56 (operator's session) | 2331 m, -133 m/s, 17 s | 2651 (-21), 2371 (-22), 1971 (-28) | 1488 m |
+| 00:54:56 (operator's session) | 3171 m, -110 m/s, 29 s | 3445 (-11), 3200 (-18), 2869 (-23) | 2495 m |
+| 00:55:53 (operator's session) | 3912 m, -191 m/s, 20 s | 4352 (-35), 3981 (-35), 3404 (-40) | 2054 m at nose -67 degrees, still diving when the match ended |
+
+Both lives so far ran to the end of the match (232 s and 242 s), with 3 and 4 recoveries. The margin depends on the dive: the triggers came at 17 to 30 s to
+ground and cost 300 to 1400 m before the aircraft turned, which is enough at 100 to 130 m/s of descent; the last dive was -35 to -67 degrees at up to 1280 KPH,
+lost 1858 m or more in about 5 s, and the outcome is unknown because the match ended. Options if that proves fatal, all the operator's call: a larger
+`recover_below_time_s` for a pursuit, a descent-rate trigger, or the preventive dive guard in the chase's pitch loop. The chase resumed at 4795 m after the
+previous recovery and was at -35 degrees within 13 s, so the chase itself dives immediately after every recovery.
+
+*Watch update 2026-09-25 01:00: the first crash with the recovery in place (the operator's 00:49 session, life 2, PURSUIT SUMMARY `end=external:respawn_detected dur=76.8s`; measured from the log).*
+Not enemy fire (no incoming warning, no `DIED ARMED` line). The chase resumed at 4081 m at 00:58:18 after the first recovery and dived at nose -40 to -43 degrees, firing
+2 to 3 missiles on the way (`Ammo missiles: 2, 1`). `BT` reads: 3946 m at -124 m/s, ttg 32 s (00:58:21); a telemetry gap (alt None, 00:58:25); 2883 m, ttg 31 s (00:58:30),
+when the altitude floor (not a hard emergency) started a soft climb WITH the afterburner at 770 KPH in the dive, released after 0.25 s by `state_exit` and followed by a 6.3 s exit
+push (`pitch budget (3 pulses) exhausted`); 2740 m, ttg 29 s (00:58:33, a stale repeat); then a garbage read (`Altitude: 218 | Speed: 7`, 00:58:36) gave `alt=1805 alt_rate=-743m/s
+ttg=2s` and started the hard emergency at 00:58:37.8 with the real altitude near 1800 m and descending fast (inferred: the ttg=2 s came from the garbage read, so the
+emergency started by luck, and later than the readings alone would have started it). In the recovery: the next read was another garbage sample (`alt=1448 rate=+486m/s angle=90`), and the
+hold's two-sided rate authority pulsed NOSE DOWN at 00:58:39.8 and 00:58:41.5 in a -49 degree dive; then nose-up pulses from 00:58:43 (rate -132 to -163 m/s) brought the nose from
+-90 degrees at 388 m to +12 degrees at 303 m (00:58:54); at 00:58:57 the ttg read 49 s, the emergency cleared mid-hold (`resuming normal fuel-floor logic`, afterburner re-engaged) at
+264 m, and at 00:59:00 the aircraft was at nose -44 degrees at altitude 0. Impact about 00:59:02, respawn detected 00:59:04.
+
+Three defects visible in one dive, none of them the mechanism ADR 148 added: (1) the trigger is late for a dive that accelerates faster than the 3 s telemetry, and can be set off by a
+garbage read; (2) a soft floor climb with the afterburner starts in a dive; (3) the hold trusts an implausible positive rate and pulses nose down. Plus the policy one: the chase
+resumes and dives again straight after each recovery. Recoveries so far (both runs): 9 started, this is the first crash; the last life of the run before it survived 4.
+Recommendation, the operator's call on the parameters: a preventive guard in the chase (no nose-down command below a time-to-ground, using the estimate the tree already keeps, with roll
+tracking continuing), and rejecting implausible rates and altitude jumps in the recovery hold.
+
+*Watch update 2026-09-25 01:03: a prologue terrain crash (the operator's session, 01:02:02 to 01:02:41, `DIED ARMED - 4 missile(s), cause=terrain`; measured).* Before the chase, in `GAME_BATTLE`, so
+neither ADR 148 nor the altitude doctrine's floor was the mechanism. The step 1 climb went vertical near the map edge (nose +56 degrees at 1263 m, then +90 degrees at 1836 m and 2303 m with
+speed falling 746 to 491 KPH), BoundaryTurn took the selector twice (01:02:09 and 01:02:20) and pulled at the top, and the aircraft fell into a dive: 2545 m at nose +37 (01:02:18), 2298 m at -24, 1521 m at
+-61 and 1060 KPH, 523 m at -57 and 1425 KPH (01:02:27), 176 m (01:02:33). The climb hold's exit routine logged `overshot into a dive (-24deg)` and `pitch budget (3 pulses) exhausted, releasing anyway`, and the tree
+returned to Climb at about 1000 m (01:02:26), too late. Prologue deaths in today's logs: 12 of about 165 su30 starts (7%): 3 enemy_fire, 2 terrain, 4 unclassified, 3 with no `DIED ARMED` line (not armed at death).
+Last hour: 3 of 10 (two enemy fire, this one). The vertical climb near the spawn edge is a known hazard of the script's step 1 (the operator's "nose up on battle starting or respawn"), not a new one; noted for a later cycle.
+
+*Watch update 2026-09-25 01:06: the second crash with the recovery in place (the operator's session, `PURSUIT SUMMARY: end=external:respawn_detected dur=162.9s scans=449 locked=178 (40%)`; measured).*
+The chase resumed at 4153 m at 01:05:24 after its second recovery and dived at nose -19 to -37 degrees, speed rising to 1271 KPH: 3453 m (01:05:32), 2878 (01:05:38), 2582 (01:05:41, floor climb started, WITH
+the afterburner, released by `state_exit` after 6.3 s), 2177 (01:05:44), 1692 (01:05:47). The hard emergency started at 01:05:48.9 from 2150 m at -161 m/s (`ttg=13s`), 1091 m at 01:05:50, 896 m at 01:05:53 with
+`Speed: 38` (an impact or a misread; the respawn was detected 3 s later). The tree's estimate still read `ttg=19s` at 1226 m: it assumes the ground is at altitude 0, and this map has terrain near 900 m and higher, so
+the aircraft hit the ground with the estimate saying about 19 s remained (inferred from the altitude and speed at the last read; no frame of the impact was checked). Recoveries with the change so far: 14 across
+the two sessions, 2 crashes, both from dives at 1200+ KPH begun at 3000 to 4000 m (the other: 00:58:38). In this life the recoveries took about half the chase (3 of them: 01:03:43, 01:04:52, 01:05:49) before the crash.
+Proposed for the next cycle, pending the operator's parameter: the chase does not command nose-down below a minimum altitude (default: the doctrine floor plus 500 m, so 3500 m for su30) or while the time-to-ground
+estimate is under 60 s; roll tracking, firing and the search roll are unchanged; a config key, off by setting it to 0.
+
+*Watch update 2026-09-25 01:28: the 01:20 death was a missile kill, not a crash, and the death classifier is blind after the weapon switch (the operator's session, `PURSUIT SUMMARY: end=external:respawn_detected dur=95.0s scans=261 locked=106 (41%) ammo=4->2 switched=yes`; measured unless labelled).*
+The recovery worked and the aircraft was shot down while climbing. Sequence: hard emergency at 01:20:18.4 from 1391 m; altitude 1645 m at 01:20:19.8 (nose +31 degrees), 1695 m at 01:20:22.8 (nose +10, 331 KPH, +17 m/s; the emergency
+climb holds the airbrake and suppresses the afterburner, so speed fell from 649 to 331 KPH in four seconds); `INCOMING MISSILE DETECTED (source=ocr_fallback ... text=INCOMING)` at 01:20:21.557 with flares deployed; the HUD digits (health, ammo, fuel)
+gone by the first OCR pass that finished after it (no digits for flares, missiles, fuel and health at 01:20:22.95 to 01:20:23.13); a red blob of 35639 px, 398 by 379, at the frame centre at 01:20:24.195; `RESPAWN` text at 01:20:26.27. No terrain explanation fits at
+1.6 km and rising a moment before the HUD vanished (inferred: the spawn altitude on this map is about 1500 m and the highest ground-impact altitude read so far is about 900 m, 01:05:53), so the cause is inferred to be the missile. No HUD frame of it exists: the
+encounter archive cap (12) had been reached. The recovery had run about 4 s and had gained about 300 m, so ADR 148 did not cause it.
+*How late the recovery started.* The chase had descended from 4016 m at 01:19:32 to 1297 m at 01:20:14 (nose -14 to -23 degrees, 980 to 1180 KPH) before this hold began at 1391 m. The floor was crossed at 01:19:49 and five soft floor climbs (01:19:49, :57, 01:20:04, :09, :10) lasted
+0.25 to 6.3 s each and released by `state_exit`; two of them ended with `climb exit - no telemetry, single 1.0s nose-down pulse applied` (01:20:08.1 and 01:20:10.6, at about 1600 m with the aircraft in a dive), the open item (d) again. Same pattern as the two crashes, one step
+short of one: the soft floor is a nudge in a chase, so the aircraft went 1600 m below it before the hard trigger.
+*Why the log has no cause line for it.* `tick_handlers.py:690` skips the `DIED ARMED` line when `had_secondary_weapon_active` is set (the missile counter then reads the heatseeker rack). In this session the three deaths with the secondary active (00:59:04,
+01:05:56, 01:20:27) have no `DIED ARMED` line and the two with it off (01:02:41 `terrain`, 01:10:15 `unclassified`) have one: three of three. So the deaths that follow a switch, which is the situation the operator's Cycle 17 report was about, are the ones
+the classifier cannot label at all, and `make sr` counts them as not armed.
+*MissileEvade cannot run in a chase (measured from the code and the logs).* `is_idle` (behavior_tree.py:194) selects Idle whenever the state is not `GAME_BATTLE`, and a pursuit lives in `GAME_BATTLE_EJECT`; the one exception (`make_idle_condition`) yields only to Climb's
+emergency; and `make_missile_evade_condition` yields to that same emergency (the operator's Phase 1 directive). So in a chase without an emergency the tree selects Idle, with one it selects Climb, and MissileEvade is unreachable either way; the chase gets flares and the ADR 128
+afterburner hold only. Logs with pursuit windows (from the 13:46 log on 2026-09-24; earlier logs carry no `PURSUIT SUMMARY` line): 16 incoming alerts, 8 inside pursuits with 0 MissileEvade starts and 4 deaths within 12 s, 8 outside pursuits with 3 MissileEvade starts and 2 deaths
+within 12 s. Four of 8 against 2 of 8 is not a difference n=8 can show, and "a death within 12 s of an alert" is a proxy that also counts deaths from other causes. The tactic at the alert inside pursuits was Climb 6 times and Idle twice (01:16:36, survived).
+Neither HLDD 015 nor ADR 070 mentions it. Whether it matters is not measurable from this sample (ADR 070's 82% against 50% survival is from `GAME_BATTLE`, not from chases; assumed to transfer, not shown).
+*Recoveries in the operator's session, 00:49 to 01:28:* 13 started, 9 ran to the 30 s cap, 3 ended in a death (two ground impacts, 00:59:04 and 01:05:56, and this missile kill), 1 ended another way. Five deaths in the session: those three, a prologue terrain crash (01:02:41) and an
+unwarned kill in a zero-lock chase (01:10:15, 107 s, `locked=0%`, no incoming alert).
+Proposed, not built, the operator's call: (1) instrumentation only: give the death line a cause when the secondary is active (same classifier, a `DIED (secondary active)` tag), so the next report can separate crash from shot-down; (2) a design question, not a tweak: whether a chase
+should be able to evade (Idle yields to an alert in a pursuit, and the chase yields its axes as ADR 148 does). Note this death would not have changed under (2) as the tree stands, because the altitude-floor emergency pre-empts MissileEvade by the operator's own directive.
+
+*Watch update 2026-09-25 01:38: a false emergency from one garbage altitude read, then a missile at 128 KPH (the operator's session, `PURSUIT SUMMARY: end=external:respawn_detected dur=69.6s`, `DIED ARMED - cause=enemy_fire (incoming 6.0s ago)`; measured unless labelled).*
+The first recovery of this life was sound: hard emergency at 01:31:02 from 1551 m at 1289 KPH, 3026 m at 01:31:30, cap at 01:31:32.4. One garbage read then undid it. `PADLOCK ... Altitude: 314` at 01:31:33.5, between real reads of 3026 m (01:31:30.5) and 3485 m (01:31:36.5).
+The plausibility filter accepted it: the implied -904 m/s is under `max_alt_rate_mps: 1000` (ADR 097 D2, calibrated on real dives that reach 919 m/s), so the smoothed value became the mean of 2704, 3026 and 314 = 2014.7 m, with `alt_rate=-906m/s ttg=2s`. The filter then rejected the good 3485
+read against that anchor (`rejected reading (speed_raw=368 altitude_raw=3485, total_rejected=19)`, an implied +1057 m/s; ADR 097 D3's reseed needs three rejections and got one). The tree read `alt=2014.7 alt_rate=-906m/s ttg=2s` unchanged at 01:31:33.6, 35.1 and 36.6, and `alt=None` at 38.1 when the snapshot went stale.
+Consequences: (1) the recovery cap's exit routine ran on it (`climb exit - overshot into a dive (-90deg) - correcting with nose-up` at 01:31:34.4, `pitch budget (3 pulses) exhausted`, `climb complete (recovery_cap, 36.3s)` at 01:31:38.4) while the aircraft was climbing at +64 degrees;
+(2) a second EMERGENCY hold (airbrake held, afterburner suppressed) started at 01:31:39.6 at 3668 m with `ttg=n/a` and no rate, 668 m above the su30 floor and climbing (inferred: the latch from the poisoned reading was still on), and ADR 148 made the chase yield to it again. The tree went back to Idle at 01:31:42.6 (`alt_rate=+81m/s`) but the hold
+thread kept pulsing (`down` with rate 80.6 at 01:31:43.9 and 45.6, `up` at 47.4, 49.1 and 50.9). Speed: 430 KPH at 01:31:30.5, 222 at 42.5, 128 at 45.5 (nose +37; `STALL PREVENTION - speed 222 KPH below 300 KPH` at 44.1). `INCOMING MISSILE DETECTED` at 01:31:33.8 and 35.3 (flares, afterburner held 5.4 s) and again at 01:31:45.8; the health digits
+were gone from about 01:31:45.8 and the respawn text came at 01:31:50.6. Inferred: a near-stalled aircraft is the easiest missile target, and the second hold should not have run. Not shown: that it would have survived at speed. Both missile deaths in this session (01:20 at 331 KPH, this one at 128 KPH) came during or just after a recovery, with the alert about 1.4 s before the HUD went (n=2).
+*Cost of a false emergency under ADR 148.* Before it, a false hard emergency in a chase was a 0.25 s nudge; now the latch makes it a hold of up to 30 s with the chase yielding, as ADR 148's Consequences said it would. The latch exists to stop a chase re-diving a low aircraft; at 3668 m it protected nothing.
+*How common the spike is (measured, with a caveat).* Single-read low outliers (a read more than 1000 m under both neighbours, the neighbours within 700 m of each other) in the PADLOCK series of the 22 logs from 2026-09-24 03:33 on: 29, six followed within 8 s by an emergency line, one of those inside the ADR 148 period (this one). The series prints raw reads,
+including ones the filter rejected (a one-step drop over about 3000 m is rejected by the 1000 m/s ceiling), so it overcounts the cases that poison the anchor. Recoveries in the operator's session so far: 16 started, 11 reached the cap, 4 ended in a death (00:59:04 and 01:05:56 ground impacts, 01:20:24 and 01:31:47 missile kills), 1 ended another way.
+Proposals, not built, the operator's call, cheapest first: (1) on the ADR 148 side: the recovery exemption applies only below a height (the doctrine floor plus a margin, for example 500 m, so 3500 m for su30), so a hold that starts or continues above it ends by the old state exit and a false emergency at altitude costs the nudge it used to;
+(2) perception: one accepted outlier should not become the anchor (a median of the last three for the smoothed value and the rate, or a reseed on the next read that agrees with the read before the outlier); ADR 097's calibration set has to be re-checked, so this is the larger change; (3) the cap's exit routine should not pulse nose-up on a nose estimate that contradicts the read before it (+64 to -90 degrees in one step).
+Not runnable while the operator's session is up: a fix cycle ends in `make r1`, which relaunches the game.
+
+*Watch update 2026-09-25 01:43: two more deaths (01:37 an impact with no recovery, 01:40 a missile kill during one) and where the session's deaths come from (the operator's session, 00:49 to 01:41; measured unless labelled).*
+*01:37:27, ground impact (`PURSUIT SUMMARY: end=external:respawn_detected dur=47.1s scans=131 locked=34 (26%)`, no `DIED ARMED` line: the switch to the secondary was at 01:37:25.7).* The chase held level near 3570 m from 01:36:51, then `HOLD[pitch]: None -> down (target err_y=+0.601)` at 01:37:20.8 and no release before the
+impact: 3045 m at 01:37:21.5, 2539 m at 24.5 (1045 KPH, nose -35), 17 m at 27.5 (1270 KPH), 2522 m in one 3 s step. The altitude floor's soft climb started at 01:37:24.6 and was released by `state_exit` 0.25 s later; its exit push (`climb exit - overshot into a dive (-35deg) - correcting with nose-up`, 3 pulses) ran until 01:37:30.9. `is_climbing()` stays
+true through that push (`_run`'s `finally` clears the flag after `_run_climb_hold` returns, controller.py:4356), and the tree only starts a hold when none is running, so the hard trigger (`ttg=18s` at 01:37:24.6 and again at 26.1, two confirming reads) could not start a recovery before the impact (inferred from that code path; no log line states it, and no `hard emergency inside a pursuit`
+line was written). A garbage `Speed: 5` read at 01:37:15.5 fired `STALL PREVENTION - speed 5 KPH below 300 KPH` at 01:37:17.1 (afterburner held; harmless here).
+*01:40:25, missile kill in a recovery (`PURSUIT SUMMARY: end=external:respawn_detected dur=138.9s scans=391 locked=101 (26%)`, no `DIED ARMED` line, secondary active).* Dive from 3405 m at 01:39:53 to 2091 m at 01:40:08.7 (1227 KPH); floor climb at 01:40:02.8 released after 0.25 s, exit push to 01:40:09.0; `INCOMING MISSILE DETECTED` at 01:40:08.9;
+hard emergency at 01:40:10.3 (`ttg=25s`), the recovery bottomed near 1690 m at 01:40:14.7, and the aircraft was at 1892 m, 271 KPH, nose +63 at 01:40:17.7 (`STALL PREVENTION` at 19.3), 371 KPH at 20.7 and 476 KPH at 23.7, climbing. Four more alerts (01:40:19.5, 20.95, 22.5, 23.9, one missile by their spacing) preceded the HUD going at about 01:40:25.5 and `RESPAWN` at 01:40:29.7.
+*Where the deaths come from.* Eight unplanned deaths in 00:49 to 01:41 (two more lives ended by the designed ammo-out dive): 3 chase-dive ground impacts (00:59:04, 01:05:56, 01:37:27), 1 prologue terrain crash (01:02:41), 3 missile kills during a recovery (01:20:24, 01:31:47, 01:40:25) and 1 unwarned kill in a zero-lock chase (01:10:15). Six of the eight
+followed a chase dive through the 3000 m floor. Recoveries: 18 started, 12 ran to the cap, 5 ended in a death (2 impacts, 3 missile kills), 1 ended another way. Missile alerts (grouped when under 6 s apart): 5 inside recovery windows (8.6 min of chase, 0.58 per min) against 3 in the rest of the chase (20.7 min, 0.14 per min); 3 of those 5 ended in a death, 0 of the 3 outside.
+That is suggestive and no more (5 against 3 alerts; one-sided p about 0.05 for a rate that simply tracks time, before any correction for looking). A recovery flies slow by design (airbrake, afterburner suppressed, steep climb: 128, 331 and 271 to 476 KPH around the three missile deaths); slow flight as the mechanism is the thing to test, and it is not shown here.
+*Recommendation, the operator's call:* the dive guard proposed on 01:06 is now the strongest option: it acts on the origin of six of the eight deaths (the descent) instead of the recovery afterwards, and it would also mean fewer recoveries, fewer chances for a false emergency, and less slow flying under fire. The cost is that the chase cannot follow a target nose-down below the guard altitude; roll tracking, firing and the search roll stay.

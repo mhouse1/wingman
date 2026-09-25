@@ -268,6 +268,14 @@ tactic. An open question (below) is whether a *long-running* pursuit
 nothing watching for it, the way HLDD 013 found `TACTIC_ATTACK_SUPPORT`
 already could.
 
+**A dive recovery flies through the chase (ADR 148, operator, 2026-09-25).** The two-writer case above was fatal in the
+00:03 session: both chases ended in the ground. A climb hold used to release on any game state other than `GAME_BATTLE`, and a
+pursuit lives in `GAME_BATTLE_EJECT`, so the tree's emergency recovery (24 airbrake holds started, 38 holds released after 0.3 s
+in five minutes) was a nudge every 1.5 s while the chase kept writing pitch and roll. Now a hard emergency (time to ground or
+terrain, not the altitude floor) flies through the state for up to `pursuit_mode.recovery_max_s` (30 s), and the chase releases
+both axes, including the search roll, until it ends, then steers again. The weapon switch that preceded the first crash was
+unrelated: the target had just been destroyed. Not yet verified live.
+
 **Altitude in the chase (ADR 147, operator, 2026-09-24).** Nothing in pursuit steers altitude except the behavior
 tree's hard altitude floor, and a floor climb is only a nudge in this state: a climb hold releases itself in
 `GAME_BATTLE_EJECT` (136 `state_exit` releases in the 18:57 session, 52 of them after 0.3 s). So the chase settles on

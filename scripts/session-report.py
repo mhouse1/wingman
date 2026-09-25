@@ -29,6 +29,11 @@ OLD_BOX = (384, 216, 1536, 816)
 # Fixed-position HUD zones masked out of the red mask (tracking.red_mass_exclude_zones_pct):
 # scoreboard and rosters, minimap, weapons panel, squad logo. A lock inside one is a bug.
 HUD_ZONES = ((0, 0, 1920, 110), (1590, 0, 1920, 330), (1440, 1060, 1920, 1200), (0, 1080, 330, 1200))
+# tracking.red_mass_aim_offset_px: since 2026-09-24 the steering point (TRACKPICK's sel) is this far
+# BELOW the nameplate, and the HUD zones are masked on the nameplate, so a zone is tested against
+# sel minus this. Without it a label just above the weapons panel put its steering point in the
+# zone and read as a HUD lock (2 false alarms in the 2026-09-25 00:03 session).
+AIM_OFFSET_PX = 100
 # Frame centre and the roll and pitch deadbands in pixels (tracking.deadband and pitch_deadband,
 # both 0.05 of the half-frame). A lock tick whose steering point is inside them is a target the
 # controller already treats as centred. TRACKPICK's sel is in absolute 1920 x 1200 coordinates.
@@ -122,7 +127,7 @@ def analyse(lines) -> dict:
                 r["lock_dy"].append(abs(y - FRAME_CENTRE[1]))
                 if not _inside(OLD_BOX, x, y):
                     r["lock_outside_old"] += 1
-                if any(_inside(z, x, y) for z in HUD_ZONES):
+                if any(_inside(z, x, y - AIM_OFFSET_PX) for z in HUD_ZONES):
                     r["lock_in_hud_zone"] += 1
                 if clu is not None:
                     r["clu"][clu] += 1

@@ -239,7 +239,8 @@ exists to run (an unattended run is the normal case, not a special one).
 
    ```bash
    pgrep -af "[w]ingman.main"        # is a session already running?
-   make nested-status                # the nested display :3 and the game, if any
+   make nested-status                # the nested display :3 and the game, if any (exit 1, ":3: DOWN" is the
+                                     # normal state before a launch, not a blocker)
    df -h . | tail -1                 # capture budget floor is 10 GB free
    ```
 
@@ -248,6 +249,10 @@ exists to run (an unattended run is the normal case, not a special one).
      so) → if it started after your last change it already is the run: go to
      Watch. If it started before, it cannot exercise the change: stop it with
      `z` (below), wait for it to exit, then launch.
+   - **If your own run dies because the operator started theirs** (their run target closes a
+     running game and its display, so yours ends with `XIO: fatal IO error on X server ":3"` and
+     exit 2), that is not a failure: theirs is now the run. Record what yours produced from the
+     rotated log, then Watch theirs read-only. It happened at 00:49 on 2026-09-25.
    - **A session you did not start is the operator's own.** Do not start a
      second one — both want `:3` and the account, and `make r1` kills and
      relaunches the game — and do not stop it. Copy its log into your scratchpad
@@ -381,6 +386,15 @@ tail -F -n 0 wingman.log | grep -E --line-buffered \
 The indicator should be the thing that must not recur, phrased so silence is
 meaningful. Include the failure signatures too — a filter that only matches the
 happy path is silent through a crash, and silence looks like success.
+
+**Every stage of the pipe must flush per line.** `grep --line-buffered`, then `sed -u` (or
+`stdbuf -oL`) for anything else; never finish with `cut`, `head` or an `awk` without
+`fflush()`: they block-buffer when writing to a pipe and the Monitor sits silent while the
+run produces events. On 2026-09-25 a Monitor ending in `cut -c1-230` delivered nothing
+for its whole 30 minutes over a session that logged a kill, two deaths and its own
+`FINISH ROUND`; the answers were in the log and only reading it found them. Prove the
+monitor at arming time: include a line that must appear early (`Configuration loaded`
+after a launch) and treat silence at startup as a broken monitor, not a quiet run.
 
 `Monitor` is a deferred tool: fetch its schema with ToolSearch (`select:Monitor`)
 before calling it, or the call fails. Arm it in the same turn as the launch, then

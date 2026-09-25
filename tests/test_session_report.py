@@ -241,3 +241,22 @@ def test_the_deadband_constants_match_the_shipped_config():
     t = cfg["tracking"]
     expected = (round(t["deadband"] * R.FRAME_CENTRE[0]), round(t["pitch_deadband"] * R.FRAME_CENTRE[1]))
     assert expected == R.DEADBAND_PX
+
+
+# --- the HUD zones are masked on the nameplate, the steering point sits 100 px below it -----
+
+def test_a_steering_point_below_a_legitimate_label_is_not_a_hud_lock():
+    """2026-09-25 00:05:01: a label at y 1004 (above the weapons panel, which starts at 1060) put its
+    steering point at y 1104, inside the panel, and the report called it a HUD lock."""
+    r = R.analyse([_pick(1, "redmass", (1749, 1104), "pass", 25, 1)])
+    assert r["locks"] == 1 and r["lock_in_hud_zone"] == 0
+
+
+def test_a_label_that_really_is_inside_a_hud_zone_still_counts():
+    r = R.analyse([_pick(1, "redmass", (1749, 1190), "pass", 25, 1)])      # label at y 1090, in the panel
+    assert r["lock_in_hud_zone"] == 1
+
+
+def test_the_aim_offset_constant_matches_the_shipped_config():
+    cfg = yaml.safe_load((Path(__file__).resolve().parent.parent / "wingman" / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["tracking"]["red_mass_aim_offset_px"] == R.AIM_OFFSET_PX

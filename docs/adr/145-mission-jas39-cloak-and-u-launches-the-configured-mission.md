@@ -141,15 +141,18 @@ in D5):
 - the 10 s disengage roll, until the mission restarts;
 - the respawn screen.
 
-**Firing may break the cloak.** `search_and_destroy` presses fire every
-`mission.weapon_loop_interval` (1.0 s) with no target check. If firing uncloaks
-the aircraft in game, the cloak will barely hold during an engagement.
-Unverified. See Open Questions.
+**A missile launch breaks the cloak (operator, 2026-09-25).** `search_and_destroy`
+presses fire every `mission.weapon_loop_interval` (1.0 s) with no target check,
+but the game launches a missile only when there is a lock, and only a launch
+breaks the cloak. The cloak therefore holds through search and approach and
+breaks at the first launch after a lock, and the loop re-activates it once it is
+off cooldown. D1 and D2 need no change.
 
-**The flare reload logs a misleading line on this jet.** When flares reach 2,
+**The JAS39 has no flare reload (operator, 2026-09-25).** When flares reach 2,
 `reload_flares` logs "Reloading flares via SPECIAL_ABILITY key", but on the JAS39
-the press is a cloak press. It is left as is (D5). Read it as a cloak press when
-reviewing a JAS39 log.
+the press is only a cloak press and no flares are refilled. Once the spawn load
+is spent, the flare burst on each new incoming alert deploys nothing. It is left
+as is (D5). Read the line as a cloak press when reviewing a JAS39 log.
 
 **The cadence is 3.0 to 3.1 s.** The interval is timed from the start of each
 press and waited out in 0.1 s slices, so the next press can land up to one slice
@@ -161,8 +164,9 @@ which is also why ADR 144's `is_padlock_blocked()` stays false for this mission.
 
 ## Open Questions
 
-1. Does firing a missile, or firing the gun, break the cloak? If it does, should
-   the cloak loop or the fire loop yield to the other?
+1. Answered (operator, 2026-09-25): only a missile launch breaks the cloak, and
+   a launch needs a lock, so a fire-key press without one leaves it up. Neither
+   loop needs to yield.
 2. The cloak's duration and cooldown are unknown. A HUD signal for "special
    ability ready" would let the mission press exactly when it is available,
    instead of retrying on a timer.

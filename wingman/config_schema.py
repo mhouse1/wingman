@@ -608,6 +608,7 @@ SCHEMA = Section(
         "pursuit_mode": Section(children={
             "enabled": BOOL,
             "pursuit_max_duration_s": SECONDS,
+            "recovery_max_s": SECONDS,   # ADR 148
             "pursuit_padlock_verify": BOOL,
             "ammo_zero_grace_s": SECONDS,
             "search_resume_delay_s": SECONDS,

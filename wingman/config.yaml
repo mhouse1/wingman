@@ -1150,6 +1150,18 @@ pursuit_mode:
   # would reach a boundary 0.5 away in about 50 s); terrain is covered by Climb's emergency.
   # Set a positive number of seconds to restore a cap.
   pursuit_max_duration_s: 0.0
+  # ADR 148 (operator, 2026-09-25: after a kill and the switch to the secondary the
+  # aircraft "crashed to the ground, it should have continued pursuit sequence"). The
+  # longest a dive-recovery climb (a HARD emergency: time to ground or terrain) may fly
+  # the airframe inside a pursuit before the chase resumes. Measured 2026-09-25 00:03,
+  # both lives: the tree's emergency selected Climb at 29 s to ground and again every
+  # 1.5 s to the impact, and every hold ended `state_exit` after 0.25 s because the
+  # hold released on any game state but GAME_BATTLE and a pursuit lives in
+  # GAME_BATTLE_EJECT. The chase yields pitch and roll while the hold runs. The floor
+  # climb (not a hard emergency) is unchanged: it stays a short nudge in a chase.
+  # 0 turns this off and restores the 0.3 s nudge. A named guess: the pull-outs needed
+  # about 3200 m at 120 to 180 m/s of descent.
+  recovery_max_s: 30.0
   # Inherits ADR 136 D4's disabled default: the padlock-off detector this
   # gates was found to be tracking a flight-path marker, not padlock state.
   pursuit_padlock_verify: false

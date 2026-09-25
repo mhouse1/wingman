@@ -1809,6 +1809,25 @@ runs of 4 or more above 24 of 116, |dy| median well under 115 px, and the share 
 20%. Archived `pursuit_mode_*.png` frames should show the `PURSUING` mark on the diamond bracket rather than on
 the label. `path=keep` ticks are the new tracker's; their count is its own evidence.
 
+
+### Live check 1 (2026-09-25 00:18 entry; the operator's own session 00:03 to 00:08 on 2026-09-25, 5 minutes, stopped with `z`)
+
+Code under test: HEAD `3cb467d` plus this change and the ADR 147 altitude change (working-tree diff hash 9218f916dd10d64d, recorded
+before any later edit). Two lives, one chase that found targets. Measured, `make sr` and the log:
+
+- The `TRACKPICK` lines carry no `aim=` field, so the changed tracker is what ran.
+- **One lock run of 65 consecutive ticks (00:05:01 to 00:05:24, 23 s), against a longest run of 22 in the 18:57 log.** 64 of its ticks
+  passed the strict gate and 1 the looser keep test, so the run was carried by the whole-region scan and the nearest-cluster
+  choice, not by the keep test. Pursuit 1 locked 65 of 153 scans (42%, first lock 19.1 s); pursuit 2 never locked. Small sample.
+- **Centring after the approach (53 ticks): |dx| median 46 px, 57% inside the 48 px roll deadband; |dy| median 77 px, 17% inside the
+  30 px pitch deadband.** Baseline |dy| 115 px, 20%. So the roll axis centres and the pitch axis still dithers about 80 px either side
+  (the steering point ran from (1749, 1104) down to within a few tens of px in x in about 4 s). Whether that is the pitch hold's lag
+  or aim jitter is not separated: pitch key holds are not logged at all, which is the gap to close before tuning.
+- **The report's HUD-zone check was wrong and is fixed.** It flagged 2 locks in an excluded zone; both were steering points 100 px
+  below a legitimate label just above the weapons panel (labels at y 1004 and 981, the panel starts at 1060). Zones are masked on the
+  nameplate, so `make sr` now tests the point minus the aim offset (3 tests).
+- Not shown: whether the game reported a lock, and whether any of the 4 missiles fired in the chase hit.
+
 ---
 
 ## Adaptive Optimization (Future, Non-V1)
