@@ -87,8 +87,8 @@ crops:
     - [0.6153, 0.9633]
   PLAY:
     coords:
-    - [0.7944, 0.8844]
-    - [0.9125, 0.9389]
+    - [0.8688, 0.8867]
+    - [0.9556, 0.94]
     text: [PLAY]
   READY:
     coords:
@@ -401,7 +401,8 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # launch in GAME_STARTING, and the restart default when no mission has been
   # recorded yet). j20 = the adaptive J20 mission, su30 = the scripted Su-30
   # sequence (su30_mission: below), jas39 = J20 plus the cloak loop
-  # (jas39_mission: below). ADR 145: the 'u' hotkey launches this same mission,
+  # (jas39_mission: below), f111 = the su30 script plus the wing sweep
+  # (f111_mission: below, ADR 149). ADR 145: the 'u' hotkey launches this same mission,
   # so this key is how a mission is chosen; 'o' still starts su30 regardless.
   # Respawn restarts whichever mission ran last.
   # Set to su30 by the operator on 2026-09-24; set j20 to launch J20 at battle
@@ -524,6 +525,41 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
 su30_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
   nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
   angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, lock_timeout_s: 5.0}
+# mission_f111 (docs/missions/f111.md, ADR 149): mission_su30 plus the F-111's
+# wing sweep on 'w' (ToggleWingSweep, a toggle). Six steps once per life: nose up
+# and sweep the wings, boresight engage, no weapon switch until the spawn weapon
+# runs out, level off at climb_alt_m with the nose at nose_angle_deg, unsweep on
+# the way back down to unsweep_alt_m, then pursuit mode. No hotkey of its own:
+# chosen with mission.default_mission: f111 ('u' and respawn follow it).
+# This block is separate from su30_mission so retuning one jet does not retune
+# the other.
+#
+# climb_alt_m: the spec's "after reaching 3000 m altitude" (meters, decided
+#   2026-09-25; the request's "3000 ft" was not meant).
+# alt_floor_m: ADR 147's per-mission floor, extended to this mission by ADR 149
+#   (operator, 2026-09-25). While f111 is in play the tree's floor is this value
+#   instead of behavior_tree.climb.alt_floor_m (4000), and the armed sustain
+#   climb stands aside; without it the tree restarts the climb just after the
+#   level-off, as it did for su30 before ADR 147. Keep it at or below
+#   climb_alt_m (tests/test_controller_config.py pins that). Remove the key to
+#   restore the tree's 4000 m floor and sustain band for this mission.
+# unsweep_alt_m: the spec's "when the altitude descends back to 3000 m", judged
+#   on a fresh altitude reading taken after the level-off.
+# unsweep_timeout_s: the spec's "wait at most 30 seconds, and on timeout unsweep
+#   anyway". The wait sits before the pursuit hand-off and delays it by at most
+#   this much.
+# wingsweep_tap_s: a 0.1 s tap, as activate_special_weapon presses 'q': 'w' is a
+#   toggle, so a press is a single event and a longer hold buys nothing.
+#
+# The angle-step numbers are su30_mission's, copied with its reasoning: named
+# guesses, not measurements. The angle is the flight-path angle from altitude
+# rate over speed (telemetry.pitch_angle_deg), which lands roughly every 3 s, so
+# the step corrects on NEW samples only and pulses rather than holds (ADR
+# 068/069: a held key overshoots on a lagging reading).
+f111_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
+  nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
+  angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, unsweep_alt_m: 3000,
+  unsweep_timeout_s: 30.0, wingsweep_tap_s: 0.1}
 # mission_jas39 (docs/missions/jas39.md, ADR 145): mission_j20 plus the JAS39's
 # special weapon, a cloak on 'q'. Chosen with mission.default_mission: jas39;
 # it has no hotkey of its own, and 'u' launches it.

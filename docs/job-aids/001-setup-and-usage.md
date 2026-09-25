@@ -43,7 +43,7 @@ Default hotkeys are defined in `wingman/controller.py`.
 
 | Key | Action |
 |-----|--------|
-| `m` | Start unattended mode (clicks play, waits for game start, auto-launches the mission `mission.default_mission` names: SU-30 as shipped, or `j20` / `jas39`) |
+| `m` | Start unattended mode (clicks play, waits for game start, auto-launches the mission `mission.default_mission` names: SU-30 as shipped, or `j20` / `jas39` / `f111`) |
 | `u` | Start the configured mission (`mission.default_mission`) manually |
 | `y` | Start loiter mission manually |
 | `o` | Start SU-30 mission manually (takes over from a running mission) |
@@ -71,6 +71,8 @@ Main config file: `wingman/config.yaml`
 | `respawn_detection.ocr_cooldown` | OCR scheduling interval |
 | `mission.restart_delay_after_unlock` | Delay before mission restart after respawn (default 4s) |
 | `mission.weapon_loop_interval` | Firing loop interval |
+| `mission.default_mission` | Mission launched at battle entry, by `u` and by the no-prior-mission restart: `su30` (shipped), `j20`, `jas39` or `f111` (the F-111: the su30 sequence plus the wing sweep on `w`, ADR 149). A respawn restarts whichever ran last (`_last_mission`: also `loiter`) |
+| `f111_mission` | F-111 mission numbers: level-off `climb_alt_m`, nose angle, `unsweep_alt_m`, `unsweep_timeout_s` (30 s), `alt_floor_m` (ADR 147 per-mission floor) |
 
 If detection is unstable, verify the capture region and grid indices first.
 

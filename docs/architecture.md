@@ -143,7 +143,7 @@ The actuation layer. Holds the mission lock, fires keys/clicks, manages the game
 | `_auto_respawn_restart` | Bool: cleared by `End` key or maneuver key press; restored when a mission starts |
 | `_eject_stop` | Event: set by `End` key or respawn detection to abort `eject_and_dive` early |
 | `_game_battle_since` | Timestamp of last `GAME_BATTLE` entry; 2s maneuver-key grace period suppresses false manual-takeover triggers at mission start |
-| `_last_mission` | String (`"j20"` / `"loiter"` / `"su30"` / `"jas39"`): used by `restart_last_mission()` |
+| `_last_mission` | String (`"j20"` / `"loiter"` / `"su30"` / `"jas39"` / `"f111"`): used by `restart_last_mission()` |
 | `_target_painting_mode` | Bool: when True, J20 mission includes target-lock painting phase |
 
 **Mission execution** (`mission_j20`) — the scripted maneuver script described
@@ -200,6 +200,23 @@ for when the ability is off cooldown and a press while cloaked does not uncloak
 the JAS39. The cloak loop is its own pair with its own stop event, thread and
 lifecycle lock, like the boresight loop. It is stopped in the mission's
 `finally`, on manual takeover and in `cleanup()`.
+
+**Mission execution** (`mission_f111`) — `mission_su30` plus the F-111's wing
+sweep (ADR 149, `docs/missions/f111.md`). Six steps once per life: nose up and,
+as the climb starts, one tap of `WINGSWEEP_KEY` (`w`) through
+`Controller.wingsweep()`; boresight engage; no weapon switch until the spawn
+weapon runs out; level off at `f111_mission.climb_alt_m` and set the nose angle;
+wait at most `unsweep_timeout_s` for a fresh altitude at or below
+`unsweep_alt_m`, then one more tap to unsweep (on timeout it unsweeps anyway);
+pursuit mode. `w` is a toggle, so the swept state is tracked in
+`_f111_wings_swept` and reset per life in `stop_eject_sequence()`; a restart in
+the same life does not sweep again, and a mission cancelled while swept presses
+nothing on the way out. The climb wait, nose-angle step and pursuit hand-off are
+the `_scripted_*` helpers `mission_su30` also runs through. ADR 147's altitude
+doctrine covers it too: while f111 is the mission in play the tree's floor is
+`f111_mission.alt_floor_m` and the armed sustain climb stands aside
+(`altitude_floor_override_m`, `sustain_climb_suppressed`). The padlock block
+(`is_padlock_blocked`) is still su30 only. No hotkey: `default_mission: f111`.
 
 Apart from `o` (su30) and `y` (loiter), no mission has a hotkey to itself:
 `mission.default_mission` picks the mission, and battle entry, the `u` hotkey and
@@ -618,7 +635,8 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `loiter_mission` | Survival hold: `target_alt`, hysteresis, orbit cadence and hold |
 | `su30_mission` | Scripted Su-30 sequence (ADR 144): `climb_alt_m`, `nose_angle_deg`, angle tolerance, pulse and bound |
 | `jas39_mission` | J20 plus the cloak (ADR 145): `turn_guard_s`, `cloak_press_interval_s` |
-| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `su30` (shipped since 2026-09-24), `j20` or `jas39` (ADR 144, ADR 145) |
+| `f111_mission` | su30 plus the wing sweep (ADR 149): `climb_alt_m`, `nose_angle_deg` and the su30 angle-step numbers, `unsweep_alt_m`, `unsweep_timeout_s`, `wingsweep_tap_s`, and `alt_floor_m` (ADR 147 extended) |
+| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `su30` (shipped since 2026-09-24), `j20`, `jas39` or `f111` (ADR 144, ADR 145, ADR 149) |
 | `mission.manual_takeover` | `persist_through_respawn` — off by default, so a respawn resumes the last mission |
 | `return_to_battle` | Design 010 instrumentation: colour trigger `region`, narrower `ocr_region` for the once-per-crossing confirmation, and partial `text` tokens |
 | `focus_guard` | Suppress injection when the game lacks focus (ADR 098); follows the nested display automatically |

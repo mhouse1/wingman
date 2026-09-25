@@ -278,7 +278,7 @@ on your own display, and work bare when the nested game window has focus. See AD
 | Key | Action |
 |-----|--------|
 | `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
-| `u` | Start the configured mission (`mission.default_mission`: `j20`, `su30` or `jas39`) — and, while in manual, hand control back to wingman |
+| `u` | Start the configured mission (`mission.default_mission`: `j20`, `su30`, `jas39` or `f111`) — and, while in manual, hand control back to wingman |
 | `y` | Start the loiter mission — climb to the hold altitude and orbit to stay alive |
 | `o` | Start the SU-30 mission — nose up, level off at 3000 m, then pursuit mode; the secondary weapon is switched in only once the first one runs out (takes the aircraft from a running mission) |
 | `m` | Activate unattended mode (also auto-enabled from config) |
@@ -300,7 +300,11 @@ mission plus the JAS39's cloak, pressing `q` every 3 s so the cloak comes back
 as soon as it is off cooldown (`docs/missions/jas39.md`). `su30` flies the SU-30
 mission, a fixed four-step sequence (`docs/missions/su30.md`, ADR 144) run once
 per life, engaging with boresight engage (the fire loop without the padlock
-camera); `o` also starts it directly. `y` flies the loiter mission, whose only
+camera); `o` also starts it directly. `f111` flies the same sequence on the
+F-111 plus its wing sweep: `w` once to sweep the wings as the climb starts, and
+once more to unsweep them when the altitude comes back down to 3000 m (or after
+30 s) before the pursuit hand-off (`docs/missions/f111.md`, ADR 149); it has no
+hotkey of its own. `y` flies the loiter mission, whose only
 objective is staying alive: climb to the hold altitude and orbit there, deciding
 from live telemetry rather than running a fixed sequence. A respawn restarts
 whichever mission ran last. Flares stay with the incoming-missile detector in all

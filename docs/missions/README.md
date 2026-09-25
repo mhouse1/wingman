@@ -15,7 +15,7 @@ follow, and the files it touches. A mission's own file holds only its spec.
 | `j20.md` | the form filled in for `mission_j20`, plus how J20 works today |
 | `su30.md` | the operator's own spec, and the layout `_template.md` follows; a scripted hand-off mission |
 | `jas39.md` | a spec written against this contract; the closest worked example of the current wiring (ADR 145) |
-| `f111.md` | `su30.md` plus a wing sweep on `w`; not yet implemented |
+| `f111.md` | `su30.md` plus a wing sweep on `w`; implemented as `mission_f111` (ADR 149) |
 
 The behavior described here was checked against the code and
 `wingman/config.yaml`, not copied from ADRs. Where an ADR and the code
@@ -55,7 +55,7 @@ Bullets run in order. Put numbers and conditions in the bullet ("after reaching
 5000 altitude set nose angle to -10 degrees"); Claude derives the config keys.
 
 * **Engagement is a bullet.** Name `search_and_destroy` (padlock plus fire) or `boresight_engage` (fire only), and put it where it should start. Position matters: the loop fires whatever weapon is selected when it starts, so a loop started before a weapon switch fires the spawn weapon until the switch. If the order matters to you, say why in the bullet.
-* **Altitude and angle targets respect the floor.** Below 4000 m the tree's Climb tactic takes the pitch axis: the hard floor (`behavior_tree.climb.alt_floor_m`) always, and the sustain band (4000 to 5000 m) while the aircraft is armed and a mission runs. A scripted flight path below 4000 m is overridden by a climb, not held. Only `mission_su30` has its own floor (ADR 147); a new mission that needs one is a shared-behavior change (default 8).
+* **Altitude and angle targets respect the floor.** Below 4000 m the tree's Climb tactic takes the pitch axis: the hard floor (`behavior_tree.climb.alt_floor_m`) always, and the sustain band (4000 to 5000 m) while the aircraft is armed and a mission runs. A scripted flight path below 4000 m is overridden by a climb, not held. Only `mission_su30` (ADR 147) and `mission_f111` (ADR 149) have their own floor; a new mission that needs one is a shared-behavior change (default 8).
 * **A mission that returns early turns off the lock-gated behavior** in section 3.1. A hand-off mission should say what takes over.
 * **A bullet that asks for something shared behavior already does** (climbing, cruise afterburner, evading) is a change to every mission. See default 8.
 
@@ -70,17 +70,18 @@ Claude applies these and records them in the ADR.
 5. **Waits.** Every wait is bounded. On timeout, log a warning and continue with the next bullet, unless continuing would dive an armed aircraft (rule 13 in section 5), in which case hold until cancelled.
 6. **Logging.** One `step N/M` line per bullet, so a live trial is readable.
 7. **Config.** Numbers from the bullets go in a `<name>_mission` block in `config.yaml` with a schema entry and a comment giving the reason for each. Nothing is hard-coded without saying so.
-8. **Shared behavior.** If a bullet needs a change to shared behavior (section 3), stop and report the options: a global change that affects every mission, or a per-mission exception. The only per-mission exception today is ADR 147's, hard-coded to `mission_su30`; extending it to another mission is new shared code. The choice is the operator's each time. Never edit shared code silently.
+8. **Shared behavior.** If a bullet needs a change to shared behavior (section 3), stop and report the options: a global change that affects every mission, or a per-mission exception. The only per-mission exception today is ADR 147's, for `mission_su30` and (ADR 149) `mission_f111`, each named in code; extending it to another mission is a shared-code change. The choice is the operator's each time. Never edit shared code silently.
 9. **Acceptance.** Claude reports the log lines to check on a live trial in its reply and in the ADR, as ADR 144 did. The spec carries no acceptance section.
 
 ## 3. What every mission inherits
 
 None of this belongs to a mission. It is shared tree and watchdog code driven
 by global config, read once and applied to whichever mission is flying. The one
-exception is ADR 147: while `mission_su30` is the mission in play, the tree uses
-`su30_mission.alt_floor_m` as its floor and the sustain band stands aside
+exception is ADR 147 (extended to `mission_f111` by ADR 149): while `mission_su30`
+or `mission_f111` is the mission in play, the tree uses that mission's
+`<name>_mission.alt_floor_m` as its floor and the sustain band stands aside
 (`Controller.altitude_floor_override_m`, `sustain_climb_suppressed`). That
-exception names su30 in code, so it is not a switch a new mission can set. A
+exception names su30 and f111 in code, so it is not a switch a new mission can set. A
 spec that wants a different value or an opt-out is asking for a shared change
 (default 8 in section 2.2).
 
@@ -119,7 +120,7 @@ ground, and the altitude floor. The sustain band climbs an armed aircraft
 (missiles above zero, mission running) below `climb.sustain.enter_below_alt`
 until `exit_above_alt`. The floor and the sustain entry are both 4000 and a test
 (`test_mission_j20_altitude_doctrine_is_4000m_everywhere`) pins them equal.
-Under ADR 147, `mission_su30` flies with a 3000 m floor and no sustain band.
+Under ADR 147, `mission_su30` flies with a 3000 m floor and no sustain band, and so, under ADR 149, does `mission_f111`.
 
 ### 3.3 Tree-independent, every tick
 
@@ -269,7 +270,7 @@ before a live trial. A live trial is still needed before the ADR leaves `Draft`.
 
 * **ADR 075 lists a shorter priority order** (no BoundaryTurn or Regroup). It is Accepted, so it is not edited; `_PRIORITY_ORDER` is current.
 * **`u` launches the configured mission and does not preempt** (ADR 145). Its handler is still named `start_j20_mission` and its key `MISSION_J20_KEY`, but it calls `_start_default_mission()`. Pressing it while a mission holds the lock is a no-op apart from a log line. `o` starts `mission_su30` directly and preempts (ADR 144, ADR 111).
-* **The altitude floor has one per-mission exception** (ADR 147): `mission_su30` flies with `su30_mission.alt_floor_m` (3000) and no sustain band. It is keyed on the last launched mission being `"su30"` (`_su30_flies_own_altitude`), not on a mission-level setting. ADR 141 stays Accepted and unchanged.
+* **The altitude floor has one per-mission exception** (ADR 147, extended by ADR 149): `mission_su30` flies with `su30_mission.alt_floor_m` (3000) and no sustain band, and `mission_f111` with `f111_mission.alt_floor_m` (3000). It is keyed on the last launched mission being `"su30"` or `"f111"` (`_own_altitude_floor_in_play_m`), not on a mission-level setting. ADR 141 stays Accepted and unchanged.
 * **`j20_mission.*` is mostly shared config despite its name.** Only `target_painting_mode` is J20's (read by the search-and-destroy weapon loop). The rest tunes the shared Engage tactic through `EngageNavigator`, so a new mission that edits it changes J20 too.
 * **`jet_profile.has_padlock` is read but nothing branches on it** (Design 011). A boresight-only jet is still a mission-level choice today.
 * **`mission_su30` is the scripted counterpart** and is still Draft, as are ADR 144 and ADR 147. Read its code for a worked hand-off mission, but not its ADRs as settled.
