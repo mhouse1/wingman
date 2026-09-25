@@ -62,6 +62,9 @@ STARTING_PLAY_CONFIRM_READS = 3
 # 1,724 confirmations in the September logs (archive duplicates included),
 # 1,718 read 160 to 312 and the other 6 read 7.
 STARTING_MIN_CONFIRMED_HEALTH = 20
+# If PLAY/READY remains visible after a click, retry instead of leaving the
+# lobby stalled indefinitely. A successful click leaves GAME_LOBBY promptly.
+LOBBY_PLAY_RETRY_S = 10.0
 
 # States where a round is genuinely under way and stopping would abandon an
 # aircraft in flight. ADR 094's deferred exit waits these out; everything else
@@ -3645,10 +3648,11 @@ class GameStateAnalyzer:
                             self._trigger("play_clicked")
                             handled = True
                             break
-                        if time.time() - self._last_lobby_play_click_ts < 60.0:
+                        click_age = time.time() - self._last_lobby_play_click_ts
+                        if click_age < LOBBY_PLAY_RETRY_S:
                             logger.debug(
-                                "Lobby quick-scan: %s visible but click suppressed (%.1fs since last click)",
-                                crop, time.time() - self._last_lobby_play_click_ts,
+                                "Lobby quick-scan: %s visible but retry suppressed (%.1fs since last click)",
+                                crop, click_age,
                             )
                             handled = True
                         elif self.game_state == GameState.GAME_STARTING:

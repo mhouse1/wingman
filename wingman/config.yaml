@@ -98,13 +98,13 @@ crops:
   # the squad lobby), so `make calibrate` will not move it.
   READY:
     coords:
-    - [0.838, 0.8858]
-    - [0.9688, 0.9458]
+    - [0.8688, 0.8956]
+    - [0.9569, 0.9367]
     text: [READY]
   CANCEL:
     coords:
-    - [0.7833, 0.8589]
-    - [0.9222, 0.9156]
+    - [0.8667, 0.8933]
+    - [0.9576, 0.9378]
     text: [CANCEL]
   CREATION_FAILED:
     coords:
