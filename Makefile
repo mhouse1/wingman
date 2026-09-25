@@ -27,6 +27,7 @@
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
 #   make g           -> launch MetalStorm only, without starting Wingman (Linux only)
+#   make update      -> update the installed MetalStorm files through Heroic (Linux only)
 #   make r           -> run wingman (Linux: auto-launches game; Windows: game must be running)
 #   make rd          -> run wingman with DEBUG log to wingman.log (same auto-launch on Linux)
 #   ADR 099: the nested display lane is switched in wingman/config.yaml
@@ -43,7 +44,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -453,6 +454,32 @@ RECORD_FLAG = $(if $(filter v,$(MAKECMDGOALS)),--record-session,)
 
 # Launch MetalStorm without starting Wingman (Linux: launch-game + wait-game; Windows: no-op).
 g: $(GAME_LAUNCH_DEPS)
+
+# Update MetalStorm through Heroic's bundled Legendary client. This is the same
+# updater Heroic runs after clicking Play, without requiring GUI automation.
+HEROIC_FLATPAK ?= com.heroicgameslauncher.hgl
+HEROIC_LEGENDARY ?= /app/bin/heroic/resources/app.asar.unpacked/build/bin/x64/linux/legendary
+HEROIC_LEGENDARY_CONFIG ?= $(HOME)/.var/app/com.heroicgameslauncher.hgl/config/heroic/legendaryConfig/legendary
+METALSTORM_APP_ID ?= 8b6a0e1413744785a43c9f9f9547b4d6
+ifeq ($(UNAME_S),Linux)
+update:
+	@if ! command -v flatpak >/dev/null 2>&1; then \
+	  echo "ERROR: flatpak is required to update MetalStorm through Heroic."; \
+	  exit 1; \
+	 fi
+	@_p=Metalstorm; \
+	 if pgrep -f "$${_p}.exe" >/dev/null 2>&1; then \
+	   echo "ERROR: MetalStorm is running; close it before updating."; \
+	   exit 1; \
+	 fi
+	@echo "Updating MetalStorm through Heroic..."
+	@flatpak run --env=LEGENDARY_CONFIG_PATH="$(HEROIC_LEGENDARY_CONFIG)" \
+	  --command="$(HEROIC_LEGENDARY)" "$(HEROIC_FLATPAK)" \
+	  update "$(METALSTORM_APP_ID)" --update-only --skip-dlcs --yes
+else
+update:
+	@echo "ERROR: make update is supported on Linux only."; exit 1
+endif
 
 r: $(GAME_LAUNCH_DEPS)
 	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main $(RECORD_FLAG)

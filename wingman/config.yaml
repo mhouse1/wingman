@@ -97,8 +97,8 @@ crops:
     text: [READY]
   CANCEL:
     coords:
-    - [0.7833, 0.8589]
-    - [0.9222, 0.9156]
+    - [0.8667, 0.8933]
+    - [0.9576, 0.9378]
     text: [CANCEL]
   CREATION_FAILED:
     coords:
