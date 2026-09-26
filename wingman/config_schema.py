@@ -545,58 +545,43 @@ SCHEMA = Section(
             "pitch_min_hold_sec": SECONDS,
             "pitch_max_hold_sec": SECONDS,
             "pitch_command_cooldown_sec": SECONDS,
-            # Selection Hardening Phase 2 (HLDD 005, 2026-09-21) — shadow
-            # only. ranked_lock_priority stays false in shipped config; see
-            # HLDD 005's Selection Hardening section for what flipping it
-            # would eventually do (Phase 3, not built yet).
-            "ranked_lock_priority": BOOL,
-            "ranked_priority_tolerance_px": _num(0),
-            "prefer_red_lock": BOOL,
-            # Direct operator instruction (2026-09-23) — see config.yaml's
-            # own comment on this key for what it overrides and why.
-            "red_mass_steering": BOOL,
-            # Optional: absent/None means no exclusion (existing tests that
-            # never set this key are unaffected). See config.yaml's comment
-            # on this key for what it targets and how it was measured.
+            # Review 018 CR-018-04 (2026-09-25): the tall-bar detector's keys
+            # (prefer_red_lock, red_mass_steering, red_mass_cluster_select,
+            # red_mass_nameplate_gate_enabled, red_mass_tallbar_fallback,
+            # ranked_lock_priority, ranked_priority_tolerance_px) are gone;
+            # an old config carrying them fails here rather than silently.
+            # See config.yaml's comment on this key for what it targets.
             "red_mass_exclude_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
             # Action item 001, Cycle 12 (2026-09-24) — see config.yaml's own
             # comments on these keys.
             "red_mass_exclude_zones_pct": Leaf(types=(list,), item_types=(list,)),
-            "red_mass_cluster_select": BOOL,
             "red_mass_cluster_glyph_window_px": Leaf(types=(list,), item_types=(int,), length=2),
             # 2026-09-24: the steering point (the aircraft, below its nameplate) and
             # the acquire/keep split — see config.yaml's own comments on these keys.
             "red_mass_aim_offset_px": _int(-300, 300),
             "red_mass_keep_min_glyphs": _int(0),
             "red_mass_keep_box_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
-            # Optional: None means "same as tracking_hsv.red_upper's hue" (no
-            # behavior change). See config.yaml's own comment on this key.
+            # null means "same as tracking_hsv.red_upper's hue". See
+            # config.yaml's own comment on this key.
             "red_mass_hue_max": _int(0, 179),
-            # Optional: None means "same as tracking_hsv.red_lower's value"
-            # (no behavior change). See config.yaml's own comment.
+            # null means "same as tracking_hsv.red_lower's value". See
+            # config.yaml's own comment.
             "red_mass_value_min": _int(0, 255),
             # HLDD 005 nameplate gate (2026-09-23) — see config.yaml's own
-            # comment on this key for what it targets and how it was measured.
-            "red_mass_nameplate_gate_enabled": BOOL,
+            # comment on these keys for what they target and how measured.
             "red_mass_nameplate_min_glyphs": _int(0),
             "red_mass_nameplate_glyph_area": Leaf(types=(list,), item_types=(int,), length=2),
             "red_mass_nameplate_glyph_max_dim": _int(0),
-            # Action item 001 (2026-09-23): False makes a gate rejection final
-            # instead of falling back to the tall-bar pick.
-            "red_mass_tallbar_fallback": BOOL,
             # HLDD 005 Sustained-Hold Actuation (2026-09-23) — see
             # config.yaml's own comment on this key for the phased rollout.
             "sustained_hold_enabled": BOOL,
             "pitch_lead_s": SECONDS,   # CR-018-01
         }),
 
+        # CR-018-04: only the red range remains (the nameplate mask).
         "tracking_hsv": Section(children={
             "red_lower": _HSV,
             "red_upper": _HSV,
-            "green_lower": _HSV,
-            "green_upper": _HSV,
-            "min_contour_area": _num(0),
-            "min_aspect_ratio": _num(0),
         }),
 
         "padlock_indicator": Section(children={
@@ -637,6 +622,11 @@ SCHEMA = Section(
             "empty_confirm_reads": _int(1),
             "steer_interval_s": SECONDS,    # CR-018-01
             "engage_interval_s": SECONDS,   # CR-018-01
+            "dive_guard_margin_m": _num(0),   # review 018 dive guard
+            "dive_guard_ttg_s": SECONDS,      # review 018 dive guard
+            "dive_guard_pullout_pulse_s": SECONDS,
+            "dive_guard_pullout_interval_s": SECONDS,
+            "dive_guard_level_rate_mps": _num(0),
         }),
 
         "hud": Section(children={

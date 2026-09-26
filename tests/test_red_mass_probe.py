@@ -18,17 +18,9 @@ _GLYPHS = 30                # 30 glyphs, 178 px wide, clears the gate (20)
 _TRACKING_CFG = {
     "enabled": True,
     "acquisition_region_pct": [0.0, 0.0, 1.0, 1.0],
-    "prefer_red_lock": True,
-    "red_mass_steering": True,
-    "red_mass_nameplate_gate_enabled": True,
     "red_mass_nameplate_min_glyphs": 20,
-    "red_mass_tallbar_fallback": False,
 }
-_HSV_CFG = {
-    "red_lower": [0, 150, 150], "red_upper": [10, 255, 255],
-    "green_lower": [45, 150, 150], "green_upper": [75, 255, 255],
-    "min_contour_area": 12, "min_aspect_ratio": 2.5,
-}
+_HSV_CFG = {"red_lower": [0, 150, 150], "red_upper": [10, 255, 255]}
 
 
 def _tracker(**overrides) -> TargetTracker:
@@ -62,12 +54,12 @@ class TestProbeEdgeReporting:
         pr = self._probe(_target(_frame(), 400))
         assert pr["clipped_edges"] == ()
         assert pr["gate"] == "pass"
-        assert pr["centroid"] == pr["mass_centroid"]
+        assert pr["centroid"] is not None
 
     def test_mass_on_the_right_border_reports_the_right_edge(self):
         frame = _frame()
         frame[290:310, _W - 30:_W] = _RED
-        assert "right" in self._probe(frame, red_mass_nameplate_gate_enabled=False)["clipped_edges"]
+        assert "right" in self._probe(frame)["clipped_edges"]
 
     def test_rejected_probe_keeps_the_mass_centroid_but_not_the_lock_centroid(self):
         pr = self._probe(_target(_frame(), 400, n_glyphs=5))

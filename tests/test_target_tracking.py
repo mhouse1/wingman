@@ -23,15 +23,14 @@ _BASE_CFG = {
         "min_hold_sec": 0.08,
         "max_hold_sec": 0.35,
         "command_cooldown_sec": 0.15,
-        "prefer_red_lock": True,
+        # The shipped HUD exclusions are the defaults (CR-018-04); off here so
+        # target geometry is plain. TestExclusions covers them.
+        "red_mass_exclude_pct": [],
+        "red_mass_exclude_zones_pct": [],
     },
     "tracking_hsv": {
         "red_lower": [0, 150, 150],
         "red_upper": [10, 255, 255],
-        "green_lower": [45, 150, 150],
-        "green_upper": [75, 255, 255],
-        "min_contour_area": 12,
-        "min_aspect_ratio": 2.5,
     },
 }
 
@@ -47,21 +46,9 @@ def _black_frame(w: int = 400, h: int = 300) -> np.ndarray:
     return np.zeros((h, w, 3), dtype=np.uint8)
 
 
-def _draw_bar(frame: np.ndarray, cx: int, cy: int, bar_h: int = 40, bar_w: int = 6,
-              bgr=(0, 220, 60)) -> np.ndarray:
-    """Paint a tall green (or custom color) vertical bar at (cx, cy) in frame coords."""
-    out = frame.copy()
-    x1 = max(0, cx - bar_w // 2)
-    y1 = max(0, cy - bar_h // 2)
-    x2 = min(frame.shape[1], cx + bar_w // 2)
-    y2 = min(frame.shape[0], cy + bar_h // 2)
-    out[y1:y2, x1:x2] = bgr
-    return out
-
-
 def _draw_circle(frame: np.ndarray, cx: int, cy: int, r: int = 25,
                  bgr=(0, 220, 60)) -> np.ndarray:
-    """Paint a circle (reticle shape) — should be rejected by aspect-ratio filter."""
+    """Paint a filled circle (the padlock tests use it as a one-blob decoy)."""
     out = frame.copy()
     cv2.circle(out, (cx, cy), r, bgr, -1)
     return out
@@ -94,54 +81,74 @@ def _draw_dashed_ring(frame: np.ndarray, cx: int, cy: int, radius: int = 25,
     return out
 
 
+_RED = (0, 0, 255)
+_W, _H = 1920, 1200
+
+
+def _frame() -> np.ndarray:
+    return np.zeros((_H, _W, 3), dtype=np.uint8)
+
+
+def _target(frame: np.ndarray, x: int, y: int, n_glyphs: int = 28, bgr=_RED) -> np.ndarray:
+    """An enemy contact whose steering point is (x, y): a nameplate block (rows
+    of glyph-sized rectangles plus an underline) centred 100 px above it,
+    `red_mass_aim_offset_px` (the aircraft marker sits below its label)."""
+    out = frame.copy()
+    cx, cy = x, y - 100
+    per_row = max(1, n_glyphs // 3)
+    rows = [per_row, per_row, n_glyphs - 2 * per_row]
+    for r, count in enumerate(rows):
+        gy = cy - 30 + r * 30
+        x0 = cx - (count * 8) // 2
+        for i in range(count):
+            out[gy:gy + 12, x0 + i * 8:x0 + i * 8 + 5] = bgr
+    out[cy + 48:cy + 52, cx - 40:cx + 40] = bgr
+    return out
+
+
 # ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------
 
 class TestStateMachine:
     def test_initial_mode_is_searching(self):
-        t = _tracker()
-        assert t.mode == TrackMode.SEARCHING
+        assert _tracker().mode == TrackMode.SEARCHING
 
     def test_first_update_transitions_to_acquiring(self):
         t = _tracker()
-        t.update(_black_frame())
+        t.update(_frame())
         assert t.mode == TrackMode.ACQUIRING
 
     def test_target_detected_transitions_to_tracking(self):
         t = _tracker()
-        frame = _draw_bar(_black_frame(), cx=200, cy=150)
-        obs = t.update(frame)
+        obs = t.update(_target(_frame(), 960, 600))
         assert obs["visible"] is True
         assert t.mode == TrackMode.TRACKING
 
     def test_every_tick_scans_the_whole_acquisition_region(self):
         """Once locked, the tracker used to scan only a local ROI around the
-        lock (88 px wide on this frame), so a target that moved further than
-        that between ticks was lost. Every tick now scans the whole region."""
+        lock, so a target that moved further than that between ticks was
+        lost. Every tick scans the whole region."""
         t = _tracker()
-        assert t.update(_draw_bar(_black_frame(), cx=100, cy=150), ts=0.0)["visible"] is True
-        obs = t.update(_draw_bar(_black_frame(), cx=330, cy=150), ts=0.3)
+        assert t.update(_target(_frame(), 400, 600), ts=0.0)["visible"] is True
+        obs = t.update(_target(_frame(), 1500, 600), ts=0.3)
         assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(330, abs=4)
+        assert obs["centroid_x"] == pytest.approx(1500, abs=6)
         assert "roi_rect" not in obs
 
     def test_miss_after_tracking_enters_lost_grace(self):
         t = _tracker()
-        frame = _draw_bar(_black_frame(), cx=200, cy=150)
-        t.update(frame)
-        assert t.mode == TrackMode.TRACKING
-        t.update(_black_frame())
+        t.update(_target(_frame(), 960, 600))
+        t.update(_frame())
         assert t.mode == TrackMode.LOST_GRACE
 
     def test_reacquire_in_grace_returns_to_tracking(self):
         t = _tracker()
-        frame = _draw_bar(_black_frame(), cx=200, cy=150)
+        frame = _target(_frame(), 960, 600)
         t.update(frame)
-        t.update(_black_frame())
+        t.update(_frame())
         assert t.mode == TrackMode.LOST_GRACE
-        obs = t.update(frame)
-        assert obs["visible"] is True
+        assert t.update(frame)["visible"] is True
         assert t.mode == TrackMode.TRACKING
 
     def test_lost_target_is_remembered_for_the_roll_on_miss_delay(self):
@@ -149,11 +156,11 @@ class TestStateMachine:
         resumes the search: pursuit_mode.search_resume_delay_s (default 2.0 s)
         when the target was last seen off centre."""
         t = _tracker()
-        t.update(_draw_bar(_black_frame(), cx=40, cy=150), ts=0.0)   # err -0.8
-        t.update(_black_frame(), ts=0.3)
-        t.update(_black_frame(), ts=1.9)
+        t.update(_target(_frame(), 200, 600), ts=0.0)     # err about -0.79
+        t.update(_frame(), ts=0.3)
+        t.update(_frame(), ts=1.9)
         assert t.mode == TrackMode.LOST_GRACE
-        t.update(_black_frame(), ts=2.05)
+        t.update(_frame(), ts=2.05)
         assert t.mode == TrackMode.ACQUIRING
 
     def test_a_target_lost_near_centre_is_remembered_for_the_centre_delay(self):
@@ -161,636 +168,182 @@ class TestStateMachine:
         search_resume_centre_err (0.15) of centre -> search_resume_centre_delay_s
         (default 6.0 s)."""
         t = _tracker()
-        t.update(_draw_bar(_black_frame(), cx=200, cy=150), ts=0.0)  # err 0
-        t.update(_black_frame(), ts=0.3)
-        t.update(_black_frame(), ts=5.9)
+        t.update(_target(_frame(), 960, 600), ts=0.0)
+        t.update(_frame(), ts=0.3)
+        t.update(_frame(), ts=5.9)
         assert t.mode == TrackMode.LOST_GRACE
-        t.update(_black_frame(), ts=6.05)
+        t.update(_frame(), ts=6.05)
         assert t.mode == TrackMode.ACQUIRING
 
     def test_memory_reads_the_same_pursuit_mode_keys_as_roll_on_miss(self):
         t = TargetTracker({**_BASE_CFG, "pursuit_mode": {
             "search_resume_delay_s": 0.5, "search_resume_centre_err": 0.15,
             "search_resume_centre_delay_s": 1.0}})
-        t.update(_draw_bar(_black_frame(), cx=40, cy=150), ts=0.0)
-        t.update(_black_frame(), ts=0.3)
-        t.update(_black_frame(), ts=0.55)
+        t.update(_target(_frame(), 200, 600), ts=0.0)
+        t.update(_frame(), ts=0.3)
+        t.update(_frame(), ts=0.55)
         assert t.mode == TrackMode.ACQUIRING
 
     def test_reset_clears_state(self):
         t = _tracker()
-        frame = _draw_bar(_black_frame(), cx=200, cy=150)
-        t.update(frame)
+        t.update(_target(_frame(), 960, 600))
         assert t.mode == TrackMode.TRACKING
         t.reset()
         assert t.mode == TrackMode.SEARCHING
-        assert t.update(_black_frame())["error_norm"] is None
+        assert t.update(_frame())["error_norm"] is None
 
 
 # ---------------------------------------------------------------------------
-# Detection: aspect-ratio filter
-# ---------------------------------------------------------------------------
-
-class TestAspectRatioFilter:
-    def test_tall_bar_is_detected(self):
-        t = _tracker()
-        frame = _draw_bar(_black_frame(400, 300), cx=200, cy=150, bar_h=50, bar_w=5)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["n_detections"] >= 1
-
-    def test_circle_is_rejected(self):
-        """Lock-on reticle (circular blob) must NOT be classified as a target bar."""
-        t = _tracker()
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25)
-        obs = t.update(frame)
-        assert obs["visible"] is False
-        assert obs["n_detections"] == 0
-
-    def test_wide_blob_is_rejected(self):
-        """A wide rectangle (h/w < 2.5) is not a target bar."""
-        t = _tracker()
-        frame = _black_frame(400, 300)
-        frame[140:160, 160:240] = (0, 200, 50)  # 20px tall × 80px wide → aspect 0.25
-        obs = t.update(frame)
-        assert obs["visible"] is False
-
-
-# ---------------------------------------------------------------------------
-# red_mass_steering (direct operator instruction, 2026-09-23): steer toward
-# the centroid of all red pixels, bypassing the aspect/area filter above
-# entirely. Default False — these tests exercise the override explicitly;
-# TestAspectRatioFilter above (which never sets this key) is the regression
-# guard proving the default leaves that filter's behavior untouched.
-# ---------------------------------------------------------------------------
-
-class TestRedMassSteering:
-    _RED_BGR = (0, 0, 255)  # H=0,S=255,V=255 — well inside red_lower/red_upper
-
-    def test_disabled_by_default(self):
-        t = _tracker()
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25,
-                              bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is False
-
-    def test_enabled_tracks_a_shape_the_aspect_filter_would_reject(self):
-        """A filled red circle fails min_aspect_ratio (it's ~1:1, not >=2.5) —
-        exactly the shape TestAspectRatioFilter.test_circle_is_rejected
-        exists to reject for the tall-bar path. With red_mass_steering on,
-        it must be tracked anyway, centered on the circle's own centroid."""
-        t = _tracker(red_mass_steering=True)
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25,
-                              bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(200, abs=2)
-        assert obs["centroid_y"] == pytest.approx(150, abs=2)
-
-    def test_n_detections_still_reports_the_tall_bar_count_not_red_mass(self):
-        """n_detections must keep meaning "tall-bar contours found" even
-        while centroid_x/y follow the red-mass override — otherwise the HUD's
-        det= readout stops matching what it has meant everywhere else."""
-        t = _tracker(red_mass_steering=True)
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25,
-                              bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is True       # red-mass override fired
-        assert obs["n_detections"] == 0     # no tall-bar contour qualified
-
-    def test_enabled_transitions_to_tracking(self):
-        t = _tracker(red_mass_steering=True)
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=25,
-                              bgr=self._RED_BGR)
-        t.update(frame)
-        assert t.mode == TrackMode.TRACKING
-
-    def test_no_red_at_all_falls_back_to_the_tall_bar_pick(self):
-        """When red_mass_steering is on but there is no red pixel anywhere,
-        _red_mass_centroid returns None and the existing tall-bar pick (a
-        green bar here) still governs — the override only overrides when it
-        actually finds something."""
-        t = _tracker(red_mass_steering=True)
-        frame = _draw_bar(_black_frame(400, 300), cx=200, cy=150)  # green
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(200, abs=2)
-
-    def test_exclusion_region_ignores_fixed_hud_chrome(self):
-        """Regression for the "NO LOCK" text false-positive (2026-09-23,
-        game_battle_eject_20260923_094830_187.png): that text is fixed,
-        boresight-relative HUD chrome, always red, always inside the acq/
-        ROI crop — without exclusion it wins the centroid outright and the
-        local ROI then narrows onto it forever. A large red blob inside the
-        configured exclusion region must not pull the centroid at all, even
-        though it is much bigger than the real target elsewhere in frame."""
-        t = _tracker(red_mass_steering=True,
-                      red_mass_exclude_pct=[0.7, 0.7, 1.0, 1.0])
-        frame = _black_frame(400, 300)
-        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=self._RED_BGR)   # real target
-        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=self._RED_BGR)  # HUD-chrome stand-in
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(100, abs=3)
-        assert obs["centroid_y"] == pytest.approx(100, abs=3)
-
-    def test_without_exclusion_configured_the_big_blob_still_wins(self):
-        """Regression guard: red_mass_exclude_pct defaults to None (no
-        exclusion) — proves the fix above is opt-in via its own config key,
-        not a change to red_mass_steering's baseline behavior."""
-        t = _tracker(red_mass_steering=True)
-        frame = _black_frame(400, 300)
-        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=self._RED_BGR)
-        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        # Mass-weighted centroid is pulled well away from the small blob
-        # toward the much larger one — not on the small blob alone.
-        assert obs["centroid_x"] > 250
-
-    def test_hue_max_ignores_afterburner_colored_orange(self):
-        """Regression for the afterburner false-positive (2026-09-23,
-        game_battle_eject_20260923_123703_35.png and 2 others): the
-        afterburner glow is orange (measured hue 7-10), the real target icon
-        is pure red (measured hue 3-5) — per-blob pixel area was checked
-        first and rejected as a discriminator (270 vs 271, 222 vs 309 px in
-        those same frames). A bigger orange blob (hue 9, afterburner
-        stand-in) must not pull the centroid once red_mass_hue_max excludes
-        its hue, even though it is much bigger than the real target icon
-        (hue 3) elsewhere in frame."""
-        t = _tracker(red_mass_steering=True, red_mass_hue_max=6)
-        frame = _black_frame(400, 300)
-        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=_bgr_from_hue(3))   # real target
-        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=_bgr_from_hue(9))  # afterburner stand-in
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(100, abs=3)
-        assert obs["centroid_y"] == pytest.approx(100, abs=3)
-
-    def test_without_hue_max_configured_the_orange_blob_still_counts(self):
-        """Regression guard: red_mass_hue_max defaults to None (falls back
-        to tracking_hsv.red_upper's own hue, 10 — no behavior change)."""
-        t = _tracker(red_mass_steering=True)
-        frame = _black_frame(400, 300)
-        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=_bgr_from_hue(3))
-        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=_bgr_from_hue(9))
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] > 250
-
-    def test_value_min_ignores_the_afterburners_fading_rim(self):
-        """Regression for a second afterburner false-positive (2026-09-23,
-        game_battle_eject_20260923_171137/38/39_0/1/2.png), found after the
-        hue_max fix above was already in place: the flame's outer rim fades
-        through the *same* red hue band the real target uses (hue 3-6, not
-        the flame's own orange bulk), so hue can't separate them. Per-blob
-        pixel area was checked again and rejected again too (bad-frame rim
-        blobs measured 328-652px, bigger than the good frame's own 79px
-        fragments — backwards from what a minimum-area rule would need).
-        Brightness is the real discriminator: the target is a flat-shaded
-        icon (value approx 255 on 86% of its qualifying pixels); the fading
-        rim only reaches value >=245 on 9-11% of its. A bigger same-hue but
-        dim blob (rim stand-in) must not pull the centroid once
-        red_mass_value_min excludes it, even though it is much bigger than
-        the real, fully-bright target icon elsewhere in frame."""
-        t = _tracker(red_mass_steering=True, red_mass_value_min=245)
-        frame = _black_frame(400, 300)
-        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=_bgr_from_hue(3, v=255))  # real target
-        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=_bgr_from_hue(3, v=200))  # fading rim stand-in
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(100, abs=3)
-        assert obs["centroid_y"] == pytest.approx(100, abs=3)
-
-    def test_without_value_min_configured_the_dim_blob_still_counts(self):
-        """Regression guard: red_mass_value_min defaults to None (falls back
-        to tracking_hsv.red_lower's own value, 150 — no behavior change)."""
-        t = _tracker(red_mass_steering=True)
-        frame = _black_frame(400, 300)
-        frame = _draw_circle(frame, cx=100, cy=100, r=10, bgr=_bgr_from_hue(3, v=255))
-        frame = _draw_circle(frame, cx=350, cy=260, r=30, bgr=_bgr_from_hue(3, v=200))
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] > 250
-
-
-def _draw_glyphs(frame: np.ndarray, cx: int, cy: int, n: int,
-                  glyph_w: int = 4, glyph_h: int = 8, gap: int = 2,
-                  bgr=(0, 0, 255)) -> np.ndarray:
-    """Paint n small, separated glyph-sized rectangles in a row centered on
-    (cx, cy), simulating the letter/digit fragments of a HUD nameplate
-    (name/distance/type) — each becomes its own connected component, sized
-    to fall inside the default red_mass_nameplate_glyph_area/max_dim
-    bounds (10-200px, <=25px per side)."""
-    out = frame.copy()
-    total_w = n * glyph_w + (n - 1) * gap
-    x0 = cx - total_w // 2
-    y1, y2 = cy - glyph_h // 2, cy + glyph_h // 2
-    for i in range(n):
-        x1 = x0 + i * (glyph_w + gap)
-        out[y1:y2, x1:x1 + glyph_w] = bgr
-    return out
-
-
-# ---------------------------------------------------------------------------
-# HLDD 005 nameplate gate (2026-09-23)
-# ---------------------------------------------------------------------------
-
-class TestNameplateGate:
-    """Regression for pursuit_mode_20260923_195448/50/53_81/83/85.png: 81
-    (correct lock, real target) measured 33 glyph-sized components nearby;
-    83 (locked onto an enemy flare effect) and 85 (locked onto the player's
-    own engine exhaust) measured 8 and 9 respectively — no nameplate renders
-    near either false positive. See TargetTracker._count_nameplate_glyphs."""
-
-    _RED_BGR = (0, 0, 255)
-
-    def test_disabled_by_default(self):
-        """Gate must do nothing unless red_mass_nameplate_gate_enabled is
-        set — a lone blob with no nameplate nearby still wins, exactly like
-        red_mass_steering's own existing baseline behavior."""
-        t = _tracker(red_mass_steering=True)
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
-                              bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(200, abs=2)
-
-    def test_enabled_rejects_a_lone_blob_with_no_nameplate(self):
-        """A lone red blob with no glyph cluster nearby (the flare/exhaust
-        shape) must be rejected outright — no tall-bar candidate exists in
-        this scene either, so the tick reports no target at all rather than
-        locking onto the blob."""
-        t = _tracker(red_mass_steering=True,
-                      red_mass_nameplate_gate_enabled=True)
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
-                              bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is False
-
-    def test_enabled_accepts_a_blob_with_a_nearby_nameplate(self):
-        """A blob with a glyph cluster at least as large as the measured
-        real-target count (33) must still be tracked."""
-        t = _tracker(red_mass_steering=True,
-                      red_mass_nameplate_gate_enabled=True,
-                      red_mass_nameplate_min_glyphs=20)
-        frame = _black_frame(400, 300)
-        frame = _draw_circle(frame, cx=200, cy=150, r=15, bgr=self._RED_BGR)
-        frame = _draw_glyphs(frame, cx=200, cy=110, n=25, bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(200, abs=5)
-
-    def test_glyph_count_below_threshold_is_rejected(self):
-        """A handful of stray glyph-sized fragments — the size of what was
-        actually measured on both false positives (8, 9) — must not clear a
-        threshold set above that count."""
-        t = _tracker(red_mass_steering=True,
-                      red_mass_nameplate_gate_enabled=True,
-                      red_mass_nameplate_min_glyphs=20)
-        frame = _black_frame(400, 300)
-        frame = _draw_circle(frame, cx=200, cy=150, r=15, bgr=self._RED_BGR)
-        frame = _draw_glyphs(frame, cx=200, cy=110, n=5, bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is False
-
-    def test_count_nameplate_glyphs_default_bounds(self):
-        """Direct unit test of the glyph-shape filter, independent of the
-        tracker's state machine: a big blob (own-exhaust/flare stand-in)
-        must not count as a glyph, using the shipped defaults (10-200 area,
-        <=25px per side)."""
-        t = _tracker()
-        mask = np.zeros((100, 100), dtype=np.uint8)
-        mask[10:40, 10:40] = 255       # 30x30 = 900px, too big to be a glyph
-        for i in range(5):
-            x = 10 + i * 10
-            mask[60:68, x:x + 4] = 255  # 4x8 = 32px, glyph-sized, gapped
-        assert t._count_nameplate_glyphs(mask) == 5
-
-
-# ---------------------------------------------------------------------------
-# Action item 001 (2026-09-23): the nameplate gate must be able to REJECT a lock
-# ---------------------------------------------------------------------------
-
-def _draw_banner_shards(frame: np.ndarray, x: int, y: int, w: int = 260,
-                        h: int = 22, shard_xs=(60, 130, 200)) -> np.ndarray:
-    """The game's "INCOMING" banner as the tall-bar path sees it while it
-    fades: a wide pink-red fill (measured H 165-178, S 139-165, V 109-238 on
-    pursuit_mode_20260923_211425_64.png) whose saturation sits just under
-    the tracker's S>=150 floor almost everywhere, with a few thin vertical
-    strips that cross it. Each strip is a 4x16 tall/narrow red contour —
-    exactly the shape _detect_targets accepts as a target bar (measured: a
-    6x18, area-41 contour on the real banner, frame 60). V stays under
-    red_mass_value_min (245) everywhere, as on the real banner, so the
-    red-mass path never sees any of it."""
-    out = frame.copy()
-    out[y:y + h, x:x + w] = _bgr_from_hue(172, 140, 190)
-    for sx in shard_xs:
-        out[y + 3:y + 19, x + sx:x + sx + 4] = _bgr_from_hue(172, 165, 200)
-    return out
-
-
-class TestTallbarFallbackSuppression:
-    """Measured 2026-09-23 (docs/action-item/001): with the nameplate gate
-    on, a gate rejection used to fall back to the tall-bar pick, so the gate
-    could narrow the red-mass override but never reject a lock. On the
-    archived pursuit/eject frames, every lock the gate accepted sat on a
-    real enemy nameplate (22 of 22) while roughly nine in ten of the
-    fallback locks were false: the INCOMING banner's shards, own exhaust,
-    terrain, fireballs. `red_mass_tallbar_fallback: false` makes the gate
-    authoritative. The default stays true so every pre-existing scenario
-    (and every synthetic single-shape test) is untouched."""
-
-    _RED_BGR = (0, 0, 255)
-
-    def _gated(self, **overrides):
-        return _tracker(red_mass_steering=True,
-                        red_mass_nameplate_gate_enabled=True,
-                        red_mass_nameplate_min_glyphs=20, **overrides)
-
-    def test_default_keeps_the_fallback_so_a_rejected_gate_still_locks_a_bar(self):
-        """The old behavior, pinned: gate rejects (no nameplate anywhere) yet
-        a tall red bar exists, and the tick still reports a lock on it."""
-        t = self._gated()
-        frame = _draw_bar(_black_frame(), cx=200, cy=150, bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(200, abs=3)
-
-    def test_fallback_off_gate_rejection_yields_no_lock(self):
-        """The bug itself. Same scene as above; with the fallback off, the
-        gate's rejection is final: nothing to steer toward."""
-        t = self._gated(red_mass_tallbar_fallback=False)
-        frame = _draw_bar(_black_frame(), cx=200, cy=150, bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is False
-        assert t.mode != TrackMode.TRACKING
-        # n_detections stays the raw tall-bar count — the tall-bar path still
-        # ran and found its bar; only its authority to lock was removed.
-        assert obs["n_detections"] == 1
-
-    def test_fallback_off_still_locks_when_the_gate_passes(self):
-        """Suppression must not touch the path that works: a blob with a real
-        nameplate cluster beside it still locks, at the red-mass centroid."""
-        t = self._gated(red_mass_tallbar_fallback=False)
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
-                             bgr=self._RED_BGR)
-        frame = _draw_glyphs(frame, cx=200, cy=110, n=25, bgr=self._RED_BGR)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] == pytest.approx(200, abs=5)
-
-    def test_fallback_off_is_inert_when_the_gate_is_disabled(self):
-        """Only a gate *rejection* suppresses the tall-bar pick. With the
-        gate off there is no rejection to be authoritative about, so a green
-        bar (no red pixels at all, hence no red-mass candidate) still locks."""
-        t = _tracker(red_mass_steering=True,
-                     red_mass_tallbar_fallback=False)
-        frame = _draw_bar(_black_frame(), cx=200, cy=150)   # default green
-        obs = t.update(frame)
-        assert obs["visible"] is True
-
-    def test_incoming_banner_shards_lock_by_default_and_not_when_suppressed(self):
-        """The mechanism behind the banner's 779 measured acquisitions
-        (docs/action-item/001): shards of the fading banner qualify as tall
-        bars, and — the banner's V being far below the red-mass floor — the
-        gate rejecting the tick changed nothing. Default reproduces the false
-        lock; the fix removes it."""
-        frame = _draw_banner_shards(_black_frame(400, 300), x=70, y=40)
-        legacy = self._gated().update(frame)
-        assert legacy["visible"] is True
-        assert 40 <= legacy["centroid_y"] <= 62        # on the banner row
-        fixed = self._gated(red_mass_tallbar_fallback=False).update(frame)
-        assert fixed["visible"] is False
-
-    def test_suppressed_tick_from_tracking_enters_lost_grace(self):
-        """A real lock followed by a gate-rejected tick is an ordinary miss
-        (LOST_GRACE), not a phantom hold on the tall-bar pick."""
-        t = self._gated(red_mass_tallbar_fallback=False)
-        locked = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
-                              bgr=self._RED_BGR)
-        locked = _draw_glyphs(locked, cx=200, cy=110, n=25, bgr=self._RED_BGR)
-        assert t.update(locked)["visible"] is True
-        assert t.mode == TrackMode.TRACKING
-        bar_only = _draw_bar(_black_frame(400, 300), cx=200, cy=150,
-                             bgr=self._RED_BGR)
-        obs = t.update(bar_only)
-        assert obs["visible"] is False
-        assert t.mode == TrackMode.LOST_GRACE
-
-    def test_config_flag_is_read(self):
-        t = TargetTracker({"tracking": {"red_mass_tallbar_fallback": False}})
-        assert t._red_mass_tallbar_fallback is False
-        assert TargetTracker({"tracking": {}})._red_mass_tallbar_fallback is True
-
-
-class TestPickPathLogging:
-    """The instrumentation action item 001 asked for first: one greppable
-    line per tick saying which path supplied the lock, what the gate saw,
-    and — when the fallback is suppressed — what it would have picked."""
-
-    _RED_BGR = (0, 0, 255)
-
-    def _pick_lines(self, caplog):
-        """The per-tick DEBUG lines only (each carries `path=`); the
-        rate-limited INFO veto line is checked separately."""
-        return [r.getMessage() for r in caplog.records
-                if "TRACKPICK: path=" in r.getMessage()]
-
-    def test_redmass_path_is_attributed_with_glyph_count(self, caplog):
-        import logging
-        t = _tracker(red_mass_steering=True,
-                     red_mass_nameplate_gate_enabled=True,
-                     red_mass_nameplate_min_glyphs=20)
-        frame = _draw_circle(_black_frame(400, 300), cx=200, cy=150, r=15,
-                             bgr=self._RED_BGR)
-        frame = _draw_glyphs(frame, cx=200, cy=110, n=25, bgr=self._RED_BGR)
-        with caplog.at_level(logging.DEBUG, logger="wingman.tracker"):
-            t.update(frame)
-        line = self._pick_lines(caplog)[-1]
-        assert "path=redmass" in line
-        assert "gate=pass" in line
-        assert "glyphs=25" in line
-
-    def test_tallbar_path_is_attributed_when_redmass_is_off(self, caplog):
-        import logging
-        t = _tracker()
-        frame = _draw_bar(_black_frame(), cx=200, cy=150)
-        with caplog.at_level(logging.DEBUG, logger="wingman.tracker"):
-            t.update(frame)
-        line = self._pick_lines(caplog)[-1]
-        assert "path=tallbar" in line
-        assert "gate=off" in line
-
-    def test_suppressed_pick_names_what_the_fallback_would_have_locked(self, caplog):
-        import logging
-        t = _tracker(red_mass_steering=True,
-                     red_mass_nameplate_gate_enabled=True,
-                     red_mass_nameplate_min_glyphs=20,
-                     red_mass_tallbar_fallback=False)
-        frame = _draw_bar(_black_frame(), cx=200, cy=150, bgr=self._RED_BGR)
-        with caplog.at_level(logging.DEBUG, logger="wingman.tracker"):
-            t.update(frame)
-        line = self._pick_lines(caplog)[-1]
-        assert "path=suppressed" in line
-        assert "gate=reject" in line
-        assert "tall=(200," in line
-
-    def test_no_candidate_at_all_is_path_none(self, caplog):
-        import logging
-        t = _tracker(red_mass_steering=True,
-                     red_mass_nameplate_gate_enabled=True,
-                     red_mass_tallbar_fallback=False)
-        with caplog.at_level(logging.DEBUG, logger="wingman.tracker"):
-            t.update(_black_frame())
-        assert "path=none" in self._pick_lines(caplog)[-1]
-
-    def test_suppression_is_also_reported_at_info_rate_limited(self, caplog):
-        """Debug lines vanish from a normal session log, so the first
-        suppressed pick is also surfaced at INFO — same 1st/10th/100th
-        rate limit every other shadow counter in this module uses."""
-        import logging
-        t = _tracker(red_mass_steering=True,
-                     red_mass_nameplate_gate_enabled=True,
-                     red_mass_tallbar_fallback=False)
-        frame = _draw_bar(_black_frame(), cx=200, cy=150, bgr=self._RED_BGR)
-        with caplog.at_level(logging.INFO, logger="wingman.tracker"):
-            for _ in range(3):
-                t.update(frame)
-        infos = [r for r in caplog.records
-                 if r.levelno == logging.INFO and "TRACKPICK" in r.getMessage()]
-        assert len(infos) == 1                     # 1st only; 2nd, 3rd suppressed
-        assert "1 so far" in infos[0].getMessage()
-
-    def test_probe_exposes_the_gate_numbers_it_decided_on(self):
-        t = _tracker(red_mass_steering=True,
-                     red_mass_nameplate_gate_enabled=True,
-                     red_mass_nameplate_min_glyphs=20)
-        frame = _draw_glyphs(_black_frame(400, 300), cx=200, cy=110, n=7,
-                             bgr=self._RED_BGR)
-        probe = t._red_mass_probe(frame, 0, 0, 400, 300)
-        assert probe["gate"] == "reject"
-        assert probe["glyphs"] == 7
-        assert probe["centroid"] is None
-        assert probe["px"] > 0
-        # The public wrapper is unchanged: same answer, no dict.
-        assert t._red_mass_centroid(frame, 0, 0, 400, 300) is None
-
-
-# ---------------------------------------------------------------------------
-# Error normalization
+# Error signal
 # ---------------------------------------------------------------------------
 
 class TestErrorNorm:
     def test_target_at_center_gives_zero_error(self):
-        t = _tracker()
-        w, h = 400, 300
-        frame = _draw_bar(_black_frame(w, h), cx=w // 2, cy=h // 2)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["error_norm"] == pytest.approx(0.0, abs=0.05)
+        obs = _tracker().update(_target(_frame(), 960, 600))
+        assert obs["error_norm"] == pytest.approx(0.0, abs=0.01)
+        assert obs["error_norm_y"] == pytest.approx(0.0, abs=0.03)
 
     def test_target_left_of_center_gives_negative_error(self):
-        t = _tracker()
-        w, h = 400, 300
-        frame = _draw_bar(_black_frame(w, h), cx=80, cy=h // 2)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["error_norm"] < -0.3
+        assert _tracker().update(_target(_frame(), 500, 600))["error_norm"] < -0.4
 
     def test_target_right_of_center_gives_positive_error(self):
-        t = _tracker()
-        w, h = 400, 300
-        frame = _draw_bar(_black_frame(w, h), cx=320, cy=h // 2)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["error_norm"] > 0.3
+        assert _tracker().update(_target(_frame(), 1400, 600))["error_norm"] > 0.4
 
-    def test_error_clamped_to_unit_range(self):
-        t = _tracker()
-        w, h = 400, 300
-        frame = _draw_bar(_black_frame(w, h), cx=2, cy=h // 2)
-        obs = t.update(frame)
-        assert -1.0 <= obs["error_norm"] <= 1.0
+    def test_target_below_center_gives_positive_vertical_error(self):
+        assert _tracker().update(_target(_frame(), 960, 900))["error_norm_y"] > 0.4
 
     def test_no_error_when_no_target(self):
-        t = _tracker()
-        obs = t.update(_black_frame())
-        assert obs["error_norm"] is None
+        obs = _tracker().update(_frame())
+        assert obs["error_norm"] is None and obs["error_norm_y"] is None
+        assert obs["visible"] is False
+
+    def test_the_observation_has_no_tall_bar_count(self):
+        """CR-018-04: n_detections counted the removed tall-bar contours."""
+        assert "n_detections" not in _tracker().update(_frame())
 
 
 # ---------------------------------------------------------------------------
-# Target selection: nearest-to-last heuristic
+# The nameplate gate and the colour filters
 # ---------------------------------------------------------------------------
 
-class TestTargetSelection:
-    def test_picks_nearer_of_two_targets_on_first_frame(self):
-        """Without a prior position, should pick target nearest to frame center."""
-        t = _tracker()
-        w, h = 400, 300
-        frame = _black_frame(w, h)
-        # left bar at x=80 (dist 120 from center 200); right bar at x=250 (dist 50)
-        # → right bar wins
-        frame = _draw_bar(frame, cx=80, cy=h // 2)
-        frame = _draw_bar(frame, cx=250, cy=h // 2)
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        assert obs["centroid_x"] > 200
+class TestNameplateGate:
+    def test_a_lone_blob_with_no_nameplate_is_not_a_target(self):
+        """Flares, own exhaust, fireballs: red, but no label."""
+        frame = _frame()
+        cv2.circle(frame, (960, 600), 40, _RED, -1)
+        assert _tracker().update(frame)["visible"] is False
 
-    def test_tracks_nearer_target_on_subsequent_frames(self):
-        """After lock, should prefer the target closest to the last known position."""
-        t = _tracker()
-        w, h = 400, 300
-        # First frame: lock on left bar
-        frame1 = _draw_bar(_black_frame(w, h), cx=100, cy=h // 2)
-        t.update(frame1)
-        assert t._last_x is not None and t._last_x < 200
+    def test_a_label_below_the_glyph_threshold_is_not_acquired(self):
+        assert _tracker().update(_target(_frame(), 960, 600, n_glyphs=12))["visible"] is False
 
-        # Second frame: two bars; tracker should stick to left
-        frame2 = _draw_bar(_black_frame(w, h), cx=100, cy=h // 2)
-        frame2 = _draw_bar(frame2, cx=350, cy=h // 2)
-        obs = t.update(frame2)
-        assert obs["centroid_x"] < 200
+    def test_the_threshold_comes_from_the_config(self):
+        t = _tracker(red_mass_nameplate_min_glyphs=10)
+        assert t.update(_target(_frame(), 960, 600, n_glyphs=12))["visible"] is True
+
+
+class TestColourFilters:
+    def test_an_afterburner_orange_label_is_ignored_by_default(self):
+        """red_mass_hue_max defaults to the shipped 6: hue 8 (afterburner glow)
+        is outside the mask."""
+        orange = _bgr_from_hue(8)
+        assert _tracker().update(_target(_frame(), 960, 600, bgr=orange))["visible"] is False
+
+    def test_a_null_hue_max_falls_back_to_the_hsv_upper_bound(self):
+        orange = _bgr_from_hue(8)
+        t = _tracker(red_mass_hue_max=None)
+        assert t.update(_target(_frame(), 960, 600, bgr=orange))["visible"] is True
+
+    def test_a_dim_label_is_ignored_by_default(self):
+        """red_mass_value_min defaults to the shipped 245: the afterburner's
+        fading rim sits below it."""
+        dim = _bgr_from_hue(2, v=200)
+        assert _tracker().update(_target(_frame(), 960, 600, bgr=dim))["visible"] is False
+
+    def test_a_null_value_min_falls_back_to_the_hsv_lower_bound(self):
+        dim = _bgr_from_hue(2, v=200)
+        t = _tracker(red_mass_value_min=None)
+        assert t.update(_target(_frame(), 960, 600, bgr=dim))["visible"] is True
+
+
+class TestExclusions:
+    def test_the_no_lock_text_is_excluded_by_default(self):
+        """red_mass_exclude_pct defaults to the shipped rectangle."""
+        frame = _frame()
+        frame[910:940, 900:1020] = _RED                     # inside 883-1037 x 900-948
+        t = TargetTracker({"tracking": {"enabled": True}})
+        assert t._red_mass_probe(frame, 0, 0, _W, _H)["px"] == 0
+
+    def test_an_empty_value_turns_the_exclusion_off(self):
+        frame = _frame()
+        frame[910:940, 900:1020] = _RED
+        t = TargetTracker({"tracking": {"enabled": True, "red_mass_exclude_pct": [],
+                                        "red_mass_exclude_zones_pct": []}})
+        assert t._red_mass_probe(frame, 0, 0, _W, _H)["px"] > 0
 
 
 # ---------------------------------------------------------------------------
-# Red vs green preference
+# TRACKPICK logging
 # ---------------------------------------------------------------------------
 
-class TestColorPreference:
-    def _hsv_bar(self, frame, cx, cy, h_val, s=220, v=220, bar_h=50, bar_w=5):
-        """Draw a bar with an explicit OpenCV HSV value."""
-        bar = np.zeros((bar_h, bar_w, 3), dtype=np.uint8)
-        bar[:] = (h_val, s, v)
-        bgr = cv2.cvtColor(bar, cv2.COLOR_HSV2BGR)
-        fh, fw = frame.shape[:2]
-        y1 = max(0, cy - bar_h // 2)
-        x1 = max(0, cx - bar_w // 2)
-        y2 = min(fh, y1 + bar_h)
-        x2 = min(fw, x1 + bar_w)
-        frame[y1:y2, x1:x2] = bgr[: y2 - y1, : x2 - x1]
-        return frame
+class TestPickPathLogging:
+    @staticmethod
+    def _line(caplog):
+        lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("TRACKPICK:")]
+        assert len(lines) == 1
+        return lines[0]
 
-    def test_prefers_red_when_both_present(self):
-        """When prefer_red=True and both red+green bars exist, red bar is selected."""
-        t = _tracker(prefer_red_lock=True)
-        w, h = 400, 300
-        frame = _black_frame(w, h)
-        # Green bar at x=100, red bar at x=300
-        frame = self._hsv_bar(frame, 300, h // 2, h_val=5)   # red
-        frame = self._hsv_bar(frame, 100, h // 2, h_val=60)  # green
-        obs = t.update(frame)
-        assert obs["visible"] is True
-        # Red bar is at x=300; green at x=100; center=200 so green is closer to center
-        # but red wins because prefer_red_lock=True
-        assert obs["centroid_x"] > 200
+    def test_a_lock_is_path_redmass_with_its_glyph_count(self, caplog):
+        with caplog.at_level("DEBUG", logger="wingman.tracker"):
+            _tracker().update(_target(_frame(), 960, 600))
+        line = self._line(caplog)
+        assert "path=redmass" in line and "gate=pass" in line and "glyphs=28" in line
 
-    def test_falls_back_to_green_when_no_red(self):
-        t = _tracker(prefer_red_lock=True)
-        w, h = 400, 300
-        frame = self._hsv_bar(_black_frame(w, h), w // 2, h // 2, h_val=60)  # green bar
-        obs = t.update(frame)
-        assert obs["visible"] is True
+    def test_no_nameplate_is_path_none_with_the_gate_rejection(self, caplog):
+        frame = _frame()
+        cv2.circle(frame, (960, 600), 40, _RED, -1)
+        with caplog.at_level("DEBUG", logger="wingman.tracker"):
+            _tracker().update(frame)
+        line = self._line(caplog)
+        assert "path=none" in line and "gate=reject" in line and "sel=-" in line
+
+    def test_the_tall_bar_fields_are_gone(self, caplog):
+        with caplog.at_level("DEBUG", logger="wingman.tracker"):
+            _tracker().update(_target(_frame(), 960, 600))
+        line = self._line(caplog)
+        for field in ("tall=", "n_tall=", "red_won="):
+            assert field not in line
+
+    def test_session_report_still_parses_the_new_line(self, caplog):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("session_report", "scripts/session-report.py")
+        sr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sr)
+        with caplog.at_level("DEBUG", logger="wingman.tracker"):
+            _tracker().update(_target(_frame(), 960, 600))
+        m = sr._PICK.search(self._line(caplog))
+        assert m is not None and m.group(1) == "redmass"
+
+
+# ---------------------------------------------------------------------------
+# CR-018-04: the code defaults are the shipped values
+# ---------------------------------------------------------------------------
+
+def test_every_code_default_matches_the_shipped_config():
+    """A config without a tracking key must behave exactly like the shipped
+    one, so a synthetic test cannot exercise a tracker that does not ship."""
+    import yaml
+    shipped_cfg = yaml.safe_load(Path("wingman/config.yaml").read_text())
+    shipped = TargetTracker(shipped_cfg)
+    bare = TargetTracker({"tracking": {"enabled": True}})
+    for attr in ("_acq_x1", "_acq_y1", "_acq_x2", "_acq_y2",
+                 "_red_mass_exclude_pct", "_red_mass_exclude_zones",
+                 "_cluster_glyph_window", "_aim_offset", "_keep_min_glyphs",
+                 "_keep_box_pct", "_red_mass_hue_max", "_red_mass_value_min",
+                 "_red_mass_nameplate_min_glyphs", "_red_mass_nameplate_glyph_area",
+                 "_red_mass_nameplate_glyph_max_dim"):
+        assert getattr(bare, attr) == getattr(shipped, attr), attr
+    assert (bare._red_lower == shipped._red_lower).all()
+    assert (bare._red_upper == shipped._red_upper).all()
 
 
 # ---------------------------------------------------------------------------
@@ -1008,56 +561,6 @@ class TestOrientNoseToTarget:
         with patch.object(ctrl, "roll_right"):
             result = ctrl.orient_nose_to_target(0.5, cooldown_sec=0.5)
         assert result == "right"
-
-
-# ---------------------------------------------------------------------------
-# Reference frame regression
-# ---------------------------------------------------------------------------
-
-class TestReferenceFrame:
-    # P1_060 reused (P2_050 deleted 2026-08-13 — byte-identical copy).
-    _REF = Path("test_screenshots/integration_test/P1_060_BATTLE_HUD_HEALTH_ALIVE_MISSILES_4.png")
-
-    @pytest.mark.skipif(
-        not _REF.exists(),
-        reason="reference screenshot not present (all-black placeholder skipped)",
-    )
-    def test_reference_frame_detects_markers(self):
-        """TargetTracker must find at least one green target bar in the reference frame."""
-        frame = cv2.imread(str(self._REF))
-        assert frame is not None, "Could not load reference frame"
-        # Check it's not all-black (placeholder check)
-        if not np.any(frame):
-            pytest.skip("reference screenshot is all-black placeholder")
-        t = _tracker()
-        obs = t.update(frame)
-        assert obs["n_detections"] >= 1, (
-            f"Expected >=1 target bar in reference frame, got {obs['n_detections']}. "
-            "HSV ranges may need tuning."
-        )
-
-    @pytest.mark.skipif(
-        not _REF.exists(),
-        reason="reference screenshot not present",
-    )
-    def test_reference_frame_rejects_reticle(self):
-        """Aspect-ratio filter must not classify the lock-on reticle circle as a target bar."""
-        frame = cv2.imread(str(self._REF))
-        if frame is None or not np.any(frame):
-            pytest.skip("reference screenshot unavailable or all-black")
-        t = _tracker()
-        obs = t.update(frame)
-        # The reticle is roughly at the left-center of the frame (approx x=0.35*w).
-        # A detection there with error_norm near -0.30 suggests the reticle was hit.
-        # We can't rule it out statically, but we CAN assert the centroid is not
-        # suspiciously small (a real bar is taller than it is wide).
-        if obs["centroid_x"] is not None:
-            # Re-run internal detect to inspect raw contours
-            raw, _red_hits, _green_hits, _red_won = t._detect_targets(frame)
-            for _cx, _cy, area in raw:
-                # All accepted contours must have passed the aspect-ratio filter —
-                # they were accepted, so aspect ratio >= 2.5. Just sanity-check area.
-                assert area >= 12, "Contour below min_contour_area was accepted"
 
 
 # ---------------------------------------------------------------------------
@@ -1422,8 +925,7 @@ class TestHudRendererRawScanArchive:
 class TestHudRendererSteeringLine:
     def test_line_drawn_from_screen_center_to_steer_target(self, tmp_path):
         """A line from screen center to the current steer target, so the HUD
-        shows where the aircraft is being commanded to point regardless of
-        which detection mode (tall-bar or red_mass_steering) produced it.
+        shows where the aircraft is being commanded to point.
         Checked against the full-res archived frame (pre-resize) so pixel
         coordinates are exact, not resize-interpolated."""
         from wingman.hud import HudRenderer

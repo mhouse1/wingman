@@ -32,17 +32,9 @@ _HUD_ZONES = [
 _BASE = {
     "enabled": True,
     "acquisition_region_pct": [0.2, 0.18, 0.8, 0.68],
-    "prefer_red_lock": True,
-    "red_mass_steering": True,
-    "red_mass_nameplate_gate_enabled": True,
     "red_mass_nameplate_min_glyphs": 20,
-    "red_mass_tallbar_fallback": False,
 }
-_HSV = {
-    "red_lower": [0, 150, 150], "red_upper": [10, 255, 255],
-    "green_lower": [45, 150, 150], "green_upper": [75, 255, 255],
-    "min_contour_area": 12, "min_aspect_ratio": 2.5,
-}
+_HSV = {"red_lower": [0, 150, 150], "red_upper": [10, 255, 255]}
 
 
 def _tracker(**overrides) -> TargetTracker:
@@ -51,8 +43,7 @@ def _tracker(**overrides) -> TargetTracker:
 
 def _wide(**extra):
     return _tracker(acquisition_region_pct=[0.0, 0.09, 1.0, 0.95],
-                    red_mass_exclude_zones_pct=_HUD_ZONES,
-                    red_mass_cluster_select=True, **extra)
+                    red_mass_exclude_zones_pct=_HUD_ZONES, **extra)
 
 
 def _frame():
@@ -84,11 +75,12 @@ def _probe(t, frame, ref=None):
 # --- the region and the zones -------------------------------------------------
 
 def test_a_nameplate_below_the_old_box_is_invisible_to_the_old_region_and_found_by_the_wide_one():
-    frame = _nameplate(_frame(), 1020, 960)               # y 930-1012, box ends at y 816
+    # x 1300: clear of the NO LOCK exclusion (x 883-1037, y 900-948), a default now.
+    frame = _nameplate(_frame(), 1300, 960)               # y 930-1012, box ends at y 816
     assert _tracker().update(frame, ts=0.0)["visible"] is False
     obs = _wide().update(frame, ts=0.0)
     assert obs["visible"] is True
-    assert obs["centroid_x"] == pytest.approx(1020, abs=3)
+    assert obs["centroid_x"] == pytest.approx(1300, abs=3)
     assert obs["centroid_y"] == pytest.approx(960 + 100, abs=12)  # the aircraft, below the label
 
 
@@ -107,10 +99,12 @@ def test_glyph_like_hud_text_in_a_zone_does_not_count_toward_the_gate():
     assert _wide().update(frame, ts=0.0)["visible"] is False
 
 
-def test_zones_are_off_by_default():
+def test_zones_are_on_by_default_and_an_empty_list_turns_them_off():
+    """CR-018-04: the shipped zones are the code default."""
     frame = _frame()
     frame[20:80, 1180:1400] = _RED
-    assert _probe(_tracker(), frame)["px"] > 0
+    assert _probe(_tracker(), frame)["px"] == 0
+    assert _probe(_tracker(red_mass_exclude_zones_pct=[]), frame)["px"] > 0
 
 
 # --- cluster selection ----------------------------------------------------------
@@ -189,7 +183,6 @@ def test_the_gate_counts_per_cluster_not_across_the_whole_crop():
     """Two half-labels far apart (12 glyphs each) pass a whole-crop count of 24 but
     are not a nameplate."""
     frame = _nameplate(_nameplate(_frame(), 700, 500, 12, False), 1500, 800, 12, False)
-    assert _probe(_tracker(), frame)["gate"] == "pass"     # old rule: 24 >= 20
     p = _probe(_wide(), frame)
     assert p["gate"] == "reject" and p["glyphs"] == 12
 
@@ -198,11 +191,6 @@ def test_a_rejected_tick_reports_the_best_cluster_count():
     frame = _nameplate(_frame(), 960, 600, 15, False)
     p = _probe(_wide(), frame)
     assert (p["gate"], p["glyphs"], p["clusters"]) == ("reject", 15, 0)
-
-
-def test_cluster_mode_is_off_by_default():
-    frame = _nameplate(_nameplate(_frame(), 700, 500, 12, False), 1500, 800, 12, False)
-    assert _probe(_tracker(), frame)["clusters"] is None
 
 
 def test_a_lock_stays_on_its_nameplate_when_a_second_one_appears():

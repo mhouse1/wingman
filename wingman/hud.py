@@ -263,12 +263,11 @@ class HudRenderer:
             cx = obs.get("centroid_x")
             cy_ = obs.get("centroid_y")
             err = obs.get("error_norm")
-            n_det = obs.get("n_detections", 0)
 
             track_color = _GREEN if visible else _YELLOW
             vis_tag = "VIS" if visible else "---"
             err_tag = f"{err:+.3f}" if err is not None else "  n/a"
-            _txt(canvas, f"Track:{mode}  {vis_tag}  err={err_tag}  det={n_det}", 8, 66, track_color)
+            _txt(canvas, f"Track:{mode}  {vis_tag}  err={err_tag}", 8, 66, track_color)
 
             # Pursued-target highlight — the one target this loop is actually
             # rolling/pitching toward, called out in a color reserved for
@@ -285,10 +284,9 @@ class HudRenderer:
             if cx is not None and cy_ is not None:
                 px, py = int(cx), int(cy_)
                 # Steering vector (2026-09-23, direct instruction): center of
-                # screen to the current steer target, whatever detection mode
-                # produced it (tall-bar pick or, when tracking.red_mass_steering
-                # is on, the red-mass centroid) — drawn first so the marker
-                # below sits on top of it at the target end.
+                # screen to the current steer target (the aircraft below the
+                # chosen nameplate) — drawn first so the marker below sits on
+                # top of it at the target end.
                 cv2.line(canvas, (scx, scy), (px, py), _PURSUIT, 1, cv2.LINE_AA)
                 thick = 2 if visible else 1
                 cv2.circle(canvas, (px, py), 16, _DARK, thick + 2, cv2.LINE_AA)

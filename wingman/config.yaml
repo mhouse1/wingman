@@ -947,14 +947,6 @@ tracking:
   pitch_min_hold_sec: 0.08
   pitch_max_hold_sec: 0.35
   pitch_command_cooldown_sec: 0.15
-  # Selection Hardening Phase 2 (2026-09-21): shadow only — ranked_lock_priority
-  # stays false here. While false, the ranked candidate pool below is computed
-  # and compared against the real selection every tick, logging only where
-  # they'd disagree (SELECT[shadow]: old=... new=... would change), never
-  # changing what actually gets selected. tolerance is a named guess, not
-  # measured — the shadow log is what should correct it.
-  ranked_lock_priority: false
-  ranked_priority_tolerance_px: 40.0
   # lost_timeout_sec (0.4) was removed 2026-09-24. How long LOST_GRACE remembers
   # a lost target is now pursuit_mode.search_resume_delay_s (or
   # search_resume_centre_delay_s near centre), the same wait roll_on_miss holds
@@ -962,28 +954,20 @@ tracking:
   # actuation layer is still waiting for. The short timeout existed to escape a
   # small LOST_GRACE ROI stuck on a stale lock; every tick now scans the whole
   # acquisition region, so that trap is gone.
-  prefer_red_lock: true
-  # Direct operator instruction (2026-09-23): always steer toward the
-  # centroid of every red pixel in the scanned crop (tracking_hsv.red_lower/
-  # upper below — the same range already used for acq-region detection, not
-  # a new sample), overriding the tall-bar contour pick in
-  # TargetTracker._select_target whenever any red pixel is present. This was
-  # raised as a recommendation against, with empirical evidence of red mass
-  # coming from muzzle flash / own-airframe effects rather than enemies in
-  # some frames (2026-09-23 conversation) — shipped true anyway per direct,
-  # repeated operator instruction overriding that recommendation. See
-  # TargetTracker._red_mass_centroid.
-  red_mass_steering: true
-  # Excludes the "NO LOCK" / lock-status HUD text from red_mass_steering's
+  # Review 018 CR-018-04 (2026-09-25): the tall-bar detector and the flags that kept
+  # it reachable (prefer_red_lock, red_mass_steering, red_mass_cluster_select,
+  # red_mass_nameplate_gate_enabled, red_mass_tallbar_fallback, ranked_lock_priority,
+  # ranked_priority_tolerance_px, tracking_hsv green_*/min_contour_area/min_aspect_ratio)
+  # are gone: the tracker has one path, nameplate clusters in the red mask. The keys
+  # below are its tuning; their code defaults are these shipped values.
+  # Excludes the "NO LOCK" / lock-status HUD text from the nameplate mask's
   # scan (2026-09-23): that text is bright red and boresight-relative, not
   # world content, so it was winning the red-mass centroid outright (seen
   # live: game_battle_eject_20260923_094830_187.png — marker landed on the
   # text while a real, closer contact sat untouched elsewhere in frame).
   # Measured at identical fractional bbox (0.474-0.526, 0.762-0.777) across
   # 4 frames from different sessions/zoom/terrain; bounds below add margin
-  # over that measurement. Applies only to red_mass_steering — the tall-bar
-  # path already rejects this text's short, wide letter-stroke contours via
-  # min_aspect_ratio.
+  # over that measurement.
   red_mass_exclude_pct: [0.46, 0.75, 0.54, 0.79]
   # Action item 001, Cycle 12 (2026-09-24): more fixed-position HUD zones with red in
   # them, masked out of the red mask exactly like the rectangle above. Fractions of the
@@ -1005,7 +989,6 @@ tracking:
   # counted per cluster (glyphs inside a 300 x 170 px window). The cluster nearest the
   # previous lock is chosen, or the screen centre when there is none. The window size is a
   # named guess. Watch: `clu=` in TRACKPICK (nameplate clusters that passed the gate).
-  red_mass_cluster_select: true
   red_mass_cluster_glyph_window_px: [300, 170]
   # 2026-09-24 (corrected the same day): the steering point is the AIRCRAFT, which the game
   # draws below its nameplate: a hollow diamond bracket (a small red jet icon on a far
@@ -1030,7 +1013,7 @@ tracking:
   # means the full gate passed.
   red_mass_keep_min_glyphs: 8
   red_mass_keep_box_pct: [0.11, 0.11]
-  # Narrows red_mass_steering's own upper hue bound to separate the
+  # Narrows the nameplate mask's upper hue bound to separate the
   # airframe's own afterburner glow (hot orange) from a real target icon
   # (pure red) — position-based exclusion doesn't work here since the
   # afterburner moves with the airframe's on-screen attitude, unlike NO
@@ -1039,12 +1022,9 @@ tracking:
   # hue 7-10 (bordering true orange), real target icon hue 3-5 (pure red) —
   # per-blob pixel area was checked first and rejected as a discriminator
   # (270 vs 271, 222 vs 309 px in these same frames — no reliable size
-  # threshold exists). 6 sits at the midpoint of the measured gap. Applies
-  # only to red_mass_steering — tracking_hsv.red_upper (10) is untouched,
-  # since _detect_targets' aspect-ratio filter already guards that path
-  # against this confusion.
+  # threshold exists). 6 sits at the midpoint of the measured gap.
   red_mass_hue_max: 6
-  # Raises red_mass_steering's own value (brightness) floor to separate the
+  # Raises the nameplate mask's value (brightness) floor to separate the
   # afterburner's fading outer rim from a real target icon — hue alone
   # doesn't: the rim fades through the same red hue band the target uses
   # (measured 2026-09-23, game_battle_eject_20260923_171137/38/39_0/1/2.png,
@@ -1054,9 +1034,7 @@ tracking:
   # backwards from what a minimum-area rule would need). Brightness is the
   # real discriminator: the target is a flat-shaded icon (value approx 255
   # on 86% of its qualifying pixels); the fading rim only reaches value
-  # >=245 on 9-11% of its qualifying pixels. Applies only to
-  # red_mass_steering — tracking_hsv's shared 150 floor (and
-  # _detect_targets' use of it) is untouched.
+  # >=245 on 9-11% of its qualifying pixels.
   red_mass_value_min: 245
   # HLDD 005 nameplate gate (2026-09-23): red_mass_hue_max/value_min above
   # each separate a real target from one specific known false positive
@@ -1067,7 +1045,7 @@ tracking:
   # positives as fast as they get patched. Every real enemy contact renders
   # a HUD nameplate (name/distance/type) nearby; neither a flare nor engine
   # exhaust ever does. Counting small glyph-shaped components in the same
-  # mask red_mass_centroid already computes (no OCR, no new color sample)
+  # red mask (no OCR, no new color sample)
   # measured 33 such components for the real target vs 8-9 for each false
   # positive in the three frames above — a roughly 4x gap. That is 3 frames
   # from one engagement, not a tuned threshold, so this shipped gated off
@@ -1078,31 +1056,9 @@ tracking:
   # no evidence either way — the flag was still false and no pursuit
   # triggered) — min_glyphs/glyph_area/glyph_max_dim below are still the
   # untuned, 3-frame values, not yet corrected by live data.
-  red_mass_nameplate_gate_enabled: true
   red_mass_nameplate_min_glyphs: 20
   red_mass_nameplate_glyph_area: [10, 200]
   red_mass_nameplate_glyph_max_dim: 25
-  # Action item 001 (2026-09-23): false makes the nameplate gate's rejection
-  # FINAL. Until now a rejection fell back to the tall-bar contour pick, so the
-  # gate could narrow the red-mass override but never reject a lock — which is
-  # why enabling it (above) "did not fix the problem". Measured on the 66
-  # archived pursuit/eject frames that carry a PURSUING marker (real functions
-  # replayed on the annotated PNGs, each marker classified by eye — inferred,
-  # not logged): every lock the gate ACCEPTED sat on a real enemy nameplate
-  # (22 of 22); of the 44 it rejected, about 4 were real nameplates and about
-  # 35 were false (INCOMING banner x3, own exhaust, terrain, fireballs, a
-  # paper sign). Banner mechanism reproduced with the real detector on real
-  # banner pixels: a 6x18, area-41, aspect-3.0 contour (pursuit_mode_
-  # 20260923_211420_60.png). Historical scale: 779 of 812 acquisitions in the
-  # banner's row within 4s of an INCOMING detection fell inside its x-extent
-  # (24.6% of such acquisitions vs 3.3% with no INCOMING nearby, 15 days of
-  # logs). Only bites while red_mass_steering AND the gate are both on. Watch:
-  # `grep TRACKPICK wingman.log` — path=suppressed lines are locks this
-  # removed, path=redmass are the ones kept. The gate's own threshold above
-  # (20) is a SEPARATE open question: 4 of ~28 real-nameplate frames scored
-  # 12-18 glyphs (junk topped out at 7) and are now lost rather than falling
-  # back — the live glyph counts logged by TRACKPICK are what should settle it.
-  red_mass_tallbar_fallback: false
   # The local ROI (local_roi_*), its clipped-nameplate follow (local_roi_follow_*) and
   # its widening ladder were removed 2026-09-24: every tick scans the whole acquisition
   # region, and the keep test above holds a lock whose label the ROI edge used to cut.
@@ -1133,10 +1089,6 @@ tracking:
 tracking_hsv:
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
-  green_lower: [45, 150, 150]
-  green_upper: [75, 255, 255]
-  min_contour_area: 12
-  min_aspect_ratio: 2.5
 # ADR 136: padlock-off indicator — a dashed green ring at screen center when
 # padlock is disengaged (calibrated against a live capture 2026-09-09: ~40
 # short dash segments, not a single filled dot). Own HSV bounds, notably
@@ -1274,6 +1226,27 @@ pursuit_mode:
   # live check is the TRACKPICK interval median (target below 0.2 s).
   steer_interval_s: 0.1
   engage_interval_s: 0.3
+  # Dive guard (review 018, action item 001 01:06 and 01:43 entries; operator,
+  # 2026-09-25). The chase does not command nose-down below the floor in play
+  # (a mission's own alt_floor_m, else behavior_tree.climb.alt_floor_m) plus
+  # dive_guard_margin_m, or while altitude over descent rate is under
+  # dive_guard_ttg_s; pitch goes neutral instead. Roll tracking, firing and the
+  # search roll are unchanged. Measured basis: six of eight unplanned deaths in
+  # the 2026-09-25 00:49-01:41 session followed a chase dive through the 3000 m
+  # floor. su30 and f111: 3000 + 500 = 3500 m. Logged as `DIVE GUARD`. The ttg
+  # term assumes the ground at altitude 0 (terrain near 900 m exists), hence
+  # the wide 60 s. Named guesses, from the action item. 0 turns a term off.
+  dive_guard_margin_m: 500
+  dive_guard_ttg_s: 60
+  # Pull-out (operator, 2026-09-25): withholding nose-down alone did not stop the
+  # 20:26:37 dive (-103 m/s at the guard, -175 m/s 3 s later), so the tree's hard
+  # emergency took the airframe at ttg 20 s and its nose-up lost the target. While
+  # the ttg term holds and the descent is steeper than dive_guard_level_rate_mps,
+  # the chase taps nose-up (pulse_s every interval_s), roll and fire unchanged.
+  # Logged as `DIVE GUARD — pull-out pulse`. Named guesses; pulse 0 turns it off.
+  dive_guard_pullout_pulse_s: 0.4
+  dive_guard_pullout_interval_s: 1.0
+  dive_guard_level_rate_mps: 30
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right

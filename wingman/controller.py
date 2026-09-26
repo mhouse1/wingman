@@ -638,6 +638,35 @@ class Controller:
         self._pursuit_steer_interval_s = max(0.02, float(_pm.get("steer_interval_s", 0.1)))
         self._pursuit_engage_interval_s = max(
             self._pursuit_steer_interval_s, float(_pm.get("engage_interval_s", 0.3)))
+        # Review 018 / action item 001 dive guard (operator, 2026-09-25): the
+        # chase may not command nose-down below the doctrine floor plus this
+        # margin, or while time to ground is under dive_guard_ttg_s. Six of
+        # eight unplanned deaths in the 00:49-01:41 session followed a chase
+        # dive through the 3000 m floor. Roll, fire and the search roll are
+        # untouched. 0 turns each term off.
+        self._pursuit_dive_guard_margin_m = float(_pm.get("dive_guard_margin_m", 500.0))
+        self._pursuit_dive_guard_ttg_s = float(_pm.get("dive_guard_ttg_s", 60.0))
+        _tree_floor = (_c.climb or {}).get("alt_floor_m")
+        # The floor when no mission flies its own (ADR 147/149 override that).
+        self._tree_alt_floor_m = None if _tree_floor is None else float(_tree_floor)
+        self._dive_guard_reason: "str | None" = None   # last verdict, for change logging
+        # Dive guard pull-out (operator, 2026-09-25 after the 20:26:37 dive):
+        # withholding nose-down did not stop that dive (-103 m/s at the guard,
+        # -175 m/s 3 s later, rolling only), so the tree's hard emergency took
+        # the airframe at ttg 20 s and its nose-up threw the target out of the
+        # frame. While the ttg term holds and the descent is steeper than
+        # dive_guard_level_rate_mps, the chase taps nose-up for
+        # dive_guard_pullout_pulse_s every dive_guard_pullout_interval_s, a
+        # gentle pull-out well before the tree's 30 s emergency. Roll and fire
+        # carry on. Named guesses; pulse 0 turns the pull-out off.
+        self._dive_guard_pullout_pulse_s = float(_pm.get("dive_guard_pullout_pulse_s", 0.4))
+        self._dive_guard_pullout_interval_s = float(
+            _pm.get("dive_guard_pullout_interval_s", 1.0))
+        self._dive_guard_level_rate_mps = float(_pm.get("dive_guard_level_rate_mps", 30.0))
+        # Set by _pursuit_dive_guard: the ttg term tripped, and the rate it saw.
+        self._dive_guard_ttg_tripped = False
+        self._dive_guard_rate: "float | None" = None
+        self._dive_guard_next_pullout_ts = 0.0
         # ADR 068 d1: True once ANY descending sample has been seen during the
         # CURRENT rotation attempt. The over-rotation guard requires it —
         # rotating past vertical means passing THROUGH a dive, so a flight path
@@ -3240,6 +3269,81 @@ class Controller:
         self._eject_thread = threading.Thread(target=_run, daemon=True)
         self._eject_thread.start()
 
+    def _pursuit_dive_guard(self) -> "str | None":
+        """Why the chase may not command nose-down right now, or None.
+
+        Review 018 / action item 001 (2026-09-25 01:06 and 01:43 entries).
+        Trips below the floor in play (the mission's own under ADR 147/149,
+        else behavior_tree.climb.alt_floor_m) plus `dive_guard_margin_m`, or
+        when altitude over descent rate is under `dive_guard_ttg_s`. Fails open
+        on unreadable telemetry: the guard only withholds nose-down, and an
+        unreadable altitude is not evidence the aircraft is low. A single low
+        misread trips it for a tick, which costs one withheld nose-down.
+        Logs once per change of verdict.
+
+        The two terms are evaluated independently: `_dive_guard_ttg_tripped`
+        and `_dive_guard_rate` record the ttg term's verdict for
+        `_dive_guard_pullout`, even when the altitude term also holds.
+        """
+        reason = None
+        self._dive_guard_ttg_tripped = False
+        self._dive_guard_rate = None
+        margin = self._pursuit_dive_guard_margin_m
+        ttg_limit = self._pursuit_dive_guard_ttg_s
+        snap = None
+        if (margin > 0 or ttg_limit > 0) and self._analyzer is not None:
+            try:
+                snap = self._analyzer.get_telemetry()
+            except Exception:
+                snap = None
+        if snap is not None and snap.altitude_fresh():
+            alt = snap.altitude.stable_value
+            rate = snap.altitude.rate
+            floor = self._own_altitude_floor_in_play_m()
+            if floor is None:
+                floor = self._tree_alt_floor_m
+            self._dive_guard_rate = rate
+            if alt is not None and ttg_limit > 0 and rate is not None and rate < 0 \
+                    and alt / -rate < ttg_limit:
+                self._dive_guard_ttg_tripped = True
+                reason = "time to ground %.0f s under %.0f s" % (alt / -rate, ttg_limit)
+            if alt is not None and margin > 0 and floor is not None \
+                    and alt < floor + margin:
+                reason = "altitude %.0f m below %.0f m" % (alt, floor + margin)
+        if (reason is None) != (self._dive_guard_reason is None):
+            if reason is not None:
+                logger.info("Controller: DIVE GUARD — nose-down withheld (%s)", reason)
+            else:
+                logger.info("Controller: DIVE GUARD — nose-down allowed again")
+        self._dive_guard_reason = reason
+        return reason
+
+    def _dive_guard_pullout(self) -> bool:
+        """Tap nose-up if the dive guard's ttg term holds and the descent is
+        steeper than `dive_guard_level_rate_mps`; True when a tap was sent.
+
+        Uses the verdict of the `_pursuit_dive_guard` call made this tick.
+        Skipped while the chase itself is holding nose-up (a tap on the same
+        key would release that hold) and between taps, so the telemetry has
+        time to show the effect. The tap is the bounded nose_up press, so the
+        takeover gate and programmatic-key bracketing apply as for any press.
+        """
+        if (self._dive_guard_pullout_pulse_s <= 0 or not self._dive_guard_ttg_tripped
+                or self._dive_guard_rate is None
+                or self._dive_guard_rate >= -self._dive_guard_level_rate_mps
+                or self._pitch_held == "up"):
+            return False
+        now = time.time()
+        if now < self._dive_guard_next_pullout_ts:
+            return False
+        self._dive_guard_next_pullout_ts = now + max(
+            self._dive_guard_pullout_interval_s, self._dive_guard_pullout_pulse_s)
+        logger.info("Controller: DIVE GUARD — pull-out pulse %.1fs (descending %.0f m/s)",
+                    self._dive_guard_pullout_pulse_s, -self._dive_guard_rate)
+        self.nose_up(hold_seconds=self._dive_guard_pullout_pulse_s, block=False,
+                     ignore_cancel=True)
+        return True
+
     def pursuit_mode_enabled(self) -> bool:
         """True when the missiles-empty trigger should call pursue_and_engage
         instead of eject_and_dive (HLDD 015). Read by AmmoEventsHandler
@@ -3390,6 +3494,8 @@ class Controller:
                 zero_reads = 0
                 switched_at = None
                 yielding = False   # ADR 148: a dive-recovery climb owns pitch and roll
+                self._dive_guard_reason = None
+                self._dive_guard_next_pullout_ts = 0.0
                 next_engage_ts = 0.0   # CR-018-01: first cycle engages at once
                 while not self._eject_stop.wait(timeout=self._pursuit_steer_interval_s):
                     if (self._pursuit_max_duration_s > 0
@@ -3436,13 +3542,23 @@ class Controller:
                                 last_seen_ts, self._pursuit_search_resume_delay_s,
                                 last_visible_err, self._pursuit_search_resume_centre_err,
                                 self._pursuit_search_resume_centre_delay_s)
+                        # Dive guard, every steering tick: a target below the
+                        # nose (err_y > 0) is not followed nose-down when low or
+                        # when the ground is close (pitch goes neutral instead),
+                        # and a steep descent is pulled toward level.
+                        guard = None if yielding else self._pursuit_dive_guard()
                         if visible and err_y is not None:
                             if not yielding:
-                                self.orient_pitch_to_target(
-                                    err_y, ignore_cancel=True,
-                                    sustained_hold=self._sustained_hold_enabled)
+                                if err_y > 0 and guard:
+                                    self.release_pitch_hold()
+                                else:
+                                    self.orient_pitch_to_target(
+                                        err_y, ignore_cancel=True,
+                                        sustained_hold=self._sustained_hold_enabled)
                         elif self._sustained_hold_enabled and not yielding:
                             self.release_pitch_hold()
+                        if guard:
+                            self._dive_guard_pullout()
                         # CR-018-01: ammo, weapon switch, fire and HUD run on their own
                         # ~0.3 s cadence (the old loop period); only steering runs faster.
                         if time.time() < next_engage_ts:
