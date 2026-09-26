@@ -52,8 +52,8 @@ make wrelease
 
 This:
 - Appends `tests/test-output/performance.json` to the local history `tests/perf-history/performance-history.jsonl` (skipped if that snapshot is already recorded; nothing is committed)
-- Copies all `docs/performance/current/run_*.json` files into `docs/performance/release/` as the new runtime baseline
-- Commits `wingman/main.py` and the runtime baseline with the current `WINGMAN_VERSION` and `WINGMAN_VERSION_DETAILS`
+- Copies all `docs/performance/current/run_*.json` files into `docs/performance/release/` as the new runtime baseline. The baseline is local to veda and never committed (ADR 100 D8).
+- Commits `wingman/main.py` with the current `WINGMAN_VERSION` and `WINGMAN_VERSION_DETAILS`
 - Regenerates the chart
 
 ### 4. View the chart

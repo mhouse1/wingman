@@ -332,6 +332,8 @@ named guesses. `actuate` / `actuate_turn` do not exist yet; they arrive with rol
 pursuit_mode:
   icon_steering:
     enabled: true             # shadow: detect, score and log ICONPTS
+    wings_level: true         # step 2a: no fixed left roll on the icon and hold rungs
+    actuate_pitch: true       # step 2b: the law's vertical intent holds pitch there
     ring_centre_pct: [0.5, 0.5]        # measured centre 959.7, 599.8 of 1920 x 1200
     ring_radius_pct: [0.14, 0.18]      # of frame height; measured 193.9 px, about 4 px spread
     area_px: [150, 2500]
@@ -342,11 +344,10 @@ pursuit_mode:
     sat_min: 110
     val_min: 200
     points_scale: 5           # reference frame gives down 5, left 1
-    points_half_life_s: 1.0
+    points_half_life_s: 1.0   # fades only while icons keep coming; holds when none is seen
     points_cap: 25
     act_pts: 10
     release_pts: 4
-    icon_coast_s: 0.3         # keys release this long after the last icon; scores stay as memory
     icon_min_path_deg: -45    # no nose-down at or past this flight-path angle (operator)
     blind_search_after_s: 3.0 # no lock and no icon for this long: search toward the last known side
 ```
@@ -490,9 +491,10 @@ icon within 5.7 degrees of straight down adds no turn points at all.
 **Per-scan update.** A scan is one steering tick of `pursue_and_engage` (`steer_interval_s`, 0.1 s
 shipped). On every scan, in this order:
 
-1. **Decay.** Both scores are multiplied by `0.5 ** (dt / points_half_life_s)`, where `dt` is the
-   measured time since the previous scan (factor 0.933 at 0.1 s and a 1.0 s half-life). Decay runs on
-   every scan, with or without an icon.
+1. **Decay, only on a scan that has an icon.** Both scores are multiplied by
+   `0.5 ** (dt / points_half_life_s)`, where `dt` is the measured time since the previous scan (factor
+   0.933 at 0.1 s and a 1.0 s half-life), so they follow the latest direction instead of piling up. A scan
+   with no icon changes nothing (below).
 2. **Crossing reset.** If this scan's contribution on an axis has the opposite sign to that axis's
    score, the axis is zeroed before the contribution is added. An icon that crosses the centre line
    means the nose has gone past the enemy on that axis.
@@ -533,19 +535,28 @@ The detector scans only the ring's bounding square (432 x 432 px at 1920 x 1200)
 
 | Event | Effect on the scores | Why |
 |-------|----------------------|-----|
-| Every scan | Decay by the half-life | Evidence fades unless the icon keeps confirming it |
+| A scan with an icon | Decay by the half-life, then the icon's points are added | The scores follow the latest direction |
+| A scan with no icon | Nothing: the scores hold | The aircraft keeps flying the direction the icons gave until the target appears (operator) |
 | Contribution opposite in sign to the axis score | That axis is zeroed, then the contribution is added | The nose has gone past the enemy on that axis |
 | The tracker reports a labelled target (`visible`) | Both zeroed, icon-held keys handed to the tracker | The tracker's error is better information |
 | ADR 148 dive recovery starts | Both zeroed, icon-held keys released | The recovery owns both axes |
 | Pursuit starts or ends, for any reason | Both zeroed, icon-held keys released | Points never carry over from one engagement or life to the next |
 
-**The points are memory; acting needs a current icon.** Icon steering holds keys only while an icon has
-been seen within `icon_coast_s` (0.3 s, three scans, enough to ride out a one-scan dropout). After that
-the icon-held keys are released at once, whatever the scores are. The scores keep decaying, and they are
-still used: an icon that reappears continues from them, and the blind search (below) turns toward the
-side they last pointed. The first draft let a saturated score keep the key held for 2.7 s after the icon
-vanished. Since the icon usually disappears when the enemy comes into view (evidence table), that coast
-would have pushed the nose past the enemy it had just found.
+**The points keep steering after the icon disappears, until the lock takes over (operator,
+2026-09-26).** "The icons are pointing to the general direction of where the target is, this is why the
+point system exists so it continues flying the direction of the icon until target appears on screen even
+when icon disappears. So, fly the direction icons indicated, then once locked on prioritize the locked-on
+target rather than using icons to dictate flight control and breaking the lock." So a scan with no icon
+neither fades nor clears the scores, and the keys they select stay held. What ends it is the tracker
+locking (the scores are zeroed and the tracker steers), a new icon (which updates them), the icon crossing
+the centre line, a dive recovery, or the pursuit ending. There is no timer.
+
+This reverses the review's "keys release 0.3 s after the last icon" (`icon_coast_s`, now removed). That
+rule assumed the jet would push past an enemy that had just come into view. In the operator's model the
+lock takes over at that point, and the first live pursuits agree: every one of 5 locks came 0.1-0.2 s
+after an icon pointing that way (Handover, below). What remains is the case where the target is in view
+but the tracker cannot lock it (no nameplate yet, or the gate rejects it): then the held direction keeps
+being flown. The dive guard and the -45 deg limit still bound a held nose-down.
 
 ### How the points drive the keys: the dominant-intent law
 
@@ -610,7 +621,7 @@ flowchart TD
     V -->|no| U[Update points from this scan]
     U --> W{Inside the wait after a lock}
     W -->|yes| WN[Neutral as today]
-    W -->|no| A{Icon seen in the last 0.3 s and an axis active}
+    W -->|no| A{An axis active}
     A -->|yes| IS[Dominant intent keys]
     A -->|no| R{Icon seen in the last 3 s}
     R -->|yes| N[Both axes neutral]
@@ -637,7 +648,8 @@ flowchart TD
 `wingman/icon_steering.py` holds all of it, with no key access: `find_ring_icons(frame, cfg)` returns a
 `RingIcon(x, y, area, w, h, angle_deg, hue)` for each icon in the ring's bounding square, largest first,
 and `IconPoints` holds the scores, the switches and the dominant-intent law. The pursuit loop calls them
-from `Controller._icon_shadow_tick` on every steering tick, after the dive guard has run, using the frame
+from `Controller._icon_rung` (before the roll decision) and `_icon_report` (after the dive guard) on every
+steering tick, using the frame
 it already captured. The tracker is not involved (the design's first placement, a `TargetTracker`
 method, would have put the scan under the tracker's lock for nothing).
 
@@ -661,10 +673,25 @@ method, would have put the scan under the tracker's lock for nothing).
      the direct test that the icon is the same enemy.
    - **Hue.** The distribution of accepted-icon hues, in particular any at 7-10 (afterburner).
    - The rung distribution: share of unlocked scans on `wait`, `icon`, `hold` and `blind`.
-2. **Pitch live** (`actuate: true`, `actuate_turn: false`). Only the vertical rungs act. The turn-dominant
-   rung stays in shadow. Pitch is where 76% of the icons point, and the dive guard and angle limit sit
-   in front of it.
-3. **Turn live.** Only after step 2 shows time to the first lock does not get worse. Measured with
+2. **Step 2a, wings level (added 2026-09-26, operator go-ahead).** `icon_steering.wings_level: true`: on
+   the `icon` and `hold` rungs the fixed left search roll is released and the wings stay level. Nothing
+   new is pressed, and the look-down taps run where the search roll would have run them, so a change in
+   `first_lock` or the recovery share can be put down to the roll alone. `wait` and `blind` keep
+   `roll_on_miss` unchanged. `ICONPTS` says `act=level` on each such tick.
+3. **Step 2b, pitch live** (`icon_steering.actuate_pitch: true`, added 2026-09-26 on the operator's
+   go-ahead after two 2a pursuits, so 2a's own effect was not measured). On the `icon` and `hold`
+   rungs the law's vertical intent holds pitch through `Controller.hold_pitch_for_icon`: `down` holds
+   NOSE_DOWN unless withheld (dive guard, a flight path at or past `icon_min_path_deg`, or no fresh
+   angle), `up` holds NOSE_UP, and `turn` or no intent leaves pitch neutral. The roll stays level (the
+   turn-dominant rung stays in shadow). **The look-down taps stop on those rungs** (operator: the icons
+   dictate the direction of flight, so the older look-down is not needed there) and run only on the
+   blind rung, the one vertical search when nothing gives a direction. `ICONPTS` says `act=level+down`
+   or `act=level+up` when a pitch key is held. Shipped with the length cap below.
+   **Length cap (same change):** `points_cap` now limits the length of the (turn, pitch) vector,
+   scaling both axes together, instead of each axis, which read every lower-left icon as 135 deg
+   (05:27 finding above). A consequence: the operator's example's slight left settles near -3 and never
+   switches on; the direction held is the icon's.
+4. **Turn live.** Only after step 2b shows time to the first lock does not get worse. Measured with
    `PURSUIT SUMMARY`'s `first_lock=` and lock share, against the pooled 5.8% locked-scan baseline
    (measured with the fixed left roll and 20 s pursuits, now uncapped), with a sample size reported for
    every figure.
@@ -693,10 +720,12 @@ For the shadow phase to answer:
    124 frames show no icon, 155 one and 20 two. Five of the six two-icon frames viewed show two red jet
    silhouettes on the ring (the sixth, before the colour rule changed, was a glare). This is why the
    chooser picks one icon and never averages.
-6. The half-life, thresholds, scale, cap and coast are named guesses, chosen to reproduce the operator's
-   example (5 and 1 points), make the major axis act in 0.3 s, and release within 0.3 s of losing the
-   icon.
-7. **Kill feed and the tracker (not acted on).** 10,319 icon-sized kill-feed blobs were logged by the
+6. The half-life, thresholds, scale and cap are named guesses, chosen to reproduce the operator's
+   example (5 and 1 points) and make the major axis act in 0.3 s.
+7. **How often is the target in view but unlockable while the held direction is flown?** That is the one
+   case where holding the points pushes past the enemy. Read it from runs of `rung=icon` with no icon on
+   screen, and what ended each (a lock, a new icon, a recovery).
+8. **Kill feed and the tracker (not acted on).** 10,319 icon-sized kill-feed blobs were logged by the
    tracker's `blob=` field, because the kill feed's second row reaches below the scoreboard exclusion
    zone (y 110 px): the reference frame has a red jet icon at (270, 120). The ring band keeps them out of
    this design, but the kill feed also carries red name text, which the nameplate gate could read as a
@@ -710,7 +739,7 @@ bindings and ADRs 069, 101, 107 and 148. What changed:
 | First draft | Revised | Why |
 |-------------|---------|-----|
 | Turn points held the roll key toward their side, together with any pitch key | Dominant-intent law: roll only with a pull, never with a push | A bank without a pull does not turn (ADR 101, measured); a bank with a push turns away from the bank. The first draft would have steered away from the reference icon's enemy after 1.6 s |
-| A saturated score kept its key held for up to 2.7 s after the icon vanished | Keys release 0.3 s after the last icon; the scores stay as memory | The icon is mostly absent when a target is on screen (32% of lock ticks against 64% unlocked), so the coast would overshoot the enemy just found |
+| A saturated score kept its key held for up to 2.7 s after the icon vanished | Keys release 0.3 s after the last icon; the scores stay as memory. **Reversed the same day by the operator:** the scores hold with no icon and keep steering until a lock (see "How the points reset") | The icon is mostly absent when a target is on screen (32% of lock ticks against 64% unlocked), so the coast would overshoot the enemy just found |
 | Icon steering pre-empted the wait after a lock | The wait keeps priority | A third of lock ticks show an icon, probably another enemy's |
 | The blind fallback kept the fixed left roll | It turns toward the side the points last showed | The fixed left roll was the thing to replace, and the scores already hold the last known side |
 | Hue 0-6 | Hue 0-15, hue logged | An orange ring icon was measured at hue 12-13 |
@@ -722,7 +751,8 @@ bindings and ADRs 069, 101, 107 and 148. What changed:
 ### Shadow stage (2026-09-26, iterate cycle)
 
 Wingman 1.8.11, game UI version not recorded. Implemented in the working tree, uncommitted:
-`wingman/icon_steering.py` (new), `Controller._icon_shadow_tick` and `_resume_delay` (shared with
+`wingman/icon_steering.py` (new), `Controller._icon_rung` / `_icon_report` (then one method,
+`_icon_shadow_tick`) and `_resume_delay` (shared with
 `roll_on_miss`, no behavior change), two `_EngagementTally` fields, `pursuit_mode.icon_steering` in
 config and schema. Shipped on, pressing nothing.
 
@@ -799,9 +829,184 @@ likelier than a coin flip.
 | 04:39:04 | 2,094 | 45% | 22% | 30% | 2% | 2% | 0 | match ended, 281 s, first lock 15.9 s |
 | 04:45:07 | 25 | 0 | 0 | 0 | 0 | 64% | 36% | shot down after 3.5 s |
 | 04:46:24 | 875 | 32% | 59% | 5% | 4% | 0% | 0 | ammo 6->0, 117 s, first lock 0.1 s |
+| 04:50:57 | 697 | 44% | 26% | 26% | 4% | 1% | 0 | ammo 6->0, 94 s, first lock 1.8 s |
+| 04:54:12 | 631 | 0 | 38% | 29% | 11% | 5% | 18% | match ended, 92 s, first lock 15.9 s |
+| 04:57:08 | 1,218 | 22% | 34% | 43% | 0% | 1% | 0 | ammo 6->0, 173 s, first lock 10.9 s |
+| 05:02:26 | 432 | 0 | 57% | 33% | 3% | 7% | 0 | ammo 6->0, 59 s, first lock 24.8 s |
 
 The dive recovery flew 32-45% of both long pursuits, from locked chases (the icon presses nothing).
-Nose-down on the icon rung was withheld by the guard 19 times in 607 and never by the angle rule.
+Nose-down on the icon rung was withheld by the guard 19 times in 607 and never by the angle rule over
+the first three; in the fourth, 25 of 73 were withheld as `angle-none` (no fresh flight-path angle), the
+first sign that "no angle, no push" can bite. Handover after four pursuits: 8 of 8 acquisitions within
+60 deg of the icon's direction (3, 10, 18, 19, 34, 45, 47 and 51 deg). After all seven pursuits of the 04:37 session
+(`logs/`, rotated at the next start; copy kept): **15 of 15** acquisitions within 60 deg of the icon's
+direction, each 0.1-0.2 s after an icon. The blind rung appeared once (04:54:12, 111 ticks, 18%): the
+only stretch of 3 s or more with no icon and no active points.
+
+**Session 04:37-05:04 (26 min 53 s, 5 missions, 7 pursuits).** Stopped with SIGTERM, not `z`: two synthetic
+`z` presses (05:02:19, 05:02:46) were never acknowledged, and wingman's key listener on `:3` logged
+`0 KeyPress events` in all 26 one-minute windows of the session, including wingman's own presses. The
+04:12 session (another launch) shows the same: 0 in all 18 windows. The 02:41 and 03:09 sessions counted
+presses in all 64 of theirs (59-171 a minute). So since the 04:12 launch the `:3` listener has heard
+nothing (measured). Inferred, not tested: the same listener detects manual takeover keys on `:3`
+(Enter, i/j/k/l, arrows), so a takeover typed into the game window would not have registered in either
+session. Cause not found; the relaunch below checks whether a fresh start clears it.
+
+**Relaunch 05:04:52 (pid 666486, hold-direction rule):** the `:3` listener counted 162 key presses in its
+first minute (05:05:56), so it hears again. It is intermittent, not cured: this start had a fresh `:3`
+(Xwayland started 05:04:28) and a fresh wingman, but so did the deaf 04:37 session (fresh Xwayland after
+the wedge). In that deaf session the `:0` listener still heard the operator's typing (`'y'`, `'o'`,
+`'enter'` at 04:45), and its startup lines match this session's exactly, so it fails silently. The
+per-minute `XKey[:3]` count is the only tell; a separate investigation (Design 009 / SAF-001), not this
+design's. The hold-direction rule is live in the shadow: from 05:05:35, `rung=icon icon=-` lines keep
+`intent=down keys=NOSE_DOWN` with the points held at +25.
+
+First pursuit on the hold rule (05:05:30-05:07:06, `end=external:match_ended dur=96.3s locked=58 (24%)
+first_lock=39.9s icon=158/327 icon_steer=39.3s`), open question 7 (measured): 8 stretches of flying the
+held direction with no icon on screen, 17.4 s in all (median 1.0 s, longest 8.4 s), every one nose-down,
+and **every one ended by the icon coming back, none by a lock**. So far a vanishing icon has been a
+dropout, not the enemy coming into view. Rungs: icon 281, recovery 232, track 139, blind 44, hold 2.
+
+**Whole 05:04 session on the hold rule (05:04:52-05:30:00, 10 pursuits, stopped with `z` at the lobby;
+log copy kept), measured:** 60 held-direction stretches, 82.4 s in all, median 0.4 s, longest 22.2 s;
+58 ended by the icon coming back, 1 by a lock, 1 by the pursuit ending. The `:3` key listener heard keys
+throughout (the 0-count alert never fired, and the synthetic `z` was acknowledged at once).
+
+The 05:27:56 pursuit is the case to design step 2b around: 75.6 s, **no lock at all**, 536 of 538 ticks
+on the icon rung, an icon on only 186 of them, held-direction stretches up to 22 s, and a death with
+2 missiles aboard (cause unclassified; the existing search and chase were flying, the shadow pressed
+nothing). Two things it shows:
+
+- **The per-axis cap loses the direction (measured, a design flaw for 2b).** A lower-left icon at
+  130-159 deg adds about (-4, +3) per scan; each axis settles at 15 times its addition, so both hit the
+  +-25 cap and the scores read (-25, +25) whatever the angle. The law then falls to "ties go to pitch"
+  and flips between `down` and `turn` on differences of a point or two (277 down, 202 turn, 57 up in this
+  pursuit). Fix before 2b: clamp the length of the (turn, pitch) vector to `points_cap`, scaling both
+  axes together, so the held direction stays the icon's direction. Not done in 2a, which does not use
+  intent.
+- **A held direction can outlast any icon for 20 s or more with no lock.** For 2a that is just level
+  wings. For 2b it would be a blind push or bank-and-pull that long, bounded only by the dive guard (which
+  withheld nose-down on 84 ticks here) and the -45 deg limit.
+
+**Step 2a live:** gate `make lint` clean, `make test` 2,279 passed, 1 failed (the known READY-crop test),
+35 skipped. Four new pursuit-loop tests: no ROLL_LEFT and no other steering press with the reference
+icon on screen, `act=level` on every tick; the look-down still runs; with a blank frame the blind rung
+still rolls left; with `wings_level: false` the icon frame still rolls left, so the tests tell the two
+settings apart. `make r1`, wingman pid 694139, started 05:30:33. Verdict for 2a, over enough pursuits
+to mean anything (dozens, given `first_lock` ranged 0.1-39.9 s): `first_lock` and the per-pursuit
+recovery share against the shadow sessions above, plus the share of unlocked ticks with `act=level`.
+
+First 2a pursuit (05:32:23-05:34:36, `dur=132.3s locked=78 (23%) first_lock=5.2s`, measured): no
+`left/search` roll hold in the whole session so far; 215 ticks at `act=level`; **recovery 56% of ticks**
+(563 of 1,004), above the 22-47% of the long shadow pursuits. One pursuit, so possibly noise. A
+mechanism to test rather than assume (inferred): with the wings level the look-down taps push the nose
+straight down instead of into a bank, so they may start more of the dives the recovery then flies.
+Read `LOOKDOWN` taps against the dive-recovery starts over the next pursuits.
+
+Second 2a pursuit (05:35:21-05:37:45, `dur=143.3s locked=87 (24%) first_lock=5.9s`): **recovery 0%**,
+icon rung 75%, track 23%; nose-down withheld as `angle-none` on 77 of 581 intent-down ticks and by the
+guard on 19. So 56% then 0%: no pattern yet. The look-down mechanism has no support so far (measured):
+of the session's three recovery starts, one had no look-down tap in the 15 s before, and the other two
+had their nearest tap 7.8 and 8.0 s earlier.
+
+All four 2a pursuits (05:30 session, measured; too few for a verdict): recovery share 56%, 0%, 0% and
+1%; `first_lock` 5.2, 5.9, 0.1 and 6.3 s; icon rung 21%, 75%, 66% and 21%. The long shadow pursuits ran
+22-47% recovery with `first_lock` 0.1-39.9 s. Step 2b replaced 2a after these four, on the operator's
+go-ahead, so 2a's effect stays unmeasured beyond them.
+
+**Terrain death under 2a (05:49:43-05:51:38, measured from the log):** 115 s, no lock, icon rung 552
+of 813 ticks with the icon mostly at 9 o'clock (158-178 deg, intent `turn`, so under 2b pitch would
+have stayed neutral). The nose-down inputs were the look-down taps: five from 05:49:43 to 05:49:53
+(path +15 to -17 deg), then the guard (ttg 57 s) pulled out at 70-73 m/s; more taps after 05:50:05;
+a 148 m/s descent at 3,719 m handed to the dive recovery at 05:50:37 for its 30 s; five more taps from
+05:51:07 (+19 to -14 deg); below the 3,000 m floor at 05:51:26; the guard read **36 s to ground** at
+05:51:29 and pulled out while the descent grew from 78 to 203 m/s; digits gone about 05:51:34; logged
+`cause=terrain`. The guard's time to ground counts from 0 m, and the terrain was far higher, the same
+gap Design 005 recorded for the 03:21 death (its recommendation, a hard chase minimum, is still an
+operator decision). What this says about 2b (inferred): 2b removes the look-down taps on the icon and
+hold rungs, which were the only nose-down inputs before both dives here, and adds icon nose-down only
+for a `down` intent with the guard clear and the path above -45 deg; the terrain gap bounds 2b exactly
+as it bounds the tracker's own chase. Not observable in this log: why the descent steepened to 203 m/s
+with no nose-down key held (no attitude trace).
+
+**Step 2b live:** gate `make lint` clean, `make test` 2,289 passed, 1 failed (the known READY-crop test),
+35 skipped. New tests: the length cap keeps a held direction on the icon's angle (100, 130, 144 and 159
+deg); in the pursuit loop the reference icon holds NOSE_DOWN with no left roll and no look-down tap,
+a -50 deg path, no fresh angle and a tripped guard each withhold it, the blind rung keeps the left roll
+and the look-down, and `actuate_pitch: false` presses no icon pitch. The 05:30 session (10 pursuits on
+2a) was stopped with `z` at the lobby (acknowledged at once) and copied. `make r1`, wingman pid 723979,
+started 05:55:25. Read per pursuit: `first_lock`, recovery share, `act=level+down` time, dive-recovery
+starts that follow an icon nose-down hold within 10 s, and `DIED ARMED ... cause=terrain`.
+
+**First 2b pursuit (05:56:40-05:58:54), measured:** the icon handover worked under control: from
+05:56:43.7 the icon pointed up and NOSE_UP was held 9.7 s, the target came into view and the tracker
+locked at 05:56:53.6 with its own first correction also nose-up (`err_y=-0.487`); `first_lock=12.8s`.
+**But held nose-down started dives.** Of the four icon NOSE_DOWN holds, two ran into the dive recovery:
+
+| Hold start | Held | At start | When the guard released it | Then | Recovery |
+|------------|------|----------|----------------------------|------|----------|
+| 05:57:47.3 | 6.2 s | 3,049 m, climbing +57 m/s | -146 m/s, ttg 21 s | -289 m/s at 2,698 m, below the floor | 05:57:55 |
+| 05:58:41.5 | 3.1 s | 4,002 m, -53 m/s | -110 m/s, ttg 35 s | -209 m/s at 3,493 m despite pull-out pulses | 05:58:49 |
+
+The -45 deg limit never tripped: the flight-path angle lags about 3 s, so the descent had built before a
+reading showed it. This is the lesson the look-down already records (ADR 068/069, "a held key overshoots
+on a lagging reading"). **Change (same cycle, reverted by the operator before it ran, see below):** icon nose-down is now one `down_pulse_s` (0.3 s) tap per
+new altitude sample, at most every `down_interval_s` (1.0 s), still behind the guard and the -45 deg
+limit; nose-up stays a hold. `ICONPTS` shows `act=level+downtap` on a tapped tick; `ICONDOWN:` logs each
+tap. Tests: nose-down is tapped and never held (`HOLD[pitch]: ... -> down` absent), and one altitude
+sample gets one tap at most.
+
+A third held push while the tap version was on the gate (measured): NOSE_DOWN held **14.3 s**
+(06:01:08.9-06:01:23.2, released only because no fresh angle arrived), -217 m/s at 3,508 m and the dive
+recovery at 06:01:26 with 16 s to ground, then `DIED ARMED ... cause=unclassified (no incoming alert this
+session)` at 06:01:42, 16 s later. Inferred: the held push caused the death (the log has no impact
+reading). Three of five held pushes in the session ended in the dive recovery. The session was given `z`
+at 06:01:45 so the held build stops at the next lobby.
+
+**Operator decision (2026-09-26 ~06:06): hold, not tap; pursuit over dive safety.** "You're attempting to tap
+nose down instead of holding? That won't work, tapping doesn't do anything meaningful ... wingman requires
+holding down the flight control keys. The dive recovery should be abandoned instead since it's preventing
+pursuit of the direction indicated by icons. We should prioritize pursuit via icons over dive recovery. Dive
+recovery should be redesigned in the future where predictive physics indicate at the planned trajectory we'll
+hit the ground; this is not something to tackle right now." The tap version was never run and is reverted:
+icon nose-down is a hold again. Asked what to switch off, the operator chose, for the whole pursuit: the dive
+recovery (ADR 148, amended), the dive guard, and the -45 deg limit (`icon_min_path_deg: null`); the
+no-fresh-angle rule stays (`require_fresh_angle: true`). New key `pursuit_mode.dive_safety: false` switches
+off the three pursuit-side mechanisms at once; the altitude-floor climb is unchanged. Consequence to watch
+(inferred from the measurements above): the held pushes that the recovery caught at 146-289 m/s will now run
+until a lock, an icon change, a missing angle reading, or the ground. Terrain deaths per pursuit are the
+number that says whether the trade pays.
+
+Gate: `make lint` clean; `make test` 2,294 passed, 1 failed (the known READY-crop test), 35 skipped. New
+tests: the icon holds nose-down (`HOLD[pitch]: None -> down (icon down`); with `dive_safety` off the guard
+never trips at 1,000 m falling 200 m/s (and does with it on); an emergency climb does not start inside a
+pursuit while a floor climb still does; with no path limit, no fresh angle still withholds the push and
+-80 deg does not. `make r1`, wingman pid 752193, started 06:20:16. Expected in the log: no `yielding pitch
+and roll` line, `dive recovery suppressed` where the recovery would have started, and `DIED ARMED` lines to
+count per pursuit.
+
+First two pursuits with `dive_safety` off (measured): no `yielding` line; `dive recovery suppressed` 5 and 2
+times.
+
+- 06:21:38, 101 s, `locked=108 (42%) first_lock=0.1s`, ended in a death (respawn, no `DIED ARMED` line, no
+  incoming missile detected). The pursuit fought down from 3,191 m to 728 m and back up. Then the icon
+  pointed down (64 deg) and **held NOSE_DOWN 4.6 s from about 1,000 m** (06:23:07.9-06:23:12.5). The icon
+  swung right, the intent became `turn` and pitch went neutral (turn is still shadow), and with nothing
+  pulling out the descent reached 270 m/s at 928 m, 3 s to ground by the 0 m count, before the respawn.
+  Inferred: a terrain death started by the icon's nose-down hold. It is the case a trajectory prediction
+  against real terrain would catch.
+- 06:24:09, 46 s, `locked=50 (42%) first_lock=23.9s ammo=2->0`: all missiles fired, alive.
+- 06:26:00 (about), 14 s, match ended, no icon.
+- 06:27:50, 37 s, `locked=25 (26%) first_lock=3.7s`, ended in a death (no incoming missile detected). The
+  icon **held NOSE_DOWN 6.1 s from about 1,940 m** (06:28:04.4-06:28:10.5): 169-197 m/s down to 1,105 m.
+  Then the icon pulled up 2 s, the tracker locked, and the jet was climbing at +43 m/s at 773 m about
+  06:28:21. The altitude went unreadable at 06:28:25. Inferred: terrain, after the icon-started dive.
+
+**Tally so far with `dive_safety` off:** of three pursuits long enough to count, two ended in a likely
+terrain death, each after an icon nose-down hold of 4.6-6.1 s started below about 2,000 m. The
+pursuit was already low in both because nothing climbs it back above the floor (the floor climb is only a
+nudge in a pursuit, ADR 147), and the icon keeps pointing down because the fight is below. Too few for a
+rate; the operator's call whether to keep collecting.
 
 **Tests:** `tests/test_icon_steering.py` (detector on the four real frames and on synthetic shapes,
 including afterburner hue and a dim orange patch; the operator's example scan by scan; crossing reset,

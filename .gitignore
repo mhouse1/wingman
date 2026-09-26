@@ -3,8 +3,12 @@ tests/test-output/
 # Test-performance history (performance.json snapshots appended by `make wrelease`).
 # Local to veda; charts are generated from this file, never from git history.
 tests/perf-history/
-# Runtime performance data — accumulates between releases; only release/ is committed
+# Runtime performance data — accumulates between releases
 docs/performance/current/
+# ADR 100 D8: the release baseline (run_*.json + runtime-performance-history.csv)
+# lives on veda only. Veda is the one host that generates performance reports;
+# `make wrelease` still promotes current/ into it, it just never commits it.
+docs/performance/release/
 # Ignore Python bytecode cache directories and compiled files
 __pycache__/
 **/__pycache__/

@@ -631,9 +631,13 @@ SCHEMA = Section(
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,
             "search_look_down_min_deg": _num(-90, 0),
+            "dive_safety": BOOL,   # operator, 2026-09-26
             # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
             "icon_steering": Section(children={
                 "enabled": BOOL,
+                "wings_level": BOOL,
+                "actuate_pitch": BOOL,
+                "require_fresh_angle": BOOL,
                 "ring_centre_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
                 "ring_radius_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
                 "area_px": Leaf(types=(list,), item_types=(int,), length=2),
@@ -648,7 +652,6 @@ SCHEMA = Section(
                 "points_cap": _num(0),
                 "act_pts": _num(0),
                 "release_pts": _num(0),
-                "icon_coast_s": SECONDS,
                 "icon_min_path_deg": Leaf(types=NUMBER, minimum=-90, maximum=0,
                                           allow_none=True),
                 "blind_search_after_s": SECONDS,

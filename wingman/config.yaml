@@ -1268,17 +1268,39 @@ pursuit_mode:
   search_look_down_pulse_s: 0.15
   search_look_down_interval_s: 1.0
   search_look_down_min_deg: -20
+  # Operator, 2026-09-26: "prioritize pursuit via icons over dive recovery". false
+  # switches off, for the whole pursuit (icons and the tracker's locked chase): the
+  # dive guard above (no withheld nose-down, no pull-out pulses), ADR 148's recovery
+  # flying through the pursuit, and the ADR 086 emergency climb starting inside one.
+  # The dive recovery is to be redesigned around a predicted trajectory. The
+  # altitude-floor climb is untouched. true restores all three.
+  dive_safety: false
   # HLDD 015 Icon-Directed Search (2026-09-26), SHADOW STAGE: each steering tick
   # finds the game's red ring icon (an arrowhead on a fixed ring around the screen
   # centre pointing at an off-screen enemy), adds points to a nose-down/up and a
   # left/right score, and logs the keys the design's law would hold as `ICONPTS:`,
-  # plus `icon=` / `icon_steer=` on PURSUIT SUMMARY. It presses nothing: the search
-  # roll and look-down above keep flying. enabled: false removes the lines.
+  # plus `icon=` / `icon_steer=` on PURSUIT SUMMARY. It presses nothing; with
+  # wings_level (step 2a) it also releases the search roll while an icon or active
+  # points give a direction, and the look-down taps carry on. enabled: false
+  # removes the lines and restores the search roll everywhere.
   # Ring geometry measured on 113,918 logged icons (centre 959.7, 599.8 of
   # 1920 x 1200, radius 193.9 px, about 4 px spread); orange counts as red and the
   # -45 deg dive limit are operator decisions; the rest are named guesses.
   icon_steering:
     enabled: true
+    # Step 2a (2026-09-26): on the icon and hold rungs, release the fixed left
+    # search roll and keep the wings level. Presses nothing new; the look-down
+    # taps carry on as before. false = pure shadow.
+    wings_level: true
+    # Step 2b (2026-09-26, operator go-ahead): the law's vertical intent acts on
+    # the icon and hold rungs: "down" holds NOSE_DOWN (withheld by the dive
+    # guard, a path at or past icon_min_path_deg, or no fresh angle), "up" holds
+    # NOSE_UP, roll level; "turn" stays in shadow. The look-down taps then run
+    # only on the blind rung. false = step 2a.
+    actuate_pitch: true
+    # No icon nose-down without a fresh flight-path angle (kept when the -45 deg
+    # limit below was removed, operator 2026-09-26).
+    require_fresh_angle: true
     ring_centre_pct: [0.5, 0.5]
     ring_radius_pct: [0.14, 0.18]   # of frame height: 168-216 px at 1200
     area_px: [150, 2500]
@@ -1289,12 +1311,11 @@ pursuit_mode:
     sat_min: 110
     val_min: 200
     points_scale: 5                 # reference icon adds nose down 5, left 1
-    points_half_life_s: 1.0
+    points_half_life_s: 1.0         # fades only while icons keep coming; holds when none is seen
     points_cap: 25
     act_pts: 10
     release_pts: 4
-    icon_coast_s: 0.3               # keys only while an icon is this recent
-    icon_min_path_deg: -45          # no icon-led nose-down at or past this path angle
+    icon_min_path_deg: null         # operator 2026-09-26: no path-angle limit (was -45)
     blind_search_after_s: 3.0
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted

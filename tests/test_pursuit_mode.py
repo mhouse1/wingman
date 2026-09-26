@@ -90,7 +90,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 eject_max_s=0.2, heatdive_enabled=False, ammo_zero_grace_s=0.0,
                 sustained_hold_enabled=False, search_resume_delay_s=0.0,
                 empty_confirm_reads=3, search_resume_centre_err=0.15,
-                search_resume_centre_delay_s=0.0, icon_steering=None):
+                search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -130,6 +130,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 "search_resume_centre_delay_s": search_resume_centre_delay_s,
                 "empty_confirm_reads": empty_confirm_reads,
                 **({"icon_steering": icon_steering} if icon_steering is not None else {}),
+                **({"dive_safety": dive_safety} if dive_safety is not None else {}),
             },
         ),
     )
@@ -873,3 +874,217 @@ def test_icon_shadow_off_logs_nothing_and_leaves_the_summary_alone(monkeypatch, 
     _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_MISS])
     assert lines == []
     assert " icon=" not in _summary_lines(caplog, "PURSUIT")[0]
+
+
+# ---------------------------------------------------------------------------
+# HLDD 015 rollout step 2a (2026-09-26): wings level instead of the fixed left
+# roll while an icon or active points give a direction. Nothing new pressed.
+# ---------------------------------------------------------------------------
+
+class _BlankCapture(_FrameCapture):
+    """A real frame with no ring icon on it."""
+
+    def __init__(self):
+        super().__init__()
+        import numpy as np
+        self.frame = np.zeros_like(self.frame)
+
+
+def _step_2a(monkeypatch, caplog, capture, wings_level=True):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=capture,
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0,
+                       sustained_hold_enabled=True,
+                       icon_steering={"enabled": True, "wings_level": wings_level})
+    ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
+    look_downs = []
+    monkeypatch.setattr(ctrl, "_search_look_down", lambda: look_downs.append(1) or False)
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(0.9)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("ICONPTS:")]
+    return _keys(ctrl), lines, look_downs
+
+
+def test_step_2a_keeps_the_left_roll_off_while_an_icon_is_on_the_ring(monkeypatch, caplog):
+    keys, lines, _ = _step_2a(monkeypatch, caplog, _FrameCapture())
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert not [k for a, k in keys if k in _STEERING_KEYS and a == "key_press"]
+    assert lines and all("act=level" in ln for ln in lines), lines
+
+
+def test_step_2a_keeps_the_look_down_taps(monkeypatch, caplog):
+    """Only the roll changes: the look-down runs where the search roll would have."""
+    _keys_, _lines, look_downs = _step_2a(monkeypatch, caplog, _FrameCapture())
+    assert look_downs
+
+
+def test_step_2a_still_rolls_left_when_no_icon_has_been_seen(monkeypatch, caplog):
+    keys, lines, look_downs = _step_2a(monkeypatch, caplog, _BlankCapture())
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert lines and all("rung=blind" in ln and "act=-" in ln for ln in lines)
+    assert look_downs
+
+
+def test_pure_shadow_still_rolls_left_with_an_icon(monkeypatch, caplog):
+    keys, lines, _ = _step_2a(monkeypatch, caplog, _FrameCapture(), wings_level=False)
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert lines and all("act=-" in ln for ln in lines)
+
+
+# ---------------------------------------------------------------------------
+# HLDD 015 rollout step 2b (2026-09-26): the icon's vertical intent holds pitch
+# on the icon and hold rungs; the look-down taps run on the blind rung only.
+# ---------------------------------------------------------------------------
+
+class _TelemetryAnalyzer(_AnalyzerStub):
+    """Ammo stub plus a REAL TelemetrySnapshot, so the icon's nose-down tap runs
+    its own sample check. `new_samples` stamps each call with a new altitude
+    timestamp; False repeats one sample."""
+
+    def __init__(self, new_samples=True):
+        super().__init__(ammo=2)
+        self.new_samples = new_samples
+        self.calls = 0
+
+    def get_telemetry(self):
+        from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
+        self.calls += 1
+        now = time.time()
+        sample_ts = now if self.new_samples else 1000.0
+        return TelemetrySnapshot(
+            speed=TelemetrySignal(value=900, stable_value=900.0, ts=now, rate=0.0),
+            altitude=TelemetrySignal(value=4000, stable_value=4000.0, ts=sample_ts, rate=0.0),
+            taken_at_s=now, stale_after_s=6.0)
+
+
+def _step_2b(monkeypatch, caplog, capture, *, angle=-5.0, guard=None, actuate_pitch=True,
+             analyzer=None):
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer or _TelemetryAnalyzer(), capture=capture,
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0,
+                       sustained_hold_enabled=True,
+                       icon_steering={"enabled": True, "wings_level": True,
+                                      "actuate_pitch": actuate_pitch})
+    ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
+    look_downs = []
+    monkeypatch.setattr(ctrl, "_search_look_down", lambda: look_downs.append(1) or False)
+    monkeypatch.setattr(ctrl, "_telemetry_path_angle_deg", lambda: angle)
+    monkeypatch.setattr(ctrl, "_pursuit_dive_guard", lambda target_visible=False: guard)
+    monkeypatch.setattr(ctrl, "_dive_guard_pullout", lambda: None)
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(0.9)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("ICONPTS:")]
+    return _keys(ctrl), lines, look_downs
+
+
+def test_step_2b_holds_nose_down_toward_the_reference_icon(monkeypatch, caplog):
+    """Held, not tapped: the flight keys only act when held (operator, 2026-09-26)."""
+    keys, lines, look_downs = _step_2b(monkeypatch, caplog, _FrameCapture())
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", NOSE_UP_KEY) not in keys
+    assert look_downs == [], "the icon owns pitch: no look-down taps on the icon rung"
+    assert any("act=level+down" in ln for ln in lines), lines
+    assert any(r.getMessage().startswith("HOLD[pitch]: None -> down (icon down")
+               for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# pursuit_mode.dive_safety (operator, 2026-09-26): pursuit via the icons comes
+# before dive safety, for the whole pursuit.
+# ---------------------------------------------------------------------------
+
+def _low_and_falling(ctrl):
+    from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
+
+    class _Low(_AnalyzerStub):
+        def get_telemetry(self):
+            now = time.time()
+            return TelemetrySnapshot(
+                speed=TelemetrySignal(value=900, stable_value=900.0, ts=now, rate=0.0),
+                altitude=TelemetrySignal(value=1000, stable_value=1000.0, ts=now, rate=-200.0),
+                taken_at_s=now, stale_after_s=6.0)
+    ctrl._analyzer = _Low()
+
+
+def test_dive_guard_trips_when_dive_safety_is_on(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=True)
+    ctrl._pursuit_dive_guard_ttg_s = 60.0
+    _low_and_falling(ctrl)
+    assert ctrl._pursuit_dive_guard(target_visible=False)
+
+
+def test_dive_guard_never_trips_with_dive_safety_off(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=False)
+    ctrl._pursuit_dive_guard_ttg_s = 60.0
+    _low_and_falling(ctrl)
+    assert ctrl._pursuit_dive_guard(target_visible=False) is None
+    assert ctrl._dive_guard_ttg_tripped is False
+
+
+def test_emergency_climb_does_not_start_inside_a_pursuit_with_dive_safety_off(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=False)
+    ctrl._pursuing.set()
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(target_alt=5000.0, emergency=True)
+    assert not ctrl._climbing.is_set()
+    assert any("dive recovery suppressed" in r.getMessage() for r in caplog.records)
+
+
+def test_altitude_floor_climb_still_starts_inside_a_pursuit(monkeypatch):
+    """Only the dive recovery was switched off; the floor climb is untouched."""
+    ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=False)
+    ctrl._pursuing.set()
+    ctrl.climb_mode(target_alt=5000.0, max_s=0.2, emergency=False)
+    try:
+        assert ctrl._climbing.is_set()
+    finally:
+        ctrl._climb_stop.set()
+        if ctrl._climb_thread is not None:
+            ctrl._climb_thread.join(timeout=3.0)
+
+
+def test_no_path_limit_but_still_no_push_without_a_fresh_angle(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True,
+                      icon_steering={"enabled": True, "icon_min_path_deg": None,
+                                     "require_fresh_angle": True})
+    monkeypatch.setattr(ctrl, "_telemetry_path_angle_deg", lambda: None)
+    assert ctrl._icon_down_withheld(None) == "angle-none"
+    monkeypatch.setattr(ctrl, "_telemetry_path_angle_deg", lambda: -80.0)
+    assert ctrl._icon_down_withheld(None) == "-", "no -45 deg limit any more"
+
+
+def test_step_2b_withholds_nose_down_at_the_path_angle_limit(monkeypatch, caplog):
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _FrameCapture(), angle=-50.0)
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert any("intent=down" in ln and "withheld=angle " in ln for ln in lines), lines
+
+
+def test_step_2b_withholds_nose_down_without_a_fresh_angle(monkeypatch, caplog):
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _FrameCapture(), angle=None)
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert any("withheld=angle-none" in ln for ln in lines), lines
+
+
+def test_step_2b_withholds_nose_down_when_the_dive_guard_trips(monkeypatch, caplog):
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _FrameCapture(), guard="ttg 40s")
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert any("withheld=guard" in ln for ln in lines), lines
+
+
+def test_step_2b_blind_rung_keeps_the_left_roll_and_the_look_down(monkeypatch, caplog):
+    keys, lines, look_downs = _step_2b(monkeypatch, caplog, _BlankCapture())
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert look_downs
+
+
+def test_step_2a_setting_presses_no_icon_pitch(monkeypatch, caplog):
+    keys, _lines, look_downs = _step_2b(monkeypatch, caplog, _FrameCapture(),
+                                        actuate_pitch=False)
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert look_downs

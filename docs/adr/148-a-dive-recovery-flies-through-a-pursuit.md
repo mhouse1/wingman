@@ -112,6 +112,27 @@ not built, and this ADR's decision is unchanged until the operator chooses.
   than 0.3 s, the `yielding pitch and roll` line, and no chase ending in an impact. `make sr` counts deaths.
 - The level-wings assumption above, and whether a 30 s cap is enough from 1000+ KPH at 3000 m.
 
+## Amendment (2026-09-26): switched off inside a pursuit, by the operator
+
+After the first live sessions of HLDD 015's icon-directed pursuit, the operator: "the dive recovery should be
+abandoned instead since its preventing pursuit of the direction indicated by icons. we should prioritize pursuit
+via icons over dive recovery. dive recovery should be redesigned in the future where predictive physics indicate
+at the planned trajectory we'll hit the ground this is not something to tackle right now." Asked which safety
+mechanisms that covers, the operator chose, for the whole pursuit (icons and the tracker's locked chase): this
+ADR's recovery flying through the pursuit, the review 018 dive guard (withheld nose-down and pull-out pulses),
+and HLDD 015's -45 deg icon path limit; the no-fresh-angle rule for the icon's nose-down stays.
+
+`pursuit_mode.dive_safety: false` (new key, shipped false; true restores the old behaviour) makes the pursuit's
+dive guard return nothing, removes the flying-through from decision 1 (the hold never enters recovery mode
+inside a pursuit), and stops an ADR 086 emergency climb from starting while a pursuit flies, so the chase is
+the only writer of pitch and roll rather than meeting a 0.3 s nudge every tick. The altitude-floor climb
+(ADR 147) was not in scope and is unchanged. Outside a pursuit nothing changes.
+
+What the sessions of 2026-09-26 measured, for the redesign: this recovery flew 22-56% of the long pursuits,
+and it did not prevent the terrain deaths recorded in HLDD 015, because the time to ground it and the dive
+guard use counts from 0 m (the 05:51 death: 36 s to ground about 5 s before impact). A trajectory-based
+prediction against the real terrain height is what the operator asks for next.
+
 ## References
 
 ADR 086 (dive recovery on time to ground), ADR 137 (emergency climb), ADR 141 (altitude floor), ADR 143 (died-armed

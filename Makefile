@@ -209,35 +209,39 @@ docker-test: docker-build
 docker-shell: docker-build
 	$(DOCKER_RUN) -it $(DOCKER_IMAGE) bash
 
+# Performance reports are generated on veda only (ADR 100 D8): both histories
+# they read - tests/perf-history/ and docs/performance/release/ - are untracked
+# and exist nowhere else, so these targets carry require-veda.
+
 # Generate CSV with performance trends from the local history
 # (tests/perf-history/, untracked - lives on veda only)
-test-perf-csv:
+test-perf-csv: require-veda
 	$(PYTHON_RUN) tests/performance_tracking.py --csv
 
 # Generate HTML visualization of performance trends
-test-perf-chart:
+test-perf-chart: require-veda
 	$(PYTHON_RUN) tests/performance_tracking.py --chart
 
 # Generate runtime aggregate CSV from release run_*.json
-runtime-perf-csv-release:
+runtime-perf-csv-release: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode release --csv
 
 # Generate runtime aggregate CSV from release + current run_*.json
-runtime-perf-csv-preview:
+runtime-perf-csv-preview: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --csv
 
 # Generate runtime release artifacts (release CSV + release chart)
-runtime-perf-release:
+runtime-perf-release: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode release --all
 
 # Generate runtime preview artifacts (preview CSV + preview chart)
-runtime-perf-preview:
+runtime-perf-preview: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --all
 
 # Run full workflow: test → CSV → chart
 # performance.json is not tracked in git; `make wrelease` appends it to the local
 # history in tests/perf-history/. View trends in tests/test-output/performance-trends.html
-test-perf: test test-perf-csv test-perf-chart
+test-perf: require-veda test test-perf-csv test-perf-chart
 	@echo ""
 	@echo "✅ Performance test complete!"
 	@echo "📊 View trends: tests/test-output/performance-trends.html"
@@ -283,15 +287,18 @@ tree:
 TP_GATES := lint test reqs-gate rr-path1-gate rr-live-path1-gate leak-check-gate
 
 # ADR 100 D7: test_screenshots is no longer tracked in git — the corpus lives
-# on veda only, and rr-path1-gate/rr-live-path1-gate/ocr read from it. Listed
+# on veda only, and rr-path1-gate/rr-live-path1-gate/ocr read from it.
+# ADR 100 D8: the performance release baseline is veda-only too, so every
+# report target and wrelease carry this guard as well. Listed
 # as the FIRST prerequisite so it fails before any of $(TP_GATES) runs;
 # putting this check in tp's own recipe body would not help, since make runs
 # prerequisites before a target's recipe regardless of where a check sits in
 # that recipe.
 require-veda:
 	@if [ "$$(hostname)" != "veda" ]; then \
-		echo "ERROR: make tp/tp-full need the full test_screenshots corpus,"; \
-		echo "which lives only on veda (ADR 100 D7). Refusing to run on host"; \
+		echo "ERROR: this target needs data that lives only on veda - the"; \
+		echo "test_screenshots corpus (ADR 100 D7) or the performance history"; \
+		echo "and release baseline (ADR 100 D8). Refusing to run on host"; \
 		echo "'$$(hostname)'. Use 'make test' for the portable, corpus-free gate."; \
 		exit 1; \
 	fi
@@ -343,9 +350,11 @@ clean:
 # Record performance.json to the local history, commit the version, then regenerate charts
 # Assumes you've already updated the version in wingman/main.py and ran make test-perf or make tp,
 # otherwise performance.json won't reflect the latest changes. The test-performance history is
-# local-only (tests/perf-history/, untracked) - it is never committed.
-# once you ran wrelease you can then run make p to push the commit with the new version and performance data to GitHub
-wrelease:
+# local-only (tests/perf-history/, untracked) - it is never committed. The runtime
+# baseline in docs/performance/release/ is local to veda as well (ADR 100 D8):
+# wrelease promotes current/ into it but never stages it.
+# once you ran wrelease you can then run make p to push the commit with the new version to GitHub
+wrelease: require-veda
 	@echo "ADR 092 leak gate (release: insufficient data blocks too)…"
 	@$(PYTHON_RUN) scripts/leak-check.py $(LEAK_ARGS); rc=$$?; \
 	if [ $$rc -ne 0 ]; then \
@@ -372,7 +381,6 @@ wrelease:
 	git add wingman/main.py
 	mkdir -p docs/performance/release
 	cp docs/performance/current/run_*.json docs/performance/release/ 2>/dev/null; true
-	git add docs/performance/release/
 	rm -f docs/performance/current/run_*.json
 	version=$$(sed -n 's/^WINGMAN_VERSION = "\([^"]*\)"/\1/p' wingman/main.py); \
 	details=$$(sed -n 's/^WINGMAN_VERSION_DETAILS = "\([^"]*\)"/\1/p' wingman/main.py); \

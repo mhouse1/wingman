@@ -71,7 +71,7 @@ make ocr            # real-OCR integration tests (PATH1 + PATH2)
 
 **Release workflow** (user-invoked only — see the git rule at the top of this file):
 ```bash
-make wrelease   # commit version + performance artifacts, regenerate charts
+make wrelease   # veda only: commit version, promote run JSONs locally, regenerate charts
 make p "msg"    # stage, commit, push
 ```
 
@@ -109,7 +109,7 @@ Manual takeover (`i/j/k/l` keys) moves to `GAME_BATTLE_MANUAL`. `GAME_STARTING_S
 3. `make rr-live-path1-gate` — `live_screen_presenter.py` shows timed screenshots on-screen while the real monitor-capture path runs; validates round-trip timing.
 4. `make ocr` — real-OCR tests on archived game screenshots in `test_screenshots/integration_test/` (slow, skipped if screenshots are all-black placeholders).
 
-**Performance workflow:** Each session writes `docs/performance/current/run_*.json`. `make wrelease` copies them to `docs/performance/release/`, commits, and regenerates HTML charts. The performance regression check in `PerformanceTracker` compares the current session against the release baseline using the thresholds in `config.yaml`.
+**Performance workflow:** Each session writes `docs/performance/current/run_*.json`. `make wrelease` copies them to `docs/performance/release/`, commits the version bump, and regenerates HTML charts. `release/` is untracked and lives on VEDA only (ADR 100 D8); VEDA is the only host that generates performance reports, and the report targets and `wrelease` refuse to run elsewhere (`require-veda`). The performance regression check in `PerformanceTracker` compares the current session against the release baseline using the thresholds in `config.yaml`.
 
 ---
 

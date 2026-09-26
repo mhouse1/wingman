@@ -9,13 +9,18 @@ icon-sized blobs: the ring is centred on the frame centre (959.7, 599.8 of
 Each scan adds points to two signed scores from the icon's direction
 (`IconPoints.scan`), the operator's design: the reference frame
 (`GAME_BATTLE_ENEMY_AT_NOSE_DOWN.png`) adds nose down 5, left 1. The scores
-decay, reset when the icon crosses the centre line, and drive a per-axis
-hysteresis switch. `IconPoints.intent` turns the switches into the keys the
+fade while icons keep coming, so they follow the latest direction, and hold
+still while no icon is on screen: the aircraft keeps flying the direction the
+icons gave until the target appears and the tracker locks (operator,
+2026-09-26). They reset on a lock, a dive recovery, the icon crossing the
+centre line and the end of the pursuit, and drive a per-axis hysteresis switch. `IconPoints.intent` turns the switches into the keys the
 dominant-intent law would hold: a push only with the wings level, a roll only
 with a pull (ADR 101: a bank without a pull does not turn the flight path).
 
-Shadow stage: nothing here presses a key. The pursuit loop logs what the law
-would hold (`ICONPTS`) while the existing search keeps flying.
+Nothing here presses a key. The pursuit loop logs what the law would hold
+(`ICONPTS`); with `wings_level` (rollout step 2a) it stops the fixed left
+search roll while an icon or active points say where the enemy is, and with
+`actuate_pitch` (step 2b) it also holds the law's vertical intent.
 """
 
 from __future__ import annotations
@@ -41,6 +46,20 @@ class IconSteeringConfig:
     ring geometry is measured, everything else is a named guess."""
 
     enabled: bool = False
+    # HLDD 015 rollout step 2a: while an icon is on the ring or the points are
+    # active, keep the wings level instead of the fixed left search roll.
+    # Presses nothing new; off keeps the pure shadow.
+    wings_level: bool = False
+    # Rollout step 2b: the law's vertical intents act. "down" holds NOSE_DOWN
+    # and "up" NOSE_UP, with the roll level; "turn" stays in shadow. Implies
+    # wings_level, and replaces the look-down taps wherever an icon or active
+    # points steer. Nose-down is withheld by the dive guard, a flight path at
+    # or past icon_min_path_deg, or no fresh angle.
+    actuate_pitch: bool = False
+    # No icon nose-down without a fresh flight-path angle reading, whether or
+    # not icon_min_path_deg is set (operator, 2026-09-26, kept when the -45 deg
+    # limit was removed).
+    require_fresh_angle: bool = True
     ring_centre_pct: tuple = (0.5, 0.5)
     # Fractions of the frame height: 168-216 px at 1200 px against 193.9 +-4.
     ring_radius_pct: tuple = (0.14, 0.18)
@@ -64,7 +83,6 @@ class IconSteeringConfig:
     points_cap: float = 25.0
     act_pts: float = 10.0
     release_pts: float = 4.0
-    icon_coast_s: float = 0.3
     # Operator, 2026-09-26: no icon-led nose-down at or past -45 deg.
     icon_min_path_deg: "float | None" = -45.0
     blind_search_after_s: float = 3.0
@@ -76,6 +94,9 @@ class IconSteeringConfig:
         min_path = cfg.get("icon_min_path_deg", d.icon_min_path_deg)
         return cls(
             enabled=bool(cfg.get("enabled", d.enabled)),
+            wings_level=bool(cfg.get("wings_level", d.wings_level)),
+            actuate_pitch=bool(cfg.get("actuate_pitch", d.actuate_pitch)),
+            require_fresh_angle=bool(cfg.get("require_fresh_angle", d.require_fresh_angle)),
             ring_centre_pct=tuple(float(v) for v in cfg.get("ring_centre_pct", d.ring_centre_pct)),
             ring_radius_pct=tuple(float(v) for v in cfg.get("ring_radius_pct", d.ring_radius_pct)),
             area_px=tuple(int(v) for v in cfg.get("area_px", d.area_px)),
@@ -90,7 +111,6 @@ class IconSteeringConfig:
             points_cap=float(cfg.get("points_cap", d.points_cap)),
             act_pts=float(cfg.get("act_pts", d.act_pts)),
             release_pts=float(cfg.get("release_pts", d.release_pts)),
-            icon_coast_s=float(cfg.get("icon_coast_s", d.icon_coast_s)),
             icon_min_path_deg=None if min_path is None else float(min_path),
             blind_search_after_s=float(cfg.get("blind_search_after_s", d.blind_search_after_s)),
         )
@@ -224,31 +244,47 @@ class IconPoints:
                                              _angle_gap(ic.angle_deg, -90.0)))
 
     def scan(self, icons: "list[RingIcon]") -> "tuple[RingIcon | None, tuple[int, int]]":
-        """One scan: decay, choose, crossing reset, add, clamp, switches.
-        Returns the chosen icon and the points it added."""
+        """One scan: choose, then (only when there is an icon) decay, crossing
+        reset, add, clamp; then the switches. Returns the chosen icon and the
+        points it added.
+
+        A scan with no icon changes nothing: the scores hold the last direction
+        (operator, 2026-09-26: "it continues flying the direction of the icon
+        until target appears on screen even when icon disappears"). Decay runs
+        only while icons keep coming, over the time since the previous scan, so
+        the scores follow the latest direction instead of piling up."""
         now = self._clock()
-        if self._last_scan_ts is not None and self._cfg.points_half_life_s > 0:
-            factor = 0.5 ** (max(0.0, now - self._last_scan_ts) / self._cfg.points_half_life_s)
-            self.turn_pts *= factor
-            self.pitch_pts *= factor
+        prev_scan_ts = self._last_scan_ts
         self._last_scan_ts = now
         icon = self.choose(icons)
         add = (0, 0)
         if icon is not None:
+            if prev_scan_ts is not None and self._cfg.points_half_life_s > 0:
+                factor = 0.5 ** (max(0.0, now - prev_scan_ts) / self._cfg.points_half_life_s)
+                self.turn_pts *= factor
+                self.pitch_pts *= factor
             self.last_icon_ts = now
             add = self.contribution(icon)
-            cap = self._cfg.points_cap
-            self.turn_pts = self._add(self.turn_pts, add[0], cap)
-            self.pitch_pts = self._add(self.pitch_pts, add[1], cap)
+            self.turn_pts = self._add(self.turn_pts, add[0])
+            self.pitch_pts = self._add(self.pitch_pts, add[1])
+            # Cap the length of the (turn, pitch) vector, not each axis: a per-axis
+            # cap filled both axes to +-25 on a lower-left icon, so every angle read
+            # 135 deg (measured, 2026-09-26 05:27 pursuit). Scaling both together
+            # keeps the held direction the icon's direction.
+            length = math.hypot(self.turn_pts, self.pitch_pts)
+            if length > self._cfg.points_cap > 0:
+                scale = self._cfg.points_cap / length
+                self.turn_pts *= scale
+                self.pitch_pts *= scale
         self.turn_active = self._switch(self.turn_active, self.turn_pts)
         self.pitch_active = self._switch(self.pitch_active, self.pitch_pts)
         return icon, add
 
     @staticmethod
-    def _add(score: float, add: int, cap: float) -> float:
+    def _add(score: float, add: int) -> float:
         if add and _sign(add) == -_sign(score):
             score = 0.0      # the icon crossed the centre line: the nose went past
-        return max(-cap, min(cap, score + add))
+        return score + add
 
     def _switch(self, active: int, score: float) -> int:
         if active and (_sign(score) != active or abs(score) < self._cfg.release_pts):
@@ -257,19 +293,14 @@ class IconPoints:
             active = _sign(score)
         return active
 
-    def icon_fresh(self) -> bool:
-        return (self.last_icon_ts is not None
-                and self._clock() - self.last_icon_ts <= self._cfg.icon_coast_s)
-
     def icon_seen_within(self, seconds: float) -> bool:
         return self.last_icon_ts is not None and self._clock() - self.last_icon_ts <= seconds
 
     def intent(self) -> "tuple[str, tuple[str, ...]]":
         """What the dominant-intent law would hold now: ("down", ...), ("up",
-        ...), ("turn", ...) or ("none", ()). Acting needs a current icon (within
-        icon_coast_s); the scores alone are memory. Ties go to pitch."""
-        if not self.icon_fresh():
-            return "none", ()
+        ...), ("turn", ...) or ("none", ()). It acts on the scores whether or not
+        an icon is on screen this scan; the lock (which zeroes them) is what
+        takes over. Ties go to pitch."""
         roll = ROLL_LEFT if self.turn_active < 0 else ROLL_RIGHT
         if self.pitch_active and (not self.turn_active
                                   or abs(self.pitch_pts) >= abs(self.turn_pts)):

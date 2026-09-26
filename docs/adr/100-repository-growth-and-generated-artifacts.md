@@ -73,6 +73,8 @@ are:
 Local-only storage would also put the entire performance history one disk
 failure from gone. 3.5 MB is a low price for the evidence trail.
 
+*(Superseded by D8, 2026-09-26: the release baseline moves to veda only.)*
+
 **D3. `make squash` is not the instrument for this.** It is
 `git rebase -i --autosquash origin/main`, and it would collapse the 170 commits
 currently ahead of `main`, releasing the intermediate blob versions among them.
@@ -201,6 +203,66 @@ are not specially guarded — run standalone on non-veda they now fail with a
 plain file-not-found rather than a gated message, which is an acceptable, if
 less friendly, edge since only `tp`/`tp-full` were asked to be restricted.
 
+**D8. The performance release baseline moves to veda only, reversing D2.**
+*(Added 2026-09-26.)* D2 kept `docs/performance/release/` in git (1,586 files,
+11 MB in the working tree at the time) so that the regression baseline would be
+portable and the evidence would outlive a disk. The operator has decided that
+**veda is the only host that generates performance reports**, so a portable
+baseline no longer buys anything, and every clone was paying for it in a
+checkout that grew by roughly 150 files per release.
+
+```bash
+git rm --cached -r docs/performance/release
+```
+
+- **Everything in `release/` is untracked**, both the run JSONs and
+  `runtime-performance-history.csv`, which is derived from them.
+  `.gitignore` gains `docs/performance/release/`.
+  `tests/test_performance_release_untracked.py` asserts it stays untracked
+  and ignored, following the D1 and D7 pattern.
+- **`make wrelease` still promotes `current/` into `release/`, but it no longer
+  stages it.** The old `git add docs/performance/release/` line is removed.
+  Leaving it in would make `wrelease` fail, because `git add` exits non-zero on
+  an ignored path.
+- **Every report target now requires `require-veda`:** `test-perf`,
+  `test-perf-csv`, `test-perf-chart`, the four `runtime-perf-*` targets, and
+  `wrelease`. Without the gate, another host would produce charts from an empty
+  or partial history and present them as the real trend. The two charts that
+  get shared, `docs/performance/runtime-performance-trends.html` and
+  `tests/test-output/performance-trends.html`, are therefore always built from
+  veda's data. Both were already untracked (D1, and `tests/test-output/`), so
+  this decision does not change how they are distributed.
+- **`PerformanceTracker` on another host has no baseline, and it degrades
+  cleanly.** `_aggregate_folder` returns `None` for a missing folder, so Block
+  2 of the period comparison logs that the baseline lives on veda and is
+  skipped. Block 1, the session against the current period, still runs.
+
+What D8 does and does not reclaim:
+
+- A fresh checkout is 11 MB and 1,586 files lighter, and future releases add
+  nothing to git.
+- The run JSONs already in history stay there, about 3.5 MB compressed. D4
+  (`git filter-repo`) is still deferred.
+- Every baseline committed before this change can therefore still be recovered
+  from git.
+
+**Checkout hazard on veda.** Git deletes a file from the working tree when
+moving from a commit that tracks it to one that does not. The `git rm --cached`
+above keeps the files on disk for this checkout. However, any later move from a
+commit that still tracks `release/` to one that does not will delete the 1,586
+historical files. The first such move is likely the `git pull` of `main` after
+this change is squash-merged. Checking out an older commit and returning also
+triggers it. Releases made after D8 are never tracked, so they are never
+touched. The deleted files are all still in history and can be restored to the
+working tree without staging them:
+
+```bash
+git restore --source=<last commit that tracked release/> -- docs/performance/release
+```
+
+Back up `docs/performance/release/` before merging, or restore it immediately
+afterwards.
+
 ## Consequences
 
 Future releases stop adding ~9 MB of regenerated HTML each. The release output
@@ -221,6 +283,14 @@ Portability across *every* machine, which D5 optimized for, is traded for a
 smaller repository; the corpus's only home is now veda, one disk failure from
 gone, the same trade D6 already accepted for `unknown_anomalies/`.
 
+**D8:** the evidence trail D2 protected now has a single home. Releases made
+after this change exist only on veda and are one disk failure from gone, the
+same trade D6 and D7 accepted. A non-veda clone runs wingman with no release
+baseline, so Block 2 of the period comparison is skipped. That host also cannot
+build any performance chart. Performance ADRs still quote measured log
+excerpts as ADR 019 requires, but a reader on another machine can no longer
+re-derive them from raw JSONs in the repository.
+
 ## Validation
 
 - **V1.** `docs/performance/runtime-performance-trends.html` and
@@ -230,6 +300,7 @@ gone, the same trade D6 already accepted for `unknown_anomalies/`.
   with no `docs/performance/` HTML present.
 - **V3.** `PerformanceTracker`'s regression check still finds its baseline from
   the committed run JSONs, on a machine that has never produced a session.
+  *(Superseded by V9: after D8 the baseline is on veda only.)*
 - **V4.** Measure the delta: the size a release adds to the pack, before and
   after, so the claim in D1 is checked rather than assumed.
 - **V5.** `tests/test_screenshot_corpus_untracked.py` passes: the 31 loose
@@ -238,6 +309,17 @@ gone, the same trade D6 already accepted for `unknown_anomalies/`.
   still passes — the corpus-dependent tests skip, none error.
 - **V7.** `make tp` / `make tp-full` refuse to run with a clear message on a
   host whose `hostname` is not `veda`, and succeed on veda.
+- **V8.** `tests/test_performance_release_untracked.py` passes:
+  `docs/performance/release/` is untracked and ignored. After the next
+  `make wrelease` on veda, `git status` shows nothing under it.
+- **V9.** On a clone without `docs/performance/release/`, a session logs
+  `[PERIOD COMPARISON] no release/ baseline — it lives on veda only` and
+  finishes normally. On veda, Block 2 still compares against the local
+  baseline.
+- **V10.** The report targets (`test-perf*`, `runtime-perf-*`) and
+  `make wrelease` refuse to run off veda and succeed on veda. The published
+  `runtime-performance-trends.html` and `tests/test-output/performance-trends.html`
+  regenerate from veda's local data.
 
 ## References
 
@@ -248,4 +330,5 @@ gone, the same trade D6 already accepted for `unknown_anomalies/`.
 - `docs/job-aids/010-run-metalstorm-on-linux.md` — second-machine validation,
   which a local-only baseline would break
 - `tests/test_screenshot_corpus_untracked.py` — D7's untracked/ignored guard
+- `tests/test_performance_release_untracked.py` — D8's untracked/ignored guard
 - Measurement: `git rev-list --objects --all` grouped by path, 2026-08-31

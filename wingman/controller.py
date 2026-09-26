@@ -700,6 +700,14 @@ class Controller:
         # positive search_floor_m replaces floor + margin as the guard's altitude
         # term; the search taps nose-down above it while the roll searches.
         self._pursuit_search_floor_m = float(_pm.get("search_floor_m", 0.0))
+        # Operator, 2026-09-26: pursuit via the icons comes before dive safety.
+        # False switches off, for the whole pursuit, the dive guard (no
+        # withheld nose-down, no pull-out pulses), ADR 148's recovery flying
+        # through the pursuit, and the ADR 086 emergency climb starting inside
+        # one. To be redesigned later around a predicted trajectory. The
+        # altitude-floor climb (ADR 147) is untouched.
+        self._pursuit_dive_safety = bool(_pm.get("dive_safety", True))
+        self._dive_recovery_suppressed_log_ts = 0.0
         self._search_look_down_pulse_s = float(_pm.get("search_look_down_pulse_s", 0.0))
         self._search_look_down_interval_s = float(_pm.get("search_look_down_interval_s", 1.0))
         self._search_look_down_min_deg = float(_pm.get("search_look_down_min_deg", -20.0))
@@ -2125,6 +2133,28 @@ class Controller:
         self._pitch_held = None
         logger.debug("HOLD[pitch]: %s -> None (%s)", prev, why)
 
+    def hold_pitch_for_icon(self, desired: "str | None", why: str) -> None:
+        """HLDD 015 step 2b: hold NOSE_DOWN ("down"), NOSE_UP ("up") or neither
+        (None) for the icon's points, on the same held-key primitives and
+        `_pitch_held` state Sustained-Hold Actuation uses, so the tracker, the
+        dive recovery and loop exit all release it the usual way. Clears the
+        tracker's pitch-rate sample: its lead estimate must not difference an
+        error against a sample taken before the icon took the axis."""
+        if desired is None:
+            self.release_pitch_hold(why=why)
+            return
+        if self._pitch_held == desired:
+            return
+        prev = self._pitch_held
+        if prev is not None:
+            self._release_tracking_key(
+                NOSE_UP_KEY if prev == "up" else NOSE_DOWN_KEY, "tracking_pitch")
+        self._press_tracking_key(
+            NOSE_UP_KEY if desired == "up" else NOSE_DOWN_KEY, "tracking_pitch")
+        self._pitch_held = desired
+        self._pitch_last_sample = None
+        logger.debug("HOLD[pitch]: %s -> %s (%s)", prev, desired, why)
+
     def release_tracking_holds(self, why: str = "release") -> None:
         """Release both axes' Sustained-Hold Actuation keys — called from
         cancel_mission()/release_for_manual_takeover() so a mid-hold
@@ -3343,6 +3373,8 @@ class Controller:
         reason = None
         self._dive_guard_ttg_tripped = False
         self._dive_guard_rate = None
+        if not self._pursuit_dive_safety:
+            return None
         margin = self._pursuit_dive_guard_margin_m
         ttg_limit = self._pursuit_dive_guard_ttg_s
         snap = None
@@ -3449,24 +3481,19 @@ class Controller:
                        ignore_cancel=True)
         return True
 
-    def _icon_shadow_tick(self, frame, points: IconPoints, tally: _EngagementTally, *,
-                          visible: bool, yielding: bool, last_seen_ts: "float | None",
-                          last_err: "float | None", guard: "str | None") -> None:
-        """HLDD 015 Icon-Directed Search, shadow stage: one ICONPTS line per
-        steering tick saying which rung the design would be on and what keys its
-        dominant-intent law would hold. Presses nothing.
+    def _icon_rung(self, frame, points: IconPoints, *, visible: bool, yielding: bool,
+                   last_seen_ts: "float | None", last_err: "float | None") -> dict:
+        """HLDD 015 Icon-Directed Search: update the points from this tick's
+        frame and say which rung the design is on. Runs before the roll
+        decision, so step 2a (`icon_steering.wings_level`) can act on it;
+        `_icon_report` logs it after the dive guard.
 
         Rungs, in priority order: `recovery` (ADR 148 owns both axes; points
         zeroed), `track` (the tracker has a labelled target; points zeroed),
         `wait` (inside roll_on_miss's neutral wait after a lock; points still
-        update), `icon` (a current icon and an active axis), `hold` (an icon
-        within blind_search_after_s: neutral while points build), `blind`
-        (today's search, which would roll toward `side=`).
-
-        `withheld` says why the law's nose-down would not be pressed: `guard`
-        (the dive guard tripped this tick), `angle` (flight path at or past
-        icon_min_path_deg) or `angle-none` (no fresh angle). The share of
-        `angle-none` decides whether "no angle, no push" is workable.
+        update), `icon` (an active axis, with or without an icon this tick),
+        `hold` (an icon within blind_search_after_s: neutral while points
+        build), `blind` (today's search, which would roll toward `side=`).
         """
         cfg = self._icon_cfg
         icons: "list" = []
@@ -3493,17 +3520,24 @@ class Controller:
                 rung = "hold"
             else:
                 rung = "blind"
+        return {"rung": rung, "icon": icon, "n": len(icons), "add": add}
+
+    def _icon_report(self, points: IconPoints, tally: _EngagementTally, state: dict,
+                     guard: "str | None", act: str) -> None:
+        """One ICONPTS line per steering tick: the rung, the points, the keys
+        the dominant-intent law would hold and what was actually done (`act`:
+        `level` when step 2a released the roll for the icon, `-` otherwise).
+
+        `withheld` says why the law's nose-down would not be pressed: `guard`
+        (the dive guard tripped this tick), `angle` (flight path at or past
+        icon_min_path_deg) or `angle-none` (no fresh angle). The share of
+        `angle-none` decides whether "no angle, no push" is workable.
+        """
+        rung, icon, add = state["rung"], state["icon"], state["add"]
         intent, keys = points.intent() if rung == "icon" else ("none", ())
-        withheld = "-"
-        if intent == "down":
-            if guard:
-                withheld = "guard"
-            elif cfg.icon_min_path_deg is not None:
-                angle = self._telemetry_path_angle_deg()
-                if angle is None:
-                    withheld = "angle-none"
-                elif angle <= cfg.icon_min_path_deg:
-                    withheld = "angle"
+        withheld = state.get("withheld")
+        if withheld is None:
+            withheld = self._icon_down_withheld(guard) if intent == "down" else "-"
         tally.icon_tick(unlocked=rung not in ("recovery", "track"),
                         has_icon=icon is not None, rung=rung)
         if logger.isEnabledFor(logging.DEBUG):
@@ -3511,10 +3545,27 @@ class Controller:
                          % (icon.x, icon.y, icon.angle_deg, icon.hue))
             logger.debug(
                 "ICONPTS: rung=%s icon=%s n=%d add=(%+d,%+d) pts=(%+.1f,%+.1f) "
-                "intent=%s keys=%s withheld=%s side=%s",
-                rung, icon_desc, len(icons), add[0], add[1], points.turn_pts,
+                "intent=%s keys=%s withheld=%s side=%s act=%s",
+                rung, icon_desc, state["n"], add[0], add[1], points.turn_pts,
                 points.pitch_pts, intent, "+".join(keys) or "-", withheld,
-                points.blind_side())
+                points.blind_side(), act)
+
+    def _icon_down_withheld(self, guard: "str | None") -> str:
+        """Why the icon's nose-down may not be pressed this tick: `guard` (the
+        dive guard tripped; never while `pursuit_mode.dive_safety` is off),
+        `angle` (flight path at or past icon_min_path_deg, when set),
+        `angle-none` (no fresh angle, when a limit is set or
+        require_fresh_angle is on), or `-`."""
+        if guard:
+            return "guard"
+        limit = self._icon_cfg.icon_min_path_deg
+        if limit is not None or self._icon_cfg.require_fresh_angle:
+            angle = self._telemetry_path_angle_deg()
+            if angle is None:
+                return "angle-none"
+            if limit is not None and angle <= limit:
+                return "angle"
+        return "-"
 
     def _telemetry_path_angle_deg(self) -> "float | None":
         """Flight-path angle from telemetry, or None when there is no fresh one."""
@@ -3714,6 +3765,26 @@ class Controller:
                                 logger.info(
                                     "Controller: pursue_and_engage — dive recovery over, "
                                     "steering resumes")
+                        icon_state = None
+                        if icon_points is not None:
+                            try:
+                                icon_state = self._icon_rung(
+                                    frame, icon_points, visible=bool(visible),
+                                    yielding=yielding, last_seen_ts=last_seen_ts,
+                                    last_err=last_visible_err)
+                            except Exception:
+                                if not icon_error_logged:
+                                    logger.exception("Controller: icon shadow tick failed")
+                                    icon_error_logged = True
+                        # HLDD 015 step 2a: with an icon on the ring or the points
+                        # active, the wings stay level instead of the fixed left
+                        # roll (a bank without a pull does not turn, ADR 101).
+                        # Nothing new is pressed; `wait` and `blind` keep
+                        # roll_on_miss exactly as before.
+                        wings_level = (icon_state is not None
+                                       and (self._icon_cfg.wings_level
+                                            or self._icon_cfg.actuate_pitch)
+                                       and icon_state["rung"] in ("icon", "hold"))
                         if visible and err is not None:
                             last_seen_ts = time.time()
                             last_visible_err = err
@@ -3722,10 +3793,15 @@ class Controller:
                                     err, ignore_cancel=True,
                                     sustained_hold=self._sustained_hold_enabled)
                         elif self._sustained_hold_enabled and not yielding:
-                            self.roll_on_miss(
-                                last_seen_ts, self._pursuit_search_resume_delay_s,
-                                last_visible_err, self._pursuit_search_resume_centre_err,
-                                self._pursuit_search_resume_centre_delay_s)
+                            if wings_level:
+                                self.release_roll_hold(
+                                    why="icon %s: wings level (HLDD 015 step 2a)"
+                                        % icon_state["rung"])
+                            else:
+                                self.roll_on_miss(
+                                    last_seen_ts, self._pursuit_search_resume_delay_s,
+                                    last_visible_err, self._pursuit_search_resume_centre_err,
+                                    self._pursuit_search_resume_centre_delay_s)
                         # Dive guard, every steering tick: a target below the
                         # nose (err_y > 0) is not followed nose-down when low or
                         # when the ground is close (pitch goes neutral instead),
@@ -3742,15 +3818,38 @@ class Controller:
                                         err_y, ignore_cancel=True,
                                         sustained_hold=self._sustained_hold_enabled)
                         elif self._sustained_hold_enabled and not yielding:
-                            self.release_pitch_hold(why="no target")
-                            if guard is None and self._roll_hold_reason == "search":
-                                self._search_look_down()
-                        if icon_points is not None:
+                            if wings_level and self._icon_cfg.actuate_pitch:
+                                # HLDD 015 step 2b: the icon's points own pitch on
+                                # the icon and hold rungs, and the look-down taps
+                                # stop there. "down" is withheld by the guard or
+                                # the angle rule; "turn" stays in shadow.
+                                intent = (icon_points.intent()[0]
+                                          if icon_state["rung"] == "icon" else "none")
+                                withheld = (self._icon_down_withheld(guard)
+                                            if intent == "down" else "-")
+                                icon_state["withheld"] = withheld
+                                why = "icon %s%s" % (
+                                    intent, "" if withheld == "-" else ", withheld: " + withheld)
+                                # Held, never tapped: the flight keys only act
+                                # when held (operator, 2026-09-26).
+                                desired = {"down": "down", "up": "up"}.get(intent)
+                                if desired == "down" and withheld != "-":
+                                    desired = None
+                                self.hold_pitch_for_icon(desired, why)
+                                icon_state["pitch"] = desired or "-"
+                            else:
+                                self.release_pitch_hold(why="no target")
+                                # Step 2a keeps the look-down taps where the search
+                                # roll would have run them, so only the roll changes.
+                                if guard is None and (self._roll_hold_reason == "search"
+                                                      or wings_level):
+                                    self._search_look_down()
+                        if icon_state is not None:
                             try:
-                                self._icon_shadow_tick(
-                                    frame, icon_points, tally, visible=bool(visible),
-                                    yielding=yielding, last_seen_ts=last_seen_ts,
-                                    last_err=last_visible_err, guard=guard)
+                                act = "level" if wings_level else "-"
+                                if icon_state.get("pitch") not in (None, "-"):
+                                    act += "+" + icon_state["pitch"]
+                                self._icon_report(icon_points, tally, icon_state, guard, act)
                             except Exception:
                                 if not icon_error_logged:
                                     logger.exception("Controller: icon shadow tick failed")
@@ -4755,6 +4854,15 @@ class Controller:
         if self._missile_evading.is_set():
             logger.info("Controller: climb suppressed — missile evade in progress")
             return
+        if emergency and self._pursuing.is_set() and not self._pursuit_dive_safety:
+            # Operator, 2026-09-26: the pursuit owns the airframe; a dive
+            # recovery would take pitch and roll from the icons and the tracker.
+            now = time.time()
+            if now - self._dive_recovery_suppressed_log_ts >= 10.0:
+                self._dive_recovery_suppressed_log_ts = now
+                logger.info("Controller: dive recovery suppressed — the pursuit owns "
+                            "the airframe (pursuit_mode.dive_safety off)")
+            return
         exit_alt = target_alt if target_alt is not None else self._climb_exit_alt
         if exit_alt is None:
             logger.warning("Controller: climb_mode disabled — exit_above_alt unset")
@@ -5514,6 +5622,7 @@ class Controller:
                         # GAME_BATTLE_MANUAL and the pursuit ends, so SAF-001 stands.
                         _recovering = (_st == GameState.GAME_BATTLE_EJECT
                                        and self._pursuing.is_set()
+                                       and self._pursuit_dive_safety
                                        and self._pursuit_recovery_max_s > 0
                                        and (recovery_since is not None or emergency_now))
                         if _recovering and recovery_since is None:

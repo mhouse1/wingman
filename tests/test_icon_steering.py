@@ -167,15 +167,29 @@ def test_the_operator_example_scan_by_scan():
     assert seen[0][:2] == (5.0, -1.0)
     assert seen[1][0] == pytest.approx(9.67, abs=0.01) and seen[1][2] == 0
     assert seen[2][0] == pytest.approx(14.02, abs=0.01) and seen[2][2] == 1   # acts at 0.3 s
-    assert seen[14][3] == 0 and seen[15][3] == -1                             # left at 1.6 s
+    # The length cap keeps the scores on the icon's direction, so the slight
+    # left settles near -3 and never switches on (the per-axis cap let it grow
+    # to -10 by 1.6 s).
+    assert all(row[3] == 0 for row in seen)
     assert p.intent() == ("down", (NOSE_DOWN,))     # pitch dominates: wings level, push
 
 
-def test_scores_are_capped():
+def test_the_score_vector_is_capped_by_length():
     clock = _Clock()
     p = IconPoints(CFG, clock=clock)
     _run(p, clock, [REF], 40)
-    assert p.pitch_pts == pytest.approx(25.0)
+    assert math.hypot(p.turn_pts, p.pitch_pts) == pytest.approx(25.0)
+
+
+@pytest.mark.parametrize("angle", [100.0, 130.0, 144.0, 159.0])
+def test_a_held_direction_keeps_the_icons_angle(angle):
+    """Measured 2026-09-26 05:27: a per-axis cap read every lower-left icon as
+    (-25, +25), i.e. 135 deg. The length cap keeps each angle apart."""
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [_icon(angle)], 60)
+    held = math.degrees(math.atan2(p.pitch_pts, p.turn_pts))
+    assert abs(held - angle) <= 6.0     # the per-scan points are whole numbers
 
 
 def test_an_icon_crossing_the_centre_line_zeroes_that_axis_first():
@@ -189,27 +203,49 @@ def test_an_icon_crossing_the_centre_line_zeroes_that_axis_first():
     assert p.turn_pts == pytest.approx(turn_before * 0.5 ** 0.1)   # untouched, decayed
 
 
-def test_keys_release_once_the_icon_is_gone_but_the_points_remain():
+def test_the_direction_is_still_flown_after_the_icon_disappears():
+    """Operator, 2026-09-26: the points exist so the aircraft keeps flying the
+    icon's direction until the target appears, even when the icon is gone."""
     clock = _Clock()
     p = IconPoints(CFG, clock=clock)
     _run(p, clock, [REF], 10)
-    _run(p, clock, [], 2)                  # 0.2 s: inside the coast
-    assert p.intent()[0] == "down"
-    _run(p, clock, [], 2)                  # 0.4 s: past it
-    assert p.intent() == ("none", ())
-    assert p.pitch_pts > CFG.act_pts       # still remembered
+    held = (p.turn_pts, p.pitch_pts)
+    _run(p, clock, [], 100)                # 10 s with no icon
+    assert (p.turn_pts, p.pitch_pts) == held
+    assert p.intent() == ("down", (NOSE_DOWN,))
     assert p.blind_side() == "left"
 
 
-def test_hysteresis_holds_between_the_release_and_act_thresholds():
+def test_a_lock_is_what_ends_it():
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [REF], 10)
+    _run(p, clock, [], 20)
+    p.reset()                              # the tracker locked
+    assert p.intent() == ("none", ())
+
+
+def test_the_first_icon_after_a_gap_decays_by_one_scan_not_by_the_gap():
     clock = _Clock()
     p = IconPoints(CFG, clock=clock)
     _run(p, clock, [REF], 3)
-    assert p.pitch_active == 1
-    while p.pitch_pts >= CFG.release_pts:
-        assert p.pitch_active == 1
-        _run(p, clock, [], 1)
-    assert p.pitch_active == 0
+    before = p.pitch_pts
+    _run(p, clock, [], 50)                 # 5 s gap
+    _run(p, clock, [REF], 1)
+    assert p.pitch_pts == pytest.approx(min(25.0, before * 0.5 ** 0.1 + 5))
+
+
+def test_hysteresis_holds_between_the_release_and_act_thresholds():
+    """Only icons now move the scores down: an icon on the far side of the
+    horizontal axis zeroes pitch (crossing reset)."""
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [REF], 3)               # pitch +14.0, active
+    _run(p, clock, [_icon(0)], 6)          # straight right: pitch adds 0, decays
+    assert CFG.release_pts <= p.pitch_pts < CFG.act_pts
+    assert p.pitch_active == 1             # still held between the thresholds
+    _run(p, clock, [_icon(0)], 13)         # 9.2 fades below 4 after 13 more scans
+    assert p.pitch_pts < CFG.release_pts and p.pitch_active == 0
 
 
 def test_a_turn_dominant_icon_banks_and_pulls():
