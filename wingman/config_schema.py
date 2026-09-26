@@ -638,6 +638,8 @@ SCHEMA = Section(
                 "enabled": BOOL,
                 "wings_level": BOOL,
                 "actuate_pitch": BOOL,
+                "actuate_turn": BOOL,
+                "turn_level_descent_mps": _num(0),
                 "require_fresh_angle": BOOL,
                 "ring_centre_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
                 "ring_radius_pct": Leaf(types=(list,), item_types=NUMBER, length=2),

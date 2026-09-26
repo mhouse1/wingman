@@ -183,6 +183,27 @@ def _summarise_turn(samples) -> str:
     return ", ".join(parts)
 
 
+def _side_of(err: "float | None") -> "str | None":
+    """The side a horizontal error points to, or None for no error."""
+    if err is None or err == 0:
+        return None
+    return "left" if err < 0 else "right"
+
+
+def _last_known_side(last_lock_ts: "float | None", last_lock_err: "float | None",
+                     icon_points: "IconPoints | None") -> "str | None":
+    """HLDD 015 blind search: the side of whichever was seen last, the lock or
+    the ring icon's points; None when neither gives a side."""
+    icon_side = None
+    if icon_points is not None and icon_points.turn_pts != 0:
+        icon_side = "left" if icon_points.turn_pts < 0 else "right"
+    icon_ts = icon_points.last_icon_ts if icon_points is not None else None
+    if icon_side is not None and icon_ts is not None \
+            and (last_lock_ts is None or icon_ts > last_lock_ts):
+        return icon_side
+    return _side_of(last_lock_err) or icon_side
+
+
 def _resume_delay(resume_delay_s: float, last_err: "float | None",
                   centre_err: "float | None",
                   centre_delay_s: "float | None") -> "tuple[float, bool]":
@@ -2028,40 +2049,49 @@ class Controller:
         logger.debug("HOLD[pitch]: %s -> %s (target err_y=%+.3f)", prev, desired, error_norm_y)
         return desired
 
-    def engage_roll_search(self) -> None:
-        """No target visible: hold ROLL_LEFT_KEY until one reappears
+    def engage_roll_search(self, side: str = "left") -> None:
+        """No target visible: hold the roll key for `side` until one reappears
         (operator directive, HLDD 005 Sustained-Hold Actuation, 2026-09-23)
-        — a fixed search default, not neutral, so the nose keeps sweeping
+        — a search default, not neutral, so the nose keeps sweeping
         instead of flying straight with nothing scanning for a new contact.
+        `side` is the side the target or icon was last seen on (HLDD 015,
+        2026-09-26: the fixed left search rolled past contacts on screen);
+        left when nothing has been seen.
         Callers invoke this only when sustained_hold is in use; harmless to
         call otherwise since it only ever touches roll-hold state this
         design's own methods manage.
 
-        Relabels rather than re-presses when ROLL_LEFT_KEY is already held
+        Relabels rather than re-presses when that key is already held
         for a target — the physical key does not change, only why it is
         held — but always sets the reason to "search" so a later
         reacquisition (`_sustained_roll_hold` finding `_roll_hold_reason !=
         "target"`) is forced to treat the next real target as a fresh
         decision rather than a silent no-op.
         """
+        side = "right" if side == "right" else "left"
+        other = "left" if side == "right" else "right"
         prev = (self._roll_held, self._roll_hold_reason)
-        if self._roll_held == "right":
-            self._release_tracking_key(ROLL_RIGHT_KEY, "tracking_roll")
+        if self._roll_held == other:
+            self._release_tracking_key(
+                ROLL_RIGHT_KEY if other == "right" else ROLL_LEFT_KEY, "tracking_roll")
             self._roll_held = None
         if self._roll_held is None:
-            self._press_tracking_key(ROLL_LEFT_KEY, "tracking_roll")
-            self._roll_held = "left"
+            self._press_tracking_key(
+                ROLL_RIGHT_KEY if side == "right" else ROLL_LEFT_KEY, "tracking_roll")
+            self._roll_held = side
         self._roll_hold_reason = "search"
-        self._log_roll_hold(prev, "search")
+        self._log_roll_hold(prev, "search %s" % side)
 
     def roll_on_miss(self, last_seen_ts: "float | None", resume_delay_s: float,
                      last_err: "float | None" = None,
                      centre_err: "float | None" = None,
-                     centre_delay_s: "float | None" = None) -> None:
+                     centre_delay_s: "float | None" = None,
+                     side: "str | None" = None) -> None:
         """No target this tick. Within `resume_delay_s` of the last tick one
         was visible, release the roll axis to neutral instead of resuming the
-        ROLL_LEFT search default; only after that long unseen (or if none was
-        ever seen) does `engage_roll_search` take over.
+        search; only after that long unseen (or if none was ever seen) does
+        `engage_roll_search` take over, toward `side` (the last known side;
+        None searches left).
 
         Action item 001 (2026-09-24). `visible` is False on every
         TargetTracker LOST_GRACE tick too, and the tracker's own grace window
@@ -2089,7 +2119,7 @@ class Controller:
                 why="miss within %.1fs of last lock%s"
                     % (delay, ", target was near centre" if near_centre else ""))
         else:
-            self.engage_roll_search()
+            self.engage_roll_search(side or "left")
 
     def release_roll_hold(self, why: str = "release") -> None:
         """Release whatever roll key Sustained-Hold Actuation is holding,
@@ -2132,6 +2162,29 @@ class Controller:
             "tracking_pitch")
         self._pitch_held = None
         logger.debug("HOLD[pitch]: %s -> None (%s)", prev, why)
+
+    def hold_roll_for_icon(self, side: "str | None", why: str) -> None:
+        """HLDD 015 step 3: hold ROLL_LEFT or ROLL_RIGHT for the icon (reason
+        "icon"), or release the roll (None: wings level). Same held-key state as
+        Sustained-Hold Actuation, so a lock (`_sustained_roll_hold`, which
+        treats any reason but "target" as a fresh decision) takes over cleanly."""
+        if side is None:
+            self.release_roll_hold(why=why)
+            return
+        if self._roll_held == side and self._roll_hold_reason == "icon":
+            return
+        prev = (self._roll_held, self._roll_hold_reason)
+        if self._roll_held is not None and self._roll_held != side:
+            self._release_tracking_key(
+                ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
+                "tracking_roll")
+            self._roll_held = None
+        if self._roll_held is None:
+            self._press_tracking_key(
+                ROLL_LEFT_KEY if side == "left" else ROLL_RIGHT_KEY, "tracking_roll")
+            self._roll_held = side
+        self._roll_hold_reason = "icon"
+        self._log_roll_hold(prev, why)
 
     def hold_pitch_for_icon(self, desired: "str | None", why: str) -> None:
         """HLDD 015 step 2b: hold NOSE_DOWN ("down"), NOSE_UP ("up") or neither
@@ -2988,7 +3041,8 @@ class Controller:
                         self.roll_on_miss(
                             last_seen_ts, self._pursuit_search_resume_delay_s,
                             last_visible_err, self._pursuit_search_resume_centre_err,
-                            self._pursuit_search_resume_centre_delay_s)
+                            self._pursuit_search_resume_centre_delay_s,
+                            side=_side_of(last_visible_err))
                     if err is not None:
                         if last_err is not None:
                             converging = abs(err) < abs(last_err)
@@ -3567,6 +3621,21 @@ class Controller:
                 return "angle"
         return "-"
 
+    def _icon_fast_descent(self) -> bool:
+        """True while a fresh altitude rate says the jet is descending faster
+        than `turn_level_descent_mps` (HLDD 015 cycle 5). False on no reading:
+        the turn is not held back on missing data."""
+        limit = self._icon_cfg.turn_level_descent_mps
+        if limit <= 0 or self._analyzer is None:
+            return False
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return False
+        if snap is None or not snap.altitude_fresh() or snap.altitude.rate is None:
+            return False
+        return snap.altitude.rate < -limit
+
     def _telemetry_path_angle_deg(self) -> "float | None":
         """Flight-path angle from telemetry, or None when there is no fresh one."""
         if self._analyzer is None:
@@ -3794,14 +3863,35 @@ class Controller:
                                     sustained_hold=self._sustained_hold_enabled)
                         elif self._sustained_hold_enabled and not yielding:
                             if wings_level:
-                                self.release_roll_hold(
-                                    why="icon %s: wings level (HLDD 015 step 2a)"
-                                        % icon_state["rung"])
+                                # Step 3: the law's roll ("turn", or "up" with a
+                                # side) when actuate_turn is on; otherwise, and for
+                                # "down" or the hold rung, the wings stay level.
+                                icon_roll = None
+                                if self._icon_cfg.actuate_turn and icon_state["rung"] == "icon":
+                                    _intent, _keys = icon_points.intent()
+                                    if "ROLL_LEFT" in _keys:
+                                        icon_roll = "left"
+                                    elif "ROLL_RIGHT" in _keys:
+                                        icon_roll = "right"
+                                # Operator, 2026-09-26 (cycle 5): in a fast dive the
+                                # turn keeps pulling with the wings level, so the pull
+                                # points up; the bank resumes once the descent eases.
+                                if icon_roll is not None and self._icon_fast_descent():
+                                    icon_roll = None
+                                    icon_state["dive_level"] = True
+                                icon_state["roll"] = icon_roll
+                                self.hold_roll_for_icon(
+                                    icon_roll, "icon %s: %s" % (
+                                        icon_state["rung"],
+                                        "bank %s (HLDD 015 step 3)" % icon_roll if icon_roll
+                                        else "wings level (HLDD 015 step 2a)"))
                             else:
                                 self.roll_on_miss(
                                     last_seen_ts, self._pursuit_search_resume_delay_s,
                                     last_visible_err, self._pursuit_search_resume_centre_err,
-                                    self._pursuit_search_resume_centre_delay_s)
+                                    self._pursuit_search_resume_centre_delay_s,
+                                    side=_last_known_side(
+                                        last_seen_ts, last_visible_err, icon_points))
                         # Dive guard, every steering tick: a target below the
                         # nose (err_y > 0) is not followed nose-down when low or
                         # when the ground is close (pitch goes neutral instead),
@@ -3833,6 +3923,8 @@ class Controller:
                                 # Held, never tapped: the flight keys only act
                                 # when held (operator, 2026-09-26).
                                 desired = {"down": "down", "up": "up"}.get(intent)
+                                if intent == "turn" and self._icon_cfg.actuate_turn:
+                                    desired = "up"      # bank and pull (step 3)
                                 if desired == "down" and withheld != "-":
                                     desired = None
                                 self.hold_pitch_for_icon(desired, why)
@@ -3847,6 +3939,10 @@ class Controller:
                         if icon_state is not None:
                             try:
                                 act = "level" if wings_level else "-"
+                                if icon_state.get("dive_level"):
+                                    act = "divelevel"
+                                if icon_state.get("roll"):
+                                    act = "bank" + icon_state["roll"]
                                 if icon_state.get("pitch") not in (None, "-"):
                                     act += "+" + icon_state["pitch"]
                                 self._icon_report(icon_points, tally, icon_state, guard, act)

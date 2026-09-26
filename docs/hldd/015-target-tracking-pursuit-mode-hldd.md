@@ -700,6 +700,118 @@ Falsified if, with actuation on, `first_lock` does not improve and the icon does
 horizontal while NOSE_DOWN is held for a lower-half icon. That would mean the keys do not move the icon
 the way the law assumes, and the mapping, not the thresholds, is what needs changing.
 
+**Normal-battle shadow verdict (09:42 and 09:59 sessions, about 25 minutes of battle, measured):** 60
+navigation rolls. With a lock on screen: 3, all toward the target (`agree=yes`). With a ring icon and no
+lock: 28, 20 toward the icon's side, 8 against it (5 with the icon straight below, where the icon rule
+would keep the wings level; 3 on the opposite side). Neither: 29. **The minimap navigation is not what
+rolls past locked targets.** Per tactic (1.5 s ticks, 08:51 to 10:08): BoundaryTurn 17-19% of battle ticks
+with a lock on screen on about 5% of them, turning left and right about equally (36 left and 46 right
+07:05-08:31); Idle 33-37% and Climb 39-42%, with a lock on screen on 8-30% and 14-17% of their ticks and
+nothing steering toward it. So in normal battle the gap is not a roll the wrong way but no roll at all
+toward a lock during Idle and Climb; the normal-battle live step (handing those rolls to the tracker) is
+not supported by the data as designed, and is parked.
+
+**Where the left rotation comes from (measured, 07:05-08:31 and 08:51-09:42):** the fixed left search
+roll: 15 and 8 holds (68 s and 43 s) in the pursuit's blind rung, 10 and 2 (67 s and 11 s) in the dive's
+own search loop, which still searches left by design. During those holds the tracker's `blob=` shows an
+icon-sized red contact off the ring on 7% and 19% of ticks and a partial nameplate (8+ glyphs, not passed
+by the gate) on 8% and 6%: the search rolled left past something on screen. And the blind rung never
+turned toward "the last known side" as this design said it would: `roll_on_miss` still holds ROLL_LEFT
+whatever `side=` says, and a lock resets the points, so the side defaults to left after every lock.
+
+**Change (iterate cycle 2, 2026-09-26 10:2x):** the search turns toward the last known side, in both
+places. `engage_roll_search(side)` holds ROLL_RIGHT or ROLL_LEFT; `roll_on_miss(..., side=)` passes it
+through. The dive's loop gives the side of the last lock (`_side_of(last_visible_err)`); the pursuit
+gives whichever was seen last, the lock or the ring icon's points (`_last_known_side`). Left only when
+nothing gave a side. `HOLD[roll]` reasons read `search left` / `search right`. Tests: a lock on the right
+then a miss searches right, a lock on the left searches left, the far-lock tests of both loops check a
+`-> right/search` transition instead of a left key press (the old assertion was the left default the
+change removes), and the side rule itself. Gate: `make lint` clean; `make test` 2,308 passed, 2 failed
+(the READY-crop test and the operator's `accept_invite` test, both unrelated), 35 skipped. `make rd`,
+wingman pid 1028881, started 10:23:48. Read: `HOLD[roll]: ... -> right/search` should now appear, and
+left-search holds after a lock on the right should be gone.
+
+**Why pursuits were slow to lock (measured, 07:05-10:28, 74 pursuits of 20 s or more):** of the icon-rung
+ticks before each first lock, 62% had the `turn` intent (the icon off to the side), 34% `down` and 3%
+`up`; in the 34 pursuits with no lock or a first lock of 20 s or more, 67% `turn`. Step 2b does nothing on
+`turn` (wings level, pitch neutral), so an enemy to the side stayed to the side while the jet flew
+straight: the 10:26 pursuit spent 67 s on the icon rung before its first lock. The cycle 2 search-side fix
+rarely comes into play for the same reason: with the icon rung covering almost every unlocked tick, the
+blind search hardly runs (none in the first two pursuits after 10:23).
+
+**Change (iterate cycle 3): rollout step 3, turn live** (`icon_steering.actuate_turn: true`), the
+operator's chosen bank-and-pull: on the icon rung, `turn` holds the roll toward the icon's side
+(`Controller.hold_roll_for_icon`, hold reason `icon`) and NOSE_UP; `up` with the turn switch on rolls
+toward its side while pulling; `down` keeps the wings level and pushes as before; the hold rung stays
+wings-level. No new nose-down. `ICONPTS` shows `act=bankleft+up` etc. Tests: the archived left icon
+(172 deg) holds ROLL_LEFT and NOSE_UP and no nose-down; with `actuate_turn: false` the same frame
+presses neither; a downward icon still pushes with the wings level. Gate: `make lint` clean; `make test` 2,311 passed, 2
+failed (the same two unrelated), 35 skipped. The 10:23 session (cycle 2 build) was stopped with `z` at the
+lobby (10:40:11). `make rd`, wingman pid 1049971, started 10:40:45. Measure: the share of long pursuits with
+a lock and the mean `first_lock`, against the 09:59 and 10:23 sessions (step 2b without the turn).
+Baseline (measured): 09:59 session, 11 long pursuits, 64% with a lock, mean first lock 8.7 s; 10:23
+session, 5, 80%, 27.5 s.
+
+First step 3 pursuits (10:41-10:48, measured): the bank-and-pull fired (169 ticks `bankright+up`, 7
+`bankleft+up`, 53 `level+down` in the first). Icon bank holds lasted up to 9.8 s, and during the long
+ones the altitude rate swung between -186 and +214 m/s rather than holding steady. Archived frames during
+right-bank holds (10:42:35, 10:42:41) show the jet knife-edge, about 90 deg of bank, in both; frames 5-6 s
+into other holds (10:43:16, 10:44:49) show about 60 deg. So a held roll key gives a steep bank of 60-90
+deg or more, not a limited one; the rate swings suggest it sometimes goes past 90 deg, where the pull
+points below the horizon (inferred; frames 6 s apart cannot separate a held 90 deg from a full roll). A
+bank-angle limit would need a bank measurement the codebase does not have. First lock times 18.3, 2.9
+and 0.1 s in the first three pursuits.
+
+**Step 3 after eight long pursuits (10:40-10:59, measured):** 8 of 8 reached a lock (against 64% and
+80% in the 09:59 and 10:23 sessions without the turn), mean first lock 9.3 s (8.7 and 27.5 s). But 8 of 8
+ended in a death, 7 with no incoming missile in the 15 s before (6 of 11 and 4 of 9 before). Every one of
+the seven came 5-23 s after the last lock, in a steep descent (-80 to -356 m/s, from 900 to 3,500 m),
+and in several the last pitch input was the icon's bank-and-pull NOSE_UP while falling at up to
+356 m/s (10:43:35, 10:56:29, 10:59:06). Inferred: past 90 deg of bank the pull points the nose below the
+horizon, so the turn becomes a dive, and with `dive_safety` off nothing pulls out. Locks up, deaths up;
+the operator's call.
+
+**Operator decision (2026-09-26 ~11:20): limit the bank.** **Change (iterate cycle 4):** the turn's roll is
+held in bursts, `turn_roll_on_s` (1.0 s) held, then `turn_roll_off_s` (1.0 s) released so the game levels
+the wings, repeated while the turn lasts; NOSE_UP is one continuous hold throughout
+(`Controller.bank_burst_for_icon`). A new side starts a fresh "on" phase; the cycle resets at the start of
+a pursuit and whenever the tracker or the search has the roll. `ICONPTS` shows `act=bankleft+up` in an
+"on" phase and `act=bankleft-off+up` in an "off" one. Test: over 2.2 s with 0.4 s phases the roll is
+pressed and released at least twice while NOSE_UP is pressed once. Measure against step 3's first eight
+pursuits: deaths with no incoming per pursuit (7 of 8), and whether locks stay near 8 of 8.
+
+**Correction (15:30, measured on the whole step 3 session, 10:40-15:30, 152 pursuits, 130 of them 20 s or
+more):** 121 of 130 long pursuits reached a lock (93%), mean first lock 7.5 s; 65 of 152 pursuits died with
+no incoming missile in the 15 s before (43%), against 44% over the 64 pursuits of the 06:20 and 07:05
+sessions without the turn (and 6 of 11, 4 of 9 in the two short sessions just before). **The "7 of 8" that
+motivated the bank limit was a small-sample fluke: the turn raised the lock rate and did not raise the
+no-incoming death rate.** The bank-burst change (cycle 4) was built on that fluke; whether to ship it is
+put back to the operator. (`DIED ARMED` in the session: 15 `terrain`, 20 `enemy_fire`.) The wingman side
+of this conversation was suspended from about 11:30 to 15:26 while the step 3 session kept running,
+which is why the sample is five hours long. **Operator decision (15:37): keep step 3 as is.** The bank-burst change
+was removed from the working tree before it ever ran (so `turn_roll_on_s` / `turn_roll_off_s` and
+`Controller.bank_burst_for_icon` do not exist); the working tree again matches the step 3 build flying since
+10:40 (pid 1049971). Lint clean, pursuit, icon and tick-handler tests 335 passed, config valid.
+
+**What precedes the no-incoming deaths under step 3 (iterate cycle 5, measured, 10:40-15:38, 66 deaths
+in pursuits with no incoming missile in the 15 s before; inputs in the last 12 s):** the icon's
+bank-and-pull in 48 (73%), the tracker's nose-down chase in 34 (52%), the icon's push in 18 (27%), a lock
+on screen in 44 (67%), none of these in 6 (9%). At the last altitude reading 94% were descending faster
+than 100 m/s (median -246 m/s), at a median 1,990 m (quartiles 1,356 and 2,501 m). Inferred: most are a
+steep descent with the bank-and-pull running, the held bank past 90 deg so the pull points down, often
+right after a locked chase pushed the nose down; with `dive_safety` off nothing levels the wings or pulls
+out. Step 3 did not raise the overall no-incoming death rate (43% of pursuits against 44% before), but it
+is now the input most often present before one.
+
+**Operator decision: level the wings in a fast dive. Change (iterate cycle 5):** while a fresh altitude
+rate says the jet is descending faster than `icon_steering.turn_level_descent_mps` (150 m/s), the icon's
+turn keeps pulling (NOSE_UP) but releases the roll so the wings level and the pull points up; it banks
+again once the descent eases (`Controller._icon_fast_descent`). No reading, no change (the turn is not held
+back on missing data). The icon's push and the tracker's lock are untouched, and nothing takes the airframe
+from the pursuit. `ICONPTS` shows `act=divelevel+up`. Tests: at -200 m/s the left icon holds NOSE_UP and no
+ROLL_LEFT; at -80 m/s it still banks. Measure: no-enemy deaths per pursuit (43% under step 3) and the
+share of them with the bank-and-pull running (73%), plus locks (93%).
+
 ### Lock rate by session (measured, 2026-09-26)
 
 Pursuits of 20 s or more that reached any lock, and the mean `first_lock` of those that did:

@@ -1303,6 +1303,17 @@ pursuit_mode:
     # NOSE_UP, roll level; "turn" stays in shadow. The look-down taps then run
     # only on the blind rung. false = step 2a.
     actuate_pitch: true
+    # Step 3 (2026-09-26, iterate): the turn acts too, the operator's chosen
+    # bank-and-pull: "turn" holds the roll toward the icon's side plus NOSE_UP,
+    # "up" with a side rolls toward it while pulling, "down" keeps the wings
+    # level. Before it, 62% of icon-steered ticks before a first lock were
+    # "turn" and flew straight. false = step 2b.
+    actuate_turn: true
+    # Operator, 2026-09-26 (cycle 5): descending faster than this (m/s), the turn keeps
+    # pulling with the wings level so the pull points up; it banks again once the
+    # descent eases. 73% of 66 no-enemy deaths under step 3 had the bank-and-pull
+    # running in the last 12 s, 94% descending faster than 100 m/s. 0 = off.
+    turn_level_descent_mps: 150
     # No icon nose-down without a fresh flight-path angle (kept when the -45 deg
     # limit below was removed, operator 2026-09-26).
     require_fresh_angle: true

@@ -546,11 +546,16 @@ def test_dive_near_centre_lock_holds_neutral_past_the_base_delay(monkeypatch):
     assert ("key_press", ROLL_LEFT_KEY) not in _run_loop(ctrl)
 
 
-def test_dive_far_lock_does_not_get_the_near_centre_hold(monkeypatch):
+def test_dive_far_lock_does_not_get_the_near_centre_hold(monkeypatch, caplog):
+    """The search resumes at once after a far lock, toward the side the target
+    was last seen on (right, err +0.5; HLDD 015 2026-09-26)."""
     ctrl = _dive_ctrl(monkeypatch, [_SEEN_FAR, _MISS], pursuit_mode={
         "search_resume_delay_s": 0.0, "search_resume_centre_err": 0.15,
         "search_resume_centre_delay_s": 30.0})
-    assert ("key_press", ROLL_LEFT_KEY) in _run_loop(ctrl)
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        _run_loop(ctrl)
+    assert any("-> right/search" in r.getMessage() for r in caplog.records
+               if r.getMessage().startswith("HOLD[roll]:"))
 
 
 _FAST_EMPTY = {"empty_confirm_reads": 2, "ammo_zero_grace_s": 30.0}

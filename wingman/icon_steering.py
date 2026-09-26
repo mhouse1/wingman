@@ -56,6 +56,19 @@ class IconSteeringConfig:
     # points steer. Nose-down is withheld by the dive guard, a flight path at
     # or past icon_min_path_deg, or no fresh angle.
     actuate_pitch: bool = False
+    # Rollout step 3 (2026-09-26): the law's roll acts too. "turn" banks toward
+    # the icon's side and pulls (BoundaryTurn's combination, operator's choice),
+    # "up" with the turn switch on rolls toward that side while pulling, "down"
+    # keeps the wings level. Measured before it: 62% of icon-steered ticks
+    # before a first lock were "turn", which step 2b left flying straight.
+    actuate_turn: bool = False
+    # Operator, 2026-09-26 (cycle 5): while descending faster than this (m/s),
+    # the turn keeps pulling but releases the roll so the wings level and the
+    # pull points up; the turn resumes once the descent eases. Measured before
+    # it: 73% of 66 no-enemy deaths under step 3 had the bank-and-pull running in
+    # the last 12 s, and 94% were descending faster than 100 m/s. 0 turns it off.
+    # Named guess.
+    turn_level_descent_mps: float = 150.0
     # No icon nose-down without a fresh flight-path angle reading, whether or
     # not icon_min_path_deg is set (operator, 2026-09-26, kept when the -45 deg
     # limit was removed).
@@ -96,6 +109,9 @@ class IconSteeringConfig:
             enabled=bool(cfg.get("enabled", d.enabled)),
             wings_level=bool(cfg.get("wings_level", d.wings_level)),
             actuate_pitch=bool(cfg.get("actuate_pitch", d.actuate_pitch)),
+            actuate_turn=bool(cfg.get("actuate_turn", d.actuate_turn)),
+            turn_level_descent_mps=float(cfg.get("turn_level_descent_mps",
+                                                 d.turn_level_descent_mps)),
             require_fresh_angle=bool(cfg.get("require_fresh_angle", d.require_fresh_angle)),
             ring_centre_pct=tuple(float(v) for v in cfg.get("ring_centre_pct", d.ring_centre_pct)),
             ring_radius_pct=tuple(float(v) for v in cfg.get("ring_radius_pct", d.ring_radius_pct)),

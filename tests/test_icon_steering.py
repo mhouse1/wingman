@@ -319,3 +319,20 @@ def test_summary_line_reports_icon_scans_and_steer_time():
     line = tally.line("PURSUIT", "cap", False)
     assert "icon=2/3" in line
     assert "icon_steer=0.2s" in line
+
+
+# ---------------------------------------------------------------------------
+# The blind search's side (HLDD 015, 2026-09-26): the side the lock or the icon
+# was last seen on, not always left.
+# ---------------------------------------------------------------------------
+
+def test_last_known_side_rules():
+    from wingman.controller import _last_known_side, _side_of
+    assert _side_of(None) is None and _side_of(-0.2) == "left" and _side_of(0.3) == "right"
+    assert _last_known_side(None, None, None) is None               # nothing seen: caller searches left
+    assert _last_known_side(100.0, 0.4, None) == "right"            # the lock's side
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [_icon(180)], 3)                                  # icon on the left, newer than the lock
+    assert _last_known_side(clock.t - 5.0, 0.4, p) == "left"
+    assert _last_known_side(clock.t + 5.0, 0.4, p) == "right"       # a lock newer than the icon wins

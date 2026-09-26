@@ -489,9 +489,19 @@ def test_miss_after_a_lock_does_not_resume_the_left_search(monkeypatch):
     assert ("key_press", ROLL_LEFT_KEY) not in keys     # and did NOT start searching
 
 
-def test_zero_delay_still_resumes_the_left_search_on_the_first_miss(monkeypatch):
+def test_zero_delay_resumes_the_search_toward_the_side_last_seen(monkeypatch):
+    """HLDD 015, 2026-09-26: the search turns toward the side the target was
+    last seen on (right here, err +0.5), no longer always left."""
     keys = _run_scripted_pursuit(monkeypatch, [_SEEN, _MISS], search_resume_delay_s=0.0)
+    assert ("key_press", ROLL_RIGHT_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+
+
+def test_a_miss_after_a_lock_on_the_left_searches_left(monkeypatch):
+    seen_left = dict(_SEEN, error_norm=-0.5)
+    keys = _run_scripted_pursuit(monkeypatch, [seen_left, _MISS], search_resume_delay_s=0.0)
     assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys
 
 
 def test_never_seen_still_searches_left_from_the_first_tick(monkeypatch):
@@ -643,7 +653,7 @@ def test_a_miss_after_a_near_centre_lock_stays_neutral_past_the_base_delay(monke
     assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
 
 
-def test_a_miss_after_a_far_from_centre_lock_still_resumes_the_search(monkeypatch):
+def test_a_miss_after_a_far_from_centre_lock_still_resumes_the_search(monkeypatch, caplog):
     """The extension is for a target the aircraft is already pointing at; one
     last seen far off to the side does not get the longer hold."""
     far = {"visible": True, "error_norm": 0.6, "error_norm_y": 0.0, "mode": "TRACKING"}
@@ -653,9 +663,12 @@ def test_a_miss_after_a_far_from_centre_lock_still_resumes_the_search(monkeypatc
                        sustained_hold_enabled=True, search_resume_delay_s=0.0,
                        search_resume_centre_delay_s=30.0)
     ctrl.set_target_tracker(tracker)
-    ctrl.pursue_and_engage()
-    _wait_for_pursuit_to_settle(ctrl)
-    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage()
+        _wait_for_pursuit_to_settle(ctrl)
+    # The search resumed (no neutral hold), toward the side last seen: right.
+    assert any("-> right/search" in r.getMessage() for r in caplog.records
+               if r.getMessage().startswith("HOLD[roll]:"))
 
 
 def test_default_pursuit_still_switches_at_its_start(monkeypatch):
@@ -939,13 +952,14 @@ def test_pure_shadow_still_rolls_left_with_an_icon(monkeypatch, caplog):
 # ---------------------------------------------------------------------------
 
 class _TelemetryAnalyzer(_AnalyzerStub):
-    """Ammo stub plus a REAL TelemetrySnapshot, so the icon's nose-down tap runs
-    its own sample check. `new_samples` stamps each call with a new altitude
-    timestamp; False repeats one sample."""
+    """Ammo stub plus a REAL TelemetrySnapshot. `new_samples` stamps each call
+    with a new altitude timestamp; False repeats one sample. `rate` is the
+    altitude rate in m/s."""
 
-    def __init__(self, new_samples=True):
+    def __init__(self, new_samples=True, rate=0.0):
         super().__init__(ammo=2)
         self.new_samples = new_samples
+        self.rate = rate
         self.calls = 0
 
     def get_telemetry(self):
@@ -955,17 +969,19 @@ class _TelemetryAnalyzer(_AnalyzerStub):
         sample_ts = now if self.new_samples else 1000.0
         return TelemetrySnapshot(
             speed=TelemetrySignal(value=900, stable_value=900.0, ts=now, rate=0.0),
-            altitude=TelemetrySignal(value=4000, stable_value=4000.0, ts=sample_ts, rate=0.0),
+            altitude=TelemetrySignal(value=4000, stable_value=4000.0, ts=sample_ts,
+                                     rate=self.rate),
             taken_at_s=now, stale_after_s=6.0)
 
 
 def _step_2b(monkeypatch, caplog, capture, *, angle=-5.0, guard=None, actuate_pitch=True,
-             analyzer=None):
+             analyzer=None, actuate_turn=False):
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer or _TelemetryAnalyzer(), capture=capture,
                        pursuit_enabled=True, pursuit_max_duration_s=0.0,
                        sustained_hold_enabled=True,
                        icon_steering={"enabled": True, "wings_level": True,
-                                      "actuate_pitch": actuate_pitch})
+                                      "actuate_pitch": actuate_pitch,
+                                      "actuate_turn": actuate_turn})
     ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
     look_downs = []
     monkeypatch.setattr(ctrl, "_search_look_down", lambda: look_downs.append(1) or False)
@@ -1088,3 +1104,55 @@ def test_step_2a_setting_presses_no_icon_pitch(monkeypatch, caplog):
                                         actuate_pitch=False)
     assert ("key_press", NOSE_DOWN_KEY) not in keys
     assert look_downs
+
+
+# ---------------------------------------------------------------------------
+# HLDD 015 rollout step 3 (2026-09-26): the turn acts, bank and pull.
+# ---------------------------------------------------------------------------
+
+class _LeftIconCapture(_FrameCapture):
+    """The archived orange ring icon at 172 deg: an enemy off to the left."""
+
+    def __init__(self):
+        super().__init__()
+        import cv2
+        from pathlib import Path
+        self.frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "icon_ring_orange_left.png"))
+
+
+def test_step_3_banks_and_pulls_toward_a_side_icon(monkeypatch, caplog):
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True)
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys
+    assert any("act=bankleft+up" in ln for ln in lines), lines
+
+
+def test_step_2b_setting_flies_a_side_icon_straight(monkeypatch, caplog):
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=False)
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", NOSE_UP_KEY) not in keys
+
+
+def test_step_3_keeps_the_wings_level_for_a_downward_icon(monkeypatch, caplog):
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _FrameCapture(), actuate_turn=True)
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys
+
+
+def test_step_3_levels_the_wings_in_a_fast_dive_and_keeps_pulling(monkeypatch, caplog):
+    """Operator, 2026-09-26 (cycle 5): descending faster than 150 m/s, the turn
+    pulls with the wings level so the pull points up."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                              analyzer=_TelemetryAnalyzer(rate=-200.0))
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert any("act=divelevel+up" in ln for ln in lines), lines
+
+
+def test_step_3_still_banks_when_the_descent_is_gentle(monkeypatch, caplog):
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                               analyzer=_TelemetryAnalyzer(rate=-80.0))
+    assert ("key_press", ROLL_LEFT_KEY) in keys
