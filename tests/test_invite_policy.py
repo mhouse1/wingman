@@ -6,6 +6,8 @@ undismissed invite dialog covers the lobby and strands the FSM.
 """
 
 import pathlib
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -68,3 +70,16 @@ def test_accept_invite_is_declared_in_the_schema(shipped_cfg):
     cfg = dict(shipped_cfg, accept_invite=True)
     assert validate_config(cfg) == []
     assert any("accept_invite" in e for e in validate_config(dict(shipped_cfg, accept_invite="yes")))
+
+
+def test_make_invite_toggles_policy_and_preserves_yaml_formatting(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("accept_invite: false # policy\nother: unchanged\n", encoding="utf-8")
+
+    command = [sys.executable, str(_ROOT / "scripts" / "toggle-invite.py"), "--config", str(config_path)]
+    accepted = subprocess.run(command, check=True, capture_output=True, text=True)
+    rejected = subprocess.run(command, check=True, capture_output=True, text=True)
+
+    assert accepted.stdout.strip() == "Party invites: ACCEPT"
+    assert rejected.stdout.strip() == "Party invites: REJECT"
+    assert config_path.read_text(encoding="utf-8") == "accept_invite: false # policy\nother: unchanged\n"
