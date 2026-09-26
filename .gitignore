@@ -35,3 +35,5 @@ test_screenshots/unknown_anomalies/*
 # history for two paths. Regenerate with `make runtime-perf-release`.
 docs/performance/runtime-performance-trends.html
 docs/performance/runtime-performance-trends.preview.html
+# Per-user Claude Code permissions — personal, never shared
+.claude/settings.local.json
