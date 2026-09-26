@@ -540,6 +540,7 @@ SCHEMA = Section(
             # HLDD 005 Safety and Gating Rules for why pitch needs an
             # independent actuation gate from roll's.
             "actuate_pitch": BOOL,
+            "battle_priority_shadow": BOOL,   # HLDD 015, 2026-09-26
             "pitch_deadband": FRACTION,
             "pitch_kp": _num(0),
             "pitch_min_hold_sec": SECONDS,

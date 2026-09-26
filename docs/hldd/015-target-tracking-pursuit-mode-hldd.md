@@ -700,6 +700,65 @@ Falsified if, with actuation on, `first_lock` does not improve and the icon does
 horizontal while NOSE_DOWN is held for a lower-half icon. That would mean the keys do not move the icon
 the way the law assumes, and the mapping, not the thresholds, is what needs changing.
 
+### Lock rate by session (measured, 2026-09-26)
+
+Pursuits of 20 s or more that reached any lock, and the mean `first_lock` of those that did:
+
+| Session | Build | Long pursuits | With a lock | Mean first lock |
+|---------|-------|---------------|-------------|-----------------|
+| 04:37 | shadow | 6 | 6 (100%) | 11.6 s |
+| 05:04 | shadow, hold rule | 7 | 6 (86%) | 22.0 s |
+| 05:30 | 2a | 9 | 7 (78%) | 4.5 s |
+| 05:55 | 2b, recovery on | 4 | 3 (75%) | 7.6 s |
+| 06:20 | 2b, `dive_safety` off | 12 | 11 (92%) | 5.3 s |
+| 07:05 | same (operator's session) | 36 | 23 (64%) | 6.8 s |
+| 08:51 | same (operator's session, to 09:10) | 7 | 3 (43%) | 4.3 s |
+
+When a live pursuit finds a target it finds it sooner than in shadow, but later in the day more of them
+find none. The four no-lock pursuits of the 08:51 session flew toward an on-screen icon 43-84% of their
+ticks and on held points the rest, never on the blind rung, and three ended in a death with no recent
+incoming missile. Inferred: chasing an icon (mostly downward) toward an enemy that never comes into lock
+range ends in the ground first. Small samples, and matches, maps and opponents differ between sessions.
+
+### Normal battle: a lock and the icons before the minimap navigation (2026-09-26, shadow stage)
+
+**Report (operator, 08:48):** "its still rotating left past targets, it just happened." **Diagnosis
+(measured, session started 08:33):** not the pursuit (its left search ran once, 1.3 s at 08:46:16). Two
+behavior-tree tactics that steer in normal battle, before any pursuit, rolled left with a target on
+screen:
+
+- **Engage/Regroup navigation** (minimap-driven, `EngageNav`): at 08:46:59.9 the tracker acquired a target
+  at (938, 585), screen centre, and in the same tick the navigation, flipping Engage and Regroup every
+  1.5 s, rolled left (`err=-0.30`); again at 08:47:02 and 08:47:05 (`err=-0.34`, `-0.67`).
+- **Boundary turn**, 08:47:53 onward: 0.227 R from the arena edge and closing (0.057 R at 08:47:59), it
+  banked and pulled left away from it; the tracker acquired targets at 08:47:57, 08:48:14 and 08:48:26 and
+  nothing steered to them. The pursuit began at 08:48:39.
+
+The cause: in GAME_BATTLE `tracking.actuate` is false, so a lock is sensed and never flown; the icon
+steering exists only inside `pursue_and_engage`. **Decision (operator go-ahead on the recommendation):**
+the same priority as the pursuit in normal battle: the boundary turn first (leaving the arena costs the
+airframe outright), then a lock, then the icons, then the minimap navigation. Shadow first.
+
+**Shadow (`tracking.battle_priority_shadow: true`):** `BehaviorTreeHandler._actuate_engage` records each
+roll the navigation commands (`last_nav_roll`: steer or orbit, direction, error, mode);
+`TrackingHudHandler` reads it later in the same main tick, after the tracker has scanned the same frame,
+and logs `BATTLEPRI: nav=<kind>:<dir> err=... mode=... lock=<err|-> icon=<angle|-> would=<track|icon|nav>:
+<left|right|hold|level> agree=<yes|no>`. A lock within the tracker's deadband is `track:hold`; an icon
+within 5.7 deg of vertical is `icon:level`. The boundary turn is not compared (it keeps priority).
+Presses nothing. Tests in `tests/test_tick_handlers.py` (`TestBattlePriorityShadow`, and the tree records
+its roll).
+
+**Verdict criteria for the first run:** the share of navigation rolls with `agree=no` while a lock is on
+screen (`would=track:...`) is the direct count of "rolling past targets"; the same for `would=icon:...`;
+and how many navigation rolls there are per battle minute. Going live would hand those ticks' roll to
+the tracker's `orient_nose_to_target` (and the icon's side) instead of the navigation's.
+
+Gate: `make lint` clean; `make test` 2,306 passed, 2 failed, 35 skipped: the known READY-crop test, and
+`test_invite_policy.py::test_shipped_config_declines_by_default`, which fails at the committed HEAD (the
+operator's 08:32 commit set `accept_invite: true` and added a test expecting `false`), unrelated. The
+operator's 08:51 session (previous code) was stopped by the operator with `z` at 09:36 and exited at
+09:42:11. `make r1`, wingman pid 983820, started 09:42:51.
+
 ### Open questions for this section
 
 Operator decisions, asked and answered 2026-09-26 (each took the recommended option):

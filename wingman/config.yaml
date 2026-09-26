@@ -942,6 +942,11 @@ tracking:
   # instead. Own flag, own gains, deliberately independent from roll's
   # actuate/deadband/kp/etc above — see HLDD 005 Safety and Gating Rules.
   actuate_pitch: false
+  # HLDD 015 normal-battle priority, SHADOW (operator, 2026-09-26: "its still rotating
+  # left past targets"): each roll the tree's minimap navigation commands in
+  # GAME_BATTLE is logged as `BATTLEPRI:` beside what a lock, else the ring icon,
+  # would have steered instead. Presses nothing.
+  battle_priority_shadow: true
   pitch_deadband: 0.05
   pitch_kp: 0.3
   pitch_min_hold_sec: 0.08

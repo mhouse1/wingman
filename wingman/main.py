@@ -26,6 +26,7 @@ WINGMAN_VERSION_DETAILS = "Find, fix, track , target, engage, Assess, attack usi
 from . import capture_budget
 from .capture import Capture
 from .config_schema import assert_valid_config
+from .icon_steering import IconSteeringConfig
 from .controller_config import ControllerConfig
 from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON,
                          set_focus_guard)
@@ -1180,6 +1181,9 @@ def main():
     )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
+        nav_source=behavior_tree,
+        icon_cfg=IconSteeringConfig.from_dict(
+            (cfg.get("pursuit_mode") or {}).get("icon_steering")),
     )
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,

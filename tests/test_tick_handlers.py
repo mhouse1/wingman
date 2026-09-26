@@ -3117,3 +3117,97 @@ def test_seek_center_ships_disabled_in_the_shipped_config():
     with open("wingman/config.yaml") as f:
         cfg = yaml.safe_load(f)
     assert cfg["behavior_tree"]["attack_support"]["seek_center_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# HLDD 015 normal-battle priority, shadow (2026-09-26): each navigation roll in
+# GAME_BATTLE is logged beside what a lock, else the ring icon, would steer.
+# ---------------------------------------------------------------------------
+
+class _NavSource:
+    def __init__(self, direction="left", age_s=0.0):
+        import time as _t
+        self.last_nav_roll = {"ts": _t.time() - age_s, "kind": "steer", "dir": direction,
+                              "err": -0.30, "mode": "regroup"}
+
+
+def _icon_frame(angle_deg):
+    import math as _m
+    import cv2 as _cv2
+    import numpy as _np
+    img = _np.zeros((1200, 1920, 3), _np.uint8)
+    x = int(round(960 + 194 * _m.cos(_m.radians(angle_deg))))
+    y = int(round(600 + 194 * _m.sin(_m.radians(angle_deg))))
+    bgr = tuple(int(c) for c in _cv2.cvtColor(_np.uint8([[[3, 165, 255]]]), _cv2.COLOR_HSV2BGR)[0, 0])
+    _cv2.rectangle(img, (x - 15, y - 15), (x + 15, y + 15), bgr, -1)
+    return img
+
+
+def _battlepri(caplog, obs, frame, nav=None, enabled=True):
+    from wingman.icon_steering import IconSteeringConfig
+    from wingman.tick_handlers import TrackingHudHandler
+    nav = nav if nav is not None else _NavSource()
+    handler = TrackingHudHandler(_TrackerStub(obs=obs), _HudStub(), _TrackAnalyzerStub(),
+                                 _TrackCtrlStub(), {"battle_priority_shadow": enabled},
+                                 nav_source=nav, icon_cfg=IconSteeringConfig(enabled=True))
+    with caplog.at_level("DEBUG", logger="wingman.tick_handlers"):
+        handler.tick(frame, GameState.GAME_BATTLE, {"health": 100})
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("BATTLEPRI:")], nav
+
+
+_NO_LOCK = {"error_norm": None, "visible": False, "mode": "ACQUIRING"}
+
+
+class TestBattlePriorityShadow:
+    def test_a_lock_the_other_way_is_logged_as_a_disagreement(self, caplog):
+        lines, _ = _battlepri(caplog, {"error_norm": 0.3, "visible": True, "mode": "TRACKING"},
+                              _icon_frame(180))
+        assert len(lines) == 1
+        assert "nav=steer:left" in lines[0] and "would=track:right" in lines[0]
+        assert "agree=no" in lines[0]
+
+    def test_a_centred_lock_wants_no_roll(self, caplog):
+        lines, _ = _battlepri(caplog, {"error_norm": 0.02, "visible": True, "mode": "TRACKING"},
+                              _icon_frame(0))
+        assert "would=track:hold agree=no" in lines[0]
+
+    def test_without_a_lock_the_icon_side_is_compared(self, caplog):
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(0))
+        assert "icon=0deg" in lines[0] and "would=icon:right agree=no" in lines[0]
+
+    def test_an_icon_straight_below_wants_the_wings_level(self, caplog):
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(90))
+        assert "would=icon:level" in lines[0]
+
+    def test_neither_lock_nor_icon_leaves_the_navigation(self, caplog):
+        import numpy as _np
+        lines, _ = _battlepri(caplog, _NO_LOCK, _np.zeros((1200, 1920, 3), _np.uint8))
+        assert "would=nav:left agree=yes" in lines[0]
+
+    def test_the_roll_is_consumed_so_it_is_logged_once(self, caplog):
+        _lines, nav = _battlepri(caplog, _NO_LOCK, _icon_frame(0))
+        assert nav.last_nav_roll is None
+
+    def test_no_line_without_a_navigation_roll_this_tick(self, caplog):
+        nav = _NavSource()
+        nav.last_nav_roll = None
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(0), nav=nav)
+        assert lines == []
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(0), nav=_NavSource(age_s=5.0))
+        assert lines == []
+
+    def test_off_logs_nothing(self, caplog):
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(0), enabled=False)
+        assert lines == []
+
+
+def test_the_tree_records_the_navigation_roll_it_commanded():
+    from types import SimpleNamespace
+    from wingman.tick_handlers import BehaviorTreeHandler
+    bt = BehaviorTreeHandler(None, _TrackCtrlStub(), {})
+    bt._nav.update = lambda *a, **k: SimpleNamespace(
+        mode="regroup", kind="steer", reason="steering", error_norm=-0.3, direction=None)
+    bt._actuate_engage([], 4000.0, 0.0)
+    assert bt.last_nav_roll is not None
+    assert bt.last_nav_roll["dir"] == "right"      # the ctrl stub always answers "right"
+    assert bt.last_nav_roll["kind"] == "steer" and bt.last_nav_roll["mode"] == "regroup"

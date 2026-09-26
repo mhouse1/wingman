@@ -48,6 +48,7 @@ from .behavior_tree import (
     tree_status_text,
 )
 from .engage_nav import RING_LONG, RING_MID, RING_SHORT, EngageNavigator, bin_rings
+from .icon_steering import find_ring_icons
 
 logger = logging.getLogger(__name__)
 
@@ -150,11 +151,23 @@ class TrackingHudHandler:
     detection — the HUD must render before the respawn block's `continue`.
     """
 
-    def __init__(self, target_tracker, hud_renderer, analyzer, ctrl, tracking_cfg):
+    def __init__(self, target_tracker, hud_renderer, analyzer, ctrl, tracking_cfg,
+                 nav_source=None, icon_cfg=None):
         self._tracker = target_tracker
         self._hud = hud_renderer
         self._analyzer = analyzer
         self._ctrl = ctrl
+        # HLDD 015 normal-battle priority, shadow stage (operator, 2026-09-26:
+        # "its still rotating left past targets"): in GAME_BATTLE the tree's
+        # minimap navigation steers and a lock on screen changes nothing. With
+        # this on, every navigation roll the tree commanded this tick is logged
+        # beside what a lock, else the ring icon, would have steered instead
+        # (`BATTLEPRI:`). Presses nothing. `nav_source` is the
+        # BehaviorTreeHandler (its `last_nav_roll`), `icon_cfg` the
+        # IconSteeringConfig.
+        self._battle_priority_shadow = bool(tracking_cfg.get("battle_priority_shadow", False))
+        self._nav_source = nav_source
+        self._icon_cfg = icon_cfg
         # Design 005's own "Live dry-run logging mode" — off (sensing-only)
         # by default even when tracking itself is enabled, so turning
         # tracking on for the first time can never silently start rolling.
@@ -189,6 +202,50 @@ class TrackingHudHandler:
         """Reset tracking when leaving the battle states entirely."""
         if prev_state in _BATTLE_STATES and new_state not in _BATTLE_STATES:
             self._tracker.reset()
+
+    # A navigation roll older than this is not this tick's (the main tick is 1.5 s).
+    _NAV_ROLL_MAX_AGE_S = 1.0
+    # |cos(angle)| under this: the icon is straight above or below, no side.
+    _ICON_SIDE_MIN = 0.1
+
+    def _log_battle_priority(self, frame, tracking_obs) -> None:
+        """One `BATTLEPRI:` line per navigation roll: what the tree's minimap
+        navigation rolled, and what the lock (first) or the ring icon (second)
+        wanted instead. `would` is `track:<left|right|hold>`, `icon:<left|right
+        |level>` or `nav:<dir>` when neither is present; `agree` compares it
+        with the navigation's roll. Measurement only."""
+        nav = getattr(self._nav_source, "last_nav_roll", None) if self._nav_source else None
+        if not nav:
+            return
+        self._nav_source.last_nav_roll = None
+        if time.time() - nav["ts"] > self._NAV_ROLL_MAX_AGE_S:
+            return
+        err = tracking_obs.get("error_norm") if tracking_obs else None
+        lock = bool(tracking_obs and tracking_obs.get("visible") and err is not None)
+        icon = None
+        if self._icon_cfg is not None:
+            icons = find_ring_icons(frame, self._icon_cfg)
+            icon = icons[0] if icons else None
+        if lock:
+            if abs(err) <= self._ctl_cfg["deadband"]:
+                would = ("track", "hold")
+            else:
+                would = ("track", "left" if err < 0 else "right")
+        elif icon is not None:
+            ux = math.cos(math.radians(icon.angle_deg))
+            if abs(ux) < self._ICON_SIDE_MIN:
+                would = ("icon", "level")
+            else:
+                would = ("icon", "left" if ux < 0 else "right")
+        else:
+            would = ("nav", nav["dir"])
+        logger.debug(
+            "BATTLEPRI: nav=%s:%s err=%s mode=%s lock=%s icon=%s would=%s:%s agree=%s",
+            nav["kind"], nav["dir"],
+            "-" if nav.get("err") is None else "%+.2f" % nav["err"], nav.get("mode", "-"),
+            "%+.2f" % err if lock else "-",
+            "-" if icon is None else "%.0fdeg" % icon.angle_deg,
+            would[0], would[1], "yes" if would[1] == nav["dir"] else "no")
 
     def tick(self, frame, current_game_state, game_state) -> bool:
         # Sensing: GAME_BATTLE and GAME_BATTLE_MANUAL alike. This never
@@ -243,6 +300,11 @@ class TrackingHudHandler:
                         logger.info(
                             "PITCH[shadow]: would %s hold=%.2fs err_y=%.2f (%d so far)",
                             "nose_up" if err_y < 0 else "nose_down", pitch_hold, err_y, n)
+            if self._battle_priority_shadow and current_game_state == GameState.GAME_BATTLE:
+                try:
+                    self._log_battle_priority(frame, tracking_obs)
+                except Exception:
+                    logger.debug("BATTLEPRI: shadow check failed", exc_info=True)
 
         # HUD renderer — annotated snapshot; always runs in GAME_BATTLE when enabled.
         if self._hud is not None and current_game_state in (
@@ -1748,6 +1810,10 @@ class BehaviorTreeHandler:
         self._orbit_interval_s = float(j20_cfg.get("orbit_roll_interval_s", 2.0))
         self._last_orbit_roll_ts = 0.0
         self._last_nav_mode = self._nav.mode
+        # HLDD 015 normal-battle priority shadow: the last roll the minimap
+        # navigation commanded ({ts, kind, dir, err, mode}), read and cleared by
+        # TrackingHudHandler later in the same tick.
+        self.last_nav_roll: "dict | None" = None
         # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own tuning,
         # not self._ctl_cfg, since that dict is EngageNavigator's combat gain
         # and splatting it here would silently ignore these config keys.
@@ -2386,6 +2452,8 @@ class BehaviorTreeHandler:
                 cmd = self._ctrl.orient_nose_to_target(intent.error_norm, **self._ctl_cfg)
                 if cmd is not None:
                     logger.debug("EngageNav: roll_%s err=%.2f", cmd, intent.error_norm)
+                    self.last_nav_roll = {"ts": time.time(), "kind": "steer", "dir": cmd,
+                                          "err": intent.error_norm, "mode": intent.mode}
         elif intent.kind == "orbit":
             if steer_only:
                 # Concurrent with a climb: correcting heading is compatible with
@@ -2405,6 +2473,10 @@ class BehaviorTreeHandler:
                 else:
                     self._ctrl.roll_right(hold_seconds=self._orbit_hold_s, block=False)
                     logger.debug("EngageNav: orbit roll_right")
+                if not self._dry_run:
+                    self.last_nav_roll = {"ts": time.time(), "kind": "orbit",
+                                          "dir": intent.direction, "err": None,
+                                          "mode": intent.mode}
 
     def _seek_center_error_norm(self, bearing_deg: float) -> float:
         """Rear-sector commit/release for the reciprocal boundary bearing
