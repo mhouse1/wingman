@@ -60,6 +60,19 @@ misread.
 **D3. Below a 1,000 m anchor the rule does not apply.** Near the ground a real descent
 can cross the ratio within one gap (900 m to 150 m in 3 s is 250 m/s).
 
+**D4 (added after live run 2). A run of misreads cannot age the anchor out.** An anchor that went stale only
+through rejections (`rejected_streak > 0`) still counts for the digit-drop test for `digit_drop_window_s` (15).
+Digit-drop rejects hold the anchor. They count toward neither D3's reseed nor the three-reject clear, because
+clearing would make the next misread the seed. Cases: 03:18:47 (294, 28) and 03:50:22 (30, 297).
+
+**D5. A lost leading digit.** A read under 1,000 m against a four-digit anchor is rejected when reaching it would
+need a fall faster than 300 m/s. That is above the top airspeed read that night (1,057 KPH, 294 m/s). It catches
+783 for 2,449 (555 m/s). It keeps a real 1,198 to 910 m in 3 s (96 m/s, 03:25:24), which the flat
+"under four digits" rule first tried would have rejected, blinding the recovery at the bottom of a dive.
+
+Not covered: a wrong digit that keeps four (2214 for 2,842, 3941 for 3,331). That belongs to ADR 086's
+single-read bypass, and changing that ADR needs its own ADR.
+
 A persistent low reading is not held off forever. Rejects do not refresh the anchor's
 timestamp, so after `stale_after_s` the gate stands aside. The low reading then seeds
 fresh with no rate and therefore no false time to ground.
@@ -93,6 +106,34 @@ Measured:
 - Pursuits locked 12% and 34% of scans.
 
 This is a short sample, but the direction is unambiguous for the failure it targets.
+
+### Gap found in live run 2 (03:09 run, measured)
+
+At 03:18:51 the run produced a false emergency through a chain of misreads, with the true altitude about 2,800 m
+throughout (2,811 m on the next read):
+1. 03:18:38.755: 3118, accepted.
+2. 03:18:41.746: 30431, rejected by the ADR 097 ceiling.
+3. 03:18:44.753: 2, rejected by D1.
+4. 03:18:47.747: 294, **accepted as a fresh seed**. The anchor was now 9 s old, past `stale_after_s`, so
+   the gate stood aside.
+5. 03:18:50.761: 28, **accepted**. The 294 anchor is below D3's 1,000 m, so D1 does not apply. The result was
+   -89 m/s and "2s to ground".
+
+The "not held off forever" behaviour in D1 lets two consecutive rejections age the anchor out. Candidate fix, not
+applied: when the anchor went stale only through rejections (`rejected_streak > 0`), apply D1 against the last
+accepted value for a longer window (about 15 s).
+
+Second gap, 03:35:18 (measured). A read of 783 between the true 2,449 and 2,331 m was accepted and started the
+hard emergency at 03:35:22.9. 783 is 32% of the anchor, so the 0.2 ratio missed it. A lost *leading* digit leaves
+up to about 45% of the value (2,783 read as 783). Candidate replacement for the ratio: reject any read of three
+digits or fewer against a fresh four-digit anchor (1,000 m or more). A real fall from 2,449 m to under 1,000 m
+in one 3 s gap would be about 480 m/s, twice the top airspeed read tonight (1,057 KPH, 294 m/s).
+
+Third class, 03:44:20 (measured). A read of 2214 between the true 2,842 and 2,717 m was accepted: a wrong digit that
+keeps four digits. It implied 209 m/s against an airspeed of 445 KPH (124 m/s) and started the hard emergency at
+03:44:24.9. Neither the ratio nor a digit-count rule catches it. ADR 097 dropped the "descent cannot exceed airspeed"
+premise because stalls break it. The narrower option: ADR 086's single-read bypass (`confirm_bypass_time_s` 15)
+should not fire on a reading that has not yet been confirmed by the next one.
 
 ## Related
 

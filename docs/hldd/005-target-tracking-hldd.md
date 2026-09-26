@@ -2054,7 +2054,37 @@ Change (operator go-ahead via `z` after the recommendation):
   `test_a_diving_chase_with_a_target_is_not_pulled_out`, which replays 02:39:26.8.
 
 Gate: `make test` 2233 passed, 1 failed (the known READY-crop test). Live run started 03:09:14 (`make rd`,
-pid 539568). Risk to watch: terrain deaths with a target in view, since only the 30 s recovery guards them now. The next run's criterion is that
+pid 539568). Risk to watch: terrain deaths with a target in view, since only the 30 s recovery guards them now.
+
+First results (03:09 run, measured):
+- Pursuits locked 59%, 37% and 11% of scans.
+- They fired 4, 3 and 2 missiles. Earlier tonight most pursuits fired none.
+- Real dive recoveries came at 03:12:03 (raw 1,686 m, 918 KPH) and 03:14:10 (raw 1,468 m, 888 KPH).
+- 03:18:51 was a false one, the ADR 150 gap recorded there.
+
+**The risk materialised at 03:21:5x.** The chase dived on a target through raw 1,773 m and then 1,460 m (03:21:47 to
+50, 868 KPH, nose -26 deg). The health digits vanished at about 03:21:52.6 (`RespawnLatency: no_digits_for=3.32s`
+at 55.97), before ADR 086's recovery took over at 03:21:54.1. It was logged as `DIED ARMED ... cause=terrain (no
+incoming alert this session)`. The cause label is a heuristic, and the crash capture is a stale frame (217 s old).
+
+Why the backstop was late:
+- The recovery's ttg uses the smoothed altitude, which read 1,743 m against 1,460 m raw (17 s against about 14 s).
+- It assumes the ground is at 0 m, while terrain here is inferred at about 1,000 to 1,400 m.
+
+Recommendation (operator decision, not applied): a hard chase minimum while a target is in view. Below about 1,500 m
+raw altitude, withhold nose-down without pulling out.
+
+Whole 03:09 run (03:09 to 04:04, 54 m 48 s, 8 missions, 16 pursuits; `logs/wingman_20260926_040404.log`;
+measured):
+- Locked scans were 1,197 of 3,630 (32%), against 24% for the 21:23 session.
+- 6 pursuits ended `end=ammo`. The 21:23 session had one in 93.
+- 10 respawns. The deaths were terrain 1, enemy fire 1 and unclassified 1.
+- There were 16 yields to the dive recovery. About 5 were misread-driven (the ADR 150 gaps: runs of misreads, a
+  lost leading digit and a wrong digit). The rest were real chase dives, 4 of them below 1,500 m raw.
+
+Next run (04:12:44, `make rd`, pid 603638): ADR 150 D4 (a run of misreads cannot age the anchor out) and D5 (a lost
+leading digit, rate-bound). Both were applied on the operator's `z` at 04:03. The 1,500 m chase minimum and an
+ADR 086 single-read change are still awaiting the operator. The next run's criterion is that
 every `HOLD[pitch]: None -> <dir>` has an end line. The first thing to read from it is how long the
 nose-down holds that precede a `yielding` line lasted, and what ended them.
 

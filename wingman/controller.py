@@ -14,6 +14,7 @@ from . import capture_budget
 from .analyzer import GameState, BATTLE_STATES, NOSE_DOWN
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre, draw_crops
+from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
 from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
     _WINGMAN_XAUTH,
     _XKEY_ALIASES,
@@ -182,6 +183,16 @@ def _summarise_turn(samples) -> str:
     return ", ".join(parts)
 
 
+def _resume_delay(resume_delay_s: float, last_err: "float | None",
+                  centre_err: "float | None",
+                  centre_delay_s: "float | None") -> "tuple[float, bool]":
+    """How long a miss after a lock waits before the search resumes, and whether
+    the near-centre extension applied (see Controller.roll_on_miss)."""
+    near_centre = (last_err is not None and centre_err is not None
+                   and centre_delay_s is not None and abs(last_err) <= centre_err)
+    return (max(resume_delay_s, centre_delay_s) if near_centre else resume_delay_s), near_centre
+
+
 class _EngagementTally:
     """Counters behind the one-line `PURSUIT SUMMARY` / `DIVE SUMMARY` INFO log
     (action item 001, Cycle 7, 2026-09-24).
@@ -210,6 +221,24 @@ class _EngagementTally:
         self.first_lock_s: "float | None" = None
         self.ammo_first: "int | None" = None
         self.ammo_last: "int | None" = None
+        # HLDD 015 icon shadow: steering ticks with no lock, those with a ring
+        # icon, and seconds the icon law would have been steering. Reported
+        # only once icon_tick() has run, so the line is unchanged without it.
+        self.icon_enabled = False
+        self.icon_unlocked = 0
+        self.icon_seen = 0
+        self.icon_steer_s = 0.0
+        self._icon_prev: "tuple[float, str] | None" = None
+
+    def icon_tick(self, unlocked: bool, has_icon: bool, rung: str) -> None:
+        now = self._clock()
+        self.icon_enabled = True
+        if self._icon_prev is not None and self._icon_prev[1] == "icon":
+            self.icon_steer_s += now - self._icon_prev[0]
+        self._icon_prev = (now, rung)
+        if unlocked:
+            self.icon_unlocked += 1
+            self.icon_seen += bool(has_icon)
 
     def scan(self, visible, ammo) -> None:
         self.scans += 1
@@ -226,10 +255,14 @@ class _EngagementTally:
         share = 100.0 * self.locked / self.scans if self.scans else 0.0
         first = "-" if self.first_lock_s is None else "%.1fs" % self.first_lock_s
         ammo = "-" if self.ammo_first is None else "%d->%d" % (self.ammo_first, self.ammo_last)
-        return ("%s SUMMARY: end=%s dur=%.1fs scans=%d locked=%d (%.0f%%) "
+        line = ("%s SUMMARY: end=%s dur=%.1fs scans=%d locked=%d (%.0f%%) "
                 "first_lock=%s ammo=%s switched=%s"
                 % (kind, end, self._clock() - self._t0, self.scans, self.locked,
                    share, first, ammo, "yes" if switched else "no"))
+        if self.icon_enabled:
+            line += " icon=%d/%d icon_steer=%.1fs" % (
+                self.icon_seen, self.icon_unlocked, self.icon_steer_s)
+        return line
 
 
 class Controller:
@@ -671,6 +704,10 @@ class Controller:
         self._search_look_down_interval_s = float(_pm.get("search_look_down_interval_s", 1.0))
         self._search_look_down_min_deg = float(_pm.get("search_look_down_min_deg", -20.0))
         self._search_look_down_next_ts = 0.0
+        # HLDD 015 Icon-Directed Search (2026-09-26), shadow stage: score the
+        # game's ring icon each steering tick and log the keys the law would
+        # hold (ICONPTS). Presses nothing; the search above keeps flying.
+        self._icon_cfg = IconSteeringConfig.from_dict(_pm.get("icon_steering"))
         # Timestamp of the altitude sample the last look-down tap acted on.
         self._search_look_down_sample_ts: "float | None" = None
         # Set by _pursuit_dive_guard: the ttg term tripped, and the rate it saw.
@@ -2038,11 +2075,7 @@ class Controller:
         cases. All three of last_err, centre_err and centre_delay_s must be
         given for it to apply.
         """
-        delay = resume_delay_s
-        near_centre = (last_err is not None and centre_err is not None
-                       and centre_delay_s is not None and abs(last_err) <= centre_err)
-        if near_centre:
-            delay = max(resume_delay_s, centre_delay_s)
+        delay, near_centre = _resume_delay(resume_delay_s, last_err, centre_err, centre_delay_s)
         if last_seen_ts is not None and time.time() - last_seen_ts < delay:
             self.release_roll_hold(
                 why="miss within %.1fs of last lock%s"
@@ -3416,6 +3449,83 @@ class Controller:
                        ignore_cancel=True)
         return True
 
+    def _icon_shadow_tick(self, frame, points: IconPoints, tally: _EngagementTally, *,
+                          visible: bool, yielding: bool, last_seen_ts: "float | None",
+                          last_err: "float | None", guard: "str | None") -> None:
+        """HLDD 015 Icon-Directed Search, shadow stage: one ICONPTS line per
+        steering tick saying which rung the design would be on and what keys its
+        dominant-intent law would hold. Presses nothing.
+
+        Rungs, in priority order: `recovery` (ADR 148 owns both axes; points
+        zeroed), `track` (the tracker has a labelled target; points zeroed),
+        `wait` (inside roll_on_miss's neutral wait after a lock; points still
+        update), `icon` (a current icon and an active axis), `hold` (an icon
+        within blind_search_after_s: neutral while points build), `blind`
+        (today's search, which would roll toward `side=`).
+
+        `withheld` says why the law's nose-down would not be pressed: `guard`
+        (the dive guard tripped this tick), `angle` (flight path at or past
+        icon_min_path_deg) or `angle-none` (no fresh angle). The share of
+        `angle-none` decides whether "no angle, no push" is workable.
+        """
+        cfg = self._icon_cfg
+        icons: "list" = []
+        icon = None
+        add = (0, 0)
+        if yielding:
+            rung = "recovery"
+            points.reset()
+        elif visible:
+            rung = "track"
+            points.reset()
+        else:
+            icons = find_ring_icons(frame, cfg)
+            icon, add = points.scan(icons)
+            wait_s, _near = _resume_delay(
+                self._pursuit_search_resume_delay_s, last_err,
+                self._pursuit_search_resume_centre_err,
+                self._pursuit_search_resume_centre_delay_s)
+            if last_seen_ts is not None and time.time() - last_seen_ts < wait_s:
+                rung = "wait"
+            elif points.intent()[0] != "none":
+                rung = "icon"
+            elif points.icon_seen_within(cfg.blind_search_after_s):
+                rung = "hold"
+            else:
+                rung = "blind"
+        intent, keys = points.intent() if rung == "icon" else ("none", ())
+        withheld = "-"
+        if intent == "down":
+            if guard:
+                withheld = "guard"
+            elif cfg.icon_min_path_deg is not None:
+                angle = self._telemetry_path_angle_deg()
+                if angle is None:
+                    withheld = "angle-none"
+                elif angle <= cfg.icon_min_path_deg:
+                    withheld = "angle"
+        tally.icon_tick(unlocked=rung not in ("recovery", "track"),
+                        has_icon=icon is not None, rung=rung)
+        if logger.isEnabledFor(logging.DEBUG):
+            icon_desc = ("-" if icon is None else "(%.0f,%.0f,%.0fdeg,h%d)"
+                         % (icon.x, icon.y, icon.angle_deg, icon.hue))
+            logger.debug(
+                "ICONPTS: rung=%s icon=%s n=%d add=(%+d,%+d) pts=(%+.1f,%+.1f) "
+                "intent=%s keys=%s withheld=%s side=%s",
+                rung, icon_desc, len(icons), add[0], add[1], points.turn_pts,
+                points.pitch_pts, intent, "+".join(keys) or "-", withheld,
+                points.blind_side())
+
+    def _telemetry_path_angle_deg(self) -> "float | None":
+        """Flight-path angle from telemetry, or None when there is no fresh one."""
+        if self._analyzer is None:
+            return None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return None
+        return snap.pitch_angle_deg() if snap is not None else None
+
     def pursuit_mode_enabled(self) -> bool:
         """True when the missiles-empty trigger should call pursue_and_engage
         instead of eject_and_dive (HLDD 015). Read by AmmoEventsHandler
@@ -3561,6 +3671,8 @@ class Controller:
                 logger.info("Controller: pursue_and_engage — tracking engaged, both axes free")
                 start = time.time()
                 tally = _EngagementTally()
+                icon_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
+                icon_error_logged = False
                 last_seen_ts = None
                 last_visible_err = None
                 zero_reads = 0
@@ -3633,6 +3745,16 @@ class Controller:
                             self.release_pitch_hold(why="no target")
                             if guard is None and self._roll_hold_reason == "search":
                                 self._search_look_down()
+                        if icon_points is not None:
+                            try:
+                                self._icon_shadow_tick(
+                                    frame, icon_points, tally, visible=bool(visible),
+                                    yielding=yielding, last_seen_ts=last_seen_ts,
+                                    last_err=last_visible_err, guard=guard)
+                            except Exception:
+                                if not icon_error_logged:
+                                    logger.exception("Controller: icon shadow tick failed")
+                                    icon_error_logged = True
                         if guard:
                             self._dive_guard_pullout()
                         # CR-018-01: ammo, weapon switch, fire and HUD run on their own

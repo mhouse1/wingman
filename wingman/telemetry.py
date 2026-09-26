@@ -259,6 +259,9 @@ class TelemetryProcessor:
         # ADR 150: an altitude read below this fraction of a fresh anchor of at
         # least _DIGIT_DROP_MIN_ANCHOR is a dropped digit, not a dive. 0 = off.
         self.digit_drop_ratio = float(cfg.get("digit_drop_ratio", 0.0))
+        # ADR 150 D4: how long an anchor that went stale only through
+        # rejections still counts for the digit-drop test.
+        self.digit_drop_window_s = float(cfg.get("digit_drop_window_s", 0.0))
         self.smoothing_window = max(1, int(cfg.get("smoothing_window", 3)))
         self.stale_after_s = float(cfg.get("stale_after_s", 6.0))
         self.trend_min_alt_rate_fps = float(cfg.get("trend_min_alt_rate_fps", 20.0))
@@ -313,6 +316,7 @@ class TelemetryProcessor:
                 now_s=now_s,
                 absolute_max=self.max_altitude_ft,
                 digit_drop_ratio=self.digit_drop_ratio,
+                digit_drop_window_s=self.digit_drop_window_s,
                 max_delta_per_s=self._altitude_bound_mps(),
                 trend_min_rate=self.trend_min_alt_rate_fps,
                 # The altitude bound is PHYSICS (vertical speed cannot exceed
@@ -376,6 +380,8 @@ class TelemetryProcessor:
 
     # ADR 150: below this anchor a real descent can cross the ratio quickly.
     _DIGIT_DROP_MIN_ANCHOR = 1000.0
+    # ADR 150 D5: above the top airspeed read on 2026-09-26 (1057 KPH, 294 m/s).
+    _DIGIT_DROP_MAX_FALL_MPS = 300.0
 
     def _update_signal(
         self,
@@ -389,6 +395,7 @@ class TelemetryProcessor:
         trend_min_rate: float,
         gate_dt_cap_s: float,
         digit_drop_ratio: float = 0.0,
+        digit_drop_window_s: float = 0.0,
     ) -> TelemetrySignal:
         if raw < 0.0 or raw > absolute_max:
             # Out-of-envelope readings are never seedable — a consistent
@@ -407,14 +414,28 @@ class TelemetryProcessor:
             and seed_age is not None
             and seed_age <= self.stale_after_s
         )
-        if (seed_usable and digit_drop_ratio > 0
+        # ADR 150 D4: an anchor aged out only by rejections still counts here, so
+        # a run of misreads cannot outlast it (03:18:47, 03:50:22 on 2026-09-26).
+        drop_anchor_usable = seed_usable or (
+            signal.value is not None and seed_age is not None
+            and signal.rejected_streak > 0 and seed_age <= digit_drop_window_s)
+        lost_leading_digit = (
+            drop_anchor_usable and raw < self._DIGIT_DROP_MIN_ANCHOR
+            and (float(signal.value) - raw) / max(seed_age, 0.1) > self._DIGIT_DROP_MAX_FALL_MPS)
+        if (drop_anchor_usable and digit_drop_ratio > 0
                 and float(signal.value) >= self._DIGIT_DROP_MIN_ANCHOR
-                and raw < float(signal.value) * digit_drop_ratio):
+                and (lost_leading_digit
+                     or raw < float(signal.value) * digit_drop_ratio)):
             # ADR 150: the true value with a digit lost (3078 read as 312, 2817
-            # as 2), which the 1000 m/s ceiling admits across a 3 s gap. Not
-            # seedable: two such reads agree with each other, and ADR 097 D3
-            # would otherwise reseed the filter onto them.
-            return self._reject(signal, hist, raw, now_s, seedable=False)
+            # as 2), which the 1000 m/s ceiling admits across a 3 s gap. D5: any
+            # read under four digits against a four-digit anchor, which also
+            # covers a lost leading digit (783 for about 2400) when reaching it
+            # would need a fall faster than _DIGIT_DROP_MAX_FALL_MPS; a real
+            # 1198 -> 910 in 3 s (03:25:24) stays accepted. Held, not counted
+            # toward a reseed or a clear: two such reads agree with each other
+            # (ADR 097 D3), and clearing would make the next misread the seed.
+            # digit_drop_window_s bounds the hold.
+            return self._reject(signal, hist, raw, now_s, seedable=False, hold=True)
         if seed_usable:
             dt = max(seed_age, 0.1)  # guard duplicate timestamps
             # Cap the dt multiplier per-gate (see the two call sites above):
@@ -444,9 +465,15 @@ class TelemetryProcessor:
         now_s: float,
         *,
         seedable: bool,
+        hold: bool = False,
     ) -> TelemetrySignal:
         self.rejected_total += 1
         streak = signal.rejected_streak + 1
+        if hold:
+            return TelemetrySignal(
+                value=signal.value, ts=signal.ts, stable_value=signal.stable_value,
+                rate=signal.rate, trend=signal.trend, rejected_streak=streak,
+                last_rejected_raw=signal.last_rejected_raw)
         # ADR 097 D3: consecutive rejections that agree with EACH OTHER while
         # disagreeing with the anchor mean the anchor is the wrong value, not
         # the readings. The count-only rule below needs three rejections to

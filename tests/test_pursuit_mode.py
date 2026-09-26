@@ -90,7 +90,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 eject_max_s=0.2, heatdive_enabled=False, ammo_zero_grace_s=0.0,
                 sustained_hold_enabled=False, search_resume_delay_s=0.0,
                 empty_confirm_reads=3, search_resume_centre_err=0.15,
-                search_resume_centre_delay_s=0.0):
+                search_resume_centre_delay_s=0.0, icon_steering=None):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -129,6 +129,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 "search_resume_centre_err": search_resume_centre_err,
                 "search_resume_centre_delay_s": search_resume_centre_delay_s,
                 "empty_confirm_reads": empty_confirm_reads,
+                **({"icon_steering": icon_steering} if icon_steering is not None else {}),
             },
         ),
     )
@@ -804,3 +805,71 @@ def test_eject_flight_active_is_true_only_while_a_pursuit_flies(monkeypatch):
         ctrl.stop_eject_sequence("respawn_detected")
         _wait_for_pursuit_to_settle(ctrl)
     assert ctrl.eject_flight_active() is False
+
+
+# ---------------------------------------------------------------------------
+# HLDD 015 Icon-Directed Search, shadow stage (2026-09-26): the loop scores the
+# ring icon and logs ICONPTS, and presses nothing it would not press anyway.
+# ---------------------------------------------------------------------------
+
+_STEERING_KEYS = {NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY}
+
+
+class _FrameCapture(_CaptureStub):
+    """Returns a real frame: the operator's reference icon (down 5, left 1)."""
+
+    def __init__(self):
+        super().__init__()
+        import cv2
+        from pathlib import Path
+        self.frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "icon_ring_nose_down.png"))
+
+    def grab_from_thread(self):
+        self.grabs += 1
+        return self.frame
+
+
+def _icon_pursuit(monkeypatch, caplog, script, icon_steering=None, **kw):
+    # Uncapped and ended by a respawn: a cap would fall through into the dive,
+    # whose own descent control presses NOSE_DOWN.
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_FrameCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0,
+                       icon_steering=icon_steering, **kw)
+    ctrl.set_target_tracker(_ScriptedTracker(script))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(0.9)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("ICONPTS:")]
+    return ctrl, lines
+
+
+def test_icon_shadow_scores_the_reference_icon_and_presses_nothing(monkeypatch, caplog):
+    ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_MISS], icon_steering={"enabled": True})
+    assert len(lines) >= 4, lines
+    assert "add=(-1,+5)" in lines[0]
+    assert any("rung=icon" in ln and "intent=down keys=NOSE_DOWN" in ln for ln in lines), lines
+    # No telemetry here, so the -45 deg limit has no angle to check against.
+    assert any("withheld=angle-none" in ln for ln in lines)
+    assert not [k for a, k in _keys(ctrl) if k in _STEERING_KEYS]
+    summary = _summary_lines(caplog, "PURSUIT")
+    assert len(summary) == 1 and " icon=" in summary[0] and "icon_steer=" in summary[0]
+
+
+def test_icon_shadow_zeroes_the_points_while_the_tracker_has_a_target(monkeypatch, caplog):
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_SEEN], icon_steering={"enabled": True})
+    assert lines and all("rung=track" in ln and "pts=(+0.0,+0.0)" in ln for ln in lines)
+
+
+def test_icon_shadow_waits_after_a_lock_like_roll_on_miss(monkeypatch, caplog):
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_SEEN, _MISS],
+                                 icon_steering={"enabled": True}, search_resume_delay_s=30.0)
+    assert "rung=track" in lines[0]
+    assert all("rung=wait" in ln for ln in lines[1:]), lines
+
+
+def test_icon_shadow_off_logs_nothing_and_leaves_the_summary_alone(monkeypatch, caplog):
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_MISS])
+    assert lines == []
+    assert " icon=" not in _summary_lines(caplog, "PURSUIT")[0]

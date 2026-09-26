@@ -631,6 +631,28 @@ SCHEMA = Section(
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,
             "search_look_down_min_deg": _num(-90, 0),
+            # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
+            "icon_steering": Section(children={
+                "enabled": BOOL,
+                "ring_centre_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
+                "ring_radius_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
+                "area_px": Leaf(types=(list,), item_types=(int,), length=2),
+                "side_px": Leaf(types=(list,), item_types=(int,), length=2),
+                "red_hue_max": _int(0, 180),
+                "orange_hue": Leaf(types=(list,), item_types=(int,), length=2),
+                "orange_min_uniform": FRACTION,
+                "sat_min": _int(0, 255),
+                "val_min": _int(0, 255),
+                "points_scale": _num(0),
+                "points_half_life_s": SECONDS,
+                "points_cap": _num(0),
+                "act_pts": _num(0),
+                "release_pts": _num(0),
+                "icon_coast_s": SECONDS,
+                "icon_min_path_deg": Leaf(types=NUMBER, minimum=-90, maximum=0,
+                                          allow_none=True),
+                "blind_search_after_s": SECONDS,
+            }),
         }),
 
         "hud": Section(children={
@@ -707,6 +729,7 @@ SCHEMA = Section(
             "max_alt_rate_mps": _num(0),
             "reseed_agreement_m": _num(0),
             "digit_drop_ratio": _num(0, 1),   # ADR 150
+            "digit_drop_window_s": SECONDS,   # ADR 150 D4
             "smoothing_window": _int(1),
             "stale_after_s": SECONDS,
             "trend_min_alt_rate_fps": _num(0),

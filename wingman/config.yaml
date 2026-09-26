@@ -1268,6 +1268,34 @@ pursuit_mode:
   search_look_down_pulse_s: 0.15
   search_look_down_interval_s: 1.0
   search_look_down_min_deg: -20
+  # HLDD 015 Icon-Directed Search (2026-09-26), SHADOW STAGE: each steering tick
+  # finds the game's red ring icon (an arrowhead on a fixed ring around the screen
+  # centre pointing at an off-screen enemy), adds points to a nose-down/up and a
+  # left/right score, and logs the keys the design's law would hold as `ICONPTS:`,
+  # plus `icon=` / `icon_steer=` on PURSUIT SUMMARY. It presses nothing: the search
+  # roll and look-down above keep flying. enabled: false removes the lines.
+  # Ring geometry measured on 113,918 logged icons (centre 959.7, 599.8 of
+  # 1920 x 1200, radius 193.9 px, about 4 px spread); orange counts as red and the
+  # -45 deg dive limit are operator decisions; the rest are named guesses.
+  icon_steering:
+    enabled: true
+    ring_centre_pct: [0.5, 0.5]
+    ring_radius_pct: [0.14, 0.18]   # of frame height: 168-216 px at 1200
+    area_px: [150, 2500]
+    side_px: [15, 70]
+    red_hue_max: 4                  # red icons hue 2-3; hue 5-10 was afterburner, sunset, flare
+    orange_hue: [11, 15]            # orange icons hue 12-13, accepted only when solid
+    orange_min_uniform: 0.6         # orange icons 0.71-0.92, sunset and glare 0.00
+    sat_min: 110
+    val_min: 200
+    points_scale: 5                 # reference icon adds nose down 5, left 1
+    points_half_life_s: 1.0
+    points_cap: 25
+    act_pts: 10
+    release_pts: 4
+    icon_coast_s: 0.3               # keys only while an icon is this recent
+    icon_min_path_deg: -45          # no icon-led nose-down at or past this path angle
+    blind_search_after_s: 3.0
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right
@@ -1352,7 +1380,10 @@ telemetry:
   reseed_agreement_m: 150      # ADR 097 D3: agreeing rejects mean a poisoned anchor
   digit_drop_ratio: 0.2        # ADR 150: reject an altitude under this fraction of a
                                # fresh anchor of 1000 m or more (a dropped digit), and
-                               # never reseed from it. 0 turns it off.
+                               # never reseed from it. 0 turns it off. Also rejects any
+                               # read under 1000 m against such an anchor (D5).
+  digit_drop_window_s: 15      # ADR 150 D4: an anchor aged out only by rejections still
+                               # counts for the digit-drop test this long.
   smoothing_window: 3
   stale_after_s: 6.0
   trend_min_alt_rate_fps: 20.0

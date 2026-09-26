@@ -101,3 +101,62 @@ def test_shipped_config():
     import yaml
     with open("wingman/config.yaml") as fh:
         assert yaml.safe_load(fh)["telemetry"]["digit_drop_ratio"] == 0.2
+
+
+# --- D4 and D5 (live gaps, 03:09 run) -----------------------------------------
+
+def _proc_d45(**over):
+    cfg = {"digit_drop_window_s": 15.0}
+    cfg.update(over)
+    return _proc(**cfg)
+
+
+def test_a_run_of_misreads_cannot_age_the_anchor_out():
+    """03:18:38-50: 3118, 30431 (ceiling), 2 (D1), then 294 and 28 were accepted
+    because the anchor had gone stale through rejections alone."""
+    rows = [(3118, 266), (30431, 262), (2, 251), (294, 245), (28, 265), (2811, 208)]
+    seen = _feed(_proc_d45(), rows)
+    assert [s.value for s in seen] == [3118, 3118, 3118, 3118, 3118, 2811], \
+        "294 and 28 must be rejected against the aged anchor, and the anchor held"
+    assert all(s.rate is None or abs(s.rate) < 300 for s in seen)
+
+
+def test_the_window_is_off_at_zero():
+    rows = [(3118, 266), (30431, 262), (2, 251), (294, 245)]
+    assert _feed(_proc(), rows)[3].value == 294
+
+
+def test_a_lost_leading_digit_is_rejected():
+    """03:35:18: 783 between the true 2449 and 2331 (32% of the anchor)."""
+    seen = _feed(_proc_d45(), [(2449, 541), (783, 557), (2331, 535)])
+    assert [s.value for s in seen] == [2449, 2449, 2331]
+
+
+def test_a_real_four_digit_descent_is_still_kept():
+    rows = [(2315, 504), (2136, 618), (1939, 703), (1669, 877), (1198, 962)]
+    assert [s.value for s in _feed(_proc_d45(), rows)] == [2315, 2136, 1939, 1669, 1198]
+
+
+def test_a_real_descent_crossing_1000_m_is_kept():
+    """03:25:21-24: the chase really fell 1198 -> 910 m (96 m/s). D5 must not
+    blind the recovery at the lowest point of a dive."""
+    rows = [(1198, 962), (910, 1057), (905, 900), (920, 800), (1095, 342)]
+    assert [s.value for s in _feed(_proc_d45(), rows)] == [1198, 910, 905, 920, 1095]
+
+
+def test_the_hold_ends_with_the_window():
+    """A low reading that persists past digit_drop_window_s is accepted fresh."""
+    proc = _proc_d45()
+    proc.update(250, 3000, 1000.0)
+    for i in range(1, 6):                          # 3 s apart, all rejected
+        proc.update(250, 300, 1000.0 + 3.0 * i)
+    assert proc.snapshot(1015.0).altitude.value == 3000
+    proc.update(250, 300, 1018.0)                  # anchor now 18 s old
+    s = proc.snapshot(1018.0).altitude
+    assert s.value == 300 and s.rate is None
+
+
+def test_shipped_window():
+    import yaml
+    with open("wingman/config.yaml") as fh:
+        assert yaml.safe_load(fh)["telemetry"]["digit_drop_window_s"] == 15
