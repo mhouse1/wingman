@@ -1022,6 +1022,31 @@ rate; the operator's call whether to keep collecting.
 icon nose-down hold, one by the tracker's locked chase), three enemy kills, two emptied the rack alive,
 two ended with the match.
 
+- 06:41:00 (about), 189 s, `locked=164 (34%) first_lock=0.1s`, death about 06:44:04 with no incoming
+  missile: icon NOSE_DOWN holds from 06:43:33, 06:43:40 and 06:43:57 and a tracker push at 06:43:47, and
+  the jet fell from 3,275 m to 540 m at 190-241 m/s (06:43:47-06:44:02). Inferred: terrain. **Four likely
+  terrain deaths in eleven pursuits** (three icon-started or icon-fed, one the tracker's chase).
+- 06:47:06 (about), 50 s, `locked=71 (55%) first_lock=0.5s`, death about 06:47:55, no incoming: the
+  tracker's chase held nose-down on a target below from 3,010 m and the jet fell to 886 m at 255-267 m/s.
+
+**Across the day's sessions (measured; `PURSUIT SUMMARY end=external:respawn_detected` with no
+`INCOMING MISSILE DETECTED` in the 15 s before, a proxy for terrain):**
+
+| Session | Build | Pursuits (20 s or more) | Deaths | With no incoming |
+|---------|-------|--------------------------|--------|------------------|
+| 04:37 | shadow, recovery on | 7 (6) | 1 | 0 |
+| 05:04 | shadow, hold rule, recovery on | 9 (7) | 6 | 1 |
+| 05:30 | step 2a, recovery on | 9 (9) | 5 | 4 |
+| 05:55 | step 2b held push, recovery on | 4 (4) | 3 | 3 |
+| 06:20 | step 2b held push, `dive_safety` off | 13 (10) | 8 | 6 |
+
+The rise comes with the first live step, not with `dive_safety`: 1 no-incoming death in 16 shadow pursuits
+against 13 in 26 since. Step 2a changed only the roll (level wings instead of the fixed left roll; the
+look-down taps kept running), and it already shows 4 in 9. Inferred, not shown: the fixed left roll kept
+the aircraft banked, so the look-down taps and the chase's pushes turned the flight path less steeply down
+than they do with the wings level. Small samples, and the proxy counts any undetected enemy kill as
+terrain.
+
 **Tests:** `tests/test_icon_steering.py` (detector on the four real frames and on synthetic shapes,
 including afterburner hue and a dim orange patch; the operator's example scan by scan; crossing reset,
 cap, coast, hysteresis, each rung of the law; summary fields) and four pursuit-loop tests in
