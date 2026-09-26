@@ -810,7 +810,9 @@ again once the descent eases (`Controller._icon_fast_descent`). No reading, no c
 back on missing data). The icon's push and the tracker's lock are untouched, and nothing takes the airframe
 from the pursuit. `ICONPTS` shows `act=divelevel+up`. Tests: at -200 m/s the left icon holds NOSE_UP and no
 ROLL_LEFT; at -80 m/s it still banks. Measure: no-enemy deaths per pursuit (43% under step 3) and the
-share of them with the bank-and-pull running (73%), plus locks (93%).
+share of them with the bank-and-pull running (73%), plus locks (93%). Gate: `make lint` clean; `make test` 2,313 passed, 2
+failed (the same two unrelated), 35 skipped. The step 3 session (10:40-15:46, 5 h) was stopped by the
+operator with `z` at the lobby (15:46:45) and copied. `make rd`, wingman pid 1324392, started 15:53:06.
 
 ### Lock rate by session (measured, 2026-09-26)
 
