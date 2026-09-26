@@ -116,9 +116,12 @@ def _pursue(monkeypatch, snap, err_y):
     return _keys(ctrl)
 
 
-def test_a_low_pursuit_does_not_press_nose_down(monkeypatch):
+def test_a_low_pursuit_follows_a_visible_target_down(monkeypatch):
+    """Reversed 2026-09-26 (operator: "when target is detected turn off altitude
+    floor"). Until then a pursuit below floor + margin never pressed nose-down,
+    target or not. The altitude term now applies only with no target in view."""
     keys = _pursue(monkeypatch, _snap(3000), err_y=+0.5)
-    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert ("key_press", NOSE_DOWN_KEY) in keys
 
 
 def test_a_high_pursuit_still_presses_nose_down(monkeypatch):
@@ -196,10 +199,13 @@ def test_a_diving_pursuit_pulls_out_with_no_target_visible(monkeypatch):
     assert ("key_press", NOSE_DOWN_KEY) not in keys
 
 
-def test_a_diving_pursuit_with_the_target_below_pulls_out_and_does_not_push(monkeypatch):
+def test_a_diving_pursuit_with_the_target_below_keeps_chasing(monkeypatch):
+    """Reversed 2026-09-26 (operator, after the 02:39 capture: "it shouldnt have
+    nosed up" when it had targets). With a target in view neither guard term
+    applies; ADR 086's 30 s recovery is the backstop."""
     keys = _pursue_visible(monkeypatch, _snap(3900, rate=-103), visible=True)
-    assert ("key_press", NOSE_UP_KEY) in keys
-    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert ("key_press", NOSE_UP_KEY) not in keys
+    assert ("key_press", NOSE_DOWN_KEY) in keys
 
 
 def test_a_recovery_in_progress_is_not_contested(monkeypatch):

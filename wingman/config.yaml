@@ -1247,6 +1247,27 @@ pursuit_mode:
   dive_guard_pullout_pulse_s: 0.4
   dive_guard_pullout_interval_s: 1.0
   dive_guard_level_rate_mps: 30
+  # Look-down search (operator, 2026-09-26: "most targets are at lower altitude
+  # around 2000, most of the fight is flying left at 3000 to 4000 horizontally so
+  # it cant see the targets"). Measured on the 21:23-01:28 session, 93 pursuits:
+  # 83% of in-pursuit altitude reads at or above 3000 m, the left search roll held
+  # about 61% of pursuit time, 24% of scans locked, and 1,124 of 9,639 lock points
+  # sat in the bottom strip of the view. While the search roll is running (no target
+  # past the resume delay), the chase taps nose-down for search_look_down_pulse_s
+  # every search_look_down_interval_s, only while the dive guard is clear and a
+  # fresh flight-path angle is shallower than search_look_down_min_deg (no reading,
+  # no tap). Logged as `LOOKDOWN:`.
+  # search_floor_m replaces "floor in play + dive_guard_margin_m" (3500 m for su30)
+  # as the dive guard's altitude term during a pursuit, so both the search and the
+  # chase may descend to about 300 m above the fight. This deliberately reverses part
+  # of the 2026-09-25 guard, whose basis was six of eight deaths after a chase dive
+  # through 3000 m. The ttg term and its pull-out, and ADR 148's hard-emergency climb,
+  # are unchanged. Named guesses. search_floor_m 0 restores floor + margin; pulse 0
+  # turns the look-down off.
+  search_floor_m: 2300
+  search_look_down_pulse_s: 0.15
+  search_look_down_interval_s: 1.0
+  search_look_down_min_deg: -20
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right
@@ -1329,6 +1350,9 @@ telemetry:
                                # Calibrated on 2026-08-27: plausible dives top
                                # out at 919 m/s, artefacts start at 1036 m/s.
   reseed_agreement_m: 150      # ADR 097 D3: agreeing rejects mean a poisoned anchor
+  digit_drop_ratio: 0.2        # ADR 150: reject an altitude under this fraction of a
+                               # fresh anchor of 1000 m or more (a dropped digit), and
+                               # never reseed from it. 0 turns it off.
   smoothing_window: 3
   stale_after_s: 6.0
   trend_min_alt_rate_fps: 20.0

@@ -256,6 +256,9 @@ class TelemetryProcessor:
         # ADR 097 D3: consecutive rejections that agree with each other to
         # within this many metres are a poisoned anchor, not a noisy sensor.
         self.reseed_agreement_m = float(cfg.get("reseed_agreement_m", 150.0))
+        # ADR 150: an altitude read below this fraction of a fresh anchor of at
+        # least _DIGIT_DROP_MIN_ANCHOR is a dropped digit, not a dive. 0 = off.
+        self.digit_drop_ratio = float(cfg.get("digit_drop_ratio", 0.0))
         self.smoothing_window = max(1, int(cfg.get("smoothing_window", 3)))
         self.stale_after_s = float(cfg.get("stale_after_s", 6.0))
         self.trend_min_alt_rate_fps = float(cfg.get("trend_min_alt_rate_fps", 20.0))
@@ -309,6 +312,7 @@ class TelemetryProcessor:
                 raw=float(altitude_raw),
                 now_s=now_s,
                 absolute_max=self.max_altitude_ft,
+                digit_drop_ratio=self.digit_drop_ratio,
                 max_delta_per_s=self._altitude_bound_mps(),
                 trend_min_rate=self.trend_min_alt_rate_fps,
                 # The altitude bound is PHYSICS (vertical speed cannot exceed
@@ -370,6 +374,9 @@ class TelemetryProcessor:
         """
         return self.max_alt_rate_mps
 
+    # ADR 150: below this anchor a real descent can cross the ratio quickly.
+    _DIGIT_DROP_MIN_ANCHOR = 1000.0
+
     def _update_signal(
         self,
         *,
@@ -381,6 +388,7 @@ class TelemetryProcessor:
         max_delta_per_s: float,
         trend_min_rate: float,
         gate_dt_cap_s: float,
+        digit_drop_ratio: float = 0.0,
     ) -> TelemetrySignal:
         if raw < 0.0 or raw > absolute_max:
             # Out-of-envelope readings are never seedable — a consistent
@@ -399,6 +407,14 @@ class TelemetryProcessor:
             and seed_age is not None
             and seed_age <= self.stale_after_s
         )
+        if (seed_usable and digit_drop_ratio > 0
+                and float(signal.value) >= self._DIGIT_DROP_MIN_ANCHOR
+                and raw < float(signal.value) * digit_drop_ratio):
+            # ADR 150: the true value with a digit lost (3078 read as 312, 2817
+            # as 2), which the 1000 m/s ceiling admits across a 3 s gap. Not
+            # seedable: two such reads agree with each other, and ADR 097 D3
+            # would otherwise reseed the filter onto them.
+            return self._reject(signal, hist, raw, now_s, seedable=False)
         if seed_usable:
             dt = max(seed_age, 0.1)  # guard duplicate timestamps
             # Cap the dt multiplier per-gate (see the two call sites above):

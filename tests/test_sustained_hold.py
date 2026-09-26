@@ -308,6 +308,56 @@ class TestRollHoldLogging:
 
 
 # ---------------------------------------------------------------------------
+# Every pitch press gets a logged end. The 2026-09-25 21:23 session logged 19
+# HOLD[pitch] presses and 17 ends: releases on a miss, the dive guard, a yield
+# or loop exit went through release_pitch_hold() silently, so a hold's length
+# could not be read from the log.
+# ---------------------------------------------------------------------------
+
+class TestPitchHoldLogging:
+    def _hold_lines(self, caplog):
+        return [r.getMessage() for r in caplog.records if r.getMessage().startswith("HOLD[pitch]")]
+
+    def test_direct_release_logs_its_reason(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(0.3, sustained_hold=True)
+        ctrl.release_pitch_hold(why="no target")
+        assert self._hold_lines(caplog) == [
+            "HOLD[pitch]: None -> down (target err_y=+0.300)",
+            "HOLD[pitch]: down -> None (no target)",
+        ]
+
+    def test_release_tracking_holds_logs_the_pitch_end(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(-0.3, sustained_hold=True)
+        ctrl.release_tracking_holds(why="yield to dive recovery")
+        assert self._hold_lines(caplog)[-1] == "HOLD[pitch]: up -> None (yield to dive recovery)"
+
+    def test_release_with_nothing_held_logs_nothing(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.release_pitch_hold(why="no target")
+        assert self._hold_lines(caplog) == []
+
+    def test_every_press_has_a_matching_end(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(0.4, sustained_hold=True)
+        ctrl.release_pitch_hold(why="dive guard err_y=+0.400")
+        ctrl.orient_pitch_to_target(-0.4, sustained_hold=True)
+        ctrl.orient_pitch_to_target(0.0, sustained_hold=True)
+        ctrl.orient_pitch_to_target(0.4, sustained_hold=True)
+        ctrl.cancel_mission()
+        lines = self._hold_lines(caplog)
+        presses = [l for l in lines if l.startswith("HOLD[pitch]: None -> ")]
+        ends = [l for l in lines if l.endswith(")") and " -> None (" in l]
+        assert len(presses) == 3
+        assert len(ends) == 3
+
+
+# ---------------------------------------------------------------------------
 # Near-centre extension (operator, 2026-09-24: "it had more than enough time
 # locked onto target but kept forcing left turn, it should have stopped left
 # turn and focused on target"). Measured on the 07:34-08:24 session with the

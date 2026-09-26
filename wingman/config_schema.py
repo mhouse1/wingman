@@ -627,6 +627,10 @@ SCHEMA = Section(
             "dive_guard_pullout_pulse_s": SECONDS,
             "dive_guard_pullout_interval_s": SECONDS,
             "dive_guard_level_rate_mps": _num(0),
+            "search_floor_m": _num(0),                  # look-down search
+            "search_look_down_pulse_s": SECONDS,
+            "search_look_down_interval_s": SECONDS,
+            "search_look_down_min_deg": _num(-90, 0),
         }),
 
         "hud": Section(children={
@@ -702,6 +706,7 @@ SCHEMA = Section(
             # (D2) plus agreement-based anchor reseeding (D3).
             "max_alt_rate_mps": _num(0),
             "reseed_agreement_m": _num(0),
+            "digit_drop_ratio": _num(0, 1),   # ADR 150
             "smoothing_window": _int(1),
             "stale_after_s": SECONDS,
             "trend_min_alt_rate_fps": _num(0),

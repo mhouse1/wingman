@@ -1828,6 +1828,236 @@ before any later edit). Two lives, one chase that found targets. Measured, `make
   nameplate, so `make sr` now tests the point minus the aim offset (3 tests).
 - Not shown: whether the game reported a lock, and whether any of the 4 missiles fired in the chase hit.
 
+### Pitch-hold release logging (2026-09-25 21:40, instrumentation only, wingman 1.8.11)
+
+Correction to Live check 1 above: by `63aa33a` (2026-09-25 21:23), pitch holds are partly logged, as
+`HOLD[pitch]: <prev> -> <dir> (target ...)` on a press and `-> None (deadband ...)` or `(lead ...)` on those
+two releases. Every other release went through `release_pitch_hold()` and logged nothing: a miss tick, the
+dive guard, a yield to the ADR 148 recovery, the pursuit loop's exit, `cancel_mission` and a manual takeover.
+
+Measured on the operator's `make rd` session started 21:23:52 on `63aa33a` (the first pursuit, 21:26:19 to
+21:27:36; copy of the log at 21:28): 19 presses, 17 logged ends. Of the 2 without an end, one nose-down hold
+(21:26:43.675, err_y +0.078) has no recorded end before `yielding pitch and roll to the dive recovery` at
+21:26:48.563. Whether it was held for those 4.9 s, or released earlier on a miss tick, cannot be read from the
+log. That is the question this closes. By 21:40 the same session showed 41 holds started from neutral
+against 36 logged returns to neutral.
+
+Not every yield to the dive recovery comes from the tracker's pitch. In the same session at 22:26:51
+(measured), the pursuit started in a dive that was already under way. `mission_su30` step 3 ("setting nose angle
+to -10 deg") pulsed about every 3 s and swung the nose +9, +51, +48, +13, -5, -22, -36 deg. ADR 086's dive
+recovery fired at 22:26:50 (3,187 m, -142 m/s). Step 3 then timed out ("not confirmed within 20s, continuing
+to pursuit") while the emergency climb held the pitch axis. It handed over to `pursue_and_engage`, which
+yielded 0.3 s after starting. A pitch-hold count around a `yielding` line therefore has to check first
+whether the pursuit began inside a recovery. The step-3 overshoot belongs to Design 015 and ADR 144, and is not fixed here.
+A second case at 23:07:48 (measured): step 3 started at +90 deg and pulsed nose-down 5 times in 20 s, reading
++20, +46, +37, +25 and then -90 deg, with speed down to 105 to 193 KPH. It is inferred, not shown, that this was
+a stall and drop. Step 3 timed out, the pursuit engaged at 23:07:47.869, and the hard-emergency climb took it
+over 0.17 s later. One altitude read of 907 m between 3,861 and 3,930 m is an OCR misread (inferred). So 2 of
+the 2 yields since 22:10 have this signature, and the tracker's pitch caused neither.
+
+A third yield at 23:23:30.759 does involve the tracker's pitch (measured). The pursuit started normally. Between
+23:23:19.95 and 22.60 it pressed nose-down 5 times on a target below the nose (err_y +0.05 to +0.56). Two of
+those holds have no logged end, which is the gap this change closes: 20.607 is followed by a fresh press from
+neutral at 21.134, and 22.603 was released silently when the dive guard withheld nose-down at 22.883 (altitude
+3,447 m, below the 3,500 m guard). The dive guard's 0.4 s pull-out pulse then fired 5 times at about 1 s
+intervals, and the dive still steepened: nose -17 to -41 to -44 deg, 101 to 110 m/s down, 3,359 m to 2,727 m
+over 8 s. ADR 148's hard-emergency climb then took over. It is inferred, not shown, that 0.4 s pulses are too weak
+against a 450 to 570 KPH dive. The other possibility, a second nose-down writer, is what the next run's
+complete `HOLD[pitch]` lines can rule in or out.
+
+A fourth yield at 23:48:32.913 does not fit either pattern (measured). The pursuit had logged ends for both of its
+pitch holds, and the last one ended at 28.426. Roll went neutral at 28.804. Neither tracking key was pressed
+again until 31.738. In that window altitude fell from 3,697 m to 3,334 m and speed rose from 278 to 388 KPH.
+The HUD "Nose -90" at 31.094 is the clamp of an estimate: a 121 m/s descent at 108 m/s airspeed has no
+real angle, so the reading is not an attitude measurement. The log does not show what started the descent.
+Earlier in the same pursuit the search held ROLL_LEFT for 47 s without a break (23:46:39.6 to 23:47:26.9).
+Separately, three altitude reads in this pursuit came back as 9xxx for 3xxx (9516, 9390, 9884), a 3-to-9 OCR
+confusion. A high misread makes the dive guard fail late, not early. Tally for the session since 22:10: 4
+yields. 2 came from `mission_su30`'s step-3 overshoot, 1 from a tracker nose-down chase that the dive guard's
+pulses did not arrest, and 1 has no cause shown.
+
+A fifth yield at 23:54:28.100 is a chain of causes (measured unless labelled).
+1. At 12.842 the dive guard withheld nose-down (altitude 3,457 m, below 3,500 m) with the nose at -16 deg and
+   the target below. The altitude-floor branch only goes neutral. The pull-out pulse fires on the
+   time-to-ground branch, which had not tripped, so the aircraft kept its descent: 3,394 m to 3,285 m, nose -19
+   deg. The tracker logged no pitch hold after 10.508, while roll kept locking.
+2. At 18.710 the plausibility filter correctly rejected `altitude_raw=6`.
+3. At 20.317 the guard logged "nose-down allowed again" at about 3,200 m. Inferred: the altitude was stale, so
+   the guard failed open by design.
+4. At 21.709 the HUD shows 7,049 m, which the filter **accepted**: no rejection line exists for it. At 24.710 it
+   **rejected the true 2,935 m** as implausible against 7,049. The next accepted read, 2,785 m, gave a computed
+   descent of 712 m/s. Only then did the time-to-ground term trip (7 s), and the hard-emergency climb took over.
+
+Two defects outside the tracker, neither fixed here. First, the plausibility filter can accept a 3-to-7 or 3-to-9
+misread and then reject the true readings after it. Second, the altitude-floor branch of the dive guard never
+pulls out of a descent that is already under way. Tally since 22:10: 5 yields. 2 from `mission_su30` step 3,
+1 from a tracker chase not arrested by the pulses, 1 with no cause shown, and 1 from this chain.
+
+A sixth yield on 2026-09-26 at 00:48:17.432 repeats the 23:23 pattern (measured). A tracker nose-down chase
+brought the nose to -29 deg. The hold pressed at 12.308 has no logged end: the dive guard withheld nose-down at
+12.574 (3,410 m) and released it silently. The guard fired its 0.4 s pull-out pulse 5 times at about 1 s
+intervals, and the nose went from -29 to -31 deg, the descent from 63 to 111 m/s and the altitude from 3,316 m
+to 2,982 m, before the hard-emergency climb took over. That is 2 of 6 yields where the pulses did not arrest a
+tracker-led dive. Inferred: the pull-out is too weak, or it starts too late for a nose already 30 deg down.
+Tally since 22:10: `mission_su30` step 3 2, tracker chase with pulses not arresting 2, no cause shown 1,
+altitude-filter chain 1.
+
+A seventh yield at 01:09:26.511 combines two of these (measured). `mission_su30` step 3 swung the nose +1, -15,
+-26, -15, +6 deg, timed out at 25.705 and started the pursuit at 2,868 m. At 26.140 the HUD read
+`Altitude: 0 | Speed: None` and no filter rejection was logged for it. The dive guard computed a 955 m/s
+descent and the hard-emergency climb fired at 26.420. Inferred: a false emergency. The nose read +6 deg
+(level) at 2,859 m three seconds earlier. Tally since 22:10 (7 yields): `mission_su30` step 3 in 3 of them
+(one alone, one combined with this altitude misread), tracker chase with pulses not arresting 2, altitude-filter
+misread 2 (one of them this case), no cause shown 1.
+
+An eighth yield at 01:11:16.486 (measured). The pursuit was already in a tracker-led dive: nose +9, -10, -23, -25,
+-27 deg and altitude 3,814 m to 3,383 m from 01:11:01 to 13, with pitch holds alternating up and down in
+0.13 to 0.25 s taps. Every hold in this window has a logged end. At 16.115 the HUD read `Altitude: 473` with no
+rejection logged. The dive guard computed a 969 m/s descent and the hard emergency fired at 16.387. Inferred:
+the dive was real (about 3,300 m, -27 deg, about 50 m/s down), but the misread is what tripped the
+emergency. Tally since 22:10 (8 yields): tracker-led dive 3, `mission_su30` step 3 3, an unrejected altitude
+misread 3, no cause shown 1. These overlap: several yields have two causes.
+
+Change: `release_pitch_hold(why=...)` and `release_tracking_holds(why=...)` log
+`HOLD[pitch]: <dir> -> None (<why>)` on every path, with the reasons `no target`,
+`dive guard err_y=...`, `yield to dive recovery`, `pursuit loop exit`, `cancel_mission` and
+`manual takeover`. The existing deadband and lead lines are unchanged, so a hold's length is the gap
+between its press line and its end line. No steering behaviour changes. Tests:
+`TestPitchHoldLogging` in `tests/test_sustained_hold.py` (4 tests, all fail on the old code).
+
+Gate: `make lint` clean. `make test`: 2204 passed, 1 failed. The failure is
+`test_lobby_ready_squad_layout::test_the_ready_crop_covers_the_button_it_is_meant_to_read`, which fails
+the same way on the unchanged HEAD (the READY crop covers 66% x 63% of the button against a 90% bar). It is
+unrelated and not fixed here. Two other tests failed on HEAD before this change: a test fake in
+`tests/test_pursuit_recovery.py` lacked `rate`, which the dive guard reads since `63aa33a`. The fake is
+now the real `TelemetrySignal`.
+
+Live check: started 2026-09-26 01:29:06 with `make rd` (pid 407053, working tree on `63aa33a` plus this change).
+The 21:23 session it follows ran 4 h 04 m and stopped with `z` at 01:28:15 in GAME_STARTING. Its log is
+`logs/wingman_20260926_012817.log`. The new run was in a live round within 40 s: stopping during matchmaking
+lets the server still form the match. The change was not in the 21:23 session.
+
+Result (measured, 01:29 to 01:38, stopped by the operator's `z`, 2 pursuits): 30 holds started from neutral
+and 31 ended to neutral. The extra one is a hold that began as a direct reversal. So every hold now has a
+logged end. The end reasons were: deadband 14, lead 13, dive guard 2, cancel_mission 1, pursuit loop exit 1.
+Three of those five paths logged nothing before. The criterion is met on a small sample. No yield to the dive
+recovery happened in this run, so the question this change was made for is still open.
+
+Operator observation (2026-09-26 01:35): most targets fly around 2,000 m, and the pursuit spends the fight
+rolling left at 3,000 to 4,000 m, where it cannot see them. The target altitude cannot be measured from the log,
+but the 21:23 session is consistent with it (measured, 93 pursuits). 83% of the 1,432 in-pursuit altitude reads
+were at or above 3,000 m. The left search roll held for about 3,050 of the 5,010 pursuit seconds. 24% of scans
+locked, and 32 pursuits never locked. The dive guard withheld nose-down 104 times on its 3,500 m altitude
+branch. Of 9,639 lock steering points, 1,124 sit in the bottom band (y 1080 to 1199 of 1200), at the scan
+region's lower edge. Inferred: many targets are at or below the bottom of the view.
+
+The first yield with full logging (01:39:35.615, measured) was not driven by the tracker's pitch. The dive
+guard's pull-out pulses (01:39:07 to 12) over-corrected into a zoom climb: nose +69 then +90 deg, speed 222 KPH.
+The search then held ROLL_LEFT for 13.3 s with pitch neutral (01:39:14.26 to 27.54), and the nose fell from
++90 to -15 deg. The only tracker pitch in the dive was one 0.25 s nose-up tap. The nose reached -36 deg and
+823 KPH before ADR 148's climb. Inferred: an unbroken search roll lets the nose drop into a spiral.
+
+### Look-down search (2026-09-26 01:54, wingman 1.8.11)
+
+Decision (operator, via two questions): search nose-down, with a lower floor. The first option offered, "look
+down, keep 3,000 m", was wrong as worded. A nose-down attitude descends at about 30 m/s at -15 deg and 400 KPH,
+so from 3,500 m the 3,000 m floor ends it in about 17 s.
+
+Change, config-gated in `pursuit_mode`:
+- While the roll is searching and the dive guard is clear, `_search_look_down` taps nose-down for
+  `search_look_down_pulse_s` (0.15) every `search_look_down_interval_s` (1.0). It taps only when a fresh
+  flight-path angle is shallower than `search_look_down_min_deg` (-20). No reading means no tap. It pulses
+  rather than holds because the angle lands about every 3 s (ADR 068/069).
+- `search_floor_m` (2300) replaces "floor in play + `dive_guard_margin_m`" (3,500 m for su30) as the dive guard's
+  altitude term during a pursuit. The chase may therefore follow a target down to about 300 m above the fight.
+  This reverses part of the 2026-09-25 guard, whose basis was six of eight deaths after chase dives through
+  3,000 m. The ttg term, its pull-out and ADR 148's hard-emergency climb are unchanged. The altitude floor is
+  not a hard emergency (`behavior_tree.hard_emergency_active` is ttg or terrain only), so descending below
+  3,000 m inside a pursuit does not by itself start the recovery.
+
+Tests: `tests/test_search_look_down.py` (13, from the real `TelemetrySnapshot`). The loop-level test fails
+without the wiring. Gate: lint clean. `make test` 2217 passed, 1 failed, the same pre-existing READY-crop test.
+
+Live check started 01:54:48 (`make rd`, pid 435905). It is judged against the 21:23 session (93 pursuits):
+- in-pursuit altitude share below 3,000 m (was 17%);
+- locked-scan share (was 24%) and pursuits never locked (was 32 of 93);
+- search-roll share of pursuit time (was 61%);
+- lock points in the bottom strip (1,124 of 9,639);
+- yields to the dive recovery (8 in the 21:23 to 01:28 window);
+- deaths by terrain (8).
+
+`LOOKDOWN:` lines show each tap with its angle and altitude.
+
+First pursuit (01:58:32 to 02:00:57, 145 s, 0 locked scans; measured). There were 100 `LOOKDOWN` taps. Instead of
+settling low, the aircraft porpoised about three times, roughly every 35 s:
+- The nose went past the -20 deg limit to -33 and -36 deg.
+- The ttg term tripped at 3,200 to 3,750 m (ttg 43 to 60 s, because ttg counts altitude above 0).
+- Its 0.4 s pull-out pulses (6 per dive) threw the nose to +43 and +57 deg, and it climbed back to about 4,100 m.
+
+The lowest altitude was 2,898 m, so the aircraft never got near the 2,300 m search floor. Inferred cause: the
+flight-path angle lands about every 3 s and the look-down taps every 1 s, so about 3 taps go in per reading and
+the angle limit is seen late. The same lag is why `mission_su30`'s angle step acts only on new samples. The
+candidate fix is at most one look-down tap per new telemetry sample. It is not applied yet, pending 2 to 3
+more pursuits.
+
+Rest of that run (01:54 to 02:13, 18 m 52 s, 4 pursuits, stopped by the operator's `z`; log
+`logs/wingman_20260926_021342.log`). Measured:
+- Locked scans were 0%, 0%, 26% and 20%.
+- There were 0 terrain deaths.
+- There were 5 yields to the dive recovery, and **all 5 were triggered by altitude misreads the filter accepted**:
+  271, 271, 2, 315 and 2 m. Each gave an impossible descent (769 to 961 m/s) at a real 1,900 to 2,300 m, then a
+  hard-emergency climb. Inferred: the lower flight band makes digit-dropping misreads more frequent.
+- The two taps logged at 02:05:52 and 53 on one +12 deg sample confirm the tap-rate cause.
+
+Two changes, both in the next run. The operator directed the second, so the run cannot separate them:
+1. At most one look-down tap per new altitude sample (`_search_look_down_sample_ts`). Test:
+   `test_one_tap_per_altitude_sample`.
+2. Operator, 2026-09-26 02:1x: "when target is detected turn off altitude floor". `_pursuit_dive_guard
+   (target_visible=...)` skips the altitude term while the tracker sees a target. The ttg term and its pull-out
+   still apply. `test_a_low_pursuit_does_not_press_nose_down` in `tests/test_cr018_dive_guard.py` encoded the
+   old rule. It is now `test_a_low_pursuit_follows_a_visible_target_down`.
+
+Gate: lint clean. `make test` 2220 passed, 2 failed: the known READY-crop test, and
+`test_min_interval_throttles_archive`, which passed 3 of 3 times alone (timing flake). Live run started 02:22:36
+(`make rd`, pid 468790).
+
+Open, not addressed by either change: the altitude plausibility filter accepts digit-dropped reads (2, 271,
+315, 473, 7049, 9xxx seen tonight), and ttg computed from them starts false hard emergencies. That is now the
+most frequent cause of losing the chase.
+
+The 02:22 run (stopped by the operator's `z` at 02:41; `logs/wingman_20260926_024159.log`) logged 11 more yields
+to the dive recovery. Every one checked was a digit-dropped altitude read: 303, 312, 334, 2, 312, 311, 285, 300,
+331, 2 and 276, each around a true value of 2,700 to 3,400 m. That makes 16 in about 47 minutes across the
+last three runs. Locked scans per pursuit were 15, 1, 0, 0 and 19%. The run cannot judge the look-down or the
+no-floor-with-target change while this was happening. Fix: ADR 150 (`docs/adr/150-reject-digit-dropped-altitude-reads.md`)
+rejects an altitude read under 20% of a fresh anchor of 1,000 m or more, and never reseeds from one. Live run
+started 02:51:58 (`make rd`, pid 499836). Result: 0 false emergencies in 10 minutes (see the ADR).
+
+Operator `/check` after the 02:39:36 `v` capture: "why did it nose up when it had targets? I told you to remove
+the altitude floor". Measured on `logs/wingman_20260926_024159.log`:
+- The altitude term never withheld with a target in view.
+- The **ttg term** did. At 02:39:26.8, at 2,373 m and -80 m/s, it read 32 s to ground, under 60 s. It withheld
+  nose-down and fired 6 pull-out pulses.
+- The nose went to +63 and then +90 deg, speed fell to 231 KPH, and the target was lost for 12 s.
+- The ttg term counts altitude above 0 m, so at 2,400 m any descent past 40 m/s trips it. It acted as a floor.
+- The nose-up at the end of the session (02:40:21 to 50) was ADR 148's recovery after a digit-drop misread, the
+  ADR 150 case.
+
+Change (operator go-ahead via `z` after the recommendation):
+- `_pursuit_dive_guard(target_visible=True)` now skips the ttg term too, so neither term applies while a target is
+  in view.
+- ADR 086's recovery (`recover_below_time_s` 30, flying through the pursuit under ADR 148) is the only backstop
+  then.
+- `test_a_diving_pursuit_with_the_target_below_pulls_out_and_does_not_push` encoded the old rule and is now
+  `..._keeps_chasing`.
+- New tests: `test_the_ttg_term_is_lifted_with_a_target_too` and
+  `test_a_diving_chase_with_a_target_is_not_pulled_out`, which replays 02:39:26.8.
+
+Gate: `make test` 2233 passed, 1 failed (the known READY-crop test). Live run started 03:09:14 (`make rd`,
+pid 539568). Risk to watch: terrain deaths with a target in view, since only the 30 s recovery guards them now. The next run's criterion is that
+every `HOLD[pitch]: None -> <dir>` has an end line. The first thing to read from it is how long the
+nose-down holds that precede a `yielding` line lasted, and what ended them.
+
 ---
 
 ## Adaptive Optimization (Future, Non-V1)

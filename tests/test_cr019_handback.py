@@ -159,8 +159,8 @@ class TestEjectAndPursuitRefused:
         ctrl.set_target_tracker(_TrackerStub())
         real_release = ctrl.release_tracking_holds
 
-        def release_then_stop():
-            real_release()
+        def release_then_stop(why="release"):
+            real_release(why=why)
             if not ctrl._eject_stop.is_set():
                 ctrl.stop_eject_sequence("respawn_detected")
         monkeypatch.setattr(ctrl, "release_tracking_holds", release_then_stop)

@@ -663,6 +663,16 @@ class Controller:
         self._dive_guard_pullout_interval_s = float(
             _pm.get("dive_guard_pullout_interval_s", 1.0))
         self._dive_guard_level_rate_mps = float(_pm.get("dive_guard_level_rate_mps", 30.0))
+        # Look-down search (operator, 2026-09-26; config.yaml pursuit_mode). A
+        # positive search_floor_m replaces floor + margin as the guard's altitude
+        # term; the search taps nose-down above it while the roll searches.
+        self._pursuit_search_floor_m = float(_pm.get("search_floor_m", 0.0))
+        self._search_look_down_pulse_s = float(_pm.get("search_look_down_pulse_s", 0.0))
+        self._search_look_down_interval_s = float(_pm.get("search_look_down_interval_s", 1.0))
+        self._search_look_down_min_deg = float(_pm.get("search_look_down_min_deg", -20.0))
+        self._search_look_down_next_ts = 0.0
+        # Timestamp of the altitude sample the last look-down tap acted on.
+        self._search_look_down_sample_ts: "float | None" = None
         # Set by _pursuit_dive_guard: the ttg term tripped, and the rate it saw.
         self._dive_guard_ttg_tripped = False
         self._dive_guard_rate: "float | None" = None
@@ -1948,10 +1958,7 @@ class Controller:
         prev_sample = self._pitch_last_sample
         self._pitch_last_sample = (now, error_norm_y)
         if abs(error_norm_y) <= deadband:
-            if self._pitch_held is not None:
-                logger.debug("HOLD[pitch]: %s -> None (deadband err_y=%+.3f)",
-                             self._pitch_held, error_norm_y)
-            self.release_pitch_hold()
+            self.release_pitch_hold(why="deadband err_y=%+.3f" % error_norm_y)
             return None
         if self._pitch_lead_s > 0 and prev_sample is not None:
             dt = now - prev_sample[0]
@@ -1959,11 +1966,8 @@ class Controller:
                 rate = (error_norm_y - prev_sample[1]) / dt
                 predicted = error_norm_y + rate * self._pitch_lead_s
                 if abs(predicted) <= deadband or predicted * error_norm_y < 0:
-                    if self._pitch_held is not None:
-                        logger.debug(
-                            "HOLD[pitch]: %s -> None (lead err_y=%+.3f pred=%+.3f)",
-                            self._pitch_held, error_norm_y, predicted)
-                    self.release_pitch_hold()
+                    self.release_pitch_hold(
+                        why="lead err_y=%+.3f pred=%+.3f" % (error_norm_y, predicted))
                     return None
         desired = "up" if error_norm_y < 0 else "down"
         if self._pitch_held == desired:
@@ -2069,23 +2073,32 @@ class Controller:
             logger.debug("HOLD[roll]: %s/%s -> %s/%s (%s)",
                          prev[0], prev[1], cur[0], cur[1], why)
 
-    def release_pitch_hold(self) -> None:
+    def release_pitch_hold(self, why: str = "release") -> None:
         """Release whatever pitch key Sustained-Hold Actuation is holding.
-        Safe no-op if nothing is held."""
+        Safe no-op if nothing is held.
+
+        Logs one `HOLD[pitch]: <dir> -> None (<why>)` line whatever the path,
+        so every press line has a matching end and a hold's length is the gap
+        between the two. Before, only deadband and lead releases logged: a
+        miss, dive-guard, yield or loop-exit release was silent, and 2 of 19
+        holds in the 2026-09-25 21:23 session had no recorded end (one
+        nose-down hold ran into a dive recovery)."""
         if self._pitch_held is None:
             return
+        prev = self._pitch_held
         self._release_tracking_key(
             NOSE_UP_KEY if self._pitch_held == "up" else NOSE_DOWN_KEY,
             "tracking_pitch")
         self._pitch_held = None
+        logger.debug("HOLD[pitch]: %s -> None (%s)", prev, why)
 
-    def release_tracking_holds(self) -> None:
+    def release_tracking_holds(self, why: str = "release") -> None:
         """Release both axes' Sustained-Hold Actuation keys — called from
         cancel_mission()/release_for_manual_takeover() so a mid-hold
         cancellation or manual takeover never leaves a tracking-commanded
         key pinned down under the operator's own input."""
-        self.release_roll_hold()
-        self.release_pitch_hold()
+        self.release_roll_hold(why=why)
+        self.release_pitch_hold(why=why)
         self._pitch_last_sample = None
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
@@ -3269,7 +3282,7 @@ class Controller:
         self._eject_thread = threading.Thread(target=_run, daemon=True)
         self._eject_thread.start()
 
-    def _pursuit_dive_guard(self) -> "str | None":
+    def _pursuit_dive_guard(self, target_visible: bool = False) -> "str | None":
         """Why the chase may not command nose-down right now, or None.
 
         Review 018 / action item 001 (2026-09-25 01:06 and 01:43 entries).
@@ -3284,6 +3297,15 @@ class Controller:
         The two terms are evaluated independently: `_dive_guard_ttg_tripped`
         and `_dive_guard_rate` record the ttg term's verdict for
         `_dive_guard_pullout`, even when the altitude term also holds.
+
+        target_visible (operator, 2026-09-26: "when target is detected turn off
+        altitude floor"; then, after the 02:39 capture: "it shouldnt have nosed
+        up"): both terms are skipped while the tracker sees a target, so the chase
+        neither withholds nose-down nor pulls out. The ttg term counts altitude
+        above 0 m, so at 2,400 m any descent past 40 m/s tripped it: measured
+        02:39:26.8, 32 s to ground at 2,373 m, six pull-out pulses, nose to +90 deg
+        and the target lost for 12 s. ADR 086's recovery (30 s, flying through the
+        pursuit under ADR 148) stays the backstop.
         """
         reason = None
         self._dive_guard_ttg_tripped = False
@@ -3291,7 +3313,8 @@ class Controller:
         margin = self._pursuit_dive_guard_margin_m
         ttg_limit = self._pursuit_dive_guard_ttg_s
         snap = None
-        if (margin > 0 or ttg_limit > 0) and self._analyzer is not None:
+        if (margin > 0 or ttg_limit > 0 or self._pursuit_search_floor_m > 0) \
+                and self._analyzer is not None:
             try:
                 snap = self._analyzer.get_telemetry()
             except Exception:
@@ -3304,12 +3327,17 @@ class Controller:
                 floor = self._tree_alt_floor_m
             self._dive_guard_rate = rate
             if alt is not None and ttg_limit > 0 and rate is not None and rate < 0 \
-                    and alt / -rate < ttg_limit:
+                    and alt / -rate < ttg_limit and not target_visible:
                 self._dive_guard_ttg_tripped = True
                 reason = "time to ground %.0f s under %.0f s" % (alt / -rate, ttg_limit)
-            if alt is not None and margin > 0 and floor is not None \
-                    and alt < floor + margin:
-                reason = "altitude %.0f m below %.0f m" % (alt, floor + margin)
+            if self._pursuit_search_floor_m > 0:
+                limit = self._pursuit_search_floor_m
+            elif margin > 0 and floor is not None:
+                limit = floor + margin
+            else:
+                limit = None
+            if alt is not None and limit is not None and alt < limit and not target_visible:
+                reason = "altitude %.0f m below %.0f m" % (alt, limit)
         if (reason is None) != (self._dive_guard_reason is None):
             if reason is not None:
                 logger.info("Controller: DIVE GUARD — nose-down withheld (%s)", reason)
@@ -3342,6 +3370,50 @@ class Controller:
                     self._dive_guard_pullout_pulse_s, -self._dive_guard_rate)
         self.nose_up(hold_seconds=self._dive_guard_pullout_pulse_s, block=False,
                      ignore_cancel=True)
+        return True
+
+    def _search_look_down(self) -> bool:
+        """Tap nose-down while the search roll is running; True when a tap was sent.
+
+        Operator, 2026-09-26: the fight is mostly below the pursuit, which searched
+        level at 3000 to 4000 m and could not see it. The caller has already
+        checked that the roll is searching and the dive guard is clear, so the
+        aircraft is above `search_floor_m` with time to ground to spare. Pulses
+        rather than holds, like `_dive_guard_pullout`: the flight-path angle lands
+        about every 3 s, and a held key overshoots on a lagging reading (ADR
+        068/069). No fresh angle means no tap, and none once the angle is at or
+        steeper than `search_look_down_min_deg`.
+
+        At most one tap per new altitude sample (the `mission_su30` angle step's
+        rule). Tapping every interval put about 3 taps into each 3 s reading, and
+        the first live pursuit (2026-09-26 01:58) overshot to -36 deg against a
+        -20 deg limit, then the ttg pull-out threw it to +57 deg. Two taps on one
+        +12 deg sample are logged at 02:05:52 and 53.
+        """
+        if self._search_look_down_pulse_s <= 0 or self._analyzer is None:
+            return False
+        now = time.time()
+        if now < self._search_look_down_next_ts:
+            return False
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return False
+        angle = snap.pitch_angle_deg() if snap is not None else None
+        if angle is None or angle <= self._search_look_down_min_deg:
+            return False
+        sample_ts = snap.altitude.ts
+        if sample_ts is not None and sample_ts == self._search_look_down_sample_ts:
+            return False
+        self._search_look_down_sample_ts = sample_ts
+        self._search_look_down_next_ts = now + max(
+            self._search_look_down_interval_s, self._search_look_down_pulse_s)
+        logger.debug("LOOKDOWN: nose-down pulse %.2fs (angle %+.0f deg, alt %s)",
+                     self._search_look_down_pulse_s, angle,
+                     "n/a" if snap.altitude.stable_value is None
+                     else "%.0f m" % snap.altitude.stable_value)
+        self.nose_down(hold_seconds=self._search_look_down_pulse_s, block=False,
+                       ignore_cancel=True)
         return True
 
     def pursuit_mode_enabled(self) -> bool:
@@ -3522,7 +3594,7 @@ class Controller:
                         if recovering != yielding:
                             yielding = recovering
                             if yielding:
-                                self.release_tracking_holds()
+                                self.release_tracking_holds(why="yield to dive recovery")
                                 logger.info(
                                     "Controller: pursue_and_engage — yielding pitch and "
                                     "roll to the dive recovery (ADR 148)")
@@ -3546,17 +3618,21 @@ class Controller:
                         # nose (err_y > 0) is not followed nose-down when low or
                         # when the ground is close (pitch goes neutral instead),
                         # and a steep descent is pulled toward level.
-                        guard = None if yielding else self._pursuit_dive_guard()
+                        guard = None if yielding else self._pursuit_dive_guard(
+                            target_visible=bool(visible))
                         if visible and err_y is not None:
                             if not yielding:
                                 if err_y > 0 and guard:
-                                    self.release_pitch_hold()
+                                    self.release_pitch_hold(
+                                        why="dive guard err_y=%+.3f" % err_y)
                                 else:
                                     self.orient_pitch_to_target(
                                         err_y, ignore_cancel=True,
                                         sustained_hold=self._sustained_hold_enabled)
                         elif self._sustained_hold_enabled and not yielding:
-                            self.release_pitch_hold()
+                            self.release_pitch_hold(why="no target")
+                            if guard is None and self._roll_hold_reason == "search":
+                                self._search_look_down()
                         if guard:
                             self._dive_guard_pullout()
                         # CR-018-01: ammo, weapon switch, fire and HUD run on their own
@@ -3644,7 +3720,7 @@ class Controller:
                 # branch below: eject_and_dive owns the airframe from here
                 # if this pursuit is handing off to it, and must not inherit
                 # a roll/pitch key this loop was holding.
-                self.release_tracking_holds()
+                self.release_tracking_holds(why="pursuit loop exit")
                 if tally is not None:
                     logger.info(tally.line(
                         "PURSUIT",
@@ -7115,7 +7191,7 @@ class Controller:
         # cancellation mid-hold must let go of it explicitly, the same as
         # every other held-key state this method's callers already expect
         # cancel_mission() to clean up.
-        self.release_tracking_holds()
+        self.release_tracking_holds(why="cancel_mission")
 
     def _mission_exit_requested(self) -> bool:
         """True when a mission loop should abort for a real program exit.
@@ -7196,7 +7272,7 @@ class Controller:
             # that Python-level state claiming a key is still held after the
             # X server has already released it (HLDD 005 Sustained-Hold
             # Actuation, 2026-09-23).
-            self.release_tracking_holds()
+            self.release_tracking_holds(why="manual takeover")
         except Exception:
             logger.exception("Controller: release_tracking_holds failed during takeover")
         for stop in (self.stop_search_and_destroy_loop,

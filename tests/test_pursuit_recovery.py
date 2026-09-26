@@ -24,14 +24,14 @@ from wingman.controller import (
     Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
 )
 from wingman.controller_config import ControllerConfig
+from wingman.telemetry import TelemetrySignal
 
 _STEER_KEYS = {NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY}
 
 
-class _Alt:
-    def __init__(self, value):
-        self.stable_value = value
-        self.ts = time.time()
+def _Alt(value):
+    """The real TelemetrySignal, level flight: the dive guard reads `rate` too."""
+    return TelemetrySignal(value=int(value), ts=time.time(), stable_value=value, rate=0.0)
 
 
 class _Snapshot:
