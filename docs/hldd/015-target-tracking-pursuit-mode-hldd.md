@@ -1008,6 +1008,20 @@ pursuit was already low in both because nothing climbs it back above the floor (
 nudge in a pursuit, ADR 147), and the icon keeps pointing down because the fight is below. Too few for a
 rate; the operator's call whether to keep collecting.
 
+- 06:29:10 (about), 93 s, `locked=55 (23%) first_lock=1.0s`, ended in a death at about 06:30:40 at 2,100 m
+  descending 34-52 m/s, after `INCOMING MISSILE DETECTED` at 06:30:22-25: enemy fire (inferred), not
+  terrain.
+- 06:31:44 and 06:34:49: 11 s each, `DIED ARMED ... cause=enemy_fire`. 06:33:04: match ended, 30 s.
+  06:36:46: 65 s, `locked=139 (84%) first_lock=4.0s ammo=2->0`, all fired, alive.
+- 06:37:57 (about), 55 s, `locked=99 (72%) first_lock=0.1s`, ended in a death at about 06:38:50 with no
+  incoming missile and no icon nose-down: **the tracker's locked chase** held nose-down on a target below
+  (`err_y` +0.07 to +0.16, 06:38:31-36), lost it, and the descent carried on at 106-117 m/s from 2,036 m to
+  613 m into the ground. Before `dive_safety` went off, ADR 148's recovery would have taken this one.
+
+**Tally at 06:39 with `dive_safety` off:** ten pursuits; three likely terrain deaths (two started by an
+icon nose-down hold, one by the tracker's locked chase), three enemy kills, two emptied the rack alive,
+two ended with the match.
+
 **Tests:** `tests/test_icon_steering.py` (detector on the four real frames and on synthetic shapes,
 including afterburner hue and a dim orange patch; the operator's example scan by scan; crossing reset,
 cap, coast, hysteresis, each rung of the law; summary fields) and four pursuit-loop tests in
