@@ -123,7 +123,7 @@ ability to defeat a missile geometrically. The measurement decides.
 | Session | Code state | Emergency-climb windows | Evade holds started inside | Verdict |
 |---------|------------|------------------------:|---------------------------:|---------|
 | 2026-09-27 11:41-15:17, `logs/wingman_20260927_151759.log`, 36 missions | before D8 | 1 (8 s) | 0 | Baseline: the conflict is rare, so V12 needs several sessions |
-| 2026-09-27 from 15:54, pid 2844217 | D8 (uncommitted) | | | Running |
+| 2026-09-27 15:54-18:33, pid 2844217, 29 rounds | D8 (uncommitted) | 0 | 0 | Not exercised: no emergency climb; check later sessions' logs |
 
 ### Live evidence for D7
 

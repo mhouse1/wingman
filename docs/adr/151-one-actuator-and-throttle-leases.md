@@ -66,7 +66,7 @@ pitch, then roll. Until then they keep Phase 1 behaviour.
 | Session | Code state | Game UI | Battle-min | Throttle drops (`<owner> released 'e' while <owner> held it`) | Emergency windows / evade holds inside | Verdict |
 |---------|------------|---------|-----------:|------|------|---------|
 | 2026-09-27 11:41-15:17, `logs/wingman_20260927_151759.log`, operator's `make rd`, 36 missions | before D2 | post-update | 168.9 | **300** (1.78 per battle-min): climb over cruise 139, evade over cruise 27, eject over cruise 25, cruise over evade 23, stall prevention over cruise 21 | 1 window, 8 s / 0 | Baseline |
-| 2026-09-27 from 15:54, `make rd`, pid 2844217; at 16:19, 5 rounds | D1-D5 (uncommitted) | post-update | 18.7 | **0**, where the baseline rate predicts about 33. 27 `still held for` lines instead: climb over cruise 18, eject over cruise 3, the rest single | 0 so far | **D2 passed.** D4 not yet exercised: no emergency climb in the run so far |
+| 2026-09-27 15:54-18:33, `make rd`, pid 2844217, 29 rounds | D1-D5 (uncommitted) | post-update | 125.7 | **0**, where the baseline rate predicts about 224. `still held for` 1.45 per battle-min instead. Presses 162.3 per battle-min (baseline 166.9), flares per incoming 0.50 (0.50), deaths 0.80 per battle-min (0.88), 0 errors | 0 / 0 | **D2 passed**, no regression visible (29 rounds: supporting, not proof). D4 not exercised: no emergency climb |
 
 ## References
 
