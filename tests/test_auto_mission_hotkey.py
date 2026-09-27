@@ -21,6 +21,7 @@ import wingman.controller as controller_module
 from wingman.controller_config import ControllerConfig
 from wingman.analyzer import GameState
 from wingman.controller import Controller
+from tests.perception_fake import PerceptionFake
 
 
 class _FakeKeyboard:
@@ -31,7 +32,7 @@ class _FakeKeyboard:
         pass
 
 
-class _FakeFSMAnalyzer:
+class _FakeFSMAnalyzer(PerceptionFake):
     def __init__(self, state):
         self.game_state = state
         self.triggered = []

@@ -41,3 +41,5 @@ docs/performance/runtime-performance-trends.html
 docs/performance/runtime-performance-trends.preview.html
 # Per-user Claude Code permissions — personal, never shared
 .claude/settings.local.json
+# CR-018-16: the operator's per-machine settings, merged over config.yaml by a live run.
+wingman/config.local.yaml

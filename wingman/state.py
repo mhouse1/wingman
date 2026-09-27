@@ -80,8 +80,21 @@ FSM_TRANSITIONS = [
     {"trigger": "manual_release",     "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
     {"trigger": "eject_started",      "source": "GAME_BATTLE",            "dest": "GAME_BATTLE_EJECT"},
     {"trigger": "eject_complete",     "source": "GAME_BATTLE_EJECT",      "dest": "GAME_BATTLE"},
-    {"trigger": "manual_force_battle", "source": "*",                    "dest": "GAME_BATTLE"},
-    {"trigger": "manual_reset",       "source": "*",                     "dest": "GAME_LOBBY"},
+    # CR-018-14: operator and recovery overrides for an FSM that has the screen
+    # wrong ('u'/'o' force battle; 'm', the GAME_END_B stall guard and the
+    # ready-button click force the lobby). Written out rather than "*": "*" also
+    # made each a self-transition that re-ran the entry hook, and would have
+    # made any future state a valid source without anyone deciding it should be.
+    {"trigger": "manual_force_battle",
+     "source": ["GAME_UNKNOWN", "GAME_END_B", "GAME_LOBBY", "GAME_WAITING",
+                "GAME_STARTING", "GAME_STARTING_STALLED", "GAME_BATTLE_MANUAL",
+                "GAME_BATTLE_EJECT"],
+     "dest": "GAME_BATTLE"},
+    {"trigger": "manual_reset",
+     "source": ["GAME_UNKNOWN", "GAME_BATTLE", "GAME_END_B", "GAME_WAITING",
+                "GAME_STARTING", "GAME_STARTING_STALLED", "GAME_BATTLE_MANUAL",
+                "GAME_BATTLE_EJECT"],
+     "dest": "GAME_LOBBY"},
     {"trigger": "continue_clicked",   "source": ["GAME_END_B", "GAME_BATTLE_MANUAL"], "dest": "GAME_LOBBY"},
     {"trigger": "respawn_detected",   "source": "GAME_END_B",            "dest": "GAME_BATTLE"},
 ]

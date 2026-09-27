@@ -26,6 +26,11 @@ class FakeController:
     def __init__(self, *_args, **_kwargs):
         self._intents = []
 
+    def register_hotkeys(self):
+        # main registers hotkeys after construction (CR-018-13); the
+        # replay lane never has any.
+        pass
+
     def start_game_starting_loop(self):
         pass
 

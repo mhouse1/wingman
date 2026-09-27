@@ -92,12 +92,42 @@ def test_the_fixture_shows_the_squad_ready_button():
     assert 240 <= w <= 270 and 70 <= h <= 85, box   # 257 x 78 as measured
 
 
-def test_the_ready_crop_covers_the_button_it_is_meant_to_read():
-    button = _button_bbox(_frame())
-    frac_w, frac_h = _overlap(_crop_px("READY"), button)
-    assert frac_w >= 0.9 and frac_h >= 0.9, (
-        f"READY crop {_crop_px('READY')} covers {frac_w:.0%} x {frac_h:.0%} of the "
-        f"button {button}; the letters are cut off, so OCR never reads them")
+def _letters_bbox(frame, button, edge=6, thr=120):
+    """The dark letters on the white button. The edge margin keeps the rounded
+    corners, where the dark background shows through, out of the box."""
+    x0, y0, x1, y1 = button
+    roi = frame[y0 + edge:y1 - edge, x0 + edge:x1 - edge]
+    ys, xs = np.where(roi.max(axis=2) < thr)
+    return (x0 + edge + int(xs.min()), y0 + edge + int(ys.min()),
+            x0 + edge + int(xs.max()) + 1, y0 + edge + int(ys.max()) + 1)
+
+
+def test_the_ready_crop_contains_the_buttons_letters():
+    """What OCR needs is the letters, not the whole button (CR-018-11).
+
+    This used to demand 90% of the button's width and height, on the premise
+    that anything less cuts the letters off. The crop recalibrated on
+    2026-09-25 (e12f9d9) wraps the letters with 3-4 px to spare and covers
+    66% x 63% of the button: the real-OCR test below reads READY through it on
+    this fixture, and on 2026-09-27 it found and clicked READY in 7 of 7 squad
+    lobbies live. The 2026-04 crop this test was written against ended 92 px
+    short of the letters, which this still catches.
+    """
+    frame = _frame()
+    letters = _letters_bbox(frame, _button_bbox(frame))
+    cx0, cy0, cx1, cy1 = _crop_px("READY")
+    assert cx0 <= letters[0] and cy0 <= letters[1] and cx1 >= letters[2] and cy1 >= letters[3], (
+        f"READY crop {(cx0, cy0, cx1, cy1)} cuts the letters {letters}; OCR cannot "
+        f"read what the crop leaves out")
+
+
+def test_the_letters_check_rejects_the_crop_that_failed_live():
+    """The 2026-04 crop behind the 127-194 s lobby stalls (module docstring)."""
+    frame = _frame()
+    letters = _letters_bbox(frame, _button_bbox(frame))
+    old = (1534, 1038, 1741, 1093)
+    assert not (old[0] <= letters[0] and old[1] <= letters[1]
+                and old[2] >= letters[2] and old[3] >= letters[3])
 
 
 def test_the_ready_crop_stays_on_the_button():

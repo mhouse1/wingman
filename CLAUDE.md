@@ -60,6 +60,8 @@ session:
 - If Docker Hub answers `429 Too Many Requests`, add
   `DOCKER_BUILD_ARGS="--build-arg BASE_IMAGE=mirror.gcr.io/library/ubuntu:24.04"`.
 
+**Pre-push hook (opt-in):** `make hooks` points git at `.githooks/pre-push`, which runs `make lint` and `make test` before every push (HLDD 016 Part 3). `git push --no-verify` skips it once.
+
 **Validation gates (run before releasing):**
 ```bash
 make tp             # fast: test + ADR044/ADR045 runtime gates + performance preview
@@ -91,8 +93,12 @@ The main loop runs in `wingman/main.py` (`main()`). Each 1.5-second tick capture
 - `wingman/capture.py` — `Capture`: wraps `mss` to grab a BGR frame from a configured monitor region. Must be called from the thread that constructed it (mss uses thread-local storage).
 - `wingman/crop_region.py` — `CropCoords` (NamedTuple) and helpers. All crop coordinates are fractions of the capture frame (0.0–1.0); x before y. Has no internal imports — safe to use anywhere.
 - `wingman/state.py` — the FSM vocabulary: `GameState`, `GameEvent`, `BATTLE_STATES`, the transition table and the nose-direction constants. Standard library only, so modules that need just these names do not load EasyOCR (CR-018-15). `analyzer.py` re-exports them; import from `state.py` in new code.
+- `wingman/perception.py` — `Perception`: the port listing every analyzer member the controller and hotkeys may read or command (CR-018-15). Using anything else fails `tests/test_perception_port.py`; tests use the shared `tests/perception_fake.py`.
+- `wingman/transition_queue.py` — `TransitionQueue`: every FSM transition, in order, for the main loop's state-change pass (CR-018-14). `make fsm` regenerates the FSM diagram in `docs/architecture.md` from the table.
+- `wingman/config_local.py` — the untracked `config.local.yaml` overlay (CR-018-16).
 - `wingman/analyzer.py` — `GameStateAnalyzer`: runs the `transitions`-based FSM over the table in `state.py`, the EasyOCR thread pool, incoming template matching, respawn detection, and health/ammo OCR. Thread-local EasyOCR readers avoid races; `_ocr_init_lock` serializes first-time model download. Exposes `trigger_event()` for FSM transitions.
-- `wingman/controller.py` — keyboard/mouse injection, click-to-crop helpers, hotkey bindings. Also houses `REGION_*` string constants used as log labels.
+- `wingman/controller.py` — keyboard/mouse injection, click-to-crop helpers. Also houses `REGION_*` string constants used as log labels.
+- `wingman/hotkeys.py` — `register_hotkeys()`: the operator's global hotkeys. `main` registers them once through `Controller.register_hotkeys()`; constructing a `Controller` registers nothing (CR-018-13).
 - `wingman/actuator.py` — `Actuator`: the only code that calls the keyboard backend's `press`/`release`/`press_and_release` (CR-018-09). Every press names its owner; `tests/test_actuator.py` fails if any other module calls `keyboard_module.press` or `.release`.
 - `wingman/performance.py` — `PerformanceTracker`: records per-crop OCR timings and incoming→flare latency into bucketed histograms; writes `run_*.json` to `docs/performance/current/`.
 - `wingman/replay.py` — `ScreenshotReplayCapture` (injects pre-recorded screenshots in place of live frames), `ReplayAssertionEngine` (records FSM state + timing for validator), `LivePathCaptureEngine` (captures real monitor frames during ADR045 live-screen test lane). Driven by YAML path configs under `tests/replay_paths/`.
@@ -104,6 +110,10 @@ The main loop runs in `wingman/main.py` (`main()`). Each 1.5-second tick capture
 Manual takeover (`i/j/k/l` keys) moves to `GAME_BATTLE_MANUAL`. `GAME_STARTING_STALLED` fires when matchmaking times out without a "Good Luck" detection.
 
 **Configuration:** `wingman/config.yaml` defines the capture region, monitor index, all named crop coordinates (`crops:`), OCR/detection parameters, and performance regression thresholds. Crop coordinates use fractional screen positions and are edited by the calibration tooling.
+
+Per-machine settings (for example `make invite`) go in the untracked `wingman/config.local.yaml`, which a live run merges over `config.yaml` and validates with the same schema (CR-018-16). Tests and replay runs read only the shipped file, so never put operator state in `config.yaml`.
+
+A new config key declares its default once, in `wingman/config_schema.py` (`Leaf(..., default=...)`), and code reads it with `schema_default("section.key")` instead of writing its own literal in `cfg.get(key, default)` (CR-018-16). `tests/test_config_defaults.py` checks every declared default against its own leaf.
 
 **Test harness layers:**
 1. `make test` — pytest unit/integration tests (fast, no game needed).
@@ -137,6 +147,20 @@ The general sequential numbering rule above applies. Additionally: before creati
 ## ADR — Performance Changes
 
 Performance ADRs must include actual log excerpts with timing data, not just estimates. ADR 019 is the reference example — before/after timings should come directly from production logs.
+
+## ADR — Shape
+
+A new ADR keeps the decision short enough to read on entry (CR-018-18: the ADR corpus
+outgrew the source it describes, and each session pays for its size).
+
+- The decision and its consequences come first, on the first page.
+- Live-trial evidence (log excerpts, per-session tables) goes in a `docs/anomaly/` or
+  `docs/performance/` document that the ADR links, not in ever-growing ADR sections.
+  The performance-ADR rule below still applies: the ADR quotes the key timings.
+- Once a decision is live, change it with a superseding ADR rather than appended
+  revisions.
+- Move an ADR to `Accepted` when its Validation section's checks are recorded;
+  `docs/workflow/005-adr-closure-pass-2026-09.md` lists the backlog.
 
 ## ADR — Superseding Decisions
 

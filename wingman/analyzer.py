@@ -1588,6 +1588,22 @@ class GameStateAnalyzer:
         """
         self._controller = controller
 
+    def note_lobby_click(self) -> None:
+        """The controller clicked PLAY/READY itself (the 'm' hotkey).
+
+        Stamps the cooldown the lobby quick-scan checks before its own click, so
+        it does not re-click the same button about a second later and undo this
+        one. CR-018-15: replaces the controller writing _last_lobby_play_click_ts.
+        """
+        self._last_lobby_play_click_ts = time.time()
+
+    def note_battle_event(self) -> None:
+        """A mission started, so the aircraft is in battle now.
+
+        CR-018-15: replaces the controller writing _last_battle_event_ts.
+        """
+        self._last_battle_event_ts = time.time()
+
     def trigger_event(self, name: str) -> bool:
         """Dispatch an FSM trigger via the thread-safe trigger wrapper."""
         return self._trigger(name)

@@ -25,6 +25,7 @@ from wingman.controller import (
 )
 from wingman.controller_config import ControllerConfig
 from wingman.telemetry import TelemetrySignal
+from tests.perception_fake import PerceptionFake
 
 _STEER_KEYS = {NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY}
 
@@ -47,7 +48,7 @@ class _Snapshot:
         return None
 
 
-class _Analyzer:
+class _Analyzer(PerceptionFake):
     def __init__(self, state=GameState.GAME_BATTLE_EJECT, altitude=3200.0):
         self.game_state = state
         self._altitude = altitude

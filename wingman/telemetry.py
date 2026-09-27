@@ -26,7 +26,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .config_schema import schema_default
+
 MPH_TO_FPS = 5280.0 / 3600.0
+# CR-018-16: telemetry.steep_dive_min_sin's one default lives in the config schema.
+# The eject controller (0.8) and TelemetryProcessor (0.5) used to disagree; the
+# shipped 0.8 hid it, and any run without the key split the two components.
+STEEP_DIVE_MIN_SIN_DEFAULT = schema_default("telemetry.steep_dive_min_sin")
 # The HUD telemetry block is actually metric (speed "KPH", altitude "m") —
 # see pitch_angle_deg(). The mph/ft naming across this module and its config
 # keys predates that discovery; the filter envelopes are tuned in raw display
@@ -266,7 +272,7 @@ class TelemetryProcessor:
         self.stale_after_s = float(cfg.get("stale_after_s", 6.0))
         self.trend_min_alt_rate_fps = float(cfg.get("trend_min_alt_rate_fps", 20.0))
         self.trend_min_speed_rate_mph_s = float(cfg.get("trend_min_speed_rate_mph_s", 15.0))
-        self.steep_min_sin = float(cfg.get("steep_dive_min_sin", 0.5))
+        self.steep_min_sin = float(cfg.get("steep_dive_min_sin", STEEP_DIVE_MIN_SIN_DEFAULT))
         self.level_max_sin = float(cfg.get("level_max_sin", 0.15))
 
         self._speed = TelemetrySignal()

@@ -34,7 +34,10 @@ from .close_button import GenericCloseRecovery, click_region
 from .crop_region import CropCoords
 from .analyzer import GameStateAnalyzer, POPUP_DISMISS_STATES
 from .state import GameState, GameEvent, BATTLE_STATES
+from .config_local import (local_path as local_config_path, merge as merge_config,
+                           overlay_keys, read_overlay)
 from .suppressed import suppressed_counts
+from .transition_queue import TransitionQueue
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -64,6 +67,7 @@ from .replay import (
     ScreenshotReplayCapture,
     build_required_screenshot_dictionary,
     find_missing_screenshots,
+    load_replay_config_overrides,
     load_replay_paths,
     select_replay_path,
     write_required_screenshot_report,
@@ -75,7 +79,7 @@ class RespawnState(Enum):
     RESPAWNING = auto()      # Respawn screen active; restart fires on health return
 
 
-def load_config(path, *, validate: bool = True):
+def load_config(path, *, validate: bool = True, local_overlay: bool = False):
     """Load config.yaml and validate it against the declared schema.
 
     Validation is fail-fast by design (Future 002 A-03): an unknown or
@@ -83,11 +87,21 @@ def load_config(path, *, validate: bool = True):
     default, which has already shipped a wrong value to production once.
     Pass validate=False only for tooling that intentionally works on a
     partial config.
+
+    `local_overlay=True` merges the operator's untracked config.local.yaml
+    over the shipped file first (CR-018-16), and the merged result is what is
+    validated. Only a live run asks for it.
     """
     with open(path, "r") as f:
         cfg = yaml.safe_load(f)
+    source = str(path)
+    if local_overlay:
+        overlay = read_overlay(path)
+        if overlay:
+            cfg = merge_config(cfg, overlay)
+            source = f"{path} + {local_config_path(path)}"
     if validate:
-        assert_valid_config(cfg, source=str(path))
+        assert_valid_config(cfg, source=source)
     return cfg
 
 
@@ -466,8 +480,26 @@ def main():
     )
     logger = logging.getLogger("wingman")
 
-    cfg = load_config(args.config)
+    # CR-018-16: a live run takes the operator's local overlay; replay and
+    # capture runs must not depend on one machine's settings.
+    _live_run = not (args.replay_config or args.capture_path_config)
+    cfg = load_config(args.config, local_overlay=_live_run)
     logger.info("Configuration loaded from %s", args.config)
+    if args.replay_config:
+        # A replay path pins the configuration it models (its config_overrides),
+        # validated like any other config.
+        _replay_overrides = load_replay_config_overrides(Path(args.replay_config))
+        if _replay_overrides:
+            cfg = merge_config(cfg, _replay_overrides)
+            assert_valid_config(cfg, source=f"{args.config} + {args.replay_config}")
+            logger.info("Replay: %s overrides %s", args.replay_config,
+                        ", ".join(overlay_keys(_replay_overrides)))
+    if _live_run:
+        _overlay = read_overlay(args.config)
+        if _overlay:
+            logger.info("Configuration: local overlay %s sets %s",
+                        local_config_path(args.config),
+                        ", ".join(overlay_keys(_overlay)))
 
     # Cross-session disk safety net: capture features cap themselves per
     # session only, and rotated logs were never deleted (2026-09-24: about
@@ -809,6 +841,10 @@ def main():
         on_auto_mission_key=_on_auto_mission_key,
         crops=analyzer.crops,
     )
+    # CR-018-13: the operator hotkeys, formerly registered inside Controller's
+    # constructor. Same moment in startup; the controller skips it in replay and
+    # capture modes (disable_hotkeys).
+    ctrl.register_hotkeys()
     # ADR 136: give the eject heatdive addition a tracker to call directly —
     # Controller cannot construct its own, TargetTracker is owned/configured
     # alongside HudRenderer above.
@@ -1151,7 +1187,6 @@ def main():
 
     # Mission restart state machine
     last_click_to_alert_ts = 0.0
-    last_game_state = None
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
     # ADR 094: when the final continue click landed. Written by the click-through
     # daemon thread, read by the deferred-exit check. A one-element list because
@@ -1247,6 +1282,11 @@ def main():
     game_watch = GamePresenceWatch(
         process_name=(cfg.get("resource_monitor", {}) or {}).get(
             "game_process_name", "Metalstorm.exe"))
+
+    # CR-018-14: every FSM transition from here on, for the state-change pass in
+    # the loop. Created last before the loop, as the first comparison used to run
+    # on the first tick; the state at this moment arrives as (None, state).
+    state_changes = TransitionQueue(analyzer)
 
     def _stop_lobby_escape_loop():
         nonlocal lobby_escape_stop, lobby_escape_thread
@@ -1432,16 +1472,19 @@ def main():
             else:
                 unknown_state_since = 0.0
 
-            if current_game_state != last_game_state:
+            # CR-018-14: one pass per FSM transition, in order (TransitionQueue).
+            # This compared this tick's state with the last tick's, which merged
+            # two transitions in one tick into one: 2 of 260 on 2026-09-27, one an
+            # EJECT round trip during a takeover handback. The rest of the tick
+            # still acts on the state this tick read.
+            for prev_game_state, new_game_state in state_changes.drain():
                 liveness.note_progress("state change")
                 logger.info("\033[96m🎮 Game state: %s → %s\033[0m",
-                            last_game_state.name if last_game_state else "UNKNOWN",
-                            current_game_state.name if current_game_state else "UNKNOWN")
-                prev_game_state = last_game_state
-                last_game_state = current_game_state
-                if current_game_state != GameState.GAME_UNKNOWN:
+                            prev_game_state.name if prev_game_state else "UNKNOWN",
+                            new_game_state.name)
+                if new_game_state != GameState.GAME_UNKNOWN:
                     startup_classification_complete = True
-                if current_game_state == GameState.GAME_END_B:
+                if new_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
                     # GAME_END_B is not a respawn flow; clear the respawn latch
                     # and any pending alive event so the match-end click-through
@@ -1457,7 +1500,7 @@ def main():
                     ctrl.stop_eject_sequence(reason="match_ended")
                 else:
                     game_end_b_since = 0.0
-                if current_game_state == GameState.GAME_LOBBY:
+                if new_game_state == GameState.GAME_LOBBY:
                     if prev_game_state is not None:
                         ctrl.cancel_mission()
                     try:
@@ -1501,17 +1544,17 @@ def main():
                     lobby_escape_thread.start()
                 else:
                     _stop_lobby_escape_loop()
-                waiting_fallback.on_state_change(current_game_state, prev_game_state)
-                enemy_presence.on_state_change(current_game_state, prev_game_state)
-                unknown_anomaly.on_state_change(current_game_state, prev_game_state)
-                behavior_tree.on_state_change(current_game_state, prev_game_state)
-                ammo_events.on_state_change(current_game_state, prev_game_state)
-                tracking_hud.on_state_change(current_game_state, prev_game_state)
-                if current_game_state == GameState.GAME_STARTING_STALLED:
+                waiting_fallback.on_state_change(new_game_state, prev_game_state)
+                enemy_presence.on_state_change(new_game_state, prev_game_state)
+                unknown_anomaly.on_state_change(new_game_state, prev_game_state)
+                behavior_tree.on_state_change(new_game_state, prev_game_state)
+                ammo_events.on_state_change(new_game_state, prev_game_state)
+                tracking_hud.on_state_change(new_game_state, prev_game_state)
+                if new_game_state == GameState.GAME_STARTING_STALLED:
                     game_starting_stalled_since = time.time()
                 else:
                     game_starting_stalled_since = 0.0
-                if current_game_state == GameState.GAME_BATTLE:
+                if new_game_state == GameState.GAME_BATTLE:
                     battle_ever_reached = True
 
             # Watchdog: if GAME_BATTLE is not entered within the stall window, exit

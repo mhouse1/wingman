@@ -45,7 +45,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: hooks fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -122,6 +122,13 @@ RR_LIVE_PATH1_PRESENTER_GRACE_S ?= 8.0
 lint:
 	uv run ruff check .
 	@echo "PASS: ruff lint clean"
+
+# HLDD 016 Part 3 (CR-018-11): opt in to the versioned pre-push hook, which runs
+# `make lint` and `make test` before every push. `git push --no-verify` skips it;
+# `git config --unset core.hooksPath` removes it.
+hooks:
+	git config core.hooksPath .githooks
+	@echo "pre-push hook installed: make lint and make test run before every push (skip one with git push --no-verify)"
 
 # One-time (then routine) formatter pass — review the diff before committing.
 format:
@@ -279,6 +286,11 @@ leak-check-gate:
 # code" is answerable by running something instead of re-reading both.
 tree:
 	@$(PYTHON_RUN) scripts/render-behavior-tree.py $(BT_ARGS)
+
+# CR-018-14: the game FSM as Mermaid, generated from wingman/state.py, and the
+# generated block in docs/architecture.md refreshed to match.
+fsm:
+	@$(PYTHON_RUN) scripts/render-fsm.py --write-doc
 
 # The gate set both preview targets must run. Shared so the two cannot drift:
 # tp-full is documented as "tp + the ADR037 real-OCR lane" (CLAUDE.md), and it

@@ -2,6 +2,16 @@
 # Tuned for full wingman.main startup where OCR workers and initial state
 # classification can consume the first few seconds.
 
+# The configuration this path models. PATH1 pins the J20 flow, in which the
+# missiles-empty response ejects from GAME_BATTLE (P1_040 at 52 s). The shipped
+# default mission became su30 on 2026-09-24 (0f2e94e); its pursuit takes the
+# aircraft into GAME_BATTLE_EJECT before missiles run out, so the missiles_empty
+# checkpoint failed on every run from then on (measured 2026-09-27, identically on
+# eb709e5 and after the code review 018 changes).
+config_overrides:
+  mission:
+    default_mission: j20
+
 PATH1_RUNTIME:
   # Startup frame only: no assertion on this step.
   - screenshot_name: P1_000_LOBBY_PLAY.png
