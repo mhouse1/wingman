@@ -62,3 +62,61 @@ def test_a_silent_listener_reports_zero_not_nothing():
 
 def test_the_report_interval_is_a_sane_positive_number():
     assert 10.0 <= input_linux._TALLY_INTERVAL_S <= 600.0
+
+
+# --- Deaf-listener watchdog (2026-09-26, SAF-001) ----------------------------
+# 3 of 21 sessions that day had the :3 listener hear 0 presses in every minute
+# from the start, and an ENTER typed into the game window was not heard. The
+# tally now compares what it heard with what wingman itself pressed there.
+
+import pytest
+
+
+@pytest.fixture
+def fresh_counts(monkeypatch):
+    monkeypatch.setattr(input_linux, "_injected_press_counts", {})
+
+
+def test_heard_nothing_while_wingman_pressed_keys_is_deaf(fresh_counts):
+    tally = _KeyTally(":3", clock=_Clock())
+    for _ in range(6):
+        input_linux._note_injected_press(":3")
+    line = tally.report()
+    assert tally.deaf is True
+    assert "wingman pressed 6" in line
+
+
+def test_a_listener_that_heard_something_is_not_deaf(fresh_counts):
+    tally = _KeyTally(":3", clock=_Clock())
+    for _ in range(6):
+        input_linux._note_injected_press(":3")
+    tally.note(False, False)
+    tally.report()
+    assert tally.deaf is False
+
+
+def test_too_few_presses_to_judge_is_not_deaf(fresh_counts):
+    """In the lobby wingman presses few keys; silence there proves nothing."""
+    tally = _KeyTally(":3", clock=_Clock())
+    for _ in range(input_linux._DEAF_MIN_INJECTED - 1):
+        input_linux._note_injected_press(":3")
+    tally.report()
+    assert tally.deaf is False
+
+
+def test_presses_on_another_display_do_not_count(fresh_counts):
+    tally = _KeyTally(":0", clock=_Clock())
+    for _ in range(20):
+        input_linux._note_injected_press(":3")
+    tally.report()
+    assert tally.deaf is False
+
+
+def test_each_interval_is_judged_on_its_own_presses(fresh_counts):
+    tally = _KeyTally(":3", clock=_Clock())
+    for _ in range(6):
+        input_linux._note_injected_press(":3")
+    tally.note(False, False)
+    tally.report()                       # heard something: fine
+    line = tally.report()                # next interval: no presses at all
+    assert tally.deaf is False and "wingman pressed 0" in line

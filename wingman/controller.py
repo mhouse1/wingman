@@ -910,6 +910,12 @@ class Controller:
         self._su30_angle_max_s = float(_su.get("angle_max_s", 20.0))
         self._su30_tick_s = float(_su.get("tick_s", 0.5))
         self._su30_lock_timeout_s = float(_su.get("lock_timeout_s", 5.0))
+        # Operator, 2026-09-26: a tracker lock or a ring icon during the climb or
+        # the nose-angle step ends the script and starts the pursuit at once.
+        # Measured before it: after the 17:37 respawn the script climbed to 3000 m
+        # and held -10 deg (nose-up pulses at 17:37:21 and :24) while the tracker
+        # had acquired targets at 17:37:10.9 and 17:37:22.9.
+        self._su30_yield_to_target = bool(_su.get("yield_to_target", False))
         # ADR 147: the altitude doctrine mission_su30 flies. The tree's hard
         # floor (behavior_tree.climb.alt_floor_m) sits above this mission's
         # level-off altitude, so the tree restarted the climb the script had
@@ -3609,9 +3615,17 @@ class Controller:
         dive guard tripped; never while `pursuit_mode.dive_safety` is off),
         `angle` (flight path at or past icon_min_path_deg, when set),
         `angle-none` (no fresh angle, when a limit is set or
-        require_fresh_angle is on), or `-`."""
+        require_fresh_angle is on), `alt` (below push_floor_m), `alt-none` (a
+        floor is set and there is no fresh altitude), or `-`."""
         if guard:
             return "guard"
+        floor = self._icon_cfg.push_floor_m
+        if floor is not None:
+            alt = self._read_stable_altitude()
+            if alt is None:
+                return "alt-none"
+            if alt < floor:
+                return "alt"
         limit = self._icon_cfg.icon_min_path_deg
         if limit is not None or self._icon_cfg.require_fresh_angle:
             angle = self._telemetry_path_angle_deg()
@@ -3665,6 +3679,24 @@ class Controller:
         "is the missiles-empty response still running, whichever strategy"
         should check both."""
         return self._pursuing.is_set()
+
+    def _stop_holds_for_pursuit(self) -> None:
+        """HLDD 015 (2026-09-26): end a climb or boundary turn that was already
+        running when the pursuit started, and wait for its finally to release its
+        keys BEFORE the pursuit presses any. Otherwise it flies on against the
+        pursuit (NOSE_UP against the icon push) and its closing releases drop the
+        pursuit's own held keys: at 18:14:46 a boundary turn begun 1 s before the
+        su30 yield released NOSE_DOWN, and the aircraft flew level for 54 s with
+        the push still logged as held."""
+        for name, stop, thread in (
+                ("boundary turn", self._boundary_turn_stop, self._boundary_turn_thread),
+                ("climb", self._climb_stop, self._climb_thread)):
+            if thread is None or not thread.is_alive():
+                continue
+            stop.set()
+            thread.join(timeout=1.5)
+            logger.info("Controller: pursuit took the airframe — %s stopped%s", name,
+                        " (still releasing after 1.5s)" if thread.is_alive() else "")
 
     def pursue_and_engage(self, on_complete=None, weapon_already_switched: bool = False,
                           defer_switch_until_empty: bool = False):
@@ -3776,6 +3808,8 @@ class Controller:
                 mission_exit_deadline = time.time() + 2.0
                 while self.is_mission_running() and time.time() < mission_exit_deadline:
                     time.sleep(0.05)
+                if not self._pursuit_dive_safety:
+                    self._stop_holds_for_pursuit()
 
                 # ignore_cancel: cancel_mission() already ran above, before
                 # this thread even started — same reasoning as
@@ -4950,14 +4984,19 @@ class Controller:
         if self._missile_evading.is_set():
             logger.info("Controller: climb suppressed — missile evade in progress")
             return
-        if emergency and self._pursuing.is_set() and not self._pursuit_dive_safety:
+        if self._pursuing.is_set() and not self._pursuit_dive_safety:
             # Operator, 2026-09-26: the pursuit owns the airframe; a dive
             # recovery would take pitch and roll from the icons and the tracker.
+            # The floor climb too (HLDD 015, 2026-09-26 18:15): inside a pursuit
+            # it left at its first state check (173 of 173 in the 17:12 log)
+            # and only ran its exit push, whose NOSE_DOWN release dropped the
+            # pursuit's own held key: 54 s of level flight while it logged a push.
             now = time.time()
             if now - self._dive_recovery_suppressed_log_ts >= 10.0:
                 self._dive_recovery_suppressed_log_ts = now
-                logger.info("Controller: dive recovery suppressed — the pursuit owns "
-                            "the airframe (pursuit_mode.dive_safety off)")
+                logger.info("Controller: %s suppressed — the pursuit owns "
+                            "the airframe (pursuit_mode.dive_safety off)",
+                            "dive recovery" if emergency else "climb")
             return
         exit_alt = target_alt if target_alt is not None else self._climb_exit_alt
         if exit_alt is None:
@@ -6001,6 +6040,11 @@ class Controller:
         target = self._climb_exit_pitch_deg
         if target is None:
             return "disabled"
+        if self._pursuing.is_set() and not self._pursuit_dive_safety:
+            # HLDD 015: the pursuit flies the attitude from here, and a pulse's
+            # release would drop a NOSE_DOWN the pursuit holds (the keyboard
+            # library keeps one state per key, not one per tactic).
+            return "pursuit"
         target = float(target)
         pulses = 0
         pitch_key = NOSE_DOWN_KEY
@@ -6764,13 +6808,17 @@ class Controller:
         self.start_boresight_engage_loop()
 
         # Step 3: climb to the level-off altitude, then set the nose angle.
-        if not self._su30_wait_for_altitude():
+        # With yield_to_target, a lock or a ring icon ends either wait early and
+        # the script goes straight to the pursuit.
+        reached = self._su30_wait_for_altitude()
+        if not reached:
             return False
         self._su30_stop_climb()
-        logger.info("Controller: mission_su30 - step 3/4: %.0f m reached, "
-                    "setting nose angle to %+.0f deg",
-                    self._su30_climb_alt_m, self._su30_nose_angle_deg)
-        self._su30_set_nose_angle()
+        if reached != "target":
+            logger.info("Controller: mission_su30 - step 3/4: %.0f m reached, "
+                        "setting nose angle to %+.0f deg",
+                        self._su30_climb_alt_m, self._su30_nose_angle_deg)
+            self._su30_set_nose_angle()
         if self._mission_cancel.is_set() or self._mission_exit_requested():
             return False
 
@@ -6789,7 +6837,8 @@ class Controller:
         """
         return self._scripted_wait_for_altitude(
             "mission_su30", self._su30_climb_alt_m, self._su30_tick_s,
-            self._su30_start_climb)
+            self._su30_start_climb,
+            interrupt=self._target_in_view if self._su30_yield_to_target else None)
 
     def _su30_stop_climb(self) -> None:
         """End whichever climb hold is running (see _scripted_stop_climb)."""
@@ -6805,7 +6854,25 @@ class Controller:
             tolerance_deg=self._su30_angle_tolerance_deg,
             confirm_reads=self._su30_angle_confirm_reads,
             pulse_s=self._su30_angle_pulse_s, max_s=self._su30_angle_max_s,
-            tick_s=self._su30_tick_s)
+            tick_s=self._su30_tick_s,
+            interrupt=self._target_in_view if self._su30_yield_to_target else None)
+
+    def _target_in_view(self) -> "str | None":
+        """What ends a scripted wait for the pursuit: "lock" when the tracker's
+        last scan had a target, "icon" when a fresh frame has a ring icon, else
+        None. Never raises: a failed check is no evidence of a target."""
+        try:
+            tracker = self._target_tracker
+            if tracker is not None and hasattr(tracker, "last_observation"):
+                obs = tracker.last_observation()
+                if obs and obs.get("visible"):
+                    return "lock"
+            if self._icon_cfg.enabled and self._capture is not None:
+                if find_ring_icons(self._capture.grab_from_thread(), self._icon_cfg):
+                    return "icon"
+        except Exception:
+            logger.debug("Controller: target-in-view check failed", exc_info=True)
+        return None
 
     def _su30_activate_pursuit(self) -> bool:
         """Step 4: hand the airframe to pursue_and_engage. True when started.
@@ -6820,10 +6887,12 @@ class Controller:
     # its own config block.
 
     def _scripted_wait_for_altitude(self, label: str, target_m: float,
-                                    tick_s: float, start_climb) -> bool:
+                                    tick_s: float, start_climb,
+                                    interrupt=None) -> "bool | str":
         """Block until a FRESH altitude reads at or above ``target_m``.
 
-        False on cancel or exit request. Never commands on a stale read: an
+        False on cancel or exit request. With ``interrupt`` (a callable returning
+        a reason or None), returns "target" as soon as it gives a reason. Never commands on a stale read: an
         altitude that has aged out says nothing about where the aircraft is
         (ADR 038), so the wait simply continues — the climb already running
         keeps its own telemetry-gated cap.
@@ -6832,6 +6901,11 @@ class Controller:
         while not self._mission_cancel.is_set():
             if self._mission_exit_requested():
                 return False
+            reason = interrupt() if interrupt is not None else None
+            if reason:
+                logger.info("Controller: %s - target in view (%s) during the climb, "
+                            "going straight to the pursuit", label, reason)
+                return "target"
             snap = (self._analyzer.get_telemetry()
                     if self._analyzer is not None else None)
             fresh = snap is not None and snap.altitude_fresh()
@@ -6874,7 +6948,7 @@ class Controller:
     def _scripted_set_nose_angle(self, label: str, *, target: float,
                                  tolerance_deg: float, confirm_reads: int,
                                  pulse_s: float, max_s: float,
-                                 tick_s: float) -> bool:
+                                 tick_s: float, interrupt=None) -> "bool | str":
         """Pulse the nose toward ``target`` degrees. True once within tolerance.
 
         False on cancel, exit request or the ``max_s`` bound; the caller
@@ -6896,6 +6970,12 @@ class Controller:
         while not self._mission_cancel.wait(timeout=tick_s):
             if self._mission_exit_requested():
                 return False
+            reason = interrupt() if interrupt is not None else None
+            if reason:
+                logger.info("Controller: %s - target in view (%s) during the "
+                            "nose-angle step, going straight to the pursuit",
+                            label, reason)
+                return "target"
             if time.time() - start >= max_s:
                 logger.warning("Controller: %s - nose angle %+.0f deg "
                                "not confirmed within %.0fs, continuing to pursuit",

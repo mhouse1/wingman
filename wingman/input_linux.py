@@ -537,6 +537,32 @@ def _drop_shared_display() -> None:
         d.close()
 
 
+# Deaf-listener watchdog (2026-09-26, SAF-001). Wingman's own KeyPress
+# injections per display: a listener on a display where wingman pressed keys
+# in the last interval must have heard them. Measured: 3 of 21 sessions that
+# day (04:12, 04:37, 15:53) had the :3 listener hear 0 presses in every
+# one-minute interval, from the start, with nothing in the log to say why, and
+# an ENTER typed into the game window was not heard. Xlib's X.KeyPress is 2.
+_KEYPRESS = 2
+_injected_press_lock = threading.Lock()
+_injected_press_counts: "dict[str, int]" = {}
+# A listener hearing nothing while wingman pressed at least this many keys on
+# its display in the same interval is deaf. A named guess; wingman fires
+# about three a second in battle.
+_DEAF_MIN_INJECTED = 5
+
+
+def _note_injected_press(display_name: str) -> None:
+    with _injected_press_lock:
+        _injected_press_counts[display_name] = _injected_press_counts.get(display_name, 0) + 1
+
+
+def injected_presses(display_name: str) -> int:
+    """KeyPress events wingman has injected on `display_name` so far."""
+    with _injected_press_lock:
+        return _injected_press_counts.get(display_name, 0)
+
+
 def _linux_key_event(key: str, event_type) -> None:
     """Inject a single KeyPress or KeyRelease event via XTest.
 
@@ -566,6 +592,8 @@ def _linux_key_event(key: str, event_type) -> None:
                     return
                 _xtest.fake_input(d, event_type, keycode)
                 d.sync()
+                if event_type in (_KEYPRESS, "KeyPress"):
+                    _note_injected_press(display_name)
                 return
             except Exception as e:
                 last_err = e
@@ -628,6 +656,10 @@ class _KeyTally:
         self._seen = 0
         self._matched = 0
         self._delivered = 0
+        self._injected_at_start = injected_presses(display)
+        # Set by report(): heard nothing while wingman pressed at least
+        # _DEAF_MIN_INJECTED keys on this display in the same interval.
+        self.deaf = False
 
     def note(self, matched: bool, delivered: bool) -> None:
         with self._lock:
@@ -636,14 +668,23 @@ class _KeyTally:
             self._delivered += bool(delivered)
 
     def report(self) -> str:
-        """One line for the interval just ended, and start the next interval."""
+        """One line for the interval just ended, and start the next interval.
+
+        Also sets `deaf` (heard nothing while wingman pressed keys here).
+
+        @relation(SAF-001.3, scope=function)
+        """
         with self._lock:
             now = self._clock()
+            injected_now = injected_presses(self.display)
+            injected = injected_now - self._injected_at_start
             line = ("XKey[%s]: %d KeyPress events in the last %.0fs "
-                    "(%d matched a registered key, %d delivered)"
+                    "(%d matched a registered key, %d delivered; wingman pressed %d)"
                     % (self.display, self._seen, now - self._since,
-                       self._matched, self._delivered))
+                       self._matched, self._delivered, injected))
+            self.deaf = self._seen == 0 and injected >= _DEAF_MIN_INJECTED
             self._since = now
+            self._injected_at_start = injected_now
             self._seen = self._matched = self._delivered = 0
         return line
 
@@ -742,7 +783,11 @@ class _LinuxXTestKeyboard:
           d_ctrl — calls record_disable_context to stop d_rec (stored for unhook_all)
 
         The outer loop retries on transient display errors (e.g. XWayland dropping
-        the connection). It exits only when _stop is set (via unhook_all).
+        the connection), and restarts the recording when the deaf-listener
+        watchdog finds it heard none of wingman's own presses. It exits only when
+        _stop is set (via unhook_all).
+
+        @relation(SAF-001.3, scope=function)
         """
         reconnect_attempts = 0
         while not self._stop.is_set():
@@ -816,8 +861,10 @@ class _LinuxXTestKeyboard:
                 # silently killing hotkeys — and with them the SAF-001 manual
                 # takeover path. Found by ruff B023 (Research 006).
                 tally = _KeyTally(display_name)
+                deaf_restart = threading.Event()
 
-                def _stop_watcher(iter_done=iter_done, d_ctrl=d_ctrl, ctx=ctx, tally=tally):
+                def _stop_watcher(iter_done=iter_done, d_ctrl=d_ctrl, d_rec=d_rec, ctx=ctx,
+                                  tally=tally, deaf_restart=deaf_restart):
                     next_report = time.time() + _TALLY_INTERVAL_S
                     while not self._stop.is_set() and not iter_done.is_set():
                         if self._stop.wait(timeout=0.5):
@@ -825,6 +872,31 @@ class _LinuxXTestKeyboard:
                         if time.time() >= next_report:
                             logger.debug("%s", tally.report())
                             next_report += _TALLY_INTERVAL_S
+                            if tally.deaf:
+                                # Deaf-listener watchdog (SAF-001): restart the
+                                # recording rather than trust a listener that heard
+                                # none of wingman's own presses.
+                                logger.warning(
+                                    "XKey[%s]: heard no key presses in the last %.0fs "
+                                    "while wingman pressed keys there - the listener is "
+                                    "deaf; restarting it (SAF-001 takeover path)",
+                                    display_name, _TALLY_INTERVAL_S)
+                                deaf_restart.set()
+                                try:
+                                    d_ctrl.record_disable_context(ctx)
+                                    d_ctrl.flush()
+                                except Exception as e:
+                                    logger.debug("XKey: watchdog could not disable the "
+                                                 "record context: %s", e)
+                                # If the blocked recording does not return, close its
+                                # connection: the loop then reconnects on the error.
+                                if not iter_done.wait(timeout=5.0):
+                                    try:
+                                        d_rec.close()
+                                    except Exception as e:
+                                        logger.debug("XKey: watchdog could not close the "
+                                                     "record connection: %s", e)
+                                return
                     if iter_done.is_set() and not self._stop.is_set():
                         return
                     try:
@@ -899,12 +971,18 @@ class _LinuxXTestKeyboard:
                     logger.info("XKey: display reconnected after %d attempt(s) — hotkeys active again", reconnect_attempts)
                     reconnect_attempts = 0
 
-                # Blocks until record_disable_context is called (from unhook_all)
+                # Blocks until record_disable_context is called (from unhook_all,
+                # or from the deaf-listener watchdog)
                 d_rec.record_enable_context(ctx, _record_handler)
                 d_rec.record_free_context(ctx)
                 d_rec.close()
                 d_ctrl.close()
                 self._contexts.pop(display_name, None)
+                iter_done.set()
+                if deaf_restart.is_set() and not self._stop.is_set():
+                    logger.info("XKey: restarting the %s listener after the deaf watchdog",
+                                display_name)
+                    continue
                 break  # clean exit: _stop was set via unhook_all
             except Exception as e:
                 # A teardown we asked for is not a failure. See the note by

@@ -956,10 +956,11 @@ class _TelemetryAnalyzer(_AnalyzerStub):
     with a new altitude timestamp; False repeats one sample. `rate` is the
     altitude rate in m/s."""
 
-    def __init__(self, new_samples=True, rate=0.0):
+    def __init__(self, new_samples=True, rate=0.0, alt=4000.0):
         super().__init__(ammo=2)
         self.new_samples = new_samples
         self.rate = rate
+        self.alt = alt
         self.calls = 0
 
     def get_telemetry(self):
@@ -969,19 +970,20 @@ class _TelemetryAnalyzer(_AnalyzerStub):
         sample_ts = now if self.new_samples else 1000.0
         return TelemetrySnapshot(
             speed=TelemetrySignal(value=900, stable_value=900.0, ts=now, rate=0.0),
-            altitude=TelemetrySignal(value=4000, stable_value=4000.0, ts=sample_ts,
-                                     rate=self.rate),
+            altitude=TelemetrySignal(value=int(self.alt), stable_value=float(self.alt),
+                                     ts=sample_ts, rate=self.rate),
             taken_at_s=now, stale_after_s=6.0)
 
 
 def _step_2b(monkeypatch, caplog, capture, *, angle=-5.0, guard=None, actuate_pitch=True,
-             analyzer=None, actuate_turn=False):
+             analyzer=None, actuate_turn=False, push_floor_m=None):
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer or _TelemetryAnalyzer(), capture=capture,
                        pursuit_enabled=True, pursuit_max_duration_s=0.0,
                        sustained_hold_enabled=True,
                        icon_steering={"enabled": True, "wings_level": True,
                                       "actuate_pitch": actuate_pitch,
-                                      "actuate_turn": actuate_turn})
+                                      "actuate_turn": actuate_turn,
+                                      "push_floor_m": push_floor_m})
     ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
     look_downs = []
     monkeypatch.setattr(ctrl, "_search_look_down", lambda: look_downs.append(1) or False)
@@ -1051,9 +1053,20 @@ def test_emergency_climb_does_not_start_inside_a_pursuit_with_dive_safety_off(mo
     assert any("dive recovery suppressed" in r.getMessage() for r in caplog.records)
 
 
-def test_altitude_floor_climb_still_starts_inside_a_pursuit(monkeypatch):
-    """Only the dive recovery was switched off; the floor climb is untouched."""
+def test_floor_climb_does_not_start_inside_a_pursuit_with_dive_safety_off(monkeypatch, caplog):
+    """2026-09-26 18:15: inside a pursuit the floor climb left at its first state
+    check and only ran its exit push, whose NOSE_DOWN release dropped the
+    pursuit's own held key."""
     ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=False)
+    ctrl._pursuing.set()
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(target_alt=5000.0, max_s=0.2, emergency=False)
+    assert not ctrl._climbing.is_set()
+    assert any("climb suppressed — the pursuit owns" in r.getMessage() for r in caplog.records)
+
+
+def test_floor_climb_still_starts_inside_a_pursuit_with_dive_safety_on(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=True)
     ctrl._pursuing.set()
     ctrl.climb_mode(target_alt=5000.0, max_s=0.2, emergency=False)
     try:
@@ -1064,6 +1077,51 @@ def test_altitude_floor_climb_still_starts_inside_a_pursuit(monkeypatch):
             ctrl._climb_thread.join(timeout=3.0)
 
 
+def test_climb_exit_push_presses_nothing_while_a_pursuit_flies(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=False)
+    ctrl._climb_exit_pitch_deg = 20.0
+    ctrl._pursuing.set()
+    assert ctrl._climb_exit_push() == "pursuit"
+    assert _keys(ctrl) == []
+
+
+_FLIGHT_KEYS = (NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY)
+
+
+def test_a_boundary_turn_running_when_the_pursuit_starts_never_touches_its_keys(
+        monkeypatch, caplog):
+    """2026-09-26 18:14:37: a boundary turn began 1 s before the su30 yield
+    started the pursuit. It held NOSE_UP against the icon push, and at 18:14:46
+    its closing releases dropped the pursuit's held NOSE_DOWN: 54 s of level
+    flight with the push still logged as held, then the out-of-bounds timer."""
+    ctrl = _make_ctrl(monkeypatch, analyzer=_TelemetryAnalyzer(), capture=_FrameCapture(),
+                      pursuit_enabled=True, pursuit_max_duration_s=0.0,
+                      sustained_hold_enabled=True, dive_safety=False,
+                      icon_steering={"enabled": True, "wings_level": True,
+                                     "actuate_pitch": True})
+    ctrl._climb_exit_pitch_deg = 20.0
+    ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
+    monkeypatch.setattr(ctrl, "_search_look_down", lambda: False)
+    monkeypatch.setattr(ctrl, "_telemetry_path_angle_deg", lambda: -5.0)
+    ctrl.boundary_turn_mode(max_s=0.5, lateral=+0.4)
+    assert ctrl._boundary_turning.is_set()
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(0.9)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    intents = ctrl.get_action_intents()
+    first_push = next(n for n, x in enumerate(intents)
+                      if x["action_type"] == "key_press" and x["key"] == NOSE_DOWN_KEY
+                      and x.get("action") == "tracking_pitch")
+    others = [(x["action_type"], x["key"], x.get("action")) for x in intents[first_push:]
+              if x["key"] in _FLIGHT_KEYS and x.get("action") in ("boundary", "climb")]
+    assert others == [], others
+    assert not ctrl._boundary_turning.is_set()
+    assert any("pursuit took the airframe — boundary turn stopped" in r.getMessage()
+               for r in caplog.records)
+
+
 def test_no_path_limit_but_still_no_push_without_a_fresh_angle(monkeypatch):
     ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True,
                       icon_steering={"enabled": True, "icon_min_path_deg": None,
@@ -1072,6 +1130,28 @@ def test_no_path_limit_but_still_no_push_without_a_fresh_angle(monkeypatch):
     assert ctrl._icon_down_withheld(None) == "angle-none"
     monkeypatch.setattr(ctrl, "_telemetry_path_angle_deg", lambda: -80.0)
     assert ctrl._icon_down_withheld(None) == "-", "no -45 deg limit any more"
+
+
+def test_icon_push_is_withheld_below_the_push_floor(monkeypatch, caplog):
+    """Operator, 2026-09-26 (cycle 9): with the dropped key fixed, the push flew
+    into the ground from about 1200 m and 700 m."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _FrameCapture(),
+                              analyzer=_TelemetryAnalyzer(alt=1200.0), push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert any("intent=down" in ln and "withheld=alt " in ln for ln in lines), lines
+
+
+def test_icon_push_still_holds_above_the_push_floor(monkeypatch, caplog):
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _FrameCapture(),
+                              analyzer=_TelemetryAnalyzer(alt=2000.0), push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+    assert any("act=level+down" in ln and "withheld=- " in ln for ln in lines), lines
+
+
+def test_icon_push_floor_withholds_without_a_fresh_altitude(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True,
+                      icon_steering={"enabled": True, "push_floor_m": 1500})
+    assert ctrl._icon_down_withheld(None) == "alt-none"
 
 
 def test_step_2b_withholds_nose_down_at_the_path_angle_limit(monkeypatch, caplog):
@@ -1110,6 +1190,33 @@ def test_step_2a_setting_presses_no_icon_pitch(monkeypatch, caplog):
 # HLDD 015 rollout step 3 (2026-09-26): the turn acts, bank and pull.
 # ---------------------------------------------------------------------------
 
+class _SyntheticIconCapture(_CaptureStub):
+    """A black frame with one red ring icon at `angle_deg` (screen convention:
+    0 right, 90 down, 180 left, -90 up)."""
+
+    def __init__(self, angle_deg):
+        super().__init__()
+        import math
+        import cv2
+        import numpy as np
+        img = np.zeros((1200, 1920, 3), np.uint8)
+        x = int(round(960 + 194 * math.cos(math.radians(angle_deg))))
+        y = int(round(600 + 194 * math.sin(math.radians(angle_deg))))
+        bgr = tuple(int(c) for c in cv2.cvtColor(np.uint8([[[3, 165, 255]]]),
+                                                cv2.COLOR_HSV2BGR)[0, 0])
+        cv2.rectangle(img, (x - 15, y - 15), (x + 15, y + 15), bgr, -1)
+        self.frame = img
+
+    def grab_from_thread(self):
+        self.grabs += 1
+        return self.frame
+
+
+def _upper_left():
+    """An enemy to the left and slightly above: the turn case (step 3)."""
+    return _SyntheticIconCapture(-170.0)
+
+
 class _LeftIconCapture(_FrameCapture):
     """The archived orange ring icon at 172 deg: an enemy off to the left."""
 
@@ -1121,7 +1228,7 @@ class _LeftIconCapture(_FrameCapture):
 
 
 def test_step_3_banks_and_pulls_toward_a_side_icon(monkeypatch, caplog):
-    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True)
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _upper_left(), actuate_turn=True)
     assert ("key_press", ROLL_LEFT_KEY) in keys
     assert ("key_press", NOSE_UP_KEY) in keys
     assert ("key_press", NOSE_DOWN_KEY) not in keys
@@ -1130,7 +1237,7 @@ def test_step_3_banks_and_pulls_toward_a_side_icon(monkeypatch, caplog):
 
 
 def test_step_2b_setting_flies_a_side_icon_straight(monkeypatch, caplog):
-    keys, _lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=False)
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _upper_left(), actuate_turn=False)
     assert ("key_press", ROLL_LEFT_KEY) not in keys
     assert ("key_press", NOSE_UP_KEY) not in keys
 
@@ -1145,7 +1252,7 @@ def test_step_3_keeps_the_wings_level_for_a_downward_icon(monkeypatch, caplog):
 def test_step_3_levels_the_wings_in_a_fast_dive_and_keeps_pulling(monkeypatch, caplog):
     """Operator, 2026-09-26 (cycle 5): descending faster than 150 m/s, the turn
     pulls with the wings level so the pull points up."""
-    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _upper_left(), actuate_turn=True,
                               analyzer=_TelemetryAnalyzer(rate=-200.0))
     assert ("key_press", ROLL_LEFT_KEY) not in keys
     assert ("key_press", NOSE_UP_KEY) in keys
@@ -1153,6 +1260,16 @@ def test_step_3_levels_the_wings_in_a_fast_dive_and_keeps_pulling(monkeypatch, c
 
 
 def test_step_3_still_banks_when_the_descent_is_gentle(monkeypatch, caplog):
-    keys, _lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _upper_left(), actuate_turn=True,
                                analyzer=_TelemetryAnalyzer(rate=-80.0))
     assert ("key_press", ROLL_LEFT_KEY) in keys
+
+
+
+def test_an_icon_below_the_horizon_pushes_with_the_wings_level(monkeypatch, caplog):
+    """Operator, 2026-09-26: below the horizon the law pushes, never banks and
+    pulls. The archived orange icon sits at 172 deg, just below the horizon."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True)
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) not in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys

@@ -98,6 +98,10 @@ class IconSteeringConfig:
     release_pts: float = 4.0
     # Operator, 2026-09-26: no icon-led nose-down at or past -45 deg.
     icon_min_path_deg: "float | None" = -45.0
+    # Operator, 2026-09-26 (cycle 9): no icon-led nose-down below this altitude
+    # (m), nor without a fresh one. Once the dropped-key defect was fixed, the
+    # push flew into the ground from about 1200 m and 700 m. None = no floor.
+    push_floor_m: "float | None" = None
     blind_search_after_s: float = 3.0
 
     @classmethod
@@ -105,6 +109,7 @@ class IconSteeringConfig:
         cfg = cfg or {}
         d = cls()
         min_path = cfg.get("icon_min_path_deg", d.icon_min_path_deg)
+        floor = cfg.get("push_floor_m", d.push_floor_m)
         return cls(
             enabled=bool(cfg.get("enabled", d.enabled)),
             wings_level=bool(cfg.get("wings_level", d.wings_level)),
@@ -128,6 +133,7 @@ class IconSteeringConfig:
             act_pts=float(cfg.get("act_pts", d.act_pts)),
             release_pts=float(cfg.get("release_pts", d.release_pts)),
             icon_min_path_deg=None if min_path is None else float(min_path),
+            push_floor_m=None if floor is None else float(floor),
             blind_search_after_s=float(cfg.get("blind_search_after_s", d.blind_search_after_s)),
         )
 
@@ -316,7 +322,15 @@ class IconPoints:
         """What the dominant-intent law would hold now: ("down", ...), ("up",
         ...), ("turn", ...) or ("none", ()). It acts on the scores whether or not
         an icon is on screen this scan; the lock (which zeroes them) is what
-        takes over. Ties go to pitch."""
+        takes over. Ties go to pitch.
+
+        Below the horizon (operator, 2026-09-26) an active axis always means a
+        push with the wings level: bank-and-pull is kept for icons on or above
+        the horizon. Measured before it: an enemy below-left (icon 130-147 deg)
+        scored more turn than pitch, so the law banked and pulled, and the pull
+        lifted the nose away from it before the bank developed."""
+        if self.pitch_pts > 0 and (self.pitch_active or self.turn_active):
+            return "down", (NOSE_DOWN,)
         roll = ROLL_LEFT if self.turn_active < 0 else ROLL_RIGHT
         if self.pitch_active and (not self.turn_active
                                   or abs(self.pitch_pts) >= abs(self.turn_pts)):

@@ -305,6 +305,12 @@ def test_config_reads_the_shipped_keys():
     assert cfg.enabled and cfg.icon_min_path_deg is None and cfg.orange_hue == (11, 14)
 
 
+def test_config_push_floor_is_off_unless_set():
+    assert IconSteeringConfig.from_dict(None).push_floor_m is None
+    assert IconSteeringConfig.from_dict({"push_floor_m": None}).push_floor_m is None
+    assert IconSteeringConfig.from_dict({"push_floor_m": 1500}).push_floor_m == 1500.0
+
+
 def test_summary_line_is_unchanged_without_the_icon_shadow():
     tally = _EngagementTally(clock=lambda: 0.0)
     assert "icon=" not in tally.line("PURSUIT", "cap", False)
@@ -336,3 +342,21 @@ def test_last_known_side_rules():
     _run(p, clock, [_icon(180)], 3)                                  # icon on the left, newer than the lock
     assert _last_known_side(clock.t - 5.0, 0.4, p) == "left"
     assert _last_known_side(clock.t + 5.0, 0.4, p) == "right"       # a lock newer than the icon wins
+
+
+
+@pytest.mark.parametrize("angle", [110.0, 145.0, 172.0, 30.0])
+def test_below_the_horizon_is_always_a_push(angle):
+    """Operator, 2026-09-26: an enemy below-left (icon 130-147 deg) scored more
+    turn than pitch and got a bank-and-pull, lifting the nose away from it."""
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [_icon(angle)], 8)
+    assert p.intent() == ("down", (NOSE_DOWN,))
+
+
+def test_above_the_horizon_a_side_icon_still_turns():
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [_icon(-170.0)], 8)
+    assert p.intent()[0] == "turn"

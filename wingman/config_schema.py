@@ -346,6 +346,7 @@ SCHEMA = Section(
             "angle_max_s": SECONDS,
             "tick_s": SECONDS,
             "lock_timeout_s": SECONDS,
+            "yield_to_target": BOOL,   # operator, 2026-09-26
         }),
 
         # ADR 149: mission_f111, mission_su30 plus the wing sweep
@@ -657,6 +658,7 @@ SCHEMA = Section(
                 "release_pts": _num(0),
                 "icon_min_path_deg": Leaf(types=NUMBER, minimum=-90, maximum=0,
                                           allow_none=True),
+                "push_floor_m": Leaf(types=NUMBER, minimum=0, allow_none=True),
                 "blind_search_after_s": SECONDS,
             }),
         }),

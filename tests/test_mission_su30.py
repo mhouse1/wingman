@@ -970,3 +970,82 @@ def test_a_stuck_last_mission_lock_costs_the_override_for_a_tick_not_the_tick(mo
         assert ctrl.altitude_floor_override_m() is None
         assert ctrl.sustain_climb_suppressed() is False
     assert any("last-mission lock timeout" in r.getMessage() for r in caplog.records)
+
+
+
+# ---------------------------------------------------------------------------
+# yield_to_target (operator, 2026-09-26): a lock or a ring icon during the climb
+# or the nose-angle step ends the script and starts the pursuit at once.
+# ---------------------------------------------------------------------------
+
+class _SeenTracker(_Tracker):
+    """A tracker whose last scan had a target from its `after`-th read on."""
+
+    def __init__(self, after=0):
+        self.after = after
+        self.reads = 0
+
+    def last_observation(self):
+        self.reads += 1
+        return {"visible": self.reads > self.after, "error_norm": 0.1, "error_norm_y": 0.0}
+
+
+def test_a_lock_during_the_climb_goes_straight_to_the_pursuit(monkeypatch, caplog):
+    analyzer = _Analyzer([(1500, 30)])            # never reaches 3000 m
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(),
+                      su30={"yield_to_target": True})
+    log = _record(ctrl, monkeypatch)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        t = _run_mission(ctrl)
+        t.join(timeout=5.0)
+    assert not t.is_alive()
+    kinds = [e[0] for e in log]
+    assert "pursue" in kinds
+    assert "nose_down" not in kinds and "nose_up" not in kinds, "the nose-angle step is skipped"
+    assert any("target in view (lock) during the climb" in r.getMessage() for r in caplog.records)
+
+
+def test_a_lock_during_the_nose_angle_step_goes_straight_to_the_pursuit(monkeypatch):
+    analyzer = _Analyzer([(3100, 30)])            # reached, nose far from -10 deg
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(after=1),
+                      su30={"yield_to_target": True})
+    log = _record(ctrl, monkeypatch)
+    t = _run_mission(ctrl)
+    t.join(timeout=5.0)
+    kinds = [e[0] for e in log]
+    assert "pursue" in kinds
+    assert "nose_down" not in kinds
+
+
+def test_a_ring_icon_also_ends_the_script(monkeypatch, caplog):
+    import cv2
+    from pathlib import Path
+
+    class _Cap:
+        frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "icon_ring_nose_down.png"))
+
+        def grab_from_thread(self):
+            return self.frame
+
+    analyzer = _Analyzer([(1500, 30)])
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(after=10 ** 6),
+                      su30={"yield_to_target": True},
+                      pursuit_mode={"icon_steering": {"enabled": True}})
+    ctrl._capture = _Cap()
+    log = _record(ctrl, monkeypatch)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        t = _run_mission(ctrl)
+        t.join(timeout=5.0)
+    assert "pursue" in [e[0] for e in log]
+    assert any("target in view (icon)" in r.getMessage() for r in caplog.records)
+
+
+def test_without_yield_the_script_keeps_climbing_past_a_lock(monkeypatch):
+    analyzer = _Analyzer([(1500, 30)])
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(),
+                      su30={"yield_to_target": False})
+    log = _record(ctrl, monkeypatch)
+    t = _run_mission(ctrl)
+    time.sleep(0.4)
+    assert "pursue" not in [e[0] for e in log]
+    _drain(ctrl, t)

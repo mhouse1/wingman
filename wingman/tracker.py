@@ -257,6 +257,11 @@ class TargetTracker:
     def enabled(self) -> bool:
         return self._enabled
 
+    def last_observation(self) -> "dict | None":
+        """A copy of the observation the last update() returned, or None."""
+        obs = self._last_obs
+        return dict(obs) if obs is not None else None
+
     @property
     def mode(self) -> TrackMode:
         return self._mode

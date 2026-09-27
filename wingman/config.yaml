@@ -530,7 +530,11 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
 # than holds (ADR 068/069: a held key overshoots on a lagging reading).
 su30_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
   nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
-  angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, lock_timeout_s: 5.0}
+  angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, lock_timeout_s: 5.0,
+  yield_to_target: true}
+# yield_to_target (operator, 2026-09-26): a tracker lock or a ring icon during the
+# climb or the nose-angle step ends the script and starts the pursuit at once (after
+# the 17:37 respawn the script climbed and held -10 deg past targets it had acquired).
 # mission_f111 (docs/missions/f111.md, ADR 149): mission_su30 plus the F-111's
 # wing sweep on 'w' (ToggleWingSweep, a toggle). Six steps once per life: nose up
 # and sweep the wings, boresight engage, no weapon switch until the spawn weapon
@@ -1332,6 +1336,10 @@ pursuit_mode:
     act_pts: 10
     release_pts: 4
     icon_min_path_deg: null         # operator 2026-09-26: no path-angle limit (was -45)
+    # Operator, 2026-09-26 (cycle 9): no icon nose-down below this altitude (m),
+    # nor without a fresh altitude. With the dropped-key defect fixed, the push
+    # flew into the ground from about 1200 m and 700 m. Named guess. null = off.
+    push_floor_m: 1500
     blind_search_after_s: 3.0
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted

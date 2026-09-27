@@ -814,6 +814,166 @@ share of them with the bank-and-pull running (73%), plus locks (93%). Gate: `mak
 failed (the same two unrelated), 35 skipped. The step 3 session (10:40-15:46, 5 h) was stopped by the
 operator with `z` at the lobby (15:46:45) and copied. `make rd`, wingman pid 1324392, started 15:53:06.
 
+**Two operator decisions (2026-09-26, about 17:40), iterate cycle 7:**
+
+- **Icons below the horizon push.** Report: "why did it just nose up when there was targets on screen?"
+  Measured, 17:37:46-55: the icon sat lower-left (130-147 deg), each scan added about (-4, +3), so the turn
+  score (-19.9) beat the pitch score (+15.1) and the law banked and pulled (`HOLD[pitch]: down -> up (icon
+  turn)` at 17:37:54): an enemy below got a nose-up before the bank developed. Change: in
+  `IconPoints.intent`, a score vector below the horizon (`pitch_pts > 0`) with either axis active is always
+  a push with the wings level; bank-and-pull stays for icons on or above the horizon. Consequence: an icon
+  just below the horizon to one side (the archived orange icon, 172 deg) now pushes instead of turning.
+  Tests: 110, 145, 172 and 30 deg give `down`; -170 deg still turns; the loop pushes on the 172 deg icon
+  with no roll and no pull; the step 3 tests use a synthetic icon at -170 deg.
+- **mission_su30 yields to a lock or an icon** (`su30_mission.yield_to_target: true`). Report: "there were
+  targets visible on screen but it executed nose up" (frame `pursuit_mode_20260926_173733_89`). Measured:
+  that nose-up was not the pursuit (it began at 17:37:33) but the su30 script after the 17:37:00 respawn:
+  step 1 climbed nose-up to 3000 m (17:37:03-12), step 3 held -10 deg with nose-up pulses at 17:37:21 and
+  :24, and the tree's dive recovery climbed at 17:37:25.9, while the tracker had acquired targets at
+  17:37:10.9 and 17:37:22.9 (the tracker only senses outside the pursuit). Change: with `yield_to_target`,
+  the shared script waits (`_scripted_wait_for_altitude`, `_scripted_set_nose_angle`) take an `interrupt`;
+  su30 passes `Controller._target_in_view` (the tracker's last scan had a target, via the new
+  `TargetTracker.last_observation()`, or a fresh frame has a ring icon), and on a reason the script stops
+  the climb, skips the nose-angle step and starts the pursuit. mission_f111 is unchanged. Tests in
+  `tests/test_mission_su30.py`: a lock during the climb and during the nose-angle step, a ring icon, and
+  no yield with the flag off.
+
+Both change flight behaviour together, so their effects on locks and deaths cannot be separated in the
+next session's numbers.
+
+Gate: `make lint` clean; `make test` 2,311 passed, 2 failed (the same two unrelated), 35 skipped. The
+cycle 6 session was stopped with `z` (lobby, 18:08:19) and its log rotated to
+`logs/wingman_20260926_180819.log`. `make rd`, wingman pid 1461946, started 18:08:50.
+
+First five minutes (measured, 18:08:50-18:13:26): the su30 script yielded on 5 of 5 starts, all to an icon
+(`target in view (icon) during the climb`), the first 6.7 s after spawn at about 1150 m of the 3000 m
+climb. Icon ticks: 399 `level+down`, 44 `bankleft+up`, 41 `level`. The listener hears the display (`XKey[:3]`
+297 and 260 per minute), no `listener is deaf`. Four pursuits, three deaths, all with an incoming missile.
+
+**Correction: another tactic's key release did cancel the push (measured, 18:15).** At 18:13 this section
+said a routine climb inside a pursuit never touches pitch. That was wrong: it counted only `climb pitch
+pulse` lines and missed the climb's exit push, which logs as `climb exit — ...`.
+
+- The tree selects `Climb` inside pursuits: 173 starts in 35 pursuits (17:12 log), 141 in 25 (18:08 log).
+  Every one leaves at its first state check (`state_exit`, 173 of 173), because the pursuit runs in
+  `GAME_BATTLE_EJECT` and the ADR 148 exemption is off with `dive_safety` off. It never pulls up.
+- It still runs `_climb_exit_push` (up to 3 NOSE_DOWN pulses, pressed and released) and then releases
+  NOSE_DOWN. So does a boundary turn's closing handback. `_climb_key` calls the keyboard library
+  directly, which keeps one state per key, not one per tactic, so these releases drop a NOSE_DOWN (or
+  roll) the pursuit is holding. The pursuit's `_pitch_held` still says `down` and it never presses again.
+- Exit pushes inside pursuits: 186 (17:12 log), 128 (18:08 log), 51 in this session's first 10 minutes;
+  61, 52 and 20 of them while the pursuit held a pitch key.
+- Boundary turns never start inside a pursuit (0 in all three logs), but 16 were already running when
+  one began and finished inside it. The su30 yield makes that more likely: the pursuit can now start
+  at any point in the script.
+
+The case that showed it, 18:14:37-18:15:40: a boundary turn began at 18:14:37.1 (roll left and NOSE_UP,
+cap 12 s); the su30 yield started the pursuit at 18:14:38.1; the icon rung began holding NOSE_DOWN at
+18:14:40.1 (icon at 14-24 deg, lower right), while the boundary turn went on holding NOSE_UP. A routine
+climb started at 18:14:40.1, left at 18:14:40.4 and ran its exit push. The boundary turn's handback
+(18:14:46.13) and the climb's (18:14:46.38) both released NOSE_DOWN. From then until 18:15:40 the log
+showed `act=level+down` on 445 ticks and `HOLD[pitch]` never changed, while the frames show wings-level
+flight at 3430-3490 m with the flight path within -2 to +5 deg. Frame 38 (18:15:25) shows `RETURN TO
+BATTLE: 8`, and the death at 18:15:40 (`cause=unclassified`, no incoming) matches the out-of-bounds timer.
+
+Change (iterate cycle 8), all only with `dive_safety` off:
+
+- `climb_mode` refuses every climb while a pursuit flies, not only the emergency one (`climb suppressed
+  — the pursuit owns the airframe`). Inside a pursuit the floor climb never flew, so no flying decision
+  changes; this supersedes the earlier scope line that the floor climb stays on.
+- `_climb_exit_push` returns `pursuit` without pressing anything while a pursuit flies.
+- At start, before its first key, the pursuit stops a running boundary turn or climb and waits up to
+  1.5 s for its handback (`pursuit took the airframe — <tactic> stopped`).
+
+Tests in `tests/test_pursuit_mode.py`: the floor climb is refused with `dive_safety` off and still starts
+with it on; the exit push presses nothing inside a pursuit; and a boundary turn running when the pursuit
+starts makes no flight-key press or release after the pursuit's first push. With the last two parts
+reverted, that test fails with `('key_release', 'j', 'boundary'), ('key_release', 'i', 'boundary'),
+('key_release', 'k', 'boundary')`, the live signature.
+
+Gate: `make lint` clean; `make test` 2,335 passed, 2 failed (the same two unrelated), 35 skipped. `make rd`,
+wingman pid 1488493, started 18:32:42. Expected in the log: `pursuit took the airframe — <tactic>
+stopped` when a pursuit starts over a running climb or boundary turn, and no `climb exit —`, `CLIMB —
+holding` or `BOUNDARY TURN — banking` line between a pursuit's start and its summary.
+
+First three minutes (measured, 18:33-18:36): `climb suppressed — the pursuit owns the airframe` at
+18:33:34, no climb or boundary line inside a pursuit, no `pursuit took the airframe` yet (no pursuit has
+started over a running tactic). Four deaths with no enemy missile close by, three of them led by the
+`wait` rung, a pattern to watch rather than a rate:
+
+- 18:35:42: the tracker, locked on a target below, held short NOSE_DOWN holds (`err_y` +0.05) while the
+  path went -17 to -24 deg and 1719 to 1323 m. At 18:35:31.4 it lost the target near the centre, and
+  the `wait` rung (the resume delay after a near-centre miss, 6 s) held nothing while the path went to
+  -30 deg and 763 m. The stored icon points then pulled up (`divelevel+up`, 18:35:37.3) at about 300 m,
+  too late.
+- The dominant rung in the 8 s before each no-incoming death, by session: 17:12 log icon 8, wait 2,
+  track 1; 18:08 log icon 5; this session so far wait 3, track 1. Too few to call a shift. Inferred,
+  not shown: with the key drop gone, pushes that used to go limp now dive, and a dive begun under the
+  tracker carries on through the hands-off wait.
+
+This is the terrain risk the operator deferred with `dive_safety: false` (a predictive redesign later),
+so no change is made here; the numbers go to the operator.
+
+By 18:38 (measured): 5 pursuits, 5 terrain deaths, 4 with no missile within 10 s. The last pitch input
+before each:
+
+| Death | Last pitch input | Telemetry before impact |
+|---|---|---|
+| 18:34:01 | `wait` (hands off) | about -10 deg, 1671 to 1206 m |
+| 18:34:47 | icon pull (`divelevel+up`) after a `wait` | -18 to -39 deg, 1181 to 629 m |
+| 18:35:42 | tracker push, then 6 s `wait`, then icon pull at about 300 m | -24 to -32 deg, 1323 to 92 m |
+| 18:36:32 | 6 s `wait`, then icon push (below-horizon icon) from about 1200 m | -10 to -13 deg, 1454 to 1226 m |
+| 18:37:31 | icon push (below-horizon icon) from about 700 m | -22 to -74 deg, 702 to 431 m |
+
+Inferred, not shown: the operator's `dive_safety: false` choice (06:20) and the cycle 7 below-horizon push
+were judged on sessions where the key drop above released an unknown share of holds (the exit push ran
+61 times under a held pitch key in the 17:12 session alone). Five pursuits is far too few for a rate,
+but 5 of 5 against 43% is unlikely by chance (about 1.5% at 0.43 each). Put to the operator: an
+altitude floor for the icon push, the -45 deg path limit back on the push, `dive_safety` back on, or
+more data first.
+
+The cycle 8 session as a whole (measured, 18:32:42-18:50:41, stopped with `z` at the lobby, log copied):
+17 pursuits, still too few for a rate. Long pursuits with a lock: 16 of 16 (93% under step 3, 69% in the
+cycle 7 session). Mean first lock 5.1 s over 16 (7.3 s, 8.8 s). Deaths: 12 terrain (10 with no missile
+within 10 s) and 1 enemy fire, so 10 of 17 with no missile close (59%, against 43% and 36%). No climb,
+boundary-turn or climb-exit line inside a pursuit (monitor, 0 events); `climb suppressed — the pursuit
+owns the airframe` 46 times; `pursuit took the airframe` 0 times, so the start-of-pursuit stop is still
+unexercised live. Inferred: with the holds no longer dropped, steering does what it logs, so locks come
+sooner and dives go deeper.
+
+**Operator decision (2026-09-26, about 18:45), iterate cycle 9: a height floor for the icon push.** Dive
+recovery stays off. The icon rung never holds NOSE_DOWN below `icon_steering.push_floor_m` (1500 m, a
+named guess), nor when there is no fresh altitude. `_icon_down_withheld` returns `alt` or `alt-none`,
+which releases the push exactly as the angle rule does, and `ICONPTS` logs it as `withheld=alt`. The
+tracker's pitch, the icon pull and bank-and-pull are untouched. It would have withheld the pushes at
+18:36:27 (about 1200 m) and 18:37:21 (about 700 m). It does nothing for the tracker-dive-then-`wait`
+deaths (18:34:47, 18:35:42).
+
+`alt-none` adds little on its own: a fresh path angle needs a fresh altitude, so a missing altitude is
+already `angle-none` (55 of 551 push ticks this session). `null` switches the floor off.
+
+Tests: `push_floor_m` reads as off unless set (`tests/test_icon_steering.py`). In
+`tests/test_pursuit_mode.py`, the reference icon at 1200 m under a 1500 m floor presses no NOSE_DOWN and
+logs `withheld=alt`, at 2000 m it still holds, and with no telemetry the withhold is `alt-none`. With the
+floor check disabled, the first and third fail.
+
+Gate: `make lint` clean; `make test` 2,339 passed, 2 failed (the same two unrelated), 35 skipped. The cycle 8
+session was stopped with `z` (lobby, 18:50:39) and rotated to `logs/wingman_20260926_185041.log`. `make rd`,
+wingman pid 1515234, started 18:57:58. Measure against the cycle 8 session: no-missile terrain deaths per
+pursuit (59%), the share of those led by an icon push, and locks (16 of 16), which the floor should not cost.
+
+The cycle 7 session as a whole (measured, 18:08:50-18:27:48, stopped with `z` at the lobby, log copied):
+14 pursuits, too few to call a rate. Long pursuits (20 s or more) with a lock: 9 of 13 (69%, against 93%
+under step 3). Mean first lock 8.8 s over the 10 that locked (7.3 s). Deaths: 3 enemy fire, 4 terrain, 1
+unclassified (the out-of-bounds case above), so 5 of 14 with no incoming (36%, against 43%). The su30
+script yielded on 14 of 14 starts, 13 to an icon and 1 to a lock (18:26:58, the first live lock yield).
+No `listener is deaf`. The key-drop defect above was live for all of it.
+
+Not changed, for the operator: with the pitch score +5 to +10 and the turn score +23, the cycle 7 rule
+still chose a wings-level push for an enemy mostly to the right. With the push working, the nose should
+come down and the pitch score cross zero and reset, handing over to bank-and-pull. Whether that is quick
+enough is for the next session's frames to show.
+
 ### Lock rate by session (measured, 2026-09-26)
 
 Pursuits of 20 s or more that reached any lock, and the mean `first_lock` of those that did:
