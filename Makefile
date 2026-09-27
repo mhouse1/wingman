@@ -678,10 +678,10 @@ wait-game:
 	       $(PYTHON_RUN) scripts/nested-display.py stop || true; \
 	       exit 1; }
 	@echo "Metalstorm.exe detected — waiting $(GAME_LOBBY_WAIT_S) s for game window to appear…"
-	@sleep $(GAME_LOBBY_WAIT_S)
-	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)" \
+	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)" GAME_WINDOW_WAIT_S="$(GAME_LOBBY_WAIT_S)" \
 	  || { echo "ERROR: game window never appeared after $(GAME_LOBBY_WAIT_S) s — the launch did not complete"; \
 	       echo "       launch log: /tmp/wingman-game-launch.log"; \
+	       $(PYTHON_RUN) -c 'from wingman.game_shutdown import close_game; close_game()'; \
 	       echo "Closing the nested display it would have been hosted on (ADR 105)…"; \
 	       $(PYTHON_RUN) scripts/nested-display.py stop || true; \
 	       exit 1; }
@@ -717,7 +717,7 @@ move-game-window:
 # blocked every subsequent launch attempt, `make` and manual alike, until
 # manually SIGKILLed).
 undecorate-game-window:
-	@$(NESTED_ENV) $(PYTHON_RUN) -m wingman.move_game_window --undecorate
+	@$(NESTED_ENV) $(PYTHON_RUN) -m wingman.move_game_window --undecorate --wait $(or $(GAME_WINDOW_WAIT_S),0)
 
 # Capture a frame with MetalStorm on screen and overlay a coordinate grid.
 # Open /tmp/wingman_grid.png to find the game window's top-left (x,y) offset,

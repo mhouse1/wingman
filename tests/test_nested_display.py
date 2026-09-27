@@ -12,6 +12,9 @@ import sys
 import unittest.mock as mock
 from pathlib import Path
 
+import wingman.move_game_window as game_window
+import wingman.focus_guard as focus_guard
+
 _spec = importlib.util.spec_from_file_location(
     "nested_display", Path(__file__).parent.parent / "scripts" / "nested-display.py")
 nd = importlib.util.module_from_spec(_spec)
@@ -71,6 +74,23 @@ def test_the_virtual_desktop_wins_over_helper_windows():
     desktop = _FakeWindow(0x400004, 4242, 1920, 1200, "Wine Desktop")
     got = nd._game_windows(_display_with([ime, tool, desktop]), SESSION)
     assert [w.id for w in got] == [0x400004, 0x2A00001, 0x2A00002]
+
+
+def test_game_session_windows_uses_live_session_by_default(monkeypatch):
+    desktop = _FakeWindow(0x400004, 4242, 1920, 1200, "Wine Desktop")
+    monkeypatch.setattr(focus_guard, "game_session_pids", lambda: SESSION)
+
+    assert focus_guard.game_session_windows(_display_with([desktop])) == [desktop]
+
+
+def test_move_game_window_finds_wine_desktop_by_session_pid(monkeypatch):
+    desktop = _FakeWindow(0x400004, 4242, 1920, 1200, "Wine Desktop")
+    display = _display_with([desktop])
+    monkeypatch.setattr(game_window, "_connect", lambda: display)
+    monkeypatch.setattr(game_window, "game_session_pids", lambda: SESSION)
+
+    assert game_window._find_game_window_id() == ("0x400004", "Wine Desktop")
+    display.close.assert_called_once()
 
 
 def test_windows_outside_the_game_session_are_ignored():

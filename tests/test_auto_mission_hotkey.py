@@ -113,6 +113,21 @@ def test_non_battle_press_forces_lobby_immediately(monkeypatch):
     assert analyzer.triggered == ["manual_reset"]
 
 
+def test_press_during_matchmaking_preserves_startup_sequence(monkeypatch):
+    for state in (GameState.GAME_WAITING, GameState.GAME_STARTING):
+        analyzer = _FakeFSMAnalyzer(state)
+        ctrl = _make_ctrl(monkeypatch, analyzer)
+        clicked = []
+        ctrl._crops = {"PLAY": (0, 0, 1, 1)}
+        ctrl.click_crop = lambda *args, **kwargs: clicked.append(args)
+
+        ctrl._on_auto_mission_hotkey()
+
+        assert analyzer.game_state == state
+        assert analyzer.triggered == []
+        assert clicked == []
+
+
 def test_key_repeat_debounce_ignored_outright(monkeypatch):
     analyzer = _FakeFSMAnalyzer(GameState.GAME_BATTLE)
     ctrl = _make_ctrl(monkeypatch, analyzer)

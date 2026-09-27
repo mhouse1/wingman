@@ -14,13 +14,11 @@ launch without requiring a manual step.
 """
 import argparse
 import os
-import re
-import subprocess
 import sys
+import time
 
 from wingman.controller import _ensure_xauthority
-
-_GEOM_RE = re.compile(r'(\d+)x(\d+)\+\d+\+\d+\s+\+(\d+)\+(\d+)')
+from wingman.focus_guard import game_session_pids, game_session_windows
 
 # _MOTIF_WM_HINTS: [flags, functions, decorations, input_mode, status]
 # flags = MWM_HINTS_DECORATIONS (1 << 1); decorations = 0 (none) removes the
@@ -30,32 +28,32 @@ _MWM_HINTS_NO_DECORATIONS = [_MWM_HINTS_DECORATIONS_FLAG, 0, 0, 0, 0]
 
 
 def _find_game_window_id():
-    """Return (window_id, title) for the Metalstorm / Wine Desktop window, or None."""
-    result = subprocess.run(
-        ["xwininfo", "-root", "-tree"],
-        capture_output=True, text=True, timeout=5.0,
-    )
-    candidates = []
-    for line in result.stdout.splitlines():
-        if '"Metalstorm"' in line:
-            priority = 0
-        elif '"Wine Desktop"' in line and "steam_app_0" in line:
-            priority = 1
-        else:
-            continue
-        m = _GEOM_RE.search(line)
-        if not m:
-            continue
-        wid_match = re.search(r'(0x[0-9a-fA-F]+)', line)
-        if not wid_match:
-            continue
-        candidates.append((priority, wid_match.group(1), line.strip()))
-
-    if not candidates:
+    """Return the largest window owned by the game's Wine session, or None."""
+    session = game_session_pids()
+    if not session:
         return None
-    candidates.sort()
-    _, wid, title = candidates[0]
-    return wid, title
+    d = _connect()
+    try:
+        windows = game_session_windows(d, session)
+        if not windows:
+            return None
+        window = windows[0]
+        try:
+            title = window.get_wm_name()
+        except Exception:
+            title = None
+        return f"0x{window.id:x}", title or "Wine Desktop"
+    finally:
+        d.close()
+
+
+def _wait_for_game_window(timeout_s: float):
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        found = _find_game_window_id()
+        if found is not None or time.monotonic() >= deadline:
+            return found
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
 
 def _connect():
@@ -82,14 +80,14 @@ def move_window(x: int, y: int) -> bool:
     return True
 
 
-def undecorate_window() -> bool:
+def undecorate_window(wait_timeout_s: float = 0.0) -> bool:
     """Strip the title bar so there is no drag handle to grab.
 
     Does not block GNOME's Super+drag-anywhere move gesture — see ADR 054 for the
     residual risk. Removing the title bar eliminates the vector that caused the
     original freeze (manual title-bar drag).
     """
-    found = _find_game_window_id()
+    found = _wait_for_game_window(wait_timeout_s)
     if found is None:
         print("ERROR: Metalstorm / Wine Desktop window not found (is the game running?)", file=sys.stderr)
         return False
@@ -110,13 +108,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--undecorate", action="store_true",
                          help="Strip the title bar (removes the drag handle)")
+    parser.add_argument("--wait", type=float, default=0.0,
+                         help="Wait up to this many seconds for the game window")
     parser.add_argument("--x", type=int, help="Target absolute X position (with move)")
     parser.add_argument("--y", type=int, help="Target absolute Y position (with move)")
     args = parser.parse_args()
 
     if args.undecorate:
-        ok = undecorate_window()
+        ok = undecorate_window(args.wait)
     elif args.x is not None and args.y is not None:
+        if args.wait:
+            parser.error("--wait is only valid with --undecorate")
         ok = move_window(args.x, args.y)
     else:
         parser.error("either --undecorate, or both --x and --y, are required")
