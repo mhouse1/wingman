@@ -20,6 +20,8 @@ import re
 import subprocess
 import time
 
+from .suppressed import log_suppressed
+
 logger = logging.getLogger(__name__)
 
 GAME_PROCESS_NAME = "Metalstorm.exe"
@@ -212,7 +214,7 @@ class FocusGuard:
             try:
                 self._focus = self._probe()
             except Exception as e:           # noqa: BLE001 - guard must not raise
-                logger.debug("FocusGuard: probe failed: %s", e)
+                log_suppressed(logger, "FocusGuard probe", e)
                 self._focus = FOCUS_UNKNOWN
             self._focus_at = now
         return self._focus

@@ -438,6 +438,12 @@ class MissionStatsTracker:
                 f"  without evade   : "
                 f"{surv(eng['not_evaded_survival'], eng['not_evaded_total'], eng['not_evaded_died'])}",
             ]
+        # CR-018-17: a reflex that raised is otherwise invisible here.
+        failures = s.get("suppressed_failures") or {}
+        if failures:
+            lines.append(
+                "Handler failures  : " + ", ".join(
+                    f"{name} {count}" for name, count in sorted(failures.items())))
         if path_line:
             lines.append(path_line.strip())
         lines.append("━" * 52)

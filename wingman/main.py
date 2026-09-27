@@ -34,6 +34,7 @@ from .close_button import GenericCloseRecovery, click_region
 from .crop_region import CropCoords
 from .analyzer import GameStateAnalyzer, POPUP_DISMISS_STATES
 from .state import GameState, GameEvent, BATTLE_STATES
+from .suppressed import suppressed_counts
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -1800,6 +1801,7 @@ def main():
                 if shadow_summary is not None:
                     extra["respawn_shadow"] = shadow_summary
                 extra["health_dropouts"] = dropout_summary
+                extra["suppressed_failures"] = suppressed_counts()   # CR-018-17
                 stats_tracker.finalize(run_id=tracker.run_id, extra=extra or None)
                 stats_tracker.print_summary()
             except Exception as e:
