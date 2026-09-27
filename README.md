@@ -2,10 +2,16 @@
 
 AI wingman automation for MetalStorm (PC), built to run unattended mission loops, support live manual takeover, and evolve toward squad-level AI tactics.
 
-Current version: v1.8.8 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04), on **CPU only**, from a low-end laptop to a desktop workstation.
+Current version: v1.8.11 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04), on **CPU only**, from a low-end laptop to a desktop workstation.
+
+![Pursuit mode: the target tracker has locked an enemy and steers the nose onto it](docs/images/game-battle-crop-overlay-2.png)
+
+*Pursuit mode (HLDD 015). The status line at the top left reads
+`[PURSUIT_MODE]` and `Track:TRACKING`, followed by the steering error. The
+magenta `PURSUING` marker is on the enemy the tracker has locked. The cyan lines
+mark the top and bottom of the area the tracker scans.*
 
 ![GAME_BATTLE with crop overlays](docs/images/game-battle-crop-overlay-1.png)
-![GAME_BATTLE with crop overlays](docs/images/game-battle-crop-overlay-2.png)
 ![GAME_BATTLE with crop overlays](docs/images/game-battle-crop-overlay-3.png)
 
 ---
@@ -20,7 +26,7 @@ Wingman is designed to scale from single-instance automation to multi-instance c
 
 ## Why This Project Exists
 
-Beyond the game itself, Wingman is an R&D reference architecture for AI-driven automation. MetalStorm is the testbed where patterns get built and proven — OCR-driven state machines, replay-based testing, calibration tooling, performance regression tracking — and those patterns are meant to be reproduced into other projects, not imported as a shared library. Other repos (e.g. `mos-docker/tests/automated`, [dojo](https://github.com/mhouse1/dojo)) already reuse the test-harness architecture developed here.
+Beyond the game itself, Wingman is an R&D reference architecture for AI-driven automation. MetalStorm is the testbed where patterns get built and proven — OCR-driven state machines, replay-based testing, calibration tooling, performance regression tracking — and those patterns are meant to be reproduced into other projects, not imported as a shared library. Other repos (e.g. `mos-docker/tests/automated`, [dojo](https://github.com/mhouse1/dojo) , [ROE](https://github.com/mhouse1/ROE)) already reuse the test-harness architecture developed here.
 
 ---
 
@@ -44,10 +50,40 @@ The behavior tree (ADR 024, built on `py_trees`) runs **active** in every sessio
 - **Engage** — minimap ring-engage geometry: steer toward contacts, orbit when merged (ADR 024 3.1a, ADR 028)
 - **MissileEvade** — evasive manoeuvre on incoming-missile detection (ADR 070); live sessions measure 90% vs 68% ten-second survival with the evade on (n=122 engagements)
 - **Climb** — terrain avoidance and closed-loop climb-to-operating-altitude, including the mission-start climb prologue (ADR 073)
-- **Eject** — missiles-empty eject-and-dive on the debounced ammo verdict, with impulse rotation and telemetry-verified ballistic descent (ADR 056/069)
+- **Eject** — the missiles-empty response on the debounced ammo verdict. With `pursuit_mode.enabled` (shipped on) it starts a pursuit (below). The eject-and-dive, with impulse rotation and telemetry-verified ballistic descent (ADR 056/069), is what a pursuit falls back to once the secondary weapon is empty too
 - **Disengage / Idle / RespawnWait** — supporting tactics and selection-only states
 
 The J20 mission is being rewritten from a hardcoded maneuver script to this tactic-driven model (v1.8.3): geometry, evasion, climb, and eject decisions all belong to the tree, with the scripted roll sequence retired. A few open-loop pieces (afterburner cadence, the fixed mission window) remain and are candidates for later conversion. New tactics enter through a **shadow-first pipeline** (ADR 073): a candidate tactic first runs selection-only, logging what it *would* do against live data; only after shadow evidence holds up does it get actuation. Per-engagement survival stats (ADR 055/070) close the loop with A/B evidence from unattended soaks.
+
+### Pursuit mode
+
+Pursuit mode (Design 015) chases enemies on screen instead of diving the
+aircraft into the ground. It starts in two ways: when the primary missiles run
+out, and at the last step of the `su30` and `f111` missions. The shipped default
+mission is `su30`. If an enemy is already in view, it starts the pursuit early,
+without finishing the climb (`su30_mission.yield_to_target`).
+
+- **Locked.** The target tracker finds enemy nameplates (the red name, range
+  and aircraft-type label) and steers roll and pitch onto the aircraft drawn
+  below the label, firing on a fixed cadence.
+- **Not locked.** When an enemy is off-screen, the game draws a red arrowhead on
+  a fixed ring around the screen centre, pointing towards it. Icon-directed
+  search (`icon_steering.py`) scores those arrowheads to decide which way to
+  steer. An enemy below the horizon gets a wings-level push. One level with or
+  above the horizon gets a bank and a pull. With no arrowhead for 3 s, the
+  aircraft searches towards the side the enemy was last seen.
+- **Ownership.** The pursuit flies both axes. While it runs, climbs are
+  refused, and a boundary turn or climb already in progress is stopped when the
+  pursuit starts.
+- **End.** A pursuit has no time limit. It ends when the secondary weapon is
+  empty too, and then falls back to eject-and-dive. A respawn, a manual takeover
+  or shutdown ends it immediately.
+
+Open risk: dive recovery is switched off during pursuits
+(`pursuit_mode.dive_safety: false`). In recent sessions, pursuits lost more
+aircraft to terrain than to enemy fire. The nose-down push is now blocked below
+1,500 m (`icon_steering.push_floor_m`). That height is an estimate and has not
+yet been validated.
 
 ---
 
@@ -60,14 +96,17 @@ One full match cycle:
 1. Lobby detection, popup dismissal, and PLAY/READY click flow.
 2. Matchmaking confirmation in GAME_WAITING (CANCEL + fallback logic).
 3. GAME_STARTING handling and transition to GAME_BATTLE.
-4. Closed-loop climb to operating altitude, then in-battle tactic selection via
-   the active behavior tree: ring-engage navigation, missile evasion, climb,
-   disengage, eject (see Phase 3 above).
+4. The configured mission flies the battle. The default, `su30`, climbs to
+   3000 m and hands over to pursuit mode. `j20` climbs to operating altitude and
+   leaves the in-battle decisions to the behavior tree: ring-engage navigation,
+   missile evasion, climb and disengage (see Phase 3 above).
 5. Incoming-missile response: flare bursts plus the MISSILE_EVADE_MODE
    manoeuvre (ADR 070).
-6. Respawn detection (dual-sensor, ADR 064) and immediate restart the moment
+6. Missiles empty: pursuit on the secondary weapon, then eject-and-dive once
+   that runs out too.
+7. Respawn detection (dual-sensor, ADR 064) and immediate restart the moment
    health returns.
-7. Match-end click-through and return to lobby — then the loop repeats.
+8. Match-end click-through and return to lobby — then the loop repeats.
 
 Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), moving into GAME_BATTLE_MANUAL behavior. Dying while in manual mode returns control to auto and restarts the mission when health comes back, so the aircraft is never left flying uncommanded.
 
@@ -93,7 +132,13 @@ Manual takeover is always available with maneuver keys (`i`, `j`, `k`, `l`), mov
 | Lobby popup handling and click-through end-state handling | ✅ |
 | Per-concern tick-loop handlers and typed orchestration event registry (ADR 060) | ✅ |
 | Live HUD overlay snapshot (health/ammo/state, written off the tick loop) | ✅ |
-| HSV target tracking with proportional roll correction | ⚙️ off by default |
+| Target tracking on enemy nameplates, keeping a lock near where it was (Design 005) | ✅ runs every battle tick; steers only in pursuit |
+| Pursuit mode: two-axis chase on the secondary weapon, falling back to eject-and-dive (Design 015) | ✅ |
+| Icon-directed search: the game's ring of red direction arrows steers the pursuit while nothing is locked (Design 015) | ✅ |
+| Scripted SU-30 and F-111 missions that hand over to pursuit, and hand over early when a target is in view (ADR 144/147/149) | ✅ |
+| Close-button recovery for an unknown popup that leaves the game state unclassified (ADR 146) | ✅ |
+| Restart of a takeover-key listener that stops hearing keys (SAF-001.3) | ✅ |
+| Shared disk budget for screenshots, logs and session video, with a free-space floor | ✅ |
 | Offline crop calibration tooling | ✅ |
 | Performance tracking and preview/release chart workflows | ✅ |
 | Layered validation: replay harness, runtime gates, real-OCR lanes (ADR 037/044/045) | ✅ |
@@ -300,7 +345,9 @@ mission plus the JAS39's cloak, pressing `q` every 3 s so the cloak comes back
 as soon as it is off cooldown (`docs/missions/jas39.md`). `su30` flies the SU-30
 mission, a fixed four-step sequence (`docs/missions/su30.md`, ADR 144) run once
 per life, engaging with boresight engage (the fire loop without the padlock
-camera); `o` also starts it directly. `f111` flies the same sequence on the
+camera). Its last step hands the aircraft to pursuit mode. It hands over earlier
+if a target lock or a ring arrow appears during the climb. `o` also starts it
+directly. `f111` flies the same sequence on the
 F-111 plus its wing sweep: `w` once to sweep the wings as the climb starts, and
 once more to unsweep them when the altitude comes back down to 3000 m (or after
 30 s) before the pursuit hand-off (`docs/missions/f111.md`, ADR 149); it has no
@@ -359,11 +406,16 @@ Roadmap: `docs/PROJECT_AI_ROADMAP.md` · Architecture: `docs/architecture.md` ·
 | `docs/adr/056-game-battle-eject-fsm-state.md` | Eject as a first-class FSM state |
 | `docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md` | Eject descent: impulse rotation + ballistic phase |
 | `docs/adr/059-health-gated-immediate-mission-restart.md` | One restart path: mission restarts when health returns |
+| `docs/adr/144-mission-su30-scripted-sequence.md` | The scripted SU-30 mission and its pursuit hand-off |
+| `docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md` | How a dive recovery and a running pursuit share the airframe |
 
 ### Design documents (HLDD)
 
 | Document | Description |
 |---|---|
+| `docs/hldd/015-target-tracking-pursuit-mode-hldd.md` | **Pursuit mode**: two-axis chase, icon-directed search, rollout evidence and open questions |
+| `docs/hldd/005-target-tracking-hldd.md` | The nameplate target tracker that pursuit mode steers on |
+| `docs/hldd/009-nested-display-isolation-hldd.md` | Nested display lane: the four `DISPLAY` consumers and the takeover-key listener |
 | `docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md` | **A GPU-accelerated real-time profile** — batched GPU OCR, per-frame missile detection, and what must not regress. Design only; the CPU path stays the default |
 
 ### Perception and detection
