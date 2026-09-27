@@ -20,7 +20,7 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.12"
+WINGMAN_VERSION = "1.9.0"
 WINGMAN_VERSION_DETAILS = "ACS: Auto resupply"
 
 from . import capture_budget
