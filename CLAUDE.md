@@ -249,6 +249,27 @@ All new documents (job aids, performance docs, code reviews, ADRs, and any other
 - **ADRs** must start as `Draft` when first created.
 - Update an ADR to `Accepted` only after implementation is complete.
 
+## README — Link Every Doc Reference
+
+`README.md` is the project's front door and a hub to the deeper docs;
+`docs/workflow/004-readme-goals-and-principles.md` sets its goals and structure.
+Every reference in it to a document must be a clickable relative link, not
+plain text or a backticked path.
+
+- Link every citation, not only the first: readers land mid-page.
+  `ADR 073` becomes `[ADR 073](docs/adr/073-climb-tactic-shadow-first.md)`.
+- In a combined citation, link each number:
+  `ADR [056](docs/adr/056-….md)/[069](docs/adr/069-….md)`.
+- A decision reference such as `ADR 099 D4a` links to the ADR file, with no
+  heading anchor. Anchors break when a heading is reworded.
+- Requirement IDs (`SAF-001`, `FR-005`) link to the generated `.md` export in
+  `docs/requirements/`, which renders on GitHub, not to the `.sdoc`.
+- Documentation Index entries are links whose text is the path.
+- Code and config paths (`wingman/config.yaml`, `wingman/tracker.py`) stay as
+  code formatting; they are not docs.
+
+After editing `README.md`, check that every link resolves to a file that exists.
+
 ## Architecture Documents (HLDD)
 
 Architecture documents live in `docs/hldd/`. Each file covers the high-level design for a subsystem or feature.

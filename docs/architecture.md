@@ -8,6 +8,11 @@
 
 Wingman is a game automation assistant for MetalStorm. It captures a live screen region, runs EasyOCR-based perception to detect game events, and issues keyboard and mouse inputs to execute flight missions without human input.
 
+Combat runs on two paths: the original padlock path, built for the J-20, the
+jet that can fire its missiles through the padlock, and
+[ACS](#acs--autonomy-core-system-design-011-partly-built), the
+airframe-independent path that the per-jet missions are expected to merge into.
+
 The design goal is a **non-blocking main loop**: perception is always asynchronous, the main thread never waits on OCR, and hotkeys remain responsive regardless of what the OCR pipeline is doing.
 
 **This document describes the system as it stands, including which pieces are
@@ -29,12 +34,16 @@ detail:
 - **Boundary-turn tuning** (ADR 101-127) — the crossings-per-mission series in
   ADR 106 has stayed flat across nine days of changes as of this document's
   last major revision; the geometry, not the firing rate, is still suspected.
-- **Pursuit mode terrain risk** (Design 015) — dive recovery is off inside a
+- **ACS consolidation** (Design 011) — the per-jet missions (su30, jas39,
+  f111) are expected to merge into one ACS mode. Lock confirmation, the
+  `BoresightEngage` leaf chosen by the jet profile, and objective selection are
+  not built. See [ACS](#acs--autonomy-core-system-design-011-partly-built).
+- **ACS pursuit terrain risk** (Design 015) — dive recovery is off inside a
   pursuit (`pursuit_mode.dive_safety: false`). In recent sessions, pursuits
   lost more aircraft to terrain than to enemy fire. The icon push floor
   (`icon_steering.push_floor_m`, 1500 m) is an estimate that has not been
   measured yet.
-- **Pursuit and the arena edge** (Design 015, open question 3) — no
+- **ACS pursuit and the arena edge** (Design 015, open question 3) — no
   behavior-tree tactic acts inside `GAME_BATTLE_EJECT` except Climb's
   emergency, and pursuits have no time cap. A long search is therefore not
   guarded against the arena boundary.
@@ -82,8 +91,8 @@ flowchart LR
 | `mission_stats.py` | Per-mission/session outcome tracking and per-engagement survival metric (ADR 055, ADR 070 V5). |
 | `performance.py` | Per-crop OCR timing, reaction latency, regression gate vs release baseline (ADR 031/034/043). |
 | `replay.py` | Replay injection, assertion engine, live path capture engine (ADR 037/041/044/045). |
-| `tracker.py` | `TargetTracker`: finds enemy nameplates as glyph clusters in a red HSV mask, keeps a lock near the previous one, and reports the steering error to the aircraft marker below the label (Design 005). Senses on every battle tick. Its output steers only inside a pursuit. Serialised by an internal lock, because the main tick, the pursuit loop and the eject heatdive loop all call it. |
-| `icon_steering.py` | Icon-directed search (Design 015): finds the red arrowheads on the fixed ring around the screen centre and turns their angles into fading turn and pitch scores (`IconPoints`). The scores give the pursuit's steering intent while nothing is locked. It presses no keys itself. |
+| `tracker.py` | ACS `TargetTracker`: finds enemy nameplates as glyph clusters in a red HSV mask, keeps a lock near the previous one, and reports the steering error to the aircraft marker below the label (Design 005). Senses on every battle tick. Its output steers only inside a pursuit. Serialised by an internal lock, because the main tick, the pursuit loop and the eject heatdive loop all call it. |
+| `icon_steering.py` | ACS icon-directed search (Design 015): finds the red arrowheads on the fixed ring around the screen centre and turns their angles into fading turn and pitch scores (`IconPoints`). The scores give the pursuit's steering intent while nothing is locked. It presses no keys itself. |
 | `hud.py` | Live HUD snapshot: annotated frame with state, health, ammo, tracker status and the `PURSUING` marker. |
 | `session_recording.py` | Opt-in paired session video and behavior-tree trace sharing one session id (Design 012). |
 | `capture_budget.py` | Shared disk budget for every capture writer: a free-space floor and per-directory file and size limits, oldest files deleted first. |
@@ -186,68 +195,33 @@ No scripted maneuver, afterburner schedule, or fixed mission window remains
 in this method — see Cruise Afterburner (ADR 134) below for where afterburner
 scheduling actually lives now, and Behavior Tree for climb/engage/evade/eject.
 
-**Mission execution** (`mission_su30`) — the opposite doctrine: a fixed four-step
-script run once per life (ADR 144, `docs/missions/su30.md`), reusing `climb_mode`
-and `pursue_and_engage`. Its engagement mode is boresight engage,
-`start_boresight_engage_loop()` — the weapon-fire loop *without* the padlock loop,
-a separate pair from `start_search_and_destroy_loop()` that neither shares state
-with nor modifies it, so a mission picks one or the other. While su30 is the
-mission in play `Controller.is_padlock_blocked()` is true and no padlock logic
-runs (the camera press, the ADR 140 auto-correction, the target-spread handler);
-it is false for every other mission. Pursuit cancels the mission, so the mission
-ends at step 4.
+**Per-jet missions** (`mission_su30`, `mission_f111`, `mission_jas39`). These
+are interim. Each flies one airframe and adds one jet-specific action to shared
+building blocks. They are expected to merge into a single ACS mode (see
+[ACS](#acs--autonomy-core-system-design-011-partly-built) below).
 
-Step 2 presses nothing (revised 2026-09-24). The spawn weapon stays selected
-until it runs out. `SWITCH_WEAPON` is a toggle, so it is pressed at most once
-per life: by the missiles-empty response if the rack empties during the script,
-or by the pursuit (`defer_switch_until_empty`) if it empties later. The pursuit
-presses it only after `pursuit_mode.empty_confirm_reads` consecutive zero reads.
+| Mission | Built on | Adds | Spec |
+|---|---|---|---|
+| `mission_su30` | A once-per-life script: climb to `climb_alt_m`, boresight fire loop, set the nose angle, hand over to pursuit | `yield_to_target`: a lock or ring icon during the climb starts the pursuit early | ADR 144/147, `docs/missions/su30.md` |
+| `mission_f111` | The su30 script | Wing sweep: one `w` tap as the climb starts, one more to unsweep at `unsweep_alt_m` or after `unsweep_timeout_s` | ADR 149, `docs/missions/f111.md` |
+| `mission_jas39` | `mission_j20`, the padlock path | Cloak loop: `q` at once, then every `cloak_press_interval_s` | ADR 145, `docs/missions/jas39.md` |
 
-`su30_mission.yield_to_target` (2026-09-26) lets a target cut the script short.
-The climb wait and the nose-angle step take an `interrupt`, and su30 passes
-`Controller._target_in_view`. That returns a reason when the tracker's last
-scan had a target or a fresh frame has a ring icon. On a reason, the script
-stops the climb, skips the nose-angle step and starts the pursuit. `mission_f111`
-does not pass the interrupt.
+Rules the scripted missions share:
 
-```mermaid
-flowchart TD
-    START[Mission start at battle entry or respawn] --> CLIMB[Step 1 nose up and climb]
-    CLIMB --> BORE[Step 2 boresight engage loop with the spawn weapon]
-    BORE --> WAIT[Wait for the level off altitude]
-    WAIT --> ANGLE[Step 3 set the nose angle]
-    ANGLE --> PURSUE[Step 4 stop the boresight loop and activate pursuit mode]
-    WAIT -->|target in view| PURSUE
-    ANGLE -->|target in view| PURSUE
-    PURSUE --> DONE[Mission ends and pursuit owns the aircraft]
-```
-
-**Mission execution** (`mission_jas39`) — `mission_j20` plus the JAS39's cloak
-(ADR 145, `docs/missions/jas39.md`). It arms its own turn guard
-(`jas39_mission.turn_guard_s`), starts the search-and-destroy loops, and starts
-the cloak loop, `start_cloak_loop()`. That loop presses `SPECIAL_ABILITY` (`q`)
-at once and then every `cloak_press_interval_s`, because wingman has no signal
-for when the ability is off cooldown and a press while cloaked does not uncloak
-the JAS39. The cloak loop is its own pair with its own stop event, thread and
-lifecycle lock, like the boresight loop. It is stopped in the mission's
-`finally`, on manual takeover and in `cleanup()`.
-
-**Mission execution** (`mission_f111`) — `mission_su30` plus the F-111's wing
-sweep (ADR 149, `docs/missions/f111.md`). Six steps once per life: nose up and,
-as the climb starts, one tap of `WINGSWEEP_KEY` (`w`) through
-`Controller.wingsweep()`; boresight engage; no weapon switch until the spawn
-weapon runs out; level off at `f111_mission.climb_alt_m` and set the nose angle;
-wait at most `unsweep_timeout_s` for a fresh altitude at or below
-`unsweep_alt_m`, then one more tap to unsweep (on timeout it unsweeps anyway);
-pursuit mode. `w` is a toggle, so the swept state is tracked in
-`_f111_wings_swept` and reset per life in `stop_eject_sequence()`; a restart in
-the same life does not sweep again, and a mission cancelled while swept presses
-nothing on the way out. The climb wait, nose-angle step and pursuit hand-off are
-the `_scripted_*` helpers `mission_su30` also runs through. ADR 147's altitude
-doctrine covers it too: while f111 is the mission in play the tree's floor is
-`f111_mission.alt_floor_m` and the armed sustain climb stands aside
-(`altitude_floor_override_m`, `sustain_climb_suppressed`). The padlock block
-(`is_padlock_blocked`) is still su30 only. No hotkey: `default_mission: f111`.
+- **Boresight fire loop.** `start_boresight_engage_loop()` is the weapon-fire
+  loop without the padlock loop. It is a separate pair from
+  `start_search_and_destroy_loop()` and shares no state with it. While su30 is
+  the mission in play, `is_padlock_blocked()` is true and no padlock logic runs.
+- **Shared steps.** The climb wait, nose-angle step and pursuit hand-off are
+  the `_scripted_*` helpers. The pursuit cancels the mission, so a script ends
+  at the hand-off.
+- **Weapon switch.** The spawn weapon stays selected until it reads empty.
+  `SWITCH_WEAPON` is a toggle, so it is pressed at most once per life: by the
+  missiles-empty response, or by the pursuit (`defer_switch_until_empty`)
+  after `pursuit_mode.empty_confirm_reads` consecutive zero reads.
+- **Altitude floor (ADR 147).** While su30 or f111 is in play, the tree's hard
+  floor is the mission's own `alt_floor_m`, and the armed sustain climb stands
+  aside (`altitude_floor_override_m`, `sustain_climb_suppressed`).
 
 Apart from `o` (su30) and `y` (loiter), no mission has a hotkey to itself:
 `mission.default_mission` picks the mission, and battle entry, the `u` hotkey and
@@ -464,87 +438,85 @@ mechanism runs cleanly, not the outcome.
 
 ---
 
-### Pursuit Mode (Design 015, active)
+### ACS — Autonomy Core System (Design 011, partly built)
 
-`Controller.pursue_and_engage` is the alternative to `eject_and_dive`: chase
-with both tracking axes instead of diving. It is not a separate FSM state. Both
-enter `GAME_BATTLE_EJECT` through the same `eject_started` trigger, so every
-gate on that state applies to both. `pursuit_mode.enabled` ships `true`.
+ACS is the airframe-independent combat layer. The padlock path (`mission_j20`,
+`search_and_destroy_loop`) fires through the padlock, which works on the J-20.
+Most other jets don't use the padlock. They need boresight: the nose pointed
+at the target. ACS steers the nose from what is on screen, so the same logic
+can fly any fighter. It is
+organised around the kill chain in `WINGMAN_VERSION_DETAILS`: find, fix, track,
+target, engage, assess.
 
-**Two entry points.**
+| ACS piece | Where | Status |
+|---|---|---|
+| Jet profile flag | `jet_profile` in config, `AnalyzerSnapshot.has_padlock` (whether the jet uses the padlock to fire) | Read at startup; nothing branches on it yet |
+| Target tracking | `tracker.py` (Design 005) | Live. Senses every battle tick; steers only inside a pursuit |
+| Icon-directed search | `icon_steering.py` (Design 015) | Live inside pursuits |
+| Pursuit | `Controller.pursue_and_engage` (Design 015) | Live, `pursuit_mode.enabled: true` |
+| Boresight firing | `start_boresight_engage_loop()` | Live in the su30 and f111 scripts. Fires on a fixed cadence, with no lock confirmation |
+| Assess | `PURSUIT SUMMARY` log line | Logged only; no decision reads it |
+| Weapon-lock confirmation | Design 011 `ToneWait` and `LockConfirmed` | Not built: no lock-indicator detector exists |
+| `BoresightEngage` tree leaf, chosen by `has_padlock` | Design 011 | Not built |
+| Event-driven target priority; waypoint and objective selection | Design 011 | Not built |
 
-- *Missiles empty.* `AmmoEventsHandler.fire_eject()` (`tick_handlers.py`) is
-  the single branch point. It calls `pursue_and_engage` when
-  `pursuit_mode_enabled()` is true and `eject_and_dive` otherwise. The pursuit
-  switches to the secondary weapon at its start.
-- *Mission hand-off.* Step 4 of `mission_su30` and the last step of
-  `mission_f111` call `pursue_and_engage(defer_switch_until_empty=True)`, which
-  keeps the selected weapon until it reads empty (see `mission_su30` above).
+**How ACS is reached today.** The pursuit starts in two places:
 
-**The loop.** One daemon thread (`_pursuing_thread`) steers every
-`steer_interval_s` (0.1 s). Every `engage_interval_s` (0.3 s) it also reads
-ammo, fires and renders the HUD (CR-018-01 split these two cadences). Each
-steering tick captures a frame, runs `TargetTracker.update()`, then picks one
-rung in this priority order (`_icon_rung`):
+- the missiles-empty response, on any mission;
+- the hand-off at the end of the su30 and f111 scripts.
+
+The per-jet missions are interim and are expected to merge into one ACS mode.
+Design 011's end state selects the engagement tactic from the jet profile
+inside the behavior tree. How jet-specific actions such as the JAS39 cloak and
+the F-111 wing sweep fit into that is not designed yet.
+
+**Normal battle measures, it does not steer.** In `GAME_BATTLE`,
+`tracking.actuate` is `false` and the minimap navigation steers.
+`tracking.battle_priority_shadow` logs a `BATTLEPRI:` line for each navigation
+roll, recording what a lock, or failing that a ring icon, would have steered
+instead. This is the shadow stage for letting a lock or icon override the
+navigation in normal battle (Design 015, normal-battle priority).
+
+#### Pursuit (Design 015)
+
+`pursue_and_engage` chases with both tracking axes. It is not a separate FSM
+state. It enters `GAME_BATTLE_EJECT` through the same `eject_started` trigger
+as `eject_and_dive`, so every gate on that state applies to both.
+`AmmoEventsHandler.fire_eject()` is the single branch point between them.
+
+One daemon thread (`_pursuing_thread`) steers every `steer_interval_s`
+(0.1 s). Every `engage_interval_s` (0.3 s) it also reads ammo, fires and
+renders the HUD. Each steering tick runs `TargetTracker.update()` and picks one
+rung, in priority order (`_icon_rung`):
 
 | Rung | When | Pitch and roll |
 |---|---|---|
-| `recovery` | an ADR 148 dive recovery owns the airframe | the recovery's; icon scores zeroed |
-| `track` | the tracker has a labelled target | roll and pitch onto the target; icon scores zeroed |
-| `wait` | inside the resume delay after losing a lock (2 s, or 6 s when the target was lost near the centre) | neutral; scores still update |
-| `icon` | an icon score axis is active | the dominant-intent law below |
-| `hold` | an icon was seen within `blind_search_after_s` (3 s) | wings level while the scores build |
-| `blind` | none of the above | `roll_on_miss` search roll towards the side the enemy was last seen, with look-down taps |
+| `recovery` | an ADR 148 dive recovery owns the airframe | the recovery's |
+| `track` | the tracker has a labelled target | roll and pitch onto the target |
+| `wait` | inside the resume delay after losing a lock | neutral |
+| `icon` | an icon score axis is active | the icon law below |
+| `hold` | an icon was seen within `blind_search_after_s` | wings level |
+| `blind` | none of the above | search roll towards the last known side, with look-down taps |
 
-Every steering tick logs one `ICONPTS` line with the rung, scores and keys.
+**The icon law** (`IconPoints.intent`). The game's off-screen enemy arrows sit
+on a fixed ring around the screen centre, so each one gives a direction but not
+a distance. Each scan adds the direction to fading turn and pitch scores, and
+each axis switches on and off with hysteresis. A score below the horizon
+pushes with the wings level. One on or above it banks towards the enemy and
+pulls, since a bank without a pull does not turn the flight path (ADR 101).
+The push is withheld below `push_floor_m` and without a fresh altitude and
+flight-path angle.
 
-**The dominant-intent law** (`IconPoints.intent`, `icon_steering.py`). The
-arrowheads sit on a ring of radius 193.9 px around the frame centre, measured
-over 113,918 blobs, so an arrowhead gives a direction but not a distance. Each
-scan adds its direction to a signed turn score and a signed pitch score. The
-scores fade while arrowheads keep arriving and hold still while none is seen,
-and each axis switches on and off with hysteresis (`act_pts`, `release_pts`).
-The law then chooses the keys:
+**The pursuit owns the airframe.** With `dive_safety` off (shipped),
+`climb_mode` refuses every climb and `_climb_exit_push` presses nothing while
+a pursuit flies. At start, the pursuit stops a running boundary turn or climb.
+The keyboard library keeps one state per key, not one per tactic, so another
+tactic's key release would otherwise drop a key the pursuit is holding.
 
-- A score vector below the horizon pushes: NOSE_DOWN, wings level.
-- A score vector on or above the horizon banks towards the enemy's side and
-  pulls. ADR 101 measured that a bank without a pull does not turn the flight
-  path.
-- While descending faster than `turn_level_descent_mps` (150 m/s), the turn
-  releases the roll and keeps the pull, so the pull points up.
-
-The push is withheld by the dive guard, when there is no fresh flight-path
-angle, and below `push_floor_m` (1500 m) or with no fresh altitude. The
-`ICONPTS` line reports the reason as `withheld=`.
-
-**The pursuit owns the airframe.** With `dive_safety` off (shipped):
-
-- `climb_mode` refuses every climb while a pursuit flies.
-- `_climb_exit_push` presses nothing.
-- At start, the pursuit stops a running boundary turn or climb and waits up to
-  1.5 s for its handback.
-
-This fixed a live defect. The keyboard library keeps one state per key, not
-one per tactic, so a climb's or boundary turn's handback released the NOSE_DOWN
-the pursuit was holding. The pursuit's own record still said the key was down,
-so it never pressed it again.
-
-**Termination (Design 015 D3).**
-
-| Condition | Next |
-|---|---|
-| Secondary weapon confirmed empty (after `ammo_zero_grace_s` from the switch) | fall through to `eject_and_dive` |
-| `pursuit_max_duration_s` elapsed | same fall-through; shipped `0` means no cap |
-| Respawn, manual takeover or shutdown (`_eject_stop`) | stop at once, no fall-through |
-
-Each pursuit ends with one `PURSUIT SUMMARY:` INFO line: end reason, duration,
-scans, locked scans, time to first lock, and ammo readings.
-
-**Normal battle is measured, not steered, by the tracker.** In `GAME_BATTLE`,
-`tracking.actuate` is `false`. The minimap navigation steers, and
-`tracking.battle_priority_shadow` logs a `BATTLEPRI:` line for each navigation
-roll. The line records what a lock, or failing that a ring icon, would have
-steered instead.
+**Termination (Design 015 D3).** When the secondary weapon is confirmed empty,
+or `pursuit_max_duration_s` elapses (shipped `0`, meaning no cap), the pursuit
+falls through to `eject_and_dive`. A respawn, manual takeover or shutdown
+(`_eject_stop`) stops it at once with no fall-through.
 
 ---
 
@@ -632,8 +604,8 @@ flowchart TD
     MT --> MRT["Mission Runner Thread\ndaemon — guarded by _mission_lock"]
     MRT --> PLT["Padlock Loop Thread\ndaemon — active during mission"]
     MRT --> WFT["Weapon Fire Loop Thread\ndaemon — active during mission"]
-    MRT --> BFT["Boresight Fire Loop Thread\ndaemon — su30 and f111 fire loop with no padlock"]
-    MT --> PUT["Pursuit Loop Thread\ndaemon — two-axis chase in GAME_BATTLE_EJECT"]
+    MRT --> BFT["Boresight Fire Loop Thread\ndaemon — ACS fire loop with no padlock"]
+    MT --> PUT["Pursuit Loop Thread\ndaemon — ACS two-axis chase in GAME_BATTLE_EJECT"]
     MT --> EDT["Eject-and-Dive Thread\ndaemon — closed-loop descent on missiles empty"]
     MT --> MET["Missile-Evade Hold Thread\ndaemon — three-key hold with clear timer"]
     MT --> DGT["Disengage Roll Thread\ndaemon — timed roll on enemy absence"]
@@ -750,15 +722,14 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make rd NESTED=0` |
 | `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
 | `loiter_mission` | Survival hold: `target_alt`, hysteresis, orbit cadence and hold |
-| `su30_mission` | Scripted Su-30 sequence (ADR 144): `climb_alt_m`, `nose_angle_deg`, angle tolerance, pulse and bound, and `yield_to_target` (start the pursuit early on a lock or ring icon) |
-| `pursuit_mode` | Pursuit (Design 015): `enabled`, `pursuit_max_duration_s` (0 = no cap), `steer_interval_s` and `engage_interval_s`, search-resume delays, ammo grace and empty confirmation, the dive guard, `dive_safety`, and the `icon_steering` block (ring geometry, colour gates, score scale, half-life, cap and hysteresis, `actuate_pitch`, `actuate_turn`, `push_floor_m`) |
-| `tracking` | Target tracker (Design 005): acquisition region, HUD exclusion zones, nameplate cluster gates, roll and pitch gains. `actuate: false` keeps it sensing only in normal battle. `battle_priority_shadow` logs `BATTLEPRI:` |
+| `jet_profile` | ACS (Design 011): the active airframe profile and its `has_padlock`, meaning whether the jet uses the padlock to fire. Read at startup; nothing branches on it yet |
+| `tracking` | ACS target tracker (Design 005): acquisition region, HUD exclusion zones, nameplate cluster gates, roll and pitch gains. `actuate: false` keeps it sensing only in normal battle. `battle_priority_shadow` logs `BATTLEPRI:` |
+| `pursuit_mode` | ACS pursuit (Design 015): `enabled`, `pursuit_max_duration_s` (0 = no cap), steering and engage cadences, search-resume delays, ammo confirmation, `dive_safety`, and the `icon_steering` block |
+| `su30_mission`, `f111_mission`, `jas39_mission` | Per-jet mission scripts (interim, see Per-jet missions): climb and nose-angle numbers, `yield_to_target` (su30), wing sweep (f111), cloak interval (jas39) |
+| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `su30` (shipped), `j20`, `jas39` or `f111` (ADR 145) |
 | `hud` | Live HUD snapshot output path and archive |
 | `capture_budget` | Free-space floor and per-directory file and size limits for every capture writer |
 | `game_unknown_close` | Close-button recovery (ADR 146): `min_stuck_s`, retry interval, click budget, match score |
-| `jas39_mission` | J20 plus the cloak (ADR 145): `turn_guard_s`, `cloak_press_interval_s` |
-| `f111_mission` | su30 plus the wing sweep (ADR 149): `climb_alt_m`, `nose_angle_deg` and the su30 angle-step numbers, `unsweep_alt_m`, `unsweep_timeout_s`, `wingsweep_tap_s`, and `alt_floor_m` (ADR 147 extended) |
-| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `su30` (shipped since 2026-09-24), `j20`, `jas39` or `f111` (ADR 144, ADR 145, ADR 149) |
 | `mission.manual_takeover` | `persist_through_respawn` — off by default, so a respawn resumes the last mission |
 | `return_to_battle` | Design 010 instrumentation: colour trigger `region`, narrower `ocr_region` for the once-per-crossing confirmation, and partial `text` tokens |
 | `focus_guard` | Suppress injection when the game lacks focus (ADR 098); follows the nested display automatically |
@@ -801,9 +772,8 @@ enter main loop → startup classifier routes GAME_UNKNOWN → lobby or battle (
 
 [GAME_BATTLE]
   → background OCR thread runs continuous parallel OCR
-  → the default mission flies: su30 climbs with the boresight fire loop, then
-    hands over to pursuit; j20 runs the padlock and weapon fire loops under
-    the behavior tree
+  → the default mission flies: a per-jet script hands over to ACS pursuit,
+    or j20 runs the padlock and weapon fire loops under the behavior tree
   → click_to detected → fire click_to_detected → GAME_END_B
 
 [GAME_END_B]
@@ -819,7 +789,7 @@ AMMO_MISSILE OCR reads 0 (debounced: consecutive confirmations + grace windows)
   → BT Eject leaf consumes the confirmed verdict → fire_eject()
   → FSM: GAME_BATTLE → GAME_BATTLE_EJECT (eject_started)
   → pursuit_mode.enabled (shipped): pursue_and_engage (Design 015)
-      → switch to the secondary weapon, chase on both axes (see Pursuit Mode)
+      → switch to the secondary weapon, chase on both axes (see ACS, Pursuit)
       → secondary confirmed empty → falls through to eject_and_dive
   → otherwise, or on that fall-through: eject_and_dive
   → descent control (ADR 069): impulse rotations → dive confirmed → ballistic,
@@ -990,7 +960,8 @@ held afterburner and pitch key, and the operator could not fly.
 | [148](adr/148-a-dive-recovery-flies-through-a-pursuit.md) | A dive recovery flies through a pursuit |
 | [149](adr/149-mission-f111-su30-plus-wing-sweep.md) | mission_f111: the Su-30 script plus the F-111 wing sweep |
 | [150](adr/150-reject-digit-dropped-altitude-reads.md) | Reject digit-dropped altitude reads |
-| [Design 015](hldd/015-target-tracking-pursuit-mode-hldd.md) | Target-tracking pursuit mode and icon-directed search |
+| [Design 011](hldd/011-acs-mode-hldd.md) | ACS: the airframe-independent combat layer |
+| [Design 015](hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search |
 
 *(This index is incomplete: ADRs 073-097 and 111-120/122-127/129-133 are not yet
 listed. The gap is largest around the boundary-turn/loiter tuning series
