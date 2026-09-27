@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # title test is not merely weaker here, it is the specific trap that ADR's probe
 # caught - an editor window titled "...Metalstorm..." satisfies a substring test
 # with the game shut down. Reused rather than reimplemented.
-from wingman.focus_guard import game_session_pids  # noqa: E402
+from wingman.focus_guard import game_session_pids, game_session_windows  # noqa: E402
 
 DEFAULT_DISPLAY = ":3"
 DEFAULT_SIZE = "1920x1200"
@@ -321,27 +321,7 @@ def start(display: str, size: str) -> int:
 
 def _game_windows(d, session: "set[int]") -> list:
     """Top-level windows on `d` owned by a process in the game's Wine session."""
-    from Xlib import Xatom
-    net_wm_pid = d.intern_atom("_NET_WM_PID")
-    found = []
-    try:
-        children = d.screen().root.query_tree().children
-    except Exception:
-        return found
-    for w in children:
-        try:
-            prop = w.get_full_property(net_wm_pid, Xatom.CARDINAL)
-        except Exception:
-            continue
-        if prop and prop.value and int(prop.value[0]) in session:
-            try:
-                geom = w.get_geometry()
-                found.append((geom.width * geom.height, w))
-            except Exception:
-                continue
-    # Largest first: the Wine virtual desktop, not a 1x1 IME helper window.
-    found.sort(key=lambda t: t[0], reverse=True)
-    return [w for _, w in found]
+    return game_session_windows(d, session)
 
 
 def focus(display: str, timeout: float) -> int:

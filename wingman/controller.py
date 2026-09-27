@@ -1161,6 +1161,14 @@ class Controller:
         if self._analyzer is None:
             return
         current_state = self._analyzer.game_state
+        if current_state in (GameState.GAME_WAITING, GameState.GAME_STARTING):
+            if self._on_auto_mission_key is not None:
+                self._on_auto_mission_key()
+            logger.info(
+                "Controller: '%s' pressed during %s — leaving matchmaking sequence undisturbed",
+                AUTO_MISSION_KEY, current_state.name,
+            )
+            return
         # SAF-001: in manual this key means "wingman, take it back" — a single
         # press, because the operator is deliberately flying and asking. The
         # double-press guard below exists for the OTHER battle states, where 'm'
