@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.11"
-WINGMAN_VERSION_DETAILS = "ACS and F2T2EA: Find, fix, track , target, engage, Assess: attacks using any missile types"
+WINGMAN_VERSION = "1.8.12"
+WINGMAN_VERSION_DETAILS = "ACS: Auto resupply"
 
 from . import capture_budget
 from .capture import Capture
