@@ -12,6 +12,7 @@ from mss import mss
 
 from . import capture_budget
 from .state import GameState, BATTLE_STATES, NOSE_DOWN
+from .actuator import Actuator
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre, draw_crops
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
@@ -48,7 +49,7 @@ def set_focus_guard(guard) -> None:
     focus_guard = guard
 
 
-def _press_key(key) -> bool:
+def _press_key(key, owner: str = "") -> bool:
     """Inject a key press unless the focus guard forbids it (ADR 098).
 
     Returns True if the key was actually pressed. Callers keep their hold loop,
@@ -56,11 +57,11 @@ def _press_key(key) -> bool:
     instead collapses a two-second hold into zero and, at the disengage-roll
     site, skipped the stop_search_and_destroy_loop() cleanup that a started loop
     depends on. Releasing a key that was never pressed is a harmless no-op.
+
+    CR-018-09: the focus-gated press of the Actuator, kept under this name for
+    its callers and tests.
     """
-    if not _may_inject("key"):
-        return False
-    keyboard_module.press(key)
-    return True
+    return _actuator.press(key, owner, focus_gate=True)
 
 
 def _may_inject(what: str = "key") -> bool:
@@ -79,6 +80,12 @@ def _may_inject(what: str = "key") -> bool:
         return guard.may_inject(what)
     except Exception:                        # noqa: BLE001 - never break the loop
         return True
+
+
+# CR-018-09 Phase 1: every key press and release goes through this object. The
+# lambdas read the module globals on each call, so tests that monkeypatch
+# `keyboard_module` or `_may_inject` still intercept every press.
+_actuator = Actuator(lambda: keyboard_module, lambda what: _may_inject(what))
 
 # A failed key RELEASE is the start of a stuck-key incident, and the key does not
 # come back when this process dies: on Linux XTest key state lives in the X
@@ -1713,7 +1720,7 @@ class Controller:
                 self._inc_programmatic_key(key)
                 release_span = 0.0  # measured below; finally must not NameError
                 try:
-                    _press_key(key)
+                    _press_key(key, owner=label)
                     start = time.time()
                     while (time.time() - start) < hold_seconds:
                         if not ignore_cancel:
@@ -1724,7 +1731,7 @@ class Controller:
                             time.sleep(0.05)
                     release_started = time.time()
                     try:
-                        keyboard_module.release(key)
+                        _actuator.release(key, label)
                     except Exception:
                         logger.exception("Controller: failed to release '%s' key", key)
                     release_span = time.time() - release_started
@@ -2411,7 +2418,10 @@ class Controller:
         guarded = key in (NOSE_DOWN_KEY, NOSE_UP_KEY)
         if not guarded:
             try:
-                (keyboard_module.press if press else keyboard_module.release)(key)
+                if press:
+                    _actuator.press(key, note, focus_gate=False)
+                else:
+                    _actuator.release(key, note)
             except Exception:
                 logger.error("Controller: %s of %r failed during %s%s",
                              "press" if press else "release", key, note,
@@ -2424,7 +2434,7 @@ class Controller:
             self._eject_held_keys.add(key)
             self._inc_programmatic_key(key)
             try:
-                _press_key(key)
+                _press_key(key, owner=note)
             except Exception:
                 logger.error("Controller: press of %r failed during %s", key, note)
             return
@@ -2432,7 +2442,7 @@ class Controller:
         self._eject_held_keys.discard(key)
         _release_started = time.time()
         try:
-            keyboard_module.release(key)
+            _actuator.release(key, note)
         except Exception:
             logger.error("Controller: release of %r failed during %s — %s",
                          key, note, _LATCH_NOTE)
@@ -4429,7 +4439,7 @@ class Controller:
             # immediately self-cancelled into manual takeover.
             self._inc_programmatic_key(ROLL_RIGHT_KEY)
             try:
-                _press_key(ROLL_RIGHT_KEY)
+                _press_key(ROLL_RIGHT_KEY, owner="disengage_roll")
                 # NOT _interruptible_sleep on _mission_cancel: cancel_mission()
                 # above set it, and reacting to it here would abort the roll
                 # after milliseconds and leave the aircraft flying straight
@@ -4456,7 +4466,7 @@ class Controller:
             finally:
                 _release_started = time.time()
                 try:
-                    keyboard_module.release(ROLL_RIGHT_KEY)
+                    _actuator.release(ROLL_RIGHT_KEY, "disengage_roll")
                 except Exception:
                     logger.error("Controller: release of %r failed ending disengage roll — %s",
                                  ROLL_RIGHT_KEY, _LATCH_NOTE)
@@ -4640,8 +4650,11 @@ class Controller:
                     key=AFTERBURNER_KEY, action="missile_evade")
             elif keyboard_module:
                 try:
-                    (keyboard_module.press if pressed
-                     else keyboard_module.release)(AFTERBURNER_KEY)
+                    if pressed:
+                        _actuator.press(AFTERBURNER_KEY, "missile_evade",
+                                        focus_gate=False)
+                    else:
+                        _actuator.release(AFTERBURNER_KEY, "missile_evade")
                 except Exception:
                     logger.exception(
                         "Controller: missile_evade burner %s failed",
@@ -4655,7 +4668,7 @@ class Controller:
                     self._record_action_intent("key_press", key=_key, action="missile_evade")
                 else:
                     try:
-                        _press_key(_key)
+                        _press_key(_key, owner="missile_evade")
                     except Exception:
                         logger.exception("Controller: missile_evade press failed for '%s'", _key)
 
@@ -4773,7 +4786,7 @@ class Controller:
                     self._record_action_intent("key_release", key=_key, action="missile_evade")
                 elif keyboard_module:
                     try:
-                        keyboard_module.release(_key)
+                        _actuator.release(_key, "missile_evade")
                     except Exception:
                         logger.error("Controller: release of %r failed ending missile evade — %s",
                                      _key, _LATCH_NOTE)
@@ -5388,7 +5401,10 @@ class Controller:
         if not keyboard_module:
             return
         try:
-            (keyboard_module.press if press else keyboard_module.release)(key)
+            if press:
+                _actuator.press(key, action, focus_gate=False)
+            else:
+                _actuator.release(key, action)
         except Exception:
             if press:
                 logger.exception("Controller: %s press failed for '%s'", action, key)
@@ -7712,13 +7728,13 @@ class Controller:
             except Exception:
                 logger.exception("Controller: loop stop failed during takeover")
         if keyboard_module and not self._simulate_os_input:
-            for _key in INJECTABLE_KEYS:
-                try:
-                    keyboard_module.release(_key)
-                except Exception:
-                    logger.error("Controller: takeover release of %r failed — %s",
-                                 _key, _LATCH_NOTE)
-            logger.info("Controller: manual takeover — all injectable keys released")
+            # CR-018-09: name what wingman was holding, before the sweep drops it.
+            held = _actuator.held()
+            _actuator.release_all(INJECTABLE_KEYS, "Controller: takeover", _LATCH_NOTE)
+            logger.info("Controller: manual takeover — all injectable keys released "
+                        "(held by wingman: %s)",
+                        ", ".join(f"{k} by {'/'.join(o)}" for k, o in sorted(held.items()))
+                        or "none")
 
     def operator_stop_requested(self) -> bool:
         """True when the operator stopped the session with Backspace (ADR 099).
@@ -7880,7 +7896,7 @@ class Controller:
                         # presses in 3s all logged as "XTest echo ... ignoring").
                         self._inc_programmatic_key(MISSION_J20_KEY)
                         try:
-                            keyboard_module.press_and_release(MISSION_J20_KEY)
+                            _actuator.tap(MISSION_J20_KEY, "game_starting_loop")
                         finally:
                             self._arm_release_grace(MISSION_J20_KEY)
                             self._dec_programmatic_key(MISSION_J20_KEY)
@@ -8124,13 +8140,9 @@ class Controller:
             # game_starting loop's press_and_release) were missing until the
             # 2026-08-14 audit — a key is stuck if the process dies inside
             # even a press_and_release call.
-            for _key in INJECTABLE_KEYS:
-                try:
-                    keyboard_module.release(_key)
-                except Exception:
-                    # Last-chance safety net on shutdown: this is the release
-                    # that stops a key surviving the process. Never silent.
-                    logger.error("Controller: cleanup release of %r failed — %s", _key, _LATCH_NOTE)
+            # Last-chance safety net on shutdown: this is the release that stops
+            # a key surviving the process. A failure is never silent.
+            _actuator.release_all(INJECTABLE_KEYS, "Controller: cleanup", _LATCH_NOTE)
             logger.info("Controller: all injectable keys released")
 
         # 3. Deregister hooks last so the guards above stay active meanwhile.

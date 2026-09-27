@@ -823,8 +823,11 @@ flight key on their own display, during GAME_BATTLE
   → Controller.release_for_manual_takeover(): stop every writer (eject,
     missile evade, climb, spawn guard, loops), cancel the mission, and RELEASE
     every injectable key
-  → from here the only automation is flare deployment; every other key press is
-    refused at the single choke point in _execute_key_press
+  → from here the only automation is flare deployment. _execute_key_press
+    refuses every other key; presses through _climb_key carry no refusal of
+    their own, so cruise, stall prevention and the afterburner evade check for
+    the takeover themselves and the other _climb_key writers rely on having
+    been stopped above (CR-018-07, CR-018-09)
   → OCR continues (health, ammo, incoming all still monitored)
   → a respawn ends the takeover and restart_last_mission() resumes what was
     flying, or 'u' hands control back on request

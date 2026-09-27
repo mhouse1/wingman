@@ -24,6 +24,8 @@ import os
 import signal
 import time
 
+from .suppressed import log_suppressed
+
 logger = logging.getLogger(__name__)
 
 _PROC = "/proc"
@@ -276,8 +278,8 @@ class GamePresenceWatch:
         self._last_poll = now
         try:
             present = bool(self._finder(self._process_name))
-        except Exception:           # never take the main loop down over a scan
-            logger.debug("GamePresenceWatch: scan failed", exc_info=True)
+        except Exception as exc:    # never take the main loop down over a scan
+            log_suppressed(logger, "GamePresenceWatch scan", exc)
             return False
         if present:
             self._seen = True

@@ -108,7 +108,7 @@ ability to defeat a missile geometrically. The measurement decides.
 | Session | Code state | Game UI | Takeovers | Evade holds started inside a manual window | Verdict |
 |---------|------------|---------|----------:|------------------------------------------:|---------|
 | 2026-09-27 04:58-07:05, `logs/wingman_20260927_070541.log` | `eb709e5`, before D7 | post-update | 2 | **2** (05:38:33 and 05:38:50, 4.0 s each, in the 05:37:39-05:38:57 window) | Defect measured |
-| 2026-09-27 07:15-08:48, `make rd`, pid 2297200; ended when the game exited and display `:3` closed (XIO, no session summary) | `eb709e5` + D7 (uncommitted) | post-update | 4 | **0**. The 08:25:27-08:26:18 window had 12 incoming detections with flares; across all four windows the evade logged `refused — manual takeover` 8 times and pressed nothing | **V10 passed** |
+| 2026-09-27 07:15-08:48, `make rd`, pid 2297200; ended when the game exited and display `:3` closed (XIO, no session summary) | `eb709e5` + D7 | post-update | 4 | **0**. The 08:25:27-08:26:18 window had 12 incoming detections with flares; across all four windows the evade logged `refused — manual takeover` 8 times and pressed nothing | **V10 passed** |
 
 ## References
 

@@ -113,7 +113,7 @@ class TestAutomaticRestartRefused:
         released = []
         monkeypatch.setattr(controller_module, "keyboard_module",
                             types.SimpleNamespace(release=released.append))
-        monkeypatch.setattr(controller_module, "_press_key", lambda k: None)
+        monkeypatch.setattr(controller_module, "_press_key", lambda k, **_: None)
         monkeypatch.setattr(ctrl, "start_search_and_destroy_loop", lambda: None)
         monkeypatch.setattr(ctrl, "stop_search_and_destroy_loop", lambda: None)
         ctrl._set_last_mission("j20")
