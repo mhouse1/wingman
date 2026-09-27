@@ -31,6 +31,11 @@ One pilot. One or more AI wingmen. A coordinated squad.
 
 Wingman is designed to scale from single-instance automation to multi-instance coordination where each agent can hold a role (aggressive, loiter, target-painting, support) and adapt as match state changes.
 
+**Mobius Squadron.** In game, Wingman flies as `[ISAF] 🄼🄾🄱🄸🅄🅂1` in Mobius
+Squadron, named after Ace Combat's Mobius 1, the ace some fans believe was an
+AI. Human pilots are welcome to join: see
+[Job Aid 013](docs/job-aids/013-join-mobius-squadron.md).
+
 ---
 
 ## Why This Project Exists
@@ -434,6 +439,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | [`docs/job-aids/008-performance-regression-workflow.md`](docs/job-aids/008-performance-regression-workflow.md) | Performance workflow |
 | [`docs/job-aids/010-run-metalstorm-on-linux.md`](docs/job-aids/010-run-metalstorm-on-linux.md) | Linux setup: Heroic, umu-run, PipeWire grant |
 | [`docs/job-aids/011-wingman-keybindings.md`](docs/job-aids/011-wingman-keybindings.md) | In-game keybinding configuration (Linux) |
+| [`docs/job-aids/013-join-mobius-squadron.md`](docs/job-aids/013-join-mobius-squadron.md) | Mobius Squadron: where the name comes from, and how to join |
 | [`docs/adr/049-linux-migration-game-and-automation-layer.md`](docs/adr/049-linux-migration-game-and-automation-layer.md) | Linux migration decisions and implementation summary |
 | [`docs/adr/050-wayland-screen-capture.md`](docs/adr/050-wayland-screen-capture.md) | PipeWire screen capture on GNOME Wayland |
 | [`docs/adr/053-linux-one-command-launch.md`](docs/adr/053-linux-one-command-launch.md) | Full Linux input stack: window detection, XTest, XRecord |
