@@ -32,8 +32,8 @@ from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTO
                          set_focus_guard)
 from .close_button import GenericCloseRecovery, click_region
 from .crop_region import CropCoords
-from .analyzer import (GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES,
-                       BATTLE_STATES)
+from .analyzer import GameStateAnalyzer, POPUP_DISMISS_STATES
+from .state import GameState, GameEvent, BATTLE_STATES
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker

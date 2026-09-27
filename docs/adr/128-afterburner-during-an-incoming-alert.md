@@ -52,6 +52,17 @@ and releases it on its own schedule, so a climb ending mid-alert would cut the
 burn silently — the feature would be off exactly when a missile is inbound, with
 nothing in the log to say so. Pressing an already-held key is harmless.
 
+**D7. Yield to a manual takeover (SAF-001), added 2026-09-27 for CR-018-07.**
+The hold does not start while the FSM is in `GAME_BATTLE_MANUAL`, and a running
+hold ends within one 0.1 s poll of a takeover. It also has its own stop event,
+which `release_for_manual_takeover()` and `cleanup()` set. Before D7 nothing on
+this path checked for a takeover. Background OCR keeps reporting incoming in
+manual, which is what keeps flares working there, so the hold re-pressed the
+throttle over the operator's release. The condition lives in `_may_hold_key`
+(ADR 139 D4), as the first requester changed there. D7 does not make the hold
+yield to the emergency-climb airbrake (ADR 137); that is CR-018-08, an open
+operator decision.
+
 ## Consequences
 
 Fuel burns faster during alerts. `climb_mode` has a fuel floor for its own
@@ -83,6 +94,21 @@ ability to defeat a missile geometrically. The measurement decides.
 - **V8 — live.** Survival ten seconds after an alert rises above the 81% / 64%
   split measured before this change, over a comparable number of engagements.
   Not yet observed.
+- **V9 (D7).** No afterburner press while the operator has the aircraft and the
+  alert persists; a takeover or the stop event ends a running hold within one
+  poll; `cleanup()` ends it; a new alert after the handback starts a hold again.
+  `tests/test_afterburner_evade.py` and `tests/test_may_hold_key.py`.
+- **V10 (D7), live.** In a session with a manual takeover during an incoming
+  alert, the log shows no `INCOMING — afterburner held` line inside the manual
+  window. A hold running at the takeover logs `afterburner evade ended — manual
+  takeover`.
+
+### Live evidence for D7
+
+| Session | Code state | Game UI | Takeovers | Evade holds started inside a manual window | Verdict |
+|---------|------------|---------|----------:|------------------------------------------:|---------|
+| 2026-09-27 04:58-07:05, `logs/wingman_20260927_070541.log` | `eb709e5`, before D7 | post-update | 2 | **2** (05:38:33 and 05:38:50, 4.0 s each, in the 05:37:39-05:38:57 window) | Defect measured |
+| 2026-09-27 07:15-08:48, `make rd`, pid 2297200; ended when the game exited and display `:3` closed (XIO, no session summary) | `eb709e5` + D7 (uncommitted) | post-update | 4 | **0**. The 08:25:27-08:26:18 window had 12 incoming detections with flares; across all four windows the evade logged `refused — manual takeover` 8 times and pressed nothing | **V10 passed** |
 
 ## References
 
@@ -91,4 +117,6 @@ ability to defeat a missile geometrically. The measurement decides.
 - ADR 073 / ADR 086 — `climb_mode`, the other consumer of the afterburner key
 - ADR 116 — why the config block is read from the ControllerConfig attribute
 - `wingman/controller.py` — `note_incoming`, `_start_afterburner_evade`
-- `tests/test_afterburner_evade.py` — V1-V7
+- `tests/test_afterburner_evade.py` — V1-V7, V9
+- SAF-001 — manual takeover ceases all commanded flight input (D7)
+- Code review 018, CR-018-07 and CR-018-08 (`docs/code-review/018-2026-09.md`)

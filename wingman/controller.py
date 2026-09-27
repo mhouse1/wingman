@@ -11,7 +11,7 @@ import cv2
 from mss import mss
 
 from . import capture_budget
-from .analyzer import GameState, BATTLE_STATES, NOSE_DOWN
+from .state import GameState, BATTLE_STATES, NOSE_DOWN
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre, draw_crops
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
@@ -496,6 +496,9 @@ class Controller:
         self._sdl_lifecycle_timeout_s = 2.0
         # ADR 128: afterburner held while a missile is inbound.
         self._ab_evade_active = threading.Event()
+        # CR-018-07: set by takeover and cleanup, which had no way to end the
+        # hold — it re-pressed the throttle over the operator's release.
+        self._ab_evade_stop = threading.Event()
         self._ab_evade_thread = None
         self._ab_evade_until = 0.0
         _me = (config.get("missile_evade", {}) or {}) if isinstance(config, dict) else {}
@@ -5070,10 +5073,22 @@ class Controller:
         cap — for the reason the climb is. AFTERBURNER_KEY is not a watched
         maneuver key, so a stuck press would not surface as a takeover; it
         would just be a throttle nobody could release.
+
+        SAF-001 (CR-018-07): it neither starts nor keeps holding while the
+        operator has the aircraft, and `_ab_evade_stop` ends it from takeover
+        and cleanup. Background OCR keeps reporting incoming in
+        GAME_BATTLE_MANUAL, so without both the hold re-pressed the throttle
+        over the operator's release for as long as the alert lasted.
         """
         if self._ab_evade_active.is_set():
             return
+        if not self._may_hold_key(AFTERBURNER_KEY, requester="afterburner_evade"):
+            logger.debug("Controller: afterburner evade refused — manual takeover")
+            return
         self._ab_evade_active.set()
+        # Only reached with no hold alive (its finally clears the active flag
+        # last), so this cannot un-stop a hold that is still running.
+        self._ab_evade_stop.clear()
 
         def _run():
             started = time.time()
@@ -5081,10 +5096,19 @@ class Controller:
             try:
                 self._climb_key(AFTERBURNER_KEY, press=True, action="evade")
                 last_press = time.time()
-                while not self._exit_event.is_set():
+                while not (self._exit_event.is_set()
+                           or self._ab_evade_stop.is_set()):
                     now = time.time()
                     burned = now - started
                     if now >= self._ab_evade_until:
+                        break
+                    # ADR 139 D4 consolidation point, checked every poll so a
+                    # takeover ends the hold within one poll even if the stop
+                    # event never arrives.
+                    if not self._may_hold_key(AFTERBURNER_KEY,
+                                              requester="afterburner_evade"):
+                        logger.info("Controller: afterburner evade ended — "
+                                    "manual takeover")
                         break
                     # RE-PRESS periodically. climb_mode drives the same key and
                     # releases it on its own schedule, so a climb ending mid
@@ -5092,13 +5116,7 @@ class Controller:
                     # would be off exactly when a missile is inbound, with
                     # nothing in the log to say so. Pressing a held key again
                     # is harmless.
-                    # ADR 139 D4: explicit consolidation-point call — always
-                    # True today (this hold has no may-hold condition beyond
-                    # its own deadline/cap above; see `_may_hold_key`), kept
-                    # visible for the same reason as the other call sites.
-                    if (now - last_press >= 1.0
-                            and self._may_hold_key(AFTERBURNER_KEY,
-                                                   requester="afterburner_evade")):
+                    if now - last_press >= 1.0:
                         self._climb_key(AFTERBURNER_KEY, press=True,
                                         action="evade")
                         last_press = now
@@ -5107,7 +5125,7 @@ class Controller:
                             "Controller: afterburner evade hit its %.0fs cap "
                             "with the alert still live", self._ab_evade_max_s)
                         break
-                    if self._exit_event.wait(timeout=0.1):
+                    if self._ab_evade_stop.wait(timeout=0.1):
                         break
             except Exception:
                 logger.exception("Controller: afterburner evade failed")
@@ -5326,9 +5344,10 @@ class Controller:
         normalizing them. Any of these being worth changing (e.g. giving
         ``climb`` a manual-takeover check it lacks today) is a separate,
         future decision requiring its own live validation — not folded in
-        here. ``key`` is accepted for the log/signature shape a future
-        per-key policy would need; every requester's condition today is in
-        fact key-independent.
+        here. CR-018-07 is the first such decision: ``afterburner_evade``
+        now refuses during a manual takeover. ``key`` is accepted for the
+        log/signature shape a future per-key policy would need; every
+        requester's condition today is in fact key-independent.
         """
         if requester == "cruise":
             # note_afterburner_cruise's `may_hold` — the only site checking
@@ -5345,9 +5364,11 @@ class Controller:
             # key specifically.
             return True
         if requester == "afterburner_evade":
-            # _start_afterburner_evade has no may-hold condition beyond its
-            # own deadline/cap.
-            return True
+            # CR-018-07 (SAF-001): refuse while the operator has the aircraft,
+            # for the first press and every poll after it. It does not yet
+            # yield to the emergency airbrake the way cruise does — that is
+            # CR-018-08, an open operator decision.
+            return not self._manual_takeover_active()
         if requester == "eject":
             # eject_and_dive's afterburner press is unconditional.
             return True
@@ -7667,6 +7688,7 @@ class Controller:
         self._boundary_turn_stop.set()   # ADR 107: it holds two flight axes
         self._sg_stop.set()
         self._disengage_stop.set()   # SAF-001 2026-09-09: was missing entirely
+        self._ab_evade_stop.set()    # CR-018-07: was missing entirely
         try:
             self.cancel_mission()
         except Exception:
@@ -8084,12 +8106,16 @@ class Controller:
         self._boundary_turn_stop.set()  # ADR 107: end any boundary turn likewise
         self._sg_stop.set()  # ADR 076: end any spawn guard via its own finally
         self._disengage_stop.set()  # CR-019-04: as release_for_manual_takeover does
+        self._ab_evade_stop.set()  # CR-018-07: ADR 128's hold, likewise
         bt_thread = self._boundary_turn_thread
         if bt_thread is not None and bt_thread.is_alive():
             bt_thread.join(timeout=1.5)   # its finally does the SAF-010 push
         me_thread = self._me_thread
         if me_thread is not None and me_thread.is_alive():
             me_thread.join(timeout=1.5)
+        ab_thread = self._ab_evade_thread
+        if ab_thread is not None and ab_thread.is_alive():
+            ab_thread.join(timeout=1.5)   # polls every 0.1s; its finally releases
 
         # 2. Belt-and-braces: release every injectable key.
         if keyboard_module and not self._simulate_os_input:

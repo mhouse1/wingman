@@ -30,7 +30,7 @@ import py_trees
 
 logger = logging.getLogger(__name__)
 
-from .analyzer import GameState
+from .state import GameState
 
 SNAPSHOT_KEY = "snapshot"
 

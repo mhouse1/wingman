@@ -26,7 +26,7 @@ import threading
 import time
 
 from . import capture_budget
-from .analyzer import GameState, BATTLE_STATES
+from .state import GameState, BATTLE_STATES
 from .behavior_tree import (
     TACTIC_ATTACK_SUPPORT,
     TACTIC_CLIMB,
