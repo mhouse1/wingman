@@ -10,9 +10,11 @@ from pathlib import Path
 import cv2
 from mss import mss
 
+from . import capture_budget
 from .analyzer import GameState, BATTLE_STATES, NOSE_DOWN
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre, draw_crops
+from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
 from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
     _WINGMAN_XAUTH,
     _XKEY_ALIASES,
@@ -107,6 +109,7 @@ from .keybindings import (                                          # noqa: F401
     FIRE_MACHINE_GUN,
     MISSION_J20_KEY,
     MISSION_LOITER_KEY,
+    MISSION_SU30_KEY,
     NOSE_DOWN_KEY,
     NOSE_UP_KEY,
     PADLOCK_CAMERA,
@@ -178,6 +181,109 @@ def _summarise_turn(samples) -> str:
     # "not measured", not "did not rotate".
     parts.append(f"n={len(usable)}")
     return ", ".join(parts)
+
+
+def _side_of(err: "float | None") -> "str | None":
+    """The side a horizontal error points to, or None for no error."""
+    if err is None or err == 0:
+        return None
+    return "left" if err < 0 else "right"
+
+
+def _last_known_side(last_lock_ts: "float | None", last_lock_err: "float | None",
+                     icon_points: "IconPoints | None") -> "str | None":
+    """HLDD 015 blind search: the side of whichever was seen last, the lock or
+    the ring icon's points; None when neither gives a side."""
+    icon_side = None
+    if icon_points is not None and icon_points.turn_pts != 0:
+        icon_side = "left" if icon_points.turn_pts < 0 else "right"
+    icon_ts = icon_points.last_icon_ts if icon_points is not None else None
+    if icon_side is not None and icon_ts is not None \
+            and (last_lock_ts is None or icon_ts > last_lock_ts):
+        return icon_side
+    return _side_of(last_lock_err) or icon_side
+
+
+def _resume_delay(resume_delay_s: float, last_err: "float | None",
+                  centre_err: "float | None",
+                  centre_delay_s: "float | None") -> "tuple[float, bool]":
+    """How long a miss after a lock waits before the search resumes, and whether
+    the near-centre extension applied (see Controller.roll_on_miss)."""
+    near_centre = (last_err is not None and centre_err is not None
+                   and centre_delay_s is not None and abs(last_err) <= centre_err)
+    return (max(resume_delay_s, centre_delay_s) if near_centre else resume_delay_s), near_centre
+
+
+class _EngagementTally:
+    """Counters behind the one-line `PURSUIT SUMMARY` / `DIVE SUMMARY` INFO log
+    (action item 001, Cycle 7, 2026-09-24).
+
+    Why: the pursuit's outcome — did it get a lock, how soon, did a missile
+    leave — could only be rebuilt from DEBUG `TRACKPICK` lines plus `Ammo
+    missiles:` transitions, and the rebuild is unreliable (a rack switch reads as
+    a 6-to-2 "launch"; INFO-level sessions carry no `TRACKPICK` at all). One line
+    per engagement, at INFO, makes the metric durable and comparable across
+    sessions. Measured motivation: the same tracker gave 5% locked scans in one
+    session and 15% in the next, so per-session outcomes need a denominator that
+    is logged, not reconstructed.
+
+    `scan()` is called once per loop cycle with the tracker's `visible` and the
+    raw missile-ammo reading. The ammo figures are raw HUD readings, so across a
+    rack switch `ammo_last` belongs to the other rack — the line says whether
+    this loop pressed the switch (a press made by the caller before the loop
+    started is not counted). Logging only: nothing here feeds a decision.
+    """
+
+    def __init__(self, clock=time.time) -> None:
+        self._clock = clock
+        self._t0 = clock()
+        self.scans = 0
+        self.locked = 0
+        self.first_lock_s: "float | None" = None
+        self.ammo_first: "int | None" = None
+        self.ammo_last: "int | None" = None
+        # HLDD 015 icon shadow: steering ticks with no lock, those with a ring
+        # icon, and seconds the icon law would have been steering. Reported
+        # only once icon_tick() has run, so the line is unchanged without it.
+        self.icon_enabled = False
+        self.icon_unlocked = 0
+        self.icon_seen = 0
+        self.icon_steer_s = 0.0
+        self._icon_prev: "tuple[float, str] | None" = None
+
+    def icon_tick(self, unlocked: bool, has_icon: bool, rung: str) -> None:
+        now = self._clock()
+        self.icon_enabled = True
+        if self._icon_prev is not None and self._icon_prev[1] == "icon":
+            self.icon_steer_s += now - self._icon_prev[0]
+        self._icon_prev = (now, rung)
+        if unlocked:
+            self.icon_unlocked += 1
+            self.icon_seen += bool(has_icon)
+
+    def scan(self, visible, ammo) -> None:
+        self.scans += 1
+        if visible:
+            self.locked += 1
+            if self.first_lock_s is None:
+                self.first_lock_s = self._clock() - self._t0
+        if ammo is not None:
+            if self.ammo_first is None:
+                self.ammo_first = ammo
+            self.ammo_last = ammo
+
+    def line(self, kind: str, end: str, switched: bool) -> str:
+        share = 100.0 * self.locked / self.scans if self.scans else 0.0
+        first = "-" if self.first_lock_s is None else "%.1fs" % self.first_lock_s
+        ammo = "-" if self.ammo_first is None else "%d->%d" % (self.ammo_first, self.ammo_last)
+        line = ("%s SUMMARY: end=%s dur=%.1fs scans=%d locked=%d (%.0f%%) "
+                "first_lock=%s ammo=%s switched=%s"
+                % (kind, end, self._clock() - self._t0, self.scans, self.locked,
+                   share, first, ammo, "yes" if switched else "no"))
+        if self.icon_enabled:
+            line += " icon=%d/%d icon_steer=%.1fs" % (
+                self.icon_seen, self.icon_unlocked, self.icon_steer_s)
+        return line
 
 
 class Controller:
@@ -282,20 +388,83 @@ class Controller:
         # detected) started, or None while any leg is false.
         self._padlock_dot_streak_since: "float | None" = None
         self._padlock_dot_confirm_s = float(padlock_center_cfg.get("confirm_seconds", 2.0))
+        # Operator directive, 2026-09-20: a real dive (16:03:56-16:04:19)
+        # pressed this correction 13 times in a row, once per tick, for the
+        # whole rest of the dive — the toggle is a fixed-cost action (either
+        # it worked or camera state is genuinely stuck some other way), not
+        # something that gets more likely to succeed by repeating it
+        # forever. Capped per dive, reset alongside _eject_weapon_switched
+        # (both the dive-start and stop_eject_sequence reset sites).
+        self._padlock_unknown_correction_max = int(
+            padlock_center_cfg.get("max_correction_attempts", 3))
+        self._padlock_unknown_correction_attempts = 0
 
         # Target tracking: timestamp of last orient_nose_to_target command
         self._last_orient_ts: float = 0.0
+        # HLDD 005 pitch axis (2026-09-21): independent cooldown timestamp,
+        # separate from roll's _last_orient_ts above — a roll command in
+        # flight must never delay a pitch command or vice versa, since the
+        # two act on different keys and can legitimately overlap.
+        self._last_pitch_orient_ts: float = 0.0
+        # HLDD 005 Sustained-Hold Actuation (2026-09-23): hold a key until the
+        # tracked condition changes instead of computing a bounded tap —
+        # Controller.boundary_turn_mode's own shape, applied to tracking.
+        # Gated by tracking.sustained_hold_enabled (default False): both
+        # orient_nose_to_target and orient_pitch_to_target keep their exact
+        # existing tap-and-cooldown behavior when this is False, so nothing
+        # here changes anything until a live trial enables it. Held-key state
+        # only, no config value — the config value that matters is the one
+        # flag below.
+        self._sustained_hold_enabled = bool((_c.tracking or {}).get("sustained_hold_enabled", False))
+        self._roll_held: "str | None" = None
+        # Which of "search" (no target — operator directive, hold
+        # ROLL_LEFT_KEY until one reappears) or "target" (holding toward a
+        # real, currently-visible target) the roll hold above is for — needed
+        # so reacquisition after a search hold is always a fresh decision,
+        # never a silent no-op because the physical key already happens to
+        # match. Pitch has no search default (operator specified roll only),
+        # so pitch does not need an equivalent.
+        self._roll_hold_reason: "str | None" = None
+        self._pitch_held: "str | None" = None
+        # CR-018-01: lead time for the sustained pitch hold's early release.
+        # A hold is let go when the error, extrapolated this far ahead at its
+        # measured rate, is inside the deadband or past centre — the nose
+        # coasts the rest of the way instead of overshooting. Measured before
+        # (2026-09-25 00:49 session): 63% of HOLD[pitch] endings were a direct
+        # up/down reversal. 0 restores release-only-inside-the-deadband.
+        # Named guess: about one pursuit steering tick plus the key's lag.
+        self._pitch_lead_s = max(0.0, float((_c.tracking or {}).get("pitch_lead_s", 0.15)))
+        # (timestamp, error_norm_y) of the previous pitch sample, for the rate.
+        self._pitch_last_sample: "tuple[float, float] | None" = None
         # ADR 136: TargetTracker reference, wired in from main.py after both
         # objects exist (Controller cannot construct it — it needs the
         # Analyzer-independent HSV/contour config TrackingHudHandler owns).
         # None until set_target_tracker() is called; the eject heatdive loop
         # no-ops when it is None.
         self._target_tracker = None
+        # HLDD 005 fix (2026-09-21): HudRenderer reference, wired in from
+        # main.py alongside set_target_tracker — same reason (Controller
+        # doesn't own or construct it; TrackingHudHandler does). None until
+        # set_hud_renderer() is called; the eject heatdive loop simply skips
+        # HUD rendering when it is None, same fail-open shape as a missing
+        # target tracker.
+        self._hud_renderer = None
         # ADR 136: True once switch_weapon() has fired for the current eject —
         # the shared AMMO_MISSILE crop then reads the secondary loadout, not
         # the primary rack, so ADR 088's rearm-abort check must stop trusting
         # it (see eject_and_dive/_eject_descent_control). Reset every dive.
         self._eject_weapon_switched = False
+        # True only while an eject_and_dive is running with its weapon switch
+        # deliberately deferred (mission_su30's pursuit cap). Set at the start
+        # of every dive, cleared when it ends; the ADR 088 rearm-abort checks
+        # read it because a loaded rack is expected there, not a rearm.
+        self._eject_defer_switch = False
+        # ADR 149: mission_f111's tracked wing-sweep state. WINGSWEEP_KEY is a
+        # toggle (ToggleWingSweep), so the mission presses it only when this
+        # says the press is needed. The wings are unswept at spawn (assumed,
+        # ADR 149), so this resets with the rest of the per-life state in
+        # stop_eject_sequence.
+        self._f111_wings_swept = False
 
         # Weapon loop state (configurable via config or start_weapon_loop)
         self._weapon_loop_active = False
@@ -335,6 +504,23 @@ class Controller:
         self._ab_evade_max_s = float(_me.get("afterburner_max_s", 20.0))
         self._sdl_padlock_thread: threading.Thread | None = None
         self._sdl_weapon_thread: threading.Thread | None = None
+        # ADR 144: boresight engagement — the weapon-fire loop without the
+        # padlock camera. Deliberately its OWN state (event, thread, lifecycle
+        # lock) rather than a flag on the search-and-destroy fields above, so
+        # the two engagement modes cannot interfere and either can be started
+        # without touching the other.
+        self._boresight_stop: threading.Event | None = None
+        self._boresight_thread: threading.Thread | None = None
+        self._boresight_lifecycle_lock = threading.Lock()
+        self._boresight_lifecycle_timeout_s = 2.0
+        # ADR 145: the JAS39 cloak loop — SPECIAL_ABILITY pressed on a fixed
+        # interval. Its own event, thread and lifecycle lock, for the reason
+        # boresight has them: it runs beside an engagement loop and must share
+        # nothing with it.
+        self._cloak_stop: threading.Event | None = None
+        self._cloak_thread: threading.Thread | None = None
+        self._cloak_lifecycle_lock = threading.Lock()
+        self._cloak_lifecycle_timeout_s = 2.0
         self._target_painting_mode = target_painting_mode
         self._simulate_os_input = bool(simulate_os_input)
         self._disable_hotkeys = bool(disable_hotkeys)
@@ -352,6 +538,21 @@ class Controller:
         # Handle to the current eject thread so cleanup() can join it briefly
         # and let its finally block release keys before the process exits.
         self._eject_thread: "threading.Thread | None" = None
+        # HLDD 015: set while pursue_and_engage's own thread is running,
+        # cleared by its finally block — same shape as self._ejecting, kept
+        # as its own flag rather than reusing self._ejecting since the two
+        # are mutually exclusive alternatives, not variants of one sequence
+        # (pursue_and_engage's own fall-through calls eject_and_dive, which
+        # then sets self._ejecting fresh for that separate, later sequence).
+        self._pursuing = threading.Event()
+        self._pursuing_thread: "threading.Thread | None" = None
+        # ADR 148: set while a HARD-emergency climb hold (dive recovery, terrain) is
+        # flying the airframe inside a pursuit. The pursuit lives in
+        # GAME_BATTLE_EJECT, where a climb hold used to release itself after 0.25 s, so
+        # the recovery was a 0.3 s nudge every 1.5 s and both chases in the 2026-09-25
+        # 00:03 session flew into the ground. Read by _run_climb_hold's state check and
+        # by the pursuit loop, which yields pitch and roll while it is set.
+        self._pursuit_recovery = threading.Event()
         # Handle to the current disengage_roll_right maneuver thread
         # (ADR 024 3.1b — liveness for the Disengage leaf).
         self._disengage_thread: "threading.Thread | None" = None
@@ -425,6 +626,123 @@ class Controller:
         # actually padlock state was worse than doing nothing. D1-D3 (the
         # dive itself) are unaffected either way.
         self._eject_cl_heatdive_padlock_verify = bool(_ecl.get("heatdive_padlock_verify", False))
+        # HLDD 015: missiles-empty alternative to eject_and_dive. Own
+        # top-level config block, not nested under eject_closed_loop — see
+        # ControllerConfig.pursuit_mode. Hard-gated false in shipped config;
+        # see pursue_and_engage's own docstring for the precondition this
+        # flag must not be flipped ahead of.
+        _pm = _c.pursuit_mode or {}
+        self._pursuit_mode_enabled = bool(_pm.get("enabled", False))
+        # 0 (or negative) means NO time cap (operator, 2026-09-24, after the 20 s
+        # cap had been dropping a working pursuit into a dive on every life): the
+        # pursuit keeps searching and pursuing until the ammo is exhausted or a
+        # respawn, takeover or shutdown stops it. The code default stays 20.0 so
+        # a config that never sets the key behaves as it always did.
+        self._pursuit_max_duration_s = float(_pm.get("pursuit_max_duration_s", 20.0))
+        self._pursuit_padlock_verify = bool(_pm.get("pursuit_padlock_verify", False))
+        # ADR 148: the longest a dive-recovery climb may keep flying a pursuit before the
+        # chase resumes (the tree starts a new one at once if the emergency is still on).
+        # 0 turns the feature off: a climb hold then releases in GAME_BATTLE_EJECT as it
+        # did before, and the chase never yields. A named guess: the 2026-09-25 dives
+        # needed a pull-out from about 3200 m at 120 to 180 m/s.
+        self._pursuit_recovery_max_s = max(0.0, float(_pm.get("recovery_max_s", 30.0)))
+        # get_ammo_missiles() reads the AMMO_MISSILE HUD region, which does
+        # not update to the post-switch_weapon secondary loadout instantly —
+        # measured live (2026-09-23): 1.79s and 9.1s after switch_weapon
+        # completed, across two separate encounters, before the analyzer's
+        # own "Ammo missiles: 2" log line first appeared. Without this grace
+        # period, pursue_and_engage's own ammo==0 check (below) trusted the
+        # very first reading — always still the pre-switch value at that
+        # point — and fell through to eject_and_dive within ~230ms on every
+        # single trigger, before the tracking loop ever got a real chance to
+        # run. Margin over both measured samples, not a large-N guarantee —
+        # a longer run of live trials should correct it if it proves wrong.
+        self._pursuit_ammo_grace_s = float(_pm.get("ammo_zero_grace_s", 12.0))
+        # Action item 001 (2026-09-24): how long a miss tick after a valid
+        # lock holds the roll axis neutral before the ROLL_LEFT search default
+        # resumes. Measured (wingman.log 2026-09-24 06:03:38-39): a lock
+        # acquired at 38.251 was rejected on the next two ROI scans, and each
+        # of those miss ticks re-pressed ROLL_LEFT, so the aircraft kept
+        # rotating left while the target crossed screen centre (frame 16,
+        # err about 0) and reached err=+0.366 by the next lock (frame 17).
+        # Named guess, not measured beyond that one 1.07s reacquisition gap.
+        # Shared by the eject dive's heatdive roll loop since 2026-09-24
+        # (operator request; the same immediate-resume showed there: all 13
+        # target holds in the 06:51-07:06 session ended `-> left/search`).
+        self._pursuit_search_resume_delay_s = float(_pm.get("search_resume_delay_s", 2.0))
+        # Near-centre extension of the above (operator, 2026-09-24): when the
+        # last visible target error was within centre_err the aircraft is
+        # already on the target, so the neutral hold is centre_delay_s instead.
+        # Measured basis and rationale: roll_on_miss's docstring. Named guesses.
+        self._pursuit_search_resume_centre_err = float(_pm.get("search_resume_centre_err", 0.15))
+        self._pursuit_search_resume_centre_delay_s = float(
+            _pm.get("search_resume_centre_delay_s", 6.0))
+        # mission_su30 defers SWITCH_WEAPON until the selected weapon runs out
+        # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
+        # consecutive ammo==0 reads are required before pressing it. At the
+        # pursuit engage cycle (engage_interval_s, ~0.3 s), 3 is about one second. Named guess.
+        self._pursuit_empty_confirm_reads = max(1, int(_pm.get("empty_confirm_reads", 3)))
+        # CR-018-01: the pursuit loop steers every steer_interval_s and reads
+        # ammo / fires / renders the HUD every engage_interval_s. Before, one
+        # 0.2 s wait plus a blocking 0.1 s fire press set both, and steering
+        # ran at about 2.7 Hz (median TRACKPICK interval 0.353 s, 00:49
+        # session). The engage cadence keeps the old ~0.3 s so
+        # empty_confirm_reads above still spans about a second — the switch
+        # key is a toggle, and a faster read would confirm a misread sooner.
+        self._pursuit_steer_interval_s = max(0.02, float(_pm.get("steer_interval_s", 0.1)))
+        self._pursuit_engage_interval_s = max(
+            self._pursuit_steer_interval_s, float(_pm.get("engage_interval_s", 0.3)))
+        # Review 018 / action item 001 dive guard (operator, 2026-09-25): the
+        # chase may not command nose-down below the doctrine floor plus this
+        # margin, or while time to ground is under dive_guard_ttg_s. Six of
+        # eight unplanned deaths in the 00:49-01:41 session followed a chase
+        # dive through the 3000 m floor. Roll, fire and the search roll are
+        # untouched. 0 turns each term off.
+        self._pursuit_dive_guard_margin_m = float(_pm.get("dive_guard_margin_m", 500.0))
+        self._pursuit_dive_guard_ttg_s = float(_pm.get("dive_guard_ttg_s", 60.0))
+        _tree_floor = (_c.climb or {}).get("alt_floor_m")
+        # The floor when no mission flies its own (ADR 147/149 override that).
+        self._tree_alt_floor_m = None if _tree_floor is None else float(_tree_floor)
+        self._dive_guard_reason: "str | None" = None   # last verdict, for change logging
+        # Dive guard pull-out (operator, 2026-09-25 after the 20:26:37 dive):
+        # withholding nose-down did not stop that dive (-103 m/s at the guard,
+        # -175 m/s 3 s later, rolling only), so the tree's hard emergency took
+        # the airframe at ttg 20 s and its nose-up threw the target out of the
+        # frame. While the ttg term holds and the descent is steeper than
+        # dive_guard_level_rate_mps, the chase taps nose-up for
+        # dive_guard_pullout_pulse_s every dive_guard_pullout_interval_s, a
+        # gentle pull-out well before the tree's 30 s emergency. Roll and fire
+        # carry on. Named guesses; pulse 0 turns the pull-out off.
+        self._dive_guard_pullout_pulse_s = float(_pm.get("dive_guard_pullout_pulse_s", 0.4))
+        self._dive_guard_pullout_interval_s = float(
+            _pm.get("dive_guard_pullout_interval_s", 1.0))
+        self._dive_guard_level_rate_mps = float(_pm.get("dive_guard_level_rate_mps", 30.0))
+        # Look-down search (operator, 2026-09-26; config.yaml pursuit_mode). A
+        # positive search_floor_m replaces floor + margin as the guard's altitude
+        # term; the search taps nose-down above it while the roll searches.
+        self._pursuit_search_floor_m = float(_pm.get("search_floor_m", 0.0))
+        # Operator, 2026-09-26: pursuit via the icons comes before dive safety.
+        # False switches off, for the whole pursuit, the dive guard (no
+        # withheld nose-down, no pull-out pulses), ADR 148's recovery flying
+        # through the pursuit, and the ADR 086 emergency climb starting inside
+        # one. To be redesigned later around a predicted trajectory. The
+        # altitude-floor climb (ADR 147) is untouched.
+        self._pursuit_dive_safety = bool(_pm.get("dive_safety", True))
+        self._dive_recovery_suppressed_log_ts = 0.0
+        self._search_look_down_pulse_s = float(_pm.get("search_look_down_pulse_s", 0.0))
+        self._search_look_down_interval_s = float(_pm.get("search_look_down_interval_s", 1.0))
+        self._search_look_down_min_deg = float(_pm.get("search_look_down_min_deg", -20.0))
+        self._search_look_down_next_ts = 0.0
+        # HLDD 015 Icon-Directed Search (2026-09-26), shadow stage: score the
+        # game's ring icon each steering tick and log the keys the law would
+        # hold (ICONPTS). Presses nothing; the search above keeps flying.
+        self._icon_cfg = IconSteeringConfig.from_dict(_pm.get("icon_steering"))
+        # Timestamp of the altitude sample the last look-down tap acted on.
+        self._search_look_down_sample_ts: "float | None" = None
+        # Set by _pursuit_dive_guard: the ttg term tripped, and the rate it saw.
+        self._dive_guard_ttg_tripped = False
+        self._dive_guard_rate: "float | None" = None
+        self._dive_guard_next_pullout_ts = 0.0
         # ADR 068 d1: True once ANY descending sample has been seen during the
         # CURRENT rotation attempt. The over-rotation guard requires it —
         # rotating past vertical means passing THROUGH a dive, so a flight path
@@ -578,6 +896,69 @@ class Controller:
         self._loiter_boundary_max_age_s = float(
             _lo.get("boundary_max_age_s", 4.0))
         self._loiter_tick_s = float(_lo.get("tick_s", 1.0))
+        # ADR 144: mission_su30's block. Which mission battle entry launches
+        # comes from the same ControllerConfig; unknown names fall back to j20
+        # (the schema already restricts the YAML to j20/su30/jas39/f111).
+        self._default_mission = str(getattr(config, "default_mission", "j20"))
+        _su = getattr(config, "su30", None) or {}
+        self._su30_climb_alt_m = float(_su.get("climb_alt_m", 3000))
+        self._su30_climb_max_s = float(_su.get("climb_max_s", 90.0))
+        self._su30_nose_angle_deg = float(_su.get("nose_angle_deg", -10))
+        self._su30_angle_tolerance_deg = float(_su.get("angle_tolerance_deg", 4.0))
+        self._su30_angle_confirm_reads = max(1, int(_su.get("angle_confirm_reads", 2)))
+        self._su30_angle_pulse_s = float(_su.get("angle_pulse_s", 0.6))
+        self._su30_angle_max_s = float(_su.get("angle_max_s", 20.0))
+        self._su30_tick_s = float(_su.get("tick_s", 0.5))
+        self._su30_lock_timeout_s = float(_su.get("lock_timeout_s", 5.0))
+        # Operator, 2026-09-26: a tracker lock or a ring icon during the climb or
+        # the nose-angle step ends the script and starts the pursuit at once.
+        # Measured before it: after the 17:37 respawn the script climbed to 3000 m
+        # and held -10 deg (nose-up pulses at 17:37:21 and :24) while the tracker
+        # had acquired targets at 17:37:10.9 and 17:37:22.9.
+        self._su30_yield_to_target = bool(_su.get("yield_to_target", False))
+        # ADR 147: the altitude doctrine mission_su30 flies. The tree's hard
+        # floor (behavior_tree.climb.alt_floor_m) sits above this mission's
+        # level-off altitude, so the tree restarted the climb the script had
+        # just stopped and the aircraft kept rising. Set, this is the floor
+        # while su30 is in play AND the armed sustain climb stands aside for
+        # it; unset leaves the tree's own doctrine untouched.
+        _su_floor = _su.get("alt_floor_m")
+        self._su30_alt_floor_m = None if _su_floor is None else float(_su_floor)
+        # The same evade-fuel reserve the tree's sustain climb honours, so the
+        # scripted climb does not burn the afterburner fuel a missile alert
+        # would need (ADR 075). Unset means no reserve, as for the tree.
+        self._su30_fuel_reserve_pct = float(_cl_cfg.get("fuel_reserve_pct", 0.0))
+        # ADR 149: mission_f111's block. The su30 numbers again, in a block of
+        # its own so that retuning one jet does not retune the other, plus the
+        # wing-sweep bullet's unsweep altitude, its bounded wait and the tap.
+        _f1 = getattr(config, "f111", None) or {}
+        self._f111_climb_alt_m = float(_f1.get("climb_alt_m", 3000))
+        self._f111_climb_max_s = float(_f1.get("climb_max_s", 90.0))
+        self._f111_nose_angle_deg = float(_f1.get("nose_angle_deg", -10))
+        self._f111_angle_tolerance_deg = float(_f1.get("angle_tolerance_deg", 4.0))
+        self._f111_angle_confirm_reads = max(1, int(_f1.get("angle_confirm_reads", 2)))
+        self._f111_angle_pulse_s = float(_f1.get("angle_pulse_s", 0.6))
+        self._f111_angle_max_s = float(_f1.get("angle_max_s", 20.0))
+        self._f111_tick_s = float(_f1.get("tick_s", 0.5))
+        self._f111_unsweep_alt_m = float(_f1.get("unsweep_alt_m", 3000))
+        self._f111_unsweep_timeout_s = float(_f1.get("unsweep_timeout_s", 30.0))
+        self._f111_wingsweep_tap_s = float(_f1.get("wingsweep_tap_s", 0.1))
+        _f1_floor = _f1.get("alt_floor_m")
+        # ADR 147, extended by ADR 149: the missions that fly their own altitude
+        # doctrine, keyed by the name _set_last_mission records. A mission is in
+        # here only when its block sets alt_floor_m; absent, the tree's floor and
+        # sustain band stand for it, as for every other mission.
+        self._own_altitude_floors_m = {}
+        if self._su30_alt_floor_m is not None:
+            self._own_altitude_floors_m["su30"] = self._su30_alt_floor_m
+        if _f1_floor is not None:
+            self._own_altitude_floors_m["f111"] = float(_f1_floor)
+        # ADR 145: mission_jas39's block. The turn guard is the same 10 s J20
+        # flies (ADR 132), read from this block so that retuning J20's
+        # mission.j20_turn_guard_s does not silently retune this mission too.
+        _jas = getattr(config, "jas39", None) or {}
+        self._jas39_turn_guard_s = float(_jas.get("turn_guard_s", 10.0))
+        self._jas39_cloak_interval_s = float(_jas.get("cloak_press_interval_s", 3.0))
         self._climb_observe_s = float(_cl_cfg.get("pulse_observe_s", 2.5))
         self._climb_min_rate = float(_cl_cfg.get("min_climb_rate", 30.0))
         # ADR 076 d3: over-rotation ceiling. The spawn guard can hand the
@@ -791,6 +1172,19 @@ class Controller:
                     if now - self._last_j20_key_ts < 0.5:  # debounce: ignore key-repeat
                         return
                     self._last_j20_key_ts = now
+                    # 'u' skips rather than preempts a running mission, and the
+                    # skip must have no side effects: relabelling _last_mission
+                    # before the launch is refused would retag the mission that
+                    # is actually flying (su30's padlock block turns off, the
+                    # next respawn restarts the wrong mission) and reset the
+                    # 2 s takeover grace. A cancelled mission still unwinding
+                    # is not "flying" — that is the resume-from-manual case.
+                    if self.is_mission_running() and not self.is_mission_teardown_in_progress():
+                        with self._last_mission_lock:
+                            flying = self._last_mission
+                        logger.info("Controller: '%s' key pressed - mission %s already "
+                                    "running, ignoring", MISSION_J20_KEY, flying)
+                        return
                     self._auto_respawn_restart = True
                     current_state = self._analyzer.game_state if self._analyzer is not None else None
                     if current_state == GameState.GAME_BATTLE_MANUAL:
@@ -808,20 +1202,26 @@ class Controller:
                         # 'u' here is the player asking for the mission NOW
                         # (e.g. after taking over during the Good-Luck wait) and
                         # must work — the old state-based echo check ate those.
-                        logger.info("Controller: '%s' key pressed - starting J20 mission (state=%s)",
-                                    MISSION_J20_KEY,
+                        logger.info("Controller: '%s' key pressed - starting the configured mission "
+                                    "(%s, state=%s)",
+                                    MISSION_J20_KEY, self._default_mission,
                                     current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
                         # Force FSM into GAME_BATTLE so lobby-only background loops (quick-scan
                         # stall-ESC, GAME_LOBBY escape loop) stop treating this as an idle lobby.
                         if self._analyzer is not None and current_state != GameState.GAME_BATTLE:
                             if not self._analyzer.trigger_event("manual_force_battle"):
                                 logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                    self._set_last_mission("j20")
-                    threading.Thread(target=self.mission_j20, daemon=True).start()
+                    # ADR 145: 'u' starts whichever mission mission.default_mission
+                    # names — the same one battle entry launches — rather than J20
+                    # by name. The config picks the mission, so a new mission needs
+                    # no hotkey of its own. With the default set to j20 this is
+                    # exactly the old behaviour.
+                    self._start_default_mission()
                 keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to start J20 mission", MISSION_J20_KEY)
+                logger.info("Controller: registered hotkey '%s' to start the configured mission (%s)",
+                            MISSION_J20_KEY, self._default_mission)
             except Exception:
-                logger.exception("Controller: failed to register J20 mission hotkey")
+                logger.exception("Controller: failed to register configured-mission hotkey")
 
             try:
                 def start_loiter_mission(_e):
@@ -832,6 +1232,31 @@ class Controller:
                 logger.info("Controller: registered hotkey '%s' to start loiter mission", MISSION_LOITER_KEY)
             except Exception:
                 logger.exception("Controller: failed to register loiter mission hotkey")
+
+            try:
+                self._last_su30_key_ts = 0.0
+                def start_su30_mission(_e):
+                    now = time.time()
+                    if now - self._last_su30_key_ts < 0.5:  # debounce: ignore key-repeat
+                        return
+                    self._last_su30_key_ts = now
+                    current_state = self._analyzer.game_state if self._analyzer is not None else None
+                    logger.info("Controller: '%s' key pressed - starting SU-30 mission (state=%s)",
+                                MISSION_SU30_KEY,
+                                current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
+                    # Same as the J20 hotkey: a press means "fly it now", so the
+                    # FSM is forced into GAME_BATTLE (which also resumes from
+                    # GAME_BATTLE_MANUAL) before the mission thread starts.
+                    if self._analyzer is not None and current_state != GameState.GAME_BATTLE:
+                        if not self._analyzer.trigger_event("manual_force_battle"):
+                            logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
+                    self._set_last_mission("su30")
+                    threading.Thread(target=self.mission_su30, kwargs={"preempt": True},
+                                     daemon=True).start()
+                keyboard_module.on_press_key(MISSION_SU30_KEY, start_su30_mission, suppress=False)
+                logger.info("Controller: registered hotkey '%s' to start SU-30 mission", MISSION_SU30_KEY)
+            except Exception:
+                logger.exception("Controller: failed to register SU-30 mission hotkey")
 
             # ADR 094: finish the round, then exit. Deferred, and reversible.
             try:
@@ -904,6 +1329,11 @@ class Controller:
 
                             # Create output directory if it doesn't exist
                             output_dir = Path("tests/test-output")
+                            # Only screenshot_*.png: this folder is shared
+                            # with live_hud.png, output_grid.png and reports.
+                            if not capture_budget.admit(output_dir, "Screenshot hotkey",
+                                                        patterns="screenshot_*.png"):
+                                return
                             output_dir.mkdir(parents=True, exist_ok=True)
 
                             # Generate timestamp filename
@@ -1164,23 +1594,31 @@ class Controller:
         return True
 
 
-    def nose_up(self, hold_seconds: float = 2.5, block: bool = True):
+    def nose_up(self, hold_seconds: float = 2.5, block: bool = True, ignore_cancel: bool = False):
         """Nose-up maneuver: presses and holds the configured nose-up key.
 
         Args:
             hold_seconds: How long to hold the key (default 2.5 seconds)
+            ignore_cancel: Pass True for callers running after self._mission_cancel
+                            is already set for the whole call's duration — same
+                            rationale as roll_left/roll_right's own parameter
+                            (ADR 136 precedent). Default False changes nothing
+                            for the ambient tracking caller (HLDD 005).
         """
         # Use generic executor to perform the key press
-        self._execute_key_press(NOSE_UP_KEY, hold_seconds=hold_seconds, block=block, action_name='nose_up')
+        self._execute_key_press(NOSE_UP_KEY, hold_seconds=hold_seconds, block=block,
+                                 action_name='nose_up', ignore_cancel=ignore_cancel)
 
-    def nose_down(self, hold_seconds: float = 2.5, block: bool = True):
+    def nose_down(self, hold_seconds: float = 2.5, block: bool = True, ignore_cancel: bool = False):
         """Nose-down maneuver: presses and holds the configured nose-down key.
 
         Args:
             hold_seconds: How long to hold the key (default 2.5 seconds)
+            ignore_cancel: See nose_up's own docstring.
         """
         # Use generic executor to perform the key press
-        self._execute_key_press(NOSE_DOWN_KEY, hold_seconds=hold_seconds, block=block, action_name='nose_down')
+        self._execute_key_press(NOSE_DOWN_KEY, hold_seconds=hold_seconds, block=block,
+                                 action_name='nose_down', ignore_cancel=ignore_cancel)
 
     def afterburner(self, hold_seconds: float = 2.5, block: bool = True):
         """Afterburner: presses and holds the configured afterburner key.
@@ -1365,6 +1803,21 @@ class Controller:
         """
         self._target_tracker = tracker
 
+    def set_hud_renderer(self, hud_renderer) -> None:
+        """Wire in the HudRenderer instance (HLDD 005 fix, 2026-09-21).
+
+        Called once from main.py, same pattern and same call site as
+        set_target_tracker — Controller doesn't own or construct the
+        renderer either (TrackingHudHandler does). Lets the eject heatdive
+        loop write to the same live_hud.png the ambient tracking path uses,
+        instead of leaving it frozen for the whole dive: TrackingHudHandler
+        .tick() — the only other caller of maybe_render — is gated to
+        GAME_BATTLE/GAME_BATTLE_MANUAL, and the dive runs entirely inside
+        GAME_BATTLE_EJECT, which that gate excludes. Until this is called,
+        the heatdive loop simply skips HUD rendering.
+        """
+        self._hud_renderer = hud_renderer
+
     def roll_left(self, hold_seconds: float = 0.3, block: bool = True, ignore_cancel: bool = False):
         """Roll left by holding the configured roll-left key."""
         if self._turn_blocked("roll_left"):
@@ -1389,8 +1842,9 @@ class Controller:
         max_hold_sec: float = 0.35,
         cooldown_sec: float = 0.15,
         ignore_cancel: bool = False,
+        sustained_hold: bool = False,
     ) -> "str | None":
-        """Apply proportional roll correction toward a target.
+        """Apply roll correction toward a target.
 
         Args:
             error_norm: Normalized horizontal error in [-1, 1].
@@ -1398,18 +1852,32 @@ class Controller:
                         Positive = target right of center → roll right.
             deadband:   No-action zone around zero.
             kp:         Proportional gain; hold_sec = kp * abs(error_norm).
+                        Ignored when sustained_hold is True.
             min_hold_sec / max_hold_sec: Clamp bounds on the roll hold duration.
+                        Ignored when sustained_hold is True.
             cooldown_sec: Minimum interval between consecutive roll commands.
+                        Ignored when sustained_hold is True.
             ignore_cancel: Pass True for callers running after self._mission_cancel
                             is already set for the whole call's duration (e.g. ADR
                             136's eject heatdive loop) — otherwise the hold is cut
                             to near-zero on the very first _mission_cancel.wait()
                             poll, since the event is already set (measured live,
                             2026-09-09: 0-11ms instead of the requested hold).
+                            Has no effect when sustained_hold is True — see
+                            _sustained_roll_hold's own note on why.
+            sustained_hold: HLDD 005 Sustained-Hold Actuation (2026-09-23).
+                            False (default): the original bounded-tap behavior
+                            below, byte-identical. True: hold the key until
+                            error_norm re-enters the deadband or changes sign,
+                            the same shape Controller.boundary_turn_mode
+                            already uses — see _sustained_roll_hold.
 
         Returns:
-            'left', 'right', or None if suppressed by deadband or cooldown.
+            'left', 'right', or None if suppressed by deadband (both modes)
+            or cooldown (tap mode only).
         """
+        if sustained_hold:
+            return self._sustained_roll_hold(error_norm, deadband)
         if abs(error_norm) <= deadband:
             return None
         now = time.time()
@@ -1422,6 +1890,338 @@ class Controller:
             return "left"
         self.roll_right(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
         return "right"
+
+    def orient_pitch_to_target(
+        self,
+        error_norm_y: float,
+        *,
+        deadband: float = 0.05,
+        kp: float = 0.30,
+        min_hold_sec: float = 0.08,
+        max_hold_sec: float = 0.35,
+        cooldown_sec: float = 0.15,
+        ignore_cancel: bool = False,
+        sustained_hold: bool = False,
+    ) -> "str | None":
+        """Apply pitch correction toward a target (HLDD 005, 2026-09-21).
+
+        Independent instance of orient_nose_to_target's control law, on the
+        vertical axis: own cooldown timestamp (_last_pitch_orient_ts, not
+        _last_orient_ts), own keys (NOSE_UP_KEY/NOSE_DOWN_KEY) — a roll
+        command in flight never delays a pitch command or vice versa.
+
+        Must never be called by the ADR 136 heatdive consumer.
+        `eject_and_dive`'s own descent control (`_eject_descent_control`,
+        ADR 069) already holds exclusive ownership of NOSE_UP_KEY/
+        NOSE_DOWN_KEY for the whole dive, and ADR 058's dive-confirmation
+        criterion depends on a cumulative real-hold-time measurement that
+        assumes it is the only thing pressing that key — see HLDD 005's
+        Safety and Gating Rules for the full reasoning. This method exists
+        for the ambient tracking path and pursue_and_engage only. This
+        restriction applies identically whether sustained_hold is set —
+        holding NOSE_UP_KEY/NOSE_DOWN_KEY indefinitely is a *worse* second
+        writer on that key than a bounded tap ever was, not a better one.
+
+        Args:
+            error_norm_y: Normalized vertical error in [-1, 1].
+                          Negative = target above center → nose up.
+                          Positive = target below center → nose down.
+            deadband:   No-action zone around zero.
+            kp:         Proportional gain; hold_sec = kp * abs(error_norm_y).
+                        Ignored when sustained_hold is True.
+            min_hold_sec / max_hold_sec: Clamp bounds on the pitch hold duration.
+                        Ignored when sustained_hold is True.
+            cooldown_sec: Minimum interval between consecutive pitch commands.
+                        Ignored when sustained_hold is True.
+            ignore_cancel: See orient_nose_to_target's own docstring — same
+                            rationale, independent of that method's own flag.
+                            Has no effect when sustained_hold is True.
+            sustained_hold: See orient_nose_to_target's own docstring — same
+                            mechanism, vertical axis. No search default: a
+                            miss tick under sustained hold releases to
+                            neutral here (release_pitch_hold), the operator
+                            directive behind ROLL_LEFT_KEY's search hold was
+                            roll-axis only.
+
+        Returns:
+            'up', 'down', or None if suppressed by deadband (both modes)
+            or cooldown (tap mode only).
+        """
+        if sustained_hold:
+            return self._sustained_pitch_hold(error_norm_y, deadband)
+        if abs(error_norm_y) <= deadband:
+            return None
+        now = time.time()
+        if now - self._last_pitch_orient_ts < cooldown_sec:
+            return None
+        hold = float(min(max(kp * abs(error_norm_y), min_hold_sec), max_hold_sec))
+        self._last_pitch_orient_ts = now
+        if error_norm_y < 0:
+            self.nose_up(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
+            return "up"
+        self.nose_down(hold_seconds=hold, block=False, ignore_cancel=ignore_cancel)
+        return "down"
+
+    def _press_tracking_key(self, key: str, action: str) -> None:
+        """Press and hold one tracking key indefinitely (Sustained-Hold
+        Actuation, HLDD 005 2026-09-23) — the same low-level primitive and
+        programmatic-key bracketing `boundary_turn_mode` already uses for
+        its own held roll/pitch keys (`_climb_key` plus
+        `_inc_programmatic_key`), applied here instead of a bounded tap.
+        No `ignore_cancel`: unlike `_execute_key_press` (what `roll_left`/
+        `roll_right`/`nose_up`/`nose_down` use), `_climb_key` never polls
+        `_mission_cancel` at all, so there is nothing to ignore — every
+        caller of this method already runs after `cancel_mission()`, same
+        as `boundary_turn_mode` itself.
+        """
+        if key in _WATCHED_MANEUVER_KEYS:
+            self._inc_programmatic_key(key)
+        self._climb_key(key, press=True, action=action)
+
+    def _release_tracking_key(self, key: str, action: str) -> None:
+        """Release a key `_press_tracking_key` pressed."""
+        self._climb_key(key, press=False, action=action)
+        if key in _WATCHED_MANEUVER_KEYS:
+            self._arm_release_grace(key)
+            self._dec_programmatic_key(key)
+
+    def _sustained_roll_hold(self, error_norm: float, deadband: float) -> "str | None":
+        """Sustained-hold roll state machine (HLDD 005, 2026-09-23) — the
+        `sustained_hold=True` branch of `orient_nose_to_target`. Holds a key
+        until `error_norm` re-enters the deadband or changes sign, instead
+        of computing a bounded tap; see that method's docstring for the
+        public contract and this design's own HLDD section for why.
+        """
+        if abs(error_norm) <= deadband:
+            self.release_roll_hold(why="deadband err=%+.3f" % error_norm)
+            return None
+        desired = "left" if error_norm < 0 else "right"
+        if self._roll_held == desired and self._roll_hold_reason == "target":
+            return desired  # already holding the right key for the right reason
+        prev = (self._roll_held, self._roll_hold_reason)
+        if self._roll_held is not None:
+            self._release_tracking_key(
+                ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
+                "tracking_roll")
+        self._press_tracking_key(
+            ROLL_LEFT_KEY if desired == "left" else ROLL_RIGHT_KEY, "tracking_roll")
+        self._roll_held = desired
+        self._roll_hold_reason = "target"
+        self._log_roll_hold(prev, "target err=%+.3f" % error_norm)
+        return desired
+
+    # A pitch sample older than this gives no usable rate (the ambient tick
+    # runs at the main loop's 1.5 s; a pursuit steers every ~0.1 s).
+    _PITCH_RATE_MAX_GAP_S = 0.5
+    # Closer samples than this give a rate dominated by pixel noise.
+    _PITCH_RATE_MIN_GAP_S = 0.02
+
+    def _sustained_pitch_hold(self, error_norm_y: float, deadband: float) -> "str | None":
+        """Pitch's own instance of `_sustained_roll_hold` — no hold-reason
+        state, since pitch has no search default to distinguish from.
+
+        CR-018-01 lead release: when the previous sample is between
+        _PITCH_RATE_MIN_GAP_S and _PITCH_RATE_MAX_GAP_S old the error rate is
+        known, and a hold is released
+        once the error extrapolated `_pitch_lead_s` ahead is inside the
+        deadband or past centre. No key is pressed in that case either: the
+        error is already closing fast enough on its own."""
+        now = time.time()
+        prev_sample = self._pitch_last_sample
+        self._pitch_last_sample = (now, error_norm_y)
+        if abs(error_norm_y) <= deadband:
+            self.release_pitch_hold(why="deadband err_y=%+.3f" % error_norm_y)
+            return None
+        if self._pitch_lead_s > 0 and prev_sample is not None:
+            dt = now - prev_sample[0]
+            if self._PITCH_RATE_MIN_GAP_S <= dt <= self._PITCH_RATE_MAX_GAP_S:
+                rate = (error_norm_y - prev_sample[1]) / dt
+                predicted = error_norm_y + rate * self._pitch_lead_s
+                if abs(predicted) <= deadband or predicted * error_norm_y < 0:
+                    self.release_pitch_hold(
+                        why="lead err_y=%+.3f pred=%+.3f" % (error_norm_y, predicted))
+                    return None
+        desired = "up" if error_norm_y < 0 else "down"
+        if self._pitch_held == desired:
+            return desired
+        prev = self._pitch_held
+        if self._pitch_held is not None:
+            self._release_tracking_key(
+                NOSE_UP_KEY if self._pitch_held == "up" else NOSE_DOWN_KEY,
+                "tracking_pitch")
+        self._press_tracking_key(
+            NOSE_UP_KEY if desired == "up" else NOSE_DOWN_KEY, "tracking_pitch")
+        self._pitch_held = desired
+        logger.debug("HOLD[pitch]: %s -> %s (target err_y=%+.3f)", prev, desired, error_norm_y)
+        return desired
+
+    def engage_roll_search(self, side: str = "left") -> None:
+        """No target visible: hold the roll key for `side` until one reappears
+        (operator directive, HLDD 005 Sustained-Hold Actuation, 2026-09-23)
+        — a search default, not neutral, so the nose keeps sweeping
+        instead of flying straight with nothing scanning for a new contact.
+        `side` is the side the target or icon was last seen on (HLDD 015,
+        2026-09-26: the fixed left search rolled past contacts on screen);
+        left when nothing has been seen.
+        Callers invoke this only when sustained_hold is in use; harmless to
+        call otherwise since it only ever touches roll-hold state this
+        design's own methods manage.
+
+        Relabels rather than re-presses when that key is already held
+        for a target — the physical key does not change, only why it is
+        held — but always sets the reason to "search" so a later
+        reacquisition (`_sustained_roll_hold` finding `_roll_hold_reason !=
+        "target"`) is forced to treat the next real target as a fresh
+        decision rather than a silent no-op.
+        """
+        side = "right" if side == "right" else "left"
+        other = "left" if side == "right" else "right"
+        prev = (self._roll_held, self._roll_hold_reason)
+        if self._roll_held == other:
+            self._release_tracking_key(
+                ROLL_RIGHT_KEY if other == "right" else ROLL_LEFT_KEY, "tracking_roll")
+            self._roll_held = None
+        if self._roll_held is None:
+            self._press_tracking_key(
+                ROLL_RIGHT_KEY if side == "right" else ROLL_LEFT_KEY, "tracking_roll")
+            self._roll_held = side
+        self._roll_hold_reason = "search"
+        self._log_roll_hold(prev, "search %s" % side)
+
+    def roll_on_miss(self, last_seen_ts: "float | None", resume_delay_s: float,
+                     last_err: "float | None" = None,
+                     centre_err: "float | None" = None,
+                     centre_delay_s: "float | None" = None,
+                     side: "str | None" = None) -> None:
+        """No target this tick. Within `resume_delay_s` of the last tick one
+        was visible, release the roll axis to neutral instead of resuming the
+        search; only after that long unseen (or if none was ever seen) does
+        `engage_roll_search` take over, toward `side` (the last known side;
+        None searches left).
+
+        Action item 001 (2026-09-24). `visible` is False on every
+        TargetTracker LOST_GRACE tick too, and the tracker's own grace window
+        is only ~0.4s, so without this a one-tick detection dropout right
+        after a lock re-pressed ROLL_LEFT immediately (measured: wingman.log
+        2026-09-24 06:03:38-39, target at screen centre in frame 16, at
+        err=+0.366 by frame 17). Neutral rather than "keep the last
+        direction": a target that has vanished would otherwise be chased with
+        open-loop roll for the whole delay.
+
+        Near-centre extension (operator, 2026-09-24: "it had more than enough
+        time locked onto target but kept forcing left turn, it should have
+        stopped left turn and focused on target"). When the last visible error
+        was within `centre_err` the aircraft is already pointing at the target,
+        so the wait is `centre_delay_s` (if longer) — spinning left after that
+        only turns it away again. Measured on the 07:34-08:24 session with the
+        2.0 s delay in place: the search resumed with the target last seen
+        within +-0.15 of centre in 6 of 10 pursuit cases and 23 of 41 dive
+        cases. All three of last_err, centre_err and centre_delay_s must be
+        given for it to apply.
+        """
+        delay, near_centre = _resume_delay(resume_delay_s, last_err, centre_err, centre_delay_s)
+        if last_seen_ts is not None and time.time() - last_seen_ts < delay:
+            self.release_roll_hold(
+                why="miss within %.1fs of last lock%s"
+                    % (delay, ", target was near centre" if near_centre else ""))
+        else:
+            self.engage_roll_search(side or "left")
+
+    def release_roll_hold(self, why: str = "release") -> None:
+        """Release whatever roll key Sustained-Hold Actuation is holding,
+        search or target, for any reason. Safe no-op if nothing is held."""
+        if self._roll_held is None:
+            return
+        prev = (self._roll_held, self._roll_hold_reason)
+        self._release_tracking_key(
+            ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
+            "tracking_roll")
+        self._roll_held = None
+        self._roll_hold_reason = None
+        self._log_roll_hold(prev, why)
+
+    def _log_roll_hold(self, prev: "tuple[str | None, str | None]", why: str) -> None:
+        """One debug line per roll-hold state change (never per tick). The
+        press/release path itself logs nothing on success, so before this the
+        log could not say what the roll axis did — 2026-09-24's over-rotation
+        had to be inferred from screenshots."""
+        cur = (self._roll_held, self._roll_hold_reason)
+        if cur != prev:
+            logger.debug("HOLD[roll]: %s/%s -> %s/%s (%s)",
+                         prev[0], prev[1], cur[0], cur[1], why)
+
+    def release_pitch_hold(self, why: str = "release") -> None:
+        """Release whatever pitch key Sustained-Hold Actuation is holding.
+        Safe no-op if nothing is held.
+
+        Logs one `HOLD[pitch]: <dir> -> None (<why>)` line whatever the path,
+        so every press line has a matching end and a hold's length is the gap
+        between the two. Before, only deadband and lead releases logged: a
+        miss, dive-guard, yield or loop-exit release was silent, and 2 of 19
+        holds in the 2026-09-25 21:23 session had no recorded end (one
+        nose-down hold ran into a dive recovery)."""
+        if self._pitch_held is None:
+            return
+        prev = self._pitch_held
+        self._release_tracking_key(
+            NOSE_UP_KEY if self._pitch_held == "up" else NOSE_DOWN_KEY,
+            "tracking_pitch")
+        self._pitch_held = None
+        logger.debug("HOLD[pitch]: %s -> None (%s)", prev, why)
+
+    def hold_roll_for_icon(self, side: "str | None", why: str) -> None:
+        """HLDD 015 step 3: hold ROLL_LEFT or ROLL_RIGHT for the icon (reason
+        "icon"), or release the roll (None: wings level). Same held-key state as
+        Sustained-Hold Actuation, so a lock (`_sustained_roll_hold`, which
+        treats any reason but "target" as a fresh decision) takes over cleanly."""
+        if side is None:
+            self.release_roll_hold(why=why)
+            return
+        if self._roll_held == side and self._roll_hold_reason == "icon":
+            return
+        prev = (self._roll_held, self._roll_hold_reason)
+        if self._roll_held is not None and self._roll_held != side:
+            self._release_tracking_key(
+                ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
+                "tracking_roll")
+            self._roll_held = None
+        if self._roll_held is None:
+            self._press_tracking_key(
+                ROLL_LEFT_KEY if side == "left" else ROLL_RIGHT_KEY, "tracking_roll")
+            self._roll_held = side
+        self._roll_hold_reason = "icon"
+        self._log_roll_hold(prev, why)
+
+    def hold_pitch_for_icon(self, desired: "str | None", why: str) -> None:
+        """HLDD 015 step 2b: hold NOSE_DOWN ("down"), NOSE_UP ("up") or neither
+        (None) for the icon's points, on the same held-key primitives and
+        `_pitch_held` state Sustained-Hold Actuation uses, so the tracker, the
+        dive recovery and loop exit all release it the usual way. Clears the
+        tracker's pitch-rate sample: its lead estimate must not difference an
+        error against a sample taken before the icon took the axis."""
+        if desired is None:
+            self.release_pitch_hold(why=why)
+            return
+        if self._pitch_held == desired:
+            return
+        prev = self._pitch_held
+        if prev is not None:
+            self._release_tracking_key(
+                NOSE_UP_KEY if prev == "up" else NOSE_DOWN_KEY, "tracking_pitch")
+        self._press_tracking_key(
+            NOSE_UP_KEY if desired == "up" else NOSE_DOWN_KEY, "tracking_pitch")
+        self._pitch_held = desired
+        self._pitch_last_sample = None
+        logger.debug("HOLD[pitch]: %s -> %s (%s)", prev, desired, why)
+
+    def release_tracking_holds(self, why: str = "release") -> None:
+        """Release both axes' Sustained-Hold Actuation keys — called from
+        cancel_mission()/release_for_manual_takeover() so a mid-hold
+        cancellation or manual takeover never leaves a tracking-commanded
+        key pinned down under the operator's own input."""
+        self.release_roll_hold(why=why)
+        self.release_pitch_hold(why=why)
+        self._pitch_last_sample = None
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
@@ -1450,9 +2250,64 @@ class Controller:
         padlock_target_switch) presses through — leaves the real in-game
         state unknown until re-confirmed.
         """
+        # ADR 144: mission_su30 never uses the padlock camera. This is the one
+        # place every programmatic press goes through, so it is the backstop;
+        # the two callers that act on their own are gated where they start.
+        if self.is_padlock_blocked():
+            logger.debug("Controller: padlock_camera skipped — mission_su30 does not use padlock")
+            return
         self._padlock_engaged = None
         self._execute_key_press(PADLOCK_CAMERA, hold_seconds=hold_seconds, block=block,
                                  action_name='padlock_camera', ignore_cancel=ignore_cancel)
+
+    def is_padlock_blocked(self) -> bool:
+        """True while mission_su30 is the mission in play (ADR 144).
+
+        That mission engages by boresight and does not use the padlock camera,
+        so none of the padlock logic runs for it. Every other mission is
+        untouched: this is False unless the last-launched mission is su30.
+        """
+        with self._last_mission_lock:
+            return self._last_mission == "su30"
+
+    def _own_altitude_floor_in_play_m(self) -> "float | None":
+        """The floor of the mission in play, if it flies its own altitude doctrine.
+
+        ADR 147 (mission_su30), extended by ADR 149 (mission_f111): each such
+        mission sets ``<name>_mission.alt_floor_m``; every other mission, and a
+        mission whose block omits the key, gets None.
+
+        Read by the behavior tree once or twice a tick, so the lock is taken with
+        a timeout: no doctrine override for a tick beats a stalled main loop.
+        """
+        if not self._own_altitude_floors_m:
+            return None
+        if not self._last_mission_lock.acquire(timeout=1.0):
+            logger.warning("Controller: last-mission lock timeout - no mission "
+                           "altitude override this tick")
+            return None
+        try:
+            return self._own_altitude_floors_m.get(self._last_mission)
+        finally:
+            self._last_mission_lock.release()
+
+    def altitude_floor_override_m(self) -> "float | None":
+        """The hard altitude floor for the mission in play, or None (ADR 147).
+
+        None means the tree's configured floor stands. Only the scripted
+        missions set one (mission_su30, and mission_f111 under ADR 149): they
+        level off at their ``climb_alt_m``, below that floor.
+        """
+        return self._own_altitude_floor_in_play_m()
+
+    def sustain_climb_suppressed(self) -> bool:
+        """True when the armed sustain climb must stand aside (ADR 147).
+
+        The sustain band is the adaptive doctrine's climb toward the operating
+        altitude; mission_su30 and mission_f111 (ADR 149) are deliberately not
+        that doctrine and fly their own level-off, so the band would only undo it.
+        """
+        return self._own_altitude_floor_in_play_m() is not None
 
     def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
         """Press padlock N times to cycle to a new target, then pause the auto-padlock loop briefly.
@@ -1493,6 +2348,23 @@ class Controller:
         """Press SPECIAL_ABILITY to reload flares (triggered when flare count == 2)."""
         logger.info("\033[93m🔥 Reloading flares via SPECIAL_ABILITY key\033[0m")
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
+
+    def activate_special_weapon(self, block: bool = True):
+        """Press SPECIAL_ABILITY once: the JAS39's cloak (ADR 145).
+
+        The same key and the same 0.1 s tap as reload_flares; what the ability
+        does depends on the airframe. The tap length is hard-coded, as it is for
+        every other tap wingman makes (fire, padlock, weapon switch): long
+        enough for the game to register it, and far shorter than the cloak
+        loop's interval, so presses never overlap. There is no log line here —
+        the cloak loop presses every few seconds, and _execute_key_press
+        already logs each press at DEBUG.
+
+        Goes through _execute_key_press, which suppresses every key except
+        flares during manual takeover (SAF-001).
+        """
+        self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block,
+                                action_name='activate_special_weapon')
 
     def _eject_key(self, press: bool, key: str, note: str = "eject_and_dive") -> None:
         """Press or release a key inside the eject sequence, honoring replay simulation.
@@ -1710,7 +2582,11 @@ class Controller:
             # ADR 136: once heatdive has switched weapons, AMMO_MISSILE reads
             # the secondary loadout, not the rack this check was written for —
             # skip it rather than false-abort on the heat-seeker count.
+            # Also skipped while a weapon switch is deliberately deferred
+            # (eject_and_dive's defer_switch_until_empty): the rack is loaded
+            # by design there, not rearmed.
             if (self._eject_abort_on_rearm and not self._eject_weapon_switched
+                    and not self._eject_defer_switch
                     and self._analyzer is not None):
                 try:
                     _mis = self._analyzer.get_ammo_missiles()
@@ -2061,18 +2937,41 @@ class Controller:
         ever runs once per tick, after that tick's own detection), so no
         separate cooldown timer is needed on top of the streak gate.
         """
+        # ADR 144: mission_su30 keeps the secondary weapon selected for its
+        # whole life, which would make this press to "correct" the padlock on
+        # every life. It does not use the padlock camera at all.
+        if self.is_padlock_blocked():
+            return
         if not self.is_secondary_weapon_active():
             return
         if self._padlock_engaged is not None:
             return
         if self._padlock_dot_streak_since is not None:
             return   # a streak is actively building — let it be checked, not interrupted
+        if self._padlock_unknown_correction_attempts >= self._padlock_unknown_correction_max:
+            if self._padlock_unknown_correction_attempts == self._padlock_unknown_correction_max:
+                # Logged exactly once per dive (bumped past max right below,
+                # so this branch cannot fire again until the next reset) —
+                # operator directive 2026-09-20: a press that never confirms
+                # after this many tries is not going to on the next one
+                # either, and silently going quiet must not read as "it
+                # worked," the same reasoning ADR 137 D5 already gave for
+                # crash_with_missiles' own capture cap.
+                logger.warning(
+                    "Controller: padlock still unknown after %d correction "
+                    "attempt(s) — giving up for this dive (ADR 140 D6)",
+                    self._padlock_unknown_correction_max)
+                self._padlock_unknown_correction_attempts += 1
+            return
+        self._padlock_unknown_correction_attempts += 1
         logger.info(
             "Controller: padlock unknown during secondary-weapon use — "
-            "pressing to correct (ADR 140 D6)")
+            "pressing to correct (%d/%d, ADR 140 D6)",
+            self._padlock_unknown_correction_attempts, self._padlock_unknown_correction_max)
         self.padlock_camera(hold_seconds=0.1, block=True, ignore_cancel=True)
 
-    def _eject_heatdive_loop(self, stop_event: threading.Event) -> None:
+    def _eject_heatdive_loop(self, stop_event: threading.Event,
+                             defer_switch_until_empty: bool = False) -> None:
         """ADR 136: roll toward the tracked target and fire heat-seekers.
 
         Runs on its own thread alongside eject_and_dive's existing,
@@ -2082,41 +2981,162 @@ class Controller:
         (set by external cancellation — manual takeover, survival hold,
         shutdown), whichever comes first, so it never outlives the dive it
         belongs to.
+
+        defer_switch_until_empty: eject_and_dive did not press SWITCH_WEAPON
+        (mission_su30's pursuit cap, ADR 144 D4). The dive fires whatever is
+        selected and this loop presses the key once, when that weapon's ammo has
+        read 0 for `pursuit_mode.empty_confirm_reads` consecutive cycles — the
+        same rule pursue_and_engage applies, for the same reason (the key is a
+        toggle, so one misread 0 must not swap away a loaded rack). Until the
+        HUD count catches up with that switch it still shows the old rack's 0,
+        so for `ammo_zero_grace_s` after it the loop fires regardless.
         """
         logger.info("Controller: eject heatdive loop started")
+        # Convergence telemetry (2026-09-21): the ambient path already logs
+        # "Tracker: roll_%s err=..." whenever it actually issues a command,
+        # but this loop — the one axis actually live today — logged nothing
+        # about its own outcome at all, which is exactly the data tuning
+        # kp/deadband/hold needs. `last_err`/`last_cmd` carry the previous
+        # cycle's reading and the command it produced forward one iteration,
+        # so this cycle's fresh reading can be reported against it: did that
+        # roll pulse actually shrink |error|, or not. Reset per dive — no
+        # carry-over from a previous encounter.
+        last_err: "float | None" = None
+        last_cmd: "str | None" = None
+        last_seen_ts: "float | None" = None
+        last_visible_err: "float | None" = None
+        zero_reads = 0
+        switched_at: "float | None" = None
+        tally = _EngagementTally()
         try:
             while not stop_event.is_set() and not self._eject_stop.is_set():
                 try:
                     frame = self._capture.grab_from_thread()
                     obs = self._target_tracker.update(frame)
-                    if obs.get("visible") and obs.get("error_norm") is not None:
+                    err = obs.get("error_norm")
+                    cmd = None
+                    if obs.get("visible") and err is not None:
+                        last_seen_ts = time.time()
+                        last_visible_err = err
                         # ignore_cancel: eject_and_dive already called
                         # cancel_mission() before this loop ever started, so
                         # self._mission_cancel stays set for the whole dive —
                         # without this every hold is cut to near-zero on the
                         # first _mission_cancel.wait() poll (measured live,
                         # 2026-09-09: 0-11ms instead of the requested hold).
-                        self.orient_nose_to_target(obs["error_norm"], ignore_cancel=True)
+                        cmd = self.orient_nose_to_target(
+                            err, ignore_cancel=True, sustained_hold=self._sustained_hold_enabled)
+                    elif self._sustained_hold_enabled:
+                        # HLDD 005 Sustained-Hold Actuation (2026-09-23): a
+                        # miss tick under the old tap model needed no action —
+                        # the previous tap had already self-released. Under a
+                        # held key, a miss must be handled explicitly or the
+                        # last-commanded key stays down.
+                        #
+                        # 2026-09-24, operator: "it had more than enough time
+                        # locked onto target but kept forcing left turn, it
+                        # should have stopped left turn and focused on target".
+                        # Measured (wingman.log 06:51-07:06, this loop): all 13
+                        # target holds ended with `-> left/search` the instant
+                        # the lock dropped — even with the target last seen on
+                        # the RIGHT (err +0.2 to +0.5), i.e. turning away from
+                        # it. roll_on_miss holds neutral for the resume delay
+                        # after a lock and only then falls back to the ROLL_LEFT
+                        # search default (still immediate if nothing was ever
+                        # seen this dive).
+                        self.roll_on_miss(
+                            last_seen_ts, self._pursuit_search_resume_delay_s,
+                            last_visible_err, self._pursuit_search_resume_centre_err,
+                            self._pursuit_search_resume_centre_delay_s,
+                            side=_side_of(last_visible_err))
+                    if err is not None:
+                        if last_err is not None:
+                            converging = abs(err) < abs(last_err)
+                            logger.debug(
+                                "HEATDIVE[roll]: err=%+.3f (was %+.3f after roll_%s, %s) mode=%s",
+                                err, last_err, last_cmd or "none",
+                                "converging" if converging else "diverging",
+                                obs.get("mode"),
+                            )
+                        last_err = err
+                        last_cmd = cmd
                     ammo = None
+                    flares = None
+                    health = None
                     if self._analyzer is not None:
                         try:
                             ammo = self._analyzer.get_ammo_missiles()
                         except Exception:
                             ammo = None
+                        try:
+                            flares = self._analyzer.get_ammo_flares()
+                        except Exception:
+                            flares = None
+                        try:
+                            health = self._analyzer.get_health()
+                        except Exception:
+                            health = None
+                    tally.scan(obs.get("visible"), ammo)
+                    # Deferred weapon switch (ADR 144 D4, 2026-09-24): see this
+                    # method's docstring and pursue_and_engage's identical rule.
+                    if defer_switch_until_empty and not self._eject_weapon_switched:
+                        if ammo == 0:
+                            zero_reads += 1
+                        elif ammo is not None:
+                            zero_reads = 0
+                        if zero_reads >= self._pursuit_empty_confirm_reads:
+                            logger.info(
+                                "Controller: eject heatdive — selected weapon empty "
+                                "(%d consecutive zero reads), switching to the "
+                                "secondary", zero_reads)
+                            self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                            self._eject_weapon_switched = True
+                            switched_at = time.time()
+                            ammo = None
                     # Fire whenever ammo is unreadable (fail open, matching
                     # the pre-ADR-136 default of just firing) or still > 0.
                     # ADR 136 D1 step 4: no lock/tone detection — the game
                     # decides when a held trigger actually releases a shot.
-                    if ammo is None or ammo > 0:
+                    # Also fire while the count is still the pre-switch rack's
+                    # (a deferred switch just happened): a stale 0 there is not
+                    # an empty secondary.
+                    if (ammo is None or ammo > 0
+                            or (switched_at is not None
+                                and time.time() - switched_at < self._pursuit_ammo_grace_s)):
                         self.fire_active_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                    # HLDD 005 fix (2026-09-21): otherwise live_hud.png goes
+                    # dark for the whole dive — TrackingHudHandler.tick(), the
+                    # only other caller of maybe_render, is gated to
+                    # GAME_BATTLE/GAME_BATTLE_MANUAL and this loop only ever
+                    # runs during GAME_BATTLE_EJECT. State name is hardcoded,
+                    # not read from the FSM: this loop cannot run in any other
+                    # state by construction (started after eject_started,
+                    # stopped before eject_complete). maybe_render's own lock
+                    # already makes concurrent calls from two threads safe,
+                    # and in practice the two callers never overlap anyway —
+                    # GAME_BATTLE and GAME_BATTLE_EJECT are mutually exclusive
+                    # FSM states.
+                    if self._hud_renderer is not None:
+                        self._hud_renderer.maybe_render(
+                            frame, obs, "GAME_BATTLE_EJECT", health, ammo, flares)
                 except Exception:
                     logger.exception("Controller: eject heatdive loop cycle failed")
                 if stop_event.wait(timeout=0.2) or self._eject_stop.is_set():
                     break
         finally:
+            # HLDD 005 Sustained-Hold Actuation (2026-09-23): loop exit, for
+            # any reason, must release a held roll key — no-op when
+            # sustained_hold was never enabled (nothing is ever held then).
+            self.release_roll_hold()
+            logger.info(tally.line(
+                "DIVE",
+                ("external:%s" % (self._eject_stop_reason or "unknown"))
+                if self._eject_stop.is_set() else "dive-end",
+                switched_at is not None))
             logger.info("Controller: eject heatdive loop stopped")
 
-    def eject_and_dive(self, on_complete=None):
+    def eject_and_dive(self, on_complete=None, weapon_already_switched: bool = False,
+                       defer_switch_until_empty: bool = False):
         """Cancel mission, hold NOSE_DOWN + AFTERBURNER simultaneously.
 
         NOSE_DOWN is held until telemetry confirms a steep dive and then kept
@@ -2126,6 +3146,27 @@ class Controller:
         AFTERBURNER is held until respawn is detected (or a 120s safety timeout);
         a speed trend that fails to rise after engagement triggers a bounded re-press.
         on_complete: optional callable invoked in the finally block after all keys are released.
+        weapon_already_switched: True when the caller (pursue_and_engage, on
+        either of its fall-through paths — HLDD 015 D3) already pressed
+        SWITCH_WEAPON for this encounter. Skips both the reset below and the
+        switch_weapon() call inside _run() (the heatdive tracking/roll/fire
+        thread still starts as usual). Without this, every pursuit-mode
+        fall-through pressed the key a second time ~0.3s after the first —
+        confirmed live, 2026-09-23: every eject cycle that session logged two
+        switch_weapon presses in immediate succession, and the secondary
+        weapon was never observed selected in game, consistent with a
+        toggle-style binding being pressed back to primary.
+
+        defer_switch_until_empty: mission_su30's pursuit hit its cap with the
+        original weapon still loaded (ADR 144 D4, revised 2026-09-24 after a
+        'v' screenshot at 08:20:14 showed the dive running on the 2/2
+        secondary with the 6/6 primary untouched). Presses no SWITCH_WEAPON at
+        the start and leaves `_eject_weapon_switched` alone; the heatdive loop
+        fires the selected weapon and switches once when it is empty. The dive
+        itself is unchanged: the two ADR 088 rearm-abort checks, whose premise
+        is an EMPTY rack, are skipped while the switch is deferred — otherwise
+        a loaded rack would read as "rearmed" and abort the dive, which would
+        be a change to what the dive does, not to when the weapon switches.
 
         No-ops (with a debug log) if an eject sequence is already in progress —
         callers should not start a second _run() thread racing the first over the
@@ -2134,17 +3175,35 @@ class Controller:
         if self._ejecting.is_set():
             logger.debug("Controller: eject_and_dive already in progress — ignoring duplicate trigger")
             return
-        logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
+        if defer_switch_until_empty:
+            logger.info("\033[91m🚀 PURSUIT CAP — cancelling mission and ejecting with the "
+                        "current weapon still loaded (switch deferred until it is empty)\033[0m")
+        else:
+            logger.info("\033[91m🚀 MISSILES EMPTY — cancelling mission and ejecting\033[0m")
         self.cancel_mission()
         self._eject_stop_reason = ""
         self._eject_stop.clear()
+        # CR-019-02: check AFTER the clear. Standby, exit and takeover each set
+        # their own flag before they set _eject_stop, so either this sees the
+        # flag or their stop lands after the clear — no window between them.
+        blocked = self._airframe_handed_back()
+        if blocked:
+            self._eject_stop_reason = blocked
+            self._eject_stop.set()
+            logger.warning("Controller: eject_and_dive refused — %s", blocked)
+            return
         self._eject_held_keys.clear()
         self._eject_phase_exit_reason = ""
-        # ADR 136: once heatdive switches to the secondary loadout, the
-        # AMMO_MISSILE crop no longer reads the primary rack — reset each
-        # dive so a stale True from a previous eject can't suppress a real
-        # ADR 088 rearm-abort next time.
-        self._eject_weapon_switched = False
+        self._eject_defer_switch = bool(defer_switch_until_empty)
+        if not weapon_already_switched and not defer_switch_until_empty:
+            # ADR 136: once heatdive switches to the secondary loadout, the
+            # AMMO_MISSILE crop no longer reads the primary rack — reset each
+            # dive so a stale True from a previous eject can't suppress a real
+            # ADR 088 rearm-abort next time. Skipped when weapon_already_switched
+            # is True — see this method's own docstring.
+            self._eject_weapon_switched = False
+        # ADR 140 D6: fresh correction budget for this dive.
+        self._padlock_unknown_correction_attempts = 0
         # Opens nose-hold accounting for this sequence (None = not in an eject).
         # The rotation-evidence flag is NOT reset here — the descent controller
         # owns its scoping (CR-014-13).
@@ -2185,16 +3244,17 @@ class Controller:
                 # roll/fire alongside the descent control below — the pitch
                 # loop itself is completely untouched by this addition.
                 if self._eject_cl_heatdive_enabled and self._target_tracker is not None:
-                    # ignore_cancel: cancel_mission() already ran above, before
-                    # this thread even started (same reason as the heatdive
-                    # loop's own presses — see _eject_heatdive_loop).
-                    self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
-                    # ADR 136: AMMO_MISSILE now reads the secondary loadout,
-                    # not the primary rack — ADR 088's rearm-abort check below
-                    # must not mistake that for a primary rearm (measured
-                    # live, 2026-09-09: false "2 missile(s) rearmed" abort on
-                    # both trials, ~8s into every heatdive-enabled dive).
-                    self._eject_weapon_switched = True
+                    if not weapon_already_switched and not defer_switch_until_empty:
+                        # ignore_cancel: cancel_mission() already ran above,
+                        # before this thread even started (same reason as the
+                        # heatdive loop's own presses — see _eject_heatdive_loop).
+                        self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                        # ADR 136: AMMO_MISSILE now reads the secondary loadout,
+                        # not the primary rack — ADR 088's rearm-abort check below
+                        # must not mistake that for a primary rearm (measured
+                        # live, 2026-09-09: false "2 missile(s) rearmed" abort on
+                        # both trials, ~8s into every heatdive-enabled dive).
+                        self._eject_weapon_switched = True
                     # ADR 136 D4: padlock must be OFF for the roll below to
                     # mean anything — with it on, the camera (and error_norm)
                     # tracks the locked target, not the aircraft's nose. Gated
@@ -2204,7 +3264,8 @@ class Controller:
                         self.ensure_padlock_off()
                     heatdive_stop = threading.Event()
                     heatdive_thread = threading.Thread(
-                        target=self._eject_heatdive_loop, args=(heatdive_stop,), daemon=True)
+                        target=self._eject_heatdive_loop,
+                        args=(heatdive_stop, defer_switch_until_empty), daemon=True)
                     heatdive_thread.start()
 
                 # ADR 069: one controller owns the whole descent — rotation
@@ -2294,6 +3355,7 @@ class Controller:
                                 break
                         if not (self._eject_abort_on_rearm
                                 and not self._eject_weapon_switched
+                                and not self._eject_defer_switch
                                 and self._analyzer is not None):
                             continue
                         try:
@@ -2320,6 +3382,7 @@ class Controller:
                     heatdive_stop.set()
                     heatdive_thread.join(timeout=2.0)
                 self._ejecting.clear()
+                self._eject_defer_switch = False
                 self._eject_nose_held_total_s = None
                 self._eject_nose_down_since = None
                 if self._simulate_os_input:
@@ -2341,6 +3404,721 @@ class Controller:
 
         self._eject_thread = threading.Thread(target=_run, daemon=True)
         self._eject_thread.start()
+
+    def _pursuit_dive_guard(self, target_visible: bool = False) -> "str | None":
+        """Why the chase may not command nose-down right now, or None.
+
+        Review 018 / action item 001 (2026-09-25 01:06 and 01:43 entries).
+        Trips below the floor in play (the mission's own under ADR 147/149,
+        else behavior_tree.climb.alt_floor_m) plus `dive_guard_margin_m`, or
+        when altitude over descent rate is under `dive_guard_ttg_s`. Fails open
+        on unreadable telemetry: the guard only withholds nose-down, and an
+        unreadable altitude is not evidence the aircraft is low. A single low
+        misread trips it for a tick, which costs one withheld nose-down.
+        Logs once per change of verdict.
+
+        The two terms are evaluated independently: `_dive_guard_ttg_tripped`
+        and `_dive_guard_rate` record the ttg term's verdict for
+        `_dive_guard_pullout`, even when the altitude term also holds.
+
+        target_visible (operator, 2026-09-26: "when target is detected turn off
+        altitude floor"; then, after the 02:39 capture: "it shouldnt have nosed
+        up"): both terms are skipped while the tracker sees a target, so the chase
+        neither withholds nose-down nor pulls out. The ttg term counts altitude
+        above 0 m, so at 2,400 m any descent past 40 m/s tripped it: measured
+        02:39:26.8, 32 s to ground at 2,373 m, six pull-out pulses, nose to +90 deg
+        and the target lost for 12 s. ADR 086's recovery (30 s, flying through the
+        pursuit under ADR 148) stays the backstop.
+        """
+        reason = None
+        self._dive_guard_ttg_tripped = False
+        self._dive_guard_rate = None
+        if not self._pursuit_dive_safety:
+            return None
+        margin = self._pursuit_dive_guard_margin_m
+        ttg_limit = self._pursuit_dive_guard_ttg_s
+        snap = None
+        if (margin > 0 or ttg_limit > 0 or self._pursuit_search_floor_m > 0) \
+                and self._analyzer is not None:
+            try:
+                snap = self._analyzer.get_telemetry()
+            except Exception:
+                snap = None
+        if snap is not None and snap.altitude_fresh():
+            alt = snap.altitude.stable_value
+            rate = snap.altitude.rate
+            floor = self._own_altitude_floor_in_play_m()
+            if floor is None:
+                floor = self._tree_alt_floor_m
+            self._dive_guard_rate = rate
+            if alt is not None and ttg_limit > 0 and rate is not None and rate < 0 \
+                    and alt / -rate < ttg_limit and not target_visible:
+                self._dive_guard_ttg_tripped = True
+                reason = "time to ground %.0f s under %.0f s" % (alt / -rate, ttg_limit)
+            if self._pursuit_search_floor_m > 0:
+                limit = self._pursuit_search_floor_m
+            elif margin > 0 and floor is not None:
+                limit = floor + margin
+            else:
+                limit = None
+            if alt is not None and limit is not None and alt < limit and not target_visible:
+                reason = "altitude %.0f m below %.0f m" % (alt, limit)
+        if (reason is None) != (self._dive_guard_reason is None):
+            if reason is not None:
+                logger.info("Controller: DIVE GUARD — nose-down withheld (%s)", reason)
+            else:
+                logger.info("Controller: DIVE GUARD — nose-down allowed again")
+        self._dive_guard_reason = reason
+        return reason
+
+    def _dive_guard_pullout(self) -> bool:
+        """Tap nose-up if the dive guard's ttg term holds and the descent is
+        steeper than `dive_guard_level_rate_mps`; True when a tap was sent.
+
+        Uses the verdict of the `_pursuit_dive_guard` call made this tick.
+        Skipped while the chase itself is holding nose-up (a tap on the same
+        key would release that hold) and between taps, so the telemetry has
+        time to show the effect. The tap is the bounded nose_up press, so the
+        takeover gate and programmatic-key bracketing apply as for any press.
+        """
+        if (self._dive_guard_pullout_pulse_s <= 0 or not self._dive_guard_ttg_tripped
+                or self._dive_guard_rate is None
+                or self._dive_guard_rate >= -self._dive_guard_level_rate_mps
+                or self._pitch_held == "up"):
+            return False
+        now = time.time()
+        if now < self._dive_guard_next_pullout_ts:
+            return False
+        self._dive_guard_next_pullout_ts = now + max(
+            self._dive_guard_pullout_interval_s, self._dive_guard_pullout_pulse_s)
+        logger.info("Controller: DIVE GUARD — pull-out pulse %.1fs (descending %.0f m/s)",
+                    self._dive_guard_pullout_pulse_s, -self._dive_guard_rate)
+        self.nose_up(hold_seconds=self._dive_guard_pullout_pulse_s, block=False,
+                     ignore_cancel=True)
+        return True
+
+    def _search_look_down(self) -> bool:
+        """Tap nose-down while the search roll is running; True when a tap was sent.
+
+        Operator, 2026-09-26: the fight is mostly below the pursuit, which searched
+        level at 3000 to 4000 m and could not see it. The caller has already
+        checked that the roll is searching and the dive guard is clear, so the
+        aircraft is above `search_floor_m` with time to ground to spare. Pulses
+        rather than holds, like `_dive_guard_pullout`: the flight-path angle lands
+        about every 3 s, and a held key overshoots on a lagging reading (ADR
+        068/069). No fresh angle means no tap, and none once the angle is at or
+        steeper than `search_look_down_min_deg`.
+
+        At most one tap per new altitude sample (the `mission_su30` angle step's
+        rule). Tapping every interval put about 3 taps into each 3 s reading, and
+        the first live pursuit (2026-09-26 01:58) overshot to -36 deg against a
+        -20 deg limit, then the ttg pull-out threw it to +57 deg. Two taps on one
+        +12 deg sample are logged at 02:05:52 and 53.
+        """
+        if self._search_look_down_pulse_s <= 0 or self._analyzer is None:
+            return False
+        now = time.time()
+        if now < self._search_look_down_next_ts:
+            return False
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return False
+        angle = snap.pitch_angle_deg() if snap is not None else None
+        if angle is None or angle <= self._search_look_down_min_deg:
+            return False
+        sample_ts = snap.altitude.ts
+        if sample_ts is not None and sample_ts == self._search_look_down_sample_ts:
+            return False
+        self._search_look_down_sample_ts = sample_ts
+        self._search_look_down_next_ts = now + max(
+            self._search_look_down_interval_s, self._search_look_down_pulse_s)
+        logger.debug("LOOKDOWN: nose-down pulse %.2fs (angle %+.0f deg, alt %s)",
+                     self._search_look_down_pulse_s, angle,
+                     "n/a" if snap.altitude.stable_value is None
+                     else "%.0f m" % snap.altitude.stable_value)
+        self.nose_down(hold_seconds=self._search_look_down_pulse_s, block=False,
+                       ignore_cancel=True)
+        return True
+
+    def _icon_rung(self, frame, points: IconPoints, *, visible: bool, yielding: bool,
+                   last_seen_ts: "float | None", last_err: "float | None") -> dict:
+        """HLDD 015 Icon-Directed Search: update the points from this tick's
+        frame and say which rung the design is on. Runs before the roll
+        decision, so step 2a (`icon_steering.wings_level`) can act on it;
+        `_icon_report` logs it after the dive guard.
+
+        Rungs, in priority order: `recovery` (ADR 148 owns both axes; points
+        zeroed), `track` (the tracker has a labelled target; points zeroed),
+        `wait` (inside roll_on_miss's neutral wait after a lock; points still
+        update), `icon` (an active axis, with or without an icon this tick),
+        `hold` (an icon within blind_search_after_s: neutral while points
+        build), `blind` (today's search, which would roll toward `side=`).
+        """
+        cfg = self._icon_cfg
+        icons: "list" = []
+        icon = None
+        add = (0, 0)
+        if yielding:
+            rung = "recovery"
+            points.reset()
+        elif visible:
+            rung = "track"
+            points.reset()
+        else:
+            icons = find_ring_icons(frame, cfg)
+            icon, add = points.scan(icons)
+            wait_s, _near = _resume_delay(
+                self._pursuit_search_resume_delay_s, last_err,
+                self._pursuit_search_resume_centre_err,
+                self._pursuit_search_resume_centre_delay_s)
+            if last_seen_ts is not None and time.time() - last_seen_ts < wait_s:
+                rung = "wait"
+            elif points.intent()[0] != "none":
+                rung = "icon"
+            elif points.icon_seen_within(cfg.blind_search_after_s):
+                rung = "hold"
+            else:
+                rung = "blind"
+        return {"rung": rung, "icon": icon, "n": len(icons), "add": add}
+
+    def _icon_report(self, points: IconPoints, tally: _EngagementTally, state: dict,
+                     guard: "str | None", act: str) -> None:
+        """One ICONPTS line per steering tick: the rung, the points, the keys
+        the dominant-intent law would hold and what was actually done (`act`:
+        `level` when step 2a released the roll for the icon, `-` otherwise).
+
+        `withheld` says why the law's nose-down would not be pressed: `guard`
+        (the dive guard tripped this tick), `angle` (flight path at or past
+        icon_min_path_deg) or `angle-none` (no fresh angle). The share of
+        `angle-none` decides whether "no angle, no push" is workable.
+        """
+        rung, icon, add = state["rung"], state["icon"], state["add"]
+        intent, keys = points.intent() if rung == "icon" else ("none", ())
+        withheld = state.get("withheld")
+        if withheld is None:
+            withheld = self._icon_down_withheld(guard) if intent == "down" else "-"
+        tally.icon_tick(unlocked=rung not in ("recovery", "track"),
+                        has_icon=icon is not None, rung=rung)
+        if logger.isEnabledFor(logging.DEBUG):
+            icon_desc = ("-" if icon is None else "(%.0f,%.0f,%.0fdeg,h%d)"
+                         % (icon.x, icon.y, icon.angle_deg, icon.hue))
+            logger.debug(
+                "ICONPTS: rung=%s icon=%s n=%d add=(%+d,%+d) pts=(%+.1f,%+.1f) "
+                "intent=%s keys=%s withheld=%s side=%s act=%s",
+                rung, icon_desc, state["n"], add[0], add[1], points.turn_pts,
+                points.pitch_pts, intent, "+".join(keys) or "-", withheld,
+                points.blind_side(), act)
+
+    def _icon_down_withheld(self, guard: "str | None") -> str:
+        """Why the icon's nose-down may not be pressed this tick: `guard` (the
+        dive guard tripped; never while `pursuit_mode.dive_safety` is off),
+        `angle` (flight path at or past icon_min_path_deg, when set),
+        `angle-none` (no fresh angle, when a limit is set or
+        require_fresh_angle is on), `alt` (below push_floor_m), `alt-none` (a
+        floor is set and there is no fresh altitude), or `-`."""
+        if guard:
+            return "guard"
+        floor = self._icon_cfg.push_floor_m
+        if floor is not None:
+            alt = self._read_stable_altitude()
+            if alt is None:
+                return "alt-none"
+            if alt < floor:
+                return "alt"
+        limit = self._icon_cfg.icon_min_path_deg
+        if limit is not None or self._icon_cfg.require_fresh_angle:
+            angle = self._telemetry_path_angle_deg()
+            if angle is None:
+                return "angle-none"
+            if limit is not None and angle <= limit:
+                return "angle"
+        return "-"
+
+    def _icon_fast_descent(self) -> bool:
+        """True while a fresh altitude rate says the jet is descending faster
+        than `turn_level_descent_mps` (HLDD 015 cycle 5). False on no reading:
+        the turn is not held back on missing data."""
+        limit = self._icon_cfg.turn_level_descent_mps
+        if limit <= 0 or self._analyzer is None:
+            return False
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return False
+        if snap is None or not snap.altitude_fresh() or snap.altitude.rate is None:
+            return False
+        return snap.altitude.rate < -limit
+
+    def _telemetry_path_angle_deg(self) -> "float | None":
+        """Flight-path angle from telemetry, or None when there is no fresh one."""
+        if self._analyzer is None:
+            return None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return None
+        return snap.pitch_angle_deg() if snap is not None else None
+
+    def pursuit_mode_enabled(self) -> bool:
+        """True when the missiles-empty trigger should call pursue_and_engage
+        instead of eject_and_dive (HLDD 015). Read by AmmoEventsHandler
+        .fire_eject(), the single choke point both strategies share."""
+        return self._pursuit_mode_enabled
+
+    def pursuit_recovery_active(self) -> bool:
+        """True while a hard-emergency climb hold is flying the airframe inside a
+        pursuit (ADR 148). The pursuit loop yields pitch and roll for as long as this
+        holds, so the recovery is the only writer of those axes."""
+        return self._pursuit_recovery.is_set() and self._pursuing.is_set()
+
+    def is_pursuing(self) -> bool:
+        """True while a pursue_and_engage sequence is in progress (HLDD 015),
+        including the window after it falls through into eject_and_dive —
+        see is_ejecting() for that half. Behavior-tree callers that need
+        "is the missiles-empty response still running, whichever strategy"
+        should check both."""
+        return self._pursuing.is_set()
+
+    def _stop_holds_for_pursuit(self) -> None:
+        """HLDD 015 (2026-09-26): end a climb or boundary turn that was already
+        running when the pursuit started, and wait for its finally to release its
+        keys BEFORE the pursuit presses any. Otherwise it flies on against the
+        pursuit (NOSE_UP against the icon push) and its closing releases drop the
+        pursuit's own held keys: at 18:14:46 a boundary turn begun 1 s before the
+        su30 yield released NOSE_DOWN, and the aircraft flew level for 54 s with
+        the push still logged as held."""
+        for name, stop, thread in (
+                ("boundary turn", self._boundary_turn_stop, self._boundary_turn_thread),
+                ("climb", self._climb_stop, self._climb_thread)):
+            if thread is None or not thread.is_alive():
+                continue
+            stop.set()
+            thread.join(timeout=1.5)
+            logger.info("Controller: pursuit took the airframe — %s stopped%s", name,
+                        " (still releasing after 1.5s)" if thread.is_alive() else "")
+
+    def pursue_and_engage(self, on_complete=None, weapon_already_switched: bool = False,
+                          defer_switch_until_empty: bool = False):
+        """HLDD 015: switch to secondary weapons and pursue with both
+        tracking axes instead of diving — the missiles-empty alternative to
+        eject_and_dive.
+
+        weapon_already_switched: True when the caller already pressed
+        SWITCH_WEAPON for this life. Skips both the flag reset and the
+        switch_weapon() press below — the key is a toggle, so a second press
+        would put the primary loadout back. Same parameter, same meaning as
+        eject_and_dive's. The default (False) is the missiles-empty path and
+        is unchanged.
+
+        defer_switch_until_empty: mission_su30's hand-off (ADR 144 D4, revised
+        2026-09-24). Pursue with whatever weapon is selected and press
+        SWITCH_WEAPON only once, when its ammo has read 0 for
+        `pursuit_mode.empty_confirm_reads` consecutive cycles. Nothing is
+        pressed at the start and the flag is not reset (it is the only record
+        of whether a switch already happened this life). After that switch
+        the ammo==0 fall-through applies exactly as in the default path, with
+        its grace period measured from the switch rather than from the start,
+        since the HUD count lags a switch (see _pursuit_ammo_grace_s). The
+        toggle is why the confirmation matters: one misread 0 would swap away
+        a rack that still has missiles, and the only undo is a second press.
+
+        Why this can use pitch and eject_and_dive's own heatdive addition
+        cannot: nothing here runs _eject_descent_control, so nothing else is
+        contending for NOSE_UP_KEY/NOSE_DOWN_KEY. eject_and_dive's heatdive
+        loop must stay roll-only forever, not just until validated, because
+        the descent controller's cumulative NOSE_DOWN hold-time accounting
+        (ADR 058) assumes it is the only writer of that key; this method
+        avoids the conflict by never starting that controller at all rather
+        than trying to coordinate two writers on the same axis.
+
+        Hard-gated (HLDD 015 Safety and Gating Rules): pursuit_mode.enabled
+        must stay false in shipped config until Design 005's Two-Axis
+        Rollout reaches a live-validated pitch channel on the ambient path.
+        This method is fully wired specifically so it CAN be validated the
+        same shadow-first way as everything else in this codebase, not so
+        it can be flipped on ahead of that precondition. This docstring is
+        not the enforcement mechanism — the config flag defaulting false is.
+
+        Termination (HLDD 015 D3), all via the loop below:
+        - secondary ammo confirmed at 0 -> falls through to eject_and_dive.
+          The airframe is now exactly the "empty, worth trading for a
+          rearmed one" case ADR 106/109 already designed the dive for.
+        - pursuit_max_duration_s elapsed first (only when it is above 0;
+          0 means no cap, the shipped setting since 2026-09-24) -> same
+          fall-through, a bounded worst case so a target-never-found
+          encounter cannot fly the empty airframe indefinitely. With no cap
+          nothing bounds the pursuit in time: it ends on ammo, respawn,
+          takeover or shutdown, and no behavior-tree tactic (boundary turn
+          included) acts inside GAME_BATTLE_EJECT, so a long search is
+          unguarded against the arena edge; see HLDD 015, open question 3.
+        - respawn / manual takeover / shutdown (self._eject_stop) -> stops
+          immediately, no fall-through — mirrors eject_and_dive's own
+          external-cancellation path exactly, same shared event.
+
+        No-ops (with a debug log) if a pursuit sequence is already running —
+        same reentrancy shape as eject_and_dive's own self._ejecting guard.
+        Falls back to eject_and_dive directly, without ever touching
+        self._pursuing, if no TargetTracker is wired: pursuing with nothing
+        to pursue is not a smaller version of this feature, it is nothing.
+        """
+        if self._pursuing.is_set():
+            logger.debug("Controller: pursue_and_engage already in progress — ignoring duplicate trigger")
+            return
+        if self._target_tracker is None:
+            logger.warning(
+                "Controller: pursue_and_engage — no TargetTracker wired, "
+                "falling back to eject_and_dive")
+            self.eject_and_dive(on_complete=on_complete)
+            return
+        if defer_switch_until_empty:
+            logger.info(
+                "\033[92m🎯 PURSUIT — current weapon stays selected until it "
+                "runs out, both axes (HLDD 015)\033[0m")
+        else:
+            logger.info(
+                "\033[92m🎯 MISSILES EMPTY — pursuing with secondary weapons, "
+                "both axes (HLDD 015)\033[0m")
+        self.cancel_mission()
+        self._eject_stop_reason = ""
+        self._eject_stop.clear()
+        # CR-019-02: same check-after-clear as eject_and_dive.
+        blocked = self._airframe_handed_back()
+        if blocked:
+            self._eject_stop_reason = blocked
+            self._eject_stop.set()
+            logger.warning("Controller: pursue_and_engage refused — %s", blocked)
+            return
+        # Shared with eject_and_dive's own reset of the same state — both
+        # strategies switch to the same secondary loadout and must not carry
+        # a stale flag/budget from whichever one ran last. Kept as-is when the
+        # caller already switched: that flag is the only record of it. Also
+        # kept as-is when the switch is deferred, for the same reason.
+        if not weapon_already_switched and not defer_switch_until_empty:
+            self._eject_weapon_switched = False
+        self._padlock_unknown_correction_attempts = 0
+
+        def _run():
+            self._pursuing.set()
+            fall_through = False
+            tally: "_EngagementTally | None" = None
+            end_reason = "external"
+            switched_here = False
+            try:
+                mission_exit_deadline = time.time() + 2.0
+                while self.is_mission_running() and time.time() < mission_exit_deadline:
+                    time.sleep(0.05)
+                if not self._pursuit_dive_safety:
+                    self._stop_holds_for_pursuit()
+
+                # ignore_cancel: cancel_mission() already ran above, before
+                # this thread even started — same reasoning as
+                # eject_and_dive's own heatdive branch and
+                # _eject_heatdive_loop's own presses.
+                if not weapon_already_switched and not defer_switch_until_empty:
+                    self.switch_weapon(hold_seconds=0.1, block=True, ignore_cancel=True)
+                    self._eject_weapon_switched = True
+                    switched_here = True
+                if self._pursuit_padlock_verify:
+                    self.ensure_padlock_off()
+
+                logger.info("Controller: pursue_and_engage — tracking engaged, both axes free")
+                start = time.time()
+                tally = _EngagementTally()
+                icon_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
+                icon_error_logged = False
+                last_seen_ts = None
+                last_visible_err = None
+                zero_reads = 0
+                switched_at = None
+                yielding = False   # ADR 148: a dive-recovery climb owns pitch and roll
+                self._dive_guard_reason = None
+                self._dive_guard_next_pullout_ts = 0.0
+                next_engage_ts = 0.0   # CR-018-01: first cycle engages at once
+                while not self._eject_stop.wait(timeout=self._pursuit_steer_interval_s):
+                    if (self._pursuit_max_duration_s > 0
+                            and time.time() - start >= self._pursuit_max_duration_s):
+                        logger.info(
+                            "Controller: pursue_and_engage — max duration "
+                            "(%.0fs) reached, falling through to eject_and_dive",
+                            self._pursuit_max_duration_s)
+                        fall_through = True
+                        end_reason = "cap"
+                        break
+                    try:
+                        frame = self._capture.grab_from_thread()
+                        obs = self._target_tracker.update(frame)
+                        visible = obs.get("visible")
+                        err = obs.get("error_norm")
+                        err_y = obs.get("error_norm_y")
+                        # ADR 148: while a hard-emergency climb is flying the airframe
+                        # (a dive the chase followed, or a search roll that spiralled),
+                        # the chase writes neither axis: the recovery is the only writer,
+                        # and the search roll is released so the wings can come level.
+                        # Tracking and firing carry on; steering resumes when it ends.
+                        recovering = self.pursuit_recovery_active()
+                        if recovering != yielding:
+                            yielding = recovering
+                            if yielding:
+                                self.release_tracking_holds(why="yield to dive recovery")
+                                logger.info(
+                                    "Controller: pursue_and_engage — yielding pitch and "
+                                    "roll to the dive recovery (ADR 148)")
+                            else:
+                                logger.info(
+                                    "Controller: pursue_and_engage — dive recovery over, "
+                                    "steering resumes")
+                        icon_state = None
+                        if icon_points is not None:
+                            try:
+                                icon_state = self._icon_rung(
+                                    frame, icon_points, visible=bool(visible),
+                                    yielding=yielding, last_seen_ts=last_seen_ts,
+                                    last_err=last_visible_err)
+                            except Exception:
+                                if not icon_error_logged:
+                                    logger.exception("Controller: icon shadow tick failed")
+                                    icon_error_logged = True
+                        # HLDD 015 step 2a: with an icon on the ring or the points
+                        # active, the wings stay level instead of the fixed left
+                        # roll (a bank without a pull does not turn, ADR 101).
+                        # Nothing new is pressed; `wait` and `blind` keep
+                        # roll_on_miss exactly as before.
+                        wings_level = (icon_state is not None
+                                       and (self._icon_cfg.wings_level
+                                            or self._icon_cfg.actuate_pitch)
+                                       and icon_state["rung"] in ("icon", "hold"))
+                        if visible and err is not None:
+                            last_seen_ts = time.time()
+                            last_visible_err = err
+                            if not yielding:
+                                self.orient_nose_to_target(
+                                    err, ignore_cancel=True,
+                                    sustained_hold=self._sustained_hold_enabled)
+                        elif self._sustained_hold_enabled and not yielding:
+                            if wings_level:
+                                # Step 3: the law's roll ("turn", or "up" with a
+                                # side) when actuate_turn is on; otherwise, and for
+                                # "down" or the hold rung, the wings stay level.
+                                icon_roll = None
+                                if self._icon_cfg.actuate_turn and icon_state["rung"] == "icon":
+                                    _intent, _keys = icon_points.intent()
+                                    if "ROLL_LEFT" in _keys:
+                                        icon_roll = "left"
+                                    elif "ROLL_RIGHT" in _keys:
+                                        icon_roll = "right"
+                                # Operator, 2026-09-26 (cycle 5): in a fast dive the
+                                # turn keeps pulling with the wings level, so the pull
+                                # points up; the bank resumes once the descent eases.
+                                if icon_roll is not None and self._icon_fast_descent():
+                                    icon_roll = None
+                                    icon_state["dive_level"] = True
+                                icon_state["roll"] = icon_roll
+                                self.hold_roll_for_icon(
+                                    icon_roll, "icon %s: %s" % (
+                                        icon_state["rung"],
+                                        "bank %s (HLDD 015 step 3)" % icon_roll if icon_roll
+                                        else "wings level (HLDD 015 step 2a)"))
+                            else:
+                                self.roll_on_miss(
+                                    last_seen_ts, self._pursuit_search_resume_delay_s,
+                                    last_visible_err, self._pursuit_search_resume_centre_err,
+                                    self._pursuit_search_resume_centre_delay_s,
+                                    side=_last_known_side(
+                                        last_seen_ts, last_visible_err, icon_points))
+                        # Dive guard, every steering tick: a target below the
+                        # nose (err_y > 0) is not followed nose-down when low or
+                        # when the ground is close (pitch goes neutral instead),
+                        # and a steep descent is pulled toward level.
+                        guard = None if yielding else self._pursuit_dive_guard(
+                            target_visible=bool(visible))
+                        if visible and err_y is not None:
+                            if not yielding:
+                                if err_y > 0 and guard:
+                                    self.release_pitch_hold(
+                                        why="dive guard err_y=%+.3f" % err_y)
+                                else:
+                                    self.orient_pitch_to_target(
+                                        err_y, ignore_cancel=True,
+                                        sustained_hold=self._sustained_hold_enabled)
+                        elif self._sustained_hold_enabled and not yielding:
+                            if wings_level and self._icon_cfg.actuate_pitch:
+                                # HLDD 015 step 2b: the icon's points own pitch on
+                                # the icon and hold rungs, and the look-down taps
+                                # stop there. "down" is withheld by the guard or
+                                # the angle rule; "turn" stays in shadow.
+                                intent = (icon_points.intent()[0]
+                                          if icon_state["rung"] == "icon" else "none")
+                                withheld = (self._icon_down_withheld(guard)
+                                            if intent == "down" else "-")
+                                icon_state["withheld"] = withheld
+                                why = "icon %s%s" % (
+                                    intent, "" if withheld == "-" else ", withheld: " + withheld)
+                                # Held, never tapped: the flight keys only act
+                                # when held (operator, 2026-09-26).
+                                desired = {"down": "down", "up": "up"}.get(intent)
+                                if intent == "turn" and self._icon_cfg.actuate_turn:
+                                    desired = "up"      # bank and pull (step 3)
+                                if desired == "down" and withheld != "-":
+                                    desired = None
+                                self.hold_pitch_for_icon(desired, why)
+                                icon_state["pitch"] = desired or "-"
+                            else:
+                                self.release_pitch_hold(why="no target")
+                                # Step 2a keeps the look-down taps where the search
+                                # roll would have run them, so only the roll changes.
+                                if guard is None and (self._roll_hold_reason == "search"
+                                                      or wings_level):
+                                    self._search_look_down()
+                        if icon_state is not None:
+                            try:
+                                act = "level" if wings_level else "-"
+                                if icon_state.get("dive_level"):
+                                    act = "divelevel"
+                                if icon_state.get("roll"):
+                                    act = "bank" + icon_state["roll"]
+                                if icon_state.get("pitch") not in (None, "-"):
+                                    act += "+" + icon_state["pitch"]
+                                self._icon_report(icon_points, tally, icon_state, guard, act)
+                            except Exception:
+                                if not icon_error_logged:
+                                    logger.exception("Controller: icon shadow tick failed")
+                                    icon_error_logged = True
+                        if guard:
+                            self._dive_guard_pullout()
+                        # CR-018-01: ammo, weapon switch, fire and HUD run on their own
+                        # ~0.3 s cadence (the old loop period); only steering runs faster.
+                        if time.time() < next_engage_ts:
+                            continue
+                        next_engage_ts = time.time() + self._pursuit_engage_interval_s
+                        ammo = None
+                        flares = None
+                        health = None
+                        if self._analyzer is not None:
+                            try:
+                                ammo = self._analyzer.get_ammo_missiles()
+                            except Exception:
+                                ammo = None
+                            try:
+                                flares = self._analyzer.get_ammo_flares()
+                            except Exception:
+                                flares = None
+                            try:
+                                health = self._analyzer.get_health()
+                            except Exception:
+                                health = None
+                        tally.scan(visible, ammo)
+                        # mission_su30 (ADR 144 D4, 2026-09-24): the switch is
+                        # deferred until the selected weapon runs out. Only a
+                        # run of consecutive 0 reads counts — SWITCH_WEAPON is
+                        # a toggle, so one misread 0 would swap away a rack
+                        # that still has missiles. None (unreadable) leaves the
+                        # run as it is, matching the fail-open fire rule below.
+                        primary_pending = (defer_switch_until_empty
+                                           and not self._eject_weapon_switched)
+                        if primary_pending:
+                            if ammo == 0:
+                                zero_reads += 1
+                            elif ammo is not None:
+                                zero_reads = 0
+                            if zero_reads >= self._pursuit_empty_confirm_reads:
+                                logger.info(
+                                    "Controller: pursue_and_engage — selected weapon "
+                                    "empty (%d consecutive zero reads), switching to "
+                                    "the secondary", zero_reads)
+                                self.switch_weapon(
+                                    hold_seconds=0.1, block=True, ignore_cancel=True)
+                                self._eject_weapon_switched = True
+                                switched_at = time.time()
+                                switched_here = True
+                                primary_pending = False
+                                # The count just read belongs to the rack that was
+                                # switched away from; the HUD needs a moment to
+                                # show the new one, so it is not acted on as if it
+                                # were the secondary's.
+                                ammo = None
+                        if ammo == 0 and not primary_pending:
+                            grace_from = switched_at if switched_at is not None else start
+                            if time.time() - grace_from >= self._pursuit_ammo_grace_s:
+                                logger.info(
+                                    "Controller: pursue_and_engage — ammo exhausted, "
+                                    "falling through to eject_and_dive")
+                                fall_through = True
+                                end_reason = "ammo"
+                                break
+                            # Still inside the post-switch grace period (see
+                            # this class's own __init__ comment on
+                            # _pursuit_ammo_grace_s) — this 0 is likely still
+                            # the pre-switch reading, not a real empty
+                            # secondary loadout. Fall through to the ammo>0
+                            # check below, which already skips firing on 0
+                            # without ending the encounter — same tolerance
+                            # _eject_heatdive_loop already has for this exact
+                            # lag, just never applied here before.
+                        # Fail open on an unreadable count, matching ADR 136
+                        # D1 step 4's own reasoning for the heatdive loop.
+                        if ammo is None or ammo > 0:
+                            self.fire_active_weapon(hold_seconds=0.1, block=False, ignore_cancel=True)
+                        if self._hud_renderer is not None:
+                            self._hud_renderer.maybe_render(
+                                frame, obs, "PURSUIT_MODE", health, ammo, flares)
+                    except Exception:
+                        logger.exception("Controller: pursue_and_engage loop cycle failed")
+            finally:
+                # HLDD 005 Sustained-Hold Actuation (2026-09-23): loop exit,
+                # for any reason, must release both axes — no-op when
+                # sustained_hold was never enabled. Before the fall_through
+                # branch below: eject_and_dive owns the airframe from here
+                # if this pursuit is handing off to it, and must not inherit
+                # a roll/pitch key this loop was holding.
+                self.release_tracking_holds(why="pursuit loop exit")
+                if tally is not None:
+                    logger.info(tally.line(
+                        "PURSUIT",
+                        end_reason if fall_through
+                        else "external:%s" % (self._eject_stop_reason or "unknown"),
+                        switched_here))
+                self._pursuing.clear()
+                # CR-019-02: a respawn, takeover or shutdown that stopped the
+                # loop after it broke for ammo or the cap wins over the dive.
+                if fall_through and self._eject_stop.is_set():
+                    logger.info(
+                        "Controller: pursue_and_engage — %s arrived as the pursuit "
+                        "ended; not handing off to eject_and_dive",
+                        self._eject_stop_reason or "external stop")
+                    fall_through = False
+                if fall_through:
+                    # weapon_already_switched: both fall-through reasons
+                    # (ammo exhausted, max duration) happen only after the
+                    # switch_weapon() call above already ran for this
+                    # encounter — see eject_and_dive's own docstring for why
+                    # this must not press the key a second time. Not so when
+                    # the switch was deferred: a max-duration fall-through can
+                    # land while the original weapon is still selected. It used
+                    # to hand eject_and_dive `False` there, so the dive pressed
+                    # SWITCH_WEAPON with the primary still loaded (operator,
+                    # 2026-09-24, 'v' screenshot 08:20:14: 6/6 primary untouched,
+                    # R-74 secondary selected; five such presses in that log).
+                    # Now the dive is told the switch is still deferred, and its
+                    # heatdive loop makes it once the weapon is empty.
+                    _switched = self._eject_weapon_switched
+                    self.eject_and_dive(
+                        on_complete=on_complete,
+                        weapon_already_switched=(_switched if defer_switch_until_empty else True),
+                        defer_switch_until_empty=(defer_switch_until_empty and not _switched))
+                else:
+                    logger.info(
+                        "Controller: pursue_and_engage — stopped externally "
+                        "(reason=%s)", self._eject_stop_reason or "unknown")
+                    if on_complete is not None:
+                        try:
+                            on_complete()
+                        except Exception:
+                            logger.exception(
+                                "Controller: pursue_and_engage on_complete callback failed")
+
+        self._pursuing_thread = threading.Thread(target=_run, daemon=True)
+        self._pursuing_thread.start()
 
     def start_search_and_destroy_loop(self):
         """Start background padlock + weapon-fire loops.
@@ -2450,6 +4228,175 @@ class Controller:
             if self._sdl_lifecycle_lock.locked():
                 self._sdl_lifecycle_lock.release()
 
+    def start_boresight_engage_loop(self):
+        """Start the boresight-engage weapon-fire loop (ADR 144).
+
+        The other engagement mode beside search_and_destroy: the same
+        weapon-fire cadence (mission.weapon_loop_interval) with NO padlock
+        loop, so the camera is never toggled and the nose stays the aim point.
+        Which mode runs is the mission's choice — mission_j20 starts
+        search_and_destroy, mission_su30 starts this.
+
+        Independent of search_and_destroy by construction: its own stop event,
+        thread and lifecycle lock, no shared state and no call into it. Both
+        may be started or stopped in either order without one affecting the
+        other. It does not stop a running search_and_destroy loop either — the
+        caller that wants "boresight only" simply never starts that one.
+
+        Not carried over from the search_and_destroy weapon loop: the
+        target_painting_mode fire suppression. That is J20's painting doctrine
+        (hold the last primary missile); this mode fires the loadout it is
+        given.
+
+        Loops stop when either _boresight_stop is set (explicit stop) or
+        _mission_cancel is set (any cancellation signal), whichever comes first.
+        """
+        # ADR 118 discipline, as for search_and_destroy: start and stop are
+        # serialised, with a timeout because this is called from mission
+        # threads and must not wedge one on a busy lock.
+        if not self._boresight_lifecycle_lock.acquire(timeout=self._boresight_lifecycle_timeout_s):
+            logger.warning("Controller: boresight_engage_loop start — lifecycle "
+                           "lock busy, skipping start")
+            return
+        try:
+            self._start_boresight_engage_locked()
+        finally:
+            if self._boresight_lifecycle_lock.locked():
+                self._boresight_lifecycle_lock.release()
+
+    def _start_boresight_engage_locked(self):
+        """The body of the start, with the lifecycle lock already held."""
+        thread = self._boresight_thread
+        if (self._boresight_stop is not None and not self._boresight_stop.is_set()
+                and thread is not None and thread.is_alive()):
+            logger.debug("Controller: boresight_engage_loop already running")
+            return
+
+        self._boresight_stop = threading.Event()
+        stop = self._boresight_stop
+
+        def _weapon_loop():
+            logger.info("Controller: boresight_engage weapon loop started")
+            try:
+                while not stop.is_set() and not self._mission_cancel.is_set():
+                    self.fire_active_weapon(hold_seconds=0.1, block=True)
+                    steps = max(1, int(self._weapon_loop_interval / 0.1))
+                    for _ in range(steps):
+                        if stop.wait(timeout=0.1) or self._mission_cancel.is_set():
+                            break
+            finally:
+                logger.info("Controller: boresight_engage weapon loop stopped")
+
+        self._boresight_thread = threading.Thread(target=_weapon_loop, daemon=True)
+        self._boresight_thread.start()
+        logger.info("Controller: boresight_engage_loop started (no padlock)")
+
+    def stop_boresight_engage_loop(self):
+        """Stop the boresight-engage weapon-fire loop.
+
+        Serialised against the start, and the join is guarded by `is_alive()`,
+        for the reason ADR 118 gives for search_and_destroy: a thread assigned
+        but not yet started cannot be joined.
+        """
+        if not self._boresight_lifecycle_lock.acquire(timeout=self._boresight_lifecycle_timeout_s):
+            logger.warning("Controller: boresight_engage_loop stop — lifecycle "
+                           "lock busy, leaving the loop running")
+            return
+        try:
+            if self._boresight_stop is None or self._boresight_stop.is_set():
+                logger.debug("Controller: boresight_engage_loop not running")
+                return
+            self._boresight_stop.set()
+            t = self._boresight_thread
+            if t is not None and t.is_alive():
+                t.join(timeout=1.0)
+            self._boresight_thread = None
+            logger.info("Controller: boresight_engage_loop stopped")
+        finally:
+            if self._boresight_lifecycle_lock.locked():
+                self._boresight_lifecycle_lock.release()
+
+    def start_cloak_loop(self):
+        """Start the JAS39 cloak loop (ADR 145, docs/missions/jas39.md).
+
+        Presses SPECIAL_ABILITY at once, then every
+        jas39_mission.cloak_press_interval_s. Wingman has no signal for when
+        the ability is off cooldown, so the loop keeps pressing: a press during
+        the cooldown does nothing in game, and on the JAS39 a press while the
+        cloak is up does not turn it off (operator, 2026-09-24). The cloak
+        therefore comes back within one interval of being available.
+
+        The same shape and discipline as start_boresight_engage_loop: its own
+        stop event, thread and lifecycle lock, start and stop serialised
+        (ADR 118), and it ends on _mission_cancel as well as on its own stop.
+        """
+        if not self._cloak_lifecycle_lock.acquire(timeout=self._cloak_lifecycle_timeout_s):
+            logger.warning("Controller: cloak_loop start — lifecycle lock busy, "
+                           "skipping start")
+            return
+        try:
+            self._start_cloak_locked()
+        finally:
+            if self._cloak_lifecycle_lock.locked():
+                self._cloak_lifecycle_lock.release()
+
+    def _start_cloak_locked(self):
+        """The body of the start, with the lifecycle lock already held."""
+        thread = self._cloak_thread
+        if (self._cloak_stop is not None and not self._cloak_stop.is_set()
+                and thread is not None and thread.is_alive()):
+            logger.debug("Controller: cloak_loop already running")
+            return
+
+        self._cloak_stop = threading.Event()
+        stop = self._cloak_stop
+        interval = self._jas39_cloak_interval_s
+
+        def _cloak_loop():
+            presses = 0
+            logger.info("Controller: cloak loop started (%s every %.1fs)",
+                        SPECIAL_ABILITY, interval)
+            try:
+                while not stop.is_set() and not self._mission_cancel.is_set():
+                    pressed_at = time.monotonic()
+                    self.activate_special_weapon(block=True)
+                    presses += 1
+                    # Wait out the rest of the interval in 0.1 s slices, so a
+                    # stop or a cancel ends the loop within a slice rather than
+                    # a whole interval later.
+                    while time.monotonic() - pressed_at < interval:
+                        if stop.wait(timeout=0.1) or self._mission_cancel.is_set():
+                            break
+            finally:
+                logger.info("Controller: cloak loop stopped after %d press(es)", presses)
+
+        self._cloak_thread = threading.Thread(target=_cloak_loop, daemon=True)
+        self._cloak_thread.start()
+
+    def stop_cloak_loop(self):
+        """Stop the JAS39 cloak loop.
+
+        Serialised against the start, and the join is guarded by `is_alive()`,
+        for the reason ADR 118 gives for search_and_destroy: a thread assigned
+        but not yet started cannot be joined.
+        """
+        if not self._cloak_lifecycle_lock.acquire(timeout=self._cloak_lifecycle_timeout_s):
+            logger.warning("Controller: cloak_loop stop — lifecycle lock busy, "
+                           "leaving the loop running")
+            return
+        try:
+            if self._cloak_stop is None or self._cloak_stop.is_set():
+                logger.debug("Controller: cloak_loop not running")
+                return
+            self._cloak_stop.set()
+            t = self._cloak_thread
+            if t is not None and t.is_alive():
+                t.join(timeout=1.0)
+            self._cloak_thread = None
+        finally:
+            if self._cloak_lifecycle_lock.locked():
+                self._cloak_lifecycle_lock.release()
+
     def disengage_roll_right(self, duration: float = 10.0):
         """Cancel mission maneuvers then hold ROLL_RIGHT_KEY for `duration` seconds.
 
@@ -2546,6 +4493,17 @@ class Controller:
         """True while an eject_and_dive sequence is in progress
         (ADR 024 3.1b — the Eject leaf's is_running_fn)."""
         return self._ejecting.is_set()
+
+    def eject_flight_active(self) -> bool:
+        """True while an eject-state strategy is actually flying the airframe:
+        the descent (`eject_descent_active`) or a pursuit (`is_pursuing`).
+
+        The Anomaly 003 detector reads this, not `eject_descent_active` alone.
+        It ends a recording session when GAME_BATTLE_EJECT has lasted 40 s with
+        nothing flying, and a pursuit has no descent, so once the pursuit lost its
+        20 s cap (2026-09-24) any pursuit over 40 s would have looked "stuck" and
+        ended a `make rd v` session."""
+        return self.eject_descent_active() or self.is_pursuing()
 
     def eject_descent_active(self) -> bool:
         """True only while `_eject_descent_control` is still actively flying
@@ -3026,6 +4984,20 @@ class Controller:
         if self._missile_evading.is_set():
             logger.info("Controller: climb suppressed — missile evade in progress")
             return
+        if self._pursuing.is_set() and not self._pursuit_dive_safety:
+            # Operator, 2026-09-26: the pursuit owns the airframe; a dive
+            # recovery would take pitch and roll from the icons and the tracker.
+            # The floor climb too (HLDD 015, 2026-09-26 18:15): inside a pursuit
+            # it left at its first state check (173 of 173 in the 17:12 log)
+            # and only ran its exit push, whose NOSE_DOWN release dropped the
+            # pursuit's own held key: 54 s of level flight while it logged a push.
+            now = time.time()
+            if now - self._dive_recovery_suppressed_log_ts >= 10.0:
+                self._dive_recovery_suppressed_log_ts = now
+                logger.info("Controller: %s suppressed — the pursuit owns "
+                            "the airframe (pursuit_mode.dive_safety off)",
+                            "dive recovery" if emergency else "climb")
+            return
         exit_alt = target_alt if target_alt is not None else self._climb_exit_alt
         if exit_alt is None:
             logger.warning("Controller: climb_mode disabled — exit_above_alt unset")
@@ -3054,6 +5026,7 @@ class Controller:
                                      exit_lead_s=float(exit_lead_s),
                                      emergency=bool(emergency))
             finally:
+                self._pursuit_recovery.clear()
                 self._climbing.clear()
 
         self._climb_thread = threading.Thread(target=_run, daemon=True)
@@ -3618,6 +5591,13 @@ class Controller:
         # hold stays RUNNING. Before D9 this hold only ever saw the value
         # frozen into the `emergency` parameter at thread start.
         emergency_now = bool(emergency)
+        # ADR 148: when a hard-emergency hold first finds itself in GAME_BATTLE_EJECT
+        # with a pursuit flying, this is the time it started flying through it. None
+        # until then. Once set the hold stays in that mode until it finishes, the
+        # pursuit or the state ends, or recovery_max_s runs out, even if the emergency
+        # itself clears first: releasing the moment the descent stops would hand a
+        # low aircraft straight back to a chase that dives.
+        recovery_since: "float | None" = None
 
         # NOSE_UP and NOSE_DOWN (ADR 076 d3 ceiling) are watched maneuver
         # keys — same programmatic bracket as the evade hold (d4), held
@@ -3770,10 +5750,36 @@ class Controller:
                 if self._analyzer is not None:
                     _st = getattr(self._analyzer, "game_state", None)
                     if isinstance(_st, GameState) and _st != GameState.GAME_BATTLE:
-                        logger.info("Controller: climb — game state %s, releasing keys",
-                                    _st.name)
-                        exit_reason = "state_exit"
-                        break
+                        # ADR 148: a pursuit lives in GAME_BATTLE_EJECT and DOES own
+                        # the airframe, so a dive recovery there is wingman flying
+                        # it, not flying something wingman lost. Only that one case
+                        # is exempt; the operator's takeover moves the state to
+                        # GAME_BATTLE_MANUAL and the pursuit ends, so SAF-001 stands.
+                        _recovering = (_st == GameState.GAME_BATTLE_EJECT
+                                       and self._pursuing.is_set()
+                                       and self._pursuit_dive_safety
+                                       and self._pursuit_recovery_max_s > 0
+                                       and (recovery_since is not None or emergency_now))
+                        if _recovering and recovery_since is None:
+                            recovery_since = time.time()
+                            self._pursuit_recovery.set()
+                            logger.info(
+                                "Controller: climb — hard emergency inside a pursuit: "
+                                "flying through %s and the chase yields (ADR 148, cap %.0fs)",
+                                _st.name, self._pursuit_recovery_max_s)
+                        elif _recovering and (time.time() - recovery_since
+                                              >= self._pursuit_recovery_max_s):
+                            logger.warning(
+                                "Controller: climb — pursuit recovery cap (%.0fs) reached, "
+                                "handing the airframe back to the chase",
+                                self._pursuit_recovery_max_s)
+                            exit_reason = "recovery_cap"
+                            break
+                        if not _recovering:
+                            logger.info("Controller: climb — game state %s, releasing keys",
+                                        _st.name)
+                            exit_reason = "state_exit"
+                            break
                 now = time.time()
                 if now - entry_ts >= cap_s:
                     logger.warning(
@@ -4034,6 +6040,11 @@ class Controller:
         target = self._climb_exit_pitch_deg
         if target is None:
             return "disabled"
+        if self._pursuing.is_set() and not self._pursuit_dive_safety:
+            # HLDD 015: the pursuit flies the attitude from here, and a pulse's
+            # release would drop a NOSE_DOWN the pursuit holds (the keyboard
+            # library keeps one state per key, not one per tactic).
+            return "pursuit"
         target = float(target)
         pulses = 0
         pitch_key = NOSE_DOWN_KEY
@@ -4642,6 +6653,732 @@ class Controller:
 
         logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
 
+    def mission_su30(self, preempt: bool = False):
+        """Scripted Su-30 mission (ADR 144, docs/missions/su30.md).
+
+        Four steps, run once per life. Battle entry and every respawn restart
+        come through here — the same single entry point mission_j20 has — so
+        "nose up on battle starting or respawn" needs no respawn wiring of its
+        own:
+
+          1. nose up             climb_mode toward ``climb_alt_m``
+          2. weapon              no press: the weapon selected at spawn stays
+                                 selected until it runs out (operator,
+                                 2026-09-24), then the secondary is switched
+                                 in once — see below
+          3. level off           at ``climb_alt_m``, pulse the nose to
+                                 ``nose_angle_deg``
+          4. pursuit mode        pursue_and_engage (HLDD 015), with its switch
+                                 deferred until the selected weapon is empty
+
+        Unlike mission_j20 this is a script, not the adaptive doctrine, and its
+        engagement mode is boresight_engage ONLY: the weapon-fire loop without
+        the padlock camera (start_boresight_engage_loop). search_and_destroy is
+        never started by this mission. The loop fires whichever weapon is
+        selected — the spawn weapon, since nothing switches it — and ends at
+        the pursuit hand-off, where pursue_and_engage fires for itself. The
+        SWITCH_WEAPON key is a toggle, so it is pressed at most once per life:
+        by the missiles-empty response (AmmoEventsHandler) if the rack runs
+        dry while this mission still holds the lock, or by pursue_and_engage
+        (defer_switch_until_empty) if it runs dry during pursuit.
+        The behavior tree still ticks while the mission holds the lock, so its
+        emergency climb can outrank the script — by design (ADR 141 floor).
+
+        Step 4 hands the airframe to pursue_and_engage, which cancels this
+        mission (it must, to own both tracking axes). The mission therefore
+        ENDS at step 4 rather than running until cancelled; pursuit's own
+        end-of-encounter falls through to eject_and_dive (HLDD 015 D3), and the
+        respawn that follows restarts this mission via restart_last_mission.
+
+        ``preempt`` is for the operator's hotkey: a mission already holding the
+        lock is cancelled to take the aircraft, rather than the keypress being
+        a silent no-op (the ADR 111 lesson). Automatic launches leave it False
+        and skip when a mission is running, exactly as mission_j20 does.
+
+        Compatible Jets: Su-30
+        """
+        if preempt and self._mission_lock.locked():
+            logger.info("\033[93mController: mission_su30 - cancelling the "
+                        "running mission to take over\033[0m")
+            self.cancel_mission()
+            acquired = self._mission_lock.acquire(
+                timeout=self._su30_lock_timeout_s)
+        else:
+            acquired = self._mission_lock.acquire(blocking=False)
+        if not acquired:
+            logger.warning("\033[91mController: mission_su30 already in progress, skipping (lock held)\033[0m")
+            return
+
+        logger.info("\033[92mController: mission_su30 - starting mission sequence (lock acquired)\033[0m")
+        # ADR 132: same reasoning as mission_j20 — the aircraft spawns on a
+        # heading that points into the arena, and one arm point at the mission
+        # covers both battle entry and every respawn restart.
+        self.arm_turn_guard()
+        self._mission_complete.clear()
+        self._mission_cancel.clear()
+        handed_off = False
+
+        def _mission_runner():
+            nonlocal handed_off
+            try:
+                handed_off = self._run_su30_sequence()
+                if handed_off:
+                    logger.info("Controller: mission_su30 - pursuit mode has the "
+                                "aircraft, mission ending")
+                else:
+                    # The script could not finish (no tracker, wrong FSM state).
+                    # Holding the lock keeps the mission-running state that the
+                    # tree's flight gates read, and a cancel (respawn, takeover,
+                    # match end) still ends it — the same tail mission_j20 has.
+                    logger.info("Controller: mission_su30 - script ended without "
+                                "pursuit, holding until cancelled")
+                    while not self._mission_cancel.wait(timeout=0.5):
+                        if self._mission_exit_requested():
+                            logger.info("Controller: mission_su30 - exit requested")
+                            break
+                    logger.info("Controller: mission_su30 - cancelled")
+            except Exception:
+                logger.exception("Controller: mission_su30 failed")
+            finally:
+                # Every exit path — cancel, exception, exit request, hand-off —
+                # ends the fire loop with the mission that owns it (as
+                # mission_loiter does for its own loops): one outliving its
+                # mission keeps pressing the fire key into the next life.
+                try:
+                    self.stop_boresight_engage_loop()
+                except Exception:
+                    logger.exception("Controller: mission_su30 - boresight_engage stop failed")
+                if not handed_off:
+                    # The climb may still be holding NOSE_UP. After a hand-off
+                    # it is already stopped, and pursuit owns the airframe, so
+                    # only the abandoned-script exits stop it here (as
+                    # mission_loiter does for the same reason).
+                    self._climb_stop.set()
+                self._mission_complete.set()
+                if self._mission_lock.locked():
+                    self._mission_lock.release()
+                    logger.info("\033[91mController: mission_su30 - lock released\033[0m")
+
+        mission_a = threading.Thread(target=_mission_runner, daemon=True)
+        mission_a.start()
+
+        # Wait for mission to complete or exit requested
+        while not self._mission_complete.wait(timeout=0.05):
+            if self._mission_exit_requested():
+                logger.info("Controller: exit requested, aborting mission wait")
+                self.cancel_mission()
+                break
+
+        mission_a.join(timeout=2.0)
+        time.sleep(0.2)
+        logger.info("\033[91mController: mission_su30 - method exiting\033[0m")
+
+    def _run_su30_sequence(self) -> bool:
+        """The four mission_su30 steps. True when pursuit mode was activated.
+
+        False means the sequence stopped short — cancelled, exit requested, or
+        pursuit could not start — and the caller decides what holding means.
+        """
+        # Step 1: nose up. climb_mode is non-blocking and idempotent, so the
+        # steps below happen while the climb is already under way.
+        logger.info("Controller: mission_su30 - step 1/4: nose up, climbing to %.0f m",
+                    self._su30_climb_alt_m)
+        self._su30_start_climb()
+
+        # Step 2: NO weapon switch here (operator, 2026-09-24: "not switch
+        # weapons until it runs out"; ADR 144 D4). The weapon selected at spawn
+        # stays selected and the fire loop below fires it. The switch to the
+        # secondary happens once that rack is empty, in whichever path is
+        # running then: AmmoEventsHandler's missiles-empty response while this
+        # mission still holds the lock, or pursue_and_engage's own deferred
+        # switch after step 4. _eject_weapon_switched is left exactly as it is:
+        # False means AMMO_MISSILE still reads the rack that is firing, which is
+        # what ADR 088's rearm-abort and the crash_with_missiles check assume.
+        if self._eject_weapon_switched:
+            logger.info("Controller: mission_su30 - step 2/4: secondary weapon "
+                        "already selected this life, nothing to do")
+        else:
+            logger.info("Controller: mission_su30 - step 2/4: keeping the selected "
+                        "weapon, switching to the secondary only when it runs out")
+
+        # Engagement: boresight only, never search_and_destroy — that loop's
+        # padlock camera is exactly what this mission does not want.
+        logger.info("Controller: mission_su30 - boresight engage on "
+                    "(weapon-fire loop, no padlock)")
+        self.start_boresight_engage_loop()
+
+        # Step 3: climb to the level-off altitude, then set the nose angle.
+        # With yield_to_target, a lock or a ring icon ends either wait early and
+        # the script goes straight to the pursuit.
+        reached = self._su30_wait_for_altitude()
+        if not reached:
+            return False
+        self._su30_stop_climb()
+        if reached != "target":
+            logger.info("Controller: mission_su30 - step 3/4: %.0f m reached, "
+                        "setting nose angle to %+.0f deg",
+                        self._su30_climb_alt_m, self._su30_nose_angle_deg)
+            self._su30_set_nose_angle()
+        if self._mission_cancel.is_set() or self._mission_exit_requested():
+            return False
+
+        # Step 4: pursuit mode.
+        return self._su30_activate_pursuit()
+
+    def _su30_start_climb(self) -> None:
+        self.climb_mode(target_alt=self._su30_climb_alt_m,
+                        max_s=self._su30_climb_max_s,
+                        fuel_floor_pct=self._su30_fuel_reserve_pct)
+
+    def _su30_wait_for_altitude(self) -> bool:
+        """Block until a FRESH altitude reads at or above the level-off target.
+
+        See _scripted_wait_for_altitude; su30's numbers and log label.
+        """
+        return self._scripted_wait_for_altitude(
+            "mission_su30", self._su30_climb_alt_m, self._su30_tick_s,
+            self._su30_start_climb,
+            interrupt=self._target_in_view if self._su30_yield_to_target else None)
+
+    def _su30_stop_climb(self) -> None:
+        """End whichever climb hold is running (see _scripted_stop_climb)."""
+        self._scripted_stop_climb("mission_su30")
+
+    def _su30_set_nose_angle(self) -> bool:
+        """Pulse the nose toward ``nose_angle_deg``. True once within tolerance.
+
+        See _scripted_set_nose_angle; su30's numbers and log label.
+        """
+        return self._scripted_set_nose_angle(
+            "mission_su30", target=self._su30_nose_angle_deg,
+            tolerance_deg=self._su30_angle_tolerance_deg,
+            confirm_reads=self._su30_angle_confirm_reads,
+            pulse_s=self._su30_angle_pulse_s, max_s=self._su30_angle_max_s,
+            tick_s=self._su30_tick_s,
+            interrupt=self._target_in_view if self._su30_yield_to_target else None)
+
+    def _target_in_view(self) -> "str | None":
+        """What ends a scripted wait for the pursuit: "lock" when the tracker's
+        last scan had a target, "icon" when a fresh frame has a ring icon, else
+        None. Never raises: a failed check is no evidence of a target."""
+        try:
+            tracker = self._target_tracker
+            if tracker is not None and hasattr(tracker, "last_observation"):
+                obs = tracker.last_observation()
+                if obs and obs.get("visible"):
+                    return "lock"
+            if self._icon_cfg.enabled and self._capture is not None:
+                if find_ring_icons(self._capture.grab_from_thread(), self._icon_cfg):
+                    return "icon"
+        except Exception:
+            logger.debug("Controller: target-in-view check failed", exc_info=True)
+        return None
+
+    def _su30_activate_pursuit(self) -> bool:
+        """Step 4: hand the airframe to pursue_and_engage. True when started.
+
+        See _scripted_activate_pursuit.
+        """
+        return self._scripted_activate_pursuit("mission_su30", "4/4")
+
+    # --- Shared by the scripted hand-off missions (mission_su30, ADR 144, and
+    # mission_f111, ADR 149). Extracted from mission_su30 unchanged apart from
+    # the parameters: the log label and the numbers each mission reads from
+    # its own config block.
+
+    def _scripted_wait_for_altitude(self, label: str, target_m: float,
+                                    tick_s: float, start_climb,
+                                    interrupt=None) -> "bool | str":
+        """Block until a FRESH altitude reads at or above ``target_m``.
+
+        False on cancel or exit request. With ``interrupt`` (a callable returning
+        a reason or None), returns "target" as soon as it gives a reason. Never commands on a stale read: an
+        altitude that has aged out says nothing about where the aircraft is
+        (ADR 038), so the wait simply continues — the climb already running
+        keeps its own telemetry-gated cap.
+        """
+        last_state = None
+        while not self._mission_cancel.is_set():
+            if self._mission_exit_requested():
+                return False
+            reason = interrupt() if interrupt is not None else None
+            if reason:
+                logger.info("Controller: %s - target in view (%s) during the climb, "
+                            "going straight to the pursuit", label, reason)
+                return "target"
+            snap = (self._analyzer.get_telemetry()
+                    if self._analyzer is not None else None)
+            fresh = snap is not None and snap.altitude_fresh()
+            alt = snap.altitude.stable_value if fresh else None
+            if alt is None:
+                if last_state != "blind":
+                    logger.info("Controller: %s - no fresh altitude, "
+                                "climb continues", label)
+                    last_state = "blind"
+            elif alt >= target_m:
+                logger.info("Controller: %s - altitude %.0f m at or "
+                            "above %.0f m", label, alt, target_m)
+                return True
+            else:
+                if last_state != "climb":
+                    logger.info("Controller: %s - climbing (%.0f m of "
+                                "%.0f m)", label, alt, target_m)
+                    last_state = "climb"
+                # Re-issued every tick: idempotent while its thread is alive
+                # (ADR 070 d8), and a climb that hit its cap or was suppressed
+                # by an evade must not be the end of the script.
+                start_climb()
+            self._mission_cancel.wait(timeout=tick_s)
+        return False
+
+    def _scripted_stop_climb(self, label: str) -> None:
+        """End whichever climb hold is running — this mission's or the tree's.
+
+        Waits for the hold to release its keys: the nose-angle step must not
+        start pulsing NOSE_DOWN against a hold that is still pressing NOSE_UP.
+        """
+        self._climb_stop.set()
+        deadline = time.time() + 2.0
+        while self._climbing.is_set() and time.time() < deadline:
+            time.sleep(0.05)
+        if self._climbing.is_set():
+            logger.warning("Controller: %s - climb hold still running "
+                           "2s after the stop request", label)
+
+    def _scripted_set_nose_angle(self, label: str, *, target: float,
+                                 tolerance_deg: float, confirm_reads: int,
+                                 pulse_s: float, max_s: float,
+                                 tick_s: float, interrupt=None) -> "bool | str":
+        """Pulse the nose toward ``target`` degrees. True once within tolerance.
+
+        False on cancel, exit request or the ``max_s`` bound; the caller
+        proceeds to pursuit on a timeout, whose own pitch loop corrects the
+        rest, and stops on a cancel.
+
+        The angle is the flight-path angle (altitude rate over speed), refreshed
+        about every 3 s, so this acts on NEW samples only and pulses instead of
+        holding: a held key on a lagging reading overshoots (ADR 068/069).
+
+        One pitch writer at a time: while any climb hold is running — the
+        ADR 141 altitude-floor emergency in particular — this presses nothing,
+        the same rule the spawn guard follows.
+        """
+        start = time.time()
+        last_ts = None
+        in_band = 0
+        yielded = False
+        while not self._mission_cancel.wait(timeout=tick_s):
+            if self._mission_exit_requested():
+                return False
+            reason = interrupt() if interrupt is not None else None
+            if reason:
+                logger.info("Controller: %s - target in view (%s) during the "
+                            "nose-angle step, going straight to the pursuit",
+                            label, reason)
+                return "target"
+            if time.time() - start >= max_s:
+                logger.warning("Controller: %s - nose angle %+.0f deg "
+                               "not confirmed within %.0fs, continuing to pursuit",
+                               label, target, max_s)
+                return False
+            if self._climbing.is_set():
+                if not yielded:
+                    logger.info("Controller: %s - a climb hold owns the "
+                                "pitch axis, nose-angle step waiting", label)
+                    yielded = True
+                continue
+            yielded = False
+            snap = (self._analyzer.get_telemetry()
+                    if self._analyzer is not None else None)
+            if snap is None or not snap.altitude_fresh():
+                continue
+            ts = snap.altitude.ts
+            if ts is None or ts == last_ts:
+                continue
+            angle = snap.pitch_angle_deg()
+            if angle is None:
+                continue
+            last_ts = ts
+            err = angle - target
+            if abs(err) <= tolerance_deg:
+                in_band += 1
+                if in_band >= confirm_reads:
+                    logger.info("Controller: %s - nose angle %+.0f deg "
+                                "(target %+.0f), confirmed over %d reads",
+                                label, angle, target, in_band)
+                    return True
+                continue
+            in_band = 0
+            direction = "down" if err > 0 else "up"
+            logger.info("Controller: %s - nose angle %+.0f deg, "
+                        "target %+.0f: pulsing nose %s", label, angle, target,
+                        direction)
+            if err > 0:
+                self.nose_down(hold_seconds=pulse_s, block=True)
+            else:
+                self.nose_up(hold_seconds=pulse_s, block=True)
+        return False
+
+    def _scripted_activate_pursuit(self, label: str, step: str) -> bool:
+        """Hand the airframe to pursue_and_engage. True when started.
+
+        Goes through the same FSM seam AmmoEventsHandler.fire_eject does —
+        eject_started on the way in, eject_complete when the encounter ends —
+        because pursuit is a behavior inside GAME_BATTLE_EJECT (HLDD 015 D1):
+        that state is what makes the tree yield the airframe and what routes a
+        respawn to stop_eject_sequence. Starting pursuit from GAME_BATTLE
+        without it would leave the tree steering roll against the tracker.
+        """
+        if self._target_tracker is None:
+            # pursue_and_engage would fall back to eject_and_dive here. A
+            # missing tracker is a wiring fault, and diving an armed aircraft
+            # because of one is not what "activate pursuit mode" asks for.
+            logger.error("\033[91mController: %s - no TargetTracker "
+                         "wired, pursuit mode cannot start\033[0m", label)
+            return False
+        analyzer = self._analyzer
+        if analyzer is not None and not analyzer.trigger_event("eject_started"):
+            logger.warning("Controller: %s - FSM refused eject_started "
+                           "(state %s), pursuit mode not started",
+                           label, getattr(analyzer, "game_state", None))
+            return False
+
+        def _on_complete():
+            if (analyzer is not None
+                    and analyzer.game_state == GameState.GAME_BATTLE_EJECT):
+                analyzer.trigger_event("eject_complete")
+
+        logger.info("Controller: %s - step %s: activating pursuit mode", label, step)
+        # Pursuit fires for itself every cycle. Ending the boresight loop first
+        # leaves exactly one writer on the fire key, rather than doubling its
+        # cadence for the moment the two overlap. Only here, after the FSM has
+        # accepted the hand-off: a mission that could not start pursuit keeps
+        # its engagement loop while it holds.
+        self.stop_boresight_engage_loop()
+        # The weapon is not switched here (ADR 144 D4, revised 2026-09-24):
+        # pursuit switches once, when the selected weapon has run out.
+        self.pursue_and_engage(on_complete=_on_complete,
+                               defer_switch_until_empty=True)
+        return True
+
+    def mission_f111(self):
+        """Scripted F-111 mission (ADR 149, docs/missions/f111.md): mission_su30
+        plus the wing sweep on WINGSWEEP_KEY.
+
+        Six steps, one per bullet of the spec, run once per life:
+
+          1. nose up + sweep   climb_mode toward ``climb_alt_m``, then one tap
+                               of WINGSWEEP_KEY unless the wings are already
+                               swept this life
+          2. engage            start_boresight_engage_loop (never
+                               search_and_destroy)
+          3. weapon            no press: the spawn weapon stays selected until
+                               it runs out, as mission_su30 (ADR 144 D4)
+          4. level off         at ``climb_alt_m``, pulse the nose to
+                               ``nose_angle_deg``
+          5. unsweep           wait, at most ``unsweep_timeout_s``, for a fresh
+                               altitude at or below ``unsweep_alt_m``, then one
+                               tap of WINGSWEEP_KEY; on timeout unsweep anyway
+          6. pursuit mode      pursue_and_engage, as mission_su30's step 4
+
+        WINGSWEEP_KEY is a toggle (ToggleWingSweep), so the swept state is
+        tracked in ``_f111_wings_swept`` and reset per life in
+        stop_eject_sequence. A mission ending between steps 1 and 5 presses
+        nothing on the way out and logs that the wings were left swept: after a
+        takeover the key is suppressed anyway, and a death resets the wings.
+
+        The altitude doctrine is ADR 147's, extended to this mission by ADR 149:
+        while f111 is the mission in play the tree's floor is
+        ``f111_mission.alt_floor_m`` and the armed sustain climb stands aside.
+
+        It has no hotkey of its own (ADR 145): mission.default_mission: f111
+        makes battle entry, 'u' and the respawn restart launch it. Like
+        mission_jas39, it skips instead of preempting when a mission already
+        holds the lock.
+
+        Compatible Jets: F-111
+        """
+        acquired = self._mission_lock.acquire(blocking=False)
+        if not acquired:
+            logger.warning("\033[91mController: mission_f111 already in progress, "
+                           "skipping (lock held)\033[0m")
+            return
+
+        logger.info("\033[92mController: mission_f111 - starting mission sequence "
+                    "(lock acquired)\033[0m")
+        # ADR 132: the same spawn-heading guard mission_su30 arms, at the one
+        # point battle entry and every respawn restart come through.
+        self.arm_turn_guard()
+        self._mission_complete.clear()
+        self._mission_cancel.clear()
+        handed_off = False
+
+        def _mission_runner():
+            nonlocal handed_off
+            try:
+                handed_off = self._run_f111_sequence()
+                if handed_off:
+                    logger.info("Controller: mission_f111 - pursuit mode has the "
+                                "aircraft, mission ending")
+                else:
+                    # As mission_su30: no tracker or an FSM refusal holds the
+                    # lock (rule 13, never dive on a fault) until cancelled.
+                    logger.info("Controller: mission_f111 - script ended without "
+                                "pursuit, holding until cancelled")
+                    while not self._mission_cancel.wait(timeout=0.5):
+                        if self._mission_exit_requested():
+                            logger.info("Controller: mission_f111 - exit requested")
+                            break
+                    logger.info("Controller: mission_f111 - cancelled")
+            except Exception:
+                logger.exception("Controller: mission_f111 failed")
+            finally:
+                # Every exit path ends the fire loop with the mission that owns
+                # it, and the climb when the script was abandoned (see
+                # mission_su30). Each stop is guarded on its own.
+                try:
+                    self.stop_boresight_engage_loop()
+                except Exception:
+                    logger.exception("Controller: mission_f111 - boresight_engage stop failed")
+                if not handed_off:
+                    self._climb_stop.set()
+                # No WINGSWEEP_KEY press from here (docs/missions/f111.md): after
+                # a takeover the key is suppressed anyway, and a death resets
+                # the wings. Say so, so a live trial can tell.
+                if self._f111_wings_swept:
+                    logger.info("Controller: mission_f111 - mission ended with the "
+                                "wings left swept (no unsweep press on exit)")
+                self._mission_complete.set()
+                if self._mission_lock.locked():
+                    self._mission_lock.release()
+                    logger.info("\033[91mController: mission_f111 - lock released\033[0m")
+
+        mission_a = threading.Thread(target=_mission_runner, daemon=True)
+        mission_a.start()
+
+        # Wait for mission to complete or exit requested
+        while not self._mission_complete.wait(timeout=0.05):
+            if self._mission_exit_requested():
+                logger.info("Controller: exit requested, aborting mission wait")
+                self.cancel_mission()
+                break
+
+        mission_a.join(timeout=2.0)
+        time.sleep(0.2)
+        logger.info("\033[91mController: mission_f111 - method exiting\033[0m")
+
+    def _run_f111_sequence(self) -> bool:
+        """The six mission_f111 steps. True when pursuit mode was activated.
+
+        False means the sequence stopped short — cancelled, exit requested, or
+        pursuit could not start — and the caller decides what holding means.
+        """
+        label = "mission_f111"
+        # Step 1: nose up, and as the climb starts sweep the wings.
+        logger.info("Controller: mission_f111 - step 1/6: nose up, climbing to "
+                    "%.0f m", self._f111_climb_alt_m)
+        self._f111_start_climb()
+        if self._f111_wings_swept:
+            # A restart within the same life (disengage roll, 'u' after a
+            # takeover): the toggle is already where this step wants it.
+            logger.info("Controller: mission_f111 - step 1/6: wings already "
+                        "swept this life, not pressing %s", WINGSWEEP_KEY)
+        elif not self._f111_press_wingsweep(swept=True):
+            return False
+
+        # Step 2: boresight engage only (mission_su30's engagement, ADR 144 D2).
+        logger.info("Controller: mission_f111 - step 2/6: boresight engage on "
+                    "(weapon-fire loop, no padlock)")
+        self.start_boresight_engage_loop()
+
+        # Step 3: no weapon press (ADR 144 D4, as mission_su30's step 2).
+        if self._eject_weapon_switched:
+            logger.info("Controller: mission_f111 - step 3/6: secondary weapon "
+                        "already selected this life, nothing to do")
+        else:
+            logger.info("Controller: mission_f111 - step 3/6: keeping the selected "
+                        "weapon, switching to the secondary only when it runs out")
+
+        # Step 4: climb to the level-off altitude, then set the nose angle.
+        if not self._scripted_wait_for_altitude(
+                label, self._f111_climb_alt_m, self._f111_tick_s,
+                self._f111_start_climb):
+            return False
+        self._scripted_stop_climb(label)
+        logger.info("Controller: mission_f111 - step 4/6: %.0f m reached, "
+                    "setting nose angle to %+.0f deg",
+                    self._f111_climb_alt_m, self._f111_nose_angle_deg)
+        self._scripted_set_nose_angle(
+            label, target=self._f111_nose_angle_deg,
+            tolerance_deg=self._f111_angle_tolerance_deg,
+            confirm_reads=self._f111_angle_confirm_reads,
+            pulse_s=self._f111_angle_pulse_s, max_s=self._f111_angle_max_s,
+            tick_s=self._f111_tick_s)
+        if self._mission_cancel.is_set() or self._mission_exit_requested():
+            return False
+
+        # Step 5: unsweep on the way back down, bounded.
+        if not self._f111_unsweep_on_descent():
+            return False
+
+        # Step 6: pursuit mode.
+        return self._scripted_activate_pursuit(label, "6/6")
+
+    def _f111_start_climb(self) -> None:
+        self.climb_mode(target_alt=self._f111_climb_alt_m,
+                        max_s=self._f111_climb_max_s,
+                        fuel_floor_pct=self._su30_fuel_reserve_pct)
+
+    def _f111_press_wingsweep(self, swept: bool) -> bool:
+        """One tap of WINGSWEEP_KEY toward ``swept``. False when cancelled first.
+
+        The key is a toggle, so the tracked state flips only when the tap was
+        sent: a mission cancelled before it presses nothing and records nothing.
+        The tap goes through Controller.wingsweep (_execute_key_press), so it is
+        suppressed during manual takeover (SAF-001).
+        """
+        step = "1/6" if swept else "5/6"
+        verb = "sweeping" if swept else "unsweeping"
+        if self._mission_cancel.is_set() or self._mission_exit_requested():
+            return False
+        logger.info("Controller: mission_f111 - step %s: %s the wings (%s, "
+                    "%.1fs tap)", step, verb, WINGSWEEP_KEY, self._f111_wingsweep_tap_s)
+        self.wingsweep(hold_seconds=self._f111_wingsweep_tap_s, block=True)
+        self._f111_wings_swept = swept
+        return True
+
+    def _f111_unsweep_on_descent(self) -> bool:
+        """Step 5: unsweep once a FRESH altitude reads at or below the unsweep
+        altitude, or after ``unsweep_timeout_s`` regardless. False on cancel.
+
+        Only samples newer than the one current when the step began count, so
+        the level-off reading (at or above the altitude) never stands in for the
+        descent. A stale or repeated sample is ignored (rule 7). The timeout
+        unsweeps anyway, so the chase always starts with the wings in their
+        spawn position; it never dives (rule 13): the step presses no pitch key.
+        """
+        if not self._f111_wings_swept:
+            logger.info("Controller: mission_f111 - step 5/6: wings not swept, "
+                        "nothing to unsweep")
+            return not (self._mission_cancel.is_set() or self._mission_exit_requested())
+        target = self._f111_unsweep_alt_m
+        timeout = self._f111_unsweep_timeout_s
+        logger.info("Controller: mission_f111 - step 5/6: waiting up to %.0fs for "
+                    "the altitude to descend to %.0f m", timeout, target)
+        start = time.time()
+        snap = (self._analyzer.get_telemetry()
+                if self._analyzer is not None else None)
+        last_ts = snap.altitude.ts if snap is not None else None
+        while not self._mission_cancel.wait(timeout=self._f111_tick_s):
+            if self._mission_exit_requested():
+                return False
+            if time.time() - start >= timeout:
+                logger.warning("Controller: mission_f111 - step 5/6: no fresh "
+                               "altitude at or below %.0f m within %.0fs, "
+                               "unsweeping anyway", target, timeout)
+                return self._f111_press_wingsweep(swept=False)
+            snap = (self._analyzer.get_telemetry()
+                    if self._analyzer is not None else None)
+            if snap is None or not snap.altitude_fresh():
+                continue
+            ts = snap.altitude.ts
+            if ts is None or ts == last_ts:
+                continue
+            last_ts = ts
+            alt = snap.altitude.stable_value
+            if alt is not None and alt <= target:
+                logger.info("Controller: mission_f111 - step 5/6: altitude %.0f m "
+                            "at or below %.0f m", alt, target)
+                return self._f111_press_wingsweep(swept=False)
+        return False
+
+    def mission_jas39(self):
+        """JAS39 mission (ADR 145, docs/missions/jas39.md): mission_j20 plus
+        the cloak.
+
+        Four steps, one per bullet of the spec:
+
+          1. spawn heading    arm_turn_guard(turn_guard_s), as J20 (ADR 132)
+          2. engage           start_search_and_destroy_loop, as J20
+          3. cloak            start_cloak_loop: SPECIAL_ABILITY every
+                              cloak_press_interval_s, so the cloak comes back
+                              as soon as it is off cooldown
+          4. run until cancelled
+
+        Everything else a JAS39 life does (climbing, engaging, evading, the
+        boundary turn, disengage, the missiles-empty response) is shared
+        behavior, exactly as for J20 (docs/missions/README.md section 3).
+
+        It has no hotkey of its own. Setting mission.default_mission to jas39
+        makes battle entry, the 'u' hotkey and the respawn restart launch it.
+        Like mission_j20, it skips instead of preempting when a mission
+        already holds the lock.
+
+        Compatible Jets: JAS39
+        """
+        acquired = self._mission_lock.acquire(blocking=False)
+        if not acquired:
+            logger.warning("\033[91mController: mission_jas39 already in progress, "
+                           "skipping (lock held)\033[0m")
+            return
+
+        logger.info("\033[92mController: mission_jas39 - starting mission sequence "
+                    "(lock acquired)\033[0m")
+        # Step 1 is armed here, at the mission, for mission_j20's reason:
+        # battle entry and every respawn restart come through this one point.
+        logger.info("Controller: mission_jas39 - step 1/4: %.0fs turn guard, "
+                    "flying the spawn heading", self._jas39_turn_guard_s)
+        self.arm_turn_guard(self._jas39_turn_guard_s)
+        self._mission_complete.clear()
+        self._mission_cancel.clear()
+
+        def _mission_runner():
+            try:
+                logger.info("Controller: mission_jas39 - step 2/4: engaging with "
+                            "search_and_destroy")
+                self.start_search_and_destroy_loop()
+                logger.info("Controller: mission_jas39 - step 3/4: cloak loop on "
+                            "(%s every %.1fs)", SPECIAL_ABILITY,
+                            self._jas39_cloak_interval_s)
+                self.start_cloak_loop()
+                logger.info("Controller: mission_jas39 - step 4/4: running until "
+                            "cancelled")
+                while not self._mission_cancel.wait(timeout=0.5):
+                    if self._mission_exit_requested():
+                        logger.info("Controller: mission_jas39 - exit requested")
+                        break
+                logger.info("Controller: mission_jas39 - cancelled, stopping loops")
+            except Exception:
+                logger.exception("Controller: mission_jas39 failed")
+            finally:
+                # Every exit path ends both loops with the mission that owns
+                # them: a loop that outlives its mission keeps pressing its key
+                # into the next life. Each stop is guarded on its own, so one
+                # that fails can neither skip the other nor keep the lock held.
+                for stop in (self.stop_cloak_loop, self.stop_search_and_destroy_loop):
+                    try:
+                        stop()
+                    except Exception:
+                        logger.exception("Controller: mission_jas39 - loop stop failed")
+                self._mission_complete.set()
+                if self._mission_lock.locked():
+                    self._mission_lock.release()
+                    logger.info("\033[91mController: mission_jas39 - lock released\033[0m")
+
+        mission_a = threading.Thread(target=_mission_runner, daemon=True)
+        mission_a.start()
+
+        # Wait for mission to complete or exit requested
+        while not self._mission_complete.wait(timeout=0.05):
+            if self._mission_exit_requested():
+                logger.info("Controller: exit requested, aborting mission wait")
+                self.cancel_mission()
+                break
+
+        mission_a.join(timeout=2.0)
+        time.sleep(0.2)
+        logger.info("\033[91mController: mission_jas39 - method exiting\033[0m")
+
     def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6, region_name: str = None):
         """Move the mouse to the center of a grid region and left-click it.
 
@@ -4856,6 +7593,12 @@ class Controller:
         logger.info("\033[91mController: cancel_mission called\033[0m")
         self._mission_cancel.set()
         self.stop_weapon_loop()
+        # HLDD 005 Sustained-Hold Actuation (2026-09-23): a held roll/pitch
+        # key does not self-expire the way a bounded tap did — a
+        # cancellation mid-hold must let go of it explicitly, the same as
+        # every other held-key state this method's callers already expect
+        # cancel_mission() to clean up.
+        self.release_tracking_holds(why="cancel_mission")
 
     def _mission_exit_requested(self) -> bool:
         """True when a mission loop should abort for a real program exit.
@@ -4928,7 +7671,20 @@ class Controller:
             self.cancel_mission()
         except Exception:
             logger.exception("Controller: cancel_mission failed during takeover")
-        for stop in (self.stop_search_and_destroy_loop,):
+        try:
+            # Explicit, independent of cancel_mission()'s own call above: the
+            # blanket INJECTABLE_KEYS release below physically lets go of
+            # every key but does not know about _roll_held/_pitch_held/
+            # _roll_hold_reason — without this, a manual takeover could leave
+            # that Python-level state claiming a key is still held after the
+            # X server has already released it (HLDD 005 Sustained-Hold
+            # Actuation, 2026-09-23).
+            self.release_tracking_holds(why="manual takeover")
+        except Exception:
+            logger.exception("Controller: release_tracking_holds failed during takeover")
+        for stop in (self.stop_search_and_destroy_loop,
+                     self.stop_boresight_engage_loop,
+                     self.stop_cloak_loop):   # ADR 145: a writer on SPECIAL_ABILITY
             try:
                 stop()
             except Exception:
@@ -5006,12 +7762,19 @@ class Controller:
         # at trigger_eject_and_dive(), so it could read stale-True for an
         # entire following life with no further eject in it.
         self._eject_weapon_switched = False
+        self._eject_defer_switch = False
+        # ADR 149: a respawn or match end also puts the F-111's wings back in
+        # their spawn position (unswept), so the tracked toggle resets here.
+        self._f111_wings_swept = False
         # ADR 140 D2: same reasoning applies to padlock state — a respawn
         # (this method's every real caller, tick_handlers.py) restores a
         # forward/chase camera, the highest-confidence signal this design
         # has, needing no visual confirmation.
         self._padlock_engaged = False
         self._padlock_dot_streak_since = None
+        # ADR 140 D6: same reasoning — a respawn or match end also ends
+        # whatever dive was accumulating correction attempts.
+        self._padlock_unknown_correction_attempts = 0
 
     def _set_last_mission(self, mission_name: str):
         with self._last_mission_lock:
@@ -5121,8 +7884,7 @@ class Controller:
                                 "\033[92mController: game_battle_alive detected in GAME_STARTING "
                                 "— launching mission immediately\033[0m")
                             self._analyzer.trigger_event("good_luck_detected")
-                            self._set_last_mission("j20")
-                            threading.Thread(target=self.mission_j20, daemon=True).start()
+                            self._start_default_mission()
                             return
 
                     if not _in_starting():
@@ -5173,10 +7935,10 @@ class Controller:
                                 "Controller: Good-Luck wait ran the full %ds without a "
                                 "battle-alive signal", good_luck_wait)
                         if _in_starting():
-                            logger.info("Controller: game_starting - launching J20 mission")
+                            logger.info("Controller: game_starting - launching %s mission",
+                                        self._default_mission.upper())
                             self._analyzer.trigger_event("good_luck_detected")
-                            self._set_last_mission("j20")
-                            threading.Thread(target=self.mission_j20, daemon=True).start()
+                            self._start_default_mission()
                         return
             except Exception:
                 logger.exception("Controller: game_starting loop error")
@@ -5187,13 +7949,49 @@ class Controller:
 
         threading.Thread(target=_loop, daemon=True).start()
 
+    def _start_default_mission(self):
+        """Record and launch the configured default mission (mission.default_mission).
+
+        The one place battle entry chooses between missions, so the two
+        GAME_STARTING launch paths, the restart fallback and the 'u' hotkey
+        (ADR 145) cannot disagree. Resolves the mission method at call time, not
+        import time. An unknown name falls back to j20.
+        """
+        missions = {"j20": self.mission_j20, "su30": self.mission_su30,
+                    "jas39": self.mission_jas39, "f111": self.mission_f111}
+        name = self._default_mission if self._default_mission in missions else "j20"
+        self._set_last_mission(name)
+        threading.Thread(target=missions[name], daemon=True).start()
+
+    def _airframe_handed_back(self) -> "str | None":
+        """Why wingman must not start flying on its own right now, or None.
+
+        CR-019-01/02: the automatic starters — the respawn and disengage
+        restarts, eject_and_dive, pursue_and_engage — each run late on their
+        own thread and used to start after Backspace (standby), an exit, or a
+        manual takeover had already stopped everything. Operator hotkeys do
+        not come through here, so restarting by hand still works.
+        """
+        if self._operator_stop_event.is_set():
+            return "operator stop (standby)"
+        if self._exit_event is not None and self._exit_event.is_set():
+            return "exit requested"
+        if self._manual_takeover_active():
+            return "manual takeover"
+        return None
+
     def restart_last_mission(self):
-        """Restart the most recently started mission, defaulting to J20 when none recorded.
+        """Restart the most recently started mission, defaulting to the configured mission when none recorded.
 
         Returns:
-            True  — mission was successfully restarted (or started as j20 default).
-            False — mission is currently running (lock held); restart skipped.
+            True  — mission was successfully restarted (or started as the default).
+            False — mission is currently running (lock held), or the airframe
+                    has been handed back (`_airframe_handed_back`); restart skipped.
         """
+        blocked = self._airframe_handed_back()
+        if blocked:
+            logger.warning("Controller: automatic mission restart refused — %s", blocked)
+            return False
         if self.is_mission_running():
             logger.warning("\033[91mController: cannot restart mission - previous mission still in progress (lock held)\033[0m")
             return False
@@ -5209,12 +8007,25 @@ class Controller:
             logger.info("Controller: restarting last mission (loiter)")
             threading.Thread(target=self.mission_loiter, daemon=True).start()
             return True
+        if mission == "su30":
+            logger.info("Controller: restarting last mission (SU-30)")
+            threading.Thread(target=self.mission_su30, daemon=True).start()
+            return True
+        if mission == "jas39":
+            logger.info("Controller: restarting last mission (JAS39)")
+            threading.Thread(target=self.mission_jas39, daemon=True).start()
+            return True
+        if mission == "f111":
+            logger.info("Controller: restarting last mission (F-111)")
+            threading.Thread(target=self.mission_f111, daemon=True).start()
+            return True
 
         # No prior mission recorded — reached GAME_BATTLE via GAME_UNKNOWN (Good Luck
-        # not detected, stalled start). Default to j20 rather than doing nothing.
-        logger.info("Controller: no prior mission recorded — defaulting to J20")
-        self._set_last_mission("j20")
-        threading.Thread(target=self.mission_j20, daemon=True).start()
+        # not detected, stalled start). Default to the configured mission (j20
+        # unless mission.default_mission says otherwise) rather than doing nothing.
+        logger.info("Controller: no prior mission recorded — defaulting to %s",
+                    self._default_mission.upper())
+        self._start_default_mission()
         return True
 
     def cleanup(self, keep_hotkeys: bool = False):
@@ -5257,6 +8068,14 @@ class Controller:
             self.stop_search_and_destroy_loop()
         except Exception:
             logger.exception("Controller: failed to stop search_and_destroy loops")
+        try:
+            self.stop_boresight_engage_loop()
+        except Exception:
+            logger.exception("Controller: failed to stop boresight_engage loop")
+        try:
+            self.stop_cloak_loop()   # ADR 145
+        except Exception:
+            logger.exception("Controller: failed to stop cloak loop")
         eject_thread = self._eject_thread
         if eject_thread is not None and eject_thread.is_alive():
             eject_thread.join(timeout=1.5)  # let its finally release keys cleanly
@@ -5264,6 +8083,7 @@ class Controller:
         self._climb_stop.set()  # ADR 073 3.2b: end any climb hold via its own finally
         self._boundary_turn_stop.set()  # ADR 107: end any boundary turn likewise
         self._sg_stop.set()  # ADR 076: end any spawn guard via its own finally
+        self._disengage_stop.set()  # CR-019-04: as release_for_manual_takeover does
         bt_thread = self._boundary_turn_thread
         if bt_thread is not None and bt_thread.is_alive():
             bt_thread.join(timeout=1.5)   # its finally does the SAF-010 push

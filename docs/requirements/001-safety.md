@@ -98,6 +98,26 @@ press shall be logged when the exception is exercised.
 **Rationale**: Stale-keystroke protection: keystrokes queued during a state transition must
 not flip the aircraft into manual mode the instant a battle begins.
 
+## The takeover-key listener stays able to hear keys
+
+**UID**: SAF-001.3 \
+**Status**: Draft
+**Relations**:
+- **Type**: `Parent` \
+  **ID**: `SAF-001`
+
+**Statement**: On the display wingman injects into, if a reporting interval of the
+takeover-key listener passes in which wingman injected key presses on that
+display but the listener received none, wingman shall log the condition and
+re-establish the listener before the end of the next reporting interval.
+
+**Rationale**: SAF-001's takeover at the game window depends on a listener that hears keys.
+On 2026-09-26, 3 of 21 sessions had the nested-display listener hear nothing
+for the whole session, from the start, with no error logged, and an ENTER
+typed into the game window did not reach the takeover path. Wingman's own
+injected presses on that display give the liveness signal. Design 009,
+"A deaf hotkey listener on the nested display".
+
 ## No commanded flight while the aircraft is dead
 
 **UID**: SAF-002

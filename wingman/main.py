@@ -20,14 +20,18 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.10"
-WINGMAN_VERSION_DETAILS = "ACS mission_j20 next phase, switch to secondary weapons then guide towards target during dive"
+WINGMAN_VERSION = "1.8.11"
+WINGMAN_VERSION_DETAILS = "ACS and F2T2EA: Find, fix, track , target, engage, Assess: attacks using any missile types"
 
+from . import capture_budget
 from .capture import Capture
 from .config_schema import assert_valid_config
+from .icon_steering import IconSteeringConfig
 from .controller_config import ControllerConfig
 from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON,
                          set_focus_guard)
+from .close_button import GenericCloseRecovery, click_region
+from .crop_region import CropCoords
 from .analyzer import (GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES,
                        BATTLE_STATES)
 from .hud import HudRenderer
@@ -464,6 +468,18 @@ def main():
     cfg = load_config(args.config)
     logger.info("Configuration loaded from %s", args.config)
 
+    # Cross-session disk safety net: capture features cap themselves per
+    # session only, and rotated logs were never deleted (2026-09-24: about
+    # 19 GB across capture folders and logs/). Rotation above runs before the
+    # config exists, so the rotated logs are pruned here.
+    capture_budget.configure(cfg)
+    if args.log_file:
+        _log_path = Path(args.log_file)
+        _files, _bytes = capture_budget.section_budget(
+            cfg, "rotated_logs", (200, 2048 * 1024 ** 2))
+        capture_budget.prune(_log_path.parent / "logs",
+                             f"{_log_path.stem}_*{_log_path.suffix}", _files, _bytes)
+
     # foundry HLDD 001: say which host mode this session is running under.
     # TRIAL latches and nothing restores it, so a session can silently run
     # with Jenkins and Redmine down — worth stating loudly at the top of the
@@ -709,10 +725,18 @@ def main():
     # just re-record pre-recorded screenshots.
     video_recorder = None
     bt_trace_writer = None
+    # Pre-declared for the same reason as the two above: the finally block
+    # far below checks `hud_renderer is not None` unconditionally, which
+    # would raise NameError instead of running the rest of cleanup if an
+    # exception hit before HudRenderer.from_config() runs.
+    hud_renderer = None
     if args.record_session and not replay_mode and not capture_mode:
         from .session_recording import BtTraceWriter, VideoRecorder
         Path("logs").mkdir(exist_ok=True)
         _rec_cfg = cfg.get("session_recording", {}) or {}
+        _files, _bytes = capture_budget.section_budget(
+            cfg, "session_video", (8, 6144 * 1024 ** 2))
+        capture_budget.prune("logs", "session_*.mp4", _files, _bytes, reserve=1)
         video_recorder = VideoRecorder(
             region, monitor_index, game_window_offset, nested_display,
             out_path=f"logs/session_{tracker.run_id}.mp4",
@@ -788,6 +812,12 @@ def main():
     # Controller cannot construct its own, TargetTracker is owned/configured
     # alongside HudRenderer above.
     ctrl.set_target_tracker(target_tracker)
+    # HLDD 005 fix (2026-09-21): same wiring, same reason, for the renderer —
+    # lets the heatdive loop write to live_hud.png too, instead of leaving it
+    # frozen for the whole dive (TrackingHudHandler.tick() only renders in
+    # GAME_BATTLE/GAME_BATTLE_MANUAL; the dive runs in GAME_BATTLE_EJECT).
+    if hud_renderer is not None:
+        ctrl.set_hud_renderer(hud_renderer)
     # ADR 140: analyzer needs padlock_state() for the telemetry log line —
     # same late-bound wiring shape, reverse direction.
     analyzer.set_controller(ctrl)
@@ -854,6 +884,8 @@ def main():
     # attempts to it, and the quick-scan thread now starts while still in
     # GAME_UNKNOWN, so the first popup event can arrive early.
     unknown_anomaly = UnknownAnomalyRecorder(cfg.get("unknown_anomaly", {}))
+    # ADR 146: click a close button when GAME_UNKNOWN outlasts every known popup remedy.
+    close_recovery = GenericCloseRecovery(cfg.get("game_unknown_close", {}))
 
     def _handle_lobby_popup(popup):
         current = analyzer.game_state
@@ -1149,6 +1181,9 @@ def main():
     )
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
+        nav_source=behavior_tree,
+        icon_cfg=IconSteeringConfig.from_dict(
+            (cfg.get("pursuit_mode") or {}).get("icon_steering")),
     )
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,
@@ -1308,7 +1343,7 @@ def main():
             # unflown (that is the anomaly), so waiting for GAME_LOBBY would
             # mean waiting on the same respawn confirmation that never comes.
             if args.record_session and eject_stuck.check(
-                    analyzer.game_state, ctrl.eject_descent_active()):
+                    analyzer.game_state, ctrl.eject_flight_active()):
                 snap = analyzer.get_telemetry()   # context only, not the trigger
                 logger.warning(
                     "\033[93m🛑 ANOMALY 003: ending session — GAME_BATTLE_EJECT "
@@ -1563,6 +1598,15 @@ def main():
             # evidence future stall handling is built from.
             unknown_anomaly.tick(frame, current_game_state)
 
+            # ADR 146: a window no known-popup template matches (a new promotion)
+            # leaves the classifier stuck; click its white-cross close button.
+            close_hit = close_recovery.tick(
+                frame, current_game_state == GameState.GAME_UNKNOWN)
+            if close_hit is not None:
+                ctrl.click_crop(CropCoords(*click_region(close_hit, frame.shape)),
+                                block=False, count=1, region_name="generic_close")
+                unknown_anomaly.note_dismiss_attempt("generic_close")
+
             # ADR 080: archive the screen when health OCR drops out during
             # live flight — the evidence the perception fix is built from.
             health_dropout.tick(frame, current_game_state)
@@ -1730,6 +1774,15 @@ def main():
                 bt_trace_writer.close()
             except Exception as e:
                 logger.warning("Design 012: trace writer close failed: %s", e)
+        # 2026-09-23: the feh window HudRenderer launches to display
+        # live_hud.png used to survive wingman exiting — nothing held a
+        # reference to it to close. Same defensive posture as the two
+        # cleanup steps above: never let this block a normal shutdown.
+        if hud_renderer is not None:
+            try:
+                hud_renderer.close()
+            except Exception as e:
+                logger.warning("HudRenderer: close failed: %s", e)
         ctrl.cleanup(keep_hotkeys=standby_armed)
         # ADR 095: the run file is written from inside analyzer.cleanup(), via
         # on_session_end() once the OCR pool has joined. load_end has to be taken

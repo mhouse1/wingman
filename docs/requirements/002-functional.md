@@ -178,7 +178,7 @@ Controller._start_afterburner_evade (wingman/controller.py).
 **UID**: FR-009
 
 **Statement**: After the operator's first Backspace has placed wingman into standby, a
-mission started by the J20 or loiter hotkey shall run until the operator
+mission started by the configured-mission or loiter hotkey shall run until the operator
 cancels it, until it completes on its own, or until a genuine program exit
 occurs; it shall not be aborted by the exit-request signal that entering
 standby itself leaves set. A program exit that occurs without the operator

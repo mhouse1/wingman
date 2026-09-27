@@ -41,10 +41,24 @@ anything in the capture or injection path.
 **Tests:**
 ```bash
 make test                             # full pytest suite + HTML report
+make docker-test                      # same suite in the Dockerfile image, on its own Xvfb display
 make test1                            # single OCR check (region 33 / continue)
 make test2                            # single OCR check (region 9 / incoming)
-pytest tests/test_analyzer.py -k foo  # run one test by name
+uv run --active pytest tests/test_analyzer.py -k foo  # run one test by name
 ```
+
+No X display (headless box, CI, a Claude Code cloud session)? Run `make docker-test`
+rather than editing tests to avoid the display. The image carries Xvfb and
+python3-tk inside the container, so the suite runs unchanged without installing
+an X server on the host (see "Python Environment" below). In a Claude Code cloud
+session:
+
+- The Docker daemon is installed but not started. If `docker info` fails, run
+  `nohup dockerd > /tmp/dockerd.log 2>&1 &` first.
+- A cold build needs about 21 GB of free disk, mostly the CUDA torch that `uv.lock`
+  pins. Skip the host `uv sync`, or delete `.venv`, if space is tight.
+- If Docker Hub answers `429 Too Many Requests`, add
+  `DOCKER_BUILD_ARGS="--build-arg BASE_IMAGE=mirror.gcr.io/library/ubuntu:24.04"`.
 
 **Validation gates (run before releasing):**
 ```bash
@@ -57,7 +71,7 @@ make ocr            # real-OCR integration tests (PATH1 + PATH2)
 
 **Release workflow** (user-invoked only — see the git rule at the top of this file):
 ```bash
-make wrelease   # commit version + performance artifacts, regenerate charts
+make wrelease   # veda only: commit version, promote run JSONs locally, regenerate charts
 make p "msg"    # stage, commit, push
 ```
 
@@ -95,7 +109,7 @@ Manual takeover (`i/j/k/l` keys) moves to `GAME_BATTLE_MANUAL`. `GAME_STARTING_S
 3. `make rr-live-path1-gate` — `live_screen_presenter.py` shows timed screenshots on-screen while the real monitor-capture path runs; validates round-trip timing.
 4. `make ocr` — real-OCR tests on archived game screenshots in `test_screenshots/integration_test/` (slow, skipped if screenshots are all-black placeholders).
 
-**Performance workflow:** Each session writes `docs/performance/current/run_*.json`. `make wrelease` copies them to `docs/performance/release/`, commits, and regenerates HTML charts. The performance regression check in `PerformanceTracker` compares the current session against the release baseline using the thresholds in `config.yaml`.
+**Performance workflow:** Each session writes `docs/performance/current/run_*.json`. `make wrelease` copies them to `docs/performance/release/`, commits the version bump, and regenerates HTML charts. `release/` is untracked and lives on VEDA only (ADR 100 D8); VEDA is the only host that generates performance reports, and the report targets and `wrelease` refuse to run elsewhere (`require-veda`). The performance regression check in `PerformanceTracker` compares the current session against the release baseline using the thresholds in `config.yaml`.
 
 ---
 
@@ -133,6 +147,28 @@ Always use the project Makefile and bash shell for commands in this repository.
 - Prefer `make <target>` for tests, builds, and project tasks.
 - Use bash as the execution shell for terminal commands.
 - Do not bypass the Makefile with ad-hoc `python`, `pytest`, or shell commands when a Makefile target already covers the task.
+
+## Python Environment — uv, Plus Two System Bindings
+
+uv owns the virtualenv and every PyPI package, on every machine (VEDA, Windows,
+cloud sessions).
+
+- Run project code and tests through uv: `make <target>` first; when no target
+  fits, invoke it the way the Makefile does — `uv run --active pytest …` or
+  `uv run --active python …`. Never run project code with `python`, `python3`,
+  `pip` or `.venv/bin/python` directly.
+- Change dependencies only with `uv add` / `uv remove`, so `pyproject.toml` and
+  `uv.lock` change together, then `uv sync --all-groups`. Never `pip install`.
+- On Linux the venv is built on the **system** Python on purpose. Two compiled
+  bindings have no PyPI wheel and come from apt instead: `python3-tk` (tkinter,
+  which `make test` needs) and `python3-gi` with `gir1.2-gstreamer-1.0` (the
+  PipeWire capture backend), bridged into the venv by a `.pth` file.
+  `scripts/setup-linux.sh` Step 5 and job aid 010 are the reference. These are
+  the only apt-installed Python pieces: do not apt-install any other Python
+  module, and do not rebuild the venv on a uv-managed Python — that breaks the
+  `gi` bridge.
+- System tools uv cannot provide (an X server such as Xvfb) are not Python
+  dependencies. Use them if already present; ask before installing one.
 
 ## Diagrams
 
@@ -212,6 +248,27 @@ All new documents (job aids, performance docs, code reviews, ADRs, and any other
 - Use `Draft` for new documents; update to `Active` or `Accepted` once reviewed.
 - **ADRs** must start as `Draft` when first created.
 - Update an ADR to `Accepted` only after implementation is complete.
+
+## README — Link Every Doc Reference
+
+`README.md` is the project's front door and a hub to the deeper docs;
+`docs/workflow/004-readme-goals-and-principles.md` sets its goals and structure.
+Every reference in it to a document must be a clickable relative link, not
+plain text or a backticked path.
+
+- Link every citation, not only the first: readers land mid-page.
+  `ADR 073` becomes `[ADR 073](docs/adr/073-climb-tactic-shadow-first.md)`.
+- In a combined citation, link each number:
+  `ADR [056](docs/adr/056-….md)/[069](docs/adr/069-….md)`.
+- A decision reference such as `ADR 099 D4a` links to the ADR file, with no
+  heading anchor. Anchors break when a heading is reworded.
+- Requirement IDs (`SAF-001`, `FR-005`) link to the generated `.md` export in
+  `docs/requirements/`, which renders on GitHub, not to the `.sdoc`.
+- Documentation Index entries are links whose text is the path.
+- Code and config paths (`wingman/config.yaml`, `wingman/tracker.py`) stay as
+  code formatting; they are not docs.
+
+After editing `README.md`, check that every link resolves to a file that exists.
 
 ## Architecture Documents (HLDD)
 

@@ -432,6 +432,9 @@ class FakeController:
     def padlock_target_switch(self, presses: int = 2, delay_between: float = 0.35) -> None:
         self._intents.append({"action_type": "padlock_target_switch"})
 
+    def is_padlock_blocked(self) -> bool:
+        return False
+
     def popup_click_allowed(self, _popup) -> bool:
         return False
 

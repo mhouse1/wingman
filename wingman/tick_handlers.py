@@ -25,8 +25,10 @@ import logging
 import threading
 import time
 
+from . import capture_budget
 from .analyzer import GameState, BATTLE_STATES
 from .behavior_tree import (
+    TACTIC_ATTACK_SUPPORT,
     TACTIC_CLIMB,
     TACTIC_DISENGAGE,
     TACTIC_ENGAGE,
@@ -46,6 +48,7 @@ from .behavior_tree import (
     tree_status_text,
 )
 from .engage_nav import RING_LONG, RING_MID, RING_SHORT, EngageNavigator, bin_rings
+from .icon_steering import find_ring_icons
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +111,17 @@ _BATTLE_STATES = BATTLE_STATES
 
 
 
+def _fmt_incoming_age(since_incoming: float) -> str:
+    """The age of the last incoming-missile alert for the DIED ARMED line
+    (ADR 143). An alert that never fired this session is an infinite age, not a
+    number: the line used to print `incoming 1790266284.2s ago` (the epoch, from
+    subtracting an unset 0.0 timestamp from `time.time()`), which read like data
+    and cost an investigation to see through."""
+    if since_incoming == float("inf"):
+        return "no incoming alert this session"
+    return f"incoming {since_incoming:.1f}s ago"
+
+
 def _fmt_rate(rate) -> str:
     """Altitude rate for the BT log line, or why it is missing (ADR 086 d2)."""
     return "n/a" if rate is None else f"{rate:+.0f}m/s"
@@ -137,11 +151,23 @@ class TrackingHudHandler:
     detection — the HUD must render before the respawn block's `continue`.
     """
 
-    def __init__(self, target_tracker, hud_renderer, analyzer, ctrl, tracking_cfg):
+    def __init__(self, target_tracker, hud_renderer, analyzer, ctrl, tracking_cfg,
+                 nav_source=None, icon_cfg=None):
         self._tracker = target_tracker
         self._hud = hud_renderer
         self._analyzer = analyzer
         self._ctrl = ctrl
+        # HLDD 015 normal-battle priority, shadow stage (operator, 2026-09-26:
+        # "its still rotating left past targets"): in GAME_BATTLE the tree's
+        # minimap navigation steers and a lock on screen changes nothing. With
+        # this on, every navigation roll the tree commanded this tick is logged
+        # beside what a lock, else the ring icon, would have steered instead
+        # (`BATTLEPRI:`). Presses nothing. `nav_source` is the
+        # BehaviorTreeHandler (its `last_nav_roll`), `icon_cfg` the
+        # IconSteeringConfig.
+        self._battle_priority_shadow = bool(tracking_cfg.get("battle_priority_shadow", False))
+        self._nav_source = nav_source
+        self._icon_cfg = icon_cfg
         # Design 005's own "Live dry-run logging mode" — off (sensing-only)
         # by default even when tracking itself is enabled, so turning
         # tracking on for the first time can never silently start rolling.
@@ -153,11 +179,73 @@ class TrackingHudHandler:
             "max_hold_sec": float(tracking_cfg.get("max_hold_sec", 0.35)),
             "cooldown_sec": float(tracking_cfg.get("command_cooldown_sec", 0.15)),
         }
+        # HLDD 005 pitch axis (2026-09-21): independent gate from roll's
+        # tracking.actuate above — deliberately its own flag, not reused,
+        # since roll already has a live-validation history (ADR 136) and
+        # pitch has none yet (Two-Axis Rollout). Never wired into ADR 136's
+        # heatdive consumer — see HLDD 005 Safety and Gating Rules.
+        self._actuate_pitch = bool(tracking_cfg.get("actuate_pitch", False))
+        self._pitch_cfg = {
+            "deadband": float(tracking_cfg.get("pitch_deadband", 0.05)),
+            "kp": float(tracking_cfg.get("pitch_kp", 0.30)),
+            "min_hold_sec": float(tracking_cfg.get("pitch_min_hold_sec", 0.08)),
+            "max_hold_sec": float(tracking_cfg.get("pitch_max_hold_sec", 0.35)),
+            "cooldown_sec": float(tracking_cfg.get("pitch_command_cooldown_sec", 0.15)),
+        }
+        # Two-Axis Rollout Phase 1 shadow counter — same rate-limited shape
+        # as every other shadow counter in this codebase (ADR 117 D9 /
+        # HLDD 013 Phase 1): log the 1st/10th/100th occurrence, then every
+        # 500th, rather than once per qualifying tick.
+        self._pitch_shadow_count = 0
 
     def on_state_change(self, new_state, prev_state=None):
         """Reset tracking when leaving the battle states entirely."""
         if prev_state in _BATTLE_STATES and new_state not in _BATTLE_STATES:
             self._tracker.reset()
+
+    # A navigation roll older than this is not this tick's (the main tick is 1.5 s).
+    _NAV_ROLL_MAX_AGE_S = 1.0
+    # |cos(angle)| under this: the icon is straight above or below, no side.
+    _ICON_SIDE_MIN = 0.1
+
+    def _log_battle_priority(self, frame, tracking_obs) -> None:
+        """One `BATTLEPRI:` line per navigation roll: what the tree's minimap
+        navigation rolled, and what the lock (first) or the ring icon (second)
+        wanted instead. `would` is `track:<left|right|hold>`, `icon:<left|right
+        |level>` or `nav:<dir>` when neither is present; `agree` compares it
+        with the navigation's roll. Measurement only."""
+        nav = getattr(self._nav_source, "last_nav_roll", None) if self._nav_source else None
+        if not nav:
+            return
+        self._nav_source.last_nav_roll = None
+        if time.time() - nav["ts"] > self._NAV_ROLL_MAX_AGE_S:
+            return
+        err = tracking_obs.get("error_norm") if tracking_obs else None
+        lock = bool(tracking_obs and tracking_obs.get("visible") and err is not None)
+        icon = None
+        if self._icon_cfg is not None:
+            icons = find_ring_icons(frame, self._icon_cfg)
+            icon = icons[0] if icons else None
+        if lock:
+            if abs(err) <= self._ctl_cfg["deadband"]:
+                would = ("track", "hold")
+            else:
+                would = ("track", "left" if err < 0 else "right")
+        elif icon is not None:
+            ux = math.cos(math.radians(icon.angle_deg))
+            if abs(ux) < self._ICON_SIDE_MIN:
+                would = ("icon", "level")
+            else:
+                would = ("icon", "left" if ux < 0 else "right")
+        else:
+            would = ("nav", nav["dir"])
+        logger.debug(
+            "BATTLEPRI: nav=%s:%s err=%s mode=%s lock=%s icon=%s would=%s:%s agree=%s",
+            nav["kind"], nav["dir"],
+            "-" if nav.get("err") is None else "%+.2f" % nav["err"], nav.get("mode", "-"),
+            "%+.2f" % err if lock else "-",
+            "-" if icon is None else "%.0fdeg" % icon.angle_deg,
+            would[0], would[1], "yes" if would[1] == nav["dir"] else "no")
 
     def tick(self, frame, current_game_state, game_state) -> bool:
         # Sensing: GAME_BATTLE and GAME_BATTLE_MANUAL alike. This never
@@ -184,6 +272,39 @@ class TrackingHudHandler:
                         "Tracker: roll_%s  err=%.2f  mode=%s",
                         cmd, err, tracking_obs["mode"],
                     )
+
+            # Pitch axis (HLDD 005, 2026-09-21): same GAME_BATTLE/mission-
+            # running gate roll already requires, plus its own independent
+            # tracking.actuate_pitch flag on top of it (never instead of it).
+            err_y = tracking_obs.get("error_norm_y")
+            if (err_y is not None and tracking_obs.get("visible")
+                    and current_game_state == GameState.GAME_BATTLE
+                    and self._ctrl.is_mission_running()):
+                if self._actuate_pitch:
+                    pcmd = self._ctrl.orient_pitch_to_target(err_y, **self._pitch_cfg)
+                    if pcmd is not None:
+                        logger.debug(
+                            "Tracker: pitch_%s  err_y=%.2f  mode=%s",
+                            pcmd, err_y, tracking_obs["mode"],
+                        )
+                elif abs(err_y) > self._pitch_cfg["deadband"]:
+                    # Two-Axis Rollout Phase 1: shadow only until
+                    # tracking.actuate_pitch flips — log what would fire,
+                    # press nothing.
+                    pitch_hold = float(min(max(
+                        self._pitch_cfg["kp"] * abs(err_y), self._pitch_cfg["min_hold_sec"]),
+                        self._pitch_cfg["max_hold_sec"]))
+                    self._pitch_shadow_count += 1
+                    n = self._pitch_shadow_count
+                    if n in (1, 10, 100) or n % 500 == 0:
+                        logger.info(
+                            "PITCH[shadow]: would %s hold=%.2fs err_y=%.2f (%d so far)",
+                            "nose_up" if err_y < 0 else "nose_down", pitch_hold, err_y, n)
+            if self._battle_priority_shadow and current_game_state == GameState.GAME_BATTLE:
+                try:
+                    self._log_battle_priority(frame, tracking_obs)
+                except Exception:
+                    logger.debug("BATTLEPRI: shadow check failed", exc_info=True)
 
         # HUD renderer — annotated snapshot; always runs in GAME_BATTLE when enabled.
         if self._hud is not None and current_game_state in (
@@ -286,6 +407,19 @@ class RespawnHandler:
         _raw_lookback = _cc_cfg.get("pre_crash_lookback_s", 5.0)
         self._pre_crash_lookback_s = float(5.0 if _raw_lookback is None else _raw_lookback)
         self._pre_crash_buffer: "collections.deque" = collections.deque()
+
+        # ADR 143: classifies each crash_with_missiles occurrence as enemy
+        # fire or terrain using two signals that don't depend on this tick's
+        # (or the pre-crash buffer's) OCR — see _classify_died_armed.
+        # Defaults comfortably above the 5.7-7.0s enemy-fire gap measured in
+        # the session that motivated this (2026-09-20); terrain_lookback_s
+        # has no live example yet to tune against.
+        _raw_enemy_fire_lookback = _cc_cfg.get("enemy_fire_lookback_s", 10.0)
+        self._enemy_fire_lookback_s = float(
+            10.0 if _raw_enemy_fire_lookback is None else _raw_enemy_fire_lookback)
+        _raw_terrain_lookback = _cc_cfg.get("terrain_lookback_s", 10.0)
+        self._terrain_lookback_s = float(
+            10.0 if _raw_terrain_lookback is None else _raw_terrain_lookback)
 
     # -- state --------------------------------------------------------------
 
@@ -405,6 +539,37 @@ class RespawnHandler:
         self._emit_capture_event("restart_last_mission")
         self._state = self._RespawnState.IDLE
 
+    # -- died-armed classification ---------------------------------------------
+
+    def _classify_died_armed(self, now: float) -> "tuple[str, float]":
+        """ADR 143: enemy_fire / terrain / unclassified for one
+        crash_with_missiles occurrence, plus the incoming-alert age (for the
+        per-occurrence log line).
+
+        Deliberately does not use the pre-crash buffer's alt/rate: the
+        2026-09-20 investigation that motivated this ADR found 0/5
+        occurrences had a readable value there despite good telemetry
+        1.5-3.0s earlier via the BT tactic's own log lines — a single-tick
+        OCR sample inherits OCR's ordinary miss rate, unlike the two signals
+        used here (a confirmed detection event; a computed, already-live-
+        validated verdict). `terrain` is checked first: an active hard
+        emergency (ttg/terrain — "hitting the ground is certain") is direct,
+        mechanism-level evidence a crash was already in progress, stronger
+        than inferring enemy fire from the mere absence of a recent missile
+        alert.
+        """
+        last_incoming_ts = self._ammo_events.last_incoming_alert_ts
+        since_incoming = now - last_incoming_ts if last_incoming_ts else float("inf")
+        last_hard_emergency_ts = (
+            self._behavior_tree.climb_last_hard_emergency_ts()
+            if self._behavior_tree is not None else 0.0)
+        since_terrain = now - last_hard_emergency_ts
+        if since_terrain <= self._terrain_lookback_s:
+            return "terrain", since_incoming
+        if since_incoming <= self._enemy_fire_lookback_s:
+            return "enemy_fire", since_incoming
+        return "unclassified", since_incoming
+
     # -- crash capture --------------------------------------------------------
 
     def _capture_crash_frame(self, frame) -> None:
@@ -435,6 +600,8 @@ class RespawnHandler:
             import cv2
             from pathlib import Path
             out_dir = Path(self._crash_capture_dir)
+            if not capture_budget.admit(out_dir, "Crash capture"):
+                return
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             # The sequence suffix (not just the timestamp) is required, not
@@ -622,17 +789,24 @@ class RespawnHandler:
                         if pre is not None:
                             capture_frame, missiles, alt, rate, pre_ts = pre
                             age_s = self._clock() - pre_ts
-                            logger.warning(
-                                "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
-                                "alt=%s rate=%s (pre-crash frame, %.1fs old)\033[0m",
-                                missiles, alt, rate, age_s)
+                            age_str = f"pre-crash frame, {age_s:.1f}s old"
                         else:
-                            logger.warning(
-                                "\033[91m💥 CRASH WITH MISSILES — %s missile(s), "
-                                "alt=%s rate=%s (no pre-crash frame buffered)\033[0m",
-                                missiles, alt, rate)
+                            age_str = "no pre-crash frame buffered"
+
+                        # ADR 143: enemy-fire vs. terrain classification,
+                        # replacing the misleading "CRASH" framing for what
+                        # ADR 137's own seventh trial already found was
+                        # mostly enemy fire, not terrain.
+                        now = self._clock()
+                        cause, since_incoming = self._classify_died_armed(now)
+                        logger.warning(
+                            "\033[91m💥 DIED ARMED — %s missile(s), cause=%s "
+                            "(%s), alt=%s rate=%s (%s)\033[0m",
+                            missiles, cause, _fmt_incoming_age(since_incoming),
+                            alt, rate, age_str)
                         self._capture_crash_frame(capture_frame)
                         self._emit_capture_event("crash_with_missiles")
+                        self._emit_capture_event(f"died_armed_{cause}")
                 self._emit_capture_event("respawn_detected")
                 # Live capture for the respawn frame itself rides the
                 # RESPAWN_DETECTED event, which fires from the background OCR
@@ -766,6 +940,13 @@ class AmmoEventsHandler:
     def battle_started_ts(self) -> float:
         return self._battle_started_ts
 
+    @property
+    def last_incoming_alert_ts(self) -> float:
+        """ADR 143: read by RespawnHandler to classify a died-armed death
+        as a likely enemy-fire kill — was there a confirmed incoming-missile
+        alert recently, not just historically this life."""
+        return self._last_incoming_alert_ts
+
     # -- tick ---------------------------------------------------------------
 
     def tick_missile_count(self, missiles_snapshot, current_game_state) -> None:
@@ -780,9 +961,13 @@ class AmmoEventsHandler:
         if self._last_missile_count is not None and missiles_snapshot < self._last_missile_count:
             self._fired_since_padlock += self._last_missile_count - missiles_snapshot
             if self._fired_since_padlock >= self._padlock_spread_missiles:
-                logger.info("Controller: %d missiles fired — switching padlock target",
-                            self._fired_since_padlock)
-                self._ctrl.padlock_target_switch()
+                # ADR 144: mission_su30 does not use the padlock camera, so there
+                # is no target to switch. Switching to the secondary rack also
+                # reads as "missiles fired" here (4 -> 2).
+                if not self._ctrl.is_padlock_blocked():
+                    logger.info("Controller: %d missiles fired — switching padlock target",
+                                self._fired_since_padlock)
+                    self._ctrl.padlock_target_switch()
                 self._fired_since_padlock = 0
         if missiles_snapshot > (self._last_missile_count or 0):
             # Missiles reloaded — reset so a pre-reload partial count isn't carried over
@@ -914,20 +1099,29 @@ class AmmoEventsHandler:
         return confirmed
 
     def fire_eject(self) -> None:
-        """Actuate the eject sequence: capture event, FSM transition, dive.
+        """Actuate the missiles-empty response: capture event, FSM transition,
+        then either dive (eject_and_dive) or pursue (pursue_and_engage,
+        HLDD 015) depending on pursuit_mode.enabled.
 
         One implementation for both callers — the legacy no-missiles path and
-        the behavior tree's Eject leaf (ADR 024 3.1b).
+        the behavior tree's Eject leaf (ADR 024 3.1b) — and the single
+        branch point both strategies share, so there is exactly one place to
+        keep them mutually exclusive rather than two independent triggers
+        that could race. Both still transition through the same
+        GAME_BATTLE_EJECT state; pursue_and_engage is a different behavior
+        inside that state, not a different FSM state (HLDD 015 D1).
         """
         self._emit_capture_event("missiles_empty")
         self._analyzer.trigger_event("eject_started")
-        self._ctrl.eject_and_dive(
-            on_complete=lambda: (
+
+        def _on_complete():
+            if self._analyzer.game_state == GameState.GAME_BATTLE_EJECT:
                 self._analyzer.trigger_event("eject_complete")
-                if self._analyzer.game_state == GameState.GAME_BATTLE_EJECT
-                else None
-            )
-        )
+
+        if self._ctrl.pursuit_mode_enabled():
+            self._ctrl.pursue_and_engage(on_complete=_on_complete)
+        else:
+            self._ctrl.eject_and_dive(on_complete=_on_complete)
 
     def tick_events(self) -> None:
         """Fire the ammo event handlers whose analyzer events are set."""
@@ -1044,6 +1238,18 @@ class BoundaryPerceptionHandler:
         # than silently dropped — if this dominates, the capture is being asked
         # for during a screen that has no minimap and the gate above is the bug.
         self._blind_no_minimap_skips = 0
+        # ADR 117 D8 (2026-09-20, superseded same day by D9): three real
+        # blind captures that session all showed a minimap with terrain but
+        # no real boundary line — a raw pixel-count floor was tried first,
+        # but visualizing the actual matched pixels (same day) found
+        # rocky/dirt terrain trivially clears any pixel-count floor, since
+        # terrain hue falls in the same HSV range as the boundary. D9
+        # replaced the count with a shape-aware check
+        # (Analyzer.get_last_boundary_had_thin_component): terrain is
+        # unambiguously too THICK (34.5-50.2 px) to pass, where a real
+        # fragmented line is thin (1.4-9.2 px) even when too short to
+        # be formally detected.
+        self._blind_no_boundary_line_skips = 0
         self._boundary_near_frac = float(minimap_cfg.get("boundary_near_frac", 0.25))
         self._boundary_turn_min_dist = 1.0
         # ~30 s of lead-up at a 1.5 s tick. Bounded: a session must not grow a
@@ -1335,6 +1541,21 @@ class BoundaryPerceptionHandler:
                 logger.debug("MAP BOUNDARY: blind capture skipped — no minimap "
                              "drawn (%d so far)", self._blind_no_minimap_skips)
             return False
+        # ADR 117 D9: a minimap is present but nothing on it is thin enough
+        # to plausibly be a boundary line — genuinely no line on screen (the
+        # aircraft isn't near an edge, or only thick terrain shares the
+        # boundary hue), not a detector miss. Same not-a-timer-advance
+        # reasoning as the no-minimap skip above: this is the common case,
+        # and must not spend the interval a genuine fragmented-line miss
+        # would need.
+        if not self._analyzer.get_last_boundary_had_thin_component():
+            self._blind_no_boundary_line_skips += 1
+            if (self._blind_no_boundary_line_skips in (1, 10, 100)
+                    or self._blind_no_boundary_line_skips % 500 == 0):
+                logger.debug(
+                    "MAP BOUNDARY: blind capture skipped — no boundary line "
+                    "(%d so far)", self._blind_no_boundary_line_skips)
+            return False
         self._blind_capture_next_ts = now + self._blind_capture_interval_s
         self._capture_boundary_frame(
             frame, "blind", f"{self._captures.get('blind', 0) + 1}")
@@ -1372,6 +1593,8 @@ class BoundaryPerceptionHandler:
             from datetime import datetime
             from pathlib import Path
             out_dir = Path(self._rtb_capture_dir)
+            if not capture_budget.admit(out_dir, "Map boundary capture"):
+                return
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = out_dir / f"{kind}_{stamp}_{seq}.png"
@@ -1587,6 +1810,35 @@ class BehaviorTreeHandler:
         self._orbit_interval_s = float(j20_cfg.get("orbit_roll_interval_s", 2.0))
         self._last_orbit_roll_ts = 0.0
         self._last_nav_mode = self._nav.mode
+        # HLDD 015 normal-battle priority shadow: the last roll the minimap
+        # navigation commanded ({ts, kind, dir, err, mode}), read and cleared by
+        # TrackingHudHandler later in the same tick.
+        self.last_nav_roll: "dict | None" = None
+        # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own tuning,
+        # not self._ctl_cfg, since that dict is EngageNavigator's combat gain
+        # and splatting it here would silently ignore these config keys.
+        attack_support_cfg = bt_cfg.get("attack_support", {}) or {}
+        self._seek_center_enabled = bool(
+            attack_support_cfg.get("seek_center_enabled", False))
+        self._seek_center_trigger_frac = float(
+            attack_support_cfg.get("seek_center_trigger_frac", 0.55))
+        self._seek_center_cfg = {
+            "deadband": float(
+                attack_support_cfg.get("seek_center_deadzone_deg", 15.0)) / 90.0,
+            "kp": float(attack_support_cfg.get("seek_center_kp", 0.3)),
+            "min_hold_sec": float(
+                attack_support_cfg.get("seek_center_min_hold_s", 0.15)),
+            "max_hold_sec": float(
+                attack_support_cfg.get("seek_center_max_hold_s", 0.6)),
+            "cooldown_sec": float(
+                attack_support_cfg.get("seek_center_cooldown_s", 2.0)),
+        }
+        # Rear-sector commit state (HLDD 013 Actuation): its own instance,
+        # copied from EngageNavigator._steer_intent's mechanism rather than
+        # shared with self._nav's, so an unrelated mode switch on one cannot
+        # reset the other.
+        self._seek_center_committed_sign: "float | None" = None
+        self._seek_center_shadow_count = 0
         # ADR 073 Phase 3.2a: while the Climb leaf is disabled it stays OUT of
         # the selector (a selection-only leaf would pre-empt Engage actuation —
         # not shadow). Instead an independent instance of the same condition is
@@ -1596,6 +1848,7 @@ class BehaviorTreeHandler:
         self._climb_shadow = None
         self._climb_emergency_fn = None
         self._climb_hard_emergency_fn = None
+        self._climb_last_hard_emergency_ts_fn = None
         self._climb_emergency_update_fn = None
         self._climb_terrain_ahead_fn = None
         self._terrain_ahead_prev = False
@@ -1645,7 +1898,14 @@ class BehaviorTreeHandler:
             actuators = {}
             if self.active and ammo_events is not None:
                 actuators.update({
-                    TACTIC_EJECT: (ammo_events.fire_eject, ctrl.is_ejecting),
+                    # HLDD 015: is_running must cover whichever strategy
+                    # fire_eject actually started — ctrl.is_ejecting alone
+                    # would read as "not running" for the whole duration of
+                    # a pursue_and_engage encounter (a separate flag), which
+                    # would let the tree re-invoke fire_eject every tick
+                    # instead of recognizing the leaf as already active.
+                    TACTIC_EJECT: (ammo_events.fire_eject,
+                                   lambda: ctrl.is_ejecting() or ctrl.is_pursuing()),
                     TACTIC_DISENGAGE: (self._start_disengage,
                                        ctrl.is_disengage_running),
                 })
@@ -1671,13 +1931,20 @@ class BehaviorTreeHandler:
             if self.active and boundary_tactic_enabled(bt_cfg):
                 actuators[TACTIC_BOUNDARY_TURN] = (self._start_boundary_turn,
                                                    ctrl.is_boundary_turning)
+            # ADR 147: the mission in play's own altitude doctrine (mission_su30
+            # levels off at 3000 m, below the tree's floor). getattr so a
+            # controller-less handler (mode off, tests) simply has none.
             self._tree = build_tree(
                 bt_cfg, actuators=actuators or None,
-                regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)))
+                regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)),
+                alt_floor_override_fn=getattr(ctrl, "altitude_floor_override_m", None),
+                sustain_suppressed_fn=getattr(ctrl, "sustain_climb_suppressed", None))
             self._writer = make_snapshot_writer()
             self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
             self._climb_hard_emergency_fn = getattr(
                 self._tree, "climb_hard_emergency_fn", None)
+            self._climb_last_hard_emergency_ts_fn = getattr(
+                self._tree, "climb_last_hard_emergency_ts_fn", None)
             self._climb_emergency_update_fn = getattr(
                 self._tree, "climb_emergency_update_fn", None)
             self._climb_terrain_ahead_fn = getattr(
@@ -1720,6 +1987,8 @@ class BehaviorTreeHandler:
             import cv2
             from pathlib import Path
             out_dir = Path(self._terrain_capture_dir)
+            if not capture_budget.admit(out_dir, "Terrain capture"):
+                return
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             path = out_dir / f"terrain_{stamp}_{self._terrain_captures}.png"
@@ -1839,6 +2108,15 @@ class BehaviorTreeHandler:
         """Restart the enemy-absence clock — called by the respawn flow, the
         3.1b analogue of EnemyPresenceHandler.arm()."""
         self._enemy_last_seen_ts = time.time()
+
+    def climb_last_hard_emergency_ts(self) -> float:
+        """ADR 143: last time the hard (ttg/terrain) climb emergency was
+        active — 0.0 if Climb isn't wired (tactic disabled) or has never
+        fired. Read by RespawnHandler to classify a died-armed death as a
+        likely terrain crash rather than enemy fire."""
+        if self._climb_last_hard_emergency_ts_fn is None:
+            return 0.0
+        return float(self._climb_last_hard_emergency_ts_fn())
 
     @property
     def enabled(self) -> bool:
@@ -2136,6 +2414,15 @@ class BehaviorTreeHandler:
             # Climb is the selection for most of a hold.
             if not snap.survival_hold:
                 self._actuate_engage(components, altitude, now, steer_only=True)
+        elif (_may_fly and not snap.survival_hold
+                and selection == TACTIC_ATTACK_SUPPORT):
+            # HLDD 013 Phase 1: the fallback slot every other tactic already
+            # outranks — nothing else is steering at all on this tick. The
+            # survival-hold exclusion is this branch's own condition, not an
+            # inner check, since (unlike Climb) it has no other reason to
+            # run during a hold at all — see ADR 110's "9 EngageNav commands
+            # reached a loitering aircraft" and HLDD 013's Actuation section.
+            self._actuate_seek_center(_b_dist, _b_fwd, _b_lat)
         return False
 
     def _actuate_engage(self, components, altitude, now, steer_only: bool = False):
@@ -2165,6 +2452,8 @@ class BehaviorTreeHandler:
                 cmd = self._ctrl.orient_nose_to_target(intent.error_norm, **self._ctl_cfg)
                 if cmd is not None:
                     logger.debug("EngageNav: roll_%s err=%.2f", cmd, intent.error_norm)
+                    self.last_nav_roll = {"ts": time.time(), "kind": "steer", "dir": cmd,
+                                          "err": intent.error_norm, "mode": intent.mode}
         elif intent.kind == "orbit":
             if steer_only:
                 # Concurrent with a climb: correcting heading is compatible with
@@ -2184,6 +2473,53 @@ class BehaviorTreeHandler:
                 else:
                     self._ctrl.roll_right(hold_seconds=self._orbit_hold_s, block=False)
                     logger.debug("EngageNav: orbit roll_right")
+                if not self._dry_run:
+                    self.last_nav_roll = {"ts": time.time(), "kind": "orbit",
+                                          "dir": intent.direction, "err": None,
+                                          "mode": intent.mode}
+
+    def _seek_center_error_norm(self, bearing_deg: float) -> float:
+        """Rear-sector commit/release for the reciprocal boundary bearing
+        (HLDD 013 Actuation), ported from EngageNavigator._steer_intent —
+        its own instance (self._seek_center_committed_sign), reusing only
+        self._nav's configured thresholds, not its state, since the two must
+        not reset each other on an unrelated mode switch.
+        """
+        abs_bearing = abs(bearing_deg)
+        if self._seek_center_committed_sign is not None:
+            if abs_bearing < self._nav.rear_release_deg:
+                self._seek_center_committed_sign = None
+            else:
+                return self._seek_center_committed_sign
+        if abs_bearing >= self._nav.rear_commit_deg:
+            self._seek_center_committed_sign = 1.0 if bearing_deg >= 0 else -1.0
+            return self._seek_center_committed_sign
+        return max(-1.0, min(1.0, bearing_deg / 90.0))
+
+    def _actuate_seek_center(self, dist, fwd, lat):
+        """TACTIC_ATTACK_SUPPORT actuation (HLDD 013 Phase 1): roll away from
+        the nearest map-boundary point on a tick where nothing else steers at
+        all. Shadow-only until seek_center_enabled — logs what it would
+        command instead, rate-limited like ADR 117 D9's blind-skip counters.
+        """
+        if lat is None or dist is None or dist > self._seek_center_trigger_frac:
+            return
+        # Reciprocal steering error in vector space — negate both components
+        # before atan2, not bearing-plus-180 with manual wrap handling (same
+        # reason MinimapEma smooths in (x, y) rather than on the angle).
+        bearing_deg = math.degrees(math.atan2(-lat, -fwd))
+        error_norm = self._seek_center_error_norm(bearing_deg)
+        if not self._seek_center_enabled:
+            self._seek_center_shadow_count += 1
+            n = self._seek_center_shadow_count
+            if n in (1, 10, 100) or n % 500 == 0:
+                logger.info(
+                    "SEEK CENTER[shadow]: would roll err=%.2f dist=%.2f (%d so far)",
+                    error_norm, dist, n)
+            return
+        cmd = self._ctrl.orient_nose_to_target(error_norm, **self._seek_center_cfg)
+        if cmd is not None:
+            logger.debug("SEEK CENTER: roll_%s err=%.2f dist=%.2f", cmd, error_norm, dist)
 
 
 class WaitingFallbackHandler:
@@ -2535,6 +2871,8 @@ class UnknownAnomalyRecorder:
             from datetime import datetime
             from pathlib import Path
             out_dir = Path(self._dir)
+            if not capture_budget.admit(out_dir, "ADR074 anomaly capture"):
+                return None
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             slug = "unknown" if episode == "GAME_UNKNOWN" else "blackout"
@@ -2613,6 +2951,8 @@ class HealthDropoutRecorder:
             from datetime import datetime
             from pathlib import Path
             out_dir = Path(self._dir)
+            if not capture_budget.admit(out_dir, "ADR080 dropout capture"):
+                return None
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = out_dir / f"dropout_{stamp}_gap{int(gap)}s.png"
@@ -2692,6 +3032,8 @@ class RespawnHealthStallRecorder:
             import cv2  # heavy import kept local: recorder is constructed once
             from pathlib import Path
             out_dir = Path(self._dir)
+            if not capture_budget.admit(out_dir, "ADR137 respawn stall capture"):
+                return None
             out_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             path = out_dir / f"stall_{stamp}_gap{int(gap)}s.png"

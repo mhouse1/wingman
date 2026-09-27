@@ -257,10 +257,12 @@ class _EventStub:
 
 
 class _AmmoCtrlStub:
-    def __init__(self, mission_running=True):
+    def __init__(self, mission_running=True, pursuit_mode=False):
         self._running = mission_running
+        self._pursuit_mode = pursuit_mode
         self.reloads = 0
         self.ejects = 0
+        self.pursuits = 0
         self.padlock_switches = 0
 
     def is_mission_running(self):
@@ -272,8 +274,17 @@ class _AmmoCtrlStub:
     def eject_and_dive(self, on_complete=None):
         self.ejects += 1
 
+    def pursuit_mode_enabled(self):
+        return self._pursuit_mode
+
+    def pursue_and_engage(self, on_complete=None):
+        self.pursuits += 1
+
     def padlock_target_switch(self):
         self.padlock_switches += 1
+
+    def is_padlock_blocked(self):
+        return False
 
     def deploy_flares(self, **kw):
         pass
@@ -418,6 +429,15 @@ class TestFlares:
         assert h.deploy_flares_on_new_incoming() is True
         assert h.deploy_flares_on_new_incoming() is False   # same timestamp
 
+    def test_last_incoming_alert_ts_is_readable(self):
+        """ADR 143: RespawnHandler's died-armed classifier reads this
+        publicly — must reflect the same value the private field holds."""
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, _ = _ammo(a)
+        assert h.last_incoming_alert_ts == 0.0   # nothing deployed yet
+        h.deploy_flares_on_new_incoming()
+        assert h.last_incoming_alert_ts == 100.0
+
     def test_incoming_suppressed_after_respawn(self):
         a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
         h, _, _ = _ammo(a)
@@ -509,19 +529,24 @@ class _RespawnCtrlStub:
 
 
 def _respawn(analyzer=None, ctrl=None, *, stability_s=0.0, enemy=None, ammo=None,
-             emit_capture_event=None, crash_capture=None, clock=None):
+             emit_capture_event=None, crash_capture=None, clock=None,
+             behavior_tree=None):
     from wingman.main import RespawnState, _alive_transition_disposition
     from wingman.tick_handlers import RespawnHandler
     a = analyzer or _RespawnAnalyzerStub()
     c = ctrl or _RespawnCtrlStub()
     enemy = enemy or SimpleNamespace(arm=lambda: None)
-    ammo = ammo or SimpleNamespace(suppress_after_respawn=lambda s: None)
+    # last_incoming_alert_ts: ADR 143's classifier reads this — 0.0 (never)
+    # is the fail-open default for a stub that isn't exercising it.
+    ammo = ammo or SimpleNamespace(suppress_after_respawn=lambda s: None,
+                                   last_incoming_alert_ts=0.0)
     # Real capture disabled by default — no test should write to disk
     # unless it is specifically exercising ADR 137 D5's capture behavior.
     mission_cfg = {"respawn_clear_stability_s": stability_s,
                    "crash_capture": {"enabled": False} if crash_capture is None else crash_capture}
     h = RespawnHandler(a, c, mission_cfg,
                        enemy_presence=enemy, ammo_events=ammo,
+                       behavior_tree=behavior_tree,
                        disposition_fn=_alive_transition_disposition,
                        respawn_state_enum=RespawnState,
                        emit_capture_event=emit_capture_event,
@@ -695,7 +720,8 @@ class TestRespawnDetection:
         """ADR 060 rule 2: cross-concern effects are named calls."""
         armed, suppressed = [], []
         h, a, c = _respawn(enemy=SimpleNamespace(arm=lambda: armed.append(1)),
-                           ammo=SimpleNamespace(suppress_after_respawn=suppressed.append))
+                           ammo=SimpleNamespace(suppress_after_respawn=suppressed.append,
+                                                last_incoming_alert_ts=0.0))
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
         assert armed == [1]
         assert suppressed == [10.0]
@@ -769,7 +795,10 @@ class TestCrashWithMissilesInstrument:
         h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2),
                            emit_capture_event=events.append)
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
-        assert events == ["crash_with_missiles", "respawn_detected"]
+        # ADR 143: no recent incoming alert or hard emergency in this stub
+        # (both default timestamps are 0.0, i.e. "never") — unclassified.
+        assert events == ["crash_with_missiles", "died_armed_unclassified",
+                          "respawn_detected"]
 
     def test_logs_the_raw_altitude_not_the_smoothed_one(self, caplog):
         """ADR 137 D4, code-review finding 2026-09-11: stable_value lags real
@@ -783,7 +812,7 @@ class TestCrashWithMissilesInstrument:
                            emit_capture_event=lambda _n: None)
         with caplog.at_level("WARNING"):
             h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
-        [msg] = [r.getMessage() for r in caplog.records if "CRASH WITH MISSILES" in r.getMessage()]
+        [msg] = [r.getMessage() for r in caplog.records if "DIED ARMED" in r.getMessage()]
         assert "alt=317" in msg, msg
         assert "1820" not in msg, msg
         assert "rate=-602.0" in msg, msg
@@ -797,7 +826,125 @@ class TestCrashWithMissilesInstrument:
         events = []
         h, a, c = _respawn(_BoomAnalyzer(missiles=2), emit_capture_event=events.append)
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)   # must not raise
-        assert events == ["crash_with_missiles", "respawn_detected"]
+        assert events == ["crash_with_missiles", "died_armed_unclassified",
+                          "respawn_detected"]
+
+
+class _BehaviorTreeStub:
+    """Minimal stand-in for BehaviorTreeHandler — just the two calls
+    RespawnHandler makes on it: arm_absence_clock() (unrelated to ADR 143,
+    called unconditionally) and climb_last_hard_emergency_ts() (ADR 143's
+    terrain signal)."""
+
+    def __init__(self, last_hard_emergency_ts=0.0):
+        self._ts = last_hard_emergency_ts
+
+    def arm_absence_clock(self):
+        pass
+
+    def climb_last_hard_emergency_ts(self):
+        return self._ts
+
+
+class TestDiedArmedClassification:
+    """ADR 143: enemy_fire / terrain / unclassified, computed from a recent
+    incoming-missile alert vs. a recent hard climb emergency — replacing the
+    misleading "it's all a crash" framing ADR 137's own seventh trial found
+    was mostly wrong (89% level-or-climbing, consistent with getting shot
+    down rather than flying into anything)."""
+
+    def _gs(self, respawning=True):
+        return {"is_respawning": respawning, "respawn_confidence": 1.0}
+
+    def test_enemy_fire_when_incoming_alert_recent(self):
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=994.0)   # 6s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_enemy_fire" in events
+
+    def test_enemy_fire_lookback_is_configurable(self):
+        """An alert just outside the configured window must not classify as
+        enemy fire — the default is a starting point, not load-bearing."""
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=989.0)   # 11s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, emit_capture_event=events.append,
+                           crash_capture={"enabled": False,
+                                          "enemy_fire_lookback_s": 10.0})
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_unclassified" in events
+        assert "died_armed_enemy_fire" not in events
+
+    def test_terrain_when_hard_emergency_recent(self):
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=0.0)   # never
+        bt = _BehaviorTreeStub(last_hard_emergency_ts=997.0)   # 3s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, behavior_tree=bt,
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_terrain" in events
+
+    def test_terrain_wins_when_both_signals_are_recent(self):
+        """An active hard emergency is direct, mechanism-level evidence a
+        crash was in progress — stronger than inferring enemy fire from an
+        unrelated missile alert earlier in the same life."""
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=996.0)   # 4s ago
+        bt = _BehaviorTreeStub(last_hard_emergency_ts=998.0)   # 2s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, behavior_tree=bt,
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_terrain" in events
+        assert "died_armed_enemy_fire" not in events
+
+    def test_unclassified_when_neither_signal_is_recent(self):
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=0.0)
+        bt = _BehaviorTreeStub(last_hard_emergency_ts=0.0)
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, behavior_tree=bt,
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_unclassified" in events
+
+    def test_no_behavior_tree_wired_falls_back_to_incoming_only(self):
+        """replay mode / a minimal harness: behavior_tree=None must not
+        raise, and must simply never contribute a terrain verdict."""
+        events = []
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=995.0)   # 5s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock, behavior_tree=None,
+                           emit_capture_event=events.append)
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        assert "died_armed_enemy_fire" in events
+
+    def test_log_line_names_the_cause_and_incoming_age(self, caplog):
+        clock = _FakeClock(1000.0)
+        ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
+                               last_incoming_alert_ts=994.0)   # 6s ago
+        h, a, c = _respawn(_RespawnAnalyzerStub(missiles=2), ammo=ammo,
+                           clock=clock)
+        with caplog.at_level("WARNING"):
+            h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        [msg] = [r.getMessage() for r in caplog.records if "DIED ARMED" in r.getMessage()]
+        assert "cause=enemy_fire" in msg, msg
+        assert "incoming 6.0s ago" in msg, msg
 
 
 class TestCrashCapture:
@@ -928,7 +1075,8 @@ class TestCrashCapture:
         h = RespawnHandler(
             _RespawnAnalyzerStub(missiles=2), _RespawnCtrlStub(), {},  # no crash_capture key at all
             enemy_presence=SimpleNamespace(arm=lambda: None),
-            ammo_events=SimpleNamespace(suppress_after_respawn=lambda s: None),
+            ammo_events=SimpleNamespace(suppress_after_respawn=lambda s: None,
+                                        last_incoming_alert_ts=0.0),
             disposition_fn=_alive_transition_disposition,
             respawn_state_enum=RespawnState)
         h.tick_detect("a_frame", self._gs(True), GameState.GAME_BATTLE)
@@ -1195,7 +1343,7 @@ class TestPreCrashBuffer:
         clock.advance(0.1)
         with caplog.at_level("WARNING"):
             h.tick_detect(_FakeFrame("death_screen"), self._gs(True), GameState.GAME_BATTLE)
-        [msg] = [r.getMessage() for r in caplog.records if "CRASH WITH MISSILES" in r.getMessage()]
+        [msg] = [r.getMessage() for r in caplog.records if "DIED ARMED" in r.getMessage()]
         assert "3 missile" in msg, msg
         assert "alt=1500" in msg, msg
         assert "rate=-400.0" in msg, msg
@@ -1224,7 +1372,7 @@ class TestPreCrashBuffer:
             crash_capture={"enabled": True, "pre_crash_buffer_s": 8.0})
         with caplog.at_level("WARNING"):
             h.tick_detect(_FakeFrame("only_frame"), self._gs(True), GameState.GAME_BATTLE)
-        [msg] = [r.getMessage() for r in caplog.records if "CRASH WITH MISSILES" in r.getMessage()]
+        [msg] = [r.getMessage() for r in caplog.records if "DIED ARMED" in r.getMessage()]
         assert "no pre-crash frame buffered" in msg, msg
 
 
@@ -2773,3 +2921,293 @@ class TestClimbEmergencyActuationUsesTheHardSignal:
         h._start_climb()
         assert "target_alt" not in h._ctrl.climb_calls[0]   # took the non-sustain branch
         assert h._ctrl.climb_calls[0]["emergency"] is False
+
+
+# --- HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT wired to the boundary reading ---
+
+class _SeekCenterCtrlStub:
+    def __init__(self):
+        self.orient_calls = []
+
+    def orient_nose_to_target(self, error_norm, **kw):
+        self.orient_calls.append((error_norm, kw))
+        if abs(error_norm) <= kw.get("deadband", 0.0):
+            return None
+        return "left" if error_norm < 0 else "right"
+
+
+def _seek_center_handler(*, enabled=False, trigger_frac=0.55,
+                         rear_commit_deg=150.0, rear_release_deg=90.0):
+    from wingman.tick_handlers import BehaviorTreeHandler
+    from wingman.engage_nav import EngageNavigator
+    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    # Own EngageNavigator instance, at the real defaults — _seek_center_error_norm
+    # reuses its rear_commit_deg/rear_release_deg (config, not state).
+    h._nav = EngageNavigator(
+        {"rear_commit_deg": rear_commit_deg, "rear_release_deg": rear_release_deg}, {})
+    h._seek_center_enabled = enabled
+    h._seek_center_trigger_frac = trigger_frac
+    h._seek_center_cfg = {
+        "deadband": 15.0 / 90.0, "kp": 0.3,
+        "min_hold_sec": 0.15, "max_hold_sec": 0.6, "cooldown_sec": 2.0,
+    }
+    h._seek_center_committed_sign = None
+    h._seek_center_shadow_count = 0
+    h._ctrl = _SeekCenterCtrlStub()
+    return h
+
+
+def test_seek_center_error_is_the_reciprocal_bearing_not_bearing_plus_180():
+    """Vector-negate-then-atan2 (HLDD 013 Actuation), not bearing+180 with
+    manual wrap-around — a boundary point at bearing 120deg (fwd=-0.5,
+    lat=+0.866) reciprocates to -60deg, not +300 or any wrapped equivalent."""
+    h = _seek_center_handler(enabled=True)
+    h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+    assert len(h._ctrl.orient_calls) == 1
+    err, _ = h._ctrl.orient_calls[0]
+    assert abs(err - (-60.0 / 90.0)) < 1e-6
+
+
+def test_seek_center_steers_away_from_the_edge_not_toward_it():
+    """A boundary point to the right-rear (bearing +120deg) must roll LEFT to
+    escape; mirrored on the left-rear (bearing -120deg) must roll RIGHT."""
+    right = _seek_center_handler(enabled=True)
+    right._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+    err_right, _ = right._ctrl.orient_calls[0]
+    assert err_right < 0
+
+    left = _seek_center_handler(enabled=True)
+    left._actuate_seek_center(dist=0.2, fwd=-0.5, lat=-0.8660254037844386)
+    err_left, _ = left._ctrl.orient_calls[0]
+    assert err_left > 0
+
+
+def test_seek_center_does_nothing_without_a_lateral_component():
+    """A 2-tuple reading (lateral is None) is treated exactly like no
+    reading at all — must not call atan2(None, ...) or otherwise raise."""
+    h = _seek_center_handler(enabled=True)
+    h._actuate_seek_center(dist=0.2, fwd=0.9, lat=None)
+    assert h._ctrl.orient_calls == []
+
+
+def test_seek_center_does_nothing_with_no_reading_at_all():
+    h = _seek_center_handler(enabled=True)
+    h._actuate_seek_center(dist=None, fwd=None, lat=None)
+    assert h._ctrl.orient_calls == []
+
+
+def test_seek_center_does_not_fire_beyond_the_trigger_radius():
+    h = _seek_center_handler(enabled=True, trigger_frac=0.55)
+    h._actuate_seek_center(dist=0.56, fwd=-0.5, lat=0.8660254037844386)
+    assert h._ctrl.orient_calls == []
+
+
+def test_seek_center_fires_at_the_trigger_radius():
+    h = _seek_center_handler(enabled=True, trigger_frac=0.55)
+    h._actuate_seek_center(dist=0.55, fwd=-0.5, lat=0.8660254037844386)
+    assert len(h._ctrl.orient_calls) == 1
+
+
+def test_seek_center_uses_its_own_config_not_the_combat_deadband():
+    """`self._ctl_cfg['deadband']` is EngageNavigator's combat-tuned bearing
+    deadzone — splatting it here would silently ignore seek_center_deadzone_deg."""
+    h = _seek_center_handler(enabled=True)
+    h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+    _, kw = h._ctrl.orient_calls[0]
+    assert abs(kw["deadband"] - 15.0 / 90.0) < 1e-9
+    assert abs(kw["deadband"] - h._nav.deadband_norm) > 1e-9
+
+
+def test_seek_center_rear_commit_no_reversal_on_dead_ahead_sign_flip():
+    """HLDD 013: the reciprocal bearing sits near +/-180deg exactly when the
+    boundary is dead ahead — the single most important case to handle well.
+    A tiny lateral jitter flips its raw sign every sample; committed, the
+    direction must hold (ported from EngageNavigator._steer_intent's own
+    rear-commit regression, live 2026-08-08 15:01)."""
+    h = _seek_center_handler()
+    first = h._seek_center_error_norm(-178.85)
+    assert first == -1.0
+    second = h._seek_center_error_norm(178.85)
+    assert second == -1.0            # no reversal
+    third = h._seek_center_error_norm(-178.28)
+    assert third == -1.0
+
+
+def test_seek_center_rear_commit_releases_as_the_edge_sweeps_forward():
+    h = _seek_center_handler()
+    bearings = [170, 135, 95, 60, 30]
+    errors = [h._seek_center_error_norm(b) for b in bearings]
+    assert all(e > 0 for e in errors), errors
+    assert errors[0] == 1.0          # still committed
+    assert errors[-1] < 1.0          # released, proportional again
+    assert abs(errors[-1] - 30.0 / 90.0) < 1e-9
+
+
+def test_seek_center_rear_commit_holds_through_the_release_band_boundary():
+    """Release only strictly below rear_release_deg — at or above it the
+    commitment must still hold (mirrors EngageNav's own off-by-one shape)."""
+    h = _seek_center_handler(rear_release_deg=90.0)
+    h._seek_center_error_norm(-178.0)          # commits negative
+    held = h._seek_center_error_norm(-90.0)    # exactly at the release band edge
+    assert held == -1.0
+    released = h._seek_center_error_norm(-89.9)
+    assert released < 0 and released > -1.0
+
+
+def test_seek_center_shadow_mode_never_actuates():
+    h = _seek_center_handler(enabled=False)
+    h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+    assert h._ctrl.orient_calls == []
+    assert h._seek_center_shadow_count == 1
+
+
+def test_seek_center_shadow_log_is_rate_limited():
+    """ADR 117 D9's blind-skip pattern: log at the 1st, 10th, 100th
+    occurrence, then every 500th — not once per qualifying tick, which
+    could otherwise log continuously for as long as the aircraft idles
+    near an edge."""
+    import wingman.tick_handlers as th
+    h = _seek_center_handler(enabled=False)
+    logged = []
+    real_info = th.logger.info
+    th.logger.info = lambda fmt, *a: logged.append(fmt % a if a else fmt)
+    try:
+        for _ in range(12):
+            h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+        assert len(logged) == 2, logged     # the 1st and the 10th
+        for _ in range(89):                 # advance to the 101st occurrence
+            h._actuate_seek_center(dist=0.2, fwd=-0.5, lat=0.8660254037844386)
+        assert len(logged) == 3, logged     # + the 100th
+        assert "SEEK CENTER[shadow]" in logged[0]
+    finally:
+        th.logger.info = real_info
+
+
+def test_seek_center_branch_carries_its_own_survival_hold_gate():
+    """HLDD 013: unlike Climb, TACTIC_ATTACK_SUPPORT has no other reason to
+    run during a hold, so the exclusion belongs in this branch's own
+    condition rather than a separate inner check — the same regression
+    class ADR 110 already fixed once for Climb (9 EngageNav commands
+    reaching a loitering aircraft, 2026-09-04)."""
+    import pathlib
+    src = pathlib.Path("wingman/tick_handlers.py").read_text()
+    marker = "and selection == TACTIC_ATTACK_SUPPORT):"
+    assert marker in src
+    branch_start = src.index("elif (_may_fly and not snap.survival_hold")
+    condition = src[branch_start:src.index(marker) + len(marker)]
+    assert "not snap.survival_hold" in condition
+    branch = src[branch_start:src.index("return False", branch_start)]
+    assert "self._actuate_seek_center(_b_dist, _b_fwd, _b_lat)" in branch
+
+
+def test_seek_center_reuses_this_ticks_destructured_boundary_locals():
+    """HLDD 013: must reuse the _b_dist/_b_fwd/_b_lat locals tick() already
+    destructured from self._boundary.perceive() this tick, not redo the
+    None/2-tuple handling perceive() already resolved via a fresh
+    self._boundary.reading property fetch."""
+    import pathlib
+    src = pathlib.Path("wingman/tick_handlers.py").read_text()
+    assert "self._actuate_seek_center(_b_dist, _b_fwd, _b_lat)" in src
+
+
+def test_seek_center_ships_disabled_in_the_shipped_config():
+    """Shadow first (HLDD 013 / ADR 070 / ADR 028 rev 4 precedent): a live
+    session's shadow log decides whether Phase 1 goes live, not a guess."""
+    import yaml
+    with open("wingman/config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["behavior_tree"]["attack_support"]["seek_center_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# HLDD 015 normal-battle priority, shadow (2026-09-26): each navigation roll in
+# GAME_BATTLE is logged beside what a lock, else the ring icon, would steer.
+# ---------------------------------------------------------------------------
+
+class _NavSource:
+    def __init__(self, direction="left", age_s=0.0):
+        import time as _t
+        self.last_nav_roll = {"ts": _t.time() - age_s, "kind": "steer", "dir": direction,
+                              "err": -0.30, "mode": "regroup"}
+
+
+def _icon_frame(angle_deg):
+    import math as _m
+    import cv2 as _cv2
+    import numpy as _np
+    img = _np.zeros((1200, 1920, 3), _np.uint8)
+    x = int(round(960 + 194 * _m.cos(_m.radians(angle_deg))))
+    y = int(round(600 + 194 * _m.sin(_m.radians(angle_deg))))
+    bgr = tuple(int(c) for c in _cv2.cvtColor(_np.uint8([[[3, 165, 255]]]), _cv2.COLOR_HSV2BGR)[0, 0])
+    _cv2.rectangle(img, (x - 15, y - 15), (x + 15, y + 15), bgr, -1)
+    return img
+
+
+def _battlepri(caplog, obs, frame, nav=None, enabled=True):
+    from wingman.icon_steering import IconSteeringConfig
+    from wingman.tick_handlers import TrackingHudHandler
+    nav = nav if nav is not None else _NavSource()
+    handler = TrackingHudHandler(_TrackerStub(obs=obs), _HudStub(), _TrackAnalyzerStub(),
+                                 _TrackCtrlStub(), {"battle_priority_shadow": enabled},
+                                 nav_source=nav, icon_cfg=IconSteeringConfig(enabled=True))
+    with caplog.at_level("DEBUG", logger="wingman.tick_handlers"):
+        handler.tick(frame, GameState.GAME_BATTLE, {"health": 100})
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("BATTLEPRI:")], nav
+
+
+_NO_LOCK = {"error_norm": None, "visible": False, "mode": "ACQUIRING"}
+
+
+class TestBattlePriorityShadow:
+    def test_a_lock_the_other_way_is_logged_as_a_disagreement(self, caplog):
+        lines, _ = _battlepri(caplog, {"error_norm": 0.3, "visible": True, "mode": "TRACKING"},
+                              _icon_frame(180))
+        assert len(lines) == 1
+        assert "nav=steer:left" in lines[0] and "would=track:right" in lines[0]
+        assert "agree=no" in lines[0]
+
+    def test_a_centred_lock_wants_no_roll(self, caplog):
+        lines, _ = _battlepri(caplog, {"error_norm": 0.02, "visible": True, "mode": "TRACKING"},
+                              _icon_frame(0))
+        assert "would=track:hold agree=no" in lines[0]
+
+    def test_without_a_lock_the_icon_side_is_compared(self, caplog):
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(0))
+        assert "icon=0deg" in lines[0] and "would=icon:right agree=no" in lines[0]
+
+    def test_an_icon_straight_below_wants_the_wings_level(self, caplog):
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(90))
+        assert "would=icon:level" in lines[0]
+
+    def test_neither_lock_nor_icon_leaves_the_navigation(self, caplog):
+        import numpy as _np
+        lines, _ = _battlepri(caplog, _NO_LOCK, _np.zeros((1200, 1920, 3), _np.uint8))
+        assert "would=nav:left agree=yes" in lines[0]
+
+    def test_the_roll_is_consumed_so_it_is_logged_once(self, caplog):
+        _lines, nav = _battlepri(caplog, _NO_LOCK, _icon_frame(0))
+        assert nav.last_nav_roll is None
+
+    def test_no_line_without_a_navigation_roll_this_tick(self, caplog):
+        nav = _NavSource()
+        nav.last_nav_roll = None
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(0), nav=nav)
+        assert lines == []
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(0), nav=_NavSource(age_s=5.0))
+        assert lines == []
+
+    def test_off_logs_nothing(self, caplog):
+        lines, _ = _battlepri(caplog, _NO_LOCK, _icon_frame(0), enabled=False)
+        assert lines == []
+
+
+def test_the_tree_records_the_navigation_roll_it_commanded():
+    from types import SimpleNamespace
+    from wingman.tick_handlers import BehaviorTreeHandler
+    bt = BehaviorTreeHandler(None, _TrackCtrlStub(), {})
+    bt._nav.update = lambda *a, **k: SimpleNamespace(
+        mode="regroup", kind="steer", reason="steering", error_norm=-0.3, direction=None)
+    bt._actuate_engage([], 4000.0, 0.0)
+    assert bt.last_nav_roll is not None
+    assert bt.last_nav_roll["dir"] == "right"      # the ctrl stub always answers "right"
+    assert bt.last_nav_roll["kind"] == "steer" and bt.last_nav_roll["mode"] == "regroup"

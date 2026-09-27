@@ -1,0 +1,424 @@
+"""HLDD 005 Sustained-Hold Actuation (2026-09-23) — hold a roll/pitch key
+until the tracked condition changes instead of computing a bounded tap.
+
+sustained_hold=False (the default on both orient_nose_to_target and
+orient_pitch_to_target) must reproduce the exact original tap/cooldown
+behavior — that is covered by the existing tests in test_target_tracking.py
+and TestOrientNoseToTarget there, which never pass sustained_hold and must
+keep passing unchanged. This file exercises the sustained_hold=True path
+directly, plus the release paths every caller now needs (miss ticks, loop
+exit, cancel_mission/manual takeover) that a self-expiring tap never did.
+"""
+
+import logging
+import threading
+import time
+
+import wingman.controller as controller_module
+from wingman.controller_config import ControllerConfig
+from wingman.controller import (
+    Controller, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+)
+
+
+def _keys(ctrl):
+    with ctrl._action_intents_lock:
+        return [(i["action_type"], i["key"]) for i in ctrl._action_intents]
+
+
+def _make_ctrl(monkeypatch, sustained_hold_enabled=True):
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    return Controller(
+        (0, 0, 1920, 1200),
+        exit_event=threading.Event(),
+        config=ControllerConfig(
+            simulate_os_input=True,
+            disable_hotkeys=True,
+            tracking={"sustained_hold_enabled": sustained_hold_enabled},
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Roll: press once, hold, release/switch on condition change
+# ---------------------------------------------------------------------------
+
+class TestSustainedRollHold:
+    def test_constant_error_presses_once_not_per_call(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        for _ in range(5):
+            result = ctrl.orient_nose_to_target(-0.3, sustained_hold=True)
+            assert result == "left"
+        presses = [k for k in _keys(ctrl) if k == ("key_press", ROLL_LEFT_KEY)]
+        assert len(presses) == 1, "must press once, not once per call, while error stays the same"
+        assert ("key_release", ROLL_LEFT_KEY) not in _keys(ctrl)
+
+    def test_error_entering_deadband_releases_the_held_key(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(-0.3, sustained_hold=True)
+        result = ctrl.orient_nose_to_target(0.02, sustained_hold=True, deadband=0.05)
+        assert result is None
+        assert ("key_release", ROLL_LEFT_KEY) in _keys(ctrl)
+        assert ctrl._roll_held is None
+        assert ctrl._roll_hold_reason is None
+
+    def test_error_flipping_sign_releases_old_and_presses_new(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(-0.3, sustained_hold=True)
+        result = ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        assert result == "right"
+        keys = _keys(ctrl)
+        assert keys.index(("key_release", ROLL_LEFT_KEY)) < keys.index(("key_press", ROLL_RIGHT_KEY))
+        assert ctrl._roll_held == "right"
+        # Never both held at once.
+        assert not (("key_press", ROLL_LEFT_KEY) in keys[keys.index(("key_release", ROLL_LEFT_KEY)):]
+                    and ("key_press", ROLL_RIGHT_KEY) in keys)
+
+    def test_disabled_by_default(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch, sustained_hold_enabled=False)
+        assert ctrl._sustained_hold_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Pitch: same mechanism, no search default
+# ---------------------------------------------------------------------------
+
+class TestSustainedPitchHold:
+    def test_constant_error_presses_once_not_per_call(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        for _ in range(5):
+            result = ctrl.orient_pitch_to_target(0.3, sustained_hold=True)
+            assert result == "down"
+        presses = [k for k in _keys(ctrl) if k == ("key_press", NOSE_DOWN_KEY)]
+        assert len(presses) == 1
+
+    def test_error_entering_deadband_releases_the_held_key(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(-0.3, sustained_hold=True)
+        result = ctrl.orient_pitch_to_target(0.0, sustained_hold=True)
+        assert result is None
+        assert ("key_release", NOSE_UP_KEY) in _keys(ctrl)
+        assert ctrl._pitch_held is None
+
+    def test_error_flipping_sign_releases_old_and_presses_new(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(-0.3, sustained_hold=True)  # up
+        result = ctrl.orient_pitch_to_target(0.3, sustained_hold=True)  # down
+        assert result == "down"
+        keys = _keys(ctrl)
+        assert keys.index(("key_release", NOSE_UP_KEY)) < keys.index(("key_press", NOSE_DOWN_KEY))
+
+
+# ---------------------------------------------------------------------------
+# Search hold (roll-only, operator directive 2026-09-23): no target holds
+# ROLL_LEFT_KEY, and reacquisition is always a fresh decision
+# ---------------------------------------------------------------------------
+
+class TestRollSearchHold:
+    def test_engage_search_holds_roll_left(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.engage_roll_search()
+        assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_repeated_search_ticks_do_not_repress(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        for _ in range(5):
+            ctrl.engage_roll_search()
+        presses = [k for k in _keys(ctrl) if k == ("key_press", ROLL_LEFT_KEY)]
+        assert len(presses) == 1
+
+    def test_search_from_a_right_target_hold_releases_right_first(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)  # right, reason="target"
+        ctrl.engage_roll_search()
+        keys = _keys(ctrl)
+        assert ("key_release", ROLL_RIGHT_KEY) in keys
+        assert ("key_press", ROLL_LEFT_KEY) in keys
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_reacquisition_with_same_direction_is_still_a_fresh_decision(self, monkeypatch):
+        """The one case a naive "already holding the right key" check gets
+        wrong: search holds left, and the newly-acquired target is also to
+        the left. Must still release-then-press, and the reason must flip to
+        "target" — never a silent no-op that leaves the reason at "search"."""
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.engage_roll_search()
+        assert ctrl._roll_hold_reason == "search"
+        result = ctrl.orient_nose_to_target(-0.3, sustained_hold=True)  # left again
+        assert result == "left"
+        keys = _keys(ctrl)
+        press_count = len([k for k in keys if k == ("key_press", ROLL_LEFT_KEY)])
+        release_count = len([k for k in keys if k == ("key_release", ROLL_LEFT_KEY)])
+        assert press_count == 2, "must press again, not skip as a no-op"
+        assert release_count == 1, "must release the search hold before the fresh press"
+        assert ctrl._roll_hold_reason == "target"
+
+    def test_reacquisition_with_opposite_direction_switches_normally(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.engage_roll_search()  # left
+        result = ctrl.orient_nose_to_target(0.3, sustained_hold=True)  # right
+        assert result == "right"
+        keys = _keys(ctrl)
+        assert ("key_release", ROLL_LEFT_KEY) in keys
+        assert ("key_press", ROLL_RIGHT_KEY) in keys
+        assert ctrl._roll_hold_reason == "target"
+
+
+# ---------------------------------------------------------------------------
+# Release paths: the hazard a held key introduces that a self-expiring tap
+# never had
+# ---------------------------------------------------------------------------
+
+class TestReleasePaths:
+    def test_release_roll_hold_is_a_noop_when_nothing_held(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.release_roll_hold()  # must not raise
+        assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+
+    def test_release_pitch_hold_is_a_noop_when_nothing_held(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.release_pitch_hold()
+        assert ("key_press", NOSE_UP_KEY) not in _keys(ctrl)
+
+    def test_release_tracking_holds_releases_both_axes(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(-0.3, sustained_hold=True)
+        ctrl.orient_pitch_to_target(0.3, sustained_hold=True)
+        ctrl.release_tracking_holds()
+        keys = _keys(ctrl)
+        assert ("key_release", ROLL_LEFT_KEY) in keys
+        assert ("key_release", NOSE_DOWN_KEY) in keys
+        assert ctrl._roll_held is None
+        assert ctrl._pitch_held is None
+        assert ctrl._roll_hold_reason is None
+
+    def test_cancel_mission_releases_a_held_key(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(-0.3, sustained_hold=True)
+        ctrl.cancel_mission()
+        assert ("key_release", ROLL_LEFT_KEY) in _keys(ctrl)
+        assert ctrl._roll_held is None
+
+    def test_manual_takeover_releases_a_held_key_and_clears_state(self, monkeypatch):
+        """The blanket INJECTABLE_KEYS release in release_for_manual_takeover
+        physically lets go of every key at the OS level, but (simulate mode
+        aside) does not know about _roll_held/_roll_hold_reason/_pitch_held —
+        without an explicit release, that Python-level state would claim a
+        key is still held after the X server has already released it."""
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.orient_pitch_to_target(-0.3, sustained_hold=True)
+        ctrl.release_for_manual_takeover()
+        assert ctrl._roll_held is None
+        assert ctrl._roll_hold_reason is None
+        assert ctrl._pitch_held is None
+
+
+# ---------------------------------------------------------------------------
+# Action item 001 (2026-09-24): a miss tick shortly after a lock must not
+# resume the ROLL_LEFT search — wingman.log 2026-09-24 06:03:38-39 measured the
+# aircraft rotating past a target that sat at screen centre in frame 16.
+# ---------------------------------------------------------------------------
+
+class TestRollOnMiss:
+    def test_miss_within_delay_releases_instead_of_searching(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)  # holding right
+        ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=5.0)
+        keys = _keys(ctrl)
+        assert ("key_release", ROLL_RIGHT_KEY) in keys
+        assert ("key_press", ROLL_LEFT_KEY) not in keys
+        assert ctrl._roll_held is None
+
+    def test_repeated_misses_within_delay_stay_neutral(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(-0.3, sustained_hold=True)  # holding left
+        for _ in range(4):
+            ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=5.0)
+        assert ctrl._roll_held is None
+        assert len([k for k in _keys(ctrl) if k == ("key_press", ROLL_LEFT_KEY)]) == 1
+
+    def test_miss_after_delay_engages_the_search_default(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 10.0, resume_delay_s=2.0)
+        assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_never_seen_engages_the_search_default_immediately(self, monkeypatch):
+        """The operator's directive (search-hold from the first tick when
+        nothing has ever been seen) must be unchanged."""
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=None, resume_delay_s=5.0)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_zero_delay_restores_the_old_immediate_resume(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=0.0)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_reacquisition_after_a_neutral_miss_is_a_fresh_press(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=5.0)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        presses = [k for k in _keys(ctrl) if k == ("key_press", ROLL_RIGHT_KEY)]
+        assert len(presses) == 2
+        assert ctrl._roll_hold_reason == "target"
+
+
+class TestRollHoldLogging:
+    def _hold_lines(self, caplog):
+        return [r.getMessage() for r in caplog.records if r.getMessage().startswith("HOLD[roll]")]
+
+    def test_a_state_change_logs_one_line(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        lines = self._hold_lines(caplog)
+        assert len(lines) == 1
+        assert "None/None -> right/target" in lines[0]
+        assert "err=+0.300" in lines[0]
+
+    def test_a_no_op_repeat_logs_nothing(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        before = len(self._hold_lines(caplog))
+        for _ in range(5):
+            ctrl.orient_nose_to_target(0.31, sustained_hold=True)
+        assert len(self._hold_lines(caplog)) == before
+
+    def test_search_and_release_each_log_their_own_transition(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.engage_roll_search()
+        ctrl.engage_roll_search()          # no-op: already searching
+        ctrl.release_roll_hold(why="test")
+        lines = self._hold_lines(caplog)
+        assert len(lines) == 2
+        assert "None/None -> left/search" in lines[0]
+        assert "left/search -> None/None (test)" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# Every pitch press gets a logged end. The 2026-09-25 21:23 session logged 19
+# HOLD[pitch] presses and 17 ends: releases on a miss, the dive guard, a yield
+# or loop exit went through release_pitch_hold() silently, so a hold's length
+# could not be read from the log.
+# ---------------------------------------------------------------------------
+
+class TestPitchHoldLogging:
+    def _hold_lines(self, caplog):
+        return [r.getMessage() for r in caplog.records if r.getMessage().startswith("HOLD[pitch]")]
+
+    def test_direct_release_logs_its_reason(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(0.3, sustained_hold=True)
+        ctrl.release_pitch_hold(why="no target")
+        assert self._hold_lines(caplog) == [
+            "HOLD[pitch]: None -> down (target err_y=+0.300)",
+            "HOLD[pitch]: down -> None (no target)",
+        ]
+
+    def test_release_tracking_holds_logs_the_pitch_end(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(-0.3, sustained_hold=True)
+        ctrl.release_tracking_holds(why="yield to dive recovery")
+        assert self._hold_lines(caplog)[-1] == "HOLD[pitch]: up -> None (yield to dive recovery)"
+
+    def test_release_with_nothing_held_logs_nothing(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.release_pitch_hold(why="no target")
+        assert self._hold_lines(caplog) == []
+
+    def test_every_press_has_a_matching_end(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(0.4, sustained_hold=True)
+        ctrl.release_pitch_hold(why="dive guard err_y=+0.400")
+        ctrl.orient_pitch_to_target(-0.4, sustained_hold=True)
+        ctrl.orient_pitch_to_target(0.0, sustained_hold=True)
+        ctrl.orient_pitch_to_target(0.4, sustained_hold=True)
+        ctrl.cancel_mission()
+        lines = self._hold_lines(caplog)
+        presses = [l for l in lines if l.startswith("HOLD[pitch]: None -> ")]
+        ends = [l for l in lines if l.endswith(")") and " -> None (" in l]
+        assert len(presses) == 3
+        assert len(ends) == 3
+
+
+# ---------------------------------------------------------------------------
+# Near-centre extension (operator, 2026-09-24: "it had more than enough time
+# locked onto target but kept forcing left turn, it should have stopped left
+# turn and focused on target"). Measured on the 07:34-08:24 session with the
+# 2.0 s delay in place: search resumed with the target last seen within +-0.15
+# of centre in 6 of 10 pursuit and 23 of 41 dive cases.
+# ---------------------------------------------------------------------------
+
+class TestRollOnMissNearCentre:
+    CENTRE = dict(centre_err=0.15, centre_delay_s=6.0)
+
+    def test_near_centre_holds_neutral_past_the_base_delay(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=2.0,
+                          last_err=0.05, **self.CENTRE)
+        assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+        assert ctrl._roll_held is None
+
+    def test_far_from_centre_uses_only_the_base_delay(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=2.0,
+                          last_err=0.4, **self.CENTRE)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_the_sign_of_the_error_does_not_matter(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=2.0,
+                          last_err=-0.05, **self.CENTRE)
+        assert ctrl._roll_held is None
+
+    def test_the_extended_hold_still_ends(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 7.0, resume_delay_s=2.0,
+                          last_err=0.05, **self.CENTRE)
+        assert ctrl._roll_held == "left"
+        assert ctrl._roll_hold_reason == "search"
+
+    def test_the_extension_never_shortens_a_longer_base_delay(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=10.0,
+                          last_err=0.05, centre_err=0.15, centre_delay_s=1.0)
+        assert ctrl._roll_held is None
+
+    def test_without_the_extension_arguments_behavior_is_unchanged(self, monkeypatch):
+        """Backward compatible: callers that pass no last_err/centre values get
+        the plain resume-delay rule of the previous change."""
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=time.time() - 3.0, resume_delay_s=2.0)
+        assert ctrl._roll_held == "left"
+
+    def test_the_log_reason_says_when_the_target_was_near_centre(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="wingman.controller")
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_nose_to_target(0.3, sustained_hold=True)
+        ctrl.roll_on_miss(last_seen_ts=time.time(), resume_delay_s=2.0,
+                          last_err=0.05, **self.CENTRE)
+        lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("HOLD[roll]")]
+        assert any("target was near centre" in m and "6.0s" in m for m in lines)
+
+    def test_never_seen_still_searches_immediately(self, monkeypatch):
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.roll_on_miss(last_seen_ts=None, resume_delay_s=2.0, last_err=None, **self.CENTRE)
+        assert ctrl._roll_held == "left"

@@ -487,7 +487,8 @@ class PerformanceTracker:
         release_agg_all = _aggregate_folder(release_dir)
         if release_agg_all is None:
             logger.info(
-                "[PERIOD COMPARISON] no release/ baseline — run 'make wrelease' to create one"
+                "[PERIOD COMPARISON] no release/ baseline — it lives on veda only"
+                " (ADR 100 D8); run 'make wrelease' there to create one"
             )
             return
 

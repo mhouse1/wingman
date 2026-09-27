@@ -101,7 +101,7 @@ def test_arming_replaces_a_previous_watchdog():
         _arm_shutdown_watchdog(timeout_s=30.0)
         first = _watchdog_timers()
         _arm_shutdown_watchdog(timeout_s=30.0)
-        second = _watchdog_timers()
+        second = _timers_after_replacing(first)
     assert len(first) == 1 and len(second) == 1, \
         f"timers leaked: {len(first)} then {len(second)}"
     _cancel_shutdown_watchdog()
@@ -110,6 +110,21 @@ def test_arming_replaces_a_previous_watchdog():
 def _watchdog_timers():
     return [t for t in threading.enumerate()
             if isinstance(t, threading.Timer) and t.is_alive()]
+
+
+def _timers_after_replacing(previous):
+    """Live timers once the replaced ones have had time to exit.
+
+    cancel() only sets the timer's event; its thread exits a moment later, so
+    counting straight after a re-arm can still see the replaced timer alive
+    (measured in a full `make test` run: "timers leaked: 1 then 2"). A timer
+    that really was cancelled exits well inside the join. One that was not,
+    the leak these tests exist to catch, is still waiting out its 30 s, stays
+    alive, and still fails the count.
+    """
+    for t in previous:
+        t.join(timeout=2.0)
+    return _watchdog_timers()
 
 
 # ADR 121, 2026-09-11 addendum: a SIGTERM produced no break out of the main
@@ -197,7 +212,7 @@ def test_arming_signal_ack_watchdog_replaces_a_previous_one():
         _arm_signal_ack_watchdog("SIGTERM", timeout_s=30.0)
         first = _watchdog_timers()
         _arm_signal_ack_watchdog("SIGTERM", timeout_s=30.0)
-        second = _watchdog_timers()
+        second = _timers_after_replacing(first)
     assert len(first) == 1 and len(second) == 1, \
         f"timers leaked: {len(first)} then {len(second)}"
     _cancel_signal_ack_watchdog()

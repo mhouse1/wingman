@@ -71,7 +71,7 @@ When you are satisfied with the current code's performance, run:
 make wrelease
 ```
 
-This copies all `docs/performance/current/` files into `docs/performance/release/` and commits them alongside the version bump. `current/` is left untouched.
+This copies all `docs/performance/current/` run files into `docs/performance/release/`, commits the version bump, and then clears the run files from `current/`. The `release/` baseline is not committed. It lives on veda only (ADR 100 D8), and `make wrelease` refuses to run on any other host.
 
 From this point, every session's Block 2 compares against that baseline:
 
@@ -109,7 +109,7 @@ Make a code change, play 5+ sessions. Block 2 shows the drift:
 | First run | Run normally, stop cleanly | Per-round histograms; Block 2 skipped |
 | Runs 2–4 | Run normally | Block 1 (outlier detection) becomes meaningful |
 | Run 5+ | Run normally | Both blocks active; Block 2 needs a `wrelease` baseline |
-| Ready to baseline | `make wrelease` | `release/` locked in and committed |
+| Ready to baseline | `make wrelease` (veda only) | `release/` locked in locally on veda |
 | After code change, run 5+ | Run normally | Block 2 shows drift; `⚠️ REGRESSION` if >20% |
 
 ---

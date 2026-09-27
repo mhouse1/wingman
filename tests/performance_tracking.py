@@ -2,140 +2,128 @@
 Performance tracking utilities for test performance trends.
 
 Features:
-- Extract performance.json from git history
+- Record performance.json snapshots to a local (untracked) history file
 - Generate CSV trends over versions
 - Visualize performance degradation with charts
 """
 
 import json
 import csv
-import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 
 class PerformanceTracker:
-    """Track and analyze test performance over time."""
+    """Track and analyze test performance over time.
+
+    History is local-only: performance.json is no longer tracked in git, so
+    each `make wrelease` appends the current snapshot to a JSONL file on the
+    machine that ran it (veda). Kept outside tests/test-output/ because
+    `make clean` wipes that directory.
+    """
 
     def __init__(self, repo_root: Path = None):
         if repo_root is None:
             repo_root = Path(__file__).resolve().parent.parent
         self.repo_root = repo_root
-        self.perf_file_path = "tests/test-output/performance.json"
+        self.perf_file = repo_root / "tests" / "test-output" / "performance.json"
+        self.history_file = repo_root / "tests" / "perf-history" / "performance-history.jsonl"
 
-    def get_git_commits_with_file(self) -> List[Tuple[str, str, str]]:
-        """
-        Get all commits that modified performance.json.
-        Returns: List of (commit_hash, version, timestamp)
-        """
+    def _read_current(self) -> Optional[Dict]:
+        """Read the latest performance.json written by conftest, if any."""
+        if not self.perf_file.exists():
+            return None
         try:
-            result = subprocess.run(
-                ["git", "log", "--follow", "--pretty=format:%H|%ae|%aI",
-                 "--", self.perf_file_path],
-                cwd=self.repo_root,
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            with open(self.perf_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not read current performance.json: {e}", file=sys.stderr)
+            return None
 
-            commits = []
-            for line in result.stdout.strip().split('\n'):
+    def load_history(self) -> List[Dict]:
+        """Return recorded performance snapshots, oldest first."""
+        if not self.history_file.exists():
+            return []
+        snapshots = []
+        with open(self.history_file, 'r') as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
                 if not line:
                     continue
-                parts = line.split('|')
-                if len(parts) >= 3:
-                    commits.append((parts[0], parts[1], parts[2]))
+                try:
+                    snapshots.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    print(f"Warning: skipping malformed history line {lineno}: {e}", file=sys.stderr)
+        return snapshots
 
-            return commits
-        except Exception as e:
-            print(f"Error getting git commits: {e}", file=sys.stderr)
-            return []
+    def record_current(self) -> bool:
+        """Append the current performance.json to the local history.
 
-    def get_performance_data_at_commit(self, commit_hash: str) -> Optional[Dict]:
-        """Get performance.json content at specific commit."""
-        try:
-            result = subprocess.run(
-                ["git", "show", f"{commit_hash}:{self.perf_file_path}"],
-                cwd=self.repo_root,
-                capture_output=True,
-                text=True,
-                check=False
-            )
+        Skips a snapshot whose timestamp is already recorded, so re-running
+        wrelease after an aborted commit does not duplicate the point.
+        """
+        current = self._read_current()
+        if current is None:
+            print(f"No performance.json at {self.perf_file} - run 'make test' first", file=sys.stderr)
+            return False
+        if any(s.get('timestamp') == current.get('timestamp') for s in self.load_history()):
+            print(f"[OK] Snapshot {current.get('timestamp')} already recorded")
+            return True
+        self.history_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.history_file, 'a') as f:
+            f.write(json.dumps(current) + '\n')
+        print(f"[OK] Recorded v{current.get('version', 'unknown')} snapshot to {self.history_file.name}")
+        return True
 
-            if result.returncode == 0:
-                return json.loads(result.stdout)
-            return None
-        except Exception as e:
-            print(f"Error reading performance data: {e}", file=sys.stderr)
-            return None
+    @staticmethod
+    def _rows_for(perf_data: Dict, label: str, fallback_version: str) -> List[Dict]:
+        version = perf_data.get('version', fallback_version)
+        perf_timestamp = perf_data.get('timestamp', datetime.now().isoformat())
+        return [
+            {
+                'timestamp': perf_timestamp,
+                'commit': label,
+                'version': version,
+                'test': test_name,
+                'duration': metrics.get('duration', 0),
+                'min': metrics.get('min', 0),
+                'max': metrics.get('max', 0),
+                'runs': metrics.get('runs', 1)
+            }
+            for test_name, metrics in perf_data.get('tests', {}).items()
+        ]
 
     def generate_csv_trends(self, output_file: Path = None, include_current: bool = False) -> Path:
         """
-        Generate CSV with performance trends over commits.
+        Generate CSV with performance trends over recorded local snapshots.
         Format: timestamp, version, test_name, duration, min, max, runs
 
         Args:
             output_file: Path to output CSV file
-            include_current: If True, append current uncommitted performance.json data
+            include_current: If True, append current unrecorded performance.json data
         """
         if output_file is None:
             output_file = Path(__file__).parent / "test-output" / "performance-history.csv"
 
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        commits = self.get_git_commits_with_file()
-        if not commits:
-            print("No commits with performance.json found", file=sys.stderr)
-            return output_file
+        history = self.load_history()
+        if not history:
+            print(f"No recorded snapshots in {self.history_file}", file=sys.stderr)
 
         rows = []
-        for commit_hash, _author, timestamp in commits:
-            perf_data = self.get_performance_data_at_commit(commit_hash)
-            if not perf_data:
-                continue
+        for idx, perf_data in enumerate(history):
+            rows.extend(self._rows_for(perf_data, f"rec{idx}", 'unknown'))
 
-            version = perf_data.get('version', 'unknown')
-            perf_timestamp = perf_data.get('timestamp', timestamp)
-
-            for test_name, metrics in perf_data.get('tests', {}).items():
-                rows.append({
-                    'timestamp': perf_timestamp,
-                    'commit': commit_hash[:8],
-                    'version': version,
-                    'test': test_name,
-                    'duration': metrics.get('duration', 0),
-                    'min': metrics.get('min', 0),
-                    'max': metrics.get('max', 0),
-                    'runs': metrics.get('runs', 1)
-                })
-
-        # Optionally include current uncommitted data
+        # Optionally include current unrecorded data
         if include_current:
-            current_perf_file = self.repo_root / self.perf_file_path
-            if current_perf_file.exists():
-                try:
-                    with open(current_perf_file, 'r') as f:
-                        current_data = json.load(f)
-
-                    version = current_data.get('version', 'uncommitted')
-                    perf_timestamp = current_data.get('timestamp', datetime.now().isoformat())
-
-                    for test_name, metrics in current_data.get('tests', {}).items():
-                        rows.append({
-                            'timestamp': perf_timestamp,
-                            'commit': 'current',
-                            'version': version,
-                            'test': test_name,
-                            'duration': metrics.get('duration', 0),
-                            'min': metrics.get('min', 0),
-                            'max': metrics.get('max', 0),
-                            'runs': metrics.get('runs', 1)
-                        })
-                    print(f"[OK] Included current uncommitted data (v{version})")
-                except Exception as e:
-                    print(f"Warning: Could not read current performance.json: {e}", file=sys.stderr)
+            current_data = self._read_current()
+            recorded = {s.get('timestamp') for s in history}
+            if current_data is not None and current_data.get('timestamp') not in recorded:
+                rows.extend(self._rows_for(current_data, 'current', 'uncommitted'))
+                print(f"[OK] Included current unrecorded data (v{current_data.get('version', 'uncommitted')})")
 
         # Write CSV
         if rows:
@@ -268,7 +256,12 @@ def main():
     parser.add_argument(
         '--csv',
         action='store_true',
-        help='Generate CSV from git history'
+        help='Generate CSV from the local performance history'
+    )
+    parser.add_argument(
+        '--record',
+        action='store_true',
+        help='Append current performance.json to the local history'
     )
     parser.add_argument(
         '--chart',
@@ -283,12 +276,18 @@ def main():
     parser.add_argument(
         '--include-current',
         action='store_true',
-        help='Include current uncommitted performance.json data in output'
+        help='Include current unrecorded performance.json data in output'
     )
 
     args = parser.parse_args()
 
     tracker = PerformanceTracker()
+
+    if args.record:
+        if not tracker.record_current():
+            sys.exit(1)
+        if not (args.all or args.csv or args.chart):
+            return
 
     if args.all or (not args.csv and not args.chart):
         # Default: generate both

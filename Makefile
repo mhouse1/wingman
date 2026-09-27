@@ -3,18 +3,21 @@
 #   make test        -> run all tests
 #   make test1       -> run region 33 continue-text OCR test
 #   make test2       -> run region 9 INCO-text OCR test
+#   make docker-test -> run make test in the Docker image (own Xvfb display, no host X needed)
+#   make docker-shell -> interactive shell in that image
 #   make test-perf   -> run tests + generate CSV + chart
 #   make tp              -> run fast preview (tests + ADR044/ADR045 runtime gates + charts)
 #   make tp-full         -> run full preview (tp + ADR037 PATH1/PATH2 OCR lane)
-#   make test-perf-csv   -> generate performance CSV from git history
+#   make test-perf-csv   -> generate performance CSV from local history
 #   make test-perf-chart -> generate performance visualization chart
 #   make runtime-perf-csv-release -> generate runtime release aggregate CSV
 #   make runtime-perf-csv-preview -> generate runtime preview aggregate CSV
 #   make runtime-perf-release -> generate runtime release chart artifacts
 #   make runtime-perf-preview -> generate runtime preview chart artifacts
 #   make report      -> run tests and generate HTML report
+#   make session-report -> one-page report on wingman.log (or LOG=logs/<file>); alias: make sr
 #   make clean       -> remove test output and screenshots
-#   make wrelease    -> force add performance.json and commit with current version
+#   make wrelease    -> record performance.json locally and commit with current version
 #   make status      -> git status
 #   make diff        -> git diff
 #   make commit      -> commit all changes with a default message
@@ -24,6 +27,7 @@
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
 #   make g           -> launch MetalStorm only, without starting Wingman (Linux only)
+#   make update      -> update the installed MetalStorm files through Heroic (Linux only)
 #   make r           -> run wingman (Linux: auto-launches game; Windows: game must be running)
 #   make rd          -> run wingman with DEBUG log to wingman.log (same auto-launch on Linux)
 #   ADR 099: the nested display lane is switched in wingman/config.yaml
@@ -37,10 +41,11 @@
 #   make ti          -> run integration tests (PATH1 + PATH2 real-OCR, alias for make ocr)
 #   make newpaths    -> capture screenshots for PATH1 or PATH2 using live Wingman play
 #   make leak-check  -> ADR 092 leak gate over logs/ (0 pass, 1 fail, 2 insufficient)
+#   make invite      -> toggle whether Wingman accepts or rejects party invites
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: leak-check leak-check-gate test test1 test2 test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g r rd launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -165,36 +170,79 @@ test1:
 test2:
 	$(PYTEST_RUN) tests/test_automated_levels.py -k level4_region9_contains_inco -q
 
-# Generate CSV with performance trends from git history
-test-perf-csv:
+# Containerised test lane (Dockerfile). Without an X server, two tests in
+# test_automated_levels.py fail on mss's "$DISPLAY not set", and without
+# python3-tk collection aborts on tests/calibrate.py's tkinter import. The image
+# supplies both, with Xvfb giving every run its own display, so the suite runs
+# unchanged anywhere Docker runs. It also keeps test key injection off the
+# operator's desktop (see _release_all_injectable_keys in tests/conftest.py).
+#
+#   make docker-test                          # make test, in the container
+#   make docker-test DOCKER_CMD="make lint"   # any other target
+#   make docker-shell                         # interactive shell, same setup
+#
+# The checkout is bind-mounted at /work, so the image rebuilds only when
+# pyproject.toml, uv.lock or .python-version change, and results land in
+# tests/test-output/ as usual. The untracked corpus (ADR 100 D7) comes along
+# wherever it exists, so on veda the corpus-gated tests run instead of skipping.
+# --user keeps files written into the mount owned by you rather than root;
+# HOME=/tmp gives that uid a writable home, since the image has no user for it.
+DOCKER       ?= docker
+DOCKER_IMAGE ?= wingman-test
+DOCKER_CMD   ?= make test
+# e.g. --build-arg BASE_IMAGE=... when Docker Hub rate-limits you (see Dockerfile)
+DOCKER_BUILD_ARGS ?=
+# CA bundle for TLS-intercepting networks, handed to the build as a secret (see
+# Dockerfile). Defaults to whatever the host already trusts via SSL_CERT_FILE,
+# which is how Claude Code cloud sessions and most corporate setups expose it;
+# empty on an ordinary machine, where the build needs none.
+DOCKER_EXTRA_CA ?= $(wildcard $(SSL_CERT_FILE))
+DOCKER_CA_FLAG   = --secret id=extra_ca,src=$(DOCKER_EXTRA_CA)
+DOCKER_RUN    = $(DOCKER) run --rm -v "$(CURDIR)":/work -w /work \
+                --user "$$(id -u):$$(id -g)" -e HOME=/tmp
+
+docker-build:
+	$(DOCKER) build $(if $(DOCKER_EXTRA_CA),$(DOCKER_CA_FLAG)) $(DOCKER_BUILD_ARGS) -t $(DOCKER_IMAGE) .
+
+docker-test: docker-build
+	$(DOCKER_RUN) $(DOCKER_IMAGE) $(DOCKER_CMD)
+
+docker-shell: docker-build
+	$(DOCKER_RUN) -it $(DOCKER_IMAGE) bash
+
+# Performance reports are generated on veda only (ADR 100 D8): both histories
+# they read - tests/perf-history/ and docs/performance/release/ - are untracked
+# and exist nowhere else, so these targets carry require-veda.
+
+# Generate CSV with performance trends from the local history
+# (tests/perf-history/, untracked - lives on veda only)
+test-perf-csv: require-veda
 	$(PYTHON_RUN) tests/performance_tracking.py --csv
 
 # Generate HTML visualization of performance trends
-test-perf-chart:
+test-perf-chart: require-veda
 	$(PYTHON_RUN) tests/performance_tracking.py --chart
 
 # Generate runtime aggregate CSV from release run_*.json
-runtime-perf-csv-release:
+runtime-perf-csv-release: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode release --csv
 
 # Generate runtime aggregate CSV from release + current run_*.json
-runtime-perf-csv-preview:
+runtime-perf-csv-preview: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --csv
 
 # Generate runtime release artifacts (release CSV + release chart)
-runtime-perf-release:
+runtime-perf-release: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode release --all
 
 # Generate runtime preview artifacts (preview CSV + preview chart)
-runtime-perf-preview:
+runtime-perf-preview: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --all
 
 # Run full workflow: test → CSV → chart
-# after running this: git add -f 'c:/dev-tools/github/wingman/tests/test-output/performance.json'
-# and commit that file to preserve performance history in git: git commit -m "v1.0.0: performance baseline"
-# Note: performance.json is ignored by default, so you need to force add it if you want to keep it in git
-# Then you can view the performance trends in tests/test-output/performance-trends.html and see how your changes affected performance over time
-test-perf: test test-perf-csv test-perf-chart
+# performance.json is not tracked in git; `make wrelease` appends it to the local
+# history in tests/perf-history/. View trends in tests/test-output/performance-trends.html
+test-perf: require-veda test test-perf-csv test-perf-chart
 	@echo ""
 	@echo "✅ Performance test complete!"
 	@echo "📊 View trends: tests/test-output/performance-trends.html"
@@ -240,15 +288,18 @@ tree:
 TP_GATES := lint test reqs-gate rr-path1-gate rr-live-path1-gate leak-check-gate
 
 # ADR 100 D7: test_screenshots is no longer tracked in git — the corpus lives
-# on veda only, and rr-path1-gate/rr-live-path1-gate/ocr read from it. Listed
+# on veda only, and rr-path1-gate/rr-live-path1-gate/ocr read from it.
+# ADR 100 D8: the performance release baseline is veda-only too, so every
+# report target and wrelease carry this guard as well. Listed
 # as the FIRST prerequisite so it fails before any of $(TP_GATES) runs;
 # putting this check in tp's own recipe body would not help, since make runs
 # prerequisites before a target's recipe regardless of where a check sits in
 # that recipe.
 require-veda:
 	@if [ "$$(hostname)" != "veda" ]; then \
-		echo "ERROR: make tp/tp-full need the full test_screenshots corpus,"; \
-		echo "which lives only on veda (ADR 100 D7). Refusing to run on host"; \
+		echo "ERROR: this target needs data that lives only on veda - the"; \
+		echo "test_screenshots corpus (ADR 100 D7) or the performance history"; \
+		echo "and release baseline (ADR 100 D8). Refusing to run on host"; \
 		echo "'$$(hostname)'. Use 'make test' for the portable, corpus-free gate."; \
 		exit 1; \
 	fi
@@ -284,17 +335,27 @@ tp-full: require-veda $(TP_GATES) ocr
 	@echo ""
 
 # Clean test artifacts
+# One-page report on a session log: engagements (PURSUIT/DIVE SUMMARY), acquisitions
+# outside the old acquisition box, HUD-zone locks, weapon switches, deaths. Reads the log
+# only. `make sr LOG=logs/wingman_<stamp>.log` for an archived session.
+session-report:
+	@$(PYTHON_RUN) scripts/session-report.py $(or $(LOG),wingman.log)
+
+sr: session-report
+
 clean:
 	rm -rf tests/test-output
 	rm -f tests/test-output/*.png
 	rm -rf test_screenshots
 
-# Force add ignored performance history file and commit with current version, then regenerate chart
-# Assumes you've already updated the version in wingman/main.py and ran make test-perf or make test-perf-preview
-# otherwise the performance.json file won't be updated with the latest performance data and the chart won't reflect the latest changes
-# and there will be no performance history to commit if you haven't generated the performance.json file with the latest data
-# once you ran wrelease you can then run make p to push the commit with the new version and performance data to GitHub
-wrelease:
+# Record performance.json to the local history, commit the version, then regenerate charts
+# Assumes you've already updated the version in wingman/main.py and ran make test-perf or make tp,
+# otherwise performance.json won't reflect the latest changes. The test-performance history is
+# local-only (tests/perf-history/, untracked) - it is never committed. The runtime
+# baseline in docs/performance/release/ is local to veda as well (ADR 100 D8):
+# wrelease promotes current/ into it but never stages it.
+# once you ran wrelease you can then run make p to push the commit with the new version to GitHub
+wrelease: require-veda
 	@echo "ADR 092 leak gate (release: insufficient data blocks too)…"
 	@$(PYTHON_RUN) scripts/leak-check.py $(LEAK_ARGS); rc=$$?; \
 	if [ $$rc -ne 0 ]; then \
@@ -317,11 +378,10 @@ wrelease:
 			exit 1; \
 		fi; \
 	fi
+	$(PYTHON_RUN) tests/performance_tracking.py --record
 	git add wingman/main.py
-	git add -f tests/test-output/performance.json
 	mkdir -p docs/performance/release
 	cp docs/performance/current/run_*.json docs/performance/release/ 2>/dev/null; true
-	git add docs/performance/release/
 	rm -f docs/performance/current/run_*.json
 	version=$$(sed -n 's/^WINGMAN_VERSION = "\([^"]*\)"/\1/p' wingman/main.py); \
 	details=$$(sed -n 's/^WINGMAN_VERSION_DETAILS = "\([^"]*\)"/\1/p' wingman/main.py); \
@@ -404,11 +464,40 @@ RECORD_FLAG = $(if $(filter v,$(MAKECMDGOALS)),--record-session,)
 # Launch MetalStorm without starting Wingman (Linux: launch-game + wait-game; Windows: no-op).
 g: $(GAME_LAUNCH_DEPS)
 
+# Update MetalStorm through Heroic's bundled Legendary client. This is the same
+# updater Heroic runs after clicking Play, without requiring GUI automation.
+HEROIC_FLATPAK ?= com.heroicgameslauncher.hgl
+HEROIC_LEGENDARY ?= /app/bin/heroic/resources/app.asar.unpacked/build/bin/x64/linux/legendary
+HEROIC_LEGENDARY_CONFIG ?= $(HOME)/.var/app/com.heroicgameslauncher.hgl/config/heroic/legendaryConfig/legendary
+METALSTORM_APP_ID ?= 8b6a0e1413744785a43c9f9f9547b4d6
+ifeq ($(UNAME_S),Linux)
+update:
+	@if ! command -v flatpak >/dev/null 2>&1; then \
+	  echo "ERROR: flatpak is required to update MetalStorm through Heroic."; \
+	  exit 1; \
+	 fi
+	@_p=Metalstorm; \
+	 if pgrep -f "$${_p}.exe" >/dev/null 2>&1; then \
+	   echo "ERROR: MetalStorm is running; close it before updating."; \
+	   exit 1; \
+	 fi
+	@echo "Updating MetalStorm through Heroic..."
+	@flatpak run --env=LEGENDARY_CONFIG_PATH="$(HEROIC_LEGENDARY_CONFIG)" \
+	  --command="$(HEROIC_LEGENDARY)" "$(HEROIC_FLATPAK)" \
+	  update "$(METALSTORM_APP_ID)" --update-only --skip-dlcs --yes
+else
+update:
+	@echo "ERROR: make update is supported on Linux only."; exit 1
+endif
+
 r: $(GAME_LAUNCH_DEPS)
 	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main $(RECORD_FLAG)
 
 rd: $(GAME_LAUNCH_DEPS)
 	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG)
+
+invite:
+	$(PYTHON_RUN) scripts/toggle-invite.py $(if $(CONFIG),--config "$(CONFIG)",)
 
 # ---------------------------------------------------------------------------
 # Per-account run targets (Research 005)
@@ -484,6 +573,14 @@ r1-probe:
 #   make turn-outcome LOG=logs/<session>.log
 turn-outcome:
 	$(PYTHON_RUN) scripts/turn-outcome.py $(or $(LOG),wingman.log)
+
+# HLDD 005's SELECT[shadow]/PITCH[shadow] evidence, summed across every
+# session (both shadow logs are rate-limited, so a raw grep -c under-reports
+# past the 10th occurrence — this reads each line's own "(N so far)" instead).
+#   make shadow-report                   # logs/*.log + wingman.log
+#   make shadow-report LOG=logs/<session>.log
+shadow-report:
+	$(PYTHON_RUN) scripts/shadow-report.py $(if $(LOG),$(LOG),)
 
 # Design 012: make frame VIDEO=logs/session_<run_id>.mp4 AT=1842.3 [OUT=/tmp/frame.png]
 frame:

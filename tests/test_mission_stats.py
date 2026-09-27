@@ -215,7 +215,34 @@ class TestEventCounting:
         t.finalize()
         with caplog.at_level("INFO"):
             t.print_summary()
-        assert "Crash w/ missiles : 0" in caplog.text
+        assert "Died armed        : 0" in caplog.text
+
+    def test_died_armed_classification_counted(self, tmp_path):
+        """ADR 143: each classified sub-cause has its own counter, separate
+        from the umbrella crash_with_missiles count."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_event("died_armed_enemy_fire", 1.0)
+        t.on_event("died_armed_terrain", 2.0)
+        t.on_event("died_armed_unclassified", 3.0)
+        _leave_battle(t, ts=10.0)
+        result = t.finalize()
+        assert result["total_died_armed_enemy_fire"] == 1
+        assert result["total_died_armed_terrain"] == 1
+        assert result["total_died_armed_unclassified"] == 1
+
+    def test_died_armed_breakdown_printed_even_at_zero(self, tmp_path, caplog):
+        """ADR 143: all three sub-causes are always shown, matching the
+        umbrella count's own always-shown precedent."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert "enemy fire      : 0" in caplog.text
+        assert "terrain crash   : 0" in caplog.text
+        assert "unclassified    : 0" in caplog.text
 
     def test_return_to_battle_with_missiles_counted(self, tmp_path):
         """Operator directive: confirmed map-boundary crossings with primary

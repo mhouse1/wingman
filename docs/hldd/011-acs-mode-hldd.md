@@ -123,7 +123,7 @@ and what is genuinely new.
 
 | ACS capability | Existing design | Status found | Disposition |
 |---|---|---|---|
-| Screen-space target detection and centering | Design 005 (`005-target-tracking-hldd.md`) | Implemented (sensing/actuation split live as of 2026-09-07), `tracking.enabled`/`tracking.actuate` both default `false`, not yet live-validated against a real match | **Extend.** This is the sensing and roll-controller core of boresight engagement. Needs pitch added (Design 005 was roll-only, "Non-Goals: pitch/yaw control loops") and a lock-confirmation signal added (see below). ADR 136 is a second, narrower direct consumer of this same sensing/roll core, run inside the eject dive rather than a tree leaf — see Refinement Backlog item 4. |
+| Screen-space target detection and centering | Design 005 (`005-target-tracking-hldd.md`) | Implemented, sensing/actuation split live as of 2026-09-07; **as of Design 005's 2026-09-21 revision, also implemented: a pitch channel** (`error_norm_y`, `Controller.orient_pitch_to_target`, gated by its own `tracking.actuate_pitch`, default `false`) alongside the existing roll channel. Neither axis is yet live-validated against a real match. | **Reuse as built, not extend.** This row previously read "needs pitch added (Design 005 was roll-only)" — that gap has since been closed by Design 005 itself, not by this document. `BoresightEngage`'s `NoseTrack` state (below) consumes Design 005's `error_norm_x`/`error_norm_y` and `orient_nose_to_target`/`orient_pitch_to_target` directly; it does not build or configure a second pitch loop. The only genuinely new piece this design still contributes is the lock-confirmation signal (see below) — that remains unbuilt anywhere in the codebase. ADR 136 is a second, narrower direct consumer of Design 005's roll channel *only*, run inside the eject dive rather than a tree leaf, and is explicitly barred from Design 005's new pitch channel (Design 005's own Safety and Gating Rules) — see Refinement Backlog item 4. |
 | Coarse target selection / steering toward contacts | Design 003 (`003-enemy-quadrant-detection-hldd.md`, now "ring-engage navigation") + `wingman/engage_nav.py` | Implemented, live-validated, backs FR-005 | **Reuse as coarse layer.** Keeps its role: get the nose roughly toward a contact from long range. Boresight's fine tracker (Design 005) takes over once a target is in-frame, exactly as Design 003's doc already states: both actuate through `Controller.orient_nose_to_target`, and the shared cooldown timestamp lets the terminal loop win when both want the roll axis. |
 | Weapon employment / fire discipline | `search_and_destroy_loop`, `padlock_camera()`, `target_painting_mode` | Implemented, padlock-only | **New parallel path**, not a modification. `BoresightEngage` fires only on a confirmed lock signal; padlock jets keep their existing path unchanged. |
 | Waypoint / objective selection (air superiority, base capture) | Design 004 (`004-strike-package-bravo-hldd.md`) | Drafted 2026-05-06, never implemented, written for multi-instance squad play | **Extend, single-instance subset.** Reuse the game-type detection, base-ownership crops, and priority-of-targets logic; drop the emote-command layer (Non-Goal above). |
@@ -216,10 +216,17 @@ stateDiagram-v2
     ToneWait --> Search : target lost past grace window
 ```
 
-- **Search / NoseTrack**: directly Design 005's sensing and roll controller,
-  extended with a **pitch** channel using the same proportional-with-deadband
-  law against vertical screen-space error, so the nose closes on the target
-  in both axes instead of roll-only.
+- **Search / NoseTrack**: directly Design 005's sensing, roll controller, and
+  (reused as-is, not rebuilt here — see the Relationship table above) its own
+  pitch controller. Design 005's 2026-09-21 revision already added the pitch
+  channel this row originally proposed building; `NoseTrack` calls
+  `TargetTracker.update()` for `error_norm_x`/`error_norm_y` and
+  `Controller.orient_nose_to_target()`/`orient_pitch_to_target()` for
+  actuation, the same entry points `_actuate_engage` and ADR 136's heatdive
+  loop already use for the roll half. The nose closes on the target in both
+  axes because Design 005 itself now does that — this design contributes no
+  proportional-control law of its own, only the state machine around it
+  (lock cone, `ToneWait`/`LockConfirmed`, fire decision) described below.
 - **Lock cone**: a config'd `abs(error_norm_x) <= lock_cone_x` and
   `abs(error_norm_y) <= lock_cone_y` band, tighter than the tracking
   deadband — the aircraft must be pointed at the target, not merely rolling
@@ -351,22 +358,35 @@ effort:
    codebase — it needs a reference-screenshot pass (same method as Design
    005's marker-color derivation) against the target boresight-only
    airframe to find whatever visual lock cue its HUD shows.
-4. **Design 005's tracker is implemented but not yet live-validated.**
+4. **Design 005's tracker is implemented — both axes, as of its 2026-09-21
+   revision — but neither is yet live-validated.**
    `tracking.enabled`/`tracking.actuate` both default `false` in shipped
-   config; it is roll-only (no pitch); its own Open Questions are unanswered
-   ("should target-tracking output feed future behavior-tree blackboard
-   inputs directly?" — yes, now, via `AnalyzerSnapshot`, which didn't exist
-   in its current form when Design 005 was drafted). Bringing it up to a
-   validated baseline is a precondition for `BoresightEngage`, not something
-   ACS Mode can assume already works.
+   config, and pitch (`tracking.actuate_pitch`, new) defaults `false` too, so
+   there is no live evidence for either axis yet. Its own Open Questions are
+   mostly answered ("should target-tracking output feed future
+   behavior-tree blackboard inputs directly?" — yes, now, via
+   `AnalyzerSnapshot`, which didn't exist in its current form when Design
+   005 was drafted) but the roll-only gap this item originally flagged is
+   now closed by Design 005 itself, not by `BoresightEngage` — see the
+   Relationship table above. Bringing *both* axes up to a validated baseline
+   is still a precondition for `BoresightEngage`; only the "who builds the
+   pitch loop" question is resolved, not the "has anyone flown it" one.
 
-   **ADR 136 is a narrower, earlier live-validation path for this exact
-   gap.** A config-gated addition inside `eject_and_dive` itself (not a tree
-   leaf, not a separate mission — see ADR 136) calls Design 005's tracker
-   and roll controller directly during the dive that already fires
-   automatically after primary missiles run empty, running alongside
-   `eject_and_dive`'s existing `NOSE_DOWN` pitch primitive (ADR 069)
-   unmodified, rather than adding pitch to Design 005 itself. It does not
+   **ADR 136 is a narrower, earlier live-validation path for the roll axis
+   specifically, not the pitch axis.** A config-gated addition inside
+   `eject_and_dive` itself (not a tree leaf, not a separate mission — see
+   ADR 136) calls Design 005's tracker and roll controller directly during
+   the dive that already fires automatically after primary missiles run
+   empty. It runs alongside `eject_and_dive`'s existing `NOSE_DOWN` pitch
+   primitive (ADR 069), unmodified, and — this is now an explicit rule in
+   Design 005's own Safety and Gating Rules, not just an absence of wiring —
+   is barred from ever enabling Design 005's new pitch channel: the descent
+   controller's cumulative `NOSE_DOWN`-hold accounting (ADR 058's dive
+   confirmation) assumes it is the sole writer of that key for the whole
+   dive, and a second, target-aiming writer on the same key would corrupt
+   it. So ADR 136 remains real flight data for the roll axis only, ahead of
+   and separate from `BoresightEngage`; it contributes nothing toward
+   validating the pitch axis `BoresightEngage` also needs. It does not
    implement lock confirmation (`ToneWait`/`LockConfirmed` below remain
    unbuilt) and does not replace this backlog item — it is real flight data
    on the sensing/roll core ahead of and separate from `BoresightEngage`,
@@ -412,10 +432,17 @@ acs_mode:
     lock_cone_y: 0.08
     lock_confirm_frames: 3
     lock_lost_grace_sec: 0.5
-    pitch_deadband: 0.05
-    pitch_kp: 0.30
-    pitch_min_hold_sec: 0.08
-    pitch_max_hold_sec: 0.35
+    # No pitch_deadband/pitch_kp/pitch_min_hold_sec/pitch_max_hold_sec here
+    # (2026-09-21 reconciliation): NoseTrack calls Design 005's own
+    # orient_pitch_to_target directly, which reads tracking.pitch_deadband /
+    # tracking.pitch_kp / tracking.pitch_min_hold_sec / tracking.pitch_max_hold_sec
+    # (wingman/config.yaml, Design 005's Configuration Additions). A second,
+    # acs_mode-local copy of the same four numbers would drift from the one
+    # Design 005's own shadow trial tunes, with no way for either config
+    # loader to catch the two going out of sync. lock_cone_x/y above stay
+    # here — they are BoresightEngage's own concept (tighter than tracking's
+    # deadband, gating ToneWait entry), not a duplicate of anything Design
+    # 005 defines.
   target_priority:
     incoming_threat_bonus: 2.0
     objective_proximity_bonus: 1.0
@@ -452,11 +479,21 @@ implementation begins):
   boresight-locked weapon unless `LockConfirmed` has been true for at least
   `lock_confirm_frames` consecutive reads, so that a fleeting reticle-color
   false-positive cannot trigger a shot with no lock.
-- **An extension to SAF-001's manual-takeover scope**: today's programmatic-key
-  bracketing covers roll and existing pitch tactics (`Climb`); boresight
-  nose-tracking adds continuous, higher-frequency pitch *and* roll
-  actuation together, and must not weaken manual-takeover responsiveness
-  during that combined actuation.
+- **An extension to SAF-001's manual-takeover scope**: boresight nose-tracking
+  adds continuous, higher-frequency pitch *and* roll actuation together, and
+  must not weaken manual-takeover responsiveness during that combined
+  actuation. **Largely inherited for free (2026-09-21 reconciliation):**
+  because `NoseTrack` calls Design 005's `orient_nose_to_target`/
+  `orient_pitch_to_target` rather than a bespoke key-press path, and both of
+  those already route through `Controller._execute_key_press`'s existing
+  `_inc_programmatic_key`/`_arm_release_grace`/`_dec_programmatic_key`
+  bracket (the same one `roll_left`/`roll_right`/`nose_up`/`nose_down`
+  already use), the programmatic-key bracketing this bullet calls for is
+  already satisfied by reuse, not new work this design must add. What
+  remains to verify — not yet done — is that the *combined* cadence (roll
+  and pitch commands firing independently, potentially every tick) doesn't
+  starve the manual-takeover listener in a way neither axis alone would;
+  that is a live-measurement question, not a code gap.
 - **`require_terrain_avoidance` as a formal safety gate** for
   `WaypointObjective`, the same role Design 004 already assigned Design 001
   — this should become a SAF requirement once Design 001's fate (implement
@@ -479,10 +516,14 @@ project's proven method for landing a new tactic without a live regression:
    selection is logged every tick against real matches before any key is
    ever pressed. Validates target-detection and objective-detection
    reliability independent of control-loop tuning.
-2. **Dry-run the control loop.** Enable Design 005's tracker (pitch added)
-   in log-only mode — compute and log roll/pitch commands without sending
-   them — exactly as Design 005's own Validation Strategy step 2 already
-   specifies.
+2. **Dry-run the control loop.** Enable Design 005's tracker — both axes,
+   already built there as of its 2026-09-21 revision, not something this
+   rollout plan constructs — in log-only mode (`tracking.actuate: false`,
+   `tracking.actuate_pitch: false`): compute and log roll/pitch commands
+   without sending them, exactly as Design 005's own Validation Strategy
+   step 2 and Two-Axis Rollout Phase 1 already specify. This step is a
+   precondition check on Design 005's own rollout, not new shadow logic
+   `BoresightEngage` needs to write.
 3. **Actuate in isolation** against one boresight-capable airframe, with
    `lock_confirm_frames` and lock-cone sizes deliberately conservative, and
    `WaypointObjective` still disabled (`acs_mode.waypoint` gated separately
@@ -528,8 +569,12 @@ project's proven method for landing a new tactic without a live regression:
 - `docs/hldd/004-strike-package-bravo-hldd.md` — source of the waypoint/base
   ownership design this document takes a single-instance subset of.
 - `docs/hldd/005-target-tracking-hldd.md` — source of the screen-space
-  tracking and roll-controller design this document extends with pitch and
-  a lock-confirmation state.
+  tracking design this document builds on. As of Design 005's 2026-09-21
+  revision it already includes both the roll and pitch controllers
+  `BoresightEngage.NoseTrack` calls directly (see its Two-Axis Rollout
+  section and this document's Relationship table, above); this document's
+  own remaining contribution is the lock-confirmation state
+  (`ToneWait`/`LockConfirmed`), not a pitch channel.
 - `docs/adr/024-phase3-behavior-tree-architecture.md` — priority selector
   this design adds tactics to.
 - `docs/adr/027-j20-target-painting-mode.md`,

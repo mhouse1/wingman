@@ -43,7 +43,7 @@ def test_punctuation_keys_resolve_through_the_alias_table():
 
 
 @pytest.mark.parametrize("closure, expected", [
-    ("_stop_watcher", {"iter_done", "d_ctrl", "ctx"}),
+    ("_stop_watcher", {"iter_done", "d_ctrl", "d_rec", "ctx", "tally", "deaf_restart"}),
     ("_record_handler", {"_ef", "d_rec", "display_name"}),
 ])
 def test_listener_closures_bind_their_loop_variables(closure, expected):
@@ -606,4 +606,127 @@ def test_a_broken_operator_stopped_predicate_does_not_open_the_gate():
         assert il.should_deliver_hotkey(":0", "backspace", 0) is False
     finally:
         il.set_operator_release_keys((), operator_stopped_fn=lambda: False)
+        il.set_injection_display(None)
+
+
+def test_key_injection_counts_presses_for_the_deaf_listener_watchdog(xtest_env, monkeypatch):
+    """SAF-001 watchdog input: presses are counted per injection display,
+    releases are not."""
+    monkeypatch.setattr(input_linux, "_injected_press_counts", {})
+    display = input_linux._inject_display_name()
+    input_linux._linux_key_event("k", "KeyPress")
+    input_linux._linux_key_event("k", "KeyRelease")
+    input_linux._linux_key_event("k", 2)           # Xlib's X.KeyPress
+    assert input_linux.injected_presses(display) == 2
+
+
+
+def test_a_deaf_listener_is_restarted(monkeypatch, caplog):
+    """SAF-001 watchdog: a recording that delivers nothing while wingman presses
+    keys on its display is torn down and set up again, not trusted."""
+    import sys
+    import types
+
+    created = []
+
+    class _Rec:
+        def __init__(self, name):
+            self.name = name
+            self._disabled = threading.Event()
+
+        def keysym_to_keycode(self, ks):
+            return 36
+
+        def record_create_context(self, *a, **k):
+            created.append(self.name)
+            return object()
+
+        def record_enable_context(self, ctx, handler):
+            _shared["active"] = self
+            self._disabled.wait(timeout=10)      # deaf: never calls the handler
+
+        def record_disable_context(self, ctx):
+            _shared["active"]._disabled.set()
+
+        def record_free_context(self, ctx):
+            pass
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    _shared = {}
+    mods = {
+        "Xlib.display": types.SimpleNamespace(Display=_Rec),
+        "Xlib.X": types.SimpleNamespace(KeyPress=2, KeyRelease=3),
+        "Xlib.XK": types.SimpleNamespace(string_to_keysym=lambda n: 99),
+        "Xlib.ext.record": types.SimpleNamespace(AllClients=3, FromServer=0),
+        "Xlib.protocol.rq": types.SimpleNamespace(EventField=lambda *_: None),
+    }
+    for name, mod in mods.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    xlib = types.ModuleType("Xlib")
+    xlib.display, xlib.X, xlib.XK = mods["Xlib.display"], mods["Xlib.X"], mods["Xlib.XK"]
+    ext = types.ModuleType("Xlib.ext")
+    ext.record = mods["Xlib.ext.record"]
+    proto = types.ModuleType("Xlib.protocol")
+    proto.rq = mods["Xlib.protocol.rq"]
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setitem(sys.modules, "Xlib.ext", ext)
+    monkeypatch.setitem(sys.modules, "Xlib.protocol", proto)
+    monkeypatch.setattr(input_linux, "_ensure_xauthority", lambda: None)
+    monkeypatch.setattr(input_linux, "_TALLY_INTERVAL_S", 0.3)
+    monkeypatch.setattr(input_linux, "_injected_press_counts", {})
+
+    kbd = input_linux._LinuxXTestKeyboard()
+    stop_pressing = threading.Event()
+
+    def _press():
+        while not stop_pressing.wait(0.02):
+            input_linux._note_injected_press(":9")
+
+    presser = threading.Thread(target=_press, daemon=True)
+    presser.start()
+    with caplog.at_level("INFO", logger="wingman.input_linux"):
+        loop = threading.Thread(target=kbd._listener_loop, args=(":9",), daemon=True)
+        loop.start()
+        deadline = time.time() + 6.0
+        while time.time() < deadline and created.count(":9") < 4:
+            time.sleep(0.05)
+        stop_pressing.set()
+        kbd._stop.set()
+        if "active" in _shared:
+            _shared["active"]._disabled.set()
+        loop.join(timeout=5.0)
+    # d_setup is not a recording; each iteration creates exactly one context.
+    assert created.count(":9") >= 2, created
+    assert any("the listener is deaf; restarting it" in r.getMessage() for r in caplog.records)
+    assert not loop.is_alive()
+
+
+# --- ENTER with NumLock on (operator report, 2026-09-26) ---------------------
+# Every ENTER the operator pressed that session reached the :0 listener as
+# `'enter' on :0 not delivered (state=0x10)`: NumLock alone. These pin the two
+# ways the takeover does work, with NumLock on.
+
+NUMLOCK = 1 << 4
+
+
+def test_enter_in_the_game_window_takes_over_with_numlock_on():
+    il = _lane()
+    try:
+        assert il.should_deliver_hotkey(":3", "enter", NUMLOCK) is True
+        assert il.should_deliver_hotkey(":3", "enter", 0) is True
+    finally:
+        il.set_injection_display(None)
+
+
+def test_enter_on_the_desktop_needs_ctrl_alt_and_numlock_does_not_break_it():
+    il = _lane()
+    try:
+        assert il.should_deliver_hotkey(":0", "enter", NUMLOCK) is False
+        assert il.should_deliver_hotkey(":0", "enter", CTRL_ALT | NUMLOCK) is True
+    finally:
         il.set_injection_display(None)

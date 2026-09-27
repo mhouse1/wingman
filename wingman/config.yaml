@@ -27,7 +27,7 @@ unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
 # Default false — accepting drops the aircraft into someone else's squad
 # mid-session and silently changes what an unattended soak is measuring.
-accept_invite: false
+accept_invite: true
 loop_interval_sec: 1.5
 region: {left: 0, top: 0, width: 1920, height: 1200}
 monitor: 1
@@ -87,18 +87,24 @@ crops:
     - [0.6153, 0.9633]
   PLAY:
     coords:
-    - [0.7944, 0.8844]
-    - [0.9125, 0.9389]
+    - [0.8688, 0.8867]
+    - [0.9556, 0.94]
     text: [PLAY]
+  # ADR 102 rev 2: the squad lobby's READY button, measured on the 2026-09-25
+  # 09:16:41 screenshot at 1606,1060 to 1863,1138 px (this crop is that box
+  # inset 3 px). The April crop covered only its upper-left corner, so READY was
+  # never read and three lobby dwells of 127 to 194 s ran before the operator
+  # clicked by hand. Not in tests/calibration_map.yaml (no capture path visits
+  # the squad lobby), so `make calibrate` will not move it.
   READY:
     coords:
-    - [0.7993, 0.8656]
-    - [0.9069, 0.9111]
+    - [0.8688, 0.8956]
+    - [0.9569, 0.9367]
     text: [READY]
   CANCEL:
     coords:
-    - [0.7833, 0.8589]
-    - [0.9222, 0.9156]
+    - [0.8667, 0.8933]
+    - [0.9576, 0.9378]
     text: [CANCEL]
   CREATION_FAILED:
     coords:
@@ -311,10 +317,30 @@ stall_recovery:
   leave_click_delay_s: 1.0    # after clicking LEAVE (squad-leave confirmation), before re-scanning PLAY/READY
   cooldown_s: 20.0            # per-crop minimum between recovery actions
 
-unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 5,
+unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 0,
   dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies,
+  # max_per_episode: 0 (2026-09-21, operator request): stop writing PNGs for
+  # disk growth during long target-tracking sessions — UnknownAnomalyRecorder
+  # .tick()'s own `self._captured >= self._max_per_episode` guard makes this
+  # a clean no-op (0 >= 0 immediately), and per ADR 093 the WARNING log line
+  # keeps firing on its doubling interval regardless, so a real GAME_UNKNOWN
+  # stranding still gets noticed — it just won't have a screenshot attached
+  # until this is raised again.
   # ADR 093: keep warning after the capture cap — silence must mean healthy.
   stuck_warn_interval_s: 300.0, stuck_warn_max_interval_s: 1800.0}
+# ADR 146 (2026-09-24): click a window's white-cross close button when GAME_UNKNOWN has
+# outlasted every known popup remedy. A full-screen "A-10 Thunderbolt, limited time offer"
+# window covered the lobby at start-up, matched no known popup, and the classifier timed out
+# 47 times over about three minutes (only a hand click cleared it). ESC is not a safe blind key:
+# on a plain lobby it opens "Exit to Desktop" with Exit highlighted (measured live). The game
+# draws every modal's close button with one white-cross sprite (29, 38 and 45 px measured), found
+# by a white-mask template match. Measured over 3,258 archived frames: real close buttons scored
+# 0.951, 0.859 and 0.937 (three genuine examples, a thin sample), the best false match on any
+# non-gameplay frame 0.747 ("Exit to Desktop" dialog). min_stuck_s is well past the 1-2 s a normal
+# classification takes; a search costs about 60 ms. Named guesses: min_stuck_s, retry_interval_s,
+# max_clicks. Watch: `grep GenericCloseRecovery wingman.log`.
+game_unknown_close: {enabled: true, min_stuck_s: 25.0, retry_interval_s: 15.0, max_clicks: 3,
+  min_score: 0.82}
 respawn_detection:
   use_ocr: true
   use_gpu: false
@@ -377,6 +403,17 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # restart) during which left/right turns are suppressed. The aircraft flies
   # the heading it spawned on, which points into the arena. 0 disables.
   j20_turn_guard_s: 10.0,
+  # ADR 144: which mission battle entry launches (the Good-Luck / battle-alive
+  # launch in GAME_STARTING, and the restart default when no mission has been
+  # recorded yet). j20 = the adaptive J20 mission, su30 = the scripted Su-30
+  # sequence (su30_mission: below), jas39 = J20 plus the cloak loop
+  # (jas39_mission: below), f111 = the su30 script plus the wing sweep
+  # (f111_mission: below, ADR 149). ADR 145: the 'u' hotkey launches this same mission,
+  # so this key is how a mission is chosen; 'o' still starts su30 regardless.
+  # Respawn restarts whichever mission ran last.
+  # Set to su30 by the operator on 2026-09-24; set j20 to launch J20 at battle
+  # entry again.
+  default_mission: su30,
   # ADR 137 D5: one frame saved at the exact crash_with_missiles tick — the
   # log-only instrument (D4) couldn't tell a genuine perception gap apart
   # from an ordinary death/explosion screen; every OCR channel reads "no
@@ -410,8 +447,16 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # Fixed lookback sidesteps detecting that boundary: always use whichever
   # buffered frame is closest to 5.0s before detection, comfortably clear
   # of the whole sequence, rather than the newest one that still looked ok.
+  # ADR 143: enemy_fire_lookback_s/terrain_lookback_s classify each
+  # crash_with_missiles occurrence instead of calling all of them a crash.
+  # enemy_fire_lookback_s defaults comfortably above the 5.7-7.0s gap
+  # measured between the last confirmed incoming-missile alert and death in
+  # the 2026-09-20 session that motivated this (all 5 that session were
+  # enemy fire, not terrain). terrain_lookback_s has no live terrain example
+  # yet to tune against — same default pending live data.
   crash_capture: {enabled: true, max_per_session: 20, pre_crash_buffer_s: 8.0,
     pre_crash_freshness_s: 2.0, pre_crash_lookback_s: 5.0,
+    enemy_fire_lookback_s: 10.0, terrain_lookback_s: 10.0,
     dir: test_screenshots/crash_with_missiles}}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
@@ -455,6 +500,88 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
   rear_commit_deg: 150, rear_release_deg: 90, orbit_direction: right, orbit_roll_hold_s: 0.3,
   orbit_roll_interval_s: 2.0, coarse_kp: 0.5, coarse_min_hold_s: 0.15, coarse_max_hold_s: 0.6,
   coarse_cooldown_s: 2.0}
+# mission_su30 ('o', docs/missions/su30.md, ADR 144): a four-step script run
+# once per life — nose up, switch to the secondary weapon, level off at
+# climb_alt_m with the nose at nose_angle_deg, then hand over to pursuit mode
+# (HLDD 015). Deliberately NOT the adaptive doctrine. Its engagement mode is
+# boresight_engage ONLY: the weapon-fire loop without the padlock camera,
+# started right after the weapon switch (so it fires the secondary) and ended at
+# the pursuit hand-off. search_and_destroy is never started by this mission.
+# Fire cadence is mission.weapon_loop_interval, shared with search_and_destroy.
+#
+# alt_floor_m (ADR 147, operator, 2026-09-24): the hard altitude floor while this
+# mission is in play, instead of behavior_tree.climb.alt_floor_m (4000, ADR 141),
+# which every other mission keeps. It also stands the tree's armed sustain climb
+# (4000 to 5000 m, ADR 075) aside for this mission. Measured 2026-09-24 18:59:
+# the script stopped its climb at 3192 m and the tree restarted one to 5000 m
+# 1.3 s later, the -10 degree step waited behind that climb for its full 20 s,
+# and the chase began at 4750 m and then rolled for minutes at the 4000 m floor
+# (13 ALTITUDE FLOOR events in 20 minutes). With the floor at the level-off
+# altitude the climb is no longer restarted and the chase is expected to hover
+# near 3000 m; the first session after 2026-09-24 has to confirm that.
+# Keep it at or below climb_alt_m: above it the tree undoes the level-off again
+# (tests/test_controller_config.py pins that). Remove the key to restore the
+# tree's own 4000 m floor and sustain band for this mission.
+#
+# The angle-step numbers are named guesses, not measurements — the same status
+# pursuit_mode.pursuit_max_duration_s carries. The angle is the flight-path
+# angle from altitude rate over speed (telemetry.pitch_angle_deg), which lands
+# roughly every 3 s, so the step corrects on NEW samples only and pulses rather
+# than holds (ADR 068/069: a held key overshoots on a lagging reading).
+su30_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
+  nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
+  angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, lock_timeout_s: 5.0,
+  yield_to_target: true}
+# yield_to_target (operator, 2026-09-26): a tracker lock or a ring icon during the
+# climb or the nose-angle step ends the script and starts the pursuit at once (after
+# the 17:37 respawn the script climbed and held -10 deg past targets it had acquired).
+# mission_f111 (docs/missions/f111.md, ADR 149): mission_su30 plus the F-111's
+# wing sweep on 'w' (ToggleWingSweep, a toggle). Six steps once per life: nose up
+# and sweep the wings, boresight engage, no weapon switch until the spawn weapon
+# runs out, level off at climb_alt_m with the nose at nose_angle_deg, unsweep on
+# the way back down to unsweep_alt_m, then pursuit mode. No hotkey of its own:
+# chosen with mission.default_mission: f111 ('u' and respawn follow it).
+# This block is separate from su30_mission so retuning one jet does not retune
+# the other.
+#
+# climb_alt_m: the spec's "after reaching 3000 m altitude" (meters, decided
+#   2026-09-25; the request's "3000 ft" was not meant).
+# alt_floor_m: ADR 147's per-mission floor, extended to this mission by ADR 149
+#   (operator, 2026-09-25). While f111 is in play the tree's floor is this value
+#   instead of behavior_tree.climb.alt_floor_m (4000), and the armed sustain
+#   climb stands aside; without it the tree restarts the climb just after the
+#   level-off, as it did for su30 before ADR 147. Keep it at or below
+#   climb_alt_m (tests/test_controller_config.py pins that). Remove the key to
+#   restore the tree's 4000 m floor and sustain band for this mission.
+# unsweep_alt_m: the spec's "when the altitude descends back to 3000 m", judged
+#   on a fresh altitude reading taken after the level-off.
+# unsweep_timeout_s: the spec's "wait at most 30 seconds, and on timeout unsweep
+#   anyway". The wait sits before the pursuit hand-off and delays it by at most
+#   this much.
+# wingsweep_tap_s: a 0.1 s tap, as activate_special_weapon presses 'q': 'w' is a
+#   toggle, so a press is a single event and a longer hold buys nothing.
+#
+# The angle-step numbers are su30_mission's, copied with its reasoning: named
+# guesses, not measurements. The angle is the flight-path angle from altitude
+# rate over speed (telemetry.pitch_angle_deg), which lands roughly every 3 s, so
+# the step corrects on NEW samples only and pulses rather than holds (ADR
+# 068/069: a held key overshoots on a lagging reading).
+f111_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
+  nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
+  angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, unsweep_alt_m: 3000,
+  unsweep_timeout_s: 30.0, wingsweep_tap_s: 0.1}
+# mission_jas39 (docs/missions/jas39.md, ADR 145): mission_j20 plus the JAS39's
+# special weapon, a cloak on 'q'. Chosen with mission.default_mission: jas39;
+# it has no hotkey of its own, and 'u' launches it.
+# turn_guard_s: the spec's "fly the spawn heading for 10 seconds" (ADR 132).
+#   J20 flies the same 10 s, but reads mission.j20_turn_guard_s; this block has
+#   its own key so retuning one mission does not retune the other. 0 disables.
+# cloak_press_interval_s: wingman has no signal for when the cloak is off
+#   cooldown, so the mission presses 'q' every 3 s and the cloak comes back
+#   within 3 s of being available (operator, 2026-09-24, after first asking for
+#   1 s). Safe only because a 'q' press while the JAS39 is cloaked does not
+#   turn the cloak off (operator, 2026-09-24).
+jas39_mission: {turn_guard_s: 10.0, cloak_press_interval_s: 3.0}
 behavior_tree:
   mode: active
   disengage_after_s: 30
@@ -604,8 +731,37 @@ behavior_tree:
     # detected reliably. The ttg/recover_below_time_s OR-term above is
     # telemetry-only and unaffected by camera view; it is NOT part of
     # this reversion.
+    # capture_max: 0 (2026-09-21, operator request): stop writing PNGs —
+    # long sessions focused on target-tracking work don't need this stream's
+    # disk growth right now. enabled/shadow stay as-is: detection and the
+    # "TERRAIN AHEAD" shadow log this section's own history depends on keep
+    # running unchanged (_capture_terrain_frame's own guard, `capture_max <=
+    # 0: return`, is what makes this a clean no-op rather than a behavior
+    # change). Raise it again for a future live-actuation trial.
     terrain_avoidance: {enabled: true, shadow: true, sky_min_frac: 0.55,
-      confirm_reads: 2, capture_max: 40, capture_cooldown_s: 20.0}
+      confirm_reads: 2, capture_max: 0, capture_cooldown_s: 20.0}
+  # HLDD 013 Phase 1: wires the existing, already-selected TACTIC_ATTACK_SUPPORT
+  # fallback slot to the existing boundary reading — roll away from the nearest
+  # map edge on ticks where nothing else steers at all. Ships shadow-only
+  # (seek_center_enabled: false); a live session's shadow log decides whether
+  # Phase 1 goes live, not a guess.
+  attack_support:
+    seek_center_enabled: false       # Phase 1 default — shadow only
+    # Deliberately wider than boundary_near_frac (0.35, BoundaryTurn's own
+    # trigger) — this is the gentle, early bias; BoundaryTurn stays the
+    # last-resort emergency layer with its own, tighter threshold.
+    seek_center_trigger_frac: 0.55
+    seek_center_deadzone_deg: 15.0
+    # Deliberately gentler than j20_mission's coarse_kp (0.5) / hold-time
+    # defaults — a background bias should correct less aggressively than
+    # active target tracking. Starting values, not measured: the shadow
+    # trial validates the trigger and direction, not roll aggressiveness
+    # (Phase 1 never actuates), so these three specifically stay a named
+    # guess into the live trial.
+    seek_center_kp: 0.3
+    seek_center_min_hold_s: 0.15
+    seek_center_max_hold_s: 0.6
+    seek_center_cooldown_s: 2.0
 # ADR 028 revision 4: `regroup_enabled` gives the navigator a command on the
 # ticks where no enemy is on the minimap — 57% of battle ticks measured over an
 # 11,383-tick session, during which it previously issued nothing and the
@@ -627,6 +783,14 @@ behavior_tree:
 # could not reach past the first map. 300 s x 120 spans a 10 h session; the cap
 # is now a disk guard rather than the thing that ends sampling.
 minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
+  # NOT disabled alongside boundary_capture_max/boundary_approach_capture_max
+  # (2026-09-21 disk-growth pass): test_blind_capture_coverage.py asserts
+  # blind_capture_max * blind_capture_interval_s spans >= 8 hours, by design
+  # ("asserted so a future edit that shrinks coverage fails here rather than
+  # in a session nobody re-reads") — this is ADR 117's "capture what the
+  # other 77% looks like" budget, not disk-hygiene config, and shrinking it
+  # is exactly the regression that test exists to catch. Left alone; ask
+  # explicitly if this one should also come down.
   minimap_present_min_px: 50,
   boundary_median_age_s: 5.0, mask_radius_frac: 0.93, min_blob_px: 4, max_blob_px: 120, ema_alpha: 0.4,
   ema_reset_after_s: 5.0, regroup_enabled: true,
@@ -645,6 +809,38 @@ minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   # Aggregate ratios were tried first and let a ragged landmass straight through.
   boundary_close_iters: 1, boundary_max_thickness_frac: 0.10,
   boundary_min_px: 20, boundary_min_span_frac: 0.5,
+  # ADR 117 D9: how far from center a component may sit and still count as
+  # "a plausible line fragment" for the blind-capture diagnostic. Measured
+  # 2026-09-20: compass-letter stroke fragments (thin by construction, same
+  # as a real line) sat at radial fraction 0.86-0.91 in 3 real blind frames;
+  # every documented real detection (see detect_map_boundary's own
+  # docstring) sits at 0.10-0.62. 0.75 sits in that gap. Does not affect the
+  # main detection acceptance above (min_span already excludes letters).
+  boundary_thin_component_max_radial_frac: 0.75,
+  # ADR 117 D9: a compact UI marker (e.g. a target/waypoint ring) is thin by
+  # the distance-transform test too, but roughly square, unlike even a short
+  # real line fragment. Measured 2026-09-20: a yellow objective-ring icon
+  # had a 16x17 bounding box (aspect ratio 1.06) at radial fraction 0.71-0.73
+  # — inside the radial limit above, only excluded by requiring elongation.
+  boundary_thin_component_min_elongation: 1.8,
+  # ADR 117 D10: an aircraft flight-path trail is also thin, elongated, and
+  # not near the rim. Measured 2026-09-20: a real boundary line's own
+  # curvature fits a circle tightly (RMS residual / span 0.003-0.006 on 2
+  # confirmed detections, even though the fitted center sits 0.4-2.2
+  # minimap-radii away — a small arc of the much larger arena edge, not a
+  # circle centered on the minimap). A trail fits no single circle well:
+  # 0.063-0.115 measured across 5 fragments from 3 real trail-contaminated
+  # captures the same night. 0.03 sits in that roughly 10x gap.
+  boundary_thin_component_max_arc_residual_frac: 0.03,
+  # ADR 117 D11: a circular UI marker's rim (e.g. a leader/MVP crown badge)
+  # fits a circle just as tightly as a real line — it IS one — so residual
+  # alone cannot tell them apart. A real boundary line is a small arc of the
+  # much larger arena edge (fitted radius 52-287 px on this crop size); a
+  # marker icon's rim is a small circle in its own right. Measured
+  # 2026-09-20/21: a confirmed icon-rim fragment fitted at 9.1 px, a second
+  # suspect capture at 12.9 px. 0.15 (about 24 px on this crop) sits in the
+  # gap below the real-line floor.
+  boundary_thin_component_min_arc_radius_frac: 0.15,
   # ADR 133: the corroborated span. The strict gate above needs the boundary to
   # arrive as ONE connected component of 0.5R, and the post-2026-09-02 minimap
   # does not reliably draw it that way — measured on 447 blind frames, EVERY
@@ -673,11 +869,20 @@ minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   # trigger firing on the same frame. Nothing respawns 0.07R from an edge.
   boundary_respawn_settle_s: 5.0,
   boundary_capture_dir: test_screenshots/unknown_anomalies,
-  boundary_capture_max: 20,
+  # Both caps 0 (2026-09-21, operator request): stop writing PNGs to control
+  # disk growth during long target-tracking-focused sessions — see
+  # _capture_boundary_frame's own `cap <= 0: return` guard. The underlying
+  # boundary-reading detection, median filter, and BOUNDARY TURN logging are
+  # unaffected; only this evidence stream (ADR 106's map-clustering
+  # question) pauses. Note: test_minimap_bearing.py's crossing-frame
+  # corpus stops growing too as a direct consequence — that test already
+  # fails independently of this change (see its own docstring) and this
+  # does not fix or worsen it, just freezes the corpus at its current size.
+  boundary_capture_max: 0,
   # Approaches get their OWN budget. A single shared counter gave priority
   # to whichever event arrived first — the frequent one — and cost every
   # crossing frame of the 2026-09-04 session.
-  boundary_approach_capture_max: 10}
+  boundary_approach_capture_max: 0}
 # HLDD 001 phase 1: forward sky-occlusion terrain detection. Detects the
 # ABSENCE of sky (not terrain colour, which varies per map) in a
 # forward-center crop. Range measured directly against two reference
@@ -706,7 +911,7 @@ return_to_battle: {region: [0.36, 0.32, 0.64, 0.378], min_red_frac: 0.10,
   ocr_region: [0.44, 0.32, 0.56, 0.378],
   text: [RETURNTO, TOBATTLE, NTOBAT, RNTOBAT, TOBAT]}
 tracking:
-  enabled: false
+  enabled: true
   # Design 005 dry-run/live split. enabled:true + actuate:false is pure
   # sensing and logging — feeds the HUD in both GAME_BATTLE and
   # GAME_BATTLE_MANUAL, never presses a key — the "Live dry-run logging
@@ -715,27 +920,184 @@ tracking:
   # zero actuation risk. actuate:true restores real roll correction, still
   # strictly GAME_BATTLE + mission-running only (SAF-001, unchanged).
   actuate: false
-  acquisition_region_pct: [0.2, 0.18, 0.8, 0.68]
+  # Widened 2026-09-24 (action item 001, Cycle 12) from [0.2, 0.18, 0.8, 0.68] on the
+  # operator's report (pursuit_mode_20260924_164821_48.png: tracker ACQUIRING, det=0,
+  # with two complete enemy nameplates at 10.3 and 10.5 km on screen below the box, y
+  # 940-1050 of 1200). Measured over 300 archived full-screen frames (glyph clusters in
+  # 300 x 170 px windows): 28 of the 68 nameplate clusters in open screen lay OUTSIDE the
+  # old box (11 below, 7 above, 3 left, 2 right, 5 corners), and a contact sheet of 12
+  # showed real nameplates in all 12. Run through the real tracker, old settings against
+  # these ones: locks 36 -> 54, none lost, steering point unchanged (median 1 px, 64%
+  # within 40 px) on the 36 frames the old box already locked, all 54 within 320 px of an
+  # independently found nameplate; update() 3.7 -> 9.5 ms. x runs edge to edge; y starts
+  # under the scoreboard strip and stops above the bottom bar. The HUD zones below and
+  # red_mass_cluster_select are what make this safe: the same wider box under the old
+  # whole-crop mean moved locked frames' steering point a median 331 px unmasked, 134 px
+  # masked. Revert by restoring the old fractions (and, ideally, leaving the zones on).
+  acquisition_region_pct: [0.0, 0.09, 1.0, 0.95]
   deadband: 0.05
   kp: 0.3
   min_hold_sec: 0.08
   max_hold_sec: 0.35
   command_cooldown_sec: 0.15
-  lost_timeout_sec: 0.7
-  prefer_red_lock: true
-  local_roi_enabled: true
-  local_roi_scale: 0.22
-  local_roi_min_px: [140, 90]
-  local_roi_expand_factor: 1.25
-  local_roi_max_scale: 0.45
-  local_roi_reacquire_cycles: 3
+  # Pitch axis (HLDD 005 Two-Axis Rollout Phase 1, 2026-09-21): shadow-only
+  # for now — actuate_pitch stays false while this ships, so nothing here
+  # presses a key yet. Logs what it would command (PITCH[shadow] lines)
+  # instead. Own flag, own gains, deliberately independent from roll's
+  # actuate/deadband/kp/etc above — see HLDD 005 Safety and Gating Rules.
+  actuate_pitch: false
+  # HLDD 015 normal-battle priority, SHADOW (operator, 2026-09-26: "its still rotating
+  # left past targets"): each roll the tree's minimap navigation commands in
+  # GAME_BATTLE is logged as `BATTLEPRI:` beside what a lock, else the ring icon,
+  # would have steered instead. Presses nothing.
+  battle_priority_shadow: true
+  pitch_deadband: 0.05
+  pitch_kp: 0.3
+  pitch_min_hold_sec: 0.08
+  pitch_max_hold_sec: 0.35
+  pitch_command_cooldown_sec: 0.15
+  # lost_timeout_sec (0.4) was removed 2026-09-24. How long LOST_GRACE remembers
+  # a lost target is now pursuit_mode.search_resume_delay_s (or
+  # search_resume_centre_delay_s near centre), the same wait roll_on_miss holds
+  # the roll axis neutral for, so the tracker no longer forgets a target the
+  # actuation layer is still waiting for. The short timeout existed to escape a
+  # small LOST_GRACE ROI stuck on a stale lock; every tick now scans the whole
+  # acquisition region, so that trap is gone.
+  # Review 018 CR-018-04 (2026-09-25): the tall-bar detector and the flags that kept
+  # it reachable (prefer_red_lock, red_mass_steering, red_mass_cluster_select,
+  # red_mass_nameplate_gate_enabled, red_mass_tallbar_fallback, ranked_lock_priority,
+  # ranked_priority_tolerance_px, tracking_hsv green_*/min_contour_area/min_aspect_ratio)
+  # are gone: the tracker has one path, nameplate clusters in the red mask. The keys
+  # below are its tuning; their code defaults are these shipped values.
+  # Excludes the "NO LOCK" / lock-status HUD text from the nameplate mask's
+  # scan (2026-09-23): that text is bright red and boresight-relative, not
+  # world content, so it was winning the red-mass centroid outright (seen
+  # live: game_battle_eject_20260923_094830_187.png — marker landed on the
+  # text while a real, closer contact sat untouched elsewhere in frame).
+  # Measured at identical fractional bbox (0.474-0.526, 0.762-0.777) across
+  # 4 frames from different sessions/zoom/terrain; bounds below add margin
+  # over that measurement.
+  red_mass_exclude_pct: [0.46, 0.75, 0.54, 0.79]
+  # Action item 001, Cycle 12 (2026-09-24): more fixed-position HUD zones with red in
+  # them, masked out of the red mask exactly like the rectangle above. Fractions of the
+  # 1920 x 1200 frame, from the archived frames: the scoreboard and team rosters (y under
+  # 110 px), the minimap (x over 1590, y under 330), the weapons panel (x over 1440, y over
+  # 1060) and the squad logo (x under 330, y over 1080). Without them the full screen
+  # passed the nameplate gate on 88 of 300 frames against 59 with them, about 29 of the 88
+  # being HUD text. Named guesses at the edges; zones are rectangles, so anything else
+  # red at a fixed screen position needs adding here.
+  red_mass_exclude_zones_pct:
+    - [0.0, 0.0, 1.0, 0.0917]
+    - [0.828, 0.0, 1.0, 0.275]
+    - [0.75, 0.883, 1.0, 1.0]
+    - [0.0, 0.9, 0.172, 1.0]
+  # Same date: steer on ONE nameplate cluster instead of the mean of every red pixel in
+  # the crop (which overrides the 2026-09-23 "centroid of all red" instruction, with the
+  # operator's go-ahead). With a wider box two nameplates are often on screen at once, and
+  # their mean is a point between them where nothing is. The nameplate gate is then
+  # counted per cluster (glyphs inside a 300 x 170 px window). The cluster nearest the
+  # previous lock is chosen, or the screen centre when there is none. The window size is a
+  # named guess. Watch: `clu=` in TRACKPICK (nameplate clusters that passed the gate).
+  red_mass_cluster_glyph_window_px: [300, 170]
+  # 2026-09-24 (corrected the same day): the steering point is the AIRCRAFT, which the game
+  # draws below its nameplate: a hollow diamond bracket (a small red jet icon on a far
+  # contact) about 100 px below the label's glyph centre. Measured on 8 archived frames with
+  # a ruler on the frame, ranges 0.36 to 6.8 km: 90, 95, 98, 101, 102, 102, 106 and 110 px
+  # (mean 100.5), no trend with range worth correcting. The marker is darker than the strict
+  # red mask (hue 0-2, value 217-230 against 245), so it cannot be found in the mask and
+  # the point is the cluster centre plus this offset (positive is down, so 100 means 100 px
+  # below). It replaces a rule that looked for a marker 162-287 px ABOVE the label and
+  # otherwise moved the label up 225 px: about 325 px above the aircraft, on a marker
+  # position no archived frame shows (it came from pairing an icon with the wrong label).
+  # The mean-of-red rule before that landed about 85 px above the aircraft.
+  red_mass_aim_offset_px: 100
+  # Same date: the gate's threshold below decides acquisition only. A lock is kept on a
+  # looser test near where it was: a cluster of at least keep_min_glyphs glyphs within
+  # keep_box_pct (half width, half height, frame fractions) of the previous lock's
+  # cluster. Measured: 11 of 18 acquisitions were lost on the very next scan; lock ticks
+  # sat at a median 25 glyphs, 46% within 4 of the threshold; cut or partly drawn real
+  # labels read 6-19 glyphs while junk never exceeded 7 (8-9 on two frames). The box is
+  # the reach the 0.22-scale local ROI gave around a lock (+-211 x +-132 px). Watch:
+  # `path=keep` in TRACKPICK is a lock only this looser test held; path=redmass still
+  # means the full gate passed.
+  red_mass_keep_min_glyphs: 8
+  red_mass_keep_box_pct: [0.11, 0.11]
+  # Narrows the nameplate mask's upper hue bound to separate the
+  # airframe's own afterburner glow (hot orange) from a real target icon
+  # (pure red) — position-based exclusion doesn't work here since the
+  # afterburner moves with the airframe's on-screen attitude, unlike NO
+  # LOCK's fixed position above. Measured directly (2026-09-23,
+  # game_battle_eject_20260923_123703/04/05_35/36/37.png): afterburner glow
+  # hue 7-10 (bordering true orange), real target icon hue 3-5 (pure red) —
+  # per-blob pixel area was checked first and rejected as a discriminator
+  # (270 vs 271, 222 vs 309 px in these same frames — no reliable size
+  # threshold exists). 6 sits at the midpoint of the measured gap.
+  red_mass_hue_max: 6
+  # Raises the nameplate mask's value (brightness) floor to separate the
+  # afterburner's fading outer rim from a real target icon — hue alone
+  # doesn't: the rim fades through the same red hue band the target uses
+  # (measured 2026-09-23, game_battle_eject_20260923_171137/38/39_0/1/2.png,
+  # after the hue_max fix above was already in place). Per-blob pixel area
+  # was checked first and rejected again here too (bad-frame rim blobs
+  # measured 328-652px, bigger than the good frame's own 79px fragments —
+  # backwards from what a minimum-area rule would need). Brightness is the
+  # real discriminator: the target is a flat-shaded icon (value approx 255
+  # on 86% of its qualifying pixels); the fading rim only reaches value
+  # >=245 on 9-11% of its qualifying pixels.
+  red_mass_value_min: 245
+  # HLDD 005 nameplate gate (2026-09-23): red_mass_hue_max/value_min above
+  # each separate a real target from one specific known false positive
+  # (afterburner bulk, afterburner rim). This session found a third and
+  # fourth kind in a single engagement — an enemy flare effect, then the
+  # player's own engine exhaust (pursuit_mode_20260923_195448/50/53_81/83/
+  # 85.png) — meaning color/brightness alone keeps finding new false
+  # positives as fast as they get patched. Every real enemy contact renders
+  # a HUD nameplate (name/distance/type) nearby; neither a flare nor engine
+  # exhaust ever does. Counting small glyph-shaped components in the same
+  # red mask (no OCR, no new color sample)
+  # measured 33 such components for the real target vs 8-9 for each false
+  # positive in the three frames above — a roughly 4x gap. That is 3 frames
+  # from one engagement, not a tuned threshold, so this shipped gated off
+  # until more encounters validate the numbers, same shape as
+  # sustained_hold_enabled below. Set true here 2026-09-23 by explicit
+  # operator instruction for a live trial, specifically to get evidence from
+  # a real pursuit/eject encounter (the 2026-09-23 20:52-20:58 session found
+  # no evidence either way — the flag was still false and no pursuit
+  # triggered) — min_glyphs/glyph_area/glyph_max_dim below are still the
+  # untuned, 3-frame values, not yet corrected by live data.
+  red_mass_nameplate_min_glyphs: 20
+  red_mass_nameplate_glyph_area: [10, 200]
+  red_mass_nameplate_glyph_max_dim: 25
+  # The local ROI (local_roi_*), its clipped-nameplate follow (local_roi_follow_*) and
+  # its widening ladder were removed 2026-09-24: every tick scans the whole acquisition
+  # region, and the keep test above holds a lock whose label the ROI edge used to cut.
+  # HLDD 005 Sustained-Hold Actuation (2026-09-23): hold ROLL_LEFT_KEY/
+  # ROLL_RIGHT_KEY/NOSE_UP_KEY/NOSE_DOWN_KEY until the tracked condition
+  # changes (Controller.boundary_turn_mode's own shape) instead of computing
+  # a bounded 0.08-0.35s tap and releasing — the tap model was found to have
+  # too little control authority in the error range pursuit_mode actually
+  # operates in (measured live: error_norm_x crept from -0.127 to -0.109
+  # over 7s of continuous, correctly-directed taps, pursuit_mode_20260923_
+  # 1849*.png). One flag drives both call sites (pursue_and_engage and
+  # _eject_heatdive_loop's roll axis) — the HLDD's own Phase 2/3 plan would
+  # have staged them separately (pursuit first, since it has no live history
+  # to protect; heatdive's roll axis only after pursuit proved convergence),
+  # but that staging requires splitting this into two flags, which has not
+  # been done. Set true here 2026-09-23 by explicit operator instruction,
+  # skipping that staging and enabling both call sites at once. See HLDD
+  # 005's own "Sustained-Hold Actuation" section for the full design.
+  sustained_hold_enabled: true
+  # CR-018-01 (review 018): release a sustained pitch hold once the vertical
+  # error, extrapolated this many seconds ahead at its measured rate, is
+  # inside the deadband or past centre. Before: 63% of HOLD[pitch] endings
+  # were a direct reversal and 18% of lock ticks sat inside the deadband
+  # (2026-09-25 00:49 session). The live check is both shares; the early
+  # releases log as `HOLD[pitch]: <dir> -> None (lead ...)`. 0 turns it off.
+  # Named guess: about one steering tick plus the key's lag.
+  pitch_lead_s: 0.15
 tracking_hsv:
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
-  green_lower: [45, 150, 150]
-  green_upper: [75, 255, 255]
-  min_contour_area: 12
-  min_aspect_ratio: 2.5
 # ADR 136: padlock-off indicator — a dashed green ring at screen center when
 # padlock is disengaged (calibrated against a live capture 2026-09-09: ~40
 # short dash segments, not a single filled dot). Own HSV bounds, notably
@@ -766,12 +1128,286 @@ padlock_center_indicator:
   green_upper: [60, 90, 255]
   min_pixels: 3
   confirm_seconds: 2.0
-hud: {enabled: true, output_path: tests/test-output/live_hud.png, interval_sec: 1.0}
+  # ADR 140 D6, operator directive 2026-09-20: a real dive pressed this
+  # correction 13 times over ~20s with no effect — capped per dive.
+  max_correction_attempts: 3
+# HLDD 015: missiles-empty alternative to eject_and_dive. Switch to secondary
+# weapons and pursue with BOTH tracking axes (roll and pitch) instead of
+# diving, since pursue_and_engage never starts the descent controller that
+# forces eject_and_dive's own heatdive addition to stay roll-only.
+#
+# enabled overridden true 2026-09-23 by explicit, repeated direct operator
+# instruction — NOT because the precondition below was met. Two-Axis
+# Rollout Phase 2 (live pitch actuation validated on the ambient path,
+# tracking.actuate_pitch: true) has NOT happened: actuate_pitch is still
+# false and zero nose_up/nose_down/orient_pitch calls exist in any session
+# log to date. HLDD 015's Safety and Gating Rules section explains the risk
+# this skips: the first live pitch actuation this codebase ever performs
+# now happens inside pursuit mode itself, compounding two unvalidated
+# things (pitch actuation behaving sensibly at all; pursuit as a strategy
+# working) into one trial with no way to separate them if it goes wrong.
+# Flagged to the operator before this edit; they chose to proceed anyway.
+pursuit_mode:
+  enabled: true
+  # Named guess, not measured — a live shadow trial should correct it, same
+  # status as HLDD 015's own Configuration Additions section.
+  # Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching and
+  # pursuing." 0 = no cap: the pursuit keeps searching (roll, pitch on a lock) and firing
+  # until the ammo is exhausted (then the dive, to rearm) or a respawn, takeover or shutdown
+  # stops it. Was 20.0, which dropped every life into the dive whether or not it had found
+  # a target. Known exposure, measured 2026-09-24: no behavior-tree tactic acts inside
+  # GAME_BATTLE_EJECT, so a long search flies straight and is unguarded against the arena
+  # edge (pursuits started a median 0.37 minimap radii from it, the worst closing rate
+  # would reach a boundary 0.5 away in about 50 s); terrain is covered by Climb's emergency.
+  # Set a positive number of seconds to restore a cap.
+  pursuit_max_duration_s: 0.0
+  # ADR 148 (operator, 2026-09-25: after a kill and the switch to the secondary the
+  # aircraft "crashed to the ground, it should have continued pursuit sequence"). The
+  # longest a dive-recovery climb (a HARD emergency: time to ground or terrain) may fly
+  # the airframe inside a pursuit before the chase resumes. Measured 2026-09-25 00:03,
+  # both lives: the tree's emergency selected Climb at 29 s to ground and again every
+  # 1.5 s to the impact, and every hold ended `state_exit` after 0.25 s because the
+  # hold released on any game state but GAME_BATTLE and a pursuit lives in
+  # GAME_BATTLE_EJECT. The chase yields pitch and roll while the hold runs. The floor
+  # climb (not a hard emergency) is unchanged: it stays a short nudge in a chase.
+  # 0 turns this off and restores the 0.3 s nudge. A named guess: the pull-outs needed
+  # about 3200 m at 120 to 180 m/s of descent.
+  recovery_max_s: 30.0
+  # Inherits ADR 136 D4's disabled default: the padlock-off detector this
+  # gates was found to be tracking a flight-path marker, not padlock state.
+  pursuit_padlock_verify: false
+  # get_ammo_missiles() reads the AMMO_MISSILE HUD region, which does not
+  # update to the post-switch_weapon secondary loadout instantly — measured
+  # live (2026-09-23): 1.79s and 9.1s after switch_weapon completed, across
+  # two separate encounters, before the analyzer's own "Ammo missiles: 2"
+  # first appeared. Without this, pursue_and_engage's own ammo==0 check
+  # trusted the very first reading (always still the pre-switch value) and
+  # fell through to eject_and_dive within ~230ms on every trigger, before
+  # the tracking loop ever ran long enough to matter. Margin over both
+  # measured samples, not a large-N guarantee.
+  ammo_zero_grace_s: 12.0
+  # Action item 001 (2026-09-24): seconds a miss tick after a valid lock holds
+  # the roll axis NEUTRAL before the ROLL_LEFT search default resumes. Every
+  # LOST_GRACE tick reports visible=False, and the tracker's own grace window
+  # is only ~0.4s, so before this a one-tick detection dropout re-pressed
+  # ROLL_LEFT at once. Measured (wingman.log 2026-09-24 06:03:38-39, frames
+  # pursuit_mode_20260924_060338_16.png and 060339_17.png): lock acquired at
+  # 38.251, rejected on the next two ROI scans, ROLL_LEFT resumed on both, and
+  # the target went from screen centre (err about 0) to err=+0.366 by the next
+  # lock. 0 restores the old immediate-resume behavior. Named guess, not
+  # measured beyond that one 1.07s reacquisition gap; the HOLD[roll] debug
+  # lines added with it are what should correct it. Also used by the eject
+  # dive's heatdive roll loop (2026-09-24, operator request): the same
+  # immediate resume showed there, all 13 target holds in the 06:51-07:06
+  # session ending `-> left/search`. Verified live 07:34-08:24: 0 of 51
+  # search resumes (10 pursuit, 41 dive) came sooner than 2.0 s after a
+  # target hold.
+  search_resume_delay_s: 2.0
+  # Near-centre extension (operator, 2026-09-24: "it had more than enough time
+  # locked onto target but kept forcing left turn, it should have stopped left
+  # turn and focused on target"). When the last visible target error was within
+  # search_resume_centre_err of screen centre the aircraft is already pointing
+  # at the target, so the neutral hold is search_resume_centre_delay_s instead
+  # (when longer). Measured on that same 07:34-08:24 session, with the 2.0 s
+  # delay in place: the search still resumed with the target last seen within
+  # +-0.15 of centre in 6 of 10 pursuit cases and 23 of 41 dive cases. Both are
+  # named guesses; the HOLD[roll] "target was near centre" lines are what
+  # should correct them. centre_delay_s 0 disables the extension.
+  search_resume_centre_err: 0.15
+  search_resume_centre_delay_s: 6.0
+  # mission_su30 no longer presses SWITCH_WEAPON at step 2 (operator,
+  # 2026-09-24: "not switch weapons until it runs out"; ADR 144 D4). Its
+  # pursuit hand-off defers the switch until the selected weapon's ammo has
+  # read 0 this many cycles in a row (about 0.35 s each). SWITCH_WEAPON is a
+  # toggle, so a single misread 0 would swap away a rack that still has
+  # missiles and the only undo is a second press. Since 2026-09-24 (operator,
+  # from a 'v' screenshot at 08:20:14 showing the 6/6 primary rack untouched)
+  # the same deferral covers the eject dive that pursuit falls into at its
+  # 20 s cap. The missiles-empty trigger keeps its own confirmation
+  # (mission.no_missiles_consecutive_required). Named guess, not measured.
+  empty_confirm_reads: 3
+  # CR-018-01 (review 018): the chase steers every steer_interval_s and reads
+  # ammo, switches, fires and renders the HUD every engage_interval_s. Before,
+  # one loop did both and steered at about 2.7 Hz (median TRACKPICK interval
+  # 0.353 s, 2026-09-25 00:49 session), and 63% of HOLD[pitch] endings were a
+  # direct up/down reversal. engage_interval_s keeps the old ~0.3 s period so
+  # empty_confirm_reads above still spans about a second. Named guesses; the
+  # live check is the TRACKPICK interval median (target below 0.2 s).
+  steer_interval_s: 0.1
+  engage_interval_s: 0.3
+  # Dive guard (review 018, action item 001 01:06 and 01:43 entries; operator,
+  # 2026-09-25). The chase does not command nose-down below the floor in play
+  # (a mission's own alt_floor_m, else behavior_tree.climb.alt_floor_m) plus
+  # dive_guard_margin_m, or while altitude over descent rate is under
+  # dive_guard_ttg_s; pitch goes neutral instead. Roll tracking, firing and the
+  # search roll are unchanged. Measured basis: six of eight unplanned deaths in
+  # the 2026-09-25 00:49-01:41 session followed a chase dive through the 3000 m
+  # floor. su30 and f111: 3000 + 500 = 3500 m. Logged as `DIVE GUARD`. The ttg
+  # term assumes the ground at altitude 0 (terrain near 900 m exists), hence
+  # the wide 60 s. Named guesses, from the action item. 0 turns a term off.
+  dive_guard_margin_m: 500
+  dive_guard_ttg_s: 60
+  # Pull-out (operator, 2026-09-25): withholding nose-down alone did not stop the
+  # 20:26:37 dive (-103 m/s at the guard, -175 m/s 3 s later), so the tree's hard
+  # emergency took the airframe at ttg 20 s and its nose-up lost the target. While
+  # the ttg term holds and the descent is steeper than dive_guard_level_rate_mps,
+  # the chase taps nose-up (pulse_s every interval_s), roll and fire unchanged.
+  # Logged as `DIVE GUARD — pull-out pulse`. Named guesses; pulse 0 turns it off.
+  dive_guard_pullout_pulse_s: 0.4
+  dive_guard_pullout_interval_s: 1.0
+  dive_guard_level_rate_mps: 30
+  # Look-down search (operator, 2026-09-26: "most targets are at lower altitude
+  # around 2000, most of the fight is flying left at 3000 to 4000 horizontally so
+  # it cant see the targets"). Measured on the 21:23-01:28 session, 93 pursuits:
+  # 83% of in-pursuit altitude reads at or above 3000 m, the left search roll held
+  # about 61% of pursuit time, 24% of scans locked, and 1,124 of 9,639 lock points
+  # sat in the bottom strip of the view. While the search roll is running (no target
+  # past the resume delay), the chase taps nose-down for search_look_down_pulse_s
+  # every search_look_down_interval_s, only while the dive guard is clear and a
+  # fresh flight-path angle is shallower than search_look_down_min_deg (no reading,
+  # no tap). Logged as `LOOKDOWN:`.
+  # search_floor_m replaces "floor in play + dive_guard_margin_m" (3500 m for su30)
+  # as the dive guard's altitude term during a pursuit, so both the search and the
+  # chase may descend to about 300 m above the fight. This deliberately reverses part
+  # of the 2026-09-25 guard, whose basis was six of eight deaths after a chase dive
+  # through 3000 m. The ttg term and its pull-out, and ADR 148's hard-emergency climb,
+  # are unchanged. Named guesses. search_floor_m 0 restores floor + margin; pulse 0
+  # turns the look-down off.
+  search_floor_m: 2300
+  search_look_down_pulse_s: 0.15
+  search_look_down_interval_s: 1.0
+  search_look_down_min_deg: -20
+  # Operator, 2026-09-26: "prioritize pursuit via icons over dive recovery". false
+  # switches off, for the whole pursuit (icons and the tracker's locked chase): the
+  # dive guard above (no withheld nose-down, no pull-out pulses), ADR 148's recovery
+  # flying through the pursuit, and the ADR 086 emergency climb starting inside one.
+  # The dive recovery is to be redesigned around a predicted trajectory. The
+  # altitude-floor climb is untouched. true restores all three.
+  dive_safety: false
+  # HLDD 015 Icon-Directed Search (2026-09-26), SHADOW STAGE: each steering tick
+  # finds the game's red ring icon (an arrowhead on a fixed ring around the screen
+  # centre pointing at an off-screen enemy), adds points to a nose-down/up and a
+  # left/right score, and logs the keys the design's law would hold as `ICONPTS:`,
+  # plus `icon=` / `icon_steer=` on PURSUIT SUMMARY. It presses nothing; with
+  # wings_level (step 2a) it also releases the search roll while an icon or active
+  # points give a direction, and the look-down taps carry on. enabled: false
+  # removes the lines and restores the search roll everywhere.
+  # Ring geometry measured on 113,918 logged icons (centre 959.7, 599.8 of
+  # 1920 x 1200, radius 193.9 px, about 4 px spread); orange counts as red and the
+  # -45 deg dive limit are operator decisions; the rest are named guesses.
+  icon_steering:
+    enabled: true
+    # Step 2a (2026-09-26): on the icon and hold rungs, release the fixed left
+    # search roll and keep the wings level. Presses nothing new; the look-down
+    # taps carry on as before. false = pure shadow.
+    wings_level: true
+    # Step 2b (2026-09-26, operator go-ahead): the law's vertical intent acts on
+    # the icon and hold rungs: "down" holds NOSE_DOWN (withheld by the dive
+    # guard, a path at or past icon_min_path_deg, or no fresh angle), "up" holds
+    # NOSE_UP, roll level; "turn" stays in shadow. The look-down taps then run
+    # only on the blind rung. false = step 2a.
+    actuate_pitch: true
+    # Step 3 (2026-09-26, iterate): the turn acts too, the operator's chosen
+    # bank-and-pull: "turn" holds the roll toward the icon's side plus NOSE_UP,
+    # "up" with a side rolls toward it while pulling, "down" keeps the wings
+    # level. Before it, 62% of icon-steered ticks before a first lock were
+    # "turn" and flew straight. false = step 2b.
+    actuate_turn: true
+    # Operator, 2026-09-26 (cycle 5): descending faster than this (m/s), the turn keeps
+    # pulling with the wings level so the pull points up; it banks again once the
+    # descent eases. 73% of 66 no-enemy deaths under step 3 had the bank-and-pull
+    # running in the last 12 s, 94% descending faster than 100 m/s. 0 = off.
+    turn_level_descent_mps: 150
+    # No icon nose-down without a fresh flight-path angle (kept when the -45 deg
+    # limit below was removed, operator 2026-09-26).
+    require_fresh_angle: true
+    ring_centre_pct: [0.5, 0.5]
+    ring_radius_pct: [0.14, 0.18]   # of frame height: 168-216 px at 1200
+    area_px: [150, 2500]
+    side_px: [15, 70]
+    red_hue_max: 4                  # red icons hue 2-3; hue 5-10 was afterburner, sunset, flare
+    orange_hue: [11, 15]            # orange icons hue 12-13, accepted only when solid
+    orange_min_uniform: 0.6         # orange icons 0.71-0.92, sunset and glare 0.00
+    sat_min: 110
+    val_min: 200
+    points_scale: 5                 # reference icon adds nose down 5, left 1
+    points_half_life_s: 1.0         # fades only while icons keep coming; holds when none is seen
+    points_cap: 25
+    act_pts: 10
+    release_pts: 4
+    icon_min_path_deg: null         # operator 2026-09-26: no path-angle limit (was -45)
+    # Operator, 2026-09-26 (cycle 9): no icon nose-down below this altitude (m),
+    # nor without a fresh altitude. With the dropped-key defect fixed, the push
+    # flew into the ground from about 1200 m and 700 m. Named guess. null = off.
+    push_floor_m: 1500
+    blind_search_after_s: 3.0
+hud:
+  # Back on (2026-09-21): the roll_right convergence investigation exhausted
+  # what wingman.log alone can show (episode trace confirmed roll_right
+  # makes no net progress even across sustained 3+ tick streaks, but not
+  # *why*) — next step needs eyes on an actual right-drifting heatdive, and
+  # this plus target_tracking_archive below is what captures that. Off by
+  # default otherwise (see git history / prior comment here) since long
+  # unattended sessions aren't watched live and normally cost nothing to
+  # leave on: sensing/shadow logging (error_norm_y, SELECT[shadow],
+  # PITCH[shadow]) comes from TargetTracker.update() directly, not from this
+  # renderer, so tracking.enabled: true below was never the reason this was
+  # off. Turn back off (hud.enabled: false is a hard override, regardless of
+  # tracking.enabled) once the roll_right question is answered.
+  enabled: true
+  output_path: tests/test-output/live_hud.png
+  interval_sec: 1.0
+  # Timestamped archive of the same annotated frame while target tracking is
+  # active during a secondary-missile encounter (ADR 136 heatdive loop, or a
+  # future HLDD 015 pursuit-mode consumer) -- live_hud.png itself is
+  # overwritten every render, so this is what actually lets a saved frame be
+  # lined up against a wingman.log timestamp for debugging. Capped per
+  # session, same shape as crash_capture's max_per_session (ADR 137 D5).
+  # Back on (2026-09-21): HEATDIVE[roll] confirmed a real, unexplained
+  # roll_right weakness (episode trace: median net progress +0.0145 for
+  # sustained roll_left streaks vs exactly +0.0000 for roll_right) but the
+  # log can't say *why* -- these frames are the next piece of evidence.
+  # Turn back off once that's answered; it isn't needed continuously.
+  target_tracking_archive:
+    enabled: true
+    dir: tests/test-output/target_tracking
+    max_files: 200
+    # Action item 001 (2026-09-23): also save the exact, unannotated crop the
+    # tracker scanned (`*_raw_ox<x>_oy<y>_fw<W>_fh<H>.png`) beside each
+    # archived frame. The annotated PNG cannot be replayed faithfully — the
+    # PURSUING marker is drawn on the very pixels that produced the lock —
+    # which is why hand-reconstructing a scan disagreed with the live log's
+    # hits= count. Replay with the real TargetTracker methods, passing the
+    # origin and frame size from the filename. ~0.15-1MB each, 200 max.
+    save_raw_scan: true
+    # 2026-09-24: every render (1/s) was archived, so a session spent its
+    # whole 200-frame cap in 6-10 minutes (5 sessions = 2.6 GB that morning)
+    # and saved nothing from later encounters. At most one frame per
+    # min_interval_s, and at most max_per_encounter per contiguous
+    # eject/pursuit encounter (0 = no per-encounter cap). Named guesses.
+    min_interval_s: 5.0
+    max_per_encounter: 12
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
 # "make rd v"), never the default — a multi-hour session's file size and CPU
 # cost scale with fps. Low by design: this is reviewed at tactic-selection
 # cadence (seconds), not watched as smooth video.
 session_recording: {fps: 2.0, scale: 0.5}
+# Cross-session disk safety net (wingman/capture_budget.py). Every capture
+# feature above caps itself per SESSION; nothing capped the total or watched
+# free space, and on 2026-09-24 capture folders plus logs/ held about 19 GB.
+# Before each capture write: skip it if free space is below min_free_gb, else
+# delete that folder's oldest images until it fits its budget. Pruning is
+# non-recursive, so subfolders are never touched. 0 = unlimited.
+capture_budget:
+  min_free_gb: 10.0
+  default: {max_files: 1000, max_mb: 2048}
+  dirs:
+    # annotated frame (about 1 MB) plus raw scan (about 0.6 MB) per save
+    tests/test-output/target_tracking: {max_files: 600, max_mb: 1024}
+  # logs/wingman_*.log, deleted oldest-first at startup
+  rotated_logs: {max_files: 200, max_mb: 2048}
+  # logs/session_*.mp4 (make rd v), deleted oldest-first before recording
+  session_video: {max_files: 8, max_mb: 6144}
 telemetry:
   # ADR 123: NOSE_DIRECTION deadband. Level flight jitters around zero altitude
   # rate, and a direction that flips every tick is not a direction — the loiter
@@ -787,6 +1423,12 @@ telemetry:
                                # Calibrated on 2026-08-27: plausible dives top
                                # out at 919 m/s, artefacts start at 1036 m/s.
   reseed_agreement_m: 150      # ADR 097 D3: agreeing rejects mean a poisoned anchor
+  digit_drop_ratio: 0.2        # ADR 150: reject an altitude under this fraction of a
+                               # fresh anchor of 1000 m or more (a dropped digit), and
+                               # never reseed from it. 0 turns it off. Also rejects any
+                               # read under 1000 m against such an anchor (D5).
+  digit_drop_window_s: 15      # ADR 150 D4: an anchor aged out only by rejections still
+                               # counts for the digit-drop test this long.
   smoothing_window: 3
   stale_after_s: 6.0
   trend_min_alt_rate_fps: 20.0

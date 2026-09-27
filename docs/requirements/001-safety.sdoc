@@ -106,6 +106,28 @@ RELATIONS:
   VALUE: SAF-001
 
 [REQUIREMENT]
+UID: SAF-001.3
+STATUS: Draft
+TITLE: The takeover-key listener stays able to hear keys
+STATEMENT: >>>
+On the display wingman injects into, if a reporting interval of the
+takeover-key listener passes in which wingman injected key presses on that
+display but the listener received none, wingman shall log the condition and
+re-establish the listener before the end of the next reporting interval.
+<<<
+RATIONALE: >>>
+SAF-001's takeover at the game window depends on a listener that hears keys.
+On 2026-09-26, 3 of 21 sessions had the nested-display listener hear nothing
+for the whole session, from the start, with no error logged, and an ENTER
+typed into the game window did not reach the takeover path. Wingman's own
+injected presses on that display give the liveness signal. Design 009,
+"A deaf hotkey listener on the nested display".
+<<<
+RELATIONS:
+- TYPE: Parent
+  VALUE: SAF-001
+
+[REQUIREMENT]
 UID: SAF-002
 TITLE: No commanded flight while the aircraft is dead
 STATEMENT: >>>

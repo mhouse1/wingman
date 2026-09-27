@@ -103,6 +103,9 @@ _CROP = Section(
 # `crops:`), not fixed schema keys — MapOf, not Section, for the same reason.
 _JET_PROFILE = Section(children={"has_padlock": BOOL})
 
+# capture_budget: 0 = unlimited for that dimension.
+_CAPTURE_BUDGET = Section(children={"max_files": _int(0), "max_mb": _num(0)})
+
 
 SCHEMA = Section(
     # "Required" means the program cannot construct itself without the key, not
@@ -189,6 +192,15 @@ SCHEMA = Section(
             "stuck_warn_max_interval_s": SECONDS,
         }),
 
+        # ADR 146 (2026-09-24) — see config.yaml's own comment on this block.
+        "game_unknown_close": Section(children={
+            "enabled": BOOL,
+            "min_stuck_s": SECONDS,
+            "retry_interval_s": SECONDS,
+            "max_clicks": _int(0),
+            "min_score": FRACTION,
+        }),
+
         "respawn_detection": Section(children={
             "use_ocr": BOOL,
             "use_gpu": BOOL,
@@ -260,6 +272,10 @@ SCHEMA = Section(
             "starting_health_probe_interval_s": SECONDS,
             "capture_stale_inject_s": SECONDS,
             "j20_turn_guard_s": SECONDS,   # ADR 132
+            # ADR 144: which mission battle entry launches; ADR 145 adds jas39
+            # and makes the 'u' hotkey launch it too; ADR 149 adds f111
+            "default_mission": Leaf(types=(str,),
+                                    choices=("j20", "su30", "jas39", "f111")),
             "padlock_spread_missiles": _int(0),
             # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
             # pre_crash_lookback_s added D8
@@ -269,6 +285,9 @@ SCHEMA = Section(
                 "pre_crash_buffer_s": SECONDS,
                 "pre_crash_freshness_s": SECONDS,
                 "pre_crash_lookback_s": SECONDS,
+                # ADR 143: enemy_fire_lookback_s/terrain_lookback_s
+                "enemy_fire_lookback_s": SECONDS,
+                "terrain_lookback_s": SECONDS,
                 "dir": STR,
             }),
             # ADR 047 waiting-state fallback (read in tick_handlers.py)
@@ -311,6 +330,49 @@ SCHEMA = Section(
             "coarse_min_hold_s": SECONDS,
             "coarse_max_hold_s": SECONDS,
             "coarse_cooldown_s": SECONDS,
+        }),
+
+        # ADR 144: mission_su30, the scripted Su-30 sequence
+        "su30_mission": Section(children={
+            "climb_alt_m": _num(0),
+            # ADR 147: the hard altitude floor while su30 is in play; absent
+            # leaves the tree's own floor and sustain band in charge.
+            "alt_floor_m": _num(0),
+            "climb_max_s": SECONDS,
+            "nose_angle_deg": _num(-90, 90),
+            "angle_tolerance_deg": _num(0, 90),
+            "angle_confirm_reads": _int(1),
+            "angle_pulse_s": SECONDS,
+            "angle_max_s": SECONDS,
+            "tick_s": SECONDS,
+            "lock_timeout_s": SECONDS,
+            "yield_to_target": BOOL,   # operator, 2026-09-26
+        }),
+
+        # ADR 149: mission_f111, mission_su30 plus the wing sweep
+        "f111_mission": Section(children={
+            "climb_alt_m": _num(0),
+            # ADR 147 extended by ADR 149: the hard altitude floor while f111
+            # is in play; absent leaves the tree's own floor and sustain band.
+            "alt_floor_m": _num(0),
+            "climb_max_s": SECONDS,
+            "nose_angle_deg": _num(-90, 90),
+            "angle_tolerance_deg": _num(0, 90),
+            "angle_confirm_reads": _int(1),
+            "angle_pulse_s": SECONDS,
+            "angle_max_s": SECONDS,
+            "tick_s": SECONDS,
+            "unsweep_alt_m": _num(0),
+            "unsweep_timeout_s": SECONDS,
+            "wingsweep_tap_s": SECONDS,
+        }),
+
+        # ADR 145: mission_jas39, J20 plus the cloak loop
+        "jas39_mission": Section(children={
+            "turn_guard_s": SECONDS,
+            # Floor of 0.5 s: with the 0.1 s tap, anything shorter is holding
+            # the key down rather than retrying it.
+            "cloak_press_interval_s": _num(0.5),
         }),
 
         # ADR 024 / 070 / 073 / 076 / 081 / 083
@@ -406,6 +468,19 @@ SCHEMA = Section(
                     "capture_dir": STR,
                 }),
             }),
+            # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own
+            # gain/hold-time knobs, independent of j20_mission's coarse_kp/
+            # coarse_min_hold_s/etc (see the HLDD's Actuation section for why
+            # this must not resolve to self._ctl_cfg's combat tuning).
+            "attack_support": Section(children={
+                "seek_center_enabled": BOOL,
+                "seek_center_trigger_frac": FRACTION,       # matches boundary_near_frac
+                "seek_center_deadzone_deg": _num(0, 180),   # matches bearing_deadzone_deg's range
+                "seek_center_kp": _num(0),
+                "seek_center_min_hold_s": SECONDS,
+                "seek_center_max_hold_s": SECONDS,
+                "seek_center_cooldown_s": SECONDS,
+            }),
         }),
 
         "minimap": Section(children={
@@ -425,6 +500,10 @@ SCHEMA = Section(
             "boundary_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
             "boundary_min_px": _int(0),
             "boundary_min_span_frac": FRACTION,
+            "boundary_thin_component_max_radial_frac": FRACTION,  # ADR 117 D9
+            "boundary_thin_component_min_elongation": _num(1),  # ADR 117 D9
+            "boundary_thin_component_max_arc_residual_frac": _num(0),  # ADR 117 D10
+            "boundary_thin_component_min_arc_radius_frac": _num(0),  # ADR 117 D11
             "boundary_relaxed_span_frac": _num(0),   # ADR 133
             "boundary_void_min_frac": _num(0),
             "boundary_void_v_max": _int(0),
@@ -457,23 +536,54 @@ SCHEMA = Section(
             "min_hold_sec": SECONDS,
             "max_hold_sec": SECONDS,
             "command_cooldown_sec": SECONDS,
-            "lost_timeout_sec": SECONDS,
-            "prefer_red_lock": BOOL,
-            "local_roi_enabled": BOOL,
-            "local_roi_scale": FRACTION,
-            "local_roi_min_px": Leaf(types=(list,), item_types=(int,), length=2),
-            "local_roi_expand_factor": _num(1.0),
-            "local_roi_max_scale": FRACTION,
-            "local_roi_reacquire_cycles": _int(0),
+            # Pitch axis (HLDD 005, 2026-09-21) — own flag, own gains,
+            # deliberately not reusing actuate/deadband/kp/etc above. See
+            # HLDD 005 Safety and Gating Rules for why pitch needs an
+            # independent actuation gate from roll's.
+            "actuate_pitch": BOOL,
+            "battle_priority_shadow": BOOL,   # HLDD 015, 2026-09-26
+            "pitch_deadband": FRACTION,
+            "pitch_kp": _num(0),
+            "pitch_min_hold_sec": SECONDS,
+            "pitch_max_hold_sec": SECONDS,
+            "pitch_command_cooldown_sec": SECONDS,
+            # Review 018 CR-018-04 (2026-09-25): the tall-bar detector's keys
+            # (prefer_red_lock, red_mass_steering, red_mass_cluster_select,
+            # red_mass_nameplate_gate_enabled, red_mass_tallbar_fallback,
+            # ranked_lock_priority, ranked_priority_tolerance_px) are gone;
+            # an old config carrying them fails here rather than silently.
+            # See config.yaml's comment on this key for what it targets.
+            "red_mass_exclude_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
+            # Action item 001, Cycle 12 (2026-09-24) — see config.yaml's own
+            # comments on these keys.
+            "red_mass_exclude_zones_pct": Leaf(types=(list,), item_types=(list,)),
+            "red_mass_cluster_glyph_window_px": Leaf(types=(list,), item_types=(int,), length=2),
+            # 2026-09-24: the steering point (the aircraft, below its nameplate) and
+            # the acquire/keep split — see config.yaml's own comments on these keys.
+            "red_mass_aim_offset_px": _int(-300, 300),
+            "red_mass_keep_min_glyphs": _int(0),
+            "red_mass_keep_box_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
+            # null means "same as tracking_hsv.red_upper's hue". See
+            # config.yaml's own comment on this key.
+            "red_mass_hue_max": _int(0, 179),
+            # null means "same as tracking_hsv.red_lower's value". See
+            # config.yaml's own comment.
+            "red_mass_value_min": _int(0, 255),
+            # HLDD 005 nameplate gate (2026-09-23) — see config.yaml's own
+            # comment on these keys for what they target and how measured.
+            "red_mass_nameplate_min_glyphs": _int(0),
+            "red_mass_nameplate_glyph_area": Leaf(types=(list,), item_types=(int,), length=2),
+            "red_mass_nameplate_glyph_max_dim": _int(0),
+            # HLDD 005 Sustained-Hold Actuation (2026-09-23) — see
+            # config.yaml's own comment on this key for the phased rollout.
+            "sustained_hold_enabled": BOOL,
+            "pitch_lead_s": SECONDS,   # CR-018-01
         }),
 
+        # CR-018-04: only the red range remains (the nameplate mask).
         "tracking_hsv": Section(children={
             "red_lower": _HSV,
             "red_upper": _HSV,
-            "green_lower": _HSV,
-            "green_upper": _HSV,
-            "min_contour_area": _num(0),
-            "min_aspect_ratio": _num(0),
         }),
 
         "padlock_indicator": Section(children={
@@ -494,12 +604,99 @@ SCHEMA = Section(
             "green_upper": _HSV,
             "min_pixels": _int(1),
             "confirm_seconds": _num(0),
+            "max_correction_attempts": _int(1),   # ADR 140 D6
+        }),
+
+        # HLDD 015: missiles-empty alternative to eject_and_dive — switch to
+        # secondary weapons and pursue with both tracking axes instead of
+        # diving. Hard-gated: enabled must stay false until Design 005's
+        # Two-Axis Rollout has a live-validated pitch channel on the ambient
+        # path (see pursue_and_engage's own docstring, controller.py).
+        "pursuit_mode": Section(children={
+            "enabled": BOOL,
+            "pursuit_max_duration_s": SECONDS,
+            "recovery_max_s": SECONDS,   # ADR 148
+            "pursuit_padlock_verify": BOOL,
+            "ammo_zero_grace_s": SECONDS,
+            "search_resume_delay_s": SECONDS,
+            "search_resume_centre_err": FRACTION,
+            "search_resume_centre_delay_s": SECONDS,
+            "empty_confirm_reads": _int(1),
+            "steer_interval_s": SECONDS,    # CR-018-01
+            "engage_interval_s": SECONDS,   # CR-018-01
+            "dive_guard_margin_m": _num(0),   # review 018 dive guard
+            "dive_guard_ttg_s": SECONDS,      # review 018 dive guard
+            "dive_guard_pullout_pulse_s": SECONDS,
+            "dive_guard_pullout_interval_s": SECONDS,
+            "dive_guard_level_rate_mps": _num(0),
+            "search_floor_m": _num(0),                  # look-down search
+            "search_look_down_pulse_s": SECONDS,
+            "search_look_down_interval_s": SECONDS,
+            "search_look_down_min_deg": _num(-90, 0),
+            "dive_safety": BOOL,   # operator, 2026-09-26
+            # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
+            "icon_steering": Section(children={
+                "enabled": BOOL,
+                "wings_level": BOOL,
+                "actuate_pitch": BOOL,
+                "actuate_turn": BOOL,
+                "turn_level_descent_mps": _num(0),
+                "require_fresh_angle": BOOL,
+                "ring_centre_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
+                "ring_radius_pct": Leaf(types=(list,), item_types=NUMBER, length=2),
+                "area_px": Leaf(types=(list,), item_types=(int,), length=2),
+                "side_px": Leaf(types=(list,), item_types=(int,), length=2),
+                "red_hue_max": _int(0, 180),
+                "orange_hue": Leaf(types=(list,), item_types=(int,), length=2),
+                "orange_min_uniform": FRACTION,
+                "sat_min": _int(0, 255),
+                "val_min": _int(0, 255),
+                "points_scale": _num(0),
+                "points_half_life_s": SECONDS,
+                "points_cap": _num(0),
+                "act_pts": _num(0),
+                "release_pts": _num(0),
+                "icon_min_path_deg": Leaf(types=NUMBER, minimum=-90, maximum=0,
+                                          allow_none=True),
+                "push_floor_m": Leaf(types=NUMBER, minimum=0, allow_none=True),
+                "blind_search_after_s": SECONDS,
+            }),
         }),
 
         "hud": Section(children={
             "enabled": BOOL,
             "output_path": STR,
             "interval_sec": SECONDS,
+            # Timestamped archive of the annotated frame while target
+            # tracking runs during a secondary-missile encounter (ADR 136
+            # heatdive loop) — live_hud.png itself is overwritten every
+            # render, so this is what lets a saved frame be lined up
+            # against a wingman.log timestamp for debugging.
+            "target_tracking_archive": Section(children={
+                "enabled": BOOL,
+                "dir": STR,
+                "max_files": _int(0),
+                # Action item 001: also save the exact, unannotated crop the
+                # tracker scanned beside each archived frame (the annotated
+                # PNG's PURSUING marker overwrites the very pixels that
+                # produced the lock, so it cannot be replayed faithfully).
+                "save_raw_scan": BOOL,
+                # Seconds between archived frames, and a cap per contiguous
+                # encounter — spreads the per-session budget across the
+                # session instead of spending it in the first minutes.
+                "min_interval_s": SECONDS,
+                "max_per_encounter": _int(0),
+            }),
+        }),
+
+        # Cross-session disk safety net shared by every capture write site
+        # (wingman/capture_budget.py). Directory keys are paths.
+        "capture_budget": Section(children={
+            "min_free_gb": _num(0),
+            "default": _CAPTURE_BUDGET,
+            "dirs": MapOf(_CAPTURE_BUDGET),
+            "rotated_logs": _CAPTURE_BUDGET,
+            "session_video": _CAPTURE_BUDGET,
         }),
 
         # Design 012: opt-in session video, paired with the BT JSONL trace.
@@ -539,6 +736,8 @@ SCHEMA = Section(
             # (D2) plus agreement-based anchor reseeding (D3).
             "max_alt_rate_mps": _num(0),
             "reseed_agreement_m": _num(0),
+            "digit_drop_ratio": _num(0, 1),   # ADR 150
+            "digit_drop_window_s": SECONDS,   # ADR 150 D4
             "smoothing_window": _int(1),
             "stale_after_s": SECONDS,
             "trend_min_alt_rate_fps": _num(0),

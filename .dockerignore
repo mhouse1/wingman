@@ -1,0 +1,8 @@
+# The image holds dependencies only; the checkout is bind-mounted at run time
+# (see Dockerfile). Allowlist the three files the build reads so the context
+# stays tiny whatever sits in the working tree: .venv alone is ~7.5 GB, and
+# test_screenshots/ and logs/ are larger still on veda.
+*
+!pyproject.toml
+!uv.lock
+!.python-version

@@ -261,6 +261,37 @@ dangerous than no lane at all**: capture on the nested display and injection on
 the human's reproduces the original corruption while appearing correctly
 configured.
 
+### A deaf hotkey listener on the nested display (2026-09-26, measured)
+
+Operator report: "during last session i pressed 'enter' multiple times, why didn't it enter
+GAME_BATTLE_MANUAL?" Two causes, in two places:
+
+- **On `:0` it was the design.** Every ENTER reached the `:0` listener and was dropped:
+  `XKey: 'enter' on :0 not delivered (state=0x10)` (15:40:56 and 15:41:00 in the 10:40 session; 15:53:12,
+  16:09:01, 16:34:18 and 16:51:33 in the 15:53 one). On the operator's display a hotkey needs ctrl+alt
+  (`_OPERATOR_MOD_MASK`), because bare keys there are ordinary typing; 0x10 is NumLock alone. The takeover
+  from the desktop is **ctrl+alt+ENTER**.
+- **On `:3` the listener was deaf.** In the 15:53 session the `:3` listener reported `0 KeyPress events` in
+  all 59 one-minute intervals, while wingman itself pressed keys there several times a second; an ENTER
+  typed into the game window would not have been heard either. Across the day, 3 of 21 sessions had a
+  `:3` listener deaf from start to finish (04:12, 04:37, 15:53) and 18 heard keys every interval. The
+  startup lines of deaf and working sessions are identical and no error is logged, so the cause is not in
+  the log.
+
+**Watchdog (iterate, operator go-ahead):** `_linux_key_event` counts wingman's own KeyPress injections per
+display (`injected_presses`); `_KeyTally.report()` marks the interval deaf when the listener heard nothing
+while wingman pressed at least `_DEAF_MIN_INJECTED` (5) keys on that display, and the per-minute line now
+ends `wingman pressed N`. The stop-watcher then logs a WARNING (`the listener is deaf; restarting it`),
+disables the record context (closing the recording connection if that does not return within 5 s), and
+the listener loop sets the recording up again instead of treating the stop as a clean exit. Tests:
+`tests/test_key_tally.py` (deaf and not-deaf cases, per display, per interval),
+`tests/test_input_linux.py` (presses counted, releases not; a fake recording that never delivers is
+restarted, and the test fails if the restart is a clean exit instead). Not yet seen live on a deaf start:
+the check is the WARNING followed by non-zero `XKey[:3]` counts. Live on the watchdog build (17:12:54, pid 1402601): the first
+interval read `XKey[:3]: 137 KeyPress events ... wingman pressed 111` (a listener that hears), and an ENTER
+typed into the game window at 17:21:39 took over: `maneuver key 'enter' pressed - entering
+GAME_BATTLE_MANUAL (manual takeover) [source=':3' (nested, game focused) mods=none]`.
+
 ## Reapplying this design
 
 A checklist, ordered so that the cheapest disqualifying question comes first.

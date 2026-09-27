@@ -23,8 +23,6 @@ NEGATIVE_LOG_PATTERNS = [
 ]
 
 POSITIVE_LOG_PATTERNS_REQUIRED = [
-    "MISSILES EMPTY — cancelling mission and ejecting",
-    "Controller: eject_and_dive — descent control engaged",
     "Analyzer: 'Good Luck' detected in good_luck crop",
     "Controller: 'Good Luck' detected",
 ]
@@ -33,6 +31,36 @@ TERMINAL_PATTERNS = [
     "Controller: eject_and_dive complete",
     "Controller: eject_and_dive — cancelled during descent",
 ]
+
+# A missiles-empty screen can lead to either of two eject flows, and each has
+# to run end to end. Since 2026-09-23 (`pursuit_mode.enabled: true`, commit
+# eabaa28) the shipped flow is the pursuit (HLDD 015): it starts on the
+# missiles-empty screen and, in this replay, is stopped by the respawn screen
+# 13 s later, well before its 20 s cap would hand over to eject_and_dive. The
+# validator only knew the eject_and_dive flow, so this gate failed at a clean
+# HEAD with three "missing" messages from that day on. Accepting the pursuit
+# flow does not loosen it: a flow counts only if ALL of its markers are
+# present, including how it ended.
+PURSUIT_STOP_REASONS = ("respawn_detected", "match_ended", "shutdown")
+EJECT_FLOWS = {
+    "eject_and_dive": {
+        "required": [
+            "MISSILES EMPTY — cancelling mission and ejecting",
+            "Controller: eject_and_dive — descent control engaged",
+        ],
+        "terminal": TERMINAL_PATTERNS,
+    },
+    "pursuit": {
+        "required": [
+            "MISSILES EMPTY — pursuing with secondary weapons",
+            "Controller: pursue_and_engage — tracking engaged",
+        ],
+        # Stopped from outside (the replay's respawn screen), or the pursuit
+        # ran to its cap and fell through to a complete eject_and_dive.
+        "terminal": [f"pursue_and_engage — stopped externally (reason={reason})"
+                     for reason in PURSUIT_STOP_REASONS] + TERMINAL_PATTERNS,
+    },
+}
 
 MANUAL_TAKEOVER_PATTERN = "GAME_BATTLE → GAME_BATTLE_MANUAL"
 
@@ -89,10 +117,27 @@ def _validate_assertions_payload(payload: dict, failures: list[str]) -> dict:
     return assertions
 
 
+def _eject_flow_summary(log_text: str) -> dict:
+    """Per eject flow: which required markers are missing, whether any terminal
+    marker was seen, and whether the flow is complete (nothing missing and a
+    terminal marker present)."""
+    summary = {}
+    for name, spec in EJECT_FLOWS.items():
+        missing = [p for p in spec["required"] if log_text.count(p) <= 0]
+        terminal_seen = any(log_text.count(p) > 0 for p in spec["terminal"])
+        summary[name] = {
+            "missing": missing,
+            "terminal_seen": terminal_seen,
+            "complete": not missing and terminal_seen,
+        }
+    return summary
+
+
 def _validate_log(log_text: str, failures: list[str]) -> dict:
     negative_counts = _count_patterns(log_text, NEGATIVE_LOG_PATTERNS)
     required_positive_counts = _count_patterns(log_text, POSITIVE_LOG_PATTERNS_REQUIRED)
     terminal_counts = _count_patterns(log_text, TERMINAL_PATTERNS)
+    flow_summary = _eject_flow_summary(log_text)
     manual_takeover_count = log_text.count(MANUAL_TAKEOVER_PATTERN)
 
     for pattern, count in negative_counts.items():
@@ -103,9 +148,16 @@ def _validate_log(log_text: str, failures: list[str]) -> dict:
         if count <= 0:
             failures.append(f"required log pattern missing: {pattern}")
 
-    terminal_total = sum(terminal_counts.values())
-    if terminal_total <= 0:
-        failures.append("missing terminal eject outcome: neither complete nor cancelled marker found")
+    completed = [name for name, info in flow_summary.items() if info["complete"]]
+    if not completed:
+        failures.append(
+            "no complete eject flow: "
+            + "; ".join(
+                f"{name} is missing {info['missing'] or 'nothing'}"
+                + ("" if info["terminal_seen"] else " and has no terminal marker")
+                for name, info in flow_summary.items()
+            )
+        )
 
     # A respawn-triggered stop during the nose phase is a successful eject —
     # and under ADR 068 d6 the nose phase spans nearly the whole eject, so
@@ -128,6 +180,8 @@ def _validate_log(log_text: str, failures: list[str]) -> dict:
         "required_positive_counts": required_positive_counts,
         "terminal_counts": terminal_counts,
         "manual_takeover_count": manual_takeover_count,
+        "eject_flows": flow_summary,
+        "eject_flow_completed": completed,
     }
 
 

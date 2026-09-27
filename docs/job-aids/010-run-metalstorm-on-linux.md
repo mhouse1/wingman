@@ -112,6 +112,17 @@ Click **Play** in Heroic. On first launch Proton-GE will run initial setup (may 
 
 Expected: game window opens, keyboard and mouse respond, frame rate is acceptable.
 
+To update an existing installation without opening Heroic or clicking Play, close
+MetalStorm and run this from the repository root:
+
+```bash
+make update
+```
+
+This invokes Heroic's bundled Legendary updater for the installed MetalStorm app.
+It uses the Epic app ID configured by default in the Makefile; override
+`METALSTORM_APP_ID` if the installation uses a different app.
+
 **No manual Wine or UMU configuration is needed.** Heroic 2.22.0 applies Proton-GE (or
 whatever default build it picks — see the note below) and UMU by default; MetalStorm
 launched correctly without any changes to the per-game settings (verified 2026-06-13).

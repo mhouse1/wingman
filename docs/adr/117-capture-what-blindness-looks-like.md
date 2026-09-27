@@ -333,3 +333,171 @@ It stays red until the detector is fixed.
 > fragmentation — corroborates it. 161 of the 509 frames catalogued here now
 > produce a reading.
 
+## D8-D10 (2026-09-20) — from raw pixel count to shape-aware to arc-curvature
+
+Operator review of three fresh blind captures found all three showed a minimap
+with terrain but **no boundary line anywhere on it** — the aircraft simply
+wasn't near an edge. Directive: stop spending the capture budget on this case.
+
+**D8 (tried, superseded same day). A raw boundary-hue pixel-COUNT floor**
+(`blind_capture_min_raw_px`, 400) on the theory that this session's 3 examples
+(183-309 raw px) sat well under this ADR's own documented real-line mass
+(550-1400 px, the "What the frames actually show" section above). **Wrong**:
+visualizing the matched pixels directly (not just counting them) found two
+independent contamination sources a bare count cannot separate from a real
+line —
+
+- The compass rim's own decorative gradient band (183-309 px in the 3
+  motivating examples).
+- Rocky/dirt **terrain** sharing the boundary hue, which trivially clears any
+  count floor on a texture-heavy map (measured 668-1561 px on two more real
+  blind frames that session, both terrain, neither a line).
+
+A pixel-count floor cannot tell "a fragmented but real line" apart from "a lot
+of wrong-colored terrain" — both are just more pixels. D8 shipped and was
+replaced the same day once this was visualized.
+
+**D9. Shape-aware: is anything actually THIN, off the rim, and elongated?**
+Computed in `detect_map_boundary` for every connected component, independent
+of whether it also passes the full span+pixel-count acceptance below it (a
+real line fragment can be thin but too short to formally qualify — exactly
+what D9 exists to still flag as worth a look). Three tests, all measured
+against real captures the same night, not picked in the abstract:
+
+1. **Thickness and area** (existing `boundary_max_thickness_frac`,
+   `boundary_min_px`) — excludes terrain (34.5-50.2 px thick, this ADR's own
+   earlier measurement) while accepting a real line (1.4-9.2 px).
+2. **Radial fraction ≤ 0.75.** Letters in the compass rim are thin by
+   construction too — same test as a real line — so thickness alone
+   reintroduces D8's rim contamination. Measured: every rim-letter fragment
+   that passed thickness+area sat at radial fraction 0.86-0.91; every
+   documented real detection in this file sits at 0.10-0.62. 0.75 sits in the
+   gap.
+3. **Elongation ≥ 1.8:1.** A compact UI marker (a target/waypoint ring) is
+   also thin by the distance-transform test — a ring's stroke has the same
+   small local thickness a line does — but its bounding box is roughly
+   square. Measured: a yellow objective-ring icon at radial fraction 0.71-0.73
+   (inside the radial limit) had a 16x17 bounding box, aspect ratio 1.06.
+
+`Analyzer.get_last_boundary_had_thin_component()` exposes the verdict;
+`BoundaryPerceptionHandler.maybe_capture_blind` skips (without spending the
+capture interval, same reasoning as the existing no-minimap skip) when it
+reads false.
+
+**Live validation, same night, found a fourth confound D9 does not catch.**
+The very next session with D9 live produced 9 blind captures; 3 were spot-
+checked by re-running the detector against the saved frames and visualizing
+the matched pixels. All 3 sat on an **aircraft flight-path trail** — thin,
+elongated (2.2-3.75:1), centered (radial fraction 0.14-0.69, comfortably
+inside the D9 radial limit) — geometrically indistinguishable from a real
+short line fragment by thickness, area, radial position, or elongation alone.
+
+**D10. Does it fit a circle?** The real boundary line is an arc — a real
+though small piece of the much larger arena edge — and a trail traces the
+aircraft's actual maneuvering, which fits no single circle well. First
+attempt at this checked whether the fitted circle's **center** sits near the
+minimap's own center (the intuitive "boundary is drawn as a proximity ring"
+model) — **measured wrong**: fitting a circle (Kasa algebraic fit) to the two
+real confirmed detections from that same night placed their true centers of
+curvature 0.43R, 1.33R, and 2.22R away from the minimap center. The boundary
+is a small arc of a much larger circle (the arena edge), so its center is
+correctly far off-crop — "concentric with the minimap" was never true.
+
+Corrected to check fit **quality** instead of fit **location**:
+`residual = RMS(distance from each pixel to the fitted circle)`, normalized
+by the component's own span. Measured the same night:
+
+| Source | resid / span |
+|---|---:|
+| Confirmed boundary detection 1 | 0.003 |
+| Confirmed boundary detection 2 | 0.006 |
+| Trail fragment 1 | 0.063 |
+| Trail fragment 2 | 0.096 |
+| Trail fragment 3 | 0.109 |
+| Trail fragment 4 | 0.115 |
+
+Roughly a 10x gap. `boundary_thin_component_max_arc_residual_frac` (0.03)
+sits in it. `_circle_fit_quality` (module-level helper, `wingman/analyzer.py`
+— returns both the residual fraction and the fitted radius, the latter used
+by D11 below) fails closed (`(float("inf"), 0.0)`) on a degenerate fit
+(fewer than 3 points, or a `LinAlgError`) rather than asserting bogus
+passing values.
+
+### Validation (D8-D10)
+
+- **V7 — unit, satisfied.** `tests/test_blind_capture_coverage.py`: synthetic
+  arc (accepted, and formally detected when long enough), synthetic thick
+  blob and sinuous zigzag (both rejected, the zigzag specifically by the
+  residual check — it independently passes thickness, area, radial position,
+  and elongation), 3 real trail-contaminated frames (rejected) and the 2 real
+  confirmed detections (accepted) from the night this was found.
+- **V8 — live, MET (partially) AND FOUND A FIFTH CONFOUND.** See D11 below —
+  exactly the outcome flagged as unsurprising when this was written.
+
+## D11 (2026-09-20/21) — a circular UI marker's rim is also a clean arc
+
+The very next live session with D10 produced 5 more blind captures. One,
+spot-checked the same way as D9/D10's confounds (crop tightly around the
+flagged component, with generous padding, at 10x scale), showed the
+highlighted pixels sitting exactly on the rim of a **circular UI marker
+icon** — a leader/MVP crown badge's yellow ring. A fragment of a circle's
+own rim fits a circle just as tightly as a real line, because it **is**
+one — D10's residual check (0.021 for this fragment) cannot tell them apart
+by curvature quality alone. A second capture from the same session
+(fitted radius 12.9 px) is suspect for the same reason but not visually
+confirmed.
+
+**D11. Does it fit a circle the SIZE of a boundary line, not the size of an
+icon?** What differs between a marker icon's rim and a real boundary line is
+scale, not shape: a real line is a small arc of the much larger arena edge
+(fitted radius 52-287 px, measured on this crop size across D10 and this
+session's further captures — 60.0, 121.4, 130.5 px); a circular icon's rim
+is a small circle in its own right (9.1 px confirmed, 12.9 px suspect).
+`boundary_thin_component_min_arc_radius_frac` (0.15, about 24 px on this
+crop) sits in the roughly 4x gap between them, using the same `fit_radius_px`
+`_circle_fit_quality` already computed for the residual check above — no new
+per-component work, just reading a value that was already being thrown away.
+
+Applying the floor to this session's 5 captures: the confirmed icon
+fragment and the suspect small-radius capture both now correctly read
+`False`; the 3 others (fitted radii 60.0-130.5 px, comfortably in the
+real-line range) are unaffected.
+
+### Validation (D11)
+
+- **V9 — unit, satisfied.** `tests/test_blind_capture_coverage.py`: a
+  synthetic small-circle arc (radius 20 px — passes thickness, area,
+  elongation, radial position, AND the residual check, residual/span 0.009 —
+  rejected only by the radius floor) and the real confirmed icon-fragment
+  frame (`blind_20260920_220226_2.png`, `ICON_RIM_NOT_BOUNDARY`), both
+  correctly excluded; the existing D9/D10 real-corpus and synthetic tests
+  (real lines, trails, thick blobs) re-verified unaffected.
+- **V10 — live, open.** As with D9 and D10, no claim that this is the last
+  confound — only that it is the one this session's evidence supports fixing
+  now. Next session: same spot-check method on any new `blind frame saved`.
+
+### Note: unrelated corpus drift, same night, not this ADR's regression
+
+The same session that produced D11's evidence also grew
+`test_screenshots/unknown_anomalies/rtb_*.png` (the glob-matched corpus
+`tests/test_minimap_bearing.py`'s `test_the_boundary_is_found_at_the_centre_
+on_crossing_frames` reads) from whatever it held before to 5 frames, one of
+which (`rtb_20260921_000644_crossing3.png`) now returns no reading and drops
+that test's rate below its 90% bar. Confirmed independent of D8-D11: none of
+this ADR's additions are reachable from `detect_map_boundary`'s span/
+thickness acceptance path that produces the return value that test checks —
+they only ever write `_last_boundary_had_thin_component`, a separate
+attribute nothing in that path reads. This is the same "line crosses bright
+tan terrain, thickness gate rejects that stretch" limitation the test's own
+docstring already names, landing on a new frame — corpus growth doing its
+job (see the D2/D3-revision section above for the precedent), not a
+regression from this work.
+
+## References (D8-D11)
+
+- `wingman/analyzer.py` — `detect_map_boundary`, `get_last_boundary_had_thin_component`,
+  `_circle_fit_quality`
+- `wingman/tick_handlers.py` — `BoundaryPerceptionHandler.maybe_capture_blind`
+- `tests/test_blind_capture_coverage.py` — `TestThinComponentShapeCheck`,
+  `TRAIL_NOT_BOUNDARY`, `CONFIRMED_BOUNDARY`, `ICON_RIM_NOT_BOUNDARY`
+
