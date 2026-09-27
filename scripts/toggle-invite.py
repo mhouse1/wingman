@@ -1,32 +1,43 @@
-"""Toggle Wingman's party-invite accept/decline policy in config.yaml."""
+"""Toggle Wingman's party-invite accept/decline policy for this machine.
+
+CR-018-16: the toggle writes the untracked `config.local.yaml` beside the
+config, which a live run merges over it, and never the tracked config itself.
+Rewriting the tracked file made the suite red, because a test pins its shipped
+default (CR-018-11). Toggling back to the shipped value removes the override.
+"""
 
 import argparse
+import os
+import sys
 from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from wingman.config_local import local_path, read_overlay  # noqa: E402
+
+_HEADER = ("# Per-machine settings, merged over config.yaml by a live run (CR-018-16).\n"
+           "# Untracked. Written by `make invite`; edit by hand for anything else.\n")
+
 
 def toggle_invite_policy(config_path: Path) -> bool:
-    text = config_path.read_text(encoding="utf-8")
-    config = yaml.safe_load(text)
-    if not isinstance(config, dict) or type(config.get("accept_invite")) is not bool:
+    shipped = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(shipped, dict) or type(shipped.get("accept_invite")) is not bool:
         raise ValueError("config must define accept_invite as true or false")
+    overlay = read_overlay(config_path)
+    current = overlay.get("accept_invite", shipped["accept_invite"])
+    if type(current) is not bool:
+        raise ValueError(f"{local_path(config_path)}: accept_invite must be true or false")
 
-    root = yaml.compose(text)
-    value_node = next(
-        (
-            value
-            for key, value in root.value
-            if key.value == "accept_invite"
-        ),
-        None,
-    )
-    if value_node is None:
-        raise ValueError("config must define accept_invite as true or false")
+    new_value = not current
+    if new_value == shipped["accept_invite"]:
+        overlay.pop("accept_invite", None)
+    else:
+        overlay["accept_invite"] = new_value
 
-    new_value = not config["accept_invite"]
-    updated = text[: value_node.start_mark.index] + str(new_value).lower() + text[value_node.end_mark.index :]
-    config_path.write_text(updated, encoding="utf-8")
+    body = yaml.safe_dump(overlay, sort_keys=False) if overlay else ""
+    local_path(config_path).write_text(_HEADER + body, encoding="utf-8")
     return new_value
 
 

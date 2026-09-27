@@ -16,6 +16,7 @@ import pytest
 import wingman.controller as controller
 from wingman.actuator import Actuator
 from wingman.controller import Controller
+from wingman.hold_tactic import HoldTactic
 from wingman.keybindings import AFTERBURNER_KEY, ROLL_RIGHT_KEY
 
 _RAW_KEY_CALLS = {"press", "release", "press_and_release", "send", "write"}
@@ -192,6 +193,7 @@ def test_takeover_names_what_wingman_was_holding(fresh_actuator, caplog):
     for name in ("_eject_stop", "_me_stop", "_climb_stop", "_boundary_turn_stop",
                  "_sg_stop", "_disengage_stop", "_ab_evade_stop"):
         setattr(c, name, threading.Event())
+    c._ab_evade = HoldTactic("afterburner evade", stop=c._ab_evade_stop)
     c._eject_stop_reason = None
     c.cancel_mission = lambda: None
     c.release_tracking_holds = lambda why=None: None
@@ -203,3 +205,114 @@ def test_takeover_names_what_wingman_was_holding(fresh_actuator, caplog):
         c.release_for_manual_takeover()
     assert "(held by wingman: e by afterburner_evade)" in caplog.text
     assert controller._actuator.held() == {}
+
+
+# --- Phase 2: the throttle is leased --------------------------------------------
+#
+# Measured before Phase 2 (2026-09-27 09:15 run, first 30 min): `climb` dropped the
+# `e` that `cruise` was holding 18 times and `stall_prevention` and `cruise` dropped
+# each other's 11 times. Each drop left the burner off until the holder's next tick.
+
+def _leased(kb, may_hold=None):
+    act = Actuator(lambda: kb, _allow, leased_keys=(AFTERBURNER_KEY,))
+    if may_hold is not None:
+        act.set_hold_policy(may_hold)
+    return act
+
+
+def test_one_owners_release_keeps_the_key_down_for_another():
+    kb = mock.MagicMock()
+    act = _leased(kb)
+    act.press(AFTERBURNER_KEY, "cruise", focus_gate=False)
+    act.press(AFTERBURNER_KEY, "climb", focus_gate=False)
+    act.release(AFTERBURNER_KEY, "climb")
+    kb.release.assert_not_called()
+    assert act.held() == {AFTERBURNER_KEY: ("cruise",)}
+    act.release(AFTERBURNER_KEY, "cruise")
+    kb.release.assert_called_once_with(AFTERBURNER_KEY)
+    assert act.held() == {}
+
+
+def test_a_holder_that_must_yield_does_not_keep_the_key_down():
+    kb = mock.MagicMock()
+    act = _leased(kb, may_hold=lambda _k, owner: owner != "cruise")
+    act.press(AFTERBURNER_KEY, "cruise", focus_gate=False)
+    act.press(AFTERBURNER_KEY, "climb", focus_gate=False)
+    act.release(AFTERBURNER_KEY, "climb")
+    kb.release.assert_called_once_with(AFTERBURNER_KEY)
+
+
+def test_reevaluate_lifts_the_key_when_every_holder_must_yield():
+    kb = mock.MagicMock()
+    allowed = {"cruise": True}
+    act = _leased(kb, may_hold=lambda _k, owner: allowed.get(owner, True))
+    act.press(AFTERBURNER_KEY, "cruise", focus_gate=False)
+    act.reevaluate(AFTERBURNER_KEY)
+    kb.release.assert_not_called()
+    allowed["cruise"] = False
+    act.reevaluate(AFTERBURNER_KEY)
+    kb.release.assert_called_once_with(AFTERBURNER_KEY)
+    assert act.held() == {AFTERBURNER_KEY: ("cruise",)}, \
+        "the lease stays; cruise re-presses when it may again"
+
+
+def test_other_keys_keep_phase_one_semantics():
+    """One key at a time: the pitch key's release still lifts it for everyone."""
+    kb = mock.MagicMock()
+    act = _leased(kb)
+    act.press("i", "spawn_guard", focus_gate=False)
+    act.release("i", "climb")
+    kb.release.assert_called_once_with("i")
+
+
+@pytest.fixture
+def leased_ctrl(monkeypatch):
+    kb = mock.MagicMock()
+    monkeypatch.setattr(controller, "keyboard_module", kb)
+    act = Actuator(lambda: controller.keyboard_module,
+                   lambda what: controller._may_inject(what),
+                   leased_keys=(AFTERBURNER_KEY,))
+    monkeypatch.setattr(controller, "_actuator", act)
+    c = Controller.__new__(Controller)
+    c._simulate_os_input = False
+    c._analyzer = None
+    c._climb_emergency_active = False
+    act.set_hold_policy(c._owner_may_hold)
+    return c, kb
+
+
+def test_a_climb_ending_no_longer_drops_the_cruise_burn(leased_ctrl):
+    c, kb = leased_ctrl
+    c._climb_key(AFTERBURNER_KEY, press=True, action="cruise")
+    c._climb_key(AFTERBURNER_KEY, press=True, action="climb")
+    c._climb_key(AFTERBURNER_KEY, press=False, action="climb")
+    kb.release.assert_not_called()
+
+
+def test_an_emergency_lifts_the_cruise_burn_at_once(leased_ctrl):
+    """ADR 137: the airbrake and the burner cancel each other. Cruise yields to the
+    emergency, so its lease must not hold the key down until its next tick."""
+    c, kb = leased_ctrl
+    c._climb_key(AFTERBURNER_KEY, press=True, action="cruise")
+    c._climb_emergency_active = True
+    controller._actuator.reevaluate(AFTERBURNER_KEY)
+    kb.release.assert_called_once_with(AFTERBURNER_KEY)
+
+
+def test_the_climb_reevaluates_the_throttle_where_the_emergency_starts():
+    src = pathlib.Path("wingman/controller.py").read_text(encoding="utf-8")
+    hold = src[src.index("    def _run_climb_hold"):]
+    hold = hold[:hold.index("\n    def ", 10)]
+    assert hold.count("self._climb_emergency_active = True") == 2
+    assert hold.count("_actuator.reevaluate(AFTERBURNER_KEY)") == 2
+
+
+def test_the_policy_table_is_what_may_hold_key_answers():
+    """ADR 139 D4's requester gates, unchanged, now read from one table."""
+    c = Controller.__new__(Controller)
+    c._analyzer = None
+    c._climb_emergency_active = True
+    for requester, yields in (("cruise", True), ("afterburner_evade", True),
+                              ("climb", False), ("missile_evade", False),
+                              ("eject", False), ("stall_prevention", False)):
+        assert c._may_hold_key(AFTERBURNER_KEY, requester) is (not yields), requester

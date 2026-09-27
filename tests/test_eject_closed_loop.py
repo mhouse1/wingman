@@ -22,9 +22,10 @@ import wingman.controller as controller_module
 from wingman.controller_config import ControllerConfig
 from wingman.controller import AFTERBURNER_KEY, Controller, NOSE_DOWN_KEY
 from wingman.telemetry import TelemetrySignal, TelemetrySnapshot, TREND_UNKNOWN
+from tests.perception_fake import PerceptionFake
 
 
-class _TelemetryStub:
+class _TelemetryStub(PerceptionFake):
     """Analyzer stand-in: snapshots built from a mutable altitude rate."""
 
     def __init__(self, speed=600, alt_rate=-20.0, available=True,

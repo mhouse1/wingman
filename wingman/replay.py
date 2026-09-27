@@ -68,6 +68,23 @@ def _normalize_step(step: Any) -> ReplayStep:
     raise ValueError(f"Unsupported replay step format: {step!r}")
 
 
+def load_replay_config_overrides(config_path: Path) -> dict:
+    """The ``config_overrides:`` mapping a replay-path file may declare, or {}.
+
+    A replay path models one configuration of the program, most of all which
+    mission flies. It says so here, so a change to a shipped default cannot
+    silently change what the path is testing: the shipped mission became su30 on
+    2026-09-24, whose pursuit leaves GAME_BATTLE before missiles run out, and
+    PATH1's J20 missiles-empty checkpoint failed on every run from then on.
+    ``load_replay_paths`` skips this key, as it skips every non-list entry.
+    """
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    overrides = data.get("config_overrides", {}) if isinstance(data, dict) else {}
+    if not isinstance(overrides, dict):
+        raise ValueError(f"{config_path}: config_overrides must be a mapping")
+    return overrides
+
+
 def load_replay_paths(config_path: Path) -> dict[str, list[ReplayStep]]:
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if data is None:

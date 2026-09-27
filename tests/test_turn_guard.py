@@ -20,6 +20,7 @@ import wingman.controller as controller_module
 from constants import CONFIG_PATH
 from wingman.analyzer import GameState
 from wingman.controller import Controller
+from tests.perception_fake import PerceptionFake
 
 
 def _load_config():
@@ -27,7 +28,7 @@ def _load_config():
         return yaml.safe_load(fh)
 
 
-class _AnalyzerStub:
+class _AnalyzerStub(PerceptionFake):
     game_state = GameState.GAME_BATTLE
     def trigger_event(self, *_a, **_k): pass
     def get_telemetry(self): return None

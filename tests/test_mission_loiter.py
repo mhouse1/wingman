@@ -45,6 +45,8 @@ def _loiter_ctrl(snaps):
     c._mission_lock = threading.Lock()
     c._mission_complete = threading.Event()
     c._mission_cancel = threading.Event()
+    c._mission_generation = 0                  # CR-018-19 cancel token
+    c._mission_generation_lock = threading.Lock()
     c._climb_stop = threading.Event()
     c._loitering = threading.Event()      # ADR 109: the survival-hold flag
     c._ejecting = threading.Event()       # ADR 111: an eject may be in flight

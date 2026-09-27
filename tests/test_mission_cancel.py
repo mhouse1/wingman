@@ -19,6 +19,7 @@ from wingman.controller_config import ControllerConfig
 from constants import CONFIG_PATH
 from wingman.controller import Controller
 from wingman.analyzer import GameState
+from tests.perception_fake import PerceptionFake
 
 
 def _load_config():
@@ -194,7 +195,7 @@ class _FrameStub:
         return object()
 
 
-class _StartingAnalyzerStub:
+class _StartingAnalyzerStub(PerceptionFake):
     """Minimal analyzer stub that stays in GAME_STARTING until told otherwise."""
 
     def __init__(self):
@@ -345,7 +346,7 @@ def test_good_luck_wait_is_bypassed_by_battle_alive(monkeypatch):
     ctrl = _make_starting_ctrl(monkeypatch, analyzer)
     ctrl._good_luck_wait_s = 30.0        # long enough that a full wait would be obvious
     ctrl._starting_max_wait_s = 60.0
-    monkeypatch.setattr(ctrl, "mission_j20", lambda: None)
+    monkeypatch.setattr(ctrl, "mission_j20", lambda **_: None)
 
     analyzer.good_luck = True             # OCR scan will set good_luck_event
     ctrl._capture = _FrameStub()
@@ -370,7 +371,7 @@ def test_good_luck_bypass_can_be_disabled(monkeypatch):
     ctrl._good_luck_wait_s = 1.5
     ctrl._good_luck_bypass_on_alive = False
     ctrl._starting_max_wait_s = 60.0
-    monkeypatch.setattr(ctrl, "mission_j20", lambda: None)
+    monkeypatch.setattr(ctrl, "mission_j20", lambda **_: None)
 
     analyzer.good_luck = True
     ctrl._capture = _FrameStub()
@@ -542,9 +543,14 @@ def test_release_covers_every_injectable_key():
     src = pathlib.Path("wingman/controller.py").read_text()
     fn = src[src.index("def release_for_manual_takeover"):]
     assert "INJECTABLE_KEYS" in fn[:1400]
+    # CR-018-10: the writers are stopped from one registry, shared with cleanup().
+    assert "self._stop_flight_writers(" in fn[:1400]
+    registry = src[src.index("def _flight_writers"):src.index("def _stop_flight_writers")]
+    # The afterburner evade stops through its HoldTactic (CR-018-10 Phase B),
+    # which sets the same _ab_evade_stop event.
     for stop in ("_eject_stop", "_me_stop", "_climb_stop", "_boundary_turn_stop",
-                 "_sg_stop", "_disengage_stop", "cancel_mission"):
-        assert stop in fn[:1400], stop
+                 "_sg_stop", "_disengage_stop", "self._ab_evade.stop", "cancel_mission"):
+        assert stop in registry, stop
 
 
 # --- SAF-001: a respawn does not revoke the operator's takeover --------------

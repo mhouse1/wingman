@@ -40,6 +40,12 @@ class ConfigError(ValueError):
     """Raised when config.yaml does not match the declared schema."""
 
 
+# CR-018-16: a leaf may carry its key's one default. The schema still injects
+# nothing into the loaded config (see the module docstring); a reader asks for the
+# default with `schema_default("section.key")` instead of writing its own literal.
+NO_DEFAULT = object()
+
+
 @dataclass(frozen=True)
 class Leaf:
     """A scalar or list value."""
@@ -51,6 +57,7 @@ class Leaf:
     item_types: tuple | None = None   # for lists: allowed element types
     length: int | None = None         # for lists: exact required length
     allow_none: bool = False
+    default: object = NO_DEFAULT      # CR-018-16: this key's one default
 
 
 @dataclass(frozen=True)
@@ -742,7 +749,9 @@ SCHEMA = Section(
             "stale_after_s": SECONDS,
             "trend_min_alt_rate_fps": _num(0),
             "trend_min_speed_rate_mph_s": _num(0),
-            "steep_dive_min_sin": FRACTION,
+            # CR-018-16: the eject controller (0.8) and TelemetryProcessor (0.5)
+            # used to default this differently; both now read this one.
+            "steep_dive_min_sin": Leaf(types=NUMBER, minimum=0.0, maximum=1.0, default=0.8),
             "level_max_sin": FRACTION,
             "ocr_every_n_ticks": _int(1),
             "eject_closed_loop": Section(children={
@@ -925,6 +934,20 @@ def validate_config(cfg, *, schema: Section = SCHEMA) -> list[str]:
     errors: list[str] = []
     _check(schema, cfg, "", errors)
     return sorted(errors)
+
+
+def schema_default(path: str, schema: Section = SCHEMA):
+    """The default the schema declares for a dotted key, e.g.
+    ``schema_default("telemetry.steep_dive_min_sin")``. KeyError when the key is
+    unknown or declares no default, so a reader cannot silently get None."""
+    node = schema
+    for part in path.split("."):
+        if not isinstance(node, Section) or part not in node.children:
+            raise KeyError(f"{path}: not a key in the config schema")
+        node = node.children[part]
+    if not isinstance(node, Leaf) or node.default is NO_DEFAULT:
+        raise KeyError(f"{path}: the schema declares no default")
+    return node.default
 
 
 def assert_valid_config(cfg, *, source: str = "config", schema: Section = SCHEMA) -> None:

@@ -15,15 +15,19 @@ import wingman.controller as controller_module
 from wingman.analyzer import GameState
 from wingman.controller import Controller
 from wingman.controller_config import ControllerConfig
+from wingman.hold_tactic import HoldTactic
 from wingman.keybindings import AFTERBURNER_KEY
 
 
 def _ctrl(clear_s=0.3, max_s=5.0, state=GameState.GAME_BATTLE):
     c = Controller.__new__(Controller)
     c._analyzer = types.SimpleNamespace(game_state=state)
+    c._climb_emergency_active = False
     c._ab_evade_active = threading.Event()
     c._ab_evade_stop = threading.Event()
     c._ab_evade_thread = None
+    c._ab_evade = HoldTactic("afterburner evade", running=c._ab_evade_active,
+                             stop=c._ab_evade_stop)
     c._ab_evade_until = 0.0
     c._ab_evade_clear_s = clear_s
     c._ab_evade_max_s = max_s
@@ -236,3 +240,38 @@ def test_cleanup_ends_the_hold(monkeypatch):
     ctrl.cleanup()
     assert not thread.is_alive(), "cleanup() returned with the hold still running"
     assert ctrl._ab_evade_stop.is_set()
+
+
+# --- CR-018-08 / ADR 137: the emergency airbrake outranks the evade ----------
+
+def test_no_press_during_an_emergency_climb():
+    """The review's probe: 2 afterburner presses in 1.5 s with the emergency
+    airbrake held and an alert persisting."""
+    c = _ctrl(clear_s=2.0)
+    c._climb_emergency_active = True
+    for _ in range(15):
+        c.note_incoming(True)
+        time.sleep(0.1)
+    assert not c.is_afterburner_evading()
+    assert not _presses(c), "the throttle cancelled the emergency airbrake"
+
+
+def test_an_emergency_mid_hold_ends_it_within_one_poll():
+    c = _ctrl(clear_s=10.0)
+    c.note_incoming(True)
+    assert c.is_afterburner_evading()
+    c._climb_emergency_active = True
+    assert _wait(lambda: not c.is_afterburner_evading(), timeout=1.0)
+    assert _releases(c), "the emergency left the afterburner pressed"
+
+
+def test_the_evade_resumes_when_the_emergency_clears():
+    """The alert may outlast the emergency; the burn should come back."""
+    c = _ctrl(clear_s=0.3)
+    c._climb_emergency_active = True
+    c.note_incoming(True)
+    assert not c.is_afterburner_evading()
+    c._climb_emergency_active = False
+    c.note_incoming(True)
+    assert c.is_afterburner_evading()
+    _settle(c)

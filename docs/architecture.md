@@ -438,6 +438,77 @@ mechanism runs cleanly, not the outcome.
 
 ---
 
+### Flight-input precedence (CR-018-12)
+
+Three authorities decide flight input: the behavior tree, the per-tick reflexes that
+run outside it, and the mission threads' own control loops. This section is the one
+place their precedence is written down, per contested key or axis. Each writer is
+named by the owner it passes to the Actuator (CR-018-09), so the log's
+`Actuator: <owner> released <key> while <owner> held it` lines map straight onto it.
+
+**Rule:** a new writer of flight input outside the tree gets a row here in the same
+change. `tests/test_flight_precedence.py` fails when the code presses a key under an
+owner this section does not name.
+
+Everywhere, first: during a manual takeover (SAF-001) `_execute_key_press` refuses
+every key but flares, and `release_for_manual_takeover()` stops every writer through
+the registry (CR-018-10). Writers that press through `_climb_key` have no refusal of
+their own at press time unless the table says so.
+
+**Tree selection order** (`make tree`): Idle, RespawnWait, Eject, MissileEvade,
+BoundaryTurn, Evade, Disengage, Climb, Engage, Regroup, AttackSupport. An earlier
+child wins selection; the entry guards below also stop a tactic that is started
+directly rather than selected.
+
+**Throttle, `AFTERBURNER_KEY`.** Leased since CR-018-09 Phase 2 (ADR 151): a release
+lifts the key only when no remaining holder may hold it, and "Yields to" below is
+`Controller._THROTTLE_YIELDS`, which the leases and `_may_hold_key` both read. Cruise
+and stall prevention still re-press every tick, which now only renews their lease.
+
+| Owner | Kind | Yields to | Holds over | How it wins | Source |
+|---|---|---|---|---|---|
+| `stall_prevention` | per-tick reflex | manual takeover | everything, including the emergency airbrake | re-press every tick | operator directive, Phase 1 |
+| `cruise` | per-tick reflex | manual takeover, emergency climb | climb, missile evade, eject | re-press every tick | ADR 134 D9 |
+| `evade` (afterburner evade) | per-tick reflex | manual takeover, emergency climb | climb | re-press every 1 s | ADR 128 D7, D8 |
+| `climb` | tactic hold | stops on its stop event; emergency swaps it for the airbrake | nothing | presses at start | ADR 073, ADR 137 D1 |
+| `missile_evade` | tactic hold | eject (ADR 070 d11) | nothing | presses at start | ADR 070, ADR 075 |
+| `eject_and_dive` | eject sequence | nothing | nothing; its descent control cuts the burner | presses at phase start | ADR 056, ADR 134 D9 |
+
+**Airbrake, `AIRBRAKE_KEY`.**
+
+| Owner | Kind | Yields to | Holds over | Source |
+|---|---|---|---|---|
+| `stall_prevention` | per-tick reflex | manual takeover | the emergency airbrake: releases it | operator directive |
+| `climb_emergency` | climb hold, emergency only | stall prevention | cruise and the afterburner evade, which yield to it | ADR 137 |
+
+**Pitch, `NOSE_UP_KEY` and `NOSE_DOWN_KEY`.**
+
+| Owner | Kind | Yields to | Source |
+|---|---|---|---|
+| `eject_and_dive` | eject sequence | nothing; every tactic below refuses to start during an eject | ADR 056, ADR 070 d11 |
+| `missile_evade` | tactic hold (the pitch_down variant) | eject | ADR 070 d13 |
+| `boundary` | tactic hold | eject, missile evade, the turn guard (ADR 132) | ADR 107 |
+| `climb` | tactic hold | eject, missile evade, a running pursuit unless `pursuit_mode.dive_safety`; a hard emergency inside a pursuit flies through and the pursuit yields, capped | ADR 073, ADR 148 |
+| `spawn_guard` | tactic hold from death to hand-off | a running climb hold, which owns the pitch key | ADR 076 |
+| `tracking_pitch` | pursuit tracking hold | stopped with the mission on cancel | HLDD 005 |
+| mission steps (`nose_up`, `nose_down` verbs) | mission scripts | refused in manual; a mission cancel | ADR 144, ADR 149, ADR 109 |
+
+**Roll, `ROLL_LEFT_KEY` and `ROLL_RIGHT_KEY`.**
+
+| Owner | Kind | Yields to | Source |
+|---|---|---|---|
+| `missile_evade` | tactic hold | eject | ADR 070 |
+| `boundary` | tactic hold | eject, missile evade, the turn guard | ADR 107, ADR 132 |
+| `disengage_roll` | tactic hold | takeover and shutdown only (not a mission cancel), the turn guard | SAF-001 2026-09-09 |
+| `tracking_roll` | pursuit tracking hold | stopped with the mission on cancel | HLDD 005 |
+| mission steps (roll verbs, the loiter orbit) | mission scripts | refused in manual; the turn guard; a mission cancel | ADR 111, ADR 132 |
+
+**Yaw, `YAW_LEFT`.** `missile_evade` only.
+
+This table records the code. The throttle's rows are the Actuator's priority data
+(ADR 151); pitch and roll become data the same way, one key at a time, each with a
+live check. Until then those keys go up on any holder's release.
+
 ### ACS — Autonomy Core System (Design 011, partly built)
 
 ACS is the airframe-independent combat layer. The padlock path (`mission_j20`,
@@ -524,36 +595,43 @@ falls through to `eject_and_dive`. A respawn, manual takeover or shutdown
 
 Nine states managed by the `transitions` library inside `GameStateAnalyzer`. All trigger calls go through `_trigger()`, which mutates state under `_state_lock` and defers external side effects until after the lock is released. `ignore_invalid_triggers=False` — invalid transitions raise `MachineError` immediately. See [ADR 025](adr/025-formalise-game-state-machine.md); `GAME_UNKNOWN` startup classification is ADR 042, `GAME_BATTLE_EJECT` is ADR 056.
 
+The diagram below is generated from the transition table in `wingman/state.py` (`make fsm`); `tests/test_fsm_table.py` fails if it drifts. The hand-drawn version it replaced was missing seven transitions (CR-018-14).
+
+<!-- BEGIN GENERATED: make fsm -->
 ```mermaid
 stateDiagram-v2
-    [*] --> GAME_UNKNOWN : startup classification
-
-    GAME_UNKNOWN --> GAME_LOBBY : classified lobby
-    GAME_UNKNOWN --> GAME_BATTLE : classified battle
-
-    GAME_LOBBY --> GAME_WAITING : play_clicked
-
-    GAME_WAITING --> GAME_STARTING : cancel_detected
-    GAME_WAITING --> GAME_LOBBY : waiting_timeout
-
-    GAME_STARTING --> GAME_BATTLE : good_luck_detected
-    GAME_STARTING --> GAME_STARTING_STALLED : starting_timeout
-
-    GAME_STARTING_STALLED --> GAME_UNKNOWN : starting_stalled_reclassify
-
-    GAME_BATTLE --> GAME_BATTLE_EJECT : eject_started
-    GAME_BATTLE_EJECT --> GAME_BATTLE : eject_complete
-    GAME_BATTLE_EJECT --> GAME_BATTLE_MANUAL : manual_takeover
-    GAME_BATTLE_EJECT --> GAME_END_B : click_to_detected
-
-    GAME_BATTLE --> GAME_END_B : click_to_detected
-    GAME_BATTLE --> GAME_BATTLE_MANUAL : manual_takeover
-
-    GAME_BATTLE_MANUAL --> GAME_BATTLE : manual_force_battle or respawn_reset
-    GAME_BATTLE_MANUAL --> GAME_END_B : click_to_detected
-
-    GAME_END_B --> GAME_LOBBY : continue_clicked
+    [*] --> GAME_UNKNOWN : startup
+    GAME_UNKNOWN --> GAME_END_B : unknown to end detected
+    GAME_UNKNOWN --> GAME_LOBBY : unknown to lobby detected or manual reset
+    GAME_UNKNOWN --> GAME_BATTLE : unknown to battle detected or manual force battle
+    GAME_LOBBY --> GAME_WAITING : play clicked
+    GAME_LOBBY --> GAME_STARTING : cancel detected
+    GAME_WAITING --> GAME_STARTING : cancel detected
+    GAME_WAITING --> GAME_LOBBY : waiting timeout or manual reset
+    GAME_STARTING --> GAME_BATTLE : good luck detected or manual force battle
+    GAME_STARTING --> GAME_STARTING_STALLED : starting timeout
+    GAME_STARTING --> GAME_LOBBY : starting play visible or manual reset
+    GAME_STARTING_STALLED --> GAME_UNKNOWN : starting stalled reclassify
+    GAME_STARTING_STALLED --> GAME_STARTING : starting recovery
+    GAME_STARTING_STALLED --> GAME_LOBBY : starting give up or manual reset
+    GAME_BATTLE --> GAME_END_B : click to detected
+    GAME_BATTLE_MANUAL --> GAME_END_B : click to detected
+    GAME_BATTLE_EJECT --> GAME_END_B : click to detected
+    GAME_BATTLE --> GAME_BATTLE_MANUAL : manual takeover
+    GAME_BATTLE_EJECT --> GAME_BATTLE_MANUAL : manual takeover
+    GAME_BATTLE_MANUAL --> GAME_BATTLE : respawn reset or manual release or manual force battle
+    GAME_BATTLE --> GAME_BATTLE_EJECT : eject started
+    GAME_BATTLE_EJECT --> GAME_BATTLE : eject complete or manual force battle
+    GAME_END_B --> GAME_BATTLE : manual force battle or respawn detected
+    GAME_LOBBY --> GAME_BATTLE : manual force battle
+    GAME_WAITING --> GAME_BATTLE : manual force battle
+    GAME_STARTING_STALLED --> GAME_BATTLE : manual force battle
+    GAME_BATTLE --> GAME_LOBBY : manual reset
+    GAME_END_B --> GAME_LOBBY : manual reset or continue clicked
+    GAME_BATTLE_MANUAL --> GAME_LOBBY : manual reset or continue clicked
+    GAME_BATTLE_EJECT --> GAME_LOBBY : manual reset
 ```
+<!-- END GENERATED: make fsm -->
 
 `GAME_UNKNOWN` is both the boot state and the stall-recovery state: the startup classifier scans lobby/battle crops until one matches (ADR 042), and `GAME_STARTING_STALLED` re-enters it after a hold so live screen state can re-route the FSM.
 
@@ -963,6 +1041,7 @@ held afterburner and pitch key, and the operator could not fly.
 | [148](adr/148-a-dive-recovery-flies-through-a-pursuit.md) | A dive recovery flies through a pursuit |
 | [149](adr/149-mission-f111-su30-plus-wing-sweep.md) | mission_f111: the Su-30 script plus the F-111 wing sweep |
 | [150](adr/150-reject-digit-dropped-altitude-reads.md) | Reject digit-dropped altitude reads |
+| [151](adr/151-one-actuator-and-throttle-leases.md) | One Actuator, and leases for the throttle (CR-018-09) |
 | [Design 011](hldd/011-acs-mode-hldd.md) | ACS: the airframe-independent combat layer |
 | [Design 015](hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search |
 

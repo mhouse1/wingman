@@ -42,11 +42,16 @@ def test_afterburner_evade_yields_to_manual_takeover():
         AFTERBURNER_KEY, requester="afterburner_evade") is False
 
 
-def test_afterburner_evade_does_not_yet_yield_to_climb_emergency():
-    """CR-018-08 is an open operator decision; this pins today's behavior so
-    that deciding it is a deliberate change to this test."""
+def test_afterburner_evade_yields_to_climb_emergency():
+    """CR-018-08: ADR 137 holds the airbrake through an emergency climb and keeps
+    the afterburner off "regardless of fuel or an incoming missile". The evade
+    re-pressed the throttle over it: 2 presses in 1.5 s in the review's probe."""
     assert _ctrl(climb_emergency=True)._may_hold_key(
-        AFTERBURNER_KEY, requester="afterburner_evade") is True
+        AFTERBURNER_KEY, requester="afterburner_evade") is False
+
+
+def test_afterburner_evade_may_hold_absent_both():
+    assert _ctrl()._may_hold_key(AFTERBURNER_KEY, requester="afterburner_evade") is True
 
 
 @pytest.mark.parametrize("requester", ["climb", "missile_evade", "eject"])

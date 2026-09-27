@@ -18,9 +18,10 @@ from wingman.controller import (
     Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY,
     ROLL_LEFT_KEY, ROLL_RIGHT_KEY, SWITCH_WEAPON,
 )
+from tests.perception_fake import PerceptionFake
 
 
-class _AnalyzerStub:
+class _AnalyzerStub(PerceptionFake):
     def __init__(self, ammo=2):
         self.ammo = ammo
 

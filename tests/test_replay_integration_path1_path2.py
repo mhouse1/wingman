@@ -278,6 +278,11 @@ class FakeController:
         self._auto_respawn = True
 
     # --- Mission state ---
+    def register_hotkeys(self):
+        # main registers hotkeys after construction (CR-018-13); the
+        # replay lane never has any.
+        pass
+
     def is_mission_running(self) -> bool:
         return self._mission_running
 

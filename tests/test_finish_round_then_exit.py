@@ -442,10 +442,11 @@ def test_backspace_sets_a_flag_distinct_from_exit_requested():
 
 
 def test_the_backspace_handler_sets_the_operator_stop_flag():
-    src = Path("wingman/controller.py").read_text()
+    # CR-018-13: the handler lives in hotkeys.py, a closure over the controller.
+    src = Path("wingman/hotkeys.py").read_text()
     handler = src[src.index("def exit_script_hotkey("):
                   src.index("keyboard_module.on_press_key('backspace'")]
-    assert "self._operator_stop_event.set()" in handler
+    assert "ctrl._operator_stop_event.set()" in handler
 
 
 def test_teardown_covers_both_operator_stops():
@@ -505,7 +506,7 @@ def test_second_backspace_requests_the_close():
 def test_the_handler_is_debounced_against_auto_repeat():
     """X auto-repeats a held key at ~25 Hz. Undebounced, one long press reads as
     both stages and closes the game the operator meant to keep."""
-    src = Path("wingman/controller.py").read_text()
+    src = Path("wingman/hotkeys.py").read_text()
     handler = src[src.index("def exit_script_hotkey("):
                   src.index("keyboard_module.on_press_key('backspace'")]
     assert "_last_exit_press" in handler
@@ -513,11 +514,11 @@ def test_the_handler_is_debounced_against_auto_repeat():
 
 
 def test_the_second_press_is_distinguished_by_the_first_flag():
-    src = Path("wingman/controller.py").read_text()
+    src = Path("wingman/hotkeys.py").read_text()
     handler = src[src.index("def exit_script_hotkey("):
                   src.index("keyboard_module.on_press_key('backspace'")]
-    first = handler.index("if self._operator_stop_event.is_set():")
-    assert "self._close_all_event.set()" in handler[first:]
+    first = handler.index("if ctrl._operator_stop_event.is_set():")
+    assert "ctrl._close_all_event.set()" in handler[first:]
 
 
 def test_standby_keeps_the_hotkey_hooks_alive():
@@ -559,11 +560,12 @@ def test_standby_narrows_every_hotkey_down_to_backspace():
 
 def test_exit_script_hotkey_is_kept_on_self():
     """cleanup() re-registers this closure later — it must survive past the
-    __init__ scope it was defined in."""
+    scope it was defined in (register_hotkeys, CR-018-13)."""
     ctrl_src = Path("wingman/controller.py").read_text()
     assert "self._exit_script_hotkey = None" in ctrl_src, \
         "must default to None so cleanup() can safely check before reusing it"
-    assert "self._exit_script_hotkey = exit_script_hotkey" in ctrl_src
+    hotkeys_src = Path("wingman/hotkeys.py").read_text()
+    assert "ctrl._exit_script_hotkey = exit_script_hotkey" in hotkeys_src
 
 
 def test_z_still_closes_immediately_without_standby():

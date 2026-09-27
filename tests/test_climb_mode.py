@@ -18,6 +18,8 @@ from wingman.controller import (
     NOSE_UP_KEY,
     ROLL_RIGHT_KEY,
 )
+from tests.perception_fake import PerceptionFake
+from wingman.state import GameState
 
 CLIMB_KEYS = {NOSE_UP_KEY, AFTERBURNER_KEY}
 
@@ -52,8 +54,14 @@ class _Snapshot:
         return self._angle
 
 
-class _FakeTelemetryAnalyzer:
+class _FakeTelemetryAnalyzer(PerceptionFake):
     """Settable stand-in for analyzer.get_telemetry() and the fuel read."""
+
+    # A climb runs in GAME_BATTLE, and the hold exits on any other state. This
+    # stub used to have no game_state at all, which the hold's getattr read as
+    # "unknown, carry on" (CR-018-15: the fake's default is the analyzer's real
+    # starting state, GAME_UNKNOWN).
+    game_state = GameState.GAME_BATTLE
 
     def __init__(self, stable_value=None, ts=None, fresh=True, fuel=None):
         self._lock = threading.Lock()

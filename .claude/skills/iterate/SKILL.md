@@ -388,11 +388,18 @@ meaningful. Include the failure signatures too — a filter that only matches th
 happy path is silent through a crash, and silence looks like success.
 
 **Every stage of the pipe must flush per line.** `grep --line-buffered`, then `sed -u` (or
-`stdbuf -oL`) for anything else; never finish with `cut`, `head` or an `awk` without
-`fflush()`: they block-buffer when writing to a pipe and the Monitor sits silent while the
-run produces events. On 2026-09-25 a Monitor ending in `cut -c1-230` delivered nothing
-for its whole 30 minutes over a session that logged a kill, two deaths and its own
-`FINISH ROUND`; the answers were in the log and only reading it found them. Prove the
+`stdbuf -oL`) for anything else; never finish with `cut` or `head`: they block-buffer when
+writing to a pipe and the Monitor sits silent while the run produces events. On 2026-09-25
+a Monitor ending in `cut -c1-230` delivered nothing for its whole 30 minutes over a session
+that logged a kill, two deaths and its own `FINISH ROUND`; the answers were in the log and
+only reading it found them.
+
+**Do not put `awk` after `grep` either, even with `fflush()`.** `awk` on VEDA is mawk,
+which block-buffers its *input*; `fflush()` only flushes its output. Behind a `grep` filter
+it receives a trickle of lines and prints nothing until its input buffer fills. On
+2026-09-27 two 30-minute Monitors ending in `awk '{...; fflush()}'` delivered nothing, and
+the same pipe run by hand stayed silent for 8 s while `tail` alone printed at once. Truncate
+with `sed -u 's/^\(.\{200\}\).*/\1/'`, or use `awk -W interactive`. Prove the
 monitor at arming time: include a line that must appear early (`Configuration loaded`
 after a launch) and treat silence at startup as a broken monitor, not a quiet run.
 

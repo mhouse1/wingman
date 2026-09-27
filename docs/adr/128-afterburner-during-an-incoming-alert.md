@@ -63,6 +63,16 @@ throttle over the operator's release. The condition lives in `_may_hold_key`
 yield to the emergency-climb airbrake (ADR 137); that is CR-018-08, an open
 operator decision.
 
+**D8. Yield to an emergency climb (ADR 137), added 2026-09-27 for CR-018-08.**
+The hold does not start while `_climb_emergency_active` is set, and a running hold
+ends within one poll of it, exactly as cruise already yields. ADR 137 holds the
+airbrake for the whole emergency and keeps the afterburner off "regardless of fuel
+or an incoming missile", because the two cancel each other out. The review's probe
+recorded 2 evade presses in 1.5 s over a held emergency airbrake. An emergency
+climb means terrain is imminent, which is certain loss; a missile still has
+flares against it. When the emergency clears and the alert persists, the next
+detection starts the hold again.
+
 ## Consequences
 
 Fuel burns faster during alerts. `climb_mode` has a fuel floor for its own
@@ -98,17 +108,29 @@ ability to defeat a missile geometrically. The measurement decides.
   alert persists; a takeover or the stop event ends a running hold within one
   poll; `cleanup()` ends it; a new alert after the handback starts a hold again.
   `tests/test_afterburner_evade.py` and `tests/test_may_hold_key.py`.
+- **V11 (D8).** No press during an emergency climb while the alert persists; an emergency
+  mid-hold ends it within one poll; the hold resumes once the emergency clears.
+  `tests/test_afterburner_evade.py` and `tests/test_may_hold_key.py`.
+- **V12 (D8), live.** Emergency-climb windows log no `INCOMING — afterburner held` line.
+  Not yet observed.
 - **V10 (D7), live.** In a session with a manual takeover during an incoming
   alert, the log shows no `INCOMING — afterburner held` line inside the manual
   window. A hold running at the takeover logs `afterburner evade ended — manual
   takeover`.
+
+### Live evidence for D8 (V12)
+
+| Session | Code state | Emergency-climb windows | Evade holds started inside | Verdict |
+|---------|------------|------------------------:|---------------------------:|---------|
+| 2026-09-27 11:41-15:17, `logs/wingman_20260927_151759.log`, 36 missions | before D8 | 1 (8 s) | 0 | Baseline: the conflict is rare, so V12 needs several sessions |
+| 2026-09-27 from 15:54, pid 2844217 | D8 (uncommitted) | | | Running |
 
 ### Live evidence for D7
 
 | Session | Code state | Game UI | Takeovers | Evade holds started inside a manual window | Verdict |
 |---------|------------|---------|----------:|------------------------------------------:|---------|
 | 2026-09-27 04:58-07:05, `logs/wingman_20260927_070541.log` | `eb709e5`, before D7 | post-update | 2 | **2** (05:38:33 and 05:38:50, 4.0 s each, in the 05:37:39-05:38:57 window) | Defect measured |
-| 2026-09-27 07:15-08:48, `make rd`, pid 2297200; ended when the game exited and display `:3` closed (XIO, no session summary) | `eb709e5` + D7 | post-update | 4 | **0**. The 08:25:27-08:26:18 window had 12 incoming detections with flares; across all four windows the evade logged `refused — manual takeover` 8 times and pressed nothing | **V10 passed** |
+| 2026-09-27 07:15-08:48, `logs/wingman_20260927_084856.log`, pid 2297200; ended when the game exited and display `:3` closed (XIO, no session summary) | `eb709e5` + D7 | post-update | 4 | **0**. The 08:25:27-08:26:18 window had 12 incoming detections with flares; across all four windows the evade logged `refused — manual takeover` 8 times and pressed nothing | **V10 passed** |
 
 ## References
 

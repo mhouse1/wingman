@@ -85,6 +85,17 @@ def strict_timing(request):
     """Fixture to provide strict timing mode flag."""
     return request.config.getoption("--strict-timing")
 
+@pytest.fixture(autouse=True)
+def _fresh_actuator_leases():
+    """CR-018-09 Phase 2: the module-level Actuator records who holds which key,
+    and for the throttle that record decides whether a release lifts the key. A
+    lease left by one test must not keep the next test's throttle down."""
+    from wingman import controller as _controller
+    _controller._actuator._held.clear()
+    yield
+    _controller._actuator._held.clear()
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     """Collect test timing data for performance validation."""
