@@ -8,15 +8,21 @@ still live.
 
 import threading
 import time
+import types
 import unittest.mock as mock
 
+import wingman.controller as controller_module
+from wingman.analyzer import GameState
 from wingman.controller import Controller
+from wingman.controller_config import ControllerConfig
 from wingman.keybindings import AFTERBURNER_KEY
 
 
-def _ctrl(clear_s=0.3, max_s=5.0):
+def _ctrl(clear_s=0.3, max_s=5.0, state=GameState.GAME_BATTLE):
     c = Controller.__new__(Controller)
+    c._analyzer = types.SimpleNamespace(game_state=state)
     c._ab_evade_active = threading.Event()
+    c._ab_evade_stop = threading.Event()
     c._ab_evade_thread = None
     c._ab_evade_until = 0.0
     c._ab_evade_clear_s = clear_s
@@ -117,3 +123,116 @@ def test_exit_releases_the_key():
     c._exit_event.set()
     _settle(c)
     assert _releases(c), "exit left the afterburner pressed"
+
+
+# --- CR-018-07 / SAF-001: the operator's aircraft is not wingman's to burn ---
+#
+# Background OCR keeps reporting incoming in GAME_BATTLE_MANUAL (that is what
+# keeps flares working there), and the tree calls note_incoming every tick in
+# every state. Before CR-018-07 nothing on this path checked for a takeover,
+# and release_for_manual_takeover had no way to stop the hold.
+
+def _wait(pred, timeout=1.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def test_no_press_while_the_operator_has_the_aircraft():
+    c = _ctrl(clear_s=2.0, state=GameState.GAME_BATTLE_MANUAL)
+    for _ in range(12):
+        c.note_incoming(True)
+        time.sleep(0.1)
+    assert not c.is_afterburner_evading()
+    assert not _presses(c), "the throttle was pressed on the operator's flight"
+
+
+def test_a_takeover_mid_hold_ends_it_within_one_poll():
+    """Even if the stop event never arrives, the hold's own poll must notice."""
+    c = _ctrl(clear_s=10.0)
+    c.note_incoming(True)
+    assert c.is_afterburner_evading()
+    c._analyzer.game_state = GameState.GAME_BATTLE_MANUAL
+    t0 = time.time()
+    assert _wait(lambda: not c.is_afterburner_evading(), timeout=1.0), \
+        "the hold kept running after takeover"
+    assert time.time() - t0 < 0.5
+    assert _releases(c), "takeover left the afterburner pressed"
+
+
+def test_the_stop_event_ends_the_hold():
+    """What release_for_manual_takeover() and cleanup() set."""
+    c = _ctrl(clear_s=10.0)
+    c.note_incoming(True)
+    c._ab_evade_stop.set()
+    t0 = time.time()
+    _settle(c, timeout=1.0)
+    assert not c.is_afterburner_evading()
+    assert time.time() - t0 < 0.5
+    assert _releases(c)
+
+
+def test_a_new_alert_after_the_handback_starts_a_hold_again():
+    """The stop event must not outlive the takeover that set it."""
+    c = _ctrl(clear_s=0.3)
+    c._ab_evade_stop.set()            # left set by an earlier takeover
+    c.note_incoming(True)
+    assert c.is_afterburner_evading()
+    assert _presses(c)
+    _settle(c)
+
+
+def _real_ctrl(monkeypatch, analyzer):
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    return Controller(
+        (0, 0, 1920, 1200),
+        analyzer=analyzer,
+        exit_event=threading.Event(),
+        config=ControllerConfig(
+            simulate_os_input=True,
+            disable_hotkeys=True,
+            missile_evade={"afterburner_clear_s": 4.0, "afterburner_max_s": 20.0},
+        ),
+    )
+
+
+def _evade_press_intents(ctrl, since):
+    return [i for i in ctrl.get_action_intents()
+            if i["action_type"] == "key_press" and i.get("key") == AFTERBURNER_KEY
+            and i.get("action") == "evade" and i["timestamp"] >= since]
+
+
+def test_release_for_manual_takeover_stops_the_hold_and_it_stays_stopped(monkeypatch):
+    """The review's probe, as a test: after the takeover release, an alert that
+    persists for 2.5 s produces no afterburner press."""
+    analyzer = types.SimpleNamespace(game_state=GameState.GAME_BATTLE)
+    ctrl = _real_ctrl(monkeypatch, analyzer)
+    ctrl.note_incoming(True)
+    assert ctrl.is_afterburner_evading()
+    thread = ctrl._ab_evade_thread
+
+    analyzer.game_state = GameState.GAME_BATTLE_MANUAL
+    ctrl.release_for_manual_takeover()
+    taken = time.time()
+    thread.join(timeout=1.0)
+    assert not thread.is_alive(), "the hold outlived the takeover"
+
+    deadline = taken + 2.5
+    while time.time() < deadline:
+        ctrl.note_incoming(True)
+        time.sleep(0.1)
+    assert _evade_press_intents(ctrl, since=taken) == []
+    assert not ctrl.is_afterburner_evading()
+
+
+def test_cleanup_ends_the_hold(monkeypatch):
+    analyzer = types.SimpleNamespace(game_state=GameState.GAME_BATTLE)
+    ctrl = _real_ctrl(monkeypatch, analyzer)
+    ctrl.note_incoming(True)
+    thread = ctrl._ab_evade_thread
+    ctrl.cleanup()
+    assert not thread.is_alive(), "cleanup() returned with the hold still running"
+    assert ctrl._ab_evade_stop.is_set()

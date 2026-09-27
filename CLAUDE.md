@@ -90,12 +90,13 @@ The main loop runs in `wingman/main.py` (`main()`). Each 1.5-second tick capture
 
 - `wingman/capture.py` — `Capture`: wraps `mss` to grab a BGR frame from a configured monitor region. Must be called from the thread that constructed it (mss uses thread-local storage).
 - `wingman/crop_region.py` — `CropCoords` (NamedTuple) and helpers. All crop coordinates are fractions of the capture frame (0.0–1.0); x before y. Has no internal imports — safe to use anywhere.
-- `wingman/analyzer.py` — `GameStateAnalyzer`: owns the `transitions`-based FSM (`GameState` enum), the EasyOCR thread pool, incoming template matching, respawn detection, and health/ammo OCR. Thread-local EasyOCR readers avoid races; `_ocr_init_lock` serializes first-time model download. Exposes `trigger_event()` for FSM transitions.
+- `wingman/state.py` — the FSM vocabulary: `GameState`, `GameEvent`, `BATTLE_STATES`, the transition table and the nose-direction constants. Standard library only, so modules that need just these names do not load EasyOCR (CR-018-15). `analyzer.py` re-exports them; import from `state.py` in new code.
+- `wingman/analyzer.py` — `GameStateAnalyzer`: runs the `transitions`-based FSM over the table in `state.py`, the EasyOCR thread pool, incoming template matching, respawn detection, and health/ammo OCR. Thread-local EasyOCR readers avoid races; `_ocr_init_lock` serializes first-time model download. Exposes `trigger_event()` for FSM transitions.
 - `wingman/controller.py` — keyboard/mouse injection, click-to-crop helpers, hotkey bindings. Also houses `REGION_*` string constants used as log labels.
 - `wingman/performance.py` — `PerformanceTracker`: records per-crop OCR timings and incoming→flare latency into bucketed histograms; writes `run_*.json` to `docs/performance/current/`.
 - `wingman/replay.py` — `ScreenshotReplayCapture` (injects pre-recorded screenshots in place of live frames), `ReplayAssertionEngine` (records FSM state + timing for validator), `LivePathCaptureEngine` (captures real monitor frames during ADR045 live-screen test lane). Driven by YAML path configs under `tests/replay_paths/`.
 
-**FSM states** (defined in `analyzer.py`):
+**FSM states** (defined in `state.py`):
 
 `GAME_UNKNOWN → GAME_LOBBY → GAME_WAITING → GAME_STARTING → GAME_BATTLE → GAME_END_B → GAME_LOBBY`
 
