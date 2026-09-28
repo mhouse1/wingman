@@ -1342,6 +1342,11 @@ pursuit_mode:
     # nor without a fresh altitude. With the dropped-key defect fixed, the push
     # flew into the ground from about 1200 m and 700 m. Named guess. null = off.
     push_floor_m: 1500
+    # Cycle 12 (2026-09-27): the floor is checked against the last altitude
+    # reading carried this far ahead at the measured descent rate, about one
+    # reading interval, not the smoothed altitude, which trailed a fast dive by
+    # 470 m (HUD 1403 m, mean 1873 m at 20:19:28). Named guess.
+    push_floor_lookahead_s: 3.0
     blind_search_after_s: 3.0
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted

@@ -996,11 +996,12 @@ class _TelemetryAnalyzer(_AnalyzerStub):
     with a new altitude timestamp; False repeats one sample. `rate` is the
     altitude rate in m/s."""
 
-    def __init__(self, new_samples=True, rate=0.0, alt=4000.0):
+    def __init__(self, new_samples=True, rate=0.0, alt=4000.0, stable=None):
         super().__init__(ammo=2)
         self.new_samples = new_samples
         self.rate = rate
         self.alt = alt
+        self.stable = alt if stable is None else stable
         self.calls = 0
 
     def get_telemetry(self):
@@ -1010,7 +1011,7 @@ class _TelemetryAnalyzer(_AnalyzerStub):
         sample_ts = now if self.new_samples else 1000.0
         return TelemetrySnapshot(
             speed=TelemetrySignal(value=900, stable_value=900.0, ts=now, rate=0.0),
-            altitude=TelemetrySignal(value=int(self.alt), stable_value=float(self.alt),
+            altitude=TelemetrySignal(value=int(self.alt), stable_value=float(self.stable),
                                      ts=sample_ts, rate=self.rate),
             taken_at_s=now, stale_after_s=6.0)
 
@@ -1342,6 +1343,25 @@ def test_after_a_near_centre_kill_the_next_icon_is_flown_toward_within_the_base_
     assert ("key_press", ROLL_LEFT_KEY) in keys
     assert ("key_press", NOSE_UP_KEY) in keys
     assert any("rung=wait" in ln for ln in lines) and "act=bankleft+up" in lines[-1], lines
+
+
+def test_a_fast_dive_is_refused_the_push_the_smoothed_altitude_would_allow(monkeypatch, caplog):
+    """Cycle 12, the 20:19:27 state: last reading 1929 m, smoothed 2248 m, 200 m/s
+    down. Three seconds on it is below the 1500 m floor, so no push; the old
+    floor read the smoothed 2248 m and pushed, down to the ground at 20:19:36."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                              analyzer=_TelemetryAnalyzer(alt=1929.0, stable=2248.0,
+                                                          rate=-200.0),
+                              push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert any("withheld=alt " in ln for ln in lines), lines
+
+
+def test_the_same_altitude_in_level_flight_still_pushes(monkeypatch, caplog):
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                               analyzer=_TelemetryAnalyzer(alt=1929.0, stable=2248.0, rate=0.0),
+                               push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) in keys
 
 
 def test_above_the_push_floor_the_same_icon_still_pushes(monkeypatch, caplog):

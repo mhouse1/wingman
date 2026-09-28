@@ -32,6 +32,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from .config_schema import schema_default
+
 # Key names the law reports. Names, not key constants: the shadow stage only
 # logs them, and actuation (HLDD 015 rollout step 2) maps them to keys.
 NOSE_DOWN = "NOSE_DOWN"
@@ -102,6 +104,9 @@ class IconSteeringConfig:
     # (m), nor without a fresh one. Once the dropped-key defect was fixed, the
     # push flew into the ground from about 1200 m and 700 m. None = no floor.
     push_floor_m: "float | None" = None
+    # Cycle 12: the floor is checked this far ahead of the last reading.
+    push_floor_lookahead_s: float = schema_default(
+        "pursuit_mode.icon_steering.push_floor_lookahead_s")
     blind_search_after_s: float = 3.0
 
     @classmethod
@@ -134,6 +139,8 @@ class IconSteeringConfig:
             release_pts=float(cfg.get("release_pts", d.release_pts)),
             icon_min_path_deg=None if min_path is None else float(min_path),
             push_floor_m=None if floor is None else float(floor),
+            push_floor_lookahead_s=float(cfg.get("push_floor_lookahead_s",
+                                                 d.push_floor_lookahead_s)),
             blind_search_after_s=float(cfg.get("blind_search_after_s", d.blind_search_after_s)),
         )
 
