@@ -119,7 +119,7 @@ def test_press_during_matchmaking_preserves_startup_sequence(monkeypatch):
         ctrl = _make_ctrl(monkeypatch, analyzer)
         clicked = []
         ctrl._crops = {"PLAY": (0, 0, 1, 1)}
-        ctrl.click_crop = lambda *args, **kwargs: clicked.append(args)
+        ctrl.click_crop = lambda *args, _clicked=clicked, **kwargs: _clicked.append(args)
 
         ctrl._on_auto_mission_hotkey()
 

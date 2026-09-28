@@ -3630,6 +3630,23 @@ class Controller:
                                        and (self._icon_cfg.wings_level
                                             or self._icon_cfg.actuate_pitch)
                                        and icon_state["rung"] in ("icon", "hold"))
+                        # Dive guard, every steering tick: a target below the
+                        # nose (err_y > 0) is not followed nose-down when low or
+                        # when the ground is close (pitch goes neutral instead),
+                        # and a steep descent is pulled toward level. Decided
+                        # before the roll so the icon law below knows it.
+                        guard = None if yielding else self._pursuit_dive_guard(
+                            target_visible=bool(visible))
+                        # The icon law's move, decided once for roll and pitch.
+                        # A refused push turns toward the icon instead of flying
+                        # straight (2026-09-27 18:51:51, IconPoints.intent).
+                        icon_withheld = "-"
+                        icon_intent = ("none", ())
+                        if icon_state is not None and icon_state["rung"] == "icon":
+                            if icon_points.intent()[0] == "down":
+                                icon_withheld = self._icon_down_withheld(guard)
+                            icon_intent = icon_points.intent(
+                                down_allowed=icon_withheld == "-")
                         if visible and err is not None:
                             last_seen_ts = time.time()
                             last_visible_err = err
@@ -3644,7 +3661,7 @@ class Controller:
                                 # "down" or the hold rung, the wings stay level.
                                 icon_roll = None
                                 if self._icon_cfg.actuate_turn and icon_state["rung"] == "icon":
-                                    _intent, _keys = icon_points.intent()
+                                    _keys = icon_intent[1]
                                     if "ROLL_LEFT" in _keys:
                                         icon_roll = "left"
                                     elif "ROLL_RIGHT" in _keys:
@@ -3668,12 +3685,6 @@ class Controller:
                                     self._pursuit_search_resume_centre_delay_s,
                                     side=_last_known_side(
                                         last_seen_ts, last_visible_err, icon_points))
-                        # Dive guard, every steering tick: a target below the
-                        # nose (err_y > 0) is not followed nose-down when low or
-                        # when the ground is close (pitch goes neutral instead),
-                        # and a steep descent is pulled toward level.
-                        guard = None if yielding else self._pursuit_dive_guard(
-                            target_visible=bool(visible))
                         if visible and err_y is not None:
                             if not yielding:
                                 if err_y > 0 and guard:
@@ -3689,10 +3700,8 @@ class Controller:
                                 # the icon and hold rungs, and the look-down taps
                                 # stop there. "down" is withheld by the guard or
                                 # the angle rule; "turn" stays in shadow.
-                                intent = (icon_points.intent()[0]
-                                          if icon_state["rung"] == "icon" else "none")
-                                withheld = (self._icon_down_withheld(guard)
-                                            if intent == "down" else "-")
+                                intent = icon_intent[0]
+                                withheld = icon_withheld
                                 icon_state["withheld"] = withheld
                                 why = "icon %s%s" % (
                                     intent, "" if withheld == "-" else ", withheld: " + withheld)
