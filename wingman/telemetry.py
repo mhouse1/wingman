@@ -97,6 +97,21 @@ class TelemetrySnapshot:
     def altitude_fresh(self) -> bool:
         return self.altitude.is_fresh(self.taken_at_s, self.stale_after_s)
 
+    def altitude_ahead(self, ahead_s: float) -> float | None:
+        """The last accepted altitude reading, carried to `ahead_s` past this
+        snapshot at the last measured rate, descending only; None when stale.
+
+        Not ``stable_value``: the mean of the last readings trails a fast dive
+        by hundreds of metres (2026-09-27 20:19:28, HUD 1403 m against a mean of
+        1873 m), and a climb the other way. The rate is only ever applied
+        downward, so a climb never raises the result above the last reading.
+        """
+        if not self.altitude_fresh() or self.altitude.value is None:
+            return None
+        age = self.altitude.age_s(self.taken_at_s) or 0.0
+        return float(self.altitude.value) + min(0.0, self.altitude.rate or 0.0) * (
+            age + max(0.0, ahead_s))
+
     def _ratio_speed(self) -> "float | None":
         """Speed for the flight-path ratio: the LAST ACCEPTED reading, not the
         smoothed mean (ADR 069 d6).

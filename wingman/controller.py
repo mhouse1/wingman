@@ -3377,13 +3377,14 @@ class Controller:
         dive guard tripped; never while `pursuit_mode.dive_safety` is off),
         `angle` (flight path at or past icon_min_path_deg, when set),
         `angle-none` (no fresh angle, when a limit is set or
-        require_fresh_angle is on), `alt` (below push_floor_m), `alt-none` (a
+        require_fresh_angle is on), `alt` (the altitude
+        push_floor_lookahead_s ahead is below push_floor_m), `alt-none` (a
         floor is set and there is no fresh altitude), or `-`."""
         if guard:
             return "guard"
         floor = self._icon_cfg.push_floor_m
         if floor is not None:
-            alt = self._read_stable_altitude()
+            alt = self._read_floor_altitude()
             if alt is None:
                 return "alt-none"
             if alt < floor:
@@ -5889,17 +5890,26 @@ class Controller:
                        "exhausted, releasing anyway", self._climb_exit_max_pulses)
         return "budget_exhausted"
 
-    def _read_stable_altitude(self) -> "float | None":
-        """Fresh telemetry stable altitude, or None when unreadable."""
+    def _read_floor_altitude(self) -> "float | None":
+        """The altitude push_floor_m is checked against: the last reading
+        carried push_floor_lookahead_s ahead at the measured descent rate
+        (`TelemetrySnapshot.altitude_ahead`), or None when unreadable.
+
+        Cycle 12 (2026-09-27): the smoothed altitude this replaced trailed fast
+        dives by hundreds of metres. Scored on every icon push logged in three
+        sessions against the HUD altitude interpolated between readings, it
+        missed all 72 push ticks below the floor, where this misses none; four
+        terrain deaths followed such a push (19:42:13, 19:43:21, 20:19:36,
+        20:31:43)."""
         if self._analyzer is None:
             return None
         try:
             snap = self._analyzer.get_telemetry()
         except Exception:
             return None
-        if snap is None or not snap.altitude_fresh():
+        if snap is None:
             return None
-        return snap.altitude.stable_value
+        return snap.altitude_ahead(self._icon_cfg.push_floor_lookahead_s)
 
     def _read_fuel_pct(self) -> "int | None":
         """Fresh afterburner fuel percentage, or None when unreadable (ADR 075)."""

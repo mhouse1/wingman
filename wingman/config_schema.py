@@ -666,6 +666,11 @@ SCHEMA = Section(
                 "icon_min_path_deg": Leaf(types=NUMBER, minimum=-90, maximum=0,
                                           allow_none=True),
                 "push_floor_m": Leaf(types=NUMBER, minimum=0, allow_none=True),
+                # Cycle 12 (2026-09-27): push_floor_m is checked against the last
+                # altitude reading projected this far ahead (about one reading
+                # interval), so a push cannot carry below the floor before the
+                # next reading arrives. Named guess.
+                "push_floor_lookahead_s": Leaf(types=NUMBER, minimum=0, default=3.0),
                 "blind_search_after_s": SECONDS,
             }),
         }),
