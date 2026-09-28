@@ -505,6 +505,11 @@ and stall prevention still re-press every tick, which now only renews their leas
 
 **Yaw, `YAW_LEFT`.** `missile_evade` only.
 
+**Machine gun, `FIRE_MACHINE_GUN`.** `pursuit_gun` only: the pursuit holds it while
+the tracked target is centred (`pursuit_mode.gun_on_centre`, operator 2026-09-28).
+It is not flight input, but it is held with the tracking holds and goes up with them
+on a cancel, a takeover and loop exit.
+
 This table records the code. The throttle's rows are the Actuator's priority data
 (ADR 151); pitch and roll become data the same way, one key at a time, each with a
 live check. Until then those keys go up on any holder's release.
