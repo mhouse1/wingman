@@ -628,6 +628,10 @@ SCHEMA = Section(
             "search_resume_delay_s": SECONDS,
             "search_resume_centre_err": FRACTION,
             "search_resume_centre_delay_s": SECONDS,
+            # Operator, 2026-09-28: hold the machine gun while the tracked target
+            # is within gun_centre_err of the screen centre on both axes.
+            "gun_on_centre": Leaf(types=(bool,), default=False),
+            "gun_centre_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.05),
             "empty_confirm_reads": _int(1),
             "steer_interval_s": SECONDS,    # CR-018-01
             "engage_interval_s": SECONDS,   # CR-018-01
