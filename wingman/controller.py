@@ -1283,10 +1283,17 @@ class Controller:
         # A climb, evade, or spawn-guard hold is commanded flight even with no
         # mission thread (the tree selects them with mission=False after a
         # respawn cancels the mission) — SAF-001's takeover must fire for
-        # them too.
+        # them too. So is a pursuit: mission_su30 and mission_f111 release the
+        # mission lock when they hand the aircraft to pursue_and_engage, and
+        # before the pursuit counted here, Enter did nothing for the whole
+        # pursuit and worked only after a respawn (operator, 2026-09-27 run).
         if not (self.is_mission_running() or self._ejecting.is_set()
+                or self._pursuing.is_set()
                 or self._climbing.is_set() or self._missile_evading.is_set()
                 or self._spawn_guarding.is_set()):
+            logger.debug("Controller: maneuver key '%s' ignored — no commanded flight "
+                         "(no mission, eject, pursuit, climb, evade or spawn guard) [%s]",
+                         key_name, describe_key_source(display, state))
             return False
 
         # The source is logged with the takeover, not separately: a takeover

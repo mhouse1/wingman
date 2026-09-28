@@ -1369,3 +1369,44 @@ def test_above_the_push_floor_the_same_icon_still_pushes(monkeypatch, caplog):
                                analyzer=_TelemetryAnalyzer(alt=2000.0), push_floor_m=1500)
     assert ("key_press", NOSE_DOWN_KEY) in keys
     assert ("key_press", ROLL_LEFT_KEY) not in keys
+
+
+# ---------------------------------------------------------------------------
+# SAF-001 during a pursuit (operator, 2026-09-27 20:48-04:25 run): Enter did
+# nothing while the pursuit flew and worked only after a respawn. The missions
+# release the mission lock when they hand the aircraft to pursue_and_engage,
+# and the takeover gate did not count the pursuit as commanded flight.
+# ---------------------------------------------------------------------------
+
+def _pursuit_in_eject_state(monkeypatch):
+    from wingman.state import GameState
+    analyzer = _AnalyzerStub(ammo=2)
+    analyzer.game_state = GameState.GAME_BATTLE_EJECT
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0)
+    ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    deadline = time.time() + 1.0
+    while not ctrl.is_pursuing() and time.time() < deadline:
+        time.sleep(0.01)
+    assert ctrl.is_pursuing()
+    return ctrl, analyzer
+
+
+def test_enter_during_a_pursuit_takes_over(monkeypatch, caplog):
+    from wingman.state import GameState
+    ctrl, analyzer = _pursuit_in_eject_state(monkeypatch)
+    assert not ctrl.is_mission_running(), "the mission has handed the aircraft over"
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        assert ctrl._handle_maneuver_key_press("enter", display=":3") is True
+    _wait_for_pursuit_to_settle(ctrl)
+    assert analyzer.game_state == GameState.GAME_BATTLE_MANUAL
+    assert any("entering GAME_BATTLE_MANUAL" in r.getMessage() for r in caplog.records)
+
+
+def test_a_takeover_key_with_nothing_flying_is_ignored_and_says_so(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        assert ctrl._handle_maneuver_key_press("enter", display=":3") is False
+    assert any("maneuver key 'enter' ignored — no commanded flight" in r.getMessage()
+               for r in caplog.records)
