@@ -1274,3 +1274,24 @@ def test_an_icon_below_the_horizon_pushes_with_the_wings_level(monkeypatch, capl
     assert ("key_press", NOSE_DOWN_KEY) in keys
     assert ("key_press", NOSE_UP_KEY) not in keys
     assert ("key_press", ROLL_LEFT_KEY) not in keys
+
+
+def test_below_the_push_floor_a_side_icon_is_turned_toward_not_flown_past(monkeypatch, caplog):
+    """2026-09-27 18:51:51: an enemy icon left and just below the horizon at 822 m.
+    The law wanted a push, push_floor_m (1500) refused it, and with the wings held
+    level the jet flew straight at a cliff for 17 s. Now the refused push banks
+    toward the icon and pulls. The archived icon sits at 172 deg, left."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                              analyzer=_TelemetryAnalyzer(alt=1200.0), push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) not in keys, "the floor still refuses the push"
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert any("intent=down" in ln and "withheld=alt " in ln and "act=bankleft+up" in ln
+               for ln in lines), lines
+
+
+def test_above_the_push_floor_the_same_icon_still_pushes(monkeypatch, caplog):
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                               analyzer=_TelemetryAnalyzer(alt=2000.0), push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys

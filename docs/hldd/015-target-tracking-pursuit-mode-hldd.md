@@ -974,6 +974,68 @@ still chose a wings-level push for an enemy mostly to the right. With the push w
 come down and the pitch score cross zero and reset, handing over to bank-and-pull. Whether that is quick
 enough is for the next session's frames to show.
 
+**Operator report (2026-09-27, 18:51:55), iterate cycle 10: a refused push turns toward the icon.** "It just
+destroyed a target but then just flew straight instead of steering towards the icon." The frame
+(`pursuit_mode_20260927_185155_43`) shows `+288`, `Track: ACQUIRING`, an enemy icon left of centre and the jet at
+822 m heading at a cliff. Measured in that session (`logs/wingman_20260927_185306.log`, 2,260 `ICONPTS` ticks):
+
+- 18:51:45.4-51.4, `rung=wait` for 6 s: the target was lost near the centre (it had just been shot), so the
+  neutral wait was `search_resume_centre_delay_s` (6 s), not `search_resume_delay_s` (2 s). The next icon, at
+  (771, 631), was scored and not flown toward.
+- 18:51:51-52:08, `rung=icon intent=down withheld=alt act=level`: the cycle 7 rule chose a wings-level push
+  for an icon left and just below the horizon (158-171 deg, points -23/+9), cycle 9's `push_floor_m` (1500)
+  refused it at 822 m, and nothing took its place. The wings were held level and the pitch neutral, so the
+  jet flew straight with the enemy to its left.
+- Over the session: of 916 ticks where the icon rung's law chose down, 686 (75%) were refused (552 `alt`, 134
+  `alt-none`), in 9 straight stretches totalling 95 s, the longest 32 s (18:45:05). The law chose a turn 3
+  times in the session.
+
+The cycle 9 entry above expected a working push to bring the pitch score through zero and hand over to
+bank-and-pull. Below the floor the push never works, so that hand-over never came.
+
+Change: `IconPoints.intent(down_allowed=...)`. When the push is refused (below `push_floor_m`, no fresh
+altitude, the dive guard or the angle rule) and the turn score is active, the law returns the turn instead,
+bank toward the icon's side and pull (`ROLL_LEFT`/`ROLL_RIGHT` + `NOSE_UP`), as for an icon on the horizon.
+Pulling is also the right move when too low to push. With no active turn (an icon nearly straight below) it
+is still `none`. The steering tick decides the dive guard and the law's move once, before the roll, so the
+roll and pitch act on the same answer. `ICONPTS` still logs the law's own `intent=down` and the `withheld`
+reason; `act=bankleft+up` shows the turn taken.
+
+Not changed: the 6 s `wait` after a kill (a separate change), and the push itself above the floor.
+
+Tests: `tests/test_icon_steering.py` (a refused push turns toward a left or right icon, not for one straight
+below, and icons above the horizon are unaffected); `tests/test_pursuit_mode.py` (the archived 172 deg left
+icon at 1200 m under a 1500 m floor presses ROLL_LEFT and NOSE_UP, no NOSE_DOWN, and logs `intent=down`,
+`withheld=alt`, `act=bankleft+up`; at 2000 m it still pushes). On the old code the pursuit test fails: the
+only key pressed was the fire key.
+
+Gate: `make lint` clean; `make test` 2,475 passed, 35 skipped, and one failure fixed in the test: the
+operator's 18:53 commit moved the manual-handback branch of `_on_auto_mission_hotkey` past a fixed
+1400-character source window, so the test now reads the whole handler. Ruff also flagged a loop-variable
+closure (B023) in that commit's new test, fixed by binding the list. `make rd`, wingman pid 3045224, started
+19:39:42.
+
+Measure: straight flight (push refused, wings level) per battle-minute, against 95 s in 6.7 battle-minutes
+(about 14 s per battle-minute, 2 rounds, so a small sample) in the 18:42 session; how often the fallback turn
+engages; and whether turning below the floor costs terrain deaths.
+
+Cycle 10 session (measured, 19:39:42-19:45:29, stopped by the operator's `z` in `GAME_WAITING`, 1 round,
+4.0 battle-minutes, 291 icon-rung ticks, so far too small to call a rate). The fallback turn engaged once
+live, at 19:43:18.8: scores -20.9/+4.0 (left and just below), push refused for no fresh altitude,
+`act=bankleft+up` for 21 ticks (2.8 s) until the death, the 18:51:51 geometry that flew straight before
+the change. The only straight stretch
+with a refused push lasted 4 s (19:41:37.8-41.7), for an icon at 100 deg with a turn score of -2.8, below
+`act_pts`: no side to turn to, as designed. A second one logged a single tick at 19:42:13.2 as the aircraft
+died. 0 errors. Deaths: 3. Two were classified terrain (19:41:33, 19:42:13; no incoming alert in the
+session, so the classifier's default). The third, 19:43:21.8, came 2.9 s after the fallback turn, but the
+dive was already under way: nose -47 deg, HUD altitude 1322 m and -187 m/s at 19:43:14.3. The BT logged
+`ttg=10s` from its smoothed 1840 m; the HUD reading gives about 7 s, which puts impact near 19:43:21. No
+altitude was read after 19:43:14 (`alt=None` from 19:43:18.8). The dive fell inside a full 5.7 s neutral
+`wait` (19:43:10.8-16.5, an icon on screen for 37 of its ticks), then the ordinary turn pulling with the wings level (`divelevel+up`) from 19:43:16.6. A respawn was first
+detected at 19:43:20.9. Inferred: the dive and the neutral `wait` caused it, the tracker-dive-then-wait pattern the
+cycle 9 entry names; the fallback turn was pulling up when it engaged. The post-loss `wait` is the next
+change.
+
 ### Lock rate by session (measured, 2026-09-26)
 
 Pursuits of 20 s or more that reached any lock, and the mean `first_lock` of those that did:

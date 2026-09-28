@@ -604,9 +604,12 @@ def test_the_operator_can_hand_control_back():
     src = pathlib.Path("wingman/controller.py").read_text()
     assert "def _release_manual_if_active" in src
     assert 'self._analyzer.trigger_event("manual_release")' in src
-    hk = src[src.index("def _on_auto_mission_hotkey"):]
-    assert "GameState.GAME_BATTLE_MANUAL:" in hk[:1400]
-    assert "_release_manual_if_active()" in hk[:1400]
+    # The whole handler, not a fixed-size prefix: the matchmaking early return
+    # added on 2026-09-27 pushed the manual branch past a 1400-character window.
+    start = src.index("def _on_auto_mission_hotkey")
+    hk = src[start:src.index("\n    def ", start + 10)]
+    assert "GameState.GAME_BATTLE_MANUAL:" in hk
+    assert "_release_manual_if_active()" in hk
 
 
 def test_manual_release_is_a_real_fsm_transition():

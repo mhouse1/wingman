@@ -360,3 +360,43 @@ def test_above_the_horizon_a_side_icon_still_turns():
     p = IconPoints(CFG, clock=clock)
     _run(p, clock, [_icon(-170.0)], 8)
     assert p.intent()[0] == "turn"
+
+
+# ---------------------------------------------------------------------------
+# A refused push turns toward the icon (2026-09-27 18:51:51). Below the horizon
+# the law pushes with the wings level; below push_floor_m the push is refused,
+# and before this the jet then flew straight with the enemy off to one side:
+# 686 of 916 icon ticks, 95 s over 9 stretches, in the 18:42 session.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("angle", [145.0, 165.0, 172.0])
+def test_a_refused_push_turns_toward_a_left_icon(angle):
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [_icon(angle)], 8)
+    assert p.intent() == ("down", (NOSE_DOWN,)), "the push itself is unchanged"
+    assert p.intent(down_allowed=False) == ("turn", (ROLL_LEFT, NOSE_UP))
+
+
+def test_a_refused_push_turns_toward_a_right_icon():
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [_icon(20.0)], 8)
+    assert p.intent(down_allowed=False) == ("turn", (ROLL_RIGHT, NOSE_UP))
+
+
+def test_a_refused_push_straight_below_has_no_side_to_turn_to():
+    """The reference icon is nearly straight down: no turn is active, so there
+    is still nothing to press."""
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [_icon(95.0)], 8)
+    assert p.turn_active == 0
+    assert p.intent(down_allowed=False) == ("none", ())
+
+
+def test_icons_above_the_horizon_ignore_down_allowed():
+    clock = _Clock()
+    p = IconPoints(CFG, clock=clock)
+    _run(p, clock, [_icon(-170.0)], 8)
+    assert p.intent(down_allowed=False) == p.intent()
