@@ -11,6 +11,7 @@ from mss import mss
 from .state import GameState, NOSE_DOWN
 from .perception import Perception
 from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT
+from .config_schema import schema_default
 from . import keybindings as _keybindings
 from .actuator import Actuator
 from .hold_tactic import HoldTactic
@@ -280,6 +281,10 @@ class _EngagementTally:
         self.icon_seen = 0
         self.icon_steer_s = 0.0
         self._icon_prev: "tuple[float, str] | None" = None
+        # Seconds the machine gun was held on a centred target; reported only
+        # when the pursuit's gun_on_centre is on.
+        self.gun_enabled = False
+        self.gun_s = 0.0
 
     def icon_tick(self, unlocked: bool, has_icon: bool, rung: str) -> None:
         now = self._clock()
@@ -313,6 +318,8 @@ class _EngagementTally:
         if self.icon_enabled:
             line += " icon=%d/%d icon_steer=%.1fs" % (
                 self.icon_seen, self.icon_unlocked, self.icon_steer_s)
+        if self.gun_enabled:
+            line += " gun=%.1fs" % self.gun_s
         return line
 
 
@@ -722,6 +729,14 @@ class Controller:
         self._pursuit_search_resume_centre_err = float(_pm.get("search_resume_centre_err", 0.15))
         self._pursuit_search_resume_centre_delay_s = float(
             _pm.get("search_resume_centre_delay_s", 6.0))
+        # Operator, 2026-09-28: the pursuit holds FIRE_MACHINE_GUN while the
+        # tracked target is centred (_pursuit_gun_tick).
+        self._pursuit_gun_on_centre = bool(
+            _pm.get("gun_on_centre", schema_default("pursuit_mode.gun_on_centre")))
+        self._pursuit_gun_centre_err = float(
+            _pm.get("gun_centre_err", schema_default("pursuit_mode.gun_centre_err")))
+        self._gun_held_since: "float | None" = None
+        self._gun_fired_s = 0.0
         # mission_su30 defers SWITCH_WEAPON until the selected weapon runs out
         # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
         # consecutive ammo==0 reads are required before pressing it. At the
@@ -1970,7 +1985,51 @@ class Controller:
         key pinned down under the operator's own input."""
         self.release_roll_hold(why=why)
         self.release_pitch_hold(why=why)
+        self.release_gun_hold(why=why)
         self._pitch_last_sample = None
+
+    # Once firing, the gun keeps going until the target is this many times
+    # gun_centre_err out, so a target sitting on the edge does not chatter the key.
+    _GUN_RELEASE_FACTOR = 1.5
+
+    def _pursuit_gun_tick(self, visible: bool, err: "float | None",
+                          err_y: "float | None") -> None:
+        """Hold FIRE_MACHINE_GUN while the tracked target is at the centre of
+        the screen (operator, 2026-09-28: "turn on machine gun 'a' when target
+        reaches center of screen"), on every pursuit steering tick.
+
+        Centred means within gun_centre_err on both axes, the tracker's error in
+        half-frame units, the same box the steering deadband leaves alone. The
+        key is held, not tapped, and let go once the target is
+        _GUN_RELEASE_FACTOR times that far out, or not visible; every other
+        release (takeover, cancel, loop exit, dive recovery) comes through
+        release_tracking_holds."""
+        if not self._pursuit_gun_on_centre:
+            return
+        limit = self._pursuit_gun_centre_err * (
+            self._GUN_RELEASE_FACTOR if self._gun_held_since is not None else 1.0)
+        centred = (bool(visible) and err is not None and err_y is not None
+                   and abs(err) <= limit and abs(err_y) <= limit)
+        if centred and self._gun_held_since is None:
+            self._press_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
+            self._gun_held_since = time.time()
+            logger.debug("HOLD[gun]: None -> fire (target centred err=%+.3f err_y=%+.3f)",
+                         err, err_y)
+        elif not centred and self._gun_held_since is not None:
+            self.release_gun_hold(
+                why="target lost" if not visible or err is None or err_y is None
+                else "off centre err=%+.3f err_y=%+.3f" % (err, err_y))
+
+    def release_gun_hold(self, why: str = "release") -> None:
+        """Release the machine gun if the pursuit is holding it; no-op
+        otherwise. Logs the burst's length."""
+        if self._gun_held_since is None:
+            return
+        held = time.time() - self._gun_held_since
+        self._gun_held_since = None
+        self._gun_fired_s += held
+        self._release_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
+        logger.debug("HOLD[gun]: fire -> None after %.1fs (%s)", held, why)
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
@@ -3595,6 +3654,8 @@ class Controller:
                 logger.info("Controller: pursue_and_engage — tracking engaged, both axes free")
                 start = time.time()
                 tally = _EngagementTally()
+                tally.gun_enabled = self._pursuit_gun_on_centre
+                self._gun_fired_s = 0.0
                 icon_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
                 icon_error_logged = False
                 last_seen_ts = None
@@ -3749,6 +3810,7 @@ class Controller:
                                 if guard is None and (self._roll_hold_reason == "search"
                                                       or wings_level):
                                     self._search_look_down()
+                        self._pursuit_gun_tick(visible, err, err_y)
                         if icon_state is not None:
                             try:
                                 act = "level" if wings_level else "-"
@@ -3852,6 +3914,7 @@ class Controller:
                 # a roll/pitch key this loop was holding.
                 self.release_tracking_holds(why="pursuit loop exit")
                 if tally is not None:
+                    tally.gun_s = self._gun_fired_s
                     logger.info(tally.line(
                         "PURSUIT",
                         end_reason if fall_through

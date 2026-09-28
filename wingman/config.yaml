@@ -1217,6 +1217,15 @@ pursuit_mode:
   # should correct them. centre_delay_s 0 disables the extension.
   search_resume_centre_err: 0.15
   search_resume_centre_delay_s: 6.0
+  # Operator, 2026-09-28: "turn on machine gun 'a' when target reaches center of
+  # screen". While the tracker has a target within gun_centre_err of the screen
+  # centre on both axes (the tracker's error, in half-frame units: 0.05 is about
+  # 48 px across and 30 px up or down at 1920x1200, the steering deadband), the
+  # pursuit holds FIRE_MACHINE_GUN; it lets go once the target is 1.5 times that
+  # far out or lost. Logged as HOLD[gun], and as gun=<s> on PURSUIT SUMMARY.
+  # Named guess; false turns it off.
+  gun_on_centre: true
+  gun_centre_err: 0.05
   # mission_su30 no longer presses SWITCH_WEAPON at step 2 (operator,
   # 2026-09-24: "not switch weapons until it runs out"; ADR 144 D4). Its
   # pursuit hand-off defers the switch until the selected weapon's ammo has
