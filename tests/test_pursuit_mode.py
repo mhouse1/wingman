@@ -844,10 +844,11 @@ class _FrameCapture(_CaptureStub):
         return self.frame
 
 
-def _icon_pursuit(monkeypatch, caplog, script, icon_steering=None, **kw):
+def _icon_pursuit(monkeypatch, caplog, script, icon_steering=None, capture=None, **kw):
     # Uncapped and ended by a respawn: a cap would fall through into the dive,
     # whose own descent control presses NOSE_DOWN.
-    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_FrameCapture(),
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2),
+                       capture=capture or _FrameCapture(),
                        pursuit_enabled=True, pursuit_max_duration_s=0.0,
                        icon_steering=icon_steering, **kw)
     ctrl.set_target_tracker(_ScriptedTracker(script))
@@ -882,6 +883,44 @@ def test_icon_shadow_waits_after_a_lock_like_roll_on_miss(monkeypatch, caplog):
                                  icon_steering={"enabled": True}, search_resume_delay_s=30.0)
     assert "rung=track" in lines[0]
     assert all("rung=wait" in ln for ln in lines[1:]), lines
+
+
+_NEAR = {"visible": True, "error_norm": 0.05, "error_norm_y": 0.0, "mode": "TRACKING"}
+
+
+def _wait_cuts(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("ICONWAIT:")]
+
+
+def test_active_icon_points_end_the_near_centre_wait_after_the_base_delay(monkeypatch, caplog):
+    """2026-09-27 18:51:45 (cycle 11): a target shot near the centre left a 6 s
+    neutral wait with the next enemy's icon on the ring the whole time. The base
+    delay still waits; the near-centre extension gives way to active points."""
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_NEAR, _MISS],
+                                 icon_steering={"enabled": True},
+                                 search_resume_delay_s=0.2, search_resume_centre_delay_s=30.0)
+    assert "rung=track" in lines[0]
+    assert "rung=wait" in lines[1], lines
+    assert "rung=icon" in lines[-1], lines
+    assert len(_wait_cuts(caplog)) == 1, "logged once per lost lock"
+
+
+def test_active_icon_points_do_not_end_the_base_delay(monkeypatch, caplog):
+    """The base delay is the lock dropping for a scan or two with the target
+    still on screen: 696 of 798 reacquisitions over 30 logs came inside it."""
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_NEAR, _MISS],
+                                 icon_steering={"enabled": True},
+                                 search_resume_delay_s=30.0, search_resume_centre_delay_s=60.0)
+    assert all("rung=wait" in ln for ln in lines[1:]), lines
+    assert _wait_cuts(caplog) == []
+
+
+def test_without_an_icon_the_near_centre_wait_runs_its_course(monkeypatch, caplog):
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_NEAR, _MISS],
+                                 icon_steering={"enabled": True}, capture=_BlankCapture(),
+                                 search_resume_delay_s=0.2, search_resume_centre_delay_s=30.0)
+    assert all("rung=wait" in ln for ln in lines[1:]), lines
+    assert _wait_cuts(caplog) == []
 
 
 def test_icon_shadow_off_logs_nothing_and_leaves_the_summary_alone(monkeypatch, caplog):
@@ -977,15 +1016,15 @@ class _TelemetryAnalyzer(_AnalyzerStub):
 
 
 def _step_2b(monkeypatch, caplog, capture, *, angle=-5.0, guard=None, actuate_pitch=True,
-             analyzer=None, actuate_turn=False, push_floor_m=None):
+             analyzer=None, actuate_turn=False, push_floor_m=None, script=None, **kw):
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer or _TelemetryAnalyzer(), capture=capture,
                        pursuit_enabled=True, pursuit_max_duration_s=0.0,
                        sustained_hold_enabled=True,
                        icon_steering={"enabled": True, "wings_level": True,
                                       "actuate_pitch": actuate_pitch,
                                       "actuate_turn": actuate_turn,
-                                      "push_floor_m": push_floor_m})
-    ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
+                                      "push_floor_m": push_floor_m}, **kw)
+    ctrl.set_target_tracker(_ScriptedTracker(script or [_MISS]))
     look_downs = []
     monkeypatch.setattr(ctrl, "_search_look_down", lambda: look_downs.append(1) or False)
     monkeypatch.setattr(ctrl, "_telemetry_path_angle_deg", lambda: angle)
@@ -1288,6 +1327,21 @@ def test_below_the_push_floor_a_side_icon_is_turned_toward_not_flown_past(monkey
     assert ("key_press", NOSE_UP_KEY) in keys
     assert any("intent=down" in ln and "withheld=alt " in ln and "act=bankleft+up" in ln
                for ln in lines), lines
+
+
+def test_after_a_near_centre_kill_the_next_icon_is_flown_toward_within_the_base_delay(
+        monkeypatch, caplog):
+    """The 18:51:45 sequence end to end: a lock near the centre is lost, the
+    archived left icon is on the ring, and the jet banks toward it once the base
+    delay is over instead of flying neutral for the whole 6 s extension. On the
+    old code nothing but the fire key was pressed inside the 0.9 s run."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                              analyzer=_TelemetryAnalyzer(alt=1200.0), push_floor_m=1500,
+                              script=[_NEAR, _MISS], search_resume_delay_s=0.2,
+                              search_resume_centre_delay_s=30.0)
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert any("rung=wait" in ln for ln in lines) and "act=bankleft+up" in lines[-1], lines
 
 
 def test_above_the_push_floor_the_same_icon_still_pushes(monkeypatch, caplog):

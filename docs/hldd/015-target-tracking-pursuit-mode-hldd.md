@@ -620,7 +620,9 @@ flowchart TD
     V -->|yes| TR[Tracker steers and zero points]
     V -->|no| U[Update points from this scan]
     U --> W{Inside the wait after a lock}
-    W -->|yes| WN[Neutral as today]
+    W -->|yes| WX{Past the base delay with an axis active}
+    WX -->|yes| IS
+    WX -->|no| WN[Neutral as today]
     W -->|no| A{An axis active}
     A -->|yes| IS[Dominant intent keys]
     A -->|no| R{Icon seen in the last 3 s}
@@ -633,7 +635,9 @@ flowchart TD
   drops for a scan or two with the target still on screen. A third of lock ticks show a ring icon, most
   likely another enemy's, so letting the icon pre-empt the wait would often steer away from the target
   just lost toward a different one. The points still update during the wait, so the icon steers at once
-  when it ends.
+  when it ends. **Narrowed 2026-09-27 (cycle 11):** only the base delay (`search_resume_delay_s`) keeps
+  priority. Active points end the near-centre extension, which measured over 30 logs recovered few
+  targets and flew neutral past a visible icon (see "Iterate cycle 11" below).
 - **The blind search turns toward the last known side.** When no lock and no icon has been seen for
   `blind_search_after_s` (3.0 s), the search runs as today, but it holds ROLL_RIGHT instead of ROLL_LEFT
   when `turn_pts` is still positive (left when it is zero or negative, and when nothing has been seen).
@@ -1036,6 +1040,94 @@ detected at 19:43:20.9. Inferred: the dive and the neutral `wait` caused it, the
 cycle 9 entry names; the fallback turn was pulling up when it engaged. The post-loss `wait` is the next
 change.
 
+**Iterate cycle 11 (2026-09-27): active icon points end the near-centre wait.** The operator's 18:51 report
+had two parts, and cycle 10 fixed only the second. The first was 18:51:45.4-51.4: a full 6 s neutral `wait`
+after the kill, with the next enemy's icon on the ring for 42 of its ticks.
+
+Measured over the 30 logs with `ICONPTS` lines (2026-09-26 to 19:45 today; several code states, so a
+diagnosis, not a rate for one build). 2,075 `wait` episodes:
+
+| Measure | Count |
+|---------|------:|
+| Episodes ended by the tracker finding a target again | 798 |
+| of those, within the base 2 s delay | 696 (87%) |
+| of those, after 2 s (only the near-centre extension waits that long) | 102 |
+| of those 102, with the icon points active before the lock came back | 48 |
+| Waits that ran past 2.2 s (the near-centre extension) | 864 |
+| of those, ended by a lock | 97 (11%) |
+| of those, ended by the timer and then flown by the icon rung | 378 |
+| of those, ended by a death (respawn detected) | 216 (25%) |
+| Full waits (5 s or more) with the points active before the end | 411 of 688 |
+| Neutral seconds in those 411 after both 2 s and the points going active | 1,439 s |
+
+The deaths inside waits mostly had no active points (12 of the 139 in full waits), so this change is not a
+fix for them. They are the tracker-dive-then-wait pattern, a separate question.
+
+Change: in `Controller._icon_rung`, once the base delay (`search_resume_delay_s`, 2 s) has passed, active
+points (`IconPoints.intent()` not `none`) end the near-centre extension and the tick goes to the `icon` rung.
+The base delay is unchanged, as is the extension when no axis is active. The tracker's own memory of the
+lost target (`LOST_GRACE`, still the full 6 s) is unchanged, so a target that comes back during the turn is
+locked as before. One DEBUG line per lost lock: `ICONWAIT: centre wait cut at <s>s of <s>s, pts=(T,P)`.
+
+Not done: the operator's "away from where the target was lost" test. The extension applies only to a lock
+lost within `search_resume_centre_err` (0.15) of the centre, and every ring icon sits 168-216 px out on the
+ring. The cost of turning is measured instead: at most 48 late reacquisitions over the 30 logs had points
+active first.
+
+Tests: `tests/test_pursuit_mode.py`, 5 new: active points end the extension after the base delay (ICONPTS goes
+`track`, `wait`, then `icon`; one `ICONWAIT`); active points do not end the base delay; with no icon the
+extension runs its course; and, end to end with the archived left icon at 1200 m under the 1500 m floor, a
+near-centre loss banks left and pulls within the run (`act=bankleft+up`). With the change disabled, the first
+and the last fail and the three guards pass.
+
+Gate: `make lint` clean; `make test` 2,480 passed, 35 skipped. `make rd`, wingman pid 3072611, started
+20:10:40.
+
+Measure: `ICONWAIT` lines per battle-minute and the seconds each one saves (the wait's length minus the cut
+time); how many cuts are followed by a lock inside the old 6 s (the turn did not lose the target) or by none;
+deaths within 6 s of a cut.
+
+Cycle 11 session, live findings (measured, `wingman.log` from 20:10:40):
+
+- First cut, 20:19:25.6: `centre wait cut at 2.1s of 6.0s, pts=(+0.0,+25.0)`. The lock had been lost at
+  20:19:23.5 near the centre with the tracker already pushing (err_y +0.05 to +0.11); a ring icon straight
+  below (85-93 deg) appeared on the next tick. The icon rung pushed with the wings level from 1929 m at -20
+  deg and 1274 KPH, still pushing at 1403 m (20:19:28.6); 389 m at 20:19:31.6; terrain death at 20:19:36.
+  Inferred: the cut started a push about 4 s earlier than the old wait would have, in a dive already under
+  way; the floor below should have stopped it at 1500 m and did not.
+- **Defect in the cycle 9 push floor: it reads the smoothed altitude.** `_icon_down_withheld` compares
+  `push_floor_m` with `snap.altitude.stable_value`, the mean of the last three accepted readings (about 9 s).
+  At 20:19:28.7 the accepted readings were 2287, 1929 and 1403, so the floor saw 1873 m while the HUD read
+  1403 m; at 20:19:31.6 it still saw 1873 m with the HUD at 389 m. At 19:43:14 it saw 1840 m against 1322 m.
+  `altitude.value`, the last accepted reading, is in the same snapshot; ADR 069 d6 made the same point about
+  speed (the smoothed value is the wrong input once the value changes fast).
+- Pushes pressed while the latest HUD altitude (within 6 s) was below 1500 m: 0 of 230 ticks in the 18:42
+  session, 30 of 104 in 3 episodes in the 19:39 session, 26 of 214 in 2 episodes so far in this one. Of those
+  5 episodes, 3 ended in a terrain death within 5 s: 19:42:13 (push from 1098 m), 19:43:21 (1322 m, 0.4 s of
+  push before `alt-none` switched it to the fallback turn), 20:19:36 (1403 m).
+- Correction to the cycle 10 session paragraph above: the 19:42:13 death followed a leaked push from
+  19:42:10 at 1098 m, and the 19:43:21 death followed 0.4 s of leaked push (19:43:18.28-18.69) before the
+  fallback turn. Both were read there as "straight" or "dive then wait" deaths.
+
+- Cuts 2 and 3: 20:21:07 (icon straight above, 1475 m at -18 deg: pulled up with the wings level, +7 deg at
+  1596 m 0.7 s later, a lock 5.6 s after the cut, pursuit ended on ammo); 20:24:30.8 (icon up and right:
+  bank right and pull; shot down 2.1 s later, incoming alert about 6 s before the death, so already under way).
+- Cut 4, 20:31:29.7: `pts=(+24.9,+1.6)`, an icon almost level on the right. The cycle 7 below-horizon rule
+  (any active axis with the pitch score above zero pushes with the wings level) pushed instead of turning
+  right: 1825 m at -4 deg, 1665 m at -10 deg (20:31:32.5), 972 m at -48 deg (20:31:35.5), when the angle rule
+  finally withheld it. The floor saw 1868 m, 1791 m, then 1487 m only at 20:31:35.6. Death 20:31:43.
+- After 4 rounds (20:10:40-20:32): 4 cuts; 2 ended in a push the lagging floor did not stop and a terrain
+  death (20:19:36, 20:31:43), 1 in a lock, 1 in an enemy kill already under way. Too few for a rate, but the
+  failure watched for (deaths after a cut) is confirmed twice by the same measured mechanism, so the run was
+  stopped with `z` at 20:32:10: further evidence on this build mixes the cut with the floor defect.
+- Session totals (`Wingman Session Summary`): 21 m 58 s, 4 missions, 14 respawns; died armed 9 (enemy
+  fire 5, terrain 3, unclassified 1). Exited at the lobby at 20:32:39, game and `:3` closed normally.
+
+Next change (cycle 12, not made in this cycle): the floor reads the last accepted altitude, projected to now
+by the measured rate (`value + rate * age`), not `stable_value`. The dive guard's own altitude terms should be
+checked for the same input. Separately, for the operator: the below-horizon push for an icon that is nearly
+level and far to one side (cut 4, and the cycle 7 note "an enemy mostly to the right").
+
 ### Lock rate by session (measured, 2026-09-26)
 
 Pursuits of 20 s or more that reached any lock, and the mean `first_lock` of those that did:
@@ -1135,7 +1227,7 @@ bindings and ADRs 069, 101, 107 and 148. What changed:
 |-------------|---------|-----|
 | Turn points held the roll key toward their side, together with any pitch key | Dominant-intent law: roll only with a pull, never with a push | A bank without a pull does not turn (ADR 101, measured); a bank with a push turns away from the bank. The first draft would have steered away from the reference icon's enemy after 1.6 s |
 | A saturated score kept its key held for up to 2.7 s after the icon vanished | Keys release 0.3 s after the last icon; the scores stay as memory. **Reversed the same day by the operator:** the scores hold with no icon and keep steering until a lock (see "How the points reset") | The icon is mostly absent when a target is on screen (32% of lock ticks against 64% unlocked), so the coast would overshoot the enemy just found |
-| Icon steering pre-empted the wait after a lock | The wait keeps priority | A third of lock ticks show an icon, probably another enemy's |
+| Icon steering pre-empted the wait after a lock | The wait keeps priority. **Narrowed 2026-09-27 (cycle 11):** the base delay keeps it; active points end the near-centre extension | A third of lock ticks show an icon, probably another enemy's. Over 30 logs, 87% of reacquisitions came inside the base delay; the extension recovered 97 of 864 |
 | The blind fallback kept the fixed left roll | It turns toward the side the points last showed | The fixed left roll was the thing to replace, and the scores already hold the last known side |
 | Hue 0-6 | Hue 0-15, hue logged | An orange ring icon was measured at hue 12-13 |
 | Full-frame scan | The ring's bounding square only | The band is the only place an icon can be |

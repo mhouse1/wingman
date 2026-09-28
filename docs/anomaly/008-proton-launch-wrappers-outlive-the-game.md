@@ -52,6 +52,8 @@ The processes left running, all started with the session:
 | 10:54:58 | `z` after a 6-minute, 1-mission run | closed 0.25 s after SIGTERM, `:3` 0.25 s later | **gone within 11 s** (checked 10:55:09) |
 | 15:17:58 | `z` after the operator's 3 h 36 m, 36-mission run | same as above | gone by 15:54 (pre-flight); exact time not recorded |
 | 18:35:22 | `z` after a 2 h 41 m, 29-mission run | same as above | **still running at 18:38:32**, stopped by hand |
+| 19:45:29 | `z` in `GAME_WAITING` after a 6-minute, 1-round run | same as above | gone by about 20:10 (pre-flight: 0 processes); exact time not recorded |
+| 20:32:39 | `z` in `GAME_LOBBY` after a 22-minute, 4-mission run | same as above | **gone within 9 s** (checked 20:32:48) |
 
 The two long `z` exits went through the same shutdown path; one left the wrappers and
 one, as far as the 15:54 check can say, did not.
