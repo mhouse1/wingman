@@ -782,6 +782,9 @@ class Controller:
         # game's ring icon each steering tick and log the keys the law would
         # hold (ICONPTS). Presses nothing; the search above keeps flying.
         self._icon_cfg = IconSteeringConfig.from_dict(_pm.get("icon_steering"))
+        # The lost lock (its last-seen time) whose centre wait the icon cut
+        # short, so ICONWAIT logs once per lost lock.
+        self._icon_wait_cut_ts: "float | None" = None
         # Timestamp of the altitude sample the last look-down tap acted on.
         self._search_look_down_sample_ts: "float | None" = None
         # Set by _pursuit_dive_guard: the ttg term tripped, and the rate it saw.
@@ -3293,7 +3296,8 @@ class Controller:
         Rungs, in priority order: `recovery` (ADR 148 owns both axes; points
         zeroed), `track` (the tracker has a labelled target; points zeroed),
         `wait` (inside roll_on_miss's neutral wait after a lock; points still
-        update), `icon` (an active axis, with or without an icon this tick),
+        update; active points end the near-centre extension but not the base
+        delay), `icon` (an active axis, with or without an icon this tick),
         `hold` (an icon within blind_search_after_s: neutral while points
         build), `blind` (today's search, which would roll toward `side=`).
         """
@@ -3314,9 +3318,25 @@ class Controller:
                 self._pursuit_search_resume_delay_s, last_err,
                 self._pursuit_search_resume_centre_err,
                 self._pursuit_search_resume_centre_delay_s)
-            if last_seen_ts is not None and time.time() - last_seen_ts < wait_s:
+            since = None if last_seen_ts is None else time.time() - last_seen_ts
+            active = points.intent()[0] != "none"
+            # Active points end the near-centre extension, never the base
+            # delay (2026-09-27, cycle 11). Over 30 logs, 696 of 798 lost locks
+            # came back within the base 2 s; the extension to 6 s ran 864 times
+            # and got 97 back, while 378 went on to the icon anyway and 216
+            # ended in a death. The 18:51:45 kill waited out all 6 s with the
+            # next enemy's icon on the ring.
+            if since is not None and since < wait_s and not (
+                    active and since >= self._pursuit_search_resume_delay_s):
                 rung = "wait"
-            elif points.intent()[0] != "none":
+            elif since is not None and since < wait_s:
+                rung = "icon"
+                if self._icon_wait_cut_ts != last_seen_ts:
+                    self._icon_wait_cut_ts = last_seen_ts
+                    logger.debug(
+                        "ICONWAIT: centre wait cut at %.1fs of %.1fs, pts=(%+.1f,%+.1f)",
+                        since, wait_s, points.turn_pts, points.pitch_pts)
+            elif active:
                 rung = "icon"
             elif points.icon_seen_within(cfg.blind_search_after_s):
                 rung = "hold"
