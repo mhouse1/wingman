@@ -44,6 +44,18 @@ def analyzer() -> GameStateAnalyzer:
         a.cleanup()
 
 
+def test_event_refresh_holds_lobby_until_30_second_recheck(analyzer: GameStateAnalyzer):
+    popup_crops = ["INVITED", "event_refresh", "FINAL_CONTINUE"]
+    analyzer._event_refresh_recheck_after = 130.0
+
+    assert analyzer._event_refresh_holds_lobby(GameState.GAME_LOBBY)
+    assert not analyzer._event_refresh_holds_lobby(GameState.GAME_WAITING)
+    assert analyzer._popup_crops_for_scan(popup_crops, now=129.9) == [
+        "INVITED", "FINAL_CONTINUE"
+    ]
+    assert analyzer._popup_crops_for_scan(popup_crops, now=130.0) == popup_crops
+
+
 @pytest.fixture
 def require_easyocr():
     pytest.importorskip("easyocr", reason="EasyOCR not installed")
