@@ -64,6 +64,7 @@ STARTING_MIN_CONFIRMED_HEALTH = 20
 # If PLAY/READY remains visible after a click, retry instead of leaving the
 # lobby stalled indefinitely. A successful click leaves GAME_LOBBY promptly.
 LOBBY_PLAY_RETRY_S = 10.0
+EVENT_REFRESH_RECHECK_S = 30.0
 
 # ADR 084: states where the FSM has lost the screen and a recovery action is
 # warranted. Deliberately EXCLUDES GAME_LOBBY / GAME_WAITING — unlike the popup
@@ -1203,6 +1204,7 @@ class GameStateAnalyzer:
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
         self._shutting_down = False
         self._last_lobby_play_click_ts = 0.0  # reset on GAME_LOBBY re-entry
+        self._event_refresh_recheck_after = 0.0
         self._waiting_cancel_baseline_gray: "np.ndarray | None" = None
         self._waiting_cancel_baseline_shape: "tuple[int, int] | None" = None
         self._waiting_cancel_baseline_lock = threading.Lock()
@@ -3361,6 +3363,15 @@ class GameStateAnalyzer:
             targets.append(STALL_UNREADY_CROP)
         return targets
 
+    def _event_refresh_holds_lobby(self, state):
+        return state == GameState.GAME_LOBBY and self._event_refresh_recheck_after > 0.0
+
+    def _popup_crops_for_scan(self, popup_crops, now):
+        if (self._event_refresh_recheck_after > 0.0
+                and now < self._event_refresh_recheck_after):
+            return [crop for crop in popup_crops if crop != "event_refresh"]
+        return popup_crops
+
     def _run_game_lobby_quick_scan(self):
         """Scan lobby crops every 1s while in a POPUP_DISMISS_STATES state.
 
@@ -3400,6 +3411,9 @@ class GameStateAnalyzer:
         while not self._lobby_quick_scan_stop.wait(timeout=1.0):
             cycle_start = time.time()
             state = self.game_state
+            if state != GameState.GAME_LOBBY:
+                self._event_refresh_recheck_after = 0.0
+            event_refresh_holds_lobby = self._event_refresh_holds_lobby(state)
             if state != GameState.GAME_LOBBY:
                 # Stall tracking only applies while continuously in GAME_LOBBY — clear it
                 # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
@@ -3443,7 +3457,7 @@ class GameStateAnalyzer:
                 play_clicked_this_cycle = False
 
                 if state == GameState.GAME_LOBBY:
-                    crops_to_scan = lobby_crops
+                    crops_to_scan = [] if event_refresh_holds_lobby else lobby_crops
                 elif state == GameState.GAME_WAITING:
                     crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
                 elif state in LOBBY_RECHECK_STATES:
@@ -3671,6 +3685,11 @@ class GameStateAnalyzer:
                 # --- Popup crops (both states, every 5s) ---
                 popup_futures = {}
                 popup_scan_start = None
+                event_refresh_recheck_due = (
+                    self._event_refresh_recheck_after > 0.0
+                    and time.time() >= self._event_refresh_recheck_after
+                )
+                popup_scan_crops = self._popup_crops_for_scan(popup_crops, time.time())
                 if do_popup_scan:
                     with self._click_to_frame_lock:
                         popup_frame = self._click_to_latest_frame
@@ -3686,7 +3705,7 @@ class GameStateAnalyzer:
                         else:
                             last_popup_scan_ts = time.time()
                             popup_scan_start = time.time()
-                            for crop in popup_crops:
+                            for crop in popup_scan_crops:
                                 popup_futures[crop] = executor.submit(     # ADR 103
                                     _process_text_region,
                                     _crop_for_ocr(popup_frame, self.crops[crop][:4]),
@@ -3710,17 +3729,27 @@ class GameStateAnalyzer:
 
                 if popup_futures:
                     popup_detected = False
-                    for crop in popup_crops:
+                    event_refresh_checked = False
+                    event_refresh_detected = False
+                    for crop in popup_scan_crops:
                         if crop not in popup_futures:
                             continue
                         try:
                             detected, _, text = popup_futures[crop].result(timeout=20)
+                            if crop == "event_refresh":
+                                event_refresh_checked = True
                             if detected:
                                 logger.info(
                                     "Lobby quick-scan: popup '%s' detected (text='%s')",
                                     crop, text,
                                 )
+                                if crop == "event_refresh":
+                                    event_refresh_detected = True
                                 self.emit(GameEvent.LOBBY_POPUP_CLICK, crop)
+                                if crop == "event_refresh":
+                                    self._event_refresh_recheck_after = (
+                                        time.time() + EVENT_REFRESH_RECHECK_S
+                                    )
                                 popup_detected = True
                                 break
                             logger.debug("Lobby quick-scan: popup '%s' not found", crop)
@@ -3734,7 +3763,16 @@ class GameStateAnalyzer:
                         # The screen is popup-free: tells the ADR 074 recorder a
                         # prior dismissal actually worked, so a continuing stall
                         # is not blamed on popup handling.
-                        self.emit(GameEvent.LOBBY_POPUP_ABSENT)
+                        if not self._event_refresh_recheck_after or event_refresh_checked:
+                            self.emit(GameEvent.LOBBY_POPUP_ABSENT)
+
+                    if (event_refresh_recheck_due and event_refresh_checked
+                            and not event_refresh_detected):
+                        self._event_refresh_recheck_after = 0.0
+                        logger.info(
+                            "Lobby quick-scan: event_refresh absent after 30s; "
+                            "lobby scan resumed"
+                        )
 
                     if popup_scan_start is not None:
                         logger.debug(
