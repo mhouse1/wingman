@@ -1,6 +1,7 @@
 import contextlib
 import ctypes
 import logging
+import math
 import sys
 import threading
 import time
@@ -19,6 +20,7 @@ from .hotkeys import register_hotkeys as _register_hotkeys
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
+from .resupply import MissileUrgency, find_resupply_marker, resupply_preempts
 from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
     _WINGMAN_XAUTH,
     _XKEY_ALIASES,
@@ -797,6 +799,12 @@ class Controller:
         # game's ring icon each steering tick and log the keys the law would
         # hold (ICONPTS). Presses nothing; the search above keeps flying.
         self._icon_cfg = IconSteeringConfig.from_dict(_pm.get("icon_steering"))
+        _resupply_cfg = _pm.get("resupply_priority") or {}
+        self._resupply_priority_enabled = bool(_resupply_cfg.get(
+            "enabled", schema_default("pursuit_mode.resupply_priority.enabled")))
+        self._resupply_priority_actuate = (
+            self._resupply_priority_enabled and bool(_resupply_cfg.get(
+                "actuate", schema_default("pursuit_mode.resupply_priority.actuate"))))
         # The lost lock (its last-seen time) whose centre wait the icon cut
         # short, so ICONWAIT logs once per lost lock.
         self._icon_wait_cut_ts: "float | None" = None
@@ -3657,11 +3665,17 @@ class Controller:
                 tally.gun_enabled = self._pursuit_gun_on_centre
                 self._gun_fired_s = 0.0
                 icon_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
+                missile_urgency = MissileUrgency(self._pursuit_empty_confirm_reads)
+                missile_priority = missile_urgency.snapshot()
+                resupply_seeking = False
+                rack_id = (0 if defer_switch_until_empty
+                           and not self._eject_weapon_switched else 1)
                 icon_error_logged = False
+                resupply_error_logged = False
                 last_seen_ts = None
                 last_visible_err = None
                 zero_reads = 0
-                switched_at = None
+                switched_at = start if switched_here or weapon_already_switched else None
                 yielding = False   # ADR 148: a dive-recovery climb owns pitch and roll
                 self._dive_guard_reason = None
                 self._dive_guard_next_pullout_ts = 0.0
@@ -3699,11 +3713,41 @@ class Controller:
                                 logger.info(
                                     "Controller: pursue_and_engage — dive recovery over, "
                                     "steering resumes")
+                        resupply_marker = None
+                        if (self._resupply_priority_enabled
+                                and (missile_priority.missiles_spent > 0
+                                 or missile_priority.empty or resupply_seeking)):
+                            try:
+                                resupply_marker = find_resupply_marker(frame)
+                            except Exception:
+                                if not resupply_error_logged:
+                                    logger.exception(
+                                        "Controller: resupply marker scan failed")
+                                    resupply_error_logged = True
+                        enemy_strength = (0.0 if icon_points is None else
+                                          math.hypot(icon_points.turn_pts,
+                                                     icon_points.pitch_pts))
+                        resupply_proposed = resupply_preempts(
+                            priority=missile_priority,
+                            marker_visible=resupply_marker is not None,
+                            opponent_locked=bool(visible),
+                            opponent_strength=enemy_strength,
+                            points_scale=self._icon_cfg.points_scale)
+                        resupply_control = (self._resupply_priority_actuate
+                                            and resupply_proposed)
+                        if resupply_proposed and not resupply_seeking:
+                            logger.info(
+                                "RESUPPLY: urgency overtook pursuit at spent=%d; "
+                                "rearm focus begins (%s)",
+                                missile_priority.missiles_spent,
+                                "actuating" if self._resupply_priority_actuate else "shadow")
+                        resupply_seeking = resupply_seeking or resupply_proposed
+                        control_visible = bool(visible) and not resupply_control
                         icon_state = None
-                        if icon_points is not None:
+                        if icon_points is not None and not resupply_control:
                             try:
                                 icon_state = self._icon_rung(
-                                    frame, icon_points, visible=bool(visible),
+                                    frame, icon_points, visible=control_visible,
                                     yielding=yielding, last_seen_ts=last_seen_ts,
                                     last_err=last_visible_err)
                             except Exception:
@@ -3725,7 +3769,7 @@ class Controller:
                         # and a steep descent is pulled toward level. Decided
                         # before the roll so the icon law below knows it.
                         guard = None if yielding else self._pursuit_dive_guard(
-                            target_visible=bool(visible))
+                            target_visible=control_visible)
                         # The icon law's move, decided once for roll and pitch.
                         # A refused push turns toward the icon instead of flying
                         # straight (2026-09-27 18:51:51, IconPoints.intent).
@@ -3736,14 +3780,21 @@ class Controller:
                                 icon_withheld = self._icon_down_withheld(guard)
                             icon_intent = icon_points.intent(
                                 down_allowed=icon_withheld == "-")
-                        if visible and err is not None:
+                        if resupply_control and not yielding:
+                            error_x = ((resupply_marker.x - frame.shape[1] / 2)
+                                       / (frame.shape[1] / 2))
+                            self.orient_nose_to_target(
+                                error_x, ignore_cancel=True,
+                                sustained_hold=self._sustained_hold_enabled)
+                        elif control_visible and err is not None:
                             last_seen_ts = time.time()
                             last_visible_err = err
                             if not yielding:
                                 self.orient_nose_to_target(
                                     err, ignore_cancel=True,
                                     sustained_hold=self._sustained_hold_enabled)
-                        elif self._sustained_hold_enabled and not yielding:
+                        elif (self._sustained_hold_enabled and not yielding
+                            and not resupply_control):
                             if wings_level:
                                 # Step 3: the law's roll ("turn", or "up" with a
                                 # side) when actuate_turn is on; otherwise, and for
@@ -3774,7 +3825,17 @@ class Controller:
                                     self._pursuit_search_resume_centre_delay_s,
                                     side=_last_known_side(
                                         last_seen_ts, last_visible_err, icon_points))
-                        if visible and err_y is not None:
+                        if resupply_control and not yielding:
+                            error_y = ((resupply_marker.y - frame.shape[0] / 2)
+                                       / (frame.shape[0] / 2))
+                            if error_y > 0 and guard:
+                                self.release_pitch_hold(
+                                    why="dive guard resupply err_y=%+.3f" % error_y)
+                            else:
+                                self.orient_pitch_to_target(
+                                    error_y, ignore_cancel=True,
+                                    sustained_hold=self._sustained_hold_enabled)
+                        elif control_visible and err_y is not None:
                             if not yielding:
                                 if err_y > 0 and guard:
                                     self.release_pitch_hold(
@@ -3810,7 +3871,7 @@ class Controller:
                                 if guard is None and (self._roll_hold_reason == "search"
                                                       or wings_level):
                                     self._search_look_down()
-                        self._pursuit_gun_tick(visible, err, err_y)
+                        self._pursuit_gun_tick(control_visible, err, err_y)
                         if icon_state is not None:
                             try:
                                 act = "level" if wings_level else "-"
@@ -3849,6 +3910,8 @@ class Controller:
                             except Exception:
                                 health = None
                         tally.scan(visible, ammo)
+                        priority_ammo_reading = ammo
+                        priority_rack_id = rack_id
                         # mission_su30 (ADR 144 D4, 2026-09-24): the switch is
                         # deferred until the selected weapon runs out. Only a
                         # run of consecutive 0 reads counts — SWITCH_WEAPON is
@@ -3870,6 +3933,7 @@ class Controller:
                                 self.switch_weapon(
                                     hold_seconds=0.1, block=True, ignore_cancel=True)
                                 self._eject_weapon_switched = True
+                                rack_id = 1
                                 switched_at = time.time()
                                 switched_here = True
                                 primary_pending = False
@@ -3878,27 +3942,64 @@ class Controller:
                                 # show the new one, so it is not acted on as if it
                                 # were the secondary's.
                                 ammo = None
+                        terminal_zero = False
                         if ammo == 0 and not primary_pending:
                             grace_from = switched_at if switched_at is not None else start
-                            if time.time() - grace_from >= self._pursuit_ammo_grace_s:
+                            terminal_zero = (
+                                time.time() - grace_from >= self._pursuit_ammo_grace_s)
+                        if self._resupply_priority_enabled and ammo == 0:
+                            logger.debug(
+                                "RESUPPLY AMMO: rack=%s primary_pending=%s "
+                                "terminal_zero=%s grace=%.1fs",
+                                rack_id, primary_pending, terminal_zero,
+                                self._pursuit_ammo_grace_s)
+                        was_empty = missile_priority.empty
+                        priority_ammo = priority_ammo_reading
+                        post_switch_grace = (
+                            switched_at is not None
+                            and priority_rack_id == rack_id
+                            and time.time() - switched_at < self._pursuit_ammo_grace_s)
+                        if post_switch_grace and priority_ammo == 0:
+                            priority_ammo = None
+                        missile_priority = missile_urgency.observe(
+                            priority_ammo, priority_rack_id,
+                            terminal_zero=(terminal_zero and priority_rack_id == rack_id),
+                            resupply_seeking=resupply_seeking)
+                        if missile_priority.rearmed:
+                            logger.info(
+                                "RESUPPLY: confirmed ammo=%s; urgency reset, "
+                                "resuming target pursuit",
+                                ammo)
+                            resupply_seeking = False
+                        if missile_priority.empty and not was_empty:
+                            logger.info(
+                                "RESUPPLY: missiles exhausted; maximum urgency reached")
+                        if (self._resupply_priority_enabled
+                                and (missile_priority.missiles_spent > 0
+                                     or missile_priority.empty)):
+                            marker_text = ("-" if resupply_marker is None else
+                                           "(%.0f,%.0f)" % (resupply_marker.x,
+                                                             resupply_marker.y))
+                            logger.debug(
+                                "RESUPPLY: spent=%d empty=%s marker=%s weight=%.1f "
+                                "opponent=%.1f proposed=%s seeking=%s mode=%s",
+                                missile_priority.missiles_spent,
+                                missile_priority.empty, marker_text,
+                                missile_priority.missiles_spent * self._icon_cfg.points_scale,
+                                enemy_strength, resupply_proposed, resupply_seeking,
+                                "actuate" if self._resupply_priority_actuate else "shadow")
+                        if terminal_zero and not self._resupply_priority_actuate:
                                 logger.info(
                                     "Controller: pursue_and_engage — ammo exhausted, "
                                     "falling through to eject_and_dive")
                                 fall_through = True
                                 end_reason = "ammo"
                                 break
-                            # Still inside the post-switch grace period (see
-                            # this class's own __init__ comment on
-                            # _pursuit_ammo_grace_s) — this 0 is likely still
-                            # the pre-switch reading, not a real empty
-                            # secondary loadout. Fall through to the ammo>0
-                            # check below, which already skips firing on 0
-                            # without ending the encounter — same tolerance
-                            # _eject_heatdive_loop already has for this exact
-                            # lag, just never applied here before.
                         # Fail open on an unreadable count, matching ADR 136
                         # D1 step 4's own reasoning for the heatdive loop.
-                        if ammo is None or ammo > 0:
+                        if ((ammo is None or ammo > 0)
+                                and not (self._resupply_priority_actuate
+                                         and missile_priority.empty)):
                             self.fire_active_weapon(hold_seconds=0.1, block=False, ignore_cancel=True)
                         if self._hud_renderer is not None:
                             self._hud_renderer.maybe_render(

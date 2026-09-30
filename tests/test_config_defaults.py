@@ -49,6 +49,18 @@ def test_a_key_without_a_declared_default_says_so():
         schema_default("telemetry.no_such_key")
 
 
+def test_resupply_priority_ships_shadow_only():
+    from wingman.config_schema import schema_default
+
+    shipped = yaml.safe_load(pathlib.Path("wingman/config.yaml").read_text(encoding="utf-8"))
+    assert schema_default("pursuit_mode.resupply_priority.enabled") is True
+    assert schema_default("pursuit_mode.resupply_priority.actuate") is False
+    assert shipped["pursuit_mode"]["resupply_priority"] == {
+        "enabled": True,
+        "actuate": False,
+    }
+
+
 def test_every_declared_default_passes_its_own_leaf():
     """A default the validator would reject is a trap for the first run without
     the key."""

@@ -19,6 +19,7 @@ from wingman.controller import (
     ROLL_LEFT_KEY, ROLL_RIGHT_KEY, SWITCH_WEAPON,
 )
 from tests.perception_fake import PerceptionFake
+from wingman.resupply import ResupplyMarker
 
 
 class _AnalyzerStub(PerceptionFake):
@@ -91,7 +92,8 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 eject_max_s=0.2, heatdive_enabled=False, ammo_zero_grace_s=0.0,
                 sustained_hold_enabled=False, search_resume_delay_s=0.0,
                 empty_confirm_reads=3, search_resume_centre_err=0.15,
-                search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None):
+                search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None,
+                resupply_priority_enabled=True, resupply_priority_actuate=False):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -130,6 +132,10 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 "search_resume_centre_err": search_resume_centre_err,
                 "search_resume_centre_delay_s": search_resume_centre_delay_s,
                 "empty_confirm_reads": empty_confirm_reads,
+                "resupply_priority": {
+                    "enabled": resupply_priority_enabled,
+                    "actuate": resupply_priority_actuate,
+                },
                 **({"icon_steering": icon_steering} if icon_steering is not None else {}),
                 **({"dive_safety": dive_safety} if dive_safety is not None else {}),
             },
@@ -254,6 +260,134 @@ def test_ammo_exhausted_falls_through_to_eject_and_dive(monkeypatch):
     assert ctrl._eject_thread is not None, "ammo-exhausted should fall through to eject_and_dive"
     assert ("key_press", FIRE_ACTIVE_WEAPON) not in _keys(ctrl), \
         "must not fire on a tick that already reads ammo == 0"
+
+
+def test_zero_ammo_actuation_seeks_marker_without_firing_or_diving(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame: marker)
+    analyzer = _AnalyzerStub(ammo=0)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True,
+        icon_steering={
+            "enabled": True,
+            "wings_level": True,
+            "actuate_pitch": True,
+            "actuate_turn": True,
+        })
+    assert ctrl._resupply_priority_actuate
+    assert ctrl._pursuit_ammo_grace_s == 0.0
+    ammo_reads = []
+    monkeypatch.setattr(analyzer, "get_ammo_missiles",
+                        lambda: ammo_reads.append(time.time()) or 0)
+    tracker = _TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0)
+    ctrl.set_target_tracker(tracker)
+
+    ctrl.pursue_and_engage()
+    try:
+        time.sleep(0.6)
+        pursuing = ctrl.is_pursuing()
+        eject_thread = ctrl._eject_thread
+        reads = list(ammo_reads)
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert pursuing, "confirmed zero must continue in resupply-seeking mode"
+    assert eject_thread is None, "zero ammo must not fall through to eject_and_dive"
+    assert reads
+    assert "maximum urgency reached" in logs
+    assert "proposed=True seeking=True mode=actuate" in logs
+    assert ("key_press", ROLL_RIGHT_KEY) in keys, "steer toward the marker on the right"
+    roll_presses = [key for action, key in keys
+                    if action == "key_press" and key in (ROLL_LEFT_KEY, ROLL_RIGHT_KEY)]
+    assert roll_presses[-1] == ROLL_RIGHT_KEY, (
+        "resupply steering supersedes the initial target correction")
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert ("key_press", FIRE_ACTIVE_WEAPON) not in keys
+
+
+def test_zero_ammo_without_marker_keeps_searching_until_external_stop(monkeypatch):
+    scans = []
+    monkeypatch.setattr(
+        controller_module, "find_resupply_marker",
+        lambda _frame: scans.append(1) or None)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_AnalyzerStub(ammo=0), capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=True))
+
+    ctrl.pursue_and_engage()
+    time.sleep(0.6)
+
+    assert ctrl.is_pursuing()
+    assert ctrl._eject_thread is None
+    assert scans, "keep searching for the marker while no target is visible"
+    assert ("key_press", ROLL_RIGHT_KEY) in _keys(ctrl), (
+        "without the marker, preserve ordinary tracking toward the visible opponent")
+    assert ("key_press", FIRE_ACTIVE_WEAPON) not in _keys(ctrl)
+
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+
+def test_resupply_does_not_override_a_locked_opponent_while_ammo_remains(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame: marker)
+    analyzer = _SequenceAnalyzer([3, 2])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    tracker = _TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0)
+    ctrl.set_target_tracker(tracker)
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    time.sleep(1.0)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    keys = _keys(ctrl)
+    assert "RESUPPLY: spent=1" in caplog.text
+    assert "marker=(1400,600)" in caplog.text
+    assert "proposed=False seeking=False mode=actuate" in caplog.text
+    assert ("key_press", ROLL_LEFT_KEY) in keys, "the locked opponent remains the target"
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys, "do not steer toward resupply under lock"
+
+
+def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame: marker)
+    analyzer = _SequenceAnalyzer([4, 2, 2, 6, 6])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    tracker = _TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0)
+    ctrl.set_target_tracker(tracker)
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(1.7)
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert "RESUPPLY: urgency overtook pursuit at spent=2" in logs
+    assert "proposed=True seeking=True mode=actuate" in logs
+    rearm_at = logs.index("RESUPPLY: confirmed ammo=6; urgency reset, resuming target pursuit")
+    assert "roll_left - pressing" in logs[rearm_at:], (
+        "target attack resumes after the confirmed ammo increase")
+    assert ("key_press", ROLL_RIGHT_KEY) in keys, "resupply focus steers toward the marker"
 
 
 def test_ammo_zero_within_grace_period_does_not_fall_through(monkeypatch):
@@ -611,6 +745,42 @@ def test_deferred_switch_grace_is_measured_from_the_switch(monkeypatch, caplog):
     assert "switching to the secondary" in caplog.text
     assert "ammo exhausted" not in caplog.text
     assert "max duration" in caplog.text
+
+
+def test_stale_zero_during_switch_grace_does_not_hide_missiles_spent(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    analyzer = _SequenceAnalyzer([0, 0, 2, 2, 1, 1])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        ammo_zero_grace_s=3.0, empty_confirm_reads=1)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(1.4)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert "RESUPPLY: spent=1 empty=False" in caplog.text
+    assert "terminal_zero=True" not in caplog.text
+
+
+def test_empty_primary_rack_contributes_spent_missiles_before_switch(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    analyzer = _SequenceAnalyzer([3, 3, 3, 0, 0, 0])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=3)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(1.8)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert "switching to the secondary" in caplog.text
+    assert "RESUPPLY: spent=3" in caplog.text
 
 
 def test_max_duration_before_empty_does_not_switch_weapons(monkeypatch):
