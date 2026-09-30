@@ -121,14 +121,20 @@ pursuit. Every new pursuit after respawn resets urgency.
   resumption, no firing at zero, no-marker fallback, and legacy shadow behavior.
 - **V4. Passed.** Policy and pursuit tests cover respawn/external stop, rearm
   reset, duration-cap fall-through, and deferred rack switching.
-- **V5. Pending live evidence.** Shipped config logs marker visibility,
-  attributed ammo by rack, urgency, and proposed steering with `actuate: false`.
-  A live trial must confirm marker detection and that approaching it produces
-  a positive ammo reading before actuation is enabled.
+- **V5. Partial live evidence (2026-09-29 canary).** One `make r1` session used
+  a local 30-second pursuit cap and `actuate: true`; shipped config remained
+  unchanged. Across 10 pursuit episodes, two transient marker candidates were
+  logged and one priority crossover occurred at `spent=2` (marker positions
+  `(211,551)` and `(177,153)`). The pursuit then reached its cap at 30.4s with
+  ammo `4->2`; no positive ammo increase or rearm was observed. The marker was
+  absent on intervening scans, so sustained resupply steering was not
+  demonstrated. No resupply scan or pursuit-loop errors occurred. V5 remains
+  open pending a frame-verified marker and a confirmed ammo increase.
 
 Final automated gates on 2026-09-29: `make lint` passed; `make test` passed
 with 2,471 passed and 75 skipped. Live marker/rearm behavior has not been
-observed, so ADR status remains Draft and steering actuation remains gated off.
+verified as resupply, and no rearm was observed; ADR status remains Draft and
+steering actuation remains gated off.
 
 ## References
 
