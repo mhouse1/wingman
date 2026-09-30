@@ -361,13 +361,19 @@ def test_resupply_does_not_override_a_locked_opponent_while_ammo_remains(monkeyp
     assert ("key_press", ROLL_RIGHT_KEY) not in keys, "do not steer toward resupply under lock"
 
 
-def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monkeypatch, caplog):
+def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monkeypatch, caplog, tmp_path):
     caplog.set_level("DEBUG", logger="wingman.controller")
     marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
     monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame: marker)
+    capture = _FrameCapture()
+    saved_frames = []
+    monkeypatch.setattr(controller_module, "_RESUPPLY_SAMPLE_DIR", tmp_path)
+    monkeypatch.setattr(
+        controller_module.cv2, "imwrite",
+        lambda path, frame: saved_frames.append((path, frame)) or True)
     analyzer = _SequenceAnalyzer([4, 2, 2, 6, 6])
     ctrl = _make_ctrl(
-        monkeypatch, analyzer=analyzer, capture=_FrameCapture(),
+        monkeypatch, analyzer=analyzer, capture=capture,
         pursuit_enabled=True, pursuit_max_duration_s=5.0,
         empty_confirm_reads=1, resupply_priority_actuate=True)
     tracker = _TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0)
@@ -384,6 +390,8 @@ def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monke
 
     assert "RESUPPLY: urgency overtook pursuit at spent=2" in logs
     assert "proposed=True seeking=True mode=actuate" in logs
+    assert len(saved_frames) == 1
+    assert saved_frames[0][1] is capture.frame
     rearm_at = logs.index("RESUPPLY: confirmed ammo=6; urgency reset, resuming target pursuit")
     assert "roll_left - pressing" in logs[rearm_at:], (
         "target attack resumes after the confirmed ammo increase")

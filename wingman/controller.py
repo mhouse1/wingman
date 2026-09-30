@@ -5,8 +5,10 @@ import math
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable, NamedTuple
 
+import cv2
 from mss import mss
 
 from .state import GameState, NOSE_DOWN
@@ -39,6 +41,7 @@ except Exception:
     keyboard_module = None
 
 logger = logging.getLogger(__name__)
+_RESUPPLY_SAMPLE_DIR = Path("tests/test-output/target_tracking")
 
 # Module-level so tests can monkeypatch `controller.keyboard_module` in one place.
 keyboard_module = maybe_install_linux_keyboard(keyboard_module)
@@ -3672,6 +3675,8 @@ class Controller:
                            and not self._eject_weapon_switched else 1)
                 icon_error_logged = False
                 resupply_error_logged = False
+                resupply_samples_saved = 0
+                last_resupply_marker_visible = False
                 last_seen_ts = None
                 last_visible_err = None
                 zero_reads = 0
@@ -3724,6 +3729,29 @@ class Controller:
                                     logger.exception(
                                         "Controller: resupply marker scan failed")
                                     resupply_error_logged = True
+                        marker_visible = resupply_marker is not None
+                        if (marker_visible and not last_resupply_marker_visible
+                                and resupply_samples_saved < 2):
+                            sample_path = _RESUPPLY_SAMPLE_DIR / (
+                                f"resupply_candidate_{time.time_ns()}_"
+                                f"{resupply_samples_saved}.png")
+                            try:
+                                _RESUPPLY_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+                                if cv2.imwrite(str(sample_path), frame):
+                                    resupply_samples_saved += 1
+                                    logger.info(
+                                        "RESUPPLY: candidate frame saved=%s marker=(%.0f,%.0f)",
+                                        sample_path, resupply_marker.x, resupply_marker.y)
+                                else:
+                                    logger.warning(
+                                        "RESUPPLY: failed to save candidate frame %s",
+                                        sample_path)
+                            except Exception:
+                                if not resupply_error_logged:
+                                    logger.exception(
+                                        "Controller: resupply candidate frame save failed")
+                                    resupply_error_logged = True
+                        last_resupply_marker_visible = marker_visible
                         enemy_strength = (0.0 if icon_points is None else
                                           math.hypot(icon_points.turn_pts,
                                                      icon_points.pitch_pts))
