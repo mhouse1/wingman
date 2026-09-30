@@ -641,6 +641,10 @@ SCHEMA = Section(
             "dive_guard_pullout_interval_s": SECONDS,
             "dive_guard_level_rate_mps": _num(0),
             "search_floor_m": _num(0),                  # look-down search
+            "resupply_priority": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                "actuate": Leaf(types=(bool,), default=False),
+            }),
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,
             "search_look_down_min_deg": _num(-90, 0),

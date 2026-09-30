@@ -1151,6 +1151,11 @@ padlock_center_indicator:
 # Flagged to the operator before this edit; they chose to proceed anyway.
 pursuit_mode:
   enabled: true
+  # ADR 152: collect yellow-marker and missile-urgency evidence without
+  # changing pursuit control until a live rearm has been confirmed.
+  resupply_priority:
+    enabled: true
+    actuate: false
   # Named guess, not measured — a live shadow trial should correct it, same
   # status as HLDD 015's own Configuration Additions section.
   # Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching and
