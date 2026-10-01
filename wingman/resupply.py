@@ -26,6 +26,10 @@ class MissilePriority:
     rearmed: bool = False
 
 
+RESUPPLY_MIN_MISSILES_SPENT = 2
+RESUPPLY_MARKER_HOLD_S = 0.5
+
+
 def find_resupply_marker(frame) -> "ResupplyMarker | None":
     """Find the sparse, near-square yellow marker in a color capture.
 
@@ -76,6 +80,30 @@ def find_resupply_marker(frame) -> "ResupplyMarker | None":
         candidates.append(ResupplyMarker(x, y, width, height, area, angle))
 
     return max(candidates, key=lambda marker: marker.area, default=None)
+
+
+class ResupplyMarkerMemory:
+    """Hold a detected marker target briefly across scan dropouts."""
+
+    def __init__(self, hold_s: float = RESUPPLY_MARKER_HOLD_S) -> None:
+        self._hold_s = max(0.0, float(hold_s))
+        self._marker: "ResupplyMarker | None" = None
+        self._seen_at: "float | None" = None
+
+    def resolve(self, marker: "ResupplyMarker | None", now: float, *,
+                seeking: bool) -> tuple["ResupplyMarker | None", bool]:
+        if marker is not None:
+            self._marker = marker
+            self._seen_at = now
+            return marker, False
+        if (seeking and self._marker is not None and self._seen_at is not None
+                and now - self._seen_at <= self._hold_s):
+            return self._marker, True
+        return None, False
+
+    def clear(self) -> None:
+        self._marker = None
+        self._seen_at = None
 
 
 class MissileUrgency:
@@ -142,21 +170,10 @@ class MissileUrgency:
         return MissilePriority(self._missiles_spent, self._empty, rearmed)
 
 
-def resupply_preempts(*, priority: MissilePriority, marker_visible: bool,
-                      opponent_locked: bool, opponent_strength: float,
-                      points_scale: float) -> bool:
-    """Whether a visible resupply marker outranks pursuit this tick.
-
-    A locked target has one points-scale unit of priority. Each missile spent
-    adds one such unit to resupply urgency, so target attacks win ties and
-    resupply can take priority before the rack is empty.
-    """
+def resupply_preempts(*, priority: MissilePriority,
+                      marker_visible: bool) -> bool:
+    """Whether a visible marker takes priority after two confirmed missiles."""
     if not marker_visible:
         return False
-    if priority.empty:
-        return True
-    if priority.missiles_spent <= 0:
-        return False
-    target_priority = max(opponent_strength,
-                          points_scale if opponent_locked else 0.0)
-    return priority.missiles_spent * points_scale > target_priority
+    return (priority.empty
+            or priority.missiles_spent >= RESUPPLY_MIN_MISSILES_SPENT)

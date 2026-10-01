@@ -24,28 +24,29 @@ the previous rack was confirmed empty before switching. Use
 `empty_confirm_reads` consecutive readings to confirm an ammo-count change.
 Each confirmed missile spent adds one unit to the resupply urgency. A rack
 switch, unreadable reading, or transient OCR increase must not reduce urgency.
-Do not add configurable urgency thresholds in the first implementation. Each
-missile spent adds one `icon_steering.points_scale` unit to resupply urgency.
-A locked target has one such unit of priority, and the target wins ties. Thus a
-visible resupply marker does not interrupt a target attack after only one
-missile is spent, but can take priority after further missiles are used. Zero
-confirmed missiles remains the maximum-priority state.
+Do not add a configurable urgency threshold. A visible resupply marker takes
+priority once at least two missiles have been confirmed spent; one spent
+missile alone does not interrupt normal pursuit. Confirmed zero remains the
+maximum-priority state.
 
-**D3. Resupply priority arbitrates pursuit steering.** While missiles remain,
-the locked target keeps priority until resupply urgency strictly exceeds its
-one-unit baseline; against unlocked search, compare resupply urgency with the
-current opponent-icon points. When a visible resupply marker wins, temporarily
-yield target steering and focus on resupply. Confirmed rearm ends that focus,
-resets urgency, and resumes target pursuit. At confirmed zero missiles, the
-marker always wins and firing is disabled. If the marker is not detected,
-continue existing pursuit behavior and keep scanning; do not steer toward a
-stale marker position or lower urgency. Existing hard safety ownership still
-takes precedence, and urgency is retained while steering yields.
+**D3. Resupply priority arbitrates pursuit steering.** Once at least two
+missiles have been confirmed spent, a visible marker temporarily takes priority
+over target and opponent-icon steering. If a later scan misses the marker,
+continue steering toward its last accepted position for at most half a second
+while scanning for it again. Then return to normal pursuit until it is detected.
+Small icons rejected by the detector remain ignored. Confirmed rearm ends the
+focus, clears the held position, resets urgency, and resumes normal pursuit. At
+confirmed zero missiles, the marker always wins and firing is disabled. Existing
+hard safety ownership still takes precedence, and urgency is retained while
+steering yields. The selected objective is shown by the same magenta HUD
+steering vector and ring used for target pursuit, labeled `RESUPPLYING` (or
+`RESUPPLYING (lost)` while using the bounded hold). The enemy tracker remains
+unchanged; the HUD receives the active steering objective separately.
 
 **D4. Resupply focus is gated and not limited to zero missiles.** When
-`pursuit_mode.resupply_priority.actuate` is true, a visible marker can interrupt
-target attack as soon as its urgency wins the priority comparison, including
-before zero. At confirmed zero, a visible marker always takes steering
+`pursuit_mode.resupply_priority.actuate` is true, a visible or briefly held
+marker can interrupt normal pursuit once two missiles are spent, before zero.
+At confirmed zero, a visible or briefly held marker always takes steering
 priority, firing stops, and the current ammo-exhaustion handoff to
 `eject_and_dive` is suppressed. Until actuation is enabled, shadow mode logs
 the same proposals and preserves existing control and handoff behavior. Keep
@@ -67,13 +68,14 @@ the next pursuit starts at its initial priority. No state carries across lives.
 ## Consequences
 
 - The pursuit loop gains yellow-icon detection and a resupply steering
-  objective, while opponent icon detection remains unchanged.
+  objective, while opponent icon detection remains unchanged. HUD annotation
+  follows whichever objective currently owns steering.
 - Confirmed ammunition readings must be attributed to the correct weapon rack
   so a weapon switch neither resets urgency nor falsely declares the inventory
   empty.
-- A visible resupply marker competes with a locked target before zero using
-  the linear urgency comparison. The target wins ties; resupply wins only when
-  more missiles spent makes its urgency strictly higher.
+- A visible resupply marker takes priority over normal pursuit after two
+  confirmed missiles have been spent, regardless of target or opponent-icon
+  strength.
 - At zero missiles the aircraft may remain in pursuit until it reaches
   resupply, is stopped externally, or reaches its configured duration cap.
   The shipped cap is currently unbounded, so failure to detect a resupply icon
@@ -86,14 +88,20 @@ the next pursuit starts at its initial priority. No state carries across lives.
 
 Implemented 2026-09-29 in `wingman/resupply.py` and
 `Controller.pursue_and_engage`. Resupply detection and urgency telemetry are
-enabled in shipped config, while resupply steering actuation remains disabled.
+enabled in shipped config. Shadow-session coverage supports advancing to a
+live actuation trial; `pursuit_mode.resupply_priority.actuate` is enabled for
+that trial.
 Ammo changes are confirmed by consecutive reads, tracked per rack, and stale
 post-switch zeroes are ignored during the existing grace period. Resupply
-urgency competes with target attack before zero; target priority wins ties.
-During resupply focus, a confirmed same-rack ammo increase resets urgency and
-resumes target pursuit. At terminal zero, actuated mode stops firing; a
-detected marker wins steering, while a missing marker preserves ordinary
-pursuit. Every new pursuit after respawn resets urgency.
+steering begins when a marker is visible or recently detected and
+either two missiles are confirmed spent or ammo is confirmed zero. The recently
+detected position is retained for at most half a second during focus; detector
+thresholds remain unchanged. The shared magenta HUD selected-target annotation
+is labeled `RESUPPLYING` while this objective controls the axes. During resupply
+focus, a confirmed same-rack ammo increase resets urgency and resumes target
+pursuit. At terminal zero, actuated mode stops firing; without a fresh or
+briefly held marker, ordinary pursuit steering resumes. Every new pursuit after
+respawn resets urgency.
 
 ## Evidence and Assumptions
 
@@ -106,8 +114,9 @@ pursuit. Every new pursuit after respawn resets urgency.
   on-screen position. It is a different visual signal from the red/orange
   enemy direction markers.
 - **Assumed:** detecting and approaching the yellow marker leads to a rearm
-  that can be confirmed by a positive ammo reading. Validate this in shadow
-  mode and a live trial before enabling resupply steering.
+  that can be confirmed by a positive ammo reading. The shadow run below
+  supports trying actuation, but only live evidence can establish marker
+  precision and confirm rearm.
 
 ## Validation
 
@@ -116,12 +125,20 @@ pursuit. Every new pursuit after respawn resets urgency.
 - **V2. Passed.** Unit tests cover confirmed per-rack decreases, monotonic
   urgency, switch preservation, transient increases, terminal-zero
   confirmation, and rearm reset.
-- **V3. Passed.** Pursuit tests cover the pre-zero lock threshold, marker
-  override once urgency exceeds target priority, confirmed rearm and target
-  resumption, no firing at zero, no-marker fallback, and legacy shadow behavior.
+- **V3. Passed.** Pursuit tests cover the two-missile marker threshold,
+  bounded hold through a brief detector dropout and expiry, confirmed rearm and
+  target resumption, HUD selected-target replacement and label, no firing at
+  zero, no-marker fallback, and legacy shadow behavior.
 - **V4. Passed.** Policy and pursuit tests cover respawn/external stop, rearm
   reset, duration-cap fall-through, and deferred rack switching.
-- **V5. Partial live evidence (2026-09-29 canary).** One `make r1` session used
+- **V5a. Shadow coverage (2026-09-29).** The 13h54m session in
+  `logs/wingman_20260929_222852.log` covered 135 missions and 543 pursuit
+  episodes. It recorded 53,657 resupply telemetry lines, including 8,969
+  marker-positive scans and 2,678 ticks where resupply would have won priority.
+  No resupply errors were logged. The shadow run did not save candidate frames
+  or record confirmed rearm resets, so it is enough to advance to an actuated
+  trial, not to validate marker precision or close V5.
+- **V5b. Partial live evidence (2026-09-29 canary).** One `make r1` session used
   a local 30-second pursuit cap and `actuate: true`; shipped config remained
   unchanged. Across 10 pursuit episodes, two transient marker candidates were
   logged and one priority crossover occurred at `spent=2` (marker positions
@@ -130,11 +147,17 @@ pursuit. Every new pursuit after respawn resets urgency.
   absent on intervening scans, so sustained resupply steering was not
   demonstrated. No resupply scan or pursuit-loop errors occurred. V5 remains
   open pending a frame-verified marker and a confirmed ammo increase.
+- **V5c. Actuated trial (2026-09-30).** The current live log recorded two
+  pursuits with resupply actuation enabled. One candidate frame visibly shows
+  the yellow marker; a second candidate appears to be an explosion/fire
+  false positive. Priority crossed at `spent=1`, but both pursuits ended
+  externally with ammo `2->2`; no confirmed rearm was observed. This supports
+  that the live path can detect and prioritize a marker, while marker precision
+  and rearm remain unverified. V5 remains open.
 
 Final automated gates on 2026-09-29: `make lint` passed; `make test` passed
-with 2,471 passed and 75 skipped. Live marker/rearm behavior has not been
-verified as resupply, and no rearm was observed; ADR status remains Draft and
-steering actuation remains gated off.
+with 2,471 passed and 75 skipped. ADR status remains Draft; V5 remains open
+pending a reliable marker and confirmed ammo increase during resupply focus.
 
 ## References
 

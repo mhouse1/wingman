@@ -6,6 +6,7 @@ import pytest
 
 from wingman.resupply import (
     MissilePriority,
+    ResupplyMarkerMemory,
     MissileUrgency,
     find_resupply_marker,
     resupply_preempts,
@@ -131,32 +132,38 @@ def test_unreadable_ammo_breaks_a_confirmation_run_without_losing_priority():
     assert state.missiles_spent == 1
 
 
-def test_resupply_weight_grows_with_each_missile_spent():
+def test_resupply_priority_requires_two_missiles_spent():
     assert not resupply_preempts(
-        priority=MissilePriority(1, False), marker_visible=True,
-        opponent_locked=False, opponent_strength=5, points_scale=5)
+        priority=MissilePriority(1, False), marker_visible=True)
     assert resupply_preempts(
-        priority=MissilePriority(2, False), marker_visible=True,
-        opponent_locked=False, opponent_strength=5, points_scale=5)
+        priority=MissilePriority(2, False), marker_visible=True)
 
 
-def test_resupply_priority_can_interrupt_target_before_zero():
+def test_resupply_priority_starts_after_two_missiles_and_overrides_opponents():
     assert not resupply_preempts(
-        priority=MissilePriority(0, False), marker_visible=True,
-        opponent_locked=True, opponent_strength=0, points_scale=5)
+        priority=MissilePriority(0, False), marker_visible=True)
     assert not resupply_preempts(
-        priority=MissilePriority(1, False), marker_visible=True,
-        opponent_locked=True, opponent_strength=0, points_scale=5)
+        priority=MissilePriority(1, False), marker_visible=True)
     assert resupply_preempts(
-        priority=MissilePriority(2, False), marker_visible=True,
-        opponent_locked=True, opponent_strength=0, points_scale=5)
-    assert not resupply_preempts(
-        priority=MissilePriority(1, False), marker_visible=True,
-        opponent_locked=False, opponent_strength=5, points_scale=5)
-    assert resupply_preempts(
-        priority=MissilePriority(2, False), marker_visible=True,
-        opponent_locked=False, opponent_strength=5, points_scale=5)
+        priority=MissilePriority(2, False), marker_visible=True)
 
     assert not resupply_preempts(
-        priority=MissilePriority(5, True), marker_visible=False,
-        opponent_locked=True, opponent_strength=25, points_scale=5)
+        priority=MissilePriority(5, True), marker_visible=False)
+    assert resupply_preempts(
+        priority=MissilePriority(0, True), marker_visible=True)
+
+
+def test_resupply_marker_memory_holds_only_during_a_brief_seek_dropout():
+    frame = cv2.imread(str(FIXTURES / "MISSILE_EMPTY_RESUPPLY.png"))
+    marker = find_resupply_marker(frame)
+    memory = ResupplyMarkerMemory(hold_s=0.5)
+
+    assert marker is not None
+    assert memory.resolve(marker, 10.0, seeking=False) == (marker, False)
+    assert memory.resolve(None, 10.49, seeking=True) == (marker, True)
+    assert memory.resolve(None, 10.51, seeking=True) == (None, False)
+    assert memory.resolve(None, 10.49, seeking=False) == (None, False)
+
+    memory.resolve(marker, 20.0, seeking=True)
+    memory.clear()
+    assert memory.resolve(None, 20.1, seeking=True) == (None, False)
