@@ -364,7 +364,15 @@ def test_resupply_does_not_override_a_locked_opponent_while_ammo_remains(monkeyp
 def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monkeypatch, caplog, tmp_path):
     caplog.set_level("DEBUG", logger="wingman.controller")
     marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
-    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame: marker)
+    detector_calls = 0
+
+    def detect_marker_with_dropout(_frame):
+        nonlocal detector_calls
+        detector_calls += 1
+        return marker if detector_calls == 1 else None
+
+    monkeypatch.setattr(
+        controller_module, "find_resupply_marker", detect_marker_with_dropout)
     capture = _FrameCapture()
     saved_frames = []
     monkeypatch.setattr(controller_module, "_RESUPPLY_SAMPLE_DIR", tmp_path)
@@ -376,6 +384,15 @@ def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monke
         monkeypatch, analyzer=analyzer, capture=capture,
         pursuit_enabled=True, pursuit_max_duration_s=5.0,
         empty_confirm_reads=1, resupply_priority_actuate=True)
+    class _HudCapture:
+        def __init__(self):
+            self.calls = []
+
+        def maybe_render(self, *args, **kwargs):
+            self.calls.append(kwargs)
+
+    hud_renderer = _HudCapture()
+    ctrl.set_hud_renderer(hud_renderer)
     tracker = _TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0)
     ctrl.set_target_tracker(tracker)
 
@@ -390,6 +407,11 @@ def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monke
 
     assert "RESUPPLY: urgency overtook pursuit at spent=2" in logs
     assert "proposed=True seeking=True mode=actuate" in logs
+    assert "marker_stale=True" in logs
+    assert any(
+        kwargs.get("steering_label") == "RESUPPLYING"
+        and kwargs.get("steering_target") == (marker.x, marker.y)
+        for kwargs in hud_renderer.calls)
     assert len(saved_frames) == 1
     assert saved_frames[0][1] is capture.frame
     rearm_at = logs.index("RESUPPLY: confirmed ammo=6; urgency reset, resuming target pursuit")

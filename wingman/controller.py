@@ -22,7 +22,13 @@ from .hotkeys import register_hotkeys as _register_hotkeys
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
-from .resupply import MissileUrgency, find_resupply_marker, resupply_preempts
+from .resupply import (
+    MissileUrgency,
+    RESUPPLY_MIN_MISSILES_SPENT,
+    ResupplyMarkerMemory,
+    find_resupply_marker,
+    resupply_preempts,
+)
 from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
     _WINGMAN_XAUTH,
     _XKEY_ALIASES,
@@ -3671,6 +3677,7 @@ class Controller:
                 missile_urgency = MissileUrgency(self._pursuit_empty_confirm_reads)
                 missile_priority = missile_urgency.snapshot()
                 resupply_seeking = False
+                resupply_marker_memory = ResupplyMarkerMemory()
                 rack_id = (0 if defer_switch_until_empty
                            and not self._eject_weapon_switched else 1)
                 icon_error_logged = False
@@ -3718,18 +3725,27 @@ class Controller:
                                 logger.info(
                                     "Controller: pursue_and_engage — dive recovery over, "
                                     "steering resumes")
-                        resupply_marker = None
+                        detected_resupply_marker = None
                         if (self._resupply_priority_enabled
                                 and (missile_priority.missiles_spent > 0
                                  or missile_priority.empty or resupply_seeking)):
                             try:
-                                resupply_marker = find_resupply_marker(frame)
+                                detected_resupply_marker = find_resupply_marker(frame)
                             except Exception:
                                 if not resupply_error_logged:
                                     logger.exception(
                                         "Controller: resupply marker scan failed")
                                     resupply_error_logged = True
-                        marker_visible = resupply_marker is not None
+                        marker_visible = detected_resupply_marker is not None
+                        resupply_priority_eligible = (
+                            missile_priority.empty
+                            or missile_priority.missiles_spent
+                            >= RESUPPLY_MIN_MISSILES_SPENT)
+                        resupply_marker, resupply_marker_stale = (
+                            resupply_marker_memory.resolve(
+                                detected_resupply_marker, time.monotonic(),
+                                seeking=(resupply_seeking
+                                         or resupply_priority_eligible)))
                         if (marker_visible and not last_resupply_marker_visible
                                 and resupply_samples_saved < 2):
                             sample_path = _RESUPPLY_SAMPLE_DIR / (
@@ -3741,7 +3757,8 @@ class Controller:
                                     resupply_samples_saved += 1
                                     logger.info(
                                         "RESUPPLY: candidate frame saved=%s marker=(%.0f,%.0f)",
-                                        sample_path, resupply_marker.x, resupply_marker.y)
+                                        sample_path, detected_resupply_marker.x,
+                                        detected_resupply_marker.y)
                                 else:
                                     logger.warning(
                                         "RESUPPLY: failed to save candidate frame %s",
@@ -3757,10 +3774,7 @@ class Controller:
                                                      icon_points.pitch_pts))
                         resupply_proposed = resupply_preempts(
                             priority=missile_priority,
-                            marker_visible=resupply_marker is not None,
-                            opponent_locked=bool(visible),
-                            opponent_strength=enemy_strength,
-                            points_scale=self._icon_cfg.points_scale)
+                            marker_visible=resupply_marker is not None)
                         resupply_control = (self._resupply_priority_actuate
                                             and resupply_proposed)
                         if resupply_proposed and not resupply_seeking:
@@ -3803,12 +3817,18 @@ class Controller:
                         # straight (2026-09-27 18:51:51, IconPoints.intent).
                         icon_withheld = "-"
                         icon_intent = ("none", ())
+                        hud_steering_target = None
+                        hud_steering_label = None
+                        hud_steering_stale = False
                         if icon_state is not None and icon_state["rung"] == "icon":
                             if icon_points.intent()[0] == "down":
                                 icon_withheld = self._icon_down_withheld(guard)
                             icon_intent = icon_points.intent(
                                 down_allowed=icon_withheld == "-")
                         if resupply_control and not yielding:
+                            hud_steering_target = (resupply_marker.x, resupply_marker.y)
+                            hud_steering_label = "RESUPPLYING"
+                            hud_steering_stale = resupply_marker_stale
                             error_x = ((resupply_marker.x - frame.shape[1] / 2)
                                        / (frame.shape[1] / 2))
                             self.orient_nose_to_target(
@@ -3999,6 +4019,7 @@ class Controller:
                                 "resuming target pursuit",
                                 ammo)
                             resupply_seeking = False
+                            resupply_marker_memory.clear()
                         if missile_priority.empty and not was_empty:
                             logger.info(
                                 "RESUPPLY: missiles exhausted; maximum urgency reached")
@@ -4010,12 +4031,14 @@ class Controller:
                                                              resupply_marker.y))
                             logger.debug(
                                 "RESUPPLY: spent=%d empty=%s marker=%s weight=%.1f "
-                                "opponent=%.1f proposed=%s seeking=%s mode=%s",
+                                "opponent=%.1f proposed=%s seeking=%s mode=%s "
+                                "marker_stale=%s",
                                 missile_priority.missiles_spent,
                                 missile_priority.empty, marker_text,
                                 missile_priority.missiles_spent * self._icon_cfg.points_scale,
                                 enemy_strength, resupply_proposed, resupply_seeking,
-                                "actuate" if self._resupply_priority_actuate else "shadow")
+                                "actuate" if self._resupply_priority_actuate else "shadow",
+                                resupply_marker_stale)
                         if terminal_zero and not self._resupply_priority_actuate:
                                 logger.info(
                                     "Controller: pursue_and_engage — ammo exhausted, "
@@ -4031,7 +4054,10 @@ class Controller:
                             self.fire_active_weapon(hold_seconds=0.1, block=False, ignore_cancel=True)
                         if self._hud_renderer is not None:
                             self._hud_renderer.maybe_render(
-                                frame, obs, "PURSUIT_MODE", health, ammo, flares)
+                                frame, obs, "PURSUIT_MODE", health, ammo, flares,
+                                steering_target=hud_steering_target,
+                                steering_label=hud_steering_label,
+                                steering_stale=hud_steering_stale)
                     except Exception:
                         logger.exception("Controller: pursue_and_engage loop cycle failed")
             finally:

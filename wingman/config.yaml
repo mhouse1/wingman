@@ -1155,7 +1155,7 @@ pursuit_mode:
   # changing pursuit control until a live rearm has been confirmed.
   resupply_priority:
     enabled: true
-    actuate: false
+    actuate: true
   # Named guess, not measured — a live shadow trial should correct it, same
   # status as HLDD 015's own Configuration Additions section.
   # Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching and
