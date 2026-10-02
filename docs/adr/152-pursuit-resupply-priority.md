@@ -21,7 +21,9 @@ remaining-ammo count for each rack across weapon switches. During the existing
 post-switch grace period, ignore zero readings that may still belong to the
 previous rack, but accept stable positive readings as the new rack's baseline:
 the previous rack was confirmed empty before switching. Use
-`empty_confirm_reads` consecutive readings to confirm an ammo-count change.
+`empty_confirm_reads` consecutive readings to confirm an ammo-count change. A
+reading is one OCR read: the pursuit loop polls the cached count several times
+per OCR cycle, and repeated polls of one read count once.
 Each confirmed missile spent adds one unit to the resupply urgency. A rack
 switch, unreadable reading, or transient OCR increase must not reduce urgency.
 Do not add a configurable urgency threshold. A visible resupply marker takes
@@ -61,7 +63,11 @@ operational risk.
 resupply proposal is active, a confirmed positive increase in the same rack's
 ammo count indicates rearm even if the rack never reached zero. Record the new
 baseline, clear the spent count, end resupply focus, and resume ordinary target
-pursuit. Ignore increases outside an active resupply focus as OCR noise.
+pursuit. Ignore increases outside an active resupply focus as OCR noise, with
+one exception: at confirmed zero, a confirmed positive count ends the empty
+state without a focus, because the game also rearms on a timer
+([ADR 088](088-eject-rearm-abort-and-incoming-priority-afterburner.md)) and
+firing must come back when it does.
 Respawn always ends the current pursuit and clears all rack counts and urgency;
 the next pursuit starts at its initial priority. No state carries across lives.
 
@@ -92,7 +98,13 @@ enabled in shipped config. Shadow-session coverage supports advancing to a
 live actuation trial; `pursuit_mode.resupply_priority.actuate` is enabled for
 that trial.
 Ammo changes are confirmed by consecutive reads, tracked per rack, and stale
-post-switch zeroes are ignored during the existing grace period. Resupply
+post-switch zeroes are ignored during the existing grace period. Since
+2026-10-02 the reads must be distinct OCR reads: the analyzer numbers each
+stored missile count (`get_ammo_missiles_read_seq`) and `MissileUrgency` does
+not advance a confirmation run on a repeated poll of the same read. With
+`empty_confirm_reads: 3` an urgency change now takes three OCR cycles (about
+three to five seconds) instead of about one second; the weapon-switch
+confirmation in the same loop is unchanged and still counts polls. Resupply
 steering begins when a marker is visible or recently detected and
 either two missiles are confirmed spent or ammo is confirmed zero. The recently
 detected position is retained for at most half a second during focus; detector
@@ -105,9 +117,14 @@ respawn resets urgency.
 
 ## Evidence and Assumptions
 
-- **Measured:** the latest `wingman.log` summary records 61 missions and zero
-  missiles-empty events. Its first line is timestamped 00:52, before this ADR
-  was edited at 06:53; it provides no evidence about resupply behavior.
+- **Measured:** the latest actuated session ran 2026-10-01 06:20 to 19:34
+  (13h13m, 136 missions). It logged 201 resupply-focus starts, all at
+  `spent>=2`, and four `RESUPPLY: confirmed ammo` resets (`7`, `3`, `2`, and
+  `44`). None is evidence of a beacon rearm: three are misreads and one is
+  ambiguous (V5e).
+- **Measured:** each of those resets fired 0.8 to 1.4 seconds after the count
+  first appeared, while one OCR cycle took 1.0 to 1.7 seconds. The three-read
+  confirmation was being met by repeated polls of a single OCR read.
 - **Measured:** both source captures exist in ignored `tests/test-output/`;
   byte-for-byte copies are committed as `tests/fixtures/` inputs.
 - **Inferred:** the resupply target can be used to steer by its detected
@@ -154,10 +171,46 @@ respawn resets urgency.
   externally with ammo `2->2`; no confirmed rearm was observed. This supports
   that the live path can detect and prioritize a marker, while marker precision
   and rearm remain unverified. V5 remains open.
+- **V5d. Actuated session after bounded marker hold (2026-10-01).** The
+  04:57-06:05 session ran with the half-second last-seen position hold. It
+  recorded 26 focus starts, but no confirmed ammo increase or rearm. The log
+  shows a marker dropout with `marker_stale=True`, followed by `marker=-` and
+  `marker_stale=False`, consistent with the hold expiring rather than persisting
+  indefinitely. Fresh marker coordinates also shifted substantially between
+  detections (for example `(1019,810)` to `(948,619)` in about 0.85s); the log
+  alone cannot establish whether this is beacon motion or the detector selecting
+  a different yellow component. V5 remains open pending frame-verified approach
+  and confirmed rearm.
+- **V5e. Second actuated session (2026-10-01).** A separate run, 06:20 to
+  19:34 in `wingman.log`, logged 201 focus starts, 639 held-marker ticks (never
+  more than two in a row, each followed by `marker=-`), eight
+  `missiles exhausted` events and no resupply errors. The priority threshold
+  and the bounded hold behaved as decided. Its four confirmed-ammo resets do
+  not show a rearm at the beacon:
+  - `ammo=7` at 07:19:58: a death mark was set three seconds earlier, the
+    respawn OCR returned `FEEFPAWL`, and the count read 2 again at 07:20:02.
+  - `ammo=3` at 12:20:07: a 2 to 3 change two seconds before
+    `RESPAWN DETECTED`.
+  - `ammo=2` at 15:42:43: a 1 to 2 change about one second after a sustained
+    marker, back to 1 ten seconds later. A single added missile also matches
+    the game's timer rearm
+    ([ADR 088](088-eject-rearm-abort-and-incoming-priority-afterburner.md)),
+    so the log cannot attribute it to the beacon.
+  - `ammo=44` at 15:47:23: flares and missiles both read 44 in one OCR cycle,
+    the count read 0 again 1.4 seconds later, and `missiles exhausted`
+    re-fired at 15:47:25. It reset urgency with `seeking=False marker=-`.
+
+  The session summary shows no `Missiles empty` outcomes. V5 remains open
+  pending a frame-verified approach and a confirmed ammo increase, in a
+  session run after the distinct-read fix of 2026-10-02.
 
 Final automated gates on 2026-09-29: `make lint` passed; `make test` passed
 with 2,471 passed and 75 skipped. ADR status remains Draft; V5 remains open
 pending a reliable marker and confirmed ammo increase during resupply focus.
+Post-change checks on 2026-10-01: `make lint` passed; all 102 tests in
+`tests/test_resupply.py` and `tests/test_pursuit_mode.py` passed.
+The distinct-read change of 2026-10-02 added two tests to
+`tests/test_resupply.py`; lint and tests have not been run on it.
 
 ## References
 

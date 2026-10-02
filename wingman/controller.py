@@ -3942,6 +3942,7 @@ class Controller:
                             continue
                         next_engage_ts = time.time() + self._pursuit_engage_interval_s
                         ammo = None
+                        ammo_read_seq = None
                         flares = None
                         health = None
                         if self._analyzer is not None:
@@ -3949,6 +3950,14 @@ class Controller:
                                 ammo = self._analyzer.get_ammo_missiles()
                             except Exception:
                                 ammo = None
+                            # After the count, so a read landing between the two
+                            # calls recounts the old value, never the new one.
+                            try:
+                                ammo_read_seq = self._analyzer.get_ammo_missiles_read_seq()
+                            except Exception:
+                                ammo_read_seq = None
+                            if not isinstance(ammo_read_seq, int):
+                                ammo_read_seq = None
                             try:
                                 flares = self._analyzer.get_ammo_flares()
                             except Exception:
@@ -4012,7 +4021,8 @@ class Controller:
                         missile_priority = missile_urgency.observe(
                             priority_ammo, priority_rack_id,
                             terminal_zero=(terminal_zero and priority_rack_id == rack_id),
-                            resupply_seeking=resupply_seeking)
+                            resupply_seeking=resupply_seeking,
+                            read_id=ammo_read_seq)
                         if missile_priority.rearmed:
                             logger.info(
                                 "RESUPPLY: confirmed ammo=%s; urgency reset, "

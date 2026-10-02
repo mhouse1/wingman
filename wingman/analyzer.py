@@ -1330,6 +1330,9 @@ class GameStateAnalyzer:
         # Ammo sub-state (GAME_BATTLE only)
         self._ammo_flares: "int | None" = None   # Last known flare count from OCR
         self._ammo_missiles: "int | None" = None  # Last known missile count from OCR
+        # ADR 152 D2: one step per stored missile read. The pursuit loop polls the
+        # count several times per OCR cycle and must not confirm one read as three.
+        self._ammo_missiles_read_seq = 0
         self._ammo_lock = threading.Lock()
         self._last_logged_flares = None
         self._last_logged_missiles = None
@@ -1617,6 +1620,21 @@ class GameStateAnalyzer:
             return None
         try:
             return self._ammo_missiles
+        finally:
+            if self._ammo_lock.locked():
+                self._ammo_lock.release()
+
+    def get_ammo_missiles_read_seq(self):
+        """Return how many missile counts OCR has stored (ADR 152 D2).
+
+        Unchanged between two calls means get_ammo_missiles() is still
+        returning the same read, not a second read that agrees with it.
+        """
+        if not self._ammo_lock.acquire(timeout=1.0):
+            logger.warning("get_ammo_missiles_read_seq: _ammo_lock timeout — returning no value")
+            return None
+        try:
+            return self._ammo_missiles_read_seq
         finally:
             if self._ammo_lock.locked():
                 self._ammo_lock.release()
@@ -3081,6 +3099,7 @@ class GameStateAnalyzer:
                         if missile_value is not None:
                             with self._ammo_lock:
                                 self._ammo_missiles = missile_value
+                                self._ammo_missiles_read_seq += 1
                             if missile_value != self._last_logged_missiles:
                                 logger.info("Ammo missiles: %d", missile_value)
                                 self._last_logged_missiles = missile_value

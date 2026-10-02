@@ -114,14 +114,20 @@ class MissileUrgency:
         self._rack = None
         self._candidate: "int | None" = None
         self._candidate_reads = 0
+        self._read_id: "int | None" = None
         self._ammo_by_rack: dict[object, int] = {}
         self._missiles_spent = 0
         self._empty = False
 
     def observe(self, ammo: "int | None", rack: object, *,
                 terminal_zero: bool = False,
-                resupply_seeking: bool = False) -> MissilePriority:
+                resupply_seeking: bool = False,
+                read_id: "int | None" = None) -> MissilePriority:
         """Record only stable counts; a rack change does not clear urgency.
+
+        `read_id` identifies the OCR read `ammo` came from. A count seen again
+        under the same id is the same read polled twice and does not advance
+        the confirmation run; without an id every call counts as a read.
 
         `terminal_zero` is false for the first rack while a deferred switch is
         pending and during the post-switch HUD grace period. A stable ammo
@@ -139,11 +145,13 @@ class MissileUrgency:
             return self.snapshot()
 
         ammo = int(ammo)
-        if ammo == self._candidate:
-            self._candidate_reads += 1
-        else:
+        new_read = read_id is None or read_id != self._read_id
+        self._read_id = read_id
+        if ammo != self._candidate:
             self._candidate = ammo
             self._candidate_reads = 1
+        elif new_read:
+            self._candidate_reads += 1
         if self._candidate_reads < self._confirm_reads:
             return self.snapshot()
 
