@@ -28,15 +28,19 @@ FROM ${BASE_IMAGE}
 #   libgl1 libglib2.0-0t64           loaded by opencv-python at import
 #   x11-utils                        xprop / xdpyinfo / xwininfo (focus guard, capture)
 #   git make procps tini             Makefile, git-aware tests, pgrep, PID 1
-# The venv sits on the system Python, as on the dev host (CLAUDE.md, "Python
-# Environment"). Of that section's two apt bindings only python3-tk is here:
-# python3-gi and GStreamer serve the PipeWire capture backend, which runs only
-# on a Wayland session, and no test imports gi.
+#   build-essential pkg-config python3-dev libgirepository-2.0-dev libcairo2-dev
+#                                    compile PyGObject and pycairo, which uv.lock
+#                                    pins and PyPI ships only as sdists
+#                                    (scripts/upgrade-linux.sh installs the same)
+# The venv sits on the system Python, so tkinter comes from python3-tk. gi is
+# built into the venv but never imported here: the PipeWire capture backend
+# runs only on a Wayland session.
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates git make procps tini \
       python3 python3-tk python3-venv \
+      build-essential pkg-config python3-dev libgirepository-2.0-dev libcairo2-dev \
       xvfb xauth x11-utils libx11-6 libxrandr2 libxfixes3 \
       libgl1 libglib2.0-0t64 \
  && rm -rf /var/lib/apt/lists/* \

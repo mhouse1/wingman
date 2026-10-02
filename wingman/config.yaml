@@ -1151,8 +1151,9 @@ padlock_center_indicator:
 # Flagged to the operator before this edit; they chose to proceed anyway.
 pursuit_mode:
   enabled: true
-  # ADR 152: collect yellow-marker and missile-urgency evidence without
-  # changing pursuit control until a live rearm has been confirmed.
+  # ADR 152: yellow-marker and missile-urgency detection. actuate: true is the
+  # live actuation trial (ADR 152 Implementation Status); false returns to
+  # shadow mode, which logs the same proposals without changing pursuit control.
   resupply_priority:
     enabled: true
     actuate: true

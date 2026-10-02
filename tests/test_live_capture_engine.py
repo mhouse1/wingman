@@ -571,3 +571,43 @@ def test_the_nested_lane_is_disabled_for_lanes_that_drive_the_real_screen():
     for later in ("set_injection_display(nested_display)", "config_for_display(",
                   "cap = Capture("):
         assert src.index(later) > guard, f"{later} must come after the lane check"
+
+
+def test_path1_live_final_step_captures_on_pursuit_handoff_without_missiles_empty(capture_dir: Path):
+    """The su30 mission hands the aircraft to pursuit itself on the missiles-0
+    frame, entering GAME_BATTLE_EJECT without fire_eject(), so no
+    missiles_empty event is ever emitted. The shipped PATH1_LIVE lane must
+    still capture that frame from the state alone."""
+    from wingman.replay import load_replay_paths
+
+    steps = load_replay_paths(Path("tests/replay_paths/adr045_live_path1.yaml"))["PATH1_LIVE"]
+    engine = LivePathCaptureEngine(
+        path_name="PATH1_LIVE",
+        steps=steps,
+        screenshot_dir=capture_dir,
+        region=(0, 0, 10, 10),
+        overwrite=True,
+        timeout_s=30.0,
+        allow_inject=False,
+        auto_resume=False,
+        timeout_advances=False,
+        out_of_order=True,
+    )
+
+    frame = _frame()
+    t = 0.0
+    for state, event in (
+        ("game_lobby", None),
+        ("game_starting", "cancel_detected"),
+        ("game_battle", "good_luck_detected"),
+        ("game_battle_eject", None),
+    ):
+        if event is not None:
+            engine.on_event(event, t)
+        for _ in range(3):
+            engine.evaluate(frame, state, t)
+            t += 0.5
+
+    assert engine.is_complete()
+    assert not engine.has_failures()
+    assert (capture_dir / steps[-1].screenshot_name).exists()

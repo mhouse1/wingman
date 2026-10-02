@@ -17,6 +17,7 @@ dependencies = [
 	"colorama",
 	"transitions",
 	"py-trees>=2.5.0",
+	"pygobject>=3.58.0 ; sys_platform == 'linux'",
 ]
 
 [dependency-groups]

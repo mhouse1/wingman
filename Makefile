@@ -45,7 +45,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: hooks fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -129,6 +129,11 @@ lint:
 hooks:
 	git config core.hooksPath .githooks
 	@echo "pre-push hook installed: make lint and make test run before every push (skip one with git push --no-verify)"
+
+# Linux only: bring the venv up to date after a pull or an Ubuntu release upgrade
+# (PyGObject build headers, stale venv, old gi bridge). Calls sudo for apt.
+upgrade-linux:
+	bash scripts/upgrade-linux.sh
 
 # One-time (then routine) formatter pass — review the diff before committing.
 format:
@@ -754,6 +759,7 @@ ti:
 rr-path1:
 	mkdir -p tests/test-output
 	rm -f $(RR_PATH1_LOG) $(RR_PATH1_ASSERTIONS) $(RR_PATH1_INTENTS) $(RR_PATH1_REPORT) $(RR_PATH1_SUMMARY)
+	. scripts/gate-display.sh; \
 	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--replay-config $(RR_PATH1_CONFIG) \
@@ -776,10 +782,14 @@ rr-validate-path1:
 # ADR044 phase 1 gate: execute runtime lane and fail fast on validator mismatch.
 rr-path1-gate: rr-path1 rr-validate-path1
 
-# ADR045 live lane: present timed screenshots on desktop while Wingman captures real monitor frames.
+# ADR045 live lane: present timed screenshots on a display while Wingman captures it.
+# Both gate lanes run on a private Xvfb (scripts/gate-display.sh, ADR 153): on
+# GNOME 50 every XTest client on the session display raises a portal dialog.
+# WINGMAN_GATE_DISPLAY=real runs a lane on the session display instead.
 rr-live-path1:
 	mkdir -p tests/test-output $(RR_LIVE_PATH1_CAPTURE_DIR)
 	rm -f $(RR_LIVE_PATH1_LOG) $(RR_LIVE_PATH1_CAPTURE_SUMMARY) $(RR_LIVE_PATH1_VALIDATION_SUMMARY) $(RR_LIVE_PATH1_PRESENTER_LOG)
+	. scripts/gate-display.sh; \
 	$(PYTHON_RUN) tests/live_screen_presenter.py \
 		--config wingman/config.yaml \
 		--path-config $(RR_LIVE_PATH1_CAPTURE_CONFIG) \

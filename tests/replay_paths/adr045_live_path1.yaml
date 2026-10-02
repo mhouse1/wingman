@@ -16,10 +16,13 @@ PATH1_LIVE:
     expected_state: GAME_BATTLE
     expected_trigger: good_luck_detected
 
-  # Since ADR056 the missiles_empty emit and the eject_started FSM transition
-  # happen in the same tick, so the state observed inside the 2s trigger
-  # freshness window is GAME_BATTLE_EJECT, never GAME_BATTLE.
+  # Shipped config runs pursuit mode (HLDD 015) here, not the legacy
+  # missiles_empty -> eject_and_dive sequence. The default su30 mission sees
+  # the target icon on this frame and hands the aircraft to pursuit itself,
+  # entering GAME_BATTLE_EJECT without fire_eject(), so the missiles_empty
+  # trigger never fires on that route. Entering the state is the one signal
+  # both routes (mission handoff, confirmed-empty fire_eject) share.
   - screenshot_name: P1_040_BATTLE_HUD_MISSILES_0_HEALTH_ALIVE.png
     injection_time_s: 52.0
     expected_state: GAME_BATTLE_EJECT
-    expected_trigger: missiles_empty
+    expected_trigger: state_enter:game_battle_eject

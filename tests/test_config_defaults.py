@@ -49,7 +49,9 @@ def test_a_key_without_a_declared_default_says_so():
         schema_default("telemetry.no_such_key")
 
 
-def test_resupply_priority_ships_shadow_only():
+def test_resupply_priority_defaults_to_shadow_and_ships_actuation_trial():
+    """A config without the key stays in shadow; shipped config enables the
+    ADR 152 live actuation trial."""
     from wingman.config_schema import schema_default
 
     shipped = yaml.safe_load(pathlib.Path("wingman/config.yaml").read_text(encoding="utf-8"))
@@ -57,7 +59,7 @@ def test_resupply_priority_ships_shadow_only():
     assert schema_default("pursuit_mode.resupply_priority.actuate") is False
     assert shipped["pursuit_mode"]["resupply_priority"] == {
         "enabled": True,
-        "actuate": False,
+        "actuate": True,
     }
 
 

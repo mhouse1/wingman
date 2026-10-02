@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -20,18 +21,26 @@ NEGATIVE_LOG_PATTERNS = [
     "Replay: injecting FSM trigger",
 ]
 
+# The missiles-0 frame hands the aircraft to pursuit mode (HLDD 015), which is
+# what shipped config does there. Pursuit is entered by two routes — the su30
+# mission's own handoff and fire_eject() on a confirmed empty rack — and each
+# logs a different opening line, so the markers below are the ones both share.
+PURSUIT_ENGAGED = "Controller: pursue_and_engage — tracking engaged, both axes free"
+
 POSITIVE_LOG_PATTERNS_REQUIRED = [
     "Capture mode enabled",
     "Analyzer: 'Good Luck' detected in good_luck crop",
     "Controller: 'Good Luck' detected",
-    "MISSILES EMPTY — cancelling mission and ejecting",
-    "Controller: eject_and_dive — descent control engaged",
+    PURSUIT_ENGAGED,
 ]
 
-TERMINAL_PATTERNS = [
-    "Controller: eject_and_dive complete",
-    "Controller: eject_and_dive — cancelled during descent",
-]
+# Written by the pursuit loop's finally block on every exit. The capture lane
+# exits as soon as its last frame is captured, so the expected end is
+# external:shutdown; ammo or cap hands off to eject_and_dive, which is also fine.
+PURSUIT_SUMMARY_RE = re.compile(r"PURSUIT SUMMARY: end=(\S+)")
+
+# External stops that need no manual takeover to explain them.
+SYSTEM_STOP_REASONS = ("shutdown", "respawn_detected", "match_ended")
 
 MANUAL_TAKEOVER_PATTERNS = [
     "GAME_BATTLE → GAME_BATTLE_MANUAL",
@@ -90,9 +99,9 @@ def _validate_capture_summary(payload: dict, failures: list[str]) -> dict:
 def _validate_log(log_text: str, failures: list[str]) -> dict:
     negative_counts = _count_patterns(log_text, NEGATIVE_LOG_PATTERNS)
     required_positive_counts = _count_patterns(log_text, POSITIVE_LOG_PATTERNS_REQUIRED)
-    terminal_counts = _count_patterns(log_text, TERMINAL_PATTERNS)
     manual_takeover_counts = _count_patterns(log_text, MANUAL_TAKEOVER_PATTERNS)
     manual_takeover_total = sum(manual_takeover_counts.values())
+    pursuit_ends = PURSUIT_SUMMARY_RE.findall(log_text)
 
     for pattern, count in negative_counts.items():
         if count > 0:
@@ -102,33 +111,26 @@ def _validate_log(log_text: str, failures: list[str]) -> dict:
         if count <= 0:
             failures.append(f"required log pattern missing: {pattern}")
 
-    terminal_total = sum(terminal_counts.values())
-    engaged_count = required_positive_counts[
-        "Controller: eject_and_dive — descent control engaged"
-    ]
-    if terminal_total <= 0 and engaged_count <= 0:
-        failures.append("missing terminal eject outcome: neither complete nor cancelled marker found")
+    if not pursuit_ends:
+        failures.append("missing terminal pursuit outcome: no PURSUIT SUMMARY line found")
 
-    # A respawn-triggered stop during the nose phase is a successful eject —
-    # and under ADR 068 d6 the nose phase spans nearly the whole eject, so
-    # system-legitimate stops (match ended, app shutdown) now land in-phase
-    # too (CR-014-11). Only cancellations with any other reason still require
-    # the manual takeover marker to explain them.
-    cancellation_count = terminal_counts["Controller: eject_and_dive — cancelled during descent"]
-    respawn_cancel_count = sum(
-        log_text.count(f"cancelled during descent (reason={reason})")
-        for reason in ("respawn_detected", "match_ended", "shutdown")
-    )
-    if cancellation_count - respawn_cancel_count > 0 and manual_takeover_total <= 0:
+    # A stop for any reason other than the system's own (shutdown, respawn,
+    # match end) must be explained by a manual takeover, as for the eject.
+    unexplained = [
+        end for end in pursuit_ends
+        if end.startswith("external:")
+        and end.split(":", 1)[1] not in SYSTEM_STOP_REASONS
+    ]
+    if unexplained and manual_takeover_total <= 0:
         failures.append(
-            "cancellation observed but missing required manual takeover marker: "
-            + " or ".join(MANUAL_TAKEOVER_PATTERNS)
+            "pursuit stopped externally (" + ", ".join(unexplained) + ") but missing "
+            "required manual takeover marker: " + " or ".join(MANUAL_TAKEOVER_PATTERNS)
         )
 
     return {
         "negative_counts": negative_counts,
         "required_positive_counts": required_positive_counts,
-        "terminal_counts": terminal_counts,
+        "pursuit_ends": pursuit_ends,
         "manual_takeover_counts": manual_takeover_counts,
         "manual_takeover_total": manual_takeover_total,
     }

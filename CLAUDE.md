@@ -118,7 +118,7 @@ A new config key declares its default once, in `wingman/config_schema.py` (`Leaf
 **Test harness layers:**
 1. `make test` — pytest unit/integration tests (fast, no game needed).
 2. `make rr-path1-gate` — runs the real `wingman.main` loop with replayed PATH1 screenshots, then validates FSM transitions against assertions.
-3. `make rr-live-path1-gate` — `live_screen_presenter.py` shows timed screenshots on-screen while the real monitor-capture path runs; validates round-trip timing.
+3. `make rr-live-path1-gate` — `live_screen_presenter.py` shows timed screenshots while the real capture path grabs them; validates round-trip timing. Layers 2 and 3 run on a private Xvfb (`scripts/gate-display.sh`, ADR 153), because GNOME 50 raises a portal dialog for every XTest client on the session display.
 4. `make ocr` — real-OCR tests on archived game screenshots in `test_screenshots/integration_test/` (slow, skipped if screenshots are all-black placeholders).
 
 **Performance workflow:** Each session writes `docs/performance/current/run_*.json`. `make wrelease` copies them to `docs/performance/release/`, commits the version bump, and regenerates HTML charts. `release/` is untracked and lives on VEDA only (ADR 100 D8); VEDA is the only host that generates performance reports, and the report targets and `wrelease` refuse to run elsewhere (`require-veda`). The performance regression check in `PerformanceTracker` compares the current session against the release baseline using the thresholds in `config.yaml`.
@@ -185,14 +185,19 @@ cloud sessions).
   `pip` or `.venv/bin/python` directly.
 - Change dependencies only with `uv add` / `uv remove`, so `pyproject.toml` and
   `uv.lock` change together, then `uv sync --all-groups`. Never `pip install`.
-- On Linux the venv is built on the **system** Python on purpose. Two compiled
-  bindings have no PyPI wheel and come from apt instead: `python3-tk` (tkinter,
-  which `make test` needs) and `python3-gi` with `gir1.2-gstreamer-1.0` (the
-  PipeWire capture backend), bridged into the venv by a `.pth` file.
-  `scripts/setup-linux.sh` Step 5 and job aid 010 are the reference. These are
-  the only apt-installed Python pieces: do not apt-install any other Python
-  module, and do not rebuild the venv on a uv-managed Python — that breaks the
-  `gi` bridge.
+- `gi` (PyGObject, the PipeWire capture backend) is a locked Linux-only
+  dependency that `uv sync` compiles from source, because PyPI ships no Linux
+  wheel. The build needs apt headers (`libgirepository-2.0-dev`,
+  `libcairo2-dev`), and the runtime needs `gir1.2-gstreamer-1.0`.
+  `scripts/upgrade-linux.sh` (`make upgrade-linux`) installs them, syncs and
+  verifies. Run it after an Ubuntu release upgrade. The old
+  `system_gi_bridge.pth` only worked while the system Python matched the venv's
+  minor version, and Ubuntu 26.04 (Python 3.14) broke it (ADR 154). Do not
+  reintroduce it.
+- Prefer a venv on a uv-managed Python (`.python-version`): it ships tkinter and
+  survives OS Python upgrades. A venv on the system Python needs apt's
+  `python3-tk` for tkinter, which `make test` needs. Do not apt-install any other
+  Python module.
 - System tools uv cannot provide (an X server such as Xvfb) are not Python
   dependencies. Use them if already present; ask before installing one.
 

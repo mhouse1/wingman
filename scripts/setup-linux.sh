@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 # setup-linux.sh — Install and configure MetalStorm + Wingman on Ubuntu/Linux.
 #
-# Automates:
-#   1. Flatpak + Heroic Games Launcher install
-#   2. Proton-GE-latest download into Heroic's tools directory (so the Wingman
+# Automates (numbers match the Step sections below):
+#   1. Flatpak
+#   2. Heroic Games Launcher install
+#   3. Proton-GE-latest download into Heroic's tools directory (so the Wingman
 #      Makefile's PROTON_ROOT default resolves without an override — Heroic
 #      left to its own defaults does not always pick GE-Proton)
-#   3. i386 multiarch + 32-bit GL/Vulkan libs (Steam Runtime container
+#   4. i386 multiarch + 32-bit GL/Vulkan libs (Steam Runtime container
 #      requirement — needed even though MetalStorm itself is 64-bit)
-#   4. uv install, `uv sync --all-groups`, and the gi/PyGObject venv bridge
-#   5. umu-run symlink (Heroic bundles its own copy; there's no separate
+#   5. uv install, then scripts/upgrade-linux.sh (ADR 154): the .venv on a
+#      uv-managed Python, PyGObject build headers, Xvfb for the gate lanes
+#      (ADR 153), `uv sync --all-groups`, the gi import check, and the GNOME
+#      window-left extension that opens the game window top-left (ADR 155)
+#   6. umu-run symlink (Heroic bundles its own copy; there's no separate
 #      install for it) — added after MetalStorm install, since that's the
 #      point at which Heroic is guaranteed to have fetched it
+#
+# Requires Ubuntu 24.04 or later (checked first): PyGObject builds against
+# GLib 2.80, which older releases do not ship.
 #
 # Does NOT touch `input` group membership — obsolete since ADR 053: Wingman's
 # Linux input path uses XTest/XRecord, which needs neither root nor that group.
@@ -45,6 +52,22 @@ if [[ -n "${SNAP:-}" ]] || [[ "${HOME}" == */snap/* ]]; then
     die "Running inside a snap terminal (HOME=${HOME}).
     UMU will fail to find umu-shim from this environment.
     Open a non-snap terminal (e.g. GNOME Terminal) and re-run this script."
+fi
+
+# Fail before the long Flatpak/Heroic/Proton steps, not at Step 5: PyGObject
+# needs GLib 2.80 (ADR 154), which Ubuntu ships from 24.04. Other Debian-based
+# distros are not version-checked; Step 5 still fails cleanly if apt lacks the
+# headers.
+# shellcheck disable=SC1091
+source /etc/os-release
+if [[ "${ID:-}" == "ubuntu" ]]; then
+    if dpkg --compare-versions "${VERSION_ID:-0}" lt 24.04; then
+        die "Ubuntu ${VERSION_ID} is too old: Wingman needs Ubuntu 24.04 or later
+    (PyGObject builds against GLib 2.80 — ADR 154). Upgrade the OS first."
+    fi
+    info "Ubuntu ${VERSION_ID} (${VERSION_CODENAME:-unknown})."
+else
+    warn "${PRETTY_NAME:-This distro} is not Ubuntu — continuing; it needs GLib 2.80 or later."
 fi
 
 # Proton-GE is stored under config/, not data/ — confirmed from Heroic 2.22.0 logs.
@@ -132,31 +155,18 @@ else
         warn "with 'apt --fix-broken install' or '-f' — that can be destructive."
         warn "This usually means either a pending-upgrade backlog (try 'sudo apt"
         warn "upgrade' first) or a missing apt pocket — check 'grep Suites:"
-        warn "/etc/apt/sources.list.d/ubuntu.sources' lists all four suites (noble,"
-        warn "noble-updates, noble-backports, noble-security). See the troubleshooting"
-        warn "section of docs/job-aids/010-run-metalstorm-on-linux.md for the fix."
+        CODENAME="${VERSION_CODENAME:-<codename>}"
+        warn "/etc/apt/sources.list.d/ubuntu.sources' lists all four suites (${CODENAME},"
+        warn "${CODENAME}-updates, ${CODENAME}-backports, ${CODENAME}-security). See the"
+        warn "troubleshooting section of docs/job-aids/010-run-metalstorm-on-linux.md for the fix."
         die "i386 library install failed — see guidance above, then re-run this script."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Step 5 — uv, Python dependencies, and the gi (PyGObject) venv bridge
+# Step 5 — uv, Python dependencies, and PyGObject
 # ---------------------------------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-info "Checking python3-tk (needed by wingman/calibrate.py and make test)..."
-if dpkg -s python3-tk &>/dev/null; then
-    info "python3-tk already installed."
-else
-    sudo apt-get install -y python3-tk
-fi
-
-info "Checking python3-gi and GStreamer introspection data..."
-if dpkg -s python3-gi gir1.2-gstreamer-1.0 &>/dev/null; then
-    info "python3-gi / gir1.2-gstreamer-1.0 already installed."
-else
-    sudo apt-get install -y python3-gi gir1.2-gstreamer-1.0
-fi
 
 info "Checking uv..."
 if ! command -v uv &>/dev/null; then
@@ -166,24 +176,10 @@ if ! command -v uv &>/dev/null; then
     source "$HOME/.local/bin/env"
 fi
 
-info "Running 'uv sync --all-groups' in ${REPO_ROOT}..."
-( cd "$REPO_ROOT" && uv sync --all-groups )
-
-info "Bridging gi (PyGObject) into the uv-managed venv..."
-SITE_PACKAGES="$(cd "$REPO_ROOT" && uv run --active python -c \
-    "import sysconfig; print(sysconfig.get_paths()['purelib'])")"
-echo "/usr/lib/python3/dist-packages" > "${SITE_PACKAGES}/system_gi_bridge.pth"
-if ( cd "$REPO_ROOT" && uv run --active python -c "
-import gi
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst
-Gst.init(None)
-" 2>/dev/null ); then
-    info "gi bridge verified — 'import gi.repository.Gst' works in the venv."
-else
-    warn "gi bridge written but verification import failed — check manually with:"
-    warn "  uv run --active python -c \"import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst\""
-fi
+# The same script brings an existing install up to date after an Ubuntu
+# upgrade (ADR 154). It also installs python3-tk, but only when the venv sits
+# on the system Python, since a uv-managed Python ships its own tkinter.
+"${REPO_ROOT}/scripts/upgrade-linux.sh"
 
 # ---------------------------------------------------------------------------
 # Manual gate A — Epic Games Store login
@@ -237,5 +233,7 @@ echo "  • Then run Wingman from the repo root:"
 echo "      make preflight   # verify dependencies"
 echo "      make g           # launch the game alone first, confirm it comes up windowed"
 echo "      make r           # start Wingman"
+echo "  • After every Ubuntu release upgrade, and after pulling a dependency change,"
+echo "    run 'make upgrade-linux' before anything else (ADR 154)."
 echo ""
 echo "See docs/job-aids/010-run-metalstorm-on-linux.md for the full troubleshooting table."
