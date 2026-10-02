@@ -12,6 +12,17 @@ nested:
   enabled: true
   display: ":3"
   size: "1920x1200"
+  # ADR 156: Xwayland 24.1.10 delivers wingman's clicks only while the
+  # operator's mouse is over the nested window (Anomaly 009). When it is not, a
+  # click detaches the nested server's host-mouse devices for as long as the
+  # click takes, then reattaches them. The operator's mouse works in the game
+  # window as before. false: never detach, clicks land only under the mouse.
+  isolate_pointer: true
+  # ADR 157: release Alt, Ctrl, Shift or Super when one stays held on the nested
+  # display for more than 1.5 s. This Xwayland leaves them down when the
+  # operator Alt+Tabs away, and the game then reads the next Enter as Alt+Enter
+  # and drops to a framed window that shifts every crop.
+  release_stuck_modifiers: true
 
 # Design 011 (ACS Mode), step 1: which weapon-employment tactic the active
 # airframe supports. Read once at startup into AnalyzerSnapshot.has_padlock.

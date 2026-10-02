@@ -59,6 +59,24 @@ rule that the venv sits on the system Python.
   Python.
 - `make rd NESTED=0` on Wayland works again.
 
+## Other changes the same upgrade forced
+
+The Python environment was one of five things Ubuntu 26.04 broke on VEDA. The
+others have their own records:
+
+- [ADR 153](153-gate-lanes-on-a-private-display.md): GNOME 50 raises a portal
+  dialog for every XTest client on the session display, so the gate lanes run
+  on a private Xvfb.
+- [ADR 155](155-window-left-extension-for-the-nested-display.md): the
+  window-left Shell extension went OUT OF DATE and never matched the nested
+  window.
+- [ADR 156](156-detach-the-host-pointer-while-a-click-is-sent.md): Xwayland
+  24.1.10 delivers wingman's clicks on the nested display only while the
+  operator's mouse is over its window.
+- [ADR 157](157-release-modifiers-left-held-on-the-nested-display.md): the same
+  Xwayland leaves Alt held on the nested display when the operator Alt+Tabs
+  away, and the game then reads Enter as Alt+Enter and frames its window.
+
 ## Why
 
 VEDA moved to Ubuntu 26.04, whose system Python is 3.14. The venv runs on

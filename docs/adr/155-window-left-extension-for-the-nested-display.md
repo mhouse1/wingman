@@ -76,8 +76,11 @@ ran, and the occasional top-left placement was Mutter's own.
 - [x] Install step, against a scratch HOME with stand-in GNOME tools: first
       install, no-op rerun, a newer Shell (51 declared), and an empty
       enabled-extensions list.
-- [ ] VEDA: `make upgrade-linux` from a non-snap terminal, then log out and in;
-      `gnome-extensions info` shows `State: ACTIVE`.
-- [ ] VEDA: `make r` opens the `Xwayland on :3` window at the top-left, and the
-      journal shows the `wingman-window-left: moved` line.
+- [x] VEDA, 2026-10-02: after `make upgrade-linux` and a re-login,
+      `gnome-extensions info` shows `Version: 2`, `State: ACTIVE`.
+- [x] VEDA, 2026-10-02 05:26: the journal shows
+      `wingman-window-left: moved "Xwayland on :9" from 1553,516 to 67,32`
+      (the work-area origin: right of the dock, below the top bar).
+- [ ] VEDA: the operator confirms by eye that `make r` opens the
+      `Xwayland on :3` window at the top-left.
 - [ ] A second Linux PC, after `make upgrade-linux` and a logout.

@@ -730,6 +730,8 @@ SCHEMA = Section(
             "enabled": BOOL,
             "display": STR,
             "size": STR,
+            "isolate_pointer": Leaf(types=(bool,), default=True),   # ADR 156
+            "release_stuck_modifiers": Leaf(types=(bool,), default=True),  # ADR 157
         }),
 
         # ADR 098: focus guard for key injection
