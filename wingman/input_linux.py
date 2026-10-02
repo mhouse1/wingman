@@ -101,11 +101,23 @@ def _ensure_xauthority() -> None:
         logger.warning("Controller: failed to create xauth db: %s", e)
 
 
+# A pointer within this many pixels of the requested point counts as on target.
+_CLICK_AIM_TOLERANCE_PX = 2
+
+
 def _linux_click(x: int, y: int, count: int = 1) -> None:
     """Left-click at absolute screen coordinates via python-xlib XTest.
 
     Works for XWayland windows (Wine/DXVK games) without root.
     XAUTHORITY is resolved from the mutter socket if not set in the environment.
+
+    Anomaly 009: the pointer is read back before every click. A click lands
+    where the pointer IS, not where it was sent, and from the Ubuntu 26.04
+    upgrade the end-of-match "Click to Continue" bursts stopped registering
+    while the log could only say they were sent. A pointer that is off target
+    is logged with its real position and re-aimed; one that is on target is
+    recorded too, so "the click missed" and "the game ignored a click that
+    hit" can be told apart from the log.
     """
     _ensure_xauthority()
     try:
@@ -113,10 +125,35 @@ def _linux_click(x: int, y: int, count: int = 1) -> None:
         from Xlib.ext import xtest as _xtest
         display_name = _inject_display_name()
         d = _xdisplay.Display(display_name)
-        _xtest.fake_input(d, _X.MotionNotify, x=x, y=y)
-        d.sync()
-        time.sleep(0.05)
+        root = d.screen().root
+
+        def _aim():
+            _xtest.fake_input(d, _X.MotionNotify, x=x, y=y)
+            d.sync()
+            time.sleep(0.05)
+            p = root.query_pointer()
+            return p.root_x, p.root_y
+
+        def _on_target(pos):
+            return (abs(pos[0] - x) <= _CLICK_AIM_TOLERANCE_PX
+                    and abs(pos[1] - y) <= _CLICK_AIM_TOLERANCE_PX)
+
+        pos = _aim()
+        seen = []
         for i in range(count):
+            if i:
+                p = root.query_pointer()
+                pos = (p.root_x, p.root_y)
+            if not _on_target(pos):
+                was = pos
+                pos = _aim()
+                logger.warning(
+                    "XTest click %d/%d on %s: pointer at (%d, %d), not the "
+                    "(%d, %d) it was sent to; re-aimed, now (%d, %d)%s",
+                    i + 1, count, display_name, was[0], was[1], x, y,
+                    pos[0], pos[1],
+                    "" if _on_target(pos) else " — STILL OFF TARGET")
+            seen.append(pos)
             _xtest.fake_input(d, _X.ButtonPress, detail=1)
             d.sync()
             time.sleep(0.05)
@@ -124,6 +161,9 @@ def _linux_click(x: int, y: int, count: int = 1) -> None:
             d.sync()
             if i < count - 1:
                 time.sleep(0.5)
+        logger.debug("XTest click: (%d, %d) x%d on %s, pointer at each click: %s",
+                     x, y, count, display_name,
+                     " ".join("(%d,%d)" % p for p in seen))
         d.close()
     except Exception as e:
         logger.error("Linux click at (%d, %d) failed: %s", x, y, e)

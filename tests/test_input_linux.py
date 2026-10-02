@@ -730,3 +730,103 @@ def test_enter_on_the_desktop_needs_ctrl_alt_and_numlock_does_not_break_it():
         assert il.should_deliver_hotkey(":0", "enter", CTRL_ALT | NUMLOCK) is True
     finally:
         il.set_injection_display(None)
+
+
+# --- Anomaly 009: _linux_click reads the pointer back before every click -----
+
+class _FakePointerDisplay:
+    """An X display whose pointer only moves when something moves it.
+
+    Reply fields are python-xlib's own (`QueryPointer`: root_x, root_y). `drift`
+    models something else moving the pointer after a click (a game recentring
+    it); `deaf` models a server that ignores the XTest motion altogether.
+    """
+
+    def __init__(self, start=(0, 0), drift=None, deaf=False):
+        self.pointer = start
+        self.drift = drift
+        self.deaf = deaf
+        self.events = []
+        self.closed = False
+
+    def screen(self):
+        display = self
+
+        class _Root:
+            def query_pointer(self):
+                return mock.Mock(root_x=display.pointer[0], root_y=display.pointer[1])
+
+        return mock.Mock(root=_Root())
+
+    def sync(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def _click_with(monkeypatch, fake, x, y, count):
+    from Xlib import X
+    import Xlib.display
+    import Xlib.ext.xtest
+
+    def fake_input(d, event_type, detail=0, time=0, root=0, x=0, y=0):
+        if event_type == X.MotionNotify:
+            d.events.append(("move", x, y))
+            if not d.deaf:
+                d.pointer = (x, y)
+        elif event_type == X.ButtonPress:
+            d.events.append(("press", d.pointer))
+        elif event_type == X.ButtonRelease:
+            d.events.append(("release", d.pointer))
+            if d.drift is not None:
+                d.pointer = d.drift
+
+    monkeypatch.setattr(Xlib.display, "Display", lambda name: fake)
+    monkeypatch.setattr(Xlib.ext.xtest, "fake_input", fake_input)
+    monkeypatch.setattr(input_linux, "_ensure_xauthority", lambda: None)
+    monkeypatch.setattr(input_linux.time, "sleep", lambda _s: None)
+    input_linux._linux_click(x, y, count)
+
+
+def test_click_on_target_moves_once_and_logs_where_each_click_landed(monkeypatch, caplog):
+    fake = _FakePointerDisplay(start=(5, 5))
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 3)
+
+    assert [e for e in fake.events if e[0] == "move"] == [("move", 939, 1094)]
+    assert [e for e in fake.events if e[0] == "press"] == [("press", (939, 1094))] * 3
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "pointer at each click: (939,1094) (939,1094) (939,1094)" in caplog.text
+    assert fake.closed
+
+
+def test_click_reaims_and_reports_a_pointer_that_moved_between_clicks(monkeypatch, caplog):
+    """The 2026-09-29 signature this was written for: seven clicks sent, the
+    log silent about where they landed. If something drags the pointer away
+    after a click, every later click must be re-aimed and the real position
+    logged."""
+    fake = _FakePointerDisplay(drift=(960, 600))
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 3)
+
+    assert [e for e in fake.events if e[0] == "press"] == [("press", (939, 1094))] * 3
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2  # clicks 2 and 3; the first was aimed fresh
+    assert "pointer at (960, 600), not the (939, 1094)" in warnings[0]
+    assert "re-aimed, now (939, 1094)" in warnings[0]
+    assert "STILL OFF TARGET" not in warnings[0]
+
+
+def test_click_says_so_when_the_pointer_will_not_move(monkeypatch, caplog):
+    fake = _FakePointerDisplay(start=(100, 200), deaf=True)
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 2)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2
+    assert all("STILL OFF TARGET" in w and "now (100, 200)" in w for w in warnings)
+    # The clicks still go out: a blind click is no worse than before, and the
+    # log now says where it landed.
+    assert [e for e in fake.events if e[0] == "press"] == [("press", (100, 200))] * 2
+    assert "pointer at each click: (100,200) (100,200)" in caplog.text
