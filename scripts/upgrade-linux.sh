@@ -267,29 +267,44 @@ EOF
     # gnome-extensions enable only knows extensions the running Shell has
     # scanned, which a new install is not until the next login. The setting
     # below is what that command writes, and the Shell reads it at login.
-    ENABLED="$(gsettings get org.gnome.shell enabled-extensions)"
-    if [[ "$ENABLED" != *"'${EXT_UUID}'"* ]]; then
-        ENABLED="$(python3 -c '
+    if ! gsettings get org.gnome.shell enabled-extensions >/dev/null 2>&1; then
+        warn "GNOME session is not active; installed the extension files but skipped enabling them."
+        if [[ $EXT_RELOGIN -eq 1 ]]; then
+            warn "Log out and back in once in a live GNOME session to enable the window-left extension."
+        fi
+    else
+        ENABLED="$(gsettings get org.gnome.shell enabled-extensions)"
+        if [[ "$ENABLED" != *"'${EXT_UUID}'"* ]]; then
+            ENABLED="$(python3 -c '
 import ast, sys
 current = sys.argv[1].removeprefix("@as ")
 uuids = ast.literal_eval(current)
 uuids.append(sys.argv[2])
 print(repr(uuids))' "$ENABLED" "$EXT_UUID")"
-        gsettings set org.gnome.shell enabled-extensions "$ENABLED"
-        info "Enabled the window-left extension."
-        EXT_RELOGIN=1
-    fi
-    if [[ "$(gsettings get org.gnome.shell disable-user-extensions)" == "true" ]]; then
-        warn "User extensions are switched off (Extensions app, top toggle); the"
-        warn "window-left extension will not run until they are switched back on."
-    fi
+            gsettings set org.gnome.shell enabled-extensions "$ENABLED"
+            info "Enabled the window-left extension."
+            EXT_RELOGIN=1
+        fi
+        if gsettings get org.gnome.shell disable-user-extensions >/dev/null 2>&1; then
+            if [[ "$(gsettings get org.gnome.shell disable-user-extensions)" == "true" ]]; then
+                warn "User extensions are switched off (Extensions app, top toggle); the"
+                warn "window-left extension will not run until they are switched back on."
+            fi
+        else
+            warn "GNOME settings are unavailable right now; extension activation will resume when the shell is active."
+        fi
 
-    EXT_STATE="$(gnome-extensions info "$EXT_UUID" 2>/dev/null | awk -F': ' '/State:/ {print $2}')"
-    if [[ $EXT_RELOGIN -eq 1 || "$EXT_STATE" != "ACTIVE" ]]; then
-        warn "Log out and back in once: on Wayland GNOME Shell loads extension"
-        warn "changes only at login (current state: ${EXT_STATE:-not loaded})."
-    else
-        info "Window-left extension ACTIVE."
+        if gnome-extensions info "$EXT_UUID" >/dev/null 2>&1; then
+            EXT_STATE="$(gnome-extensions info "$EXT_UUID" 2>/dev/null | awk -F': ' '/State:/ {print $2}')"
+            if [[ $EXT_RELOGIN -eq 1 || "$EXT_STATE" != "ACTIVE" ]]; then
+                warn "Log out and back in once: on Wayland GNOME Shell loads extension"
+                warn "changes only at login (current state: ${EXT_STATE:-not loaded})."
+            else
+                info "Window-left extension ACTIVE."
+            fi
+        else
+            warn "GNOME Shell state is unavailable right now; the extension will activate after login."
+        fi
     fi
 fi
 
