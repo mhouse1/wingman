@@ -25,7 +25,7 @@ WINGMAN_VERSION_DETAILS = "ACS: Auto resupply"
 
 from . import capture_budget
 from .capture import Capture
-from .config_schema import assert_valid_config
+from .config_schema import assert_valid_config, schema_default
 from .icon_steering import IconSteeringConfig
 from .controller_config import ControllerConfig
 from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON,
@@ -556,6 +556,11 @@ def main():
     elif _nested_override in ("1", "true", "yes"):
         _nested_on = True
     nested_display = None
+    # ADR 156: the display whose host-pointer devices clicks may detach, so the
+    # shutdown path can make sure they are attached again.
+    pointer_isolated_display = None
+    # ADR 157: the guard that releases modifiers left held on the nested display.
+    stuck_modifier_guard = None
     if _nested_on and sys.platform != "win32":
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import (set_injection_display, set_injected_keys,
@@ -594,6 +599,32 @@ def main():
         logger.info("ADR 099: nested lane ACTIVE - capture and injection on %s, "
                     "hotkeys observed on %s", nested_display,
                     ", ".join(_observe_display_names()))
+        # ADR 156 / Anomaly 009: Xwayland 24.1.10 delivers XTest clicks to a
+        # window only while the operator's mouse is over the nested window. A
+        # click detaches the server's host-pointer devices for as long as it
+        # takes and reattaches them, so the operator's mouse keeps working in
+        # the game window. Reattach here too: a session that was killed
+        # mid-click may have left them detached on a server that is still up.
+        if bool(_nested.get("isolate_pointer",
+                            schema_default("nested.isolate_pointer"))):
+            from .input_linux import set_pointer_isolation_display
+            from .pointer_isolation import set_host_pointer_isolated
+            pointer_isolated_display = nested_display
+            set_pointer_isolation_display(nested_display)
+            _leftover = set_host_pointer_isolated(nested_display, False)
+            logger.info("ADR 156: clicks on %s detach the host pointer only while "
+                        "they are sent%s", nested_display,
+                        (" (reattached leftover: %s)" % ", ".join(_leftover))
+                        if _leftover else "")
+        # ADR 157: Alt left held when the operator Alt+Tabs away turns their
+        # next Enter into Alt+Enter, and the game drops to a framed window.
+        if bool(_nested.get("release_stuck_modifiers",
+                            schema_default("nested.release_stuck_modifiers"))):
+            from .input_linux import StuckModifierGuard
+            stuck_modifier_guard = StuckModifierGuard(nested_display)
+            stuck_modifier_guard.start()
+            logger.info("ADR 157: releasing modifier keys held on %s for more "
+                        "than 1.5s", nested_display)
 
     # ADR 098: gate injection on the game having focus. Installed process-wide
     # because the injection sites are module-level in controller.
@@ -1829,7 +1860,24 @@ def main():
                 hud_renderer.close()
             except Exception as e:
                 logger.warning("HudRenderer: close failed: %s", e)
+        # ADR 157: stop the guard before the key cleanup below, so it cannot
+        # inject a release into a display that is being torn down.
+        if stuck_modifier_guard is not None:
+            stuck_modifier_guard.stop()
         ctrl.cleanup(keep_hotkeys=standby_armed)
+        # ADR 156: make sure the operator's mouse is attached. A click normally
+        # reattaches it itself; this covers one that was cut short by the exit.
+        if pointer_isolated_display is not None:
+            try:
+                from .input_linux import set_pointer_isolation_display
+                from .pointer_isolation import set_host_pointer_isolated
+                set_pointer_isolation_display(None)
+                _restored = set_host_pointer_isolated(pointer_isolated_display, False)
+                if _restored:
+                    logger.info("ADR 156: host pointer reattached on %s (%s)",
+                                pointer_isolated_display, ", ".join(_restored))
+            except Exception as e:
+                logger.warning("ADR 156: host pointer restore failed: %s", e)
         # ADR 095: the run file is written from inside analyzer.cleanup(), via
         # on_session_end() once the OCR pool has joined. load_end has to be taken
         # BEFORE that call or it misses the file entirely — the 2026-08-26 14:37

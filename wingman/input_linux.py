@@ -104,6 +104,57 @@ def _ensure_xauthority() -> None:
 # A pointer within this many pixels of the requested point counts as on target.
 _CLICK_AIM_TOLERANCE_PX = 2
 
+# ADR 156: the display whose host-pointer devices a click may detach while it
+# is being sent, or None. Set by main with the nested lane.
+_isolate_pointer_display = None
+
+# Clicks can overlap (the lobby scanner clicks from its own thread while the
+# main loop is mid-burst), so the detach is counted: the first click that needs
+# it detaches, the last one to finish reattaches.
+_isolation_lock = threading.Lock()
+_isolation_holders = 0
+_ISOLATION_LOCK_TIMEOUT_S = 2.0
+
+
+def set_pointer_isolation_display(display_name) -> None:
+    """Name the display whose host-pointer devices a click may detach, or None."""
+    global _isolate_pointer_display
+    _isolate_pointer_display = display_name or None
+
+
+def _hold_host_pointer_away(display_name: str) -> bool:
+    """Detach the host pointer for a click in progress. True when held."""
+    global _isolation_holders
+    if not _isolation_lock.acquire(timeout=_ISOLATION_LOCK_TIMEOUT_S):
+        logger.warning("XTest click on %s: host-pointer lock timeout - clicking "
+                       "without detaching", display_name)
+        return False
+    try:
+        if _isolation_holders == 0:
+            from .pointer_isolation import set_host_pointer_isolated
+            set_host_pointer_isolated(display_name, True)
+        _isolation_holders += 1
+        return True
+    finally:
+        _isolation_lock.release()
+
+
+def _release_host_pointer(display_name: str) -> None:
+    """Give the operator's mouse back once the last overlapping click is done."""
+    global _isolation_holders
+    if not _isolation_lock.acquire(timeout=_ISOLATION_LOCK_TIMEOUT_S):
+        # main reattaches at shutdown, and the next click's release does too.
+        logger.warning("XTest click on %s: host-pointer lock timeout - not "
+                       "reattached by this click", display_name)
+        return
+    try:
+        _isolation_holders = max(0, _isolation_holders - 1)
+        if _isolation_holders == 0:
+            from .pointer_isolation import set_host_pointer_isolated
+            set_host_pointer_isolated(display_name, False)
+    finally:
+        _isolation_lock.release()
+
 
 def _linux_click(x: int, y: int, count: int = 1) -> None:
     """Left-click at absolute screen coordinates via python-xlib XTest.
@@ -112,12 +163,24 @@ def _linux_click(x: int, y: int, count: int = 1) -> None:
     XAUTHORITY is resolved from the mutter socket if not set in the environment.
 
     Anomaly 009: the pointer is read back before every click. A click lands
-    where the pointer IS, not where it was sent, and from the Ubuntu 26.04
-    upgrade the end-of-match "Click to Continue" bursts stopped registering
-    while the log could only say they were sent. A pointer that is off target
-    is logged with its real position and re-aimed; one that is on target is
-    recorded too, so "the click missed" and "the game ignored a click that
-    hit" can be told apart from the log.
+    where the pointer IS, and in the window the server says it is over, not
+    where it was sent. A pointer that is off target is logged with its real
+    position and re-aimed.
+
+    ADR 156: the host pointer devices are detached for as long as this click
+    takes, and reattached in the finally block, in the two cases where the
+    click would otherwise miss:
+
+    - the server reports the pointer over NO window. Xwayland 24.1.10 delivers
+      XTest clicks to a window only while the operator's real mouse is over the
+      nested window, so their mouse is elsewhere;
+    - the pointer is not where it was just sent. The operator's mouse is over
+      the window and moving, and is steering the pointer (2026-10-02 06:25: a
+      PLAY click read back at (210, 382), then (360, 486) after a re-aim, and
+      went out there).
+
+    With their mouse at rest over the window nothing is touched. Outside the
+    click the operator's mouse works in the game window as it always did.
     """
     _ensure_xauthority()
     try:
@@ -126,44 +189,65 @@ def _linux_click(x: int, y: int, count: int = 1) -> None:
         display_name = _inject_display_name()
         d = _xdisplay.Display(display_name)
         root = d.screen().root
+        may_detach = _isolate_pointer_display == display_name
+        holding = False
+        why = ""
 
         def _aim():
             _xtest.fake_input(d, _X.MotionNotify, x=x, y=y)
             d.sync()
             time.sleep(0.05)
             p = root.query_pointer()
-            return p.root_x, p.root_y
+            return (p.root_x, p.root_y), bool(p.child)
 
         def _on_target(pos):
             return (abs(pos[0] - x) <= _CLICK_AIM_TOLERANCE_PX
                     and abs(pos[1] - y) <= _CLICK_AIM_TOLERANCE_PX)
 
-        pos = _aim()
-        seen = []
-        for i in range(count):
-            if i:
-                p = root.query_pointer()
-                pos = (p.root_x, p.root_y)
-            if not _on_target(pos):
-                was = pos
-                pos = _aim()
-                logger.warning(
-                    "XTest click %d/%d on %s: pointer at (%d, %d), not the "
-                    "(%d, %d) it was sent to; re-aimed, now (%d, %d)%s",
-                    i + 1, count, display_name, was[0], was[1], x, y,
-                    pos[0], pos[1],
-                    "" if _on_target(pos) else " — STILL OFF TARGET")
-            seen.append(pos)
-            _xtest.fake_input(d, _X.ButtonPress, detail=1)
-            d.sync()
-            time.sleep(0.05)
-            _xtest.fake_input(d, _X.ButtonRelease, detail=1)
-            d.sync()
-            if i < count - 1:
-                time.sleep(0.5)
-        logger.debug("XTest click: (%d, %d) x%d on %s, pointer at each click: %s",
-                     x, y, count, display_name,
-                     " ".join("(%d,%d)" % p for p in seen))
+        try:
+            pos, over_window = _aim()
+            seen = []
+            for i in range(count):
+                if i:
+                    p = root.query_pointer()
+                    pos, over_window = (p.root_x, p.root_y), bool(p.child)
+                if (may_detach and not holding
+                        and (not over_window or not _on_target(pos))):
+                    why = ("pointer over no window" if not over_window else
+                           "operator's mouse had it at (%d,%d)" % pos)
+                    holding = _hold_host_pointer_away(display_name)
+                    pos, over_window = _aim()
+                if not over_window:
+                    logger.warning(
+                        "XTest click %d/%d on %s: pointer is over no window at "
+                        "(%d, %d) - this click will not reach the game "
+                        "(Anomaly 009)%s", i + 1, count, display_name, pos[0], pos[1],
+                        "" if may_detach else "; nested.isolate_pointer is off")
+                if not _on_target(pos):
+                    was = pos
+                    pos, over_window = _aim()
+                    logger.warning(
+                        "XTest click %d/%d on %s: pointer at (%d, %d), not the "
+                        "(%d, %d) it was sent to; re-aimed, now (%d, %d)%s",
+                        i + 1, count, display_name, was[0], was[1], x, y,
+                        pos[0], pos[1],
+                        "" if _on_target(pos) else " — STILL OFF TARGET")
+                seen.append(pos)
+                _xtest.fake_input(d, _X.ButtonPress, detail=1)
+                d.sync()
+                time.sleep(0.05)
+                _xtest.fake_input(d, _X.ButtonRelease, detail=1)
+                d.sync()
+                if i < count - 1:
+                    time.sleep(0.5)
+            logger.debug("XTest click: (%d, %d) x%d on %s, pointer at each click: %s%s",
+                         x, y, count, display_name,
+                         " ".join("(%d,%d)" % p for p in seen),
+                         (" (host pointer detached for this click: %s)" % why)
+                         if holding else "")
+        finally:
+            if holding:
+                _release_host_pointer(display_name)
         d.close()
     except Exception as e:
         logger.error("Linux click at (%d, %d) failed: %s", x, y, e)
@@ -575,6 +659,99 @@ def _drop_shared_display() -> None:
     # that is the normal path here, not an error worth surfacing.
     with contextlib.suppress(Exception):
         d.close()
+
+
+# --- Modifier keys left held on the nested display (ADR 157) -----------------
+# Rootful Xwayland 24.1.10 does not release held keys when keyboard focus leaves
+# its window (`keyboard_handle_leave` only does so when rootless). An operator
+# who Alt+Tabs away from the game window leaves Alt down on the nested display
+# for as long as they are away; on return Xwayland clears its own state without
+# sending a KeyRelease, so Wine still believes Alt is held and the next Enter is
+# Alt+Enter: the game drops to a framed window, shifted 4 px right and 30 px
+# down, and every crop and click is off (2026-10-02: Alt held 6.3 s and 24.1 s;
+# a bare Enter with mods=none framed the window in the same second).
+#
+# While the key is still down in X, a real KeyRelease does reach the game. So
+# any modifier held here longer than a human chord is released. Wingman binds
+# no modifier, so it cannot be releasing one of its own.
+_OPERATOR_MODIFIERS = ("Alt_L", "Alt_R", "Meta_L", "Meta_R", "Super_L", "Super_R",
+                       "Control_L", "Control_R", "Shift_L", "Shift_R")
+_STUCK_MODIFIER_AFTER_S = 1.5
+_STUCK_MODIFIER_POLL_S = 0.5
+
+
+class StuckModifierGuard:
+    """Release modifier keys that stay held on `display_name` (ADR 157)."""
+
+    def __init__(self, display_name: str, after_s: float = _STUCK_MODIFIER_AFTER_S,
+                 poll_s: float = _STUCK_MODIFIER_POLL_S, clock=time.monotonic):
+        self._display_name = display_name
+        self._after_s = float(after_s)
+        self._poll_s = float(poll_s)
+        self._clock = clock
+        self._codes = None              # keycode -> keysym name, read once
+        self._since = {}                # keycode -> first time seen held
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="stuck-modifier-guard")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(timeout=self._poll_s):
+            try:
+                self.check()
+            except Exception as e:
+                # The nested server going away mid-session is the usual cause;
+                # the injection path reports that loudly on its own.
+                logger.debug("XKey: stuck-modifier check on %s failed: %s",
+                             self._display_name, e)
+
+    def check(self) -> list:
+        """Release every modifier held past the threshold. Returns their names."""
+        from Xlib import X as _X, XK as _XK
+        from Xlib.ext import xtest as _xtest
+        released = []
+        with _display_lock:
+            try:
+                d = _shared_xtest_display(self._display_name)
+                if self._codes is None:
+                    self._codes = {}
+                    for name in _OPERATOR_MODIFIERS:
+                        keycode = d.keysym_to_keycode(_XK.string_to_keysym(name))
+                        if keycode:
+                            self._codes.setdefault(keycode, name)
+                keymap = d.query_keymap()
+                now = self._clock()
+                down = [kc for kc in self._codes if keymap[kc >> 3] & (1 << (kc & 7))]
+                for kc in [kc for kc in self._since if kc not in down]:
+                    del self._since[kc]
+                for kc in down:
+                    held_s = now - self._since.setdefault(kc, now)
+                    if held_s >= self._after_s:
+                        _xtest.fake_input(d, _X.KeyRelease, kc)
+                        d.sync()
+                        del self._since[kc]
+                        released.append((self._codes[kc], held_s))
+            except Exception:
+                _drop_shared_display()
+                raise
+        for name, held_s in released:
+            logger.info(
+                "XKey: released %s on %s — held %.1fs with no release, the "
+                "operator's keyboard left the game window (ADR 157)",
+                name, self._display_name, held_s)
+        return [name for name, _ in released]
 
 
 # Deaf-listener watchdog (2026-09-26, SAF-001). Wingman's own KeyPress
