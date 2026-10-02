@@ -2,7 +2,11 @@
 
 | Status   | Date       | Wingman Version |
 |----------|------------|-----------------|
-| Draft | 2026-07-11 | 1.6.23          |
+| Superseded | 2026-07-11 | 1.6.23          |
+
+> **Superseded by [ADR 155](155-window-left-extension-for-the-nested-display.md)** (2026-10-02):
+> the extension now targets the nested display's window, hooks the window actor's
+> `first-frame`, and ships in the repo, installed by `make upgrade-linux`.
 
 ## Context
 

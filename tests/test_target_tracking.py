@@ -715,6 +715,28 @@ class TestHudRendererFehClose:
         fake_proc.terminate.assert_called_once()
         fake_proc.kill.assert_called_once()
 
+    def test_launch_registers_close_at_exit_and_close_unregisters_it(self, tmp_path):
+        """A crash between construction and main()'s shutdown finally must
+        still close the window: atexit is the backstop (2026-10-02)."""
+        from wingman.hud import HudRenderer
+        fake_proc = Mock()
+        fake_proc.poll.return_value = None
+        with patch("wingman.hud.subprocess.Popen", return_value=fake_proc), \
+                patch("wingman.hud.atexit") as fake_atexit:
+            renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                    feh_geometry="800x600+0+0")
+            fake_atexit.register.assert_called_once_with(renderer.close)
+            renderer.close()
+            fake_atexit.unregister.assert_called_once_with(renderer.close)
+
+    def test_no_atexit_hook_without_a_feh_window(self, tmp_path):
+        from wingman.hud import HudRenderer
+        with patch("wingman.hud.atexit") as fake_atexit:
+            renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0)
+            renderer.close()
+        fake_atexit.register.assert_not_called()
+        fake_atexit.unregister.assert_not_called()
+
     def test_close_is_a_noop_when_feh_already_exited(self, tmp_path):
         from wingman.hud import HudRenderer
         fake_proc = Mock()

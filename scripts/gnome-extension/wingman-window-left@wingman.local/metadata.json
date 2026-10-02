@@ -1,0 +1,7 @@
+{
+    "uuid": "wingman-window-left@wingman.local",
+    "name": "Wingman Window Left",
+    "description": "Opens Wingman's game window (the nested display's 'Xwayland on :N' window, or the game's own window when it runs on the session display) at the top-left of its monitor. ADR 155.",
+    "shell-version": ["46", "47", "48", "49", "50"],
+    "version": 2
+}

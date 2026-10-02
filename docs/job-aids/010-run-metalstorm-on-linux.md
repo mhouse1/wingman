@@ -12,8 +12,8 @@ Proton path will be simpler; until then, use this guide.
 **Automation available:** `scripts/setup-linux.sh` covers everything below except Steps 2
 and 3 (EGS login, MetalStorm install), which need a human and are done inside the
 script's two pauses rather than as separate steps: Flatpak/Heroic install (Step 1),
-Proton-GE download (part of Step 4), the i386 multiarch prerequisite, `uv`/dependency sync
-and the `gi` bridge (Steps 5–6), and the `umu-run` symlink (Step 7, run after the pauses
+Proton-GE download (part of Step 4), the i386 multiarch prerequisite, `uv`, dependency
+sync and the PyGObject build (Steps 5–6, through `scripts/upgrade-linux.sh`), and the `umu-run` symlink (Step 7, run after the pauses
 since Heroic only fetches its bundled copy once a game install has happened). It does
 **not** touch `input` group membership — see Step 8, that's obsolete. It does not run
 `make r` for you (Step 9) — do that yourself once it finishes.
@@ -22,7 +22,8 @@ since Heroic only fetches its bundled copy once a game install has happened). It
 
 ## Prerequisites
 
-- Ubuntu 22.04 or later (other Debian-based distros should work)
+- Ubuntu 24.04 or later (other Debian-based distros should work). PyGObject builds
+  against GLib 2.80, which 22.04 does not ship.
 - An Epic Games Store account with MetalStorm purchased
 - GNOME on Wayland works directly — Wingman captures via PipeWire and injects input via
   XTest over XWayland (ADR 050/053). A pure X11 session also works. Neither root nor
@@ -59,13 +60,11 @@ since Heroic only fetches its bundled copy once a game install has happened). It
      already there, then `sudo apt update && sudo apt upgrade` before retrying.
      **This was the actual root cause on the one machine that hit it** — clearing
      the upgrade backlog alone (cause 1) was necessary but not sufficient.
-- `python3-tk` — required for `wingman/calibrate.py` and thus for `make test`, which
-  collects `tests/test_calibrate_config_writer.py`. Not part of `uv sync`: `tkinter` has
-  no PyPI wheel: it's a compiled binding to system Tcl/Tk, gated by how the interpreter
-  itself was built. Ubuntu ships it as a separate package from base `python3`.
-  ```bash
-  sudo apt install python3-tk
-  ```
+- `tkinter` — required for `wingman/calibrate.py` and thus for `make test`, which
+  collects `tests/test_calibrate_config_writer.py`. A uv-managed Python (the default
+  since ADR 154) ships it, so there is nothing to install. A venv on the system Python
+  needs apt's binding for that Python (`pythonX.Y-tk`, or `python3-tk` for the
+  release's default); `make upgrade-linux` (Step 6) installs it only in that case.
 - Internet connection for first-time Proton-GE (or equivalent) download (~1 GB)
 
 ---
@@ -146,47 +145,47 @@ Makefile default, per the `?=` convention documented there.
 
 ---
 
-## Step 5 — Install `uv` and sync Python dependencies
-
-From the repository root:
+## Step 5 — Install `uv`
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env    # or open a new terminal
-uv sync --all-groups
 ```
-
-`uv sync` builds `.venv` against the system Python interpreter (`uv run --active` follows
-whatever `.venv` was created against) rather than downloading a standalone one, so system
-packages that provide compiled extensions — `python3-tk` (above) and `gi` (next) — attach
-to that same interpreter via the OS package manager, not via `uv`/`pip`.
 
 ---
 
-## Step 6 — Bridge `gi` (PyGObject) into the venv
+## Step 6 — Build the Python environment
 
-`wingman/capture.py`'s PipeWire backend imports `gi.repository.Gst`. Like `tkinter`,
-`gi` has no PyPI wheel — it's a compiled binding to system GObject-introspection
-libraries. Install the system package and GStreamer introspection data, then bridge them
-into the uv-managed venv with a `.pth` file (Research 007):
+From the repository root:
 
 ```bash
-sudo apt install python3-gi gir1.2-gstreamer-1.0
-echo "/usr/lib/python3/dist-packages" > .venv/lib/python3.12/site-packages/system_gi_bridge.pth
+make upgrade-linux        # same as scripts/upgrade-linux.sh
 ```
 
-Adjust the `python3.12` path segment to match your venv's actual Python version
-(`ls .venv/lib/`). Verify:
+`wingman/capture.py`'s PipeWire backend imports `gi.repository.Gst`. PyGObject is a
+locked Linux-only dependency, but PyPI ships it (and its dependency pycairo) only as
+source, so `uv sync` compiles both. The script:
 
-```bash
-uv run --active python -c "
-import gi
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst
-Gst.init(None)
-print('OK:', Gst.version_string())
-"
-```
+1. creates `.venv` on a uv-managed Python from `.python-version` if there is none, or
+   if its interpreter no longer runs. A uv-managed Python includes tkinter and survives
+   Ubuntu's Python version bumps;
+2. apt-installs the build headers (`build-essential pkg-config libgirepository-2.0-dev
+   libcairo2-dev`) and the runtime Gst typelib (`gir1.2-gstreamer-1.0`);
+3. deletes the old `system_gi_bridge.pth`, if present;
+4. runs `uv sync --all-groups`;
+5. checks that `gi` and `Gst` import from inside the venv, and that tkinter imports;
+6. on GNOME, installs the window-left Shell extension (ADR 155) so the game's window
+   opens at the top-left of the screen. Log out and back in once afterwards: GNOME
+   loads extension changes only at login.
+
+Re-run it after every Ubuntu release upgrade. It is safe to run repeatedly. A venv still
+on the system Python gets a warning; `scripts/upgrade-linux.sh --rebuild-venv` moves it
+onto a uv-managed Python.
+
+**History:** until 2026-10 the venv borrowed apt's `python3-gi` through
+`system_gi_bridge.pth`. That only works while the system Python has the venv's minor
+version. On Ubuntu 26.04 (Python 3.14) a 3.12 venv fails with
+`ImportError: cannot import name '_gi' from partially initialized module 'gi'`.
 
 ---
 
@@ -300,8 +299,8 @@ values win over the defaults):
 | `PROTONPATH '...GE-Proton-latest' is not valid, toolmanifest.vdf not found` | `PROTON_ROOT` default doesn't match what's actually installed | `ls .../tools/proton/` (Step 4) and override `PROTON_ROOT` (Step 9) |
 | `/bin/sh: 1: umu-run: not found` (in `/tmp/wingman-game-launch.log`) | `umu-run` never installed at `~/.local/bin/umu-run` | Step 7 — symlink Heroic's bundled copy |
 | `python: not found` from a `make` target | `uv` not on `PATH` in that shell (installed after the terminal opened, or `.bashrc` not sourced) | `source ~/.local/bin/env` or open a new terminal; confirm with `command -v uv` |
-| `ModuleNotFoundError: No module named 'tkinter'` | `python3-tk` not installed | Prerequisites — `sudo apt install python3-tk` |
-| `ModuleNotFoundError: No module named 'gi'` | `gi` not bridged into the uv venv | Step 6 |
+| `ModuleNotFoundError: No module named 'tkinter'` | Venv on the system Python without `python3-tk` | `sudo apt install python3-tk`, or `scripts/upgrade-linux.sh --rebuild-venv` |
+| `ModuleNotFoundError: No module named 'gi'`, or `cannot import name '_gi' from partially initialized module 'gi'` | PyGObject not built into the venv, or a leftover `system_gi_bridge.pth` after an Ubuntu upgrade | Step 6 — `make upgrade-linux` |
 | Game crashes instantly: `Unhandled exception in Xalia ... SDL_Init: No displays available` | Proton's Xalia accessibility bridge doesn't work on this XWayland setup | `export PROTON_USE_XALIA=0` before launching |
 | Game crashes: `d3d12: could not create a DXGI factory` or `d3d11: failed to create factory (80004005)` | DXVK inside the Steam Runtime container can't see a real GPU — almost always missing i386 multiarch, not a GPU driver problem | Prerequisites — enable i386 multiarch and install the `:i386` graphics libs. Confirm the real cause in `/tmp/steam-0.log` (`PROTON_LOG=1`): look for `DXVK: No adapters found` |
 | Player.log: `Forced GfxDevice 'Vulkan' was not built from editor` | The Windows build doesn't include Vulkan shaders — `-force-vulkan` isn't a usable workaround for this game | Fix the underlying DXVK/adapter issue instead (row above) rather than forcing Vulkan |
@@ -316,7 +315,7 @@ values win over the defaults):
 - ADR 050 — PipeWire screen capture on GNOME Wayland
 - ADR 053 — Linux one-command launch: input injection stack, no root/`input` group required
 - ADR 047 — Host environment pre-flight check
-- Research 007 — PyCharm IDE fit (documents the `system_gi_bridge.pth` approach)
+- Research 007 — PyCharm IDE fit (documents the retired `system_gi_bridge.pth` approach)
 - Heroic Games Launcher: [Flathub page](https://flathub.org/apps/com.heroicgameslauncher.hgl)
 - Proton-GE: available via Heroic Wine Manager → PROTON-GE tab (or whatever build Heroic
   actually installs — check before assuming)

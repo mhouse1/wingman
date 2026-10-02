@@ -9,6 +9,7 @@ Usage:
     renderer.maybe_render(frame, tracking_obs, state_name, health, missiles, flares)
 """
 
+import atexit
 import logging
 import os
 import subprocess
@@ -113,6 +114,12 @@ class HudRenderer:
                 stderr=subprocess.DEVNULL,
             )
             logger.info("HudRenderer: feh launched (%s)", geometry)
+            # Backstop for every exit that skips the shutdown sequence's
+            # close(). main() builds the renderer well before its main-loop
+            # try/finally, so an exception in between orphaned the window
+            # (2026-10-02: three feh windows left open by crashed replay
+            # tests). close() is idempotent and unregisters this itself.
+            atexit.register(self.close)
         except FileNotFoundError:
             logger.warning("HudRenderer: feh not found — install with: sudo apt install feh")
 
@@ -127,6 +134,8 @@ class HudRenderer:
         alone under Xwayland (observed live, 2026-09-23).
         """
         proc = self._feh_process
+        if proc is not None:
+            atexit.unregister(self.close)
         if proc is None or proc.poll() is not None:
             return  # never launched, or already exited on its own
         try:
