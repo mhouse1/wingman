@@ -132,6 +132,38 @@ def test_unreadable_ammo_breaks_a_confirmation_run_without_losing_priority():
     assert state.missiles_spent == 1
 
 
+def test_one_ocr_read_polled_repeatedly_does_not_confirm_a_rearm():
+    """2026-10-01 15:47: one misread of 44 was polled three times and reset urgency."""
+    urgency = MissileUrgency(confirm_reads=3)
+    for read_id in (1, 2, 3):
+        urgency.observe(2, "secondary", read_id=read_id)
+    for read_id in (4, 5, 6):
+        empty = urgency.observe(0, "secondary", terminal_zero=True, read_id=read_id)
+    assert empty.empty
+
+    for _ in range(5):
+        polled = urgency.observe(44, "secondary", read_id=7)
+    assert not polled.rearmed
+    assert polled.empty
+
+    urgency.observe(44, "secondary", read_id=8)
+    rearmed = urgency.observe(44, "secondary", read_id=9)
+    assert rearmed.rearmed
+    assert not rearmed.empty
+
+
+def test_spent_missiles_need_distinct_reads_to_confirm():
+    urgency = MissileUrgency(confirm_reads=2)
+    urgency.observe(4, "secondary", read_id=1)
+    urgency.observe(4, "secondary", read_id=2)
+
+    for _ in range(4):
+        polled = urgency.observe(3, "secondary", read_id=3)
+    assert polled.missiles_spent == 0
+
+    assert urgency.observe(3, "secondary", read_id=4).missiles_spent == 1
+
+
 def test_resupply_priority_requires_two_missiles_spent():
     assert not resupply_preempts(
         priority=MissilePriority(1, False), marker_visible=True)

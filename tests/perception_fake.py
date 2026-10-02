@@ -34,6 +34,9 @@ class PerceptionFake:
     def get_ammo_missiles(self):
         return None
 
+    def get_ammo_missiles_read_seq(self):
+        return None
+
     def get_ammo_flares(self):
         return None
 
