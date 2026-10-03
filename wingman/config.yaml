@@ -770,6 +770,22 @@ behavior_tree:
     # running unchanged (_capture_terrain_frame's own guard, `capture_max <=
     # 0: return`, is what makes this a clean no-op rather than a behavior
     # change). Raise it again for a future live-actuation trial.
+    #
+    # RE-GRADUATED 2026-10-02 (operator, /proceed on the ADR 148 recommendation):
+    # shadow: false. On the canyon map 5 of the first 6 deaths of the 21:45 session
+    # followed a shadow TERRAIN AHEAD with no missile (21:58:44.975: sky 0.00 while
+    # the icon held NOSE_DOWN, death 4 s later), and frames show the chase following
+    # targets low over mesas. The padlock concern above stands unresolved; two
+    # likely false positives were seen, both climbing during a missile hit. A firing
+    # now flies ADR 148's crash recovery (airbrake while the path is below level,
+    # hand back at the first fresh path at or above level).
+    #
+    # BACK TO SHADOW the same night (2026-10-03 00:10): on a night map the sky is
+    # far darker than sky_hsv's value floor (180), so the live sky fraction read
+    # 0.000-0.001 while climbing at +40 deg into open sky, terrain ahead held
+    # true continuously, and the crash recovery took the airframe every time the
+    # path dipped below level (00:08:47, 00:09:02, 00:09:17). Needs a detector that
+    # handles night maps before it actuates again.
     terrain_avoidance: {enabled: true, shadow: true, sky_min_frac: 0.55,
       confirm_reads: 2, capture_max: 0, capture_cooldown_s: 20.0}
   # HLDD 013 Phase 1: wires the existing, already-selected TACTIC_ATTACK_SUPPORT
@@ -1347,6 +1363,17 @@ pursuit_mode:
   # The dive recovery is to be redesigned around a predicted trajectory. The
   # altitude-floor climb is untouched. true restores all three.
   dive_safety: false
+  # Operator, 2026-10-02 (the predicted-trajectory redesign above): "wingman needs to
+  # apply brakes and nose up if the altitude and speed change rate would result into a
+  # ground crash". true lets the tree's HARD emergency (time to ground from altitude
+  # over descent rate; terrain ahead too once climb.terrain_avoidance.shadow is false;
+  # never the floor) fly ADR 148's airbrake and
+  # nose-up recovery inside a pursuit, resupply search included, while dive_safety
+  # stays off; the recovery hands the chase back as soon as that emergency clears.
+  # Measured on the 19:26 session: 44 of 62 descents with under 20 s to ground ended
+  # in a death, and the 20:20 one had the emergency requested from 20:19:47 and
+  # suppressed to impact. false restores the suppression.
+  crash_recovery: true
   # HLDD 015 Icon-Directed Search (2026-09-26), SHADOW STAGE: each steering tick
   # finds the game's red ring icon (an arrowhead on a fixed ring around the screen
   # centre pointing at an off-screen enemy), adds points to a nose-down/up and a

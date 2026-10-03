@@ -2852,6 +2852,10 @@ class _ClimbCtrlStub:
     def __init__(self):
         self.climb_calls = []
         self.emergency_calls = []
+        self.climbing = False
+
+    def is_climbing(self):
+        return self.climbing
 
     def climb_mode(self, **kw):
         self.climb_calls.append(kw)
@@ -2906,6 +2910,19 @@ class TestClimbEmergencyActuationUsesTheHardSignal:
         h = _climb_handler(hard_emergency=True, broad_emergency=True)
         h._update_climb(object())
         assert h._ctrl.emergency_calls == [True]
+
+    def test_a_running_hold_hears_the_verdict_whatever_leaf_is_selected(self):
+        """2026-10-02 23:36: Idle won the selection, _update_climb stopped running,
+        and the hold kept a stale emergency for 30 s."""
+        h = _climb_handler(hard_emergency=False, broad_emergency=False)
+        h._ctrl.climbing = True
+        h._push_climb_emergency()
+        assert h._ctrl.emergency_calls == [False]
+
+    def test_no_push_without_a_running_hold(self):
+        h = _climb_handler(hard_emergency=True)
+        h._push_climb_emergency()
+        assert h._ctrl.emergency_calls == []
 
     def test_missing_hard_emergency_fn_defaults_to_non_emergency(self):
         h = _climb_handler(hard_emergency=False)

@@ -457,7 +457,12 @@ class TelemetryProcessor:
             # (ADR 097 D3), and clearing would make the next misread the seed.
             # digit_drop_window_s bounds the hold.
             return self._reject(signal, hist, raw, now_s, seedable=False, hold=True)
-        if seed_usable:
+        # The same anchor gates the next read too (ADR 148 amendment, 2026-10-02): at the
+        # 3 s cadence one rejected read makes the next good one 6 s old, past
+        # stale_after_s, and the bypass below cleared the history, so a dive lost its rate
+        # for two reads. 22:18:36.9: 14210 rejected, 1162 then accepted with no rate and
+        # no time to ground until 455 m. A gap with no rejections still reseeds.
+        if seed_usable or drop_anchor_usable:
             dt = max(seed_age, 0.1)  # guard duplicate timestamps
             # Cap the dt multiplier per-gate (see the two call sites above):
             # acceleration-envelope gates must not widen when the sampler is

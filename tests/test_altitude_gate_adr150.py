@@ -160,3 +160,26 @@ def test_shipped_window():
     import yaml
     with open("wingman/config.yaml") as fh:
         assert yaml.safe_load(fh)["telemetry"]["digit_drop_window_s"] == 15
+
+
+def test_one_rejected_read_does_not_cost_the_descent_rate():
+    """2026-10-02 22:18:33.9-39.9: 1523 m, then 14210 (rejected), then 1162 m six
+    seconds after the last accepted read. The stale-seed bypass cleared the history,
+    so 1162 carried no rate and the dive had no time to ground until 455 m."""
+    p = _proc(digit_drop_window_s=15.0)
+    p.update(1017, 1667, 1000.0)
+    p.update(1017, 1523, 1003.0)
+    p.update(1017, 14210, 1006.0)                 # rejected
+    p.update(1019, 1162, 1009.0)                  # 6 s after the last accepted read
+    alt = p.snapshot(1009.0).altitude
+    assert alt.value == 1162
+    assert alt.rate is not None and alt.rate < -50.0, alt.rate   # (1162 - 1523) / 6 s
+
+
+def test_a_gap_without_rejections_still_reseeds():
+    p = _proc(digit_drop_window_s=15.0)
+    p.update(1017, 1667, 1000.0)
+    p.update(1017, 1523, 1003.0)
+    p.update(1019, 1162, 1009.5)                  # outage, nothing rejected
+    alt = p.snapshot(1009.5).altitude
+    assert alt.value == 1162 and alt.rate is None
