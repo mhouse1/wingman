@@ -13,6 +13,7 @@ import wingman.controller as controller_module
 from wingman.controller_config import ControllerConfig
 from wingman.analyzer import GameState
 from wingman.controller import Controller, NOSE_UP_KEY
+from tests.perception_fake import PerceptionFake
 
 
 class _FakeKeyboard:
@@ -26,7 +27,7 @@ class _FakeKeyboard:
         self.events.append(("release", key, time.time()))
 
 
-class _FakeStateAnalyzer:
+class _FakeStateAnalyzer(PerceptionFake):
     def __init__(self, state=GameState.GAME_BATTLE):
         self.game_state = state
 

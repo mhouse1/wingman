@@ -26,11 +26,12 @@ from wingman.config_schema import validate_config
 from wingman.controller import (Controller, FIRE_ACTIVE_WEAPON, MISSION_J20_KEY,
                                 PADLOCK_CAMERA, SPECIAL_ABILITY)
 from wingman.controller_config import ControllerConfig
+from tests.perception_fake import PerceptionFake
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-class _Analyzer:
+class _Analyzer(PerceptionFake):
     def __init__(self, state=GameState.GAME_BATTLE):
         self.game_state = state
         self._last_battle_event_ts = 0.0
@@ -461,7 +462,7 @@ class _ThreadStub:
         _ThreadStub.started.append((self._target, self._kwargs))
 
 
-class _StateAnalyzer:
+class _StateAnalyzer(PerceptionFake):
     def __init__(self, state):
         self.game_state = state
         self.trigger_calls = []
@@ -479,6 +480,7 @@ def _hotkey_ctrl(monkeypatch, state, **cfg):
     analyzer = _StateAnalyzer(state)
     ctrl = Controller((0, 0, 1920, 1200), analyzer=analyzer,
                       config=ControllerConfig(**cfg))
+    ctrl.register_hotkeys()   # CR-018-13: no longer done by __init__
     _ThreadStub.started = []
     return ctrl, keyboard, analyzer
 
@@ -497,7 +499,9 @@ def test_u_launches_the_configured_mission(monkeypatch, mission):
     assert len(_ThreadStub.started) == 1
     target, kwargs = _ThreadStub.started[0]
     assert target == getattr(ctrl, f"mission_{mission}")
-    assert kwargs == {}, "'u' skips, rather than preempts, a running mission"
+    assert "preempt" not in kwargs, "'u' skips, rather than preempts, a running mission"
+    # CR-018-19: an automatic-style launch carries the cancel token it took.
+    assert kwargs == {"token": ctrl.mission_token()}
 
 
 def test_u_without_a_configured_mission_still_launches_j20(monkeypatch):
@@ -515,7 +519,9 @@ def test_u_logs_which_mission_it_starts(monkeypatch, caplog):
     ctrl, keyboard, _ = _hotkey_ctrl(monkeypatch, GameState.GAME_LOBBY,
                                      default_mission="jas39")
 
-    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+    # The handler logs from wingman.hotkeys (CR-018-13); the launch from the controller.
+    with caplog.at_level(logging.INFO, logger="wingman.controller"), \
+            caplog.at_level(logging.INFO, logger="wingman.hotkeys"):
         keyboard.handlers[MISSION_J20_KEY](object())
 
     assert ("'u' key pressed - starting the configured mission (jas39, "
@@ -579,7 +585,7 @@ def _restart_ctrl(monkeypatch, **cfg):
     launched = []
     for name in ("j20", "su30", "jas39", "loiter"):
         monkeypatch.setattr(ctrl, f"mission_{name}",
-                            lambda name=name: launched.append(name))
+                            lambda name=name, **_: launched.append(name))
     return ctrl, launched
 
 

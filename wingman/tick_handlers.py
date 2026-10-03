@@ -26,7 +26,8 @@ import threading
 import time
 
 from . import capture_budget
-from .analyzer import GameState, BATTLE_STATES
+from .state import GameState, BATTLE_STATES
+from .suppressed import log_suppressed
 from .behavior_tree import (
     TACTIC_ATTACK_SUPPORT,
     TACTIC_CLIMB,
@@ -1276,8 +1277,8 @@ class BoundaryPerceptionHandler:
         """
         try:
             reading = self._analyzer.detect_map_boundary(frame)
-        except Exception:
-            logger.debug("Boundary read failed", exc_info=True)
+        except Exception as exc:
+            log_suppressed(logger, "detect_map_boundary", exc)
             reading = None
         # ADR 117: the RAW verdict, before the respawn settle and the median
         # filter. Only a raw None is detector blindness; a reading that exists
@@ -2079,6 +2080,16 @@ class BehaviorTreeHandler:
         if self._climb_hard_emergency_fn is not None:
             self._ctrl.set_climb_emergency(bool(self._climb_hard_emergency_fn()))
 
+    def _push_climb_emergency(self) -> None:
+        """Push this tick's HARD verdict into a running climb hold, whatever leaf
+        the tree selects (ADR 148 amendment, 2026-10-02 23:36). `_update_climb`
+        only runs while Climb is selected; once Idle won, the hold kept a stale
+        emergency and flew 30 s to its cap instead of handing the chase back."""
+        is_climbing = getattr(self._ctrl, "is_climbing", None)
+        if (self._climb_hard_emergency_fn is not None and callable(is_climbing)
+                and is_climbing()):
+            self._ctrl.set_climb_emergency(bool(self._climb_hard_emergency_fn()))
+
     def _start_disengage(self) -> None:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence
         clock — the legacy handler's fire-once-and-reset semantics, so the
@@ -2174,28 +2185,28 @@ class BehaviorTreeHandler:
         # ticks must extend the burn rather than let it lapse mid-alert.
         try:
             self._ctrl.note_incoming(bool(incoming), now)
-        except Exception:
-            logger.debug("note_incoming failed", exc_info=True)
+        except Exception as exc:
+            log_suppressed(logger, "note_incoming", exc)
         # ADR 134: cruise afterburner. Tree-independent for the same reason
         # note_incoming is — it only touches one key and would rarely tick if
         # it had to compete with Engage/AttackSupport for tree priority.
         try:
             self._ctrl.note_afterburner_cruise(
                 current_game_state, self._ctrl.is_mission_running())
-        except Exception:
-            logger.debug("note_afterburner_cruise failed", exc_info=True)
+        except Exception as exc:
+            log_suppressed(logger, "note_afterburner_cruise", exc)
         # Phase 1 (operator directive): stall prevention. Same
         # tree-independent shape as note_afterburner_cruise above.
         try:
             self._ctrl.note_stall_prevention(current_game_state)
-        except Exception:
-            logger.debug("note_stall_prevention failed", exc_info=True)
+        except Exception as exc:
+            log_suppressed(logger, "note_stall_prevention", exc)
         # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
         # control loop, so it needs the reading rather than the tactic.
         try:
             self._ctrl.note_boundary(_b_dist, _b_fwd)
-        except Exception:
-            logger.debug("note_boundary failed", exc_info=True)
+        except Exception as exc:
+            log_suppressed(logger, "note_boundary", exc)
         # ADR 140 D4/D6: drives Controller's padlock_state() tri-state.
         # Run BEFORE the terrain read below (reordered by ADR 142) so
         # padlock_state() reflects THIS tick's frame, not the previous
@@ -2239,8 +2250,8 @@ class BehaviorTreeHandler:
                 and self._ctrl.padlock_state() is False):
             try:
                 _terrain_sky_frac = self._analyzer.detect_terrain_ahead(frame)
-            except Exception:
-                logger.debug("detect_terrain_ahead failed", exc_info=True)
+            except Exception as exc:
+                log_suppressed(logger, "detect_terrain_ahead", exc)
                 _terrain_sky_frac = None
         snap = AnalyzerSnapshot(
             health=game_state.get("health"),
@@ -2276,8 +2287,9 @@ class BehaviorTreeHandler:
         if self._climb_emergency_update_fn is not None:
             try:
                 self._climb_emergency_update_fn(snap, now)
-            except Exception:
-                logger.debug("climb_emergency_update_fn failed", exc_info=True)
+            except Exception as exc:
+                log_suppressed(logger, "climb_emergency_update_fn", exc)
+        self._push_climb_emergency()
         # HLDD 001 Phase 1: capture evidence on the FALSE->TRUE edge, right
         # after the update above refreshes terrain_ahead_active for THIS
         # tick and before the tree consumes it — mirrors the emergency

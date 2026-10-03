@@ -16,6 +16,7 @@ from wingman.controller_config import ControllerConfig
 from constants import CONFIG_PATH
 from wingman.controller import Controller
 from wingman.analyzer import GameState
+from tests.perception_fake import PerceptionFake
 
 
 def _load_config():
@@ -112,7 +113,7 @@ def test_restart_last_mission_returns_false_when_running(ctrl):
             ctrl._mission_lock.release()
 
 
-class _AnalyzerStub:
+class _AnalyzerStub(PerceptionFake):
     def __init__(self, state: GameState):
         self.game_state = state
         self.trigger_calls = []
@@ -355,6 +356,7 @@ def test_padlock_hotkey_ignores_wingmans_own_press(monkeypatch):
     cfg = _load_config()
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
     ctrl = Controller(region, analyzer=_AnalyzerStub(GameState.GAME_BATTLE))
+    ctrl.register_hotkeys()   # CR-018-13: no longer done by __init__
 
     handler = keyboard_stub.handlers[controller_module.PADLOCK_CAMERA]
     ctrl._padlock_cooldown_until = 0.0
@@ -423,6 +425,7 @@ def test_manual_padlock_press_sets_state_unknown(monkeypatch):
     cfg = _load_config()
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
     ctrl = Controller(region, analyzer=_AnalyzerStub(GameState.GAME_BATTLE))
+    ctrl.register_hotkeys()   # CR-018-13: no longer done by __init__
     ctrl._padlock_engaged = False
     handler = keyboard_stub.handlers[controller_module.PADLOCK_CAMERA]
 
@@ -844,7 +847,8 @@ def test_genuine_u_press_during_game_starting_starts_mission(monkeypatch):
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
     analyzer = _AnalyzerStub(GameState.GAME_STARTING)
     ctrl = Controller(region, analyzer=analyzer)
-    ctrl.mission_j20 = lambda: None
+    ctrl.register_hotkeys()   # CR-018-13: no longer done by __init__
+    ctrl.mission_j20 = lambda **_: None
 
     _ThreadStub.started_targets = []
     handler = keyboard_stub.handlers[controller_module.MISSION_J20_KEY]
@@ -864,7 +868,8 @@ def test_wingmans_own_u_press_is_ignored_as_echo(monkeypatch):
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
     analyzer = _AnalyzerStub(GameState.GAME_STARTING)
     ctrl = Controller(region, analyzer=analyzer)
-    ctrl.mission_j20 = lambda: None
+    ctrl.register_hotkeys()   # CR-018-13: no longer done by __init__
+    ctrl.mission_j20 = lambda **_: None
     handler = keyboard_stub.handlers[controller_module.MISSION_J20_KEY]
     event = type("_Event", (), {"name": controller_module.MISSION_J20_KEY})()
 
@@ -896,7 +901,8 @@ def test_j20_hotkey_forces_battle_via_fsm_trigger(monkeypatch):
     region = (0, 0, cfg["region"]["width"], cfg["region"]["height"])
     analyzer = _AnalyzerStub(GameState.GAME_LOBBY)
     ctrl = Controller(region, analyzer=analyzer)
-    ctrl.mission_j20 = lambda: None
+    ctrl.register_hotkeys()   # CR-018-13: no longer done by __init__
+    ctrl.mission_j20 = lambda **_: None
 
     _ThreadStub.started_targets = []
     handler = keyboard_stub.handlers[controller_module.MISSION_J20_KEY]

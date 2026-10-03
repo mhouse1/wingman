@@ -1,20 +1,36 @@
 import contextlib
 import ctypes
 import logging
+import math
 import sys
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 import cv2
 from mss import mss
 
-from . import capture_budget
-from .analyzer import GameState, BATTLE_STATES, NOSE_DOWN
+from .state import GameState, NOSE_DOWN
+from .perception import Perception
+from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT
+from .config_schema import schema_default
+from . import keybindings as _keybindings
+from .actuator import Actuator
+from .hold_tactic import HoldTactic
+from .hotkeys import register_hotkeys as _register_hotkeys
 from .controller_config import ControllerConfig
-from .crop_region import CropCoords, crop_centre, draw_crops
+from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
+from .resupply import (
+    MissileUrgency,
+    RESUPPLY_MIN_MISSILES_SPENT,
+    ResupplyMarkerMemory,
+    find_resupply_marker,
+    find_resupply_ring_icons,
+    marker_nearer_than_target,
+    resupply_preempts,
+)
 from .input_linux import (  # noqa: F401  — re-exported: conftest.py, move_game_window.py and tests import these from here
     _WINGMAN_XAUTH,
     _XKEY_ALIASES,
@@ -33,6 +49,7 @@ except Exception:
     keyboard_module = None
 
 logger = logging.getLogger(__name__)
+_RESUPPLY_SAMPLE_DIR = Path("tests/test-output/target_tracking")
 
 # Module-level so tests can monkeypatch `controller.keyboard_module` in one place.
 keyboard_module = maybe_install_linux_keyboard(keyboard_module)
@@ -48,7 +65,7 @@ def set_focus_guard(guard) -> None:
     focus_guard = guard
 
 
-def _press_key(key) -> bool:
+def _press_key(key, owner: str = "") -> bool:
     """Inject a key press unless the focus guard forbids it (ADR 098).
 
     Returns True if the key was actually pressed. Callers keep their hold loop,
@@ -56,11 +73,11 @@ def _press_key(key) -> bool:
     instead collapses a two-second hold into zero and, at the disengage-roll
     site, skipped the stop_search_and_destroy_loop() cleanup that a started loop
     depends on. Releasing a key that was never pressed is a harmless no-op.
+
+    CR-018-09: the focus-gated press of the Actuator, kept under this name for
+    its callers and tests.
     """
-    if not _may_inject("key"):
-        return False
-    keyboard_module.press(key)
-    return True
+    return _actuator.press(key, owner, focus_gate=True)
 
 
 def _may_inject(what: str = "key") -> bool:
@@ -80,6 +97,14 @@ def _may_inject(what: str = "key") -> bool:
     except Exception:                        # noqa: BLE001 - never break the loop
         return True
 
+
+# CR-018-09 Phase 1: every key press and release goes through this object. The
+# lambdas read the module globals on each call, so tests that monkeypatch
+# `keyboard_module` or `_may_inject` still intercept every press.
+# Phase 2 (2026-09-27): the throttle is leased; see Actuator and _THROTTLE_YIELDS.
+_actuator = Actuator(lambda: keyboard_module, lambda what: _may_inject(what),
+                     leased_keys=(_keybindings.AFTERBURNER_KEY,))
+
 # A failed key RELEASE is the start of a stuck-key incident, and the key does not
 # come back when this process dies: on Linux XTest key state lives in the X
 # SERVER and survives for the whole session; on Windows the injected key stays
@@ -89,6 +114,25 @@ def _may_inject(what: str = "key") -> bool:
 _LATCH_NOTE = ("key may stay latched in the X server for this session"
                if sys.platform != "win32"
                else "key may stay held down in the Windows input queue")
+
+
+class _Writer(NamedTuple):
+    """Something that commands flight input over time (CR-018-10).
+
+    ``stop`` takes the reason ("manual takeover", "shutdown"). ``threads``
+    returns the thread handles to wait for at shutdown. ``spawned_by`` names
+    the Controller methods whose threads this entry stops, which is what
+    tests/test_flight_writers.py checks every thread this module starts against.
+    """
+    name: str
+    stop: "Callable[[str], None]"
+    threads: "Callable[[], tuple]"
+    spawned_by: "tuple[str, ...]" = ()
+
+
+# Shared by every thread cleanup() waits for. The stops are all set before the
+# first join, so the threads wind down in parallel and the slowest one decides.
+_WRITER_JOIN_BUDGET_S = 4.0
 
 
 # Key bindings and the emote list live in keybindings.py so they are findable
@@ -250,6 +294,10 @@ class _EngagementTally:
         self.icon_seen = 0
         self.icon_steer_s = 0.0
         self._icon_prev: "tuple[float, str] | None" = None
+        # Seconds the machine gun was held on a centred target; reported only
+        # when the pursuit's gun_on_centre is on.
+        self.gun_enabled = False
+        self.gun_s = 0.0
 
     def icon_tick(self, unlocked: bool, has_icon: bool, rung: str) -> None:
         now = self._clock()
@@ -283,6 +331,8 @@ class _EngagementTally:
         if self.icon_enabled:
             line += " icon=%d/%d icon_steer=%.1fs" % (
                 self.icon_seen, self.icon_unlocked, self.icon_steer_s)
+        if self.gun_enabled:
+            line += " gun=%.1fs" % self.gun_s
         return line
 
 
@@ -339,6 +389,11 @@ class Controller:
         self._mission_lock = threading.Lock()
         self._mission_complete = threading.Event()
         self._mission_cancel = threading.Event()
+        # CR-018-19: the cancel token. cancel_mission() bumps the generation, and
+        # an automatic launch captures it before starting the mission's thread;
+        # see _claim_mission_cancel.
+        self._mission_generation = 0
+        self._mission_generation_lock = threading.Lock()
         self._exit_event = exit_event  # Event to signal program exit
         # ADR 094: deferred exit. Set by the FINISH_ROUND_THEN_EXIT hotkey and
         # read by the main loop at its safe point. An Event rather than a bool
@@ -358,7 +413,10 @@ class Controller:
         self._exit_script_hotkey = None
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
-        self._analyzer = analyzer
+        # CR-018-15: read and commanded only through the Perception port.
+        self._analyzer: "Perception | None" = analyzer
+        # CR-018-09 Phase 2: the Actuator's throttle leases ask this controller.
+        _actuator.set_hold_policy(self._owner_may_hold)
         self._capture = capture
         self._on_auto_mission_key = on_auto_mission_key
         self._last_auto_mission_key_ts = 0.0
@@ -496,7 +554,14 @@ class Controller:
         self._sdl_lifecycle_timeout_s = 2.0
         # ADR 128: afterburner held while a missile is inbound.
         self._ab_evade_active = threading.Event()
+        # CR-018-07: set by takeover and cleanup, which had no way to end the
+        # hold — it re-pressed the throttle over the operator's release.
+        self._ab_evade_stop = threading.Event()
         self._ab_evade_thread = None
+        # CR-018-10 Phase B: the first tactic on the shared lifecycle; it wraps
+        # the two events above, which the rest of the controller still reads.
+        self._ab_evade = HoldTactic("afterburner evade", running=self._ab_evade_active,
+                                    stop=self._ab_evade_stop)
         self._ab_evade_until = 0.0
         _me = (config.get("missile_evade", {}) or {}) if isinstance(config, dict) else {}
         _me = getattr(config, "missile_evade", None) or _me or {}
@@ -677,6 +742,14 @@ class Controller:
         self._pursuit_search_resume_centre_err = float(_pm.get("search_resume_centre_err", 0.15))
         self._pursuit_search_resume_centre_delay_s = float(
             _pm.get("search_resume_centre_delay_s", 6.0))
+        # Operator, 2026-09-28: the pursuit holds FIRE_MACHINE_GUN while the
+        # tracked target is centred (_pursuit_gun_tick).
+        self._pursuit_gun_on_centre = bool(
+            _pm.get("gun_on_centre", schema_default("pursuit_mode.gun_on_centre")))
+        self._pursuit_gun_centre_err = float(
+            _pm.get("gun_centre_err", schema_default("pursuit_mode.gun_centre_err")))
+        self._gun_held_since: "float | None" = None
+        self._gun_fired_s = 0.0
         # mission_su30 defers SWITCH_WEAPON until the selected weapon runs out
         # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
         # consecutive ammo==0 reads are required before pressing it. At the
@@ -728,15 +801,50 @@ class Controller:
         # one. To be redesigned later around a predicted trajectory. The
         # altitude-floor climb (ADR 147) is untouched.
         self._pursuit_dive_safety = bool(_pm.get("dive_safety", True))
+        # Operator, 2026-10-02: that redesign. With dive_safety off, a HARD emergency
+        # (predicted time to ground; terrain ahead once out of shadow) still flies ADR 148's airbrake
+        # and nose-up recovery through the pursuit, and only while it holds.
+        self._pursuit_crash_recovery = bool(_pm.get(
+            "crash_recovery", schema_default("pursuit_mode.crash_recovery")))
         self._dive_recovery_suppressed_log_ts = 0.0
         self._search_look_down_pulse_s = float(_pm.get("search_look_down_pulse_s", 0.0))
         self._search_look_down_interval_s = float(_pm.get("search_look_down_interval_s", 1.0))
         self._search_look_down_min_deg = float(_pm.get("search_look_down_min_deg", -20.0))
         self._search_look_down_next_ts = 0.0
+        # Operator, 2026-10-02: "currently it continuously flies left when no
+        # targets are sighted, modify it to fly up to 7000 altitude or until
+        # target sighted". Where the blind search would roll, it climbs with the
+        # roll released until the altitude reaches search_climb_alt_m; then the
+        # roll search resumes until a target is next seen. 0 = off.
+        self._search_climb_alt_m = float(_pm.get(
+            "search_climb_alt_m", schema_default("pursuit_mode.search_climb_alt_m")))
+        self._search_climb_max_deg = float(_pm.get(
+            "search_climb_max_deg", schema_default("pursuit_mode.search_climb_max_deg")))
+        self._search_climb_reached = False
+        self._search_climbing = False
         # HLDD 015 Icon-Directed Search (2026-09-26), shadow stage: score the
         # game's ring icon each steering tick and log the keys the law would
         # hold (ICONPTS). Presses nothing; the search above keeps flying.
         self._icon_cfg = IconSteeringConfig.from_dict(_pm.get("icon_steering"))
+        _resupply_cfg = _pm.get("resupply_priority") or {}
+        self._resupply_priority_enabled = bool(_resupply_cfg.get(
+            "enabled", schema_default("pursuit_mode.resupply_priority.enabled")))
+        self._resupply_priority_actuate = (
+            self._resupply_priority_enabled and bool(_resupply_cfg.get(
+                "actuate", schema_default("pursuit_mode.resupply_priority.actuate"))))
+        # Operator, 2026-10-02: the resupply point sits near terrain, so a
+        # confirmed rearm is followed at once by a nose-up hold this long, with
+        # the roll released. 0 = off.
+        self._resupply_rearm_climb_s = float(_resupply_cfg.get(
+            "rearm_climb_s",
+            schema_default("pursuit_mode.resupply_priority.rearm_climb_s")))
+        # Operator, 2026-10-02: the resupply icon counts when it appears in
+        # the tracker's acquisition region, so both read the same key.
+        self._resupply_region_pct = tuple(float(v) for v in (_c.tracking or {}).get(
+            "acquisition_region_pct", schema_default("tracking.acquisition_region_pct")))
+        # The lost lock (its last-seen time) whose centre wait the icon cut
+        # short, so ICONWAIT logs once per lost lock.
+        self._icon_wait_cut_ts: "float | None" = None
         # Timestamp of the altitude sample the last look-down tap acted on.
         self._search_look_down_sample_ts: "float | None" = None
         # Set by _pursuit_dive_guard: the ttg term tripped, and the rate it saw.
@@ -769,7 +877,8 @@ class Controller:
         # Why the descent controller returned: established / rate_target /
         # pulses_exhausted / over_rotation / no_telemetry / timeout / cancelled.
         self._eject_phase_exit_reason: str = ""
-        self._eject_steep_min_sin = float(_tel_cfg.get("steep_dive_min_sin", 0.8))
+        self._eject_steep_min_sin = float(_tel_cfg.get("steep_dive_min_sin",
+                                                       STEEP_DIVE_MIN_SIN_DEFAULT))
         self._eject_level_max_sin = float(_tel_cfg.get("level_max_sin", 0.15))
 
         # ADR 070 d10: MISSILE_EVADE_MODE tuning, constructor-injected from the
@@ -1065,330 +1174,15 @@ class Controller:
         # GAME_BATTLE HUD — used by live capture mode for P2_020.
         self._on_manual_takeover_frame = None
 
-        # Exit script hotkey (Backspace).
-        # Honor disable_hotkeys so replay/capture automation is not interrupted by
-        # ambient keyboard events from the host environment.
-        # Probe keyboard access on the first registration; if ImportError (Linux not in
-        # 'input' group), emit one warning and skip all remaining hotkeys.
-        _kbd_ok = True
-        if keyboard_module and not self._disable_hotkeys:
-            try:
-                def exit_script_hotkey(_e):
-                    # Debounced: X auto-repeats a held key at ~25 Hz, and an
-                    # undebounced handler would read one long press as both
-                    # stages and close the game the operator meant to keep.
-                    now = time.time()
-                    if now - self._last_exit_press < 0.5:
-                        return
-                    self._last_exit_press = now
-                    if self._operator_stop_event.is_set():
-                        # Second press, during standby.
-                        self._close_all_event.set()
-                        logger.info("\033[93mController: Backspace again — closing "
-                                    "MetalStorm and the nested display\033[0m")
-                        return
-                    self._operator_stop_event.set()
-                    logger.info("\033[93mController: Backspace — ending wingman; "
-                                "MetalStorm stays up for manual control. Press "
-                                "Backspace again to close everything.\033[0m")
-                    if self._exit_event:
-                        self._exit_event.set()
-                # Kept on self so cleanup(keep_hotkeys=True) can re-register
-                # just this one hotkey after tearing every other one down —
-                # see the comment there for why.
-                self._exit_script_hotkey = exit_script_hotkey
-                keyboard_module.on_press_key('backspace', exit_script_hotkey, suppress=False)
-                logger.info("Controller: registered hotkey 'backspace' to exit script")
-            except ImportError as e:
-                logger.warning(
-                    "Controller: keyboard hotkeys disabled — %s  "
-                    "(fix: sudo usermod -aG input $USER then log out and back in)",
-                    e,
-                )
-                _kbd_ok = False
-            except Exception:
-                logger.exception("Controller: failed to register exit script hotkey")
+    def register_hotkeys(self) -> None:
+        """Register the operator hotkeys (CR-018-13).
 
-        # Register hotkey for weapon loop toggle and other hotkeys
-        if keyboard_module and not self._disable_hotkeys and _kbd_ok:
-            # Cancel mission hotkey (End)
-            try:
-                self._last_cancel_key_ts = 0.0
-                def cancel_mission_hotkey(_e):
-                    now = time.time()
-                    if now - self._last_cancel_key_ts < 0.5:  # debounce: ignore key-repeat
-                        return
-                    self._last_cancel_key_ts = now
-                    logger.info("Controller: '%s' key pressed - cancelling mission and disabling auto-respawn restart", CANCEL_MISSION_KEY)
-                    self._auto_respawn_restart = False
-                    self._eject_stop_reason = "manual_cancel_key"
-                    self._eject_stop.set()
-                    self.cancel_mission()
-                keyboard_module.on_press_key(CANCEL_MISSION_KEY, cancel_mission_hotkey, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to cancel mission", CANCEL_MISSION_KEY)
-            except Exception:
-                logger.exception("Controller: failed to register cancel mission hotkey")
-
-            # Maneuver keys cancel mission when pressed during GAME_BATTLE (manual takeover)
-            try:
-                def maneuver_key_pressed(e):
-                    # getattr: the Windows `keyboard` fallback delivers real
-                    # KeyboardEvents, which carry no display or modifier state.
-                    self._handle_maneuver_key_press(
-                        key_name=getattr(e, 'name', str(e)),
-                        is_injected=getattr(e, 'is_injected', False),
-                        display=getattr(e, 'display', None),
-                        state=getattr(e, 'state', 0),
-                    )
-                for _key in _WATCHED_MANEUVER_KEYS:
-                    keyboard_module.on_press_key(_key, maneuver_key_pressed, suppress=False)
-                logger.info(
-                    "Controller: registered maneuver keys (%s/%s/%s/%s) and arrow keys to cancel mission on manual press",
-                    NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
-                )
-            except Exception:
-                logger.exception("Controller: failed to register maneuver key hotkeys")
-            try:
-                keyboard_module.add_hotkey(TOGGLE_WEAPON_LOOP_KEY, self.toggle_weapon_loop)
-                logger.info("Controller: registered hotkey '%s' to toggle weapon loop", TOGGLE_WEAPON_LOOP_KEY)
-            except Exception:
-                logger.exception("Controller: failed to register weapon loop hotkey")
-
-            try:
-                self._last_j20_key_ts = 0.0
-                def start_j20_mission(_e):
-                    # Our own game_starting-loop presses echo back through
-                    # XRecord — recognize them by the programmatic bracket +
-                    # release grace, NOT by FSM state.
-                    with self._programmatic_key_lock:
-                        if (self._programmatic_key_counts.get(MISSION_J20_KEY, 0) > 0
-                                or time.time() < self._prog_release_grace_until.get(
-                                    MISSION_J20_KEY, 0.0)):
-                            logger.debug(
-                                "Controller: '%s' key is wingman's own injected press (echo), ignoring",
-                                MISSION_J20_KEY)
-                            return
-                    now = time.time()
-                    if now - self._last_j20_key_ts < 0.5:  # debounce: ignore key-repeat
-                        return
-                    self._last_j20_key_ts = now
-                    # 'u' skips rather than preempts a running mission, and the
-                    # skip must have no side effects: relabelling _last_mission
-                    # before the launch is refused would retag the mission that
-                    # is actually flying (su30's padlock block turns off, the
-                    # next respawn restarts the wrong mission) and reset the
-                    # 2 s takeover grace. A cancelled mission still unwinding
-                    # is not "flying" — that is the resume-from-manual case.
-                    if self.is_mission_running() and not self.is_mission_teardown_in_progress():
-                        with self._last_mission_lock:
-                            flying = self._last_mission
-                        logger.info("Controller: '%s' key pressed - mission %s already "
-                                    "running, ignoring", MISSION_J20_KEY, flying)
-                        return
-                    self._auto_respawn_restart = True
-                    current_state = self._analyzer.game_state if self._analyzer is not None else None
-                    if current_state == GameState.GAME_BATTLE_MANUAL:
-                        # Only force FSM back to GAME_BATTLE when resuming from manual takeover.
-                        logger.info(
-                            "Controller: '%s' key pressed — resuming auto mode from GAME_BATTLE_MANUAL",
-                            MISSION_J20_KEY,
-                        )
-                        if not self._analyzer.trigger_event("manual_force_battle"):
-                            logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                    else:
-                        # NOTE: there is deliberately no GAME_STARTING special
-                        # case anymore. Echoes of wingman's own presses are
-                        # filtered by the programmatic bracket above; a genuine
-                        # 'u' here is the player asking for the mission NOW
-                        # (e.g. after taking over during the Good-Luck wait) and
-                        # must work — the old state-based echo check ate those.
-                        logger.info("Controller: '%s' key pressed - starting the configured mission "
-                                    "(%s, state=%s)",
-                                    MISSION_J20_KEY, self._default_mission,
-                                    current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
-                        # Force FSM into GAME_BATTLE so lobby-only background loops (quick-scan
-                        # stall-ESC, GAME_LOBBY escape loop) stop treating this as an idle lobby.
-                        if self._analyzer is not None and current_state != GameState.GAME_BATTLE:
-                            if not self._analyzer.trigger_event("manual_force_battle"):
-                                logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                    # ADR 145: 'u' starts whichever mission mission.default_mission
-                    # names — the same one battle entry launches — rather than J20
-                    # by name. The config picks the mission, so a new mission needs
-                    # no hotkey of its own. With the default set to j20 this is
-                    # exactly the old behaviour.
-                    self._start_default_mission()
-                keyboard_module.on_press_key(MISSION_J20_KEY, start_j20_mission, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to start the configured mission (%s)",
-                            MISSION_J20_KEY, self._default_mission)
-            except Exception:
-                logger.exception("Controller: failed to register configured-mission hotkey")
-
-            try:
-                def start_loiter_mission(_e):
-                    logger.info("Controller: '%s' key pressed - starting loiter mission", MISSION_LOITER_KEY)
-                    self._set_last_mission("loiter")
-                    threading.Thread(target=self.mission_loiter, daemon=True).start()
-                keyboard_module.on_press_key(MISSION_LOITER_KEY, start_loiter_mission, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to start loiter mission", MISSION_LOITER_KEY)
-            except Exception:
-                logger.exception("Controller: failed to register loiter mission hotkey")
-
-            try:
-                self._last_su30_key_ts = 0.0
-                def start_su30_mission(_e):
-                    now = time.time()
-                    if now - self._last_su30_key_ts < 0.5:  # debounce: ignore key-repeat
-                        return
-                    self._last_su30_key_ts = now
-                    current_state = self._analyzer.game_state if self._analyzer is not None else None
-                    logger.info("Controller: '%s' key pressed - starting SU-30 mission (state=%s)",
-                                MISSION_SU30_KEY,
-                                current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
-                    # Same as the J20 hotkey: a press means "fly it now", so the
-                    # FSM is forced into GAME_BATTLE (which also resumes from
-                    # GAME_BATTLE_MANUAL) before the mission thread starts.
-                    if self._analyzer is not None and current_state != GameState.GAME_BATTLE:
-                        if not self._analyzer.trigger_event("manual_force_battle"):
-                            logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                    self._set_last_mission("su30")
-                    threading.Thread(target=self.mission_su30, kwargs={"preempt": True},
-                                     daemon=True).start()
-                keyboard_module.on_press_key(MISSION_SU30_KEY, start_su30_mission, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to start SU-30 mission", MISSION_SU30_KEY)
-            except Exception:
-                logger.exception("Controller: failed to register SU-30 mission hotkey")
-
-            # ADR 094: finish the round, then exit. Deferred, and reversible.
-            try:
-                self._last_finish_round_press = 0.0
-                def finish_round_then_exit(_e):
-                    now = time.time()
-                    if now - self._last_finish_round_press < 0.5:
-                        return                      # debounce key-repeat
-                    self._last_finish_round_press = now
-                    if self._finish_round_event.is_set():
-                        # A deferred action that cannot be recalled is a trap:
-                        # the operator waits minutes with no way back except
-                        # killing the process (ADR 094).
-                        self._finish_round_event.clear()
-                        logger.info("\033[93m🏁 FINISH ROUND: cancelled — the "
-                                    "session continues\033[0m")
-                        return
-                    self._finish_round_event.set()
-                    # Pressed in the lobby the stop is immediate: the main loop's
-                    # safe point is already true, and the quick-scan is now barred
-                    # from starting another round. Say which one is happening -
-                    # "at the next lobby" while sitting IN the lobby reads as a
-                    # long wait and invites a second press that cancels it.
-                    _st = self._analyzer.game_state if self._analyzer is not None else None
-                    if _st is not None and _st not in BATTLE_STATES:
-                        logger.info("\033[93m🏁 FINISH ROUND: requested in %s — no "
-                                    "round in progress, stopping now and closing "
-                                    "MetalStorm (ADR 094). Press '%s' again to "
-                                    "cancel.\033[0m", _st.name, FINISH_ROUND_THEN_EXIT)
-                    else:
-                        logger.info("\033[93m🏁 FINISH ROUND: requested — wingman will "
-                                    "stop at the next lobby, then close MetalStorm "
-                                    "(ADR 094). Press '%s' again to cancel.\033[0m",
-                                    FINISH_ROUND_THEN_EXIT)
-                keyboard_module.on_press_key(FINISH_ROUND_THEN_EXIT,
-                                             finish_round_then_exit, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to finish the round "
-                            "then exit", FINISH_ROUND_THEN_EXIT)
-            except Exception:
-                logger.exception("Controller: failed to register finish-round hotkey")
-
-            # Register hotkey for simulating respawn detected (for testing)
-            try:
-                self._simulate_respawn_flag = threading.Event()
-                self._last_b_press_time = 0.0
-                def simulate_respawn(_e):
-                    now = time.time()
-                    if now - self._last_b_press_time < 0.5:  # debounce: ignore key-repeat
-                        return
-                    self._last_b_press_time = now
-                    logger.info("Controller: '%s' key pressed - simulating respawn detected (as if OCR detected 'RESPAWN')", SIMULATE_RESPAWN_KEY)
-                    if self._analyzer is not None:
-                        self._analyzer.inject_respawn_ocr_result(True, 1.0, "ocr")
-                        logger.info("Controller: Injected fake OCR respawn result into analyzer cache.")
-                    else:
-                        logger.warning("Controller: No analyzer reference to inject fake OCR respawn result.")
-                    self._simulate_respawn_flag.set()
-                keyboard_module.on_press_key(SIMULATE_RESPAWN_KEY, simulate_respawn, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to simulate respawn detected", SIMULATE_RESPAWN_KEY)
-            except Exception:
-                logger.exception("Controller: failed to register simulate respawn hotkey")
-
-            # Register hotkey for capturing screenshots (for testing/debugging)
-            try:
-                def capture_screenshot(e):
-                    logger.info("Controller: '%s' key pressed - capturing screenshot", CAPTURE_SCREEN_SHOT)
-                    if self._capture is not None and self._analyzer is not None:
-                        try:
-                            frame = self._capture.grab_from_thread()
-
-                            # Create output directory if it doesn't exist
-                            output_dir = Path("tests/test-output")
-                            # Only screenshot_*.png: this folder is shared
-                            # with live_hud.png, output_grid.png and reports.
-                            if not capture_budget.admit(output_dir, "Screenshot hotkey",
-                                                        patterns="screenshot_*.png"):
-                                return
-                            output_dir.mkdir(parents=True, exist_ok=True)
-
-                            # Generate timestamp filename
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            filename = output_dir / f"screenshot_{timestamp}.png"
-
-                            if self._capture_with_overlay:
-                                # Draw only state-relevant crop overlays when enabled.
-                                crops = self._analyzer.crops_for_state()
-                                frame = draw_crops(frame, crops)
-                                logger.info("Controller: Screenshot saved to %s with crop overlays", filename)
-                            else:
-                                logger.info("Controller: Screenshot saved to %s without overlays", filename)
-
-                            cv2.imwrite(str(filename), frame)
-                        except Exception as e:
-                            logger.exception("Controller: Failed to capture screenshot: %s", e)
-                    else:
-                        logger.warning("Controller: No capture or analyzer reference to take screenshot.")
-                keyboard_module.on_press_key(CAPTURE_SCREEN_SHOT, capture_screenshot, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to capture screenshot", CAPTURE_SCREEN_SHOT)
-            except Exception:
-                logger.exception("Controller: failed to register capture screenshot hotkey")
-
-            # Padlock camera cooldown hotkey: when P is pressed manually, suppress
-            # the padlock loop for 10 seconds so it doesn't immediately re-lock.
-            try:
-                def padlock_key_pressed(_e):
-                    # Only a *manual* press should suppress the loop. Without this
-                    # guard the loop's own padlock_camera() presses echo back through
-                    # this hook and set the 10s cooldown on every tick, halving the
-                    # effective cadence from 6s to ~12s (observed 2026-07-30).
-                    with self._programmatic_key_lock:
-                        if self._programmatic_key_counts.get(PADLOCK_CAMERA, 0) > 0:
-                            return
-                        if time.time() < self._prog_release_grace_until.get(PADLOCK_CAMERA, 0.0):
-                            return
-                    cooldown = 10.0
-                    self._padlock_cooldown_until = time.time() + cooldown
-                    # ADR 140 D3: a genuine manual press, outside padlock_camera()'s
-                    # own call graph entirely — still flips the real toggle, so
-                    # confidence in the last-known state is lost here too.
-                    self._padlock_engaged = None
-                    logger.info("Controller: '%s' key pressed manually - padlock loop cooldown set for %.0fs", PADLOCK_CAMERA, cooldown)
-                keyboard_module.on_press_key(PADLOCK_CAMERA, padlock_key_pressed, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to set padlock loop cooldown", PADLOCK_CAMERA)
-            except Exception:
-                logger.exception("Controller: failed to register padlock camera cooldown hotkey")
-
-            # Auto-mission hotkey: force GAME_LOBBY state, then click PLAY/READY
-            try:
-                keyboard_module.on_press_key(AUTO_MISSION_KEY, self._on_auto_mission_hotkey, suppress=False)
-                logger.info("Controller: registered hotkey '%s' to click PLAY/READY in GAME_LOBBY", AUTO_MISSION_KEY)
-            except Exception:
-                logger.exception("Controller: failed to register auto mission hotkey")
+        ``main`` calls this once, straight after construction, so building a
+        Controller has no global side effect. It reads this module's
+        ``keyboard_module`` at call time, so a test that swaps the backend gets
+        the handlers registered on its stub.
+        """
+        _register_hotkeys(self, keyboard_module)
 
     def _release_manual_if_active(self) -> bool:
         """Operator hands the aircraft back (SAF-001). True if it was in manual.
@@ -1430,6 +1224,14 @@ class Controller:
         if self._analyzer is None:
             return
         current_state = self._analyzer.game_state
+        if current_state in (GameState.GAME_WAITING, GameState.GAME_STARTING):
+            if self._on_auto_mission_key is not None:
+                self._on_auto_mission_key()
+            logger.info(
+                "Controller: '%s' pressed during %s — leaving matchmaking sequence undisturbed",
+                AUTO_MISSION_KEY, current_state.name,
+            )
+            return
         # SAF-001: in manual this key means "wingman, take it back" — a single
         # press, because the operator is deliberately flying and asking. The
         # double-press guard below exists for the OTHER battle states, where 'm'
@@ -1470,7 +1272,7 @@ class Controller:
         # clicks PLAY/READY on its own (analyzer.py _last_lobby_play_click_ts).
         # Without this, GAME_LOBBY entry resets that timestamp to 0, and the
         # quick-scan thread re-clicks the same button ~1s later, undoing this click.
-        self._analyzer._last_lobby_play_click_ts = time.time()
+        self._analyzer.note_lobby_click()
 
     def _record_action_intent(self, action_type: str, **payload):
         intent = {
@@ -1541,10 +1343,17 @@ class Controller:
         # A climb, evade, or spawn-guard hold is commanded flight even with no
         # mission thread (the tree selects them with mission=False after a
         # respawn cancels the mission) — SAF-001's takeover must fire for
-        # them too.
+        # them too. So is a pursuit: mission_su30 and mission_f111 release the
+        # mission lock when they hand the aircraft to pursue_and_engage, and
+        # before the pursuit counted here, Enter did nothing for the whole
+        # pursuit and worked only after a respawn (operator, 2026-09-27 run).
         if not (self.is_mission_running() or self._ejecting.is_set()
+                or self._pursuing.is_set()
                 or self._climbing.is_set() or self._missile_evading.is_set()
                 or self._spawn_guarding.is_set()):
+            logger.debug("Controller: maneuver key '%s' ignored — no commanded flight "
+                         "(no mission, eject, pursuit, climb, evade or spawn guard) [%s]",
+                         key_name, describe_key_source(display, state))
             return False
 
         # The source is logged with the takeover, not separately: a takeover
@@ -1710,7 +1519,7 @@ class Controller:
                 self._inc_programmatic_key(key)
                 release_span = 0.0  # measured below; finally must not NameError
                 try:
-                    _press_key(key)
+                    _press_key(key, owner=label)
                     start = time.time()
                     while (time.time() - start) < hold_seconds:
                         if not ignore_cancel:
@@ -1721,7 +1530,7 @@ class Controller:
                             time.sleep(0.05)
                     release_started = time.time()
                     try:
-                        keyboard_module.release(key)
+                        _actuator.release(key, label)
                     except Exception:
                         logger.exception("Controller: failed to release '%s' key", key)
                     release_span = time.time() - release_started
@@ -2221,7 +2030,51 @@ class Controller:
         key pinned down under the operator's own input."""
         self.release_roll_hold(why=why)
         self.release_pitch_hold(why=why)
+        self.release_gun_hold(why=why)
         self._pitch_last_sample = None
+
+    # Once firing, the gun keeps going until the target is this many times
+    # gun_centre_err out, so a target sitting on the edge does not chatter the key.
+    _GUN_RELEASE_FACTOR = 1.5
+
+    def _pursuit_gun_tick(self, visible: bool, err: "float | None",
+                          err_y: "float | None") -> None:
+        """Hold FIRE_MACHINE_GUN while the tracked target is at the centre of
+        the screen (operator, 2026-09-28: "turn on machine gun 'a' when target
+        reaches center of screen"), on every pursuit steering tick.
+
+        Centred means within gun_centre_err on both axes, the tracker's error in
+        half-frame units, the same box the steering deadband leaves alone. The
+        key is held, not tapped, and let go once the target is
+        _GUN_RELEASE_FACTOR times that far out, or not visible; every other
+        release (takeover, cancel, loop exit, dive recovery) comes through
+        release_tracking_holds."""
+        if not self._pursuit_gun_on_centre:
+            return
+        limit = self._pursuit_gun_centre_err * (
+            self._GUN_RELEASE_FACTOR if self._gun_held_since is not None else 1.0)
+        centred = (bool(visible) and err is not None and err_y is not None
+                   and abs(err) <= limit and abs(err_y) <= limit)
+        if centred and self._gun_held_since is None:
+            self._press_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
+            self._gun_held_since = time.time()
+            logger.debug("HOLD[gun]: None -> fire (target centred err=%+.3f err_y=%+.3f)",
+                         err, err_y)
+        elif not centred and self._gun_held_since is not None:
+            self.release_gun_hold(
+                why="target lost" if not visible or err is None or err_y is None
+                else "off centre err=%+.3f err_y=%+.3f" % (err, err_y))
+
+    def release_gun_hold(self, why: str = "release") -> None:
+        """Release the machine gun if the pursuit is holding it; no-op
+        otherwise. Logs the burst's length."""
+        if self._gun_held_since is None:
+            return
+        held = time.time() - self._gun_held_since
+        self._gun_held_since = None
+        self._gun_fired_s += held
+        self._release_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
+        logger.debug("HOLD[gun]: fire -> None after %.1fs (%s)", held, why)
 
     def deploy_flares(self, hold_seconds: float = 0.05, block: bool = True, ignore_cancel: bool = False):
         """Deploy flares (short press of the configured flares key)."""
@@ -2408,7 +2261,10 @@ class Controller:
         guarded = key in (NOSE_DOWN_KEY, NOSE_UP_KEY)
         if not guarded:
             try:
-                (keyboard_module.press if press else keyboard_module.release)(key)
+                if press:
+                    _actuator.press(key, note, focus_gate=False)
+                else:
+                    _actuator.release(key, note)
             except Exception:
                 logger.error("Controller: %s of %r failed during %s%s",
                              "press" if press else "release", key, note,
@@ -2421,7 +2277,7 @@ class Controller:
             self._eject_held_keys.add(key)
             self._inc_programmatic_key(key)
             try:
-                _press_key(key)
+                _press_key(key, owner=note)
             except Exception:
                 logger.error("Controller: press of %r failed during %s", key, note)
             return
@@ -2429,7 +2285,7 @@ class Controller:
         self._eject_held_keys.discard(key)
         _release_started = time.time()
         try:
-            keyboard_module.release(key)
+            _actuator.release(key, note)
         except Exception:
             logger.error("Controller: release of %r failed during %s — %s",
                          key, note, _LATCH_NOTE)
@@ -3542,7 +3398,8 @@ class Controller:
         return True
 
     def _icon_rung(self, frame, points: IconPoints, *, visible: bool, yielding: bool,
-                   last_seen_ts: "float | None", last_err: "float | None") -> dict:
+                   last_seen_ts: "float | None", last_err: "float | None",
+                   find=None) -> dict:
         """HLDD 015 Icon-Directed Search: update the points from this tick's
         frame and say which rung the design is on. Runs before the roll
         decision, so step 2a (`icon_steering.wings_level`) can act on it;
@@ -3551,9 +3408,14 @@ class Controller:
         Rungs, in priority order: `recovery` (ADR 148 owns both axes; points
         zeroed), `track` (the tracker has a labelled target; points zeroed),
         `wait` (inside roll_on_miss's neutral wait after a lock; points still
-        update), `icon` (an active axis, with or without an icon this tick),
+        update; active points end the near-centre extension but not the base
+        delay), `icon` (an active axis, with or without an icon this tick),
         `hold` (an icon within blind_search_after_s: neutral while points
         build), `blind` (today's search, which would roll toward `side=`).
+
+        `find` replaces `find_ring_icons`: resupply mode passes the finder for
+        the yellow resupply pin, so the same law flies toward the resupply
+        point instead of an enemy.
         """
         cfg = self._icon_cfg
         icons: "list" = []
@@ -3566,15 +3428,31 @@ class Controller:
             rung = "track"
             points.reset()
         else:
-            icons = find_ring_icons(frame, cfg)
+            icons = (find or find_ring_icons)(frame, cfg)
             icon, add = points.scan(icons)
             wait_s, _near = _resume_delay(
                 self._pursuit_search_resume_delay_s, last_err,
                 self._pursuit_search_resume_centre_err,
                 self._pursuit_search_resume_centre_delay_s)
-            if last_seen_ts is not None and time.time() - last_seen_ts < wait_s:
+            since = None if last_seen_ts is None else time.time() - last_seen_ts
+            active = points.intent()[0] != "none"
+            # Active points end the near-centre extension, never the base
+            # delay (2026-09-27, cycle 11). Over 30 logs, 696 of 798 lost locks
+            # came back within the base 2 s; the extension to 6 s ran 864 times
+            # and got 97 back, while 378 went on to the icon anyway and 216
+            # ended in a death. The 18:51:45 kill waited out all 6 s with the
+            # next enemy's icon on the ring.
+            if since is not None and since < wait_s and not (
+                    active and since >= self._pursuit_search_resume_delay_s):
                 rung = "wait"
-            elif points.intent()[0] != "none":
+            elif since is not None and since < wait_s:
+                rung = "icon"
+                if self._icon_wait_cut_ts != last_seen_ts:
+                    self._icon_wait_cut_ts = last_seen_ts
+                    logger.debug(
+                        "ICONWAIT: centre wait cut at %.1fs of %.1fs, pts=(%+.1f,%+.1f)",
+                        since, wait_s, points.turn_pts, points.pitch_pts)
+            elif active:
                 rung = "icon"
             elif points.icon_seen_within(cfg.blind_search_after_s):
                 rung = "hold"
@@ -3610,18 +3488,53 @@ class Controller:
                 points.pitch_pts, intent, "+".join(keys) or "-", withheld,
                 points.blind_side(), act)
 
+    def _search_climb_active(self, last_seen_ts: "float | None",
+                             last_err: "float | None") -> bool:
+        """Whether the blind search climbs this tick instead of rolling.
+
+        Not within the search resume delay of a lock (the roll stays neutral
+        there, as before), not once search_climb_alt_m has been reached since a
+        target was last seen, and not without a fresh altitude: the roll search
+        flies then. Logs the start of a climb and reaching the altitude."""
+        if self._search_climb_alt_m <= 0 or self._search_climb_reached \
+                or self._analyzer is None:
+            return False
+        delay, _near = _resume_delay(
+            self._pursuit_search_resume_delay_s, last_err,
+            self._pursuit_search_resume_centre_err,
+            self._pursuit_search_resume_centre_delay_s)
+        if last_seen_ts is not None and time.time() - last_seen_ts < delay:
+            return False
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return False
+        if snap is None or not snap.altitude_fresh() or snap.altitude.stable_value is None:
+            return False
+        alt = snap.altitude.stable_value
+        if alt >= self._search_climb_alt_m:
+            self._search_climb_reached = True
+            logger.info("Controller: SEARCH CLIMB — %.0f m reached, the roll search resumes",
+                        alt)
+            return False
+        if not self._search_climbing:
+            logger.info("Controller: SEARCH CLIMB — no target, climbing from %.0f m to %.0f m",
+                        alt, self._search_climb_alt_m)
+        return True
+
     def _icon_down_withheld(self, guard: "str | None") -> str:
         """Why the icon's nose-down may not be pressed this tick: `guard` (the
         dive guard tripped; never while `pursuit_mode.dive_safety` is off),
         `angle` (flight path at or past icon_min_path_deg, when set),
         `angle-none` (no fresh angle, when a limit is set or
-        require_fresh_angle is on), `alt` (below push_floor_m), `alt-none` (a
+        require_fresh_angle is on), `alt` (the altitude
+        push_floor_lookahead_s ahead is below push_floor_m), `alt-none` (a
         floor is set and there is no fresh altitude), or `-`."""
         if guard:
             return "guard"
         floor = self._icon_cfg.push_floor_m
         if floor is not None:
-            alt = self._read_stable_altitude()
+            alt = self._read_floor_altitude()
             if alt is None:
                 return "alt-none"
             if alt < floor:
@@ -3825,12 +3738,34 @@ class Controller:
                 logger.info("Controller: pursue_and_engage — tracking engaged, both axes free")
                 start = time.time()
                 tally = _EngagementTally()
+                tally.gun_enabled = self._pursuit_gun_on_centre
+                self._gun_fired_s = 0.0
                 icon_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
+                # Resupply mode steers by the yellow resupply pin with points of
+                # its own, so an enemy's direction never leaks into the search.
+                resupply_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
+                missile_urgency = MissileUrgency(self._pursuit_empty_confirm_reads)
+                missile_priority = missile_urgency.snapshot()
+                resupply_seeking = False
+                resupply_marker_memory = ResupplyMarkerMemory()
+                rack_id = (0 if defer_switch_until_empty
+                           and not self._eject_weapon_switched else 1)
                 icon_error_logged = False
+                resupply_error_logged = False
+                resupply_samples_saved = 0
+                last_resupply_marker_visible = False
                 last_seen_ts = None
                 last_visible_err = None
                 zero_reads = 0
-                switched_at = None
+                # 2026-10-02: a resupply refills both racks (a saved frame shows 2/2
+                # and 2/2), so after a confirmed rearm the rack that is not selected is
+                # loaded again and the next empty read means "switch", not "out".
+                other_rack_rearmed = False
+                rearm_climb_until = 0.0   # nose-up after a rearm ends at this time
+                self._search_climb_reached = False
+                self._search_climbing = False
+                secondary_spent = False
+                switched_at = start if switched_here or weapon_already_switched else None
                 yielding = False   # ADR 148: a dive-recovery climb owns pitch and roll
                 self._dive_guard_reason = None
                 self._dive_guard_next_pullout_ts = 0.0
@@ -3868,13 +3803,100 @@ class Controller:
                                 logger.info(
                                     "Controller: pursue_and_engage — dive recovery over, "
                                     "steering resumes")
+                        detected_resupply_marker = None
+                        if (self._resupply_priority_enabled
+                                and (missile_priority.missiles_spent > 0
+                                 or missile_priority.empty or resupply_seeking)):
+                            try:
+                                detected_resupply_marker = find_resupply_marker(
+                                    frame, region_pct=self._resupply_region_pct)
+                            except Exception:
+                                if not resupply_error_logged:
+                                    logger.exception(
+                                        "Controller: resupply marker scan failed")
+                                    resupply_error_logged = True
+                        marker_visible = detected_resupply_marker is not None
+                        resupply_priority_eligible = (
+                            missile_priority.empty
+                            or missile_priority.missiles_spent
+                            >= RESUPPLY_MIN_MISSILES_SPENT)
+                        resupply_marker, resupply_marker_stale = (
+                            resupply_marker_memory.resolve(
+                                detected_resupply_marker, time.monotonic(),
+                                seeking=(resupply_seeking
+                                         or resupply_priority_eligible)))
+                        if (marker_visible and not last_resupply_marker_visible
+                                and resupply_samples_saved < 2):
+                            sample_path = _RESUPPLY_SAMPLE_DIR / (
+                                f"resupply_candidate_{time.time_ns()}_"
+                                f"{resupply_samples_saved}.png")
+                            try:
+                                _RESUPPLY_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+                                if cv2.imwrite(str(sample_path), frame):
+                                    resupply_samples_saved += 1
+                                    logger.info(
+                                        "RESUPPLY: candidate frame saved=%s marker=(%.0f,%.0f)",
+                                        sample_path, detected_resupply_marker.x,
+                                        detected_resupply_marker.y)
+                                else:
+                                    logger.warning(
+                                        "RESUPPLY: failed to save candidate frame %s",
+                                        sample_path)
+                            except Exception:
+                                if not resupply_error_logged:
+                                    logger.exception(
+                                        "Controller: resupply candidate frame save failed")
+                                    resupply_error_logged = True
+                        last_resupply_marker_visible = marker_visible
+                        enemy_strength = (0.0 if icon_points is None else
+                                          math.hypot(icon_points.turn_pts,
+                                                     icon_points.pitch_pts))
+                        resupply_proposed = resupply_preempts(
+                            priority=missile_priority,
+                            marker_visible=resupply_marker is not None)
+                        # Operator, 2026-10-02: while weapons remain, go for
+                        # whichever is nearer the screen centre, the resupply
+                        # icon or a visible target. Firing carries on either way.
+                        target_nearer = (
+                            resupply_proposed and not missile_priority.empty
+                            and bool(visible) and err is not None
+                            and not marker_nearer_than_target(
+                                resupply_marker, err, err_y,
+                                frame.shape[1], frame.shape[0]))
+                        if target_nearer:
+                            resupply_proposed = False
+                        resupply_control = (self._resupply_priority_actuate
+                                            and resupply_proposed)
+                        # Same date: with every rack empty the pursuit searches
+                        # for resupply instead of targets. Nameplates and
+                        # opponent icons are not steered at and the gun stays
+                        # off until a confirmed rearm; without the icon in view
+                        # the search manoeuvre below flies.
+                        resupply_search = (self._resupply_priority_actuate
+                                           and missile_priority.empty)
+                        if resupply_proposed and not resupply_seeking:
+                            logger.info(
+                                "RESUPPLY: urgency overtook pursuit at spent=%d; "
+                                "rearm focus begins (%s)",
+                                missile_priority.missiles_spent,
+                                "actuating" if self._resupply_priority_actuate else "shadow")
+                        resupply_seeking = resupply_seeking or resupply_proposed
+                        control_visible = (bool(visible) and not resupply_control
+                                           and not resupply_search)
                         icon_state = None
-                        if icon_points is not None:
+                        # In resupply mode the icon law runs on the resupply pin:
+                        # no lock to wait out, so no last-seen time either.
+                        steer_points = resupply_points if resupply_search else icon_points
+                        search_seen_ts = None if resupply_search else last_seen_ts
+                        search_seen_err = None if resupply_search else last_visible_err
+                        if steer_points is not None and not resupply_control:
                             try:
                                 icon_state = self._icon_rung(
-                                    frame, icon_points, visible=bool(visible),
-                                    yielding=yielding, last_seen_ts=last_seen_ts,
-                                    last_err=last_visible_err)
+                                    frame, steer_points, visible=control_visible,
+                                    yielding=yielding, last_seen_ts=search_seen_ts,
+                                    last_err=search_seen_err,
+                                    find=(find_resupply_ring_icons if resupply_search
+                                          else None))
                             except Exception:
                                 if not icon_error_logged:
                                     logger.exception("Controller: icon shadow tick failed")
@@ -3888,21 +3910,63 @@ class Controller:
                                        and (self._icon_cfg.wings_level
                                             or self._icon_cfg.actuate_pitch)
                                        and icon_state["rung"] in ("icon", "hold"))
-                        if visible and err is not None:
+                        # Dive guard, every steering tick: a target below the
+                        # nose (err_y > 0) is not followed nose-down when low or
+                        # when the ground is close (pitch goes neutral instead),
+                        # and a steep descent is pulled toward level. Decided
+                        # before the roll so the icon law below knows it.
+                        guard = None if yielding else self._pursuit_dive_guard(
+                            target_visible=control_visible)
+                        # The icon law's move, decided once for roll and pitch.
+                        # A refused push turns toward the icon instead of flying
+                        # straight (2026-09-27 18:51:51, IconPoints.intent).
+                        icon_withheld = "-"
+                        icon_intent = ("none", ())
+                        hud_steering_target = None
+                        hud_steering_label = None
+                        hud_steering_stale = False
+                        if icon_state is not None and icon_state["rung"] == "icon":
+                            if steer_points.intent()[0] == "down":
+                                icon_withheld = self._icon_down_withheld(guard)
+                            icon_intent = steer_points.intent(
+                                down_allowed=icon_withheld == "-")
+                        # The climb-out after a rearm owns both axes until it ends.
+                        climbing_out = False
+                        if rearm_climb_until:
+                            if time.time() < rearm_climb_until:
+                                climbing_out = not yielding
+                            else:
+                                rearm_climb_until = 0.0
+                                self.release_pitch_hold(why="rearm climb-out over")
+                        search_climbing = False
+                        if climbing_out:
+                            self.release_roll_hold(why="rearm climb-out")
+                        elif resupply_control and not yielding:
+                            hud_steering_target = (resupply_marker.x, resupply_marker.y)
+                            hud_steering_label = "RESUPPLYING"
+                            hud_steering_stale = resupply_marker_stale
+                            error_x = ((resupply_marker.x - frame.shape[1] / 2)
+                                       / (frame.shape[1] / 2))
+                            self.orient_nose_to_target(
+                                error_x, ignore_cancel=True,
+                                sustained_hold=self._sustained_hold_enabled)
+                        elif control_visible and err is not None:
                             last_seen_ts = time.time()
                             last_visible_err = err
+                            self._search_climb_reached = False
                             if not yielding:
                                 self.orient_nose_to_target(
                                     err, ignore_cancel=True,
                                     sustained_hold=self._sustained_hold_enabled)
-                        elif self._sustained_hold_enabled and not yielding:
+                        elif (self._sustained_hold_enabled and not yielding
+                            and not resupply_control):
                             if wings_level:
                                 # Step 3: the law's roll ("turn", or "up" with a
                                 # side) when actuate_turn is on; otherwise, and for
                                 # "down" or the hold rung, the wings stay level.
                                 icon_roll = None
                                 if self._icon_cfg.actuate_turn and icon_state["rung"] == "icon":
-                                    _intent, _keys = icon_points.intent()
+                                    _keys = icon_intent[1]
                                     if "ROLL_LEFT" in _keys:
                                         icon_roll = "left"
                                     elif "ROLL_RIGHT" in _keys:
@@ -3919,20 +3983,31 @@ class Controller:
                                         icon_state["rung"],
                                         "bank %s (HLDD 015 step 3)" % icon_roll if icon_roll
                                         else "wings level (HLDD 015 step 2a)"))
+                            elif (not resupply_search
+                                  and self._search_climb_active(search_seen_ts, search_seen_err)):
+                                search_climbing = True
+                                self.release_roll_hold(why="search climb")
                             else:
                                 self.roll_on_miss(
-                                    last_seen_ts, self._pursuit_search_resume_delay_s,
-                                    last_visible_err, self._pursuit_search_resume_centre_err,
+                                    search_seen_ts, self._pursuit_search_resume_delay_s,
+                                    search_seen_err, self._pursuit_search_resume_centre_err,
                                     self._pursuit_search_resume_centre_delay_s,
                                     side=_last_known_side(
-                                        last_seen_ts, last_visible_err, icon_points))
-                        # Dive guard, every steering tick: a target below the
-                        # nose (err_y > 0) is not followed nose-down when low or
-                        # when the ground is close (pitch goes neutral instead),
-                        # and a steep descent is pulled toward level.
-                        guard = None if yielding else self._pursuit_dive_guard(
-                            target_visible=bool(visible))
-                        if visible and err_y is not None:
+                                        search_seen_ts, search_seen_err, steer_points))
+                        self._search_climbing = search_climbing
+                        if climbing_out:
+                            self.hold_pitch_for_icon("up", "rearm climb-out")
+                        elif resupply_control and not yielding:
+                            error_y = ((resupply_marker.y - frame.shape[0] / 2)
+                                       / (frame.shape[0] / 2))
+                            if error_y > 0 and guard:
+                                self.release_pitch_hold(
+                                    why="dive guard resupply err_y=%+.3f" % error_y)
+                            else:
+                                self.orient_pitch_to_target(
+                                    error_y, ignore_cancel=True,
+                                    sustained_hold=self._sustained_hold_enabled)
+                        elif control_visible and err_y is not None:
                             if not yielding:
                                 if err_y > 0 and guard:
                                     self.release_pitch_hold(
@@ -3947,10 +4022,8 @@ class Controller:
                                 # the icon and hold rungs, and the look-down taps
                                 # stop there. "down" is withheld by the guard or
                                 # the angle rule; "turn" stays in shadow.
-                                intent = (icon_points.intent()[0]
-                                          if icon_state["rung"] == "icon" else "none")
-                                withheld = (self._icon_down_withheld(guard)
-                                            if intent == "down" else "-")
+                                intent = icon_intent[0]
+                                withheld = icon_withheld
                                 icon_state["withheld"] = withheld
                                 why = "icon %s%s" % (
                                     intent, "" if withheld == "-" else ", withheld: " + withheld)
@@ -3963,6 +4036,16 @@ class Controller:
                                     desired = None
                                 self.hold_pitch_for_icon(desired, why)
                                 icon_state["pitch"] = desired or "-"
+                            elif search_climbing:
+                                # Held, never tapped (above), and only below the
+                                # climb angle: a held key overshoots on the angle
+                                # reading's lag, and no reading means no hold.
+                                angle = self._telemetry_path_angle_deg()
+                                self.hold_pitch_for_icon(
+                                    "up" if angle is not None
+                                    and angle < self._search_climb_max_deg else None,
+                                    "search climb angle %s" % (
+                                        "n/a" if angle is None else "%+.0f" % angle))
                             else:
                                 self.release_pitch_hold(why="no target")
                                 # Step 2a keeps the look-down taps where the search
@@ -3970,6 +4053,7 @@ class Controller:
                                 if guard is None and (self._roll_hold_reason == "search"
                                                       or wings_level):
                                     self._search_look_down()
+                        self._pursuit_gun_tick(control_visible, err, err_y)
                         if icon_state is not None:
                             try:
                                 act = "level" if wings_level else "-"
@@ -3979,7 +4063,7 @@ class Controller:
                                     act = "bank" + icon_state["roll"]
                                 if icon_state.get("pitch") not in (None, "-"):
                                     act += "+" + icon_state["pitch"]
-                                self._icon_report(icon_points, tally, icon_state, guard, act)
+                                self._icon_report(steer_points, tally, icon_state, guard, act)
                             except Exception:
                                 if not icon_error_logged:
                                     logger.exception("Controller: icon shadow tick failed")
@@ -3992,6 +4076,7 @@ class Controller:
                             continue
                         next_engage_ts = time.time() + self._pursuit_engage_interval_s
                         ammo = None
+                        ammo_read_seq = None
                         flares = None
                         health = None
                         if self._analyzer is not None:
@@ -3999,6 +4084,14 @@ class Controller:
                                 ammo = self._analyzer.get_ammo_missiles()
                             except Exception:
                                 ammo = None
+                            # After the count, so a read landing between the two
+                            # calls recounts the old value, never the new one.
+                            try:
+                                ammo_read_seq = self._analyzer.get_ammo_missiles_read_seq()
+                            except Exception:
+                                ammo_read_seq = None
+                            if not isinstance(ammo_read_seq, int):
+                                ammo_read_seq = None
                             try:
                                 flares = self._analyzer.get_ammo_flares()
                             except Exception:
@@ -4008,27 +4101,50 @@ class Controller:
                             except Exception:
                                 health = None
                         tally.scan(visible, ammo)
+                        priority_ammo_reading = ammo
+                        priority_rack_id = rack_id
                         # mission_su30 (ADR 144 D4, 2026-09-24): the switch is
                         # deferred until the selected weapon runs out. Only a
                         # run of consecutive 0 reads counts — SWITCH_WEAPON is
                         # a toggle, so one misread 0 would swap away a rack
                         # that still has missiles. None (unreadable) leaves the
                         # run as it is, matching the fail-open fire rule below.
-                        primary_pending = (defer_switch_until_empty
-                                           and not self._eject_weapon_switched)
+                        primary_pending = (
+                            (defer_switch_until_empty
+                             and not self._eject_weapon_switched
+                             and not secondary_spent)
+                            or other_rack_rearmed)
                         if primary_pending:
                             if ammo == 0:
                                 zero_reads += 1
                             elif ammo is not None:
                                 zero_reads = 0
                             if zero_reads >= self._pursuit_empty_confirm_reads:
+                                # After a rearm the secondary is the selected rack,
+                                # so the loaded one is the primary.
+                                back_to_primary = other_rack_rearmed and rack_id == 1
                                 logger.info(
                                     "Controller: pursue_and_engage — selected weapon "
                                     "empty (%d consecutive zero reads), switching to "
-                                    "the secondary", zero_reads)
+                                    "the %s", zero_reads,
+                                    "primary, reloaded by the rearm" if back_to_primary
+                                    else "secondary")
                                 self.switch_weapon(
                                     hold_seconds=0.1, block=True, ignore_cancel=True)
-                                self._eject_weapon_switched = True
+                                # The tally needs three OCR reads to confirm a
+                                # count and this switch takes about a second, so
+                                # the rack's last missiles are credited here.
+                                missile_priority = missile_urgency.rack_emptied(rack_id)
+                                if back_to_primary:
+                                    # AMMO_MISSILE reads the primary again.
+                                    self._eject_weapon_switched = False
+                                    secondary_spent = True
+                                    rack_id = 0
+                                else:
+                                    self._eject_weapon_switched = True
+                                    rack_id = 1
+                                other_rack_rearmed = False
+                                zero_reads = 0
                                 switched_at = time.time()
                                 switched_here = True
                                 primary_pending = False
@@ -4037,31 +4153,93 @@ class Controller:
                                 # show the new one, so it is not acted on as if it
                                 # were the secondary's.
                                 ammo = None
+                        terminal_zero = False
                         if ammo == 0 and not primary_pending:
                             grace_from = switched_at if switched_at is not None else start
-                            if time.time() - grace_from >= self._pursuit_ammo_grace_s:
+                            terminal_zero = (
+                                time.time() - grace_from >= self._pursuit_ammo_grace_s)
+                        if self._resupply_priority_enabled and ammo == 0:
+                            logger.debug(
+                                "RESUPPLY AMMO: rack=%s primary_pending=%s "
+                                "terminal_zero=%s grace=%.1fs",
+                                rack_id, primary_pending, terminal_zero,
+                                self._pursuit_ammo_grace_s)
+                        was_empty = missile_priority.empty
+                        priority_ammo = priority_ammo_reading
+                        post_switch_grace = (
+                            switched_at is not None
+                            and priority_rack_id == rack_id
+                            and time.time() - switched_at < self._pursuit_ammo_grace_s)
+                        if post_switch_grace and priority_ammo == 0:
+                            priority_ammo = None
+                        missile_priority = missile_urgency.observe(
+                            priority_ammo, priority_rack_id,
+                            terminal_zero=(terminal_zero and priority_rack_id == rack_id),
+                            resupply_seeking=resupply_seeking,
+                            read_id=ammo_read_seq)
+                        if missile_priority.rearmed:
+                            logger.info(
+                                "RESUPPLY: confirmed ammo=%s; urgency reset, "
+                                "resuming target pursuit",
+                                ammo)
+                            resupply_seeking = False
+                            resupply_marker_memory.clear()
+                            if self._resupply_priority_actuate:
+                                other_rack_rearmed = True
+                                secondary_spent = False
+                                zero_reads = 0
+                                if self._resupply_rearm_climb_s > 0:
+                                    rearm_climb_until = (
+                                        time.time() + self._resupply_rearm_climb_s)
+                                    logger.info(
+                                        "RESUPPLY: rearm climb-out, nose up for %.1fs",
+                                        self._resupply_rearm_climb_s)
+                            for _points in (icon_points, resupply_points):
+                                if _points is not None:
+                                    _points.reset()
+                        if missile_priority.empty and not was_empty:
+                            logger.info(
+                                "RESUPPLY: missiles exhausted; maximum urgency reached%s",
+                                "; searching for resupply, targets ignored until rearm"
+                                if self._resupply_priority_actuate else "")
+                        if (self._resupply_priority_enabled
+                                and (missile_priority.missiles_spent > 0
+                                     or missile_priority.empty)):
+                            marker_text = ("-" if resupply_marker is None else
+                                           "(%.0f,%.0f)" % (resupply_marker.x,
+                                                             resupply_marker.y))
+                            logger.debug(
+                                "RESUPPLY: spent=%d empty=%s marker=%s weight=%.1f "
+                                "opponent=%.1f proposed=%s seeking=%s mode=%s "
+                                "marker_stale=%s target_nearer=%s search=%s pin=%s",
+                                missile_priority.missiles_spent,
+                                missile_priority.empty, marker_text,
+                                missile_priority.missiles_spent * self._icon_cfg.points_scale,
+                                enemy_strength, resupply_proposed, resupply_seeking,
+                                "actuate" if self._resupply_priority_actuate else "shadow",
+                                resupply_marker_stale, target_nearer, resupply_search,
+                                "-" if not resupply_search or icon_state is None
+                                or icon_state.get("icon") is None
+                                else "%.0f" % icon_state["icon"].angle_deg)
+                        if terminal_zero and not self._resupply_priority_actuate:
                                 logger.info(
                                     "Controller: pursue_and_engage — ammo exhausted, "
                                     "falling through to eject_and_dive")
                                 fall_through = True
                                 end_reason = "ammo"
                                 break
-                            # Still inside the post-switch grace period (see
-                            # this class's own __init__ comment on
-                            # _pursuit_ammo_grace_s) — this 0 is likely still
-                            # the pre-switch reading, not a real empty
-                            # secondary loadout. Fall through to the ammo>0
-                            # check below, which already skips firing on 0
-                            # without ending the encounter — same tolerance
-                            # _eject_heatdive_loop already has for this exact
-                            # lag, just never applied here before.
                         # Fail open on an unreadable count, matching ADR 136
                         # D1 step 4's own reasoning for the heatdive loop.
-                        if ammo is None or ammo > 0:
+                        if ((ammo is None or ammo > 0)
+                                and not (self._resupply_priority_actuate
+                                         and missile_priority.empty)):
                             self.fire_active_weapon(hold_seconds=0.1, block=False, ignore_cancel=True)
                         if self._hud_renderer is not None:
                             self._hud_renderer.maybe_render(
-                                frame, obs, "PURSUIT_MODE", health, ammo, flares)
+                                frame, obs, "PURSUIT_MODE", health, ammo, flares,
+                                steering_target=hud_steering_target,
+                                steering_label=hud_steering_label,
+                                steering_stale=hud_steering_stale)
                     except Exception:
                         logger.exception("Controller: pursue_and_engage loop cycle failed")
             finally:
@@ -4073,6 +4251,7 @@ class Controller:
                 # a roll/pitch key this loop was holding.
                 self.release_tracking_holds(why="pursuit loop exit")
                 if tally is not None:
+                    tally.gun_s = self._gun_fired_s
                     logger.info(tally.line(
                         "PURSUIT",
                         end_reason if fall_through
@@ -4170,18 +4349,13 @@ class Controller:
                 while not stop.is_set() and not self._mission_cancel.is_set():
                     should_fire = True
                     if self._target_painting_mode and self._analyzer is not None:
-                        ammo_lock = self._analyzer._ammo_lock
-                        if not ammo_lock.acquire(timeout=0.5):
-                            logger.debug("Controller: target_painting ammo lock timeout — firing")
-                        else:
-                            try:
-                                missiles = self._analyzer._ammo_missiles
-                            finally:
-                                if ammo_lock.locked():
-                                    ammo_lock.release()
-                            if missiles == 1 and self._analyzer.game_state != GameState.GAME_BATTLE_MANUAL:
-                                logger.debug("Controller: target_painting suppressing fire (ammo_missiles=1)")
-                                should_fire = False
+                        # CR-018-15: the public read, which takes the same lock
+                        # (1.0 s timeout, None on timeout). A timeout still fires,
+                        # as the private read here did.
+                        missiles = self._analyzer.get_ammo_missiles()
+                        if missiles == 1 and self._analyzer.game_state != GameState.GAME_BATTLE_MANUAL:
+                            logger.debug("Controller: target_painting suppressing fire (ammo_missiles=1)")
+                            should_fire = False
                     if should_fire:
                         self.fire_active_weapon(hold_seconds=0.1, block=True)
                     steps = max(1, int(self._weapon_loop_interval / 0.1))
@@ -4426,7 +4600,7 @@ class Controller:
             # immediately self-cancelled into manual takeover.
             self._inc_programmatic_key(ROLL_RIGHT_KEY)
             try:
-                _press_key(ROLL_RIGHT_KEY)
+                _press_key(ROLL_RIGHT_KEY, owner="disengage_roll")
                 # NOT _interruptible_sleep on _mission_cancel: cancel_mission()
                 # above set it, and reacting to it here would abort the roll
                 # after milliseconds and leave the aircraft flying straight
@@ -4453,7 +4627,7 @@ class Controller:
             finally:
                 _release_started = time.time()
                 try:
-                    keyboard_module.release(ROLL_RIGHT_KEY)
+                    _actuator.release(ROLL_RIGHT_KEY, "disengage_roll")
                 except Exception:
                     logger.error("Controller: release of %r failed ending disengage roll — %s",
                                  ROLL_RIGHT_KEY, _LATCH_NOTE)
@@ -4637,8 +4811,11 @@ class Controller:
                     key=AFTERBURNER_KEY, action="missile_evade")
             elif keyboard_module:
                 try:
-                    (keyboard_module.press if pressed
-                     else keyboard_module.release)(AFTERBURNER_KEY)
+                    if pressed:
+                        _actuator.press(AFTERBURNER_KEY, "missile_evade",
+                                        focus_gate=False)
+                    else:
+                        _actuator.release(AFTERBURNER_KEY, "missile_evade")
                 except Exception:
                     logger.exception(
                         "Controller: missile_evade burner %s failed",
@@ -4652,7 +4829,7 @@ class Controller:
                     self._record_action_intent("key_press", key=_key, action="missile_evade")
                 else:
                     try:
-                        _press_key(_key)
+                        _press_key(_key, owner="missile_evade")
                     except Exception:
                         logger.exception("Controller: missile_evade press failed for '%s'", _key)
 
@@ -4770,7 +4947,7 @@ class Controller:
                     self._record_action_intent("key_release", key=_key, action="missile_evade")
                 elif keyboard_module:
                     try:
-                        keyboard_module.release(_key)
+                        _actuator.release(_key, "missile_evade")
                     except Exception:
                         logger.error("Controller: release of %r failed ending missile evade — %s",
                                      _key, _LATCH_NOTE)
@@ -4984,7 +5161,8 @@ class Controller:
         if self._missile_evading.is_set():
             logger.info("Controller: climb suppressed — missile evade in progress")
             return
-        if self._pursuing.is_set() and not self._pursuit_dive_safety:
+        if (self._pursuing.is_set() and not self._pursuit_dive_safety
+                and not (emergency and self._pursuit_crash_recovery)):
             # Operator, 2026-09-26: the pursuit owns the airframe; a dive
             # recovery would take pitch and roll from the icons and the tracker.
             # The floor climb too (HLDD 015, 2026-09-26 18:15): inside a pursuit
@@ -4998,6 +5176,18 @@ class Controller:
                             "the airframe (pursuit_mode.dive_safety off)",
                             "dive recovery" if emergency else "climb")
             return
+        if self._pursuing.is_set() and not self._pursuit_dive_safety and emergency:
+            # The hand-back rule at the start too (2026-10-02 23:40): a fresh path at
+            # or above level overrides the tree's lagging mean, or every tick of that
+            # lag would start a hold, tap the airbrake and hand straight back.
+            _path = self._telemetry_path_angle_deg()
+            if _path is not None and _path >= 0.0:
+                now = time.time()
+                if now - self._dive_recovery_suppressed_log_ts >= 10.0:
+                    self._dive_recovery_suppressed_log_ts = now
+                    logger.info("Controller: crash recovery not started — path %+.0f deg "
+                                "is level or climbing", _path)
+                return
         exit_alt = target_alt if target_alt is not None else self._climb_exit_alt
         if exit_alt is None:
             logger.warning("Controller: climb_mode disabled — exit_above_alt unset")
@@ -5070,10 +5260,20 @@ class Controller:
         cap — for the reason the climb is. AFTERBURNER_KEY is not a watched
         maneuver key, so a stuck press would not surface as a takeover; it
         would just be a throttle nobody could release.
+
+        SAF-001 (CR-018-07): it neither starts nor keeps holding while the
+        operator has the aircraft, and `_ab_evade_stop` ends it from takeover
+        and cleanup. CR-018-08: nor during an emergency climb, whose airbrake it
+        would cancel (ADR 137). Background OCR keeps reporting incoming in
+        GAME_BATTLE_MANUAL, so without both the hold re-pressed the throttle
+        over the operator's release for as long as the alert lasted.
         """
-        if self._ab_evade_active.is_set():
+        if self._ab_evade.is_running():
             return
-        self._ab_evade_active.set()
+        if not self._may_hold_key(AFTERBURNER_KEY, requester="afterburner_evade"):
+            logger.debug("Controller: afterburner evade refused — %s",
+                         self._afterburner_evade_refusal())
+            return
 
         def _run():
             started = time.time()
@@ -5081,10 +5281,19 @@ class Controller:
             try:
                 self._climb_key(AFTERBURNER_KEY, press=True, action="evade")
                 last_press = time.time()
-                while not self._exit_event.is_set():
+                while not (self._exit_event.is_set()
+                           or self._ab_evade_stop.is_set()):
                     now = time.time()
                     burned = now - started
                     if now >= self._ab_evade_until:
+                        break
+                    # ADR 139 D4 consolidation point, checked every poll so a
+                    # takeover ends the hold within one poll even if the stop
+                    # event never arrives.
+                    if not self._may_hold_key(AFTERBURNER_KEY,
+                                              requester="afterburner_evade"):
+                        logger.info("Controller: afterburner evade ended — %s",
+                                    self._afterburner_evade_refusal())
                         break
                     # RE-PRESS periodically. climb_mode drives the same key and
                     # releases it on its own schedule, so a climb ending mid
@@ -5092,13 +5301,7 @@ class Controller:
                     # would be off exactly when a missile is inbound, with
                     # nothing in the log to say so. Pressing a held key again
                     # is harmless.
-                    # ADR 139 D4: explicit consolidation-point call — always
-                    # True today (this hold has no may-hold condition beyond
-                    # its own deadline/cap above; see `_may_hold_key`), kept
-                    # visible for the same reason as the other call sites.
-                    if (now - last_press >= 1.0
-                            and self._may_hold_key(AFTERBURNER_KEY,
-                                                   requester="afterburner_evade")):
+                    if now - last_press >= 1.0:
                         self._climb_key(AFTERBURNER_KEY, press=True,
                                         action="evade")
                         last_press = now
@@ -5107,22 +5310,30 @@ class Controller:
                             "Controller: afterburner evade hit its %.0fs cap "
                             "with the alert still live", self._ab_evade_max_s)
                         break
-                    if self._exit_event.wait(timeout=0.1):
+                    if self._ab_evade_stop.wait(timeout=0.1):
                         break
             except Exception:
                 logger.exception("Controller: afterburner evade failed")
             finally:
+                # HoldTactic clears the running flag after this returns.
                 self._climb_key(AFTERBURNER_KEY, press=False, action="evade")
-                self._ab_evade_active.clear()
                 logger.info(
                     "\033[95m🔥 Afterburner evade released after %.1fs\033[0m",
                     burned)
 
         logger.info("\033[95m🔥 INCOMING — afterburner held until %.0fs clear"
                     "\033[0m", self._ab_evade_clear_s)
-        self._ab_evade_thread = threading.Thread(
-            target=_run, daemon=True, name="AfterburnerEvade")
-        self._ab_evade_thread.start()
+        # Sets the running flag and clears the stop event before the thread
+        # exists (the ADR 070 d8 pattern), so a second detection this tick
+        # refreshes the deadline instead of starting a rival hold.
+        self._ab_evade.start(_run, thread_name="AfterburnerEvade")
+        self._ab_evade_thread = self._ab_evade.thread
+
+    def _afterburner_evade_refusal(self) -> str:
+        """Why `_may_hold_key` refused the evade, for its log line only."""
+        if self._manual_takeover_active():
+            return "manual takeover"
+        return "emergency climb airbrake (ADR 137)"
 
     def is_afterburner_evading(self) -> bool:
         """True while the missile-evade afterburner hold owns the throttle."""
@@ -5316,47 +5527,52 @@ class Controller:
         """True while stall prevention owns the airbrake/afterburner keys."""
         return self._stall_active
 
-    def _may_hold_key(self, _key: str, requester: str) -> bool:
-        """ADR 139 D4: the single named point for AFTERBURNER_KEY/AIRBRAKE_KEY
-        arbitration across the five tactic threads that share them.
+    # CR-018-09 Phase 2: who may hold the throttle, as data. Each Actuator owner
+    # lists the conditions it yields to; docs/architecture.md "Flight-input
+    # precedence" is the prose of this table. The Actuator's leases read it through
+    # _owner_may_hold, and _may_hold_key maps its requester names onto it. An owner
+    # not listed yields to nothing.
+    _THROTTLE_YIELDS = {
+        "cruise": ("manual_takeover", "climb_emergency"),    # ADR 134 D9, ADR 137
+        "evade": ("manual_takeover", "climb_emergency"),     # ADR 128 D7, D8
+        "climb": (),                  # stops on its own stop event (registry)
+        "missile_evade": (),          # own fuel gate; yields to eject by entry guard
+        "eject_and_dive": (),         # its descent control cuts the burner itself
+        "stall_prevention": (),       # operator directive: a near-stall is physical
+    }
+    # The requester names ADR 139 D4 introduced, onto Actuator owners.
+    _REQUESTER_OWNER = {
+        "cruise": "cruise", "afterburner_evade": "evade", "climb": "climb",
+        "missile_evade": "missile_evade", "eject": "eject_and_dive",
+        "stall_prevention": "stall_prevention",
+    }
 
-        A consolidation, not a fix: direct audit found these five sites do
-        not agree with each other today, and this first version reproduces
-        each site's current effective behavior exactly rather than
-        normalizing them. Any of these being worth changing (e.g. giving
-        ``climb`` a manual-takeover check it lacks today) is a separate,
-        future decision requiring its own live validation — not folded in
-        here. ``key`` is accepted for the log/signature shape a future
-        per-key policy would need; every requester's condition today is in
-        fact key-independent.
+    def _yield_condition(self, name: str) -> bool:
+        if name == "manual_takeover":
+            return self._manual_takeover_active()
+        if name == "climb_emergency":
+            return bool(self._climb_emergency_active)
+        raise ValueError(f"unknown yield condition {name!r}")
+
+    def _owner_may_hold(self, _key: str, owner: str) -> bool:
+        """May ``owner`` hold the throttle right now (the Actuator's policy)."""
+        return not any(self._yield_condition(c)
+                       for c in self._THROTTLE_YIELDS.get(owner, ()))
+
+    def _may_hold_key(self, key: str, requester: str) -> bool:
+        """ADR 139 D4's single arbitration point for the shared throttle and
+        airbrake keys, now a lookup into ``_THROTTLE_YIELDS`` (CR-018-09 Phase 2).
+
+        ADR 139 D4 replicated each site's gate rather than normalizing them; the
+        table keeps those gates exactly, with the two later decisions: CR-018-07
+        (the afterburner evade yields to a takeover) and CR-018-08 (and to an
+        emergency climb). Every condition is key-independent.
         """
-        if requester == "cruise":
-            # note_afterburner_cruise's `may_hold` — the only site checking
-            # either flag today.
-            return (not self._manual_takeover_active()
-                   and not self._climb_emergency_active)
-        if requester == "climb":
-            # _run_climb_hold's fuel/afterburner logic has no manual-takeover
-            # check of its own — replicated as-is, not added here.
-            return True
-        if requester == "missile_evade":
-            # _run_missile_evade_hold has its own independent fuel gate and a
-            # state_exit game-state backstop, not a may-hold condition on this
-            # key specifically.
-            return True
-        if requester == "afterburner_evade":
-            # _start_afterburner_evade has no may-hold condition beyond its
-            # own deadline/cap.
-            return True
-        if requester == "eject":
-            # eject_and_dive's afterburner press is unconditional.
-            return True
-        if requester == "stall_prevention":
-            # note_stall_prevention (Phase 1, operator directive): a near-
-            # stall is a physical fact regardless of what else is holding
-            # the airframe — unconditional, same shape as eject/climb.
-            return True
-        raise ValueError(f"_may_hold_key: unknown requester {requester!r}")
+        try:
+            owner = self._REQUESTER_OWNER[requester]
+        except KeyError:
+            raise ValueError(f"_may_hold_key: unknown requester {requester!r}") from None
+        return self._owner_may_hold(key, owner)
 
     def _climb_key(self, key: str, press: bool, action: str = "climb"):
         """Press/release one climb-family key, honoring simulate mode."""
@@ -5367,7 +5583,10 @@ class Controller:
         if not keyboard_module:
             return
         try:
-            (keyboard_module.press if press else keyboard_module.release)(key)
+            if press:
+                _actuator.press(key, action, focus_gate=False)
+            else:
+                _actuator.release(key, action)
         except Exception:
             if press:
                 logger.exception("Controller: %s press failed for '%s'", action, key)
@@ -5642,6 +5861,9 @@ class Controller:
                 # keep the aircraft off the ground in the first place.
                 self._climb_key(AIRBRAKE_KEY, press=True, action="climb_emergency")
                 self._climb_emergency_active = True
+                # Phase 2: cruise or the evade may hold a throttle lease; they
+                # yield to this, so the burn goes now, not on their next tick.
+                _actuator.reevaluate(AFTERBURNER_KEY)
                 logger.info("Controller: climb — EMERGENCY: airbrake held, "
                             "afterburner suppressed (cruise-afterburner yields too)")
             elif fuel is None or fuel > fuel_floor_pct:
@@ -5672,6 +5894,7 @@ class Controller:
                         self._climb_key(AIRBRAKE_KEY, press=True,
                                         action="climb_emergency")
                         self._climb_emergency_active = True
+                        _actuator.reevaluate(AFTERBURNER_KEY)   # as at the start
                         logger.warning(
                             "Controller: climb — emergency ESCALATED mid-hold "
                             "(ADR 137 D9) — airbrake engaged, afterburner "
@@ -5686,16 +5909,46 @@ class Controller:
                             "Controller: climb — emergency CLEARED mid-hold "
                             "(ADR 137 D9) — resuming normal fuel-floor logic")
                     emergency_now = _requested_emergency
+                # Brake only while the path points down (ADR 148 amendment,
+                # 2026-10-02). The tree's altitude is a 3-read mean, so its
+                # emergency outlives the descent: at 20:44:40 the airbrake was
+                # still held at +24 deg and the aircraft stalled at 45 kph and
+                # 143 m. At or above level the airbrake comes off and the fuel
+                # logic below may light the burner; below level it goes back on.
+                # No angle keeps the current state: at 21:32:32.7 a `Nose: n/a`
+                # read at 18 kph near vertical put the airbrake back on.
+                if last_angle is None:
+                    _braking = emergency_now and self._climb_emergency_active
+                else:
+                    _braking = emergency_now and last_angle < 0.0
+                if _braking != self._climb_emergency_active:
+                    if _braking:
+                        if ab_held:
+                            self._climb_key(AFTERBURNER_KEY, press=False)
+                            ab_held = False
+                        self._climb_key(AIRBRAKE_KEY, press=True,
+                                        action="climb_emergency")
+                        self._climb_emergency_active = True
+                        _actuator.reevaluate(AFTERBURNER_KEY)
+                        logger.info("Controller: climb — path below level again, "
+                                    "airbrake on")
+                    else:
+                        self._climb_key(AIRBRAKE_KEY, press=False,
+                                        action="climb_emergency")
+                        self._climb_emergency_active = False
+                        logger.info("Controller: climb — path %+.0f deg, at or above "
+                                    "level: airbrake released, thrust allowed",
+                                    last_angle)
                 # ADR 075 burner gate: release at the floor (a held key at 0%
                 # blocks recharge; the sustain floor keeps the evade reserve),
                 # re-press only after the rearm margin refills. ADR 137:
-                # entirely skipped in the emergency case — see above.
+                # entirely skipped while the airbrake is held — see above.
                 fuel = self._read_fuel_pct()
                 # ADR 139 D4: explicit consolidation-point call — always True
                 # today (climb has no manual-takeover check of its own; see
                 # `_may_hold_key`), kept visible so a future change to the
                 # shared gate is not silently bypassed here.
-                if (fuel is not None and not emergency_now
+                if (fuel is not None and not self._climb_emergency_active
                         and self._may_hold_key(AFTERBURNER_KEY, requester="climb")):
                     _incoming = self._incoming_now()
                     if ab_held and fuel <= fuel_floor_pct and not _incoming:
@@ -5755,11 +6008,34 @@ class Controller:
                         # it, not flying something wingman lost. Only that one case
                         # is exempt; the operator's takeover moves the state to
                         # GAME_BATTLE_MANUAL and the pursuit ends, so SAF-001 stands.
+                        # pursuit_mode.crash_recovery (operator, 2026-10-02) keeps this
+                        # with dive_safety off, for the hard emergency only. It hands
+                        # the chase back once the emergency has cleared AND the path
+                        # points up: clearing alone would return a still-falling
+                        # aircraft to a chase that dives (the latch's reason below).
                         _recovering = (_st == GameState.GAME_BATTLE_EJECT
                                        and self._pursuing.is_set()
-                                       and self._pursuit_dive_safety
+                                       and (self._pursuit_dive_safety
+                                            or self._pursuit_crash_recovery)
                                        and self._pursuit_recovery_max_s > 0
                                        and (recovery_since is not None or emergency_now))
+                        # Operator, 2026-10-02 23:40: a fresh path at or above level
+                        # hands back whatever the tree's 3-read mean still says; that
+                        # lag kept holds pulling to +90 deg at 132-245 kph. With no
+                        # angle, the cleared emergency and a climbing rate still do.
+                        _climbing_now = (last_angle >= 0.0 if last_angle is not None
+                                         else (not emergency_now and last_rate is not None
+                                               and last_rate >= 0.0))
+                        if (_recovering and recovery_since is not None
+                                and _climbing_now
+                                and not self._pursuit_dive_safety):
+                            logger.info(
+                                "Controller: climb — crash no longer predicted after "
+                                "%.1fs (path %s), handing the airframe back to the chase",
+                                time.time() - recovery_since,
+                                "n/a" if last_angle is None else "%+.0f deg" % last_angle)
+                            exit_reason = "crash_cleared"
+                            break
                         if _recovering and recovery_since is None:
                             recovery_since = time.time()
                             self._pursuit_recovery.set()
@@ -5949,7 +6225,7 @@ class Controller:
             # press of 'l' is mistaken for an echo.
             self._climb_key(NOSE_UP_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
-            if emergency_now:
+            if emergency_now or self._climb_emergency_active:
                 self._climb_key(AIRBRAKE_KEY, press=False, action="climb_emergency")
                 self._climb_emergency_active = False
             # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE
@@ -6087,17 +6363,26 @@ class Controller:
                        "exhausted, releasing anyway", self._climb_exit_max_pulses)
         return "budget_exhausted"
 
-    def _read_stable_altitude(self) -> "float | None":
-        """Fresh telemetry stable altitude, or None when unreadable."""
+    def _read_floor_altitude(self) -> "float | None":
+        """The altitude push_floor_m is checked against: the last reading
+        carried push_floor_lookahead_s ahead at the measured descent rate
+        (`TelemetrySnapshot.altitude_ahead`), or None when unreadable.
+
+        Cycle 12 (2026-09-27): the smoothed altitude this replaced trailed fast
+        dives by hundreds of metres. Scored on every icon push logged in three
+        sessions against the HUD altitude interpolated between readings, it
+        missed all 72 push ticks below the floor, where this misses none; four
+        terrain deaths followed such a push (19:42:13, 19:43:21, 20:19:36,
+        20:31:43)."""
         if self._analyzer is None:
             return None
         try:
             snap = self._analyzer.get_telemetry()
         except Exception:
             return None
-        if snap is None or not snap.altitude_fresh():
+        if snap is None:
             return None
-        return snap.altitude.stable_value
+        return snap.altitude_ahead(self._icon_cfg.push_floor_lookahead_s)
 
     def _read_fuel_pct(self) -> "int | None":
         """Fresh afterburner fuel percentage, or None when unreadable (ADR 075)."""
@@ -6316,7 +6601,7 @@ class Controller:
             logger.info("Controller: mission_loiter - entry pull-up held %.2fs",
                         _held)
 
-    def mission_loiter(self):
+    def mission_loiter(self, token: "int | None" = None):
         """Stay alive: climb to a holding altitude and orbit there.
 
         Behaviour-driven, not a fixed sequence. The previous implementation was
@@ -6357,6 +6642,13 @@ class Controller:
         # a mission started by a state transition, and the old
         # acquire(blocking=False) made the keypress a silent no-op whenever j20
         # held the lock — the operator pressed 'y' and nothing happened.
+        # CR-018-19: an automatic launch (the respawn restart) that a cancel has
+        # overtaken does not start. Checked before the preemption below, whose
+        # own cancel would otherwise make every token look stale.
+        if token is not None and token != self.mission_token():
+            logger.info("Controller: mission_loiter - cancelled before it started, "
+                        "not starting")
+            return
         if self._mission_lock.locked():
             logger.info("\033[93mController: mission_loiter - cancelling the "
                         "running mission to take the hold\033[0m")
@@ -6399,7 +6691,7 @@ class Controller:
         # trim correction and useless against a vertical dive. This is the one
         # place the hold is allowed to simply hold the stick back.
         self._mission_complete.clear()
-        self._mission_cancel.clear()
+        self._claim_mission_cancel("mission_loiter", None)   # its own preemption, above
         # AFTER the cancel flag is cleared, not before. Measured live
         # 2026-09-05 10:12:59: the pull-up ran while `_mission_cancel` was
         # still set from the pre-emption above, and `nose_up(block=True)`
@@ -6588,7 +6880,7 @@ class Controller:
                 self.cancel_mission()
                 break
 
-    def mission_j20(self):
+    def mission_j20(self, token: "int | None" = None):
         """Fully adaptive J20 mission (ADR 075): the behavior tree owns every
         in-battle decision — sustained climb to operating altitude while armed,
         engage geometry, missile evade, eject. The mission thread contributes
@@ -6604,6 +6896,10 @@ class Controller:
         if not acquired:
             logger.warning("\033[91mController: mission_j20 already in progress, skipping (lock held)\033[0m")
             return
+        if not self._claim_mission_cancel("mission_j20", token):
+            if self._mission_lock.locked():
+                self._mission_lock.release()
+            return
 
         logger.info("\033[92mController: mission_j20 - starting mission sequence (lock acquired)\033[0m")
         # ADR 132: fly the spawn heading first. Battle entry and every respawn
@@ -6612,7 +6908,6 @@ class Controller:
         # both cases and cannot drift apart from them.
         self.arm_turn_guard()
         self._mission_complete.clear()
-        self._mission_cancel.clear()
 
         def _mission_runner():
             try:
@@ -6637,23 +6932,9 @@ class Controller:
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
+        self._await_mission("mission_j20", mission_a)
 
-        # Wait for mission to complete or exit requested
-        while not self._mission_complete.wait(timeout=0.05):
-            if self._mission_exit_requested():
-                logger.info("Controller: exit requested, aborting mission wait")
-                self.cancel_mission()
-                break
-
-        # Wait for the mission runner thread to fully exit
-        mission_a.join(timeout=2.0)
-
-        # Small delay to let keyboard library settle after key presses
-        time.sleep(0.2)
-
-        logger.info("\033[91mController: mission_j20 - method exiting\033[0m")
-
-    def mission_su30(self, preempt: bool = False):
+    def mission_su30(self, preempt: bool = False, token: "int | None" = None):
         """Scripted Su-30 mission (ADR 144, docs/missions/su30.md).
 
         Four steps, run once per life. Battle entry and every respawn restart
@@ -6708,6 +6989,10 @@ class Controller:
         if not acquired:
             logger.warning("\033[91mController: mission_su30 already in progress, skipping (lock held)\033[0m")
             return
+        if not self._claim_mission_cancel("mission_su30", token):
+            if self._mission_lock.locked():
+                self._mission_lock.release()
+            return
 
         logger.info("\033[92mController: mission_su30 - starting mission sequence (lock acquired)\033[0m")
         # ADR 132: same reasoning as mission_j20 — the aircraft spawns on a
@@ -6715,7 +7000,6 @@ class Controller:
         # covers both battle entry and every respawn restart.
         self.arm_turn_guard()
         self._mission_complete.clear()
-        self._mission_cancel.clear()
         handed_off = False
 
         def _mission_runner():
@@ -6761,17 +7045,7 @@ class Controller:
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
-
-        # Wait for mission to complete or exit requested
-        while not self._mission_complete.wait(timeout=0.05):
-            if self._mission_exit_requested():
-                logger.info("Controller: exit requested, aborting mission wait")
-                self.cancel_mission()
-                break
-
-        mission_a.join(timeout=2.0)
-        time.sleep(0.2)
-        logger.info("\033[91mController: mission_su30 - method exiting\033[0m")
+        self._await_mission("mission_su30", mission_a)
 
     def _run_su30_sequence(self) -> bool:
         """The four mission_su30 steps. True when pursuit mode was activated.
@@ -7061,7 +7335,7 @@ class Controller:
                                defer_switch_until_empty=True)
         return True
 
-    def mission_f111(self):
+    def mission_f111(self, token: "int | None" = None):
         """Scripted F-111 mission (ADR 149, docs/missions/f111.md): mission_su30
         plus the wing sweep on WINGSWEEP_KEY.
 
@@ -7103,6 +7377,10 @@ class Controller:
             logger.warning("\033[91mController: mission_f111 already in progress, "
                            "skipping (lock held)\033[0m")
             return
+        if not self._claim_mission_cancel("mission_f111", token):
+            if self._mission_lock.locked():
+                self._mission_lock.release()
+            return
 
         logger.info("\033[92mController: mission_f111 - starting mission sequence "
                     "(lock acquired)\033[0m")
@@ -7110,7 +7388,6 @@ class Controller:
         # point battle entry and every respawn restart come through.
         self.arm_turn_guard()
         self._mission_complete.clear()
-        self._mission_cancel.clear()
         handed_off = False
 
         def _mission_runner():
@@ -7155,17 +7432,7 @@ class Controller:
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
-
-        # Wait for mission to complete or exit requested
-        while not self._mission_complete.wait(timeout=0.05):
-            if self._mission_exit_requested():
-                logger.info("Controller: exit requested, aborting mission wait")
-                self.cancel_mission()
-                break
-
-        mission_a.join(timeout=2.0)
-        time.sleep(0.2)
-        logger.info("\033[91mController: mission_f111 - method exiting\033[0m")
+        self._await_mission("mission_f111", mission_a)
 
     def _run_f111_sequence(self) -> bool:
         """The six mission_f111 steps. True when pursuit mode was activated.
@@ -7292,7 +7559,7 @@ class Controller:
                 return self._f111_press_wingsweep(swept=False)
         return False
 
-    def mission_jas39(self):
+    def mission_jas39(self, token: "int | None" = None):
         """JAS39 mission (ADR 145, docs/missions/jas39.md): mission_j20 plus
         the cloak.
 
@@ -7321,6 +7588,10 @@ class Controller:
             logger.warning("\033[91mController: mission_jas39 already in progress, "
                            "skipping (lock held)\033[0m")
             return
+        if not self._claim_mission_cancel("mission_jas39", token):
+            if self._mission_lock.locked():
+                self._mission_lock.release()
+            return
 
         logger.info("\033[92mController: mission_jas39 - starting mission sequence "
                     "(lock acquired)\033[0m")
@@ -7330,7 +7601,6 @@ class Controller:
                     "flying the spawn heading", self._jas39_turn_guard_s)
         self.arm_turn_guard(self._jas39_turn_guard_s)
         self._mission_complete.clear()
-        self._mission_cancel.clear()
 
         def _mission_runner():
             try:
@@ -7367,17 +7637,7 @@ class Controller:
 
         mission_a = threading.Thread(target=_mission_runner, daemon=True)
         mission_a.start()
-
-        # Wait for mission to complete or exit requested
-        while not self._mission_complete.wait(timeout=0.05):
-            if self._mission_exit_requested():
-                logger.info("Controller: exit requested, aborting mission wait")
-                self.cancel_mission()
-                break
-
-        mission_a.join(timeout=2.0)
-        time.sleep(0.2)
-        logger.info("\033[91mController: mission_jas39 - method exiting\033[0m")
+        self._await_mission("mission_jas39", mission_a)
 
     def click_grid_region(self, region_num: int, grid_rows: int = 8, grid_cols: int = 8, block: bool = False, count: int = 6, region_name: str = None):
         """Move the mouse to the center of a grid region and left-click it.
@@ -7582,6 +7842,45 @@ class Controller:
         else:
             threading.Thread(target=_do_click, daemon=True).start()
 
+    def mission_token(self) -> int:
+        """The cancel generation now. An automatic launch takes this BEFORE it
+        starts the mission's thread and passes it as ``token`` (CR-018-19)."""
+        with self._mission_generation_lock:
+            return self._mission_generation
+
+    def _claim_mission_cancel(self, name: str, token: "int | None") -> bool:
+        """Mission entry: clear the stale cancel flag, unless a cancel arrived
+        after the mission was requested. CR-018-19 (carried from CR-016-01).
+
+        Every mission used to clear ``_mission_cancel`` on entry, so a cancel
+        issued between the launch and the new thread reaching that line was
+        swallowed and the mission flew anyway. With a token from the launch,
+        a newer generation means exactly that cancel: refuse. ``token=None``
+        is an operator launch, which keeps the old meaning: the operator's
+        press is newer than any cancel before it. This is the only place the
+        flag is cleared.
+        """
+        with self._mission_generation_lock:
+            if token is not None and token != self._mission_generation:
+                logger.info("Controller: %s - cancelled before it started "
+                            "(requested at generation %d, now %d), not starting",
+                            name, token, self._mission_generation)
+                return False
+            self._mission_cancel.clear()
+            return True
+
+    def _await_mission(self, name: str, thread: threading.Thread) -> None:
+        """The shared tail of a mission method: wait for the runner, join it."""
+        while not self._mission_complete.wait(timeout=0.05):
+            if self._mission_exit_requested():
+                logger.info("Controller: exit requested, aborting mission wait")
+                self.cancel_mission()
+                break
+        thread.join(timeout=2.0)
+        # Small delay to let keyboard library settle after key presses
+        time.sleep(0.2)
+        logger.info("\033[91mController: %s - method exiting\033[0m", name)
+
     def cancel_mission(self):
         """Request cancellation of any running mission.
 
@@ -7591,7 +7890,11 @@ class Controller:
         the mission runner thread.
         """
         logger.info("\033[91mController: cancel_mission called\033[0m")
-        self._mission_cancel.set()
+        # Under the token lock, so a mission entry either sees this cancel's
+        # generation or clears before it and then sees the flag (CR-018-19).
+        with self._mission_generation_lock:
+            self._mission_generation += 1
+            self._mission_cancel.set()
         self.stop_weapon_loop()
         # HLDD 005 Sustained-Hold Actuation (2026-09-23): a held roll/pitch
         # key does not self-expire the way a bounded tap did — a
@@ -7650,6 +7953,93 @@ class Controller:
         except Exception:
             return False
 
+    def _flight_writers(self) -> "tuple[_Writer, ...]":
+        """Every writer of flight input, in the order takeover and shutdown stop it.
+
+        CR-018-10: this one list replaces the two that release_for_manual_takeover()
+        and cleanup() kept by hand. Those drifted three times: _disengage_stop was
+        missing from takeover until 2026-09-09 and from cleanup until CR-019-04, and
+        the afterburner evade was missing from both until CR-018-07. A thread this
+        class starts must be listed here or exempted, with a reason, in
+        tests/test_flight_writers.py.
+
+        Built on every call, so the thread handles are the current ones.
+        """
+        def _set(event):
+            return lambda _reason: event.set()
+
+        def _stop_eject(reason):
+            self._eject_stop_reason = reason
+            self._eject_stop.set()
+
+        return (
+            # The pursuit loop waits on _eject_stop too, so one stop ends both.
+            _Writer("eject and pursuit", _stop_eject,
+                    lambda: (self._eject_thread, self._pursuing_thread),
+                    ("eject_and_dive", "pursue_and_engage")),
+            _Writer("missile evade", _set(self._me_stop),
+                    lambda: (self._me_thread,), ("missile_evade_mode",)),
+            _Writer("climb", _set(self._climb_stop),
+                    lambda: (self._climb_thread,), ("climb_mode",)),
+            # ADR 107: it holds two flight axes.
+            _Writer("boundary turn", _set(self._boundary_turn_stop),
+                    lambda: (self._boundary_turn_thread,), ("boundary_turn_mode",)),
+            _Writer("spawn guard", _set(self._sg_stop),
+                    lambda: (self._sg_thread,), ("start_spawn_guard",)),
+            # Only takeover and shutdown set this, never a plain mission cancel;
+            # see disengage_roll_right.
+            _Writer("disengage roll", _set(self._disengage_stop),
+                    lambda: (self._disengage_thread,), ("disengage_roll_right",)),
+            _Writer("afterburner evade", self._ab_evade.stop,
+                    lambda: (self._ab_evade.thread,), ("_start_afterburner_evade",)),
+            # Missions, and the weapon loop they start, end on _mission_cancel.
+            _Writer("missions and weapon loop", lambda _reason: self.cancel_mission(),
+                    lambda: (),
+                    ("mission_j20", "mission_su30", "mission_f111", "mission_jas39",
+                     "mission_loiter", "start_weapon_loop", "_start_default_mission",
+                     "restart_last_mission", "start_loiter_mission",
+                     "start_su30_mission")),
+            # Explicit, independent of cancel_mission()'s own call: the blanket
+            # INJECTABLE_KEYS release physically lets go of every key but does not
+            # know about _roll_held/_pitch_held/_roll_hold_reason. Without this,
+            # a takeover could leave that state claiming a key is held after the X
+            # server released it (HLDD 005 Sustained-Hold Actuation, 2026-09-23).
+            _Writer("tracking holds",
+                    lambda reason: self.release_tracking_holds(why=reason),
+                    lambda: ()),
+            _Writer("search and destroy",
+                    lambda _reason: self.stop_search_and_destroy_loop(), lambda: (),
+                    ("_start_search_and_destroy_locked",)),
+            _Writer("boresight engage",
+                    lambda _reason: self.stop_boresight_engage_loop(), lambda: (),
+                    ("_start_boresight_engage_locked",)),
+            # ADR 145: a writer on SPECIAL_ABILITY.
+            _Writer("cloak", lambda _reason: self.stop_cloak_loop(), lambda: (),
+                    ("_start_cloak_locked",)),
+        )
+
+    def _stop_flight_writers(self, reason: str) -> None:
+        """Tell every flight writer to stop. One failure does not skip the rest."""
+        for writer in self._flight_writers():
+            try:
+                writer.stop(reason)
+            except Exception:
+                logger.exception("Controller: stopping %s failed during %s",
+                                 writer.name, reason)
+
+    def _join_flight_writers(self, budget_s: float) -> None:
+        """Wait, within one shared budget, for the writers' threads to finish."""
+        deadline = time.time() + budget_s
+        for writer in self._flight_writers():
+            for thread in writer.threads():
+                if (thread is None or not thread.is_alive()
+                        or thread is threading.current_thread()):
+                    continue
+                thread.join(timeout=max(0.0, deadline - time.time()))
+                if thread.is_alive():
+                    logger.warning("Controller: %s thread still running after its stop",
+                                   writer.name)
+
     def release_for_manual_takeover(self) -> None:
         """Hand the aircraft to the operator: stop every writer, release every
         key (SAF-001).
@@ -7660,43 +8050,15 @@ class Controller:
         from the GAME_BATTLE_MANUAL entry hook so it runs however takeover was
         reached.
         """
-        self._eject_stop_reason = "manual takeover"
-        self._eject_stop.set()
-        self._me_stop.set()
-        self._climb_stop.set()
-        self._boundary_turn_stop.set()   # ADR 107: it holds two flight axes
-        self._sg_stop.set()
-        self._disengage_stop.set()   # SAF-001 2026-09-09: was missing entirely
-        try:
-            self.cancel_mission()
-        except Exception:
-            logger.exception("Controller: cancel_mission failed during takeover")
-        try:
-            # Explicit, independent of cancel_mission()'s own call above: the
-            # blanket INJECTABLE_KEYS release below physically lets go of
-            # every key but does not know about _roll_held/_pitch_held/
-            # _roll_hold_reason — without this, a manual takeover could leave
-            # that Python-level state claiming a key is still held after the
-            # X server has already released it (HLDD 005 Sustained-Hold
-            # Actuation, 2026-09-23).
-            self.release_tracking_holds(why="manual takeover")
-        except Exception:
-            logger.exception("Controller: release_tracking_holds failed during takeover")
-        for stop in (self.stop_search_and_destroy_loop,
-                     self.stop_boresight_engage_loop,
-                     self.stop_cloak_loop):   # ADR 145: a writer on SPECIAL_ABILITY
-            try:
-                stop()
-            except Exception:
-                logger.exception("Controller: loop stop failed during takeover")
+        self._stop_flight_writers("manual takeover")
         if keyboard_module and not self._simulate_os_input:
-            for _key in INJECTABLE_KEYS:
-                try:
-                    keyboard_module.release(_key)
-                except Exception:
-                    logger.error("Controller: takeover release of %r failed — %s",
-                                 _key, _LATCH_NOTE)
-            logger.info("Controller: manual takeover — all injectable keys released")
+            # CR-018-09: name what wingman was holding, before the sweep drops it.
+            held = _actuator.held()
+            _actuator.release_all(INJECTABLE_KEYS, "Controller: takeover", _LATCH_NOTE)
+            logger.info("Controller: manual takeover — all injectable keys released "
+                        "(held by wingman: %s)",
+                        ", ".join(f"{k} by {'/'.join(o)}" for k, o in sorted(held.items()))
+                        or "none")
 
     def operator_stop_requested(self) -> bool:
         """True when the operator stopped the session with Backspace (ADR 099).
@@ -7782,7 +8144,7 @@ class Controller:
         self._auto_respawn_restart = True
         self._game_battle_since = time.time()
         if self._analyzer is not None:
-            self._analyzer._last_battle_event_ts = time.time()
+            self._analyzer.note_battle_event()
             logger.info("Controller: mission '%s' started → GAME_BATTLE", mission_name)
 
     def _start_game_starting_loop(self):
@@ -7796,8 +8158,9 @@ class Controller:
         """
         # Clear any stale cancel from prior states (mirrors mission_j20 / mission_loiter pattern).
         # cancel_mission() is called on on_enter_GAME_LOBBY; without this clear the loop
-        # would see the flag already set and exit immediately.
-        self._mission_cancel.clear()
+        # would see the flag already set and exit immediately. No token: the loop
+        # ends on its own when the FSM leaves GAME_STARTING.
+        self._claim_mission_cancel("game_starting_loop", None)
 
         good_luck_event = threading.Event()
         ocr_running = threading.Event()
@@ -7858,7 +8221,7 @@ class Controller:
                         # presses in 3s all logged as "XTest echo ... ignoring").
                         self._inc_programmatic_key(MISSION_J20_KEY)
                         try:
-                            keyboard_module.press_and_release(MISSION_J20_KEY)
+                            _actuator.tap(MISSION_J20_KEY, "game_starting_loop")
                         finally:
                             self._arm_release_grace(MISSION_J20_KEY)
                             self._dec_programmatic_key(MISSION_J20_KEY)
@@ -7961,7 +8324,11 @@ class Controller:
                     "jas39": self.mission_jas39, "f111": self.mission_f111}
         name = self._default_mission if self._default_mission in missions else "j20"
         self._set_last_mission(name)
-        threading.Thread(target=missions[name], daemon=True).start()
+        # CR-018-19: taken before the thread starts, so a cancel that lands
+        # before the mission reaches its entry is not swallowed there.
+        token = self.mission_token()
+        threading.Thread(target=missions[name], kwargs={"token": token},
+                         daemon=True).start()
 
     def _airframe_handed_back(self) -> "str | None":
         """Why wingman must not start flying on its own right now, or None.
@@ -7998,26 +8365,32 @@ class Controller:
 
         with self._last_mission_lock:
             mission = self._last_mission
+        token = self.mission_token()   # CR-018-19: before any thread starts
 
         if mission == "j20":
             logger.info("Controller: restarting last mission (J20)")
-            threading.Thread(target=self.mission_j20, daemon=True).start()
+            threading.Thread(target=self.mission_j20, kwargs={"token": token},
+                             daemon=True).start()
             return True
         if mission == "loiter":
             logger.info("Controller: restarting last mission (loiter)")
-            threading.Thread(target=self.mission_loiter, daemon=True).start()
+            threading.Thread(target=self.mission_loiter, kwargs={"token": token},
+                             daemon=True).start()
             return True
         if mission == "su30":
             logger.info("Controller: restarting last mission (SU-30)")
-            threading.Thread(target=self.mission_su30, daemon=True).start()
+            threading.Thread(target=self.mission_su30, kwargs={"token": token},
+                             daemon=True).start()
             return True
         if mission == "jas39":
             logger.info("Controller: restarting last mission (JAS39)")
-            threading.Thread(target=self.mission_jas39, daemon=True).start()
+            threading.Thread(target=self.mission_jas39, kwargs={"token": token},
+                             daemon=True).start()
             return True
         if mission == "f111":
             logger.info("Controller: restarting last mission (F-111)")
-            threading.Thread(target=self.mission_f111, daemon=True).start()
+            threading.Thread(target=self.mission_f111, kwargs={"token": token},
+                             daemon=True).start()
             return True
 
         # No prior mission recorded — reached GAME_BATTLE via GAME_UNKNOWN (Good Luck
@@ -8060,36 +8433,11 @@ class Controller:
 
         @relation(SAF-007, scope=function)
         """
-        # 1. Stop the writers so nothing re-presses after our releases.
-        self._eject_stop_reason = "shutdown"
-        self._eject_stop.set()
-        self.cancel_mission()
-        try:
-            self.stop_search_and_destroy_loop()
-        except Exception:
-            logger.exception("Controller: failed to stop search_and_destroy loops")
-        try:
-            self.stop_boresight_engage_loop()
-        except Exception:
-            logger.exception("Controller: failed to stop boresight_engage loop")
-        try:
-            self.stop_cloak_loop()   # ADR 145
-        except Exception:
-            logger.exception("Controller: failed to stop cloak loop")
-        eject_thread = self._eject_thread
-        if eject_thread is not None and eject_thread.is_alive():
-            eject_thread.join(timeout=1.5)  # let its finally release keys cleanly
-        self._me_stop.set()  # ADR 070: end any evade hold via its own finally
-        self._climb_stop.set()  # ADR 073 3.2b: end any climb hold via its own finally
-        self._boundary_turn_stop.set()  # ADR 107: end any boundary turn likewise
-        self._sg_stop.set()  # ADR 076: end any spawn guard via its own finally
-        self._disengage_stop.set()  # CR-019-04: as release_for_manual_takeover does
-        bt_thread = self._boundary_turn_thread
-        if bt_thread is not None and bt_thread.is_alive():
-            bt_thread.join(timeout=1.5)   # its finally does the SAF-010 push
-        me_thread = self._me_thread
-        if me_thread is not None and me_thread.is_alive():
-            me_thread.join(timeout=1.5)
+        # 1. Stop the writers so nothing re-presses after our releases, then wait
+        #    for their finally blocks: those release each writer's own keys with
+        #    the echo grace, and the boundary turn's does the SAF-010 push.
+        self._stop_flight_writers("shutdown")
+        self._join_flight_writers(_WRITER_JOIN_BUDGET_S)
 
         # 2. Belt-and-braces: release every injectable key.
         if keyboard_module and not self._simulate_os_input:
@@ -8098,13 +8446,9 @@ class Controller:
             # game_starting loop's press_and_release) were missing until the
             # 2026-08-14 audit — a key is stuck if the process dies inside
             # even a press_and_release call.
-            for _key in INJECTABLE_KEYS:
-                try:
-                    keyboard_module.release(_key)
-                except Exception:
-                    # Last-chance safety net on shutdown: this is the release
-                    # that stops a key surviving the process. Never silent.
-                    logger.error("Controller: cleanup release of %r failed — %s", _key, _LATCH_NOTE)
+            # Last-chance safety net on shutdown: this is the release that stops
+            # a key surviving the process. A failure is never silent.
+            _actuator.release_all(INJECTABLE_KEYS, "Controller: cleanup", _LATCH_NOTE)
             logger.info("Controller: all injectable keys released")
 
         # 3. Deregister hooks last so the guards above stay active meanwhile.

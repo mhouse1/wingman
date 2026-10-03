@@ -199,7 +199,7 @@ Alternatives).
 |-------|------|-----------|
 | 1 | `uv add --dev pytest-xdist`; `TEST_WORKERS`; `loadgroup`; per-file OCR groups and the `serial` marker; `make test-serial`. Run the suite 5 times in parallel with the game running. | Median wall time under 2 min; peak memory recorded; 5 of 5 runs with the same failures as a serial run; every new failure traced to a shared resource and fixed or marked. |
 | 2 | `uv add --dev pytest-testmon`; `scripts/test-changed.sh`; `make test-changed`; `.testmondata` gitignored. | Mutation check: editing a function in `tracker.py` selects its tests and not unrelated ones; editing `config.yaml` falls back to the full run; a docs-only change runs nothing. |
-| 3 | `.githooks/pre-push`, `make hooks`. | A push with a failing test is blocked; `--no-verify` bypasses it. |
+| 3 | `.githooks/pre-push`, `make hooks`. | A push with a failing test is blocked; `--no-verify` bypasses it. Implemented 2026-09-27 for CR-018-11 (`tests/test_pre_push_hook.py`); installed only by `make hooks`, and until Phase 1 lands each push costs a serial run of about 7 min. |
 | 4 | The `CLAUDE.md` section. | One Claude session run under the policy uses one full run per task. |
 | 5 (later) | Replace fixed sleeps in the slowest files with event waits or an injected clock, starting with `test_pursuit_mode.py`, `test_climb_mode.py` and `test_eject_heatdive.py`. | Summed duration of those files cut by half; no loss of coverage. |
 

@@ -254,6 +254,8 @@ owning process id.
 | Target window never appears | Focus assertion times out | Report and fail rather than run blind |
 | Focus lost mid-session | Not currently detected | **Open.** Focus is asserted at launch only; a target that restarts itself drops it |
 | Guard evaluating the wrong display | All injection suppressed | Guard is handed the injection display at construction |
+| Clicks reach no window while the operator's mouse is off the nested window (Xwayland 24.1.10) | The click reads the pointer back and the server reports it over no window | The click detaches the nested server's host-pointer devices while it is sent, then reattaches them. Never disable them: that crashes the server when the mouse returns. ADR 156, Anomaly 009 |
+| A modifier key left held on the nested display after the operator Alt+Tabs away (Xwayland 24.1.10); the game reads the next Enter as Alt+Enter and frames its window, shifting every crop | A guard polls the nested server's key state | Any modifier held more than 1.5 s gets a real KeyRelease. ADR 157, Anomaly 010 |
 | Configuration missing or malformed | Parse failure | Fail closed — lane disabled. A half-applied lane is worse than no lane, because capture and injection would target different displays |
 
 The fail-closed rule deserves emphasis. **A partially applied lane is more

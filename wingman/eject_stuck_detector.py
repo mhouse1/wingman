@@ -33,7 +33,7 @@ also documented in the anomaly record:
 import logging
 import time
 
-from .analyzer import GameState
+from .state import GameState
 
 logger = logging.getLogger(__name__)
 

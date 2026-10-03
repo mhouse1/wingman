@@ -32,6 +32,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from .config_schema import schema_default
+
 # Key names the law reports. Names, not key constants: the shadow stage only
 # logs them, and actuation (HLDD 015 rollout step 2) maps them to keys.
 NOSE_DOWN = "NOSE_DOWN"
@@ -102,6 +104,9 @@ class IconSteeringConfig:
     # (m), nor without a fresh one. Once the dropped-key defect was fixed, the
     # push flew into the ground from about 1200 m and 700 m. None = no floor.
     push_floor_m: "float | None" = None
+    # Cycle 12: the floor is checked this far ahead of the last reading.
+    push_floor_lookahead_s: float = schema_default(
+        "pursuit_mode.icon_steering.push_floor_lookahead_s")
     blind_search_after_s: float = 3.0
 
     @classmethod
@@ -134,6 +139,8 @@ class IconSteeringConfig:
             release_pts=float(cfg.get("release_pts", d.release_pts)),
             icon_min_path_deg=None if min_path is None else float(min_path),
             push_floor_m=None if floor is None else float(floor),
+            push_floor_lookahead_s=float(cfg.get("push_floor_lookahead_s",
+                                                 d.push_floor_lookahead_s)),
             blind_search_after_s=float(cfg.get("blind_search_after_s", d.blind_search_after_s)),
         )
 
@@ -318,7 +325,7 @@ class IconPoints:
     def icon_seen_within(self, seconds: float) -> bool:
         return self.last_icon_ts is not None and self._clock() - self.last_icon_ts <= seconds
 
-    def intent(self) -> "tuple[str, tuple[str, ...]]":
+    def intent(self, down_allowed: bool = True) -> "tuple[str, tuple[str, ...]]":
         """What the dominant-intent law would hold now: ("down", ...), ("up",
         ...), ("turn", ...) or ("none", ()). It acts on the scores whether or not
         an icon is on screen this scan; the lock (which zeroes them) is what
@@ -328,10 +335,23 @@ class IconPoints:
         push with the wings level: bank-and-pull is kept for icons on or above
         the horizon. Measured before it: an enemy below-left (icon 130-147 deg)
         scored more turn than pitch, so the law banked and pulled, and the pull
-        lifted the nose away from it before the bank developed."""
-        if self.pitch_pts > 0 and (self.pitch_active or self.turn_active):
-            return "down", (NOSE_DOWN,)
+        lifted the nose away from it before the bank developed.
+
+        ``down_allowed=False`` (the push is refused: below push_floor_m, the dive
+        guard, the angle rule) turns toward the icon's side instead, the bank and
+        pull an icon on the horizon gets, and pulling is right when too low to
+        push. Before this the refused push left the wings level and the pitch
+        neutral, so the jet flew straight with the enemy off to one side: 686 of
+        916 icon ticks, 95 s over 9 stretches, in the 2026-09-27 18:42 session
+        (the 18:51:51 case: icon 158-171 deg, points -23/+9, at 822 m). With no
+        side to turn to (turn not active) it is still "none"."""
         roll = ROLL_LEFT if self.turn_active < 0 else ROLL_RIGHT
+        if self.pitch_pts > 0 and (self.pitch_active or self.turn_active):
+            if down_allowed:
+                return "down", (NOSE_DOWN,)
+            if self.turn_active:
+                return "turn", (roll, NOSE_UP)
+            return "none", ()
         if self.pitch_active and (not self.turn_active
                                   or abs(self.pitch_pts) >= abs(self.turn_pts)):
             if self.pitch_active > 0:

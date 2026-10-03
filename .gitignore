@@ -18,7 +18,7 @@ __pycache__/
 *.cache.write
 untrack_todo.md
 to_be_added/
-FUTURE/
+docs/FUTURE/
 wingman.log
 wingman_live.log
 *.log
@@ -26,6 +26,7 @@ wingman_live.log
 # artifacts, never meant to be published (see logs/session_*.mp4, logs/bt_trace_*.jsonl)
 logs/session_*.mp4
 logs/bt_trace_*.jsonl
+tests/fixtures/
 # ADR 100 D7: the whole corpus (including telemetry/, integration_test/, and
 # the loose top-level PNGs D5 originally kept tracked) lives on veda only now.
 # `git rm --cached` was needed once to untrack what this line alone cannot
@@ -41,3 +42,5 @@ docs/performance/runtime-performance-trends.html
 docs/performance/runtime-performance-trends.preview.html
 # Per-user Claude Code permissions — personal, never shared
 .claude/settings.local.json
+# CR-018-16: the operator's per-machine settings, merged over config.yaml by a live run.
+wingman/config.local.yaml

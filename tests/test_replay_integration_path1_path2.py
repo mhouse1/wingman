@@ -82,6 +82,11 @@ def _build_test_config(tmp_path: Path) -> Path:
     debug["draw_markers"] = False
     debug["debug_output_dir"] = str(tmp_path / "debug")
 
+    # No HUD: with tracking enabled it opens a feh window on the operator's
+    # display, which this in-process test has no use for. A run that raised
+    # inside main() used to leave that window open after the suite.
+    cfg.setdefault("hud", {})["enabled"] = False
+
     out = tmp_path / "test_config.yaml"
     out.write_text(
         yaml.dump(cfg, default_flow_style=None, sort_keys=False, allow_unicode=True),
@@ -278,6 +283,11 @@ class FakeController:
         self._auto_respawn = True
 
     # --- Mission state ---
+    def register_hotkeys(self):
+        # main registers hotkeys after construction (CR-018-13); the
+        # replay lane never has any.
+        pass
+
     def is_mission_running(self) -> bool:
         return self._mission_running
 
@@ -295,6 +305,59 @@ class FakeController:
         Controller. The stub doesn't drive the eject heatdive loop, so it
         just needs to exist and not raise."""
         self._target_tracker = tracker
+
+    def set_hud_renderer(self, hud_renderer) -> None:
+        """HLDD 005: main.py wires the renderer in right after the tracker;
+        the stub never renders."""
+        self._hud_renderer = hud_renderer
+
+    def close_all_requested(self) -> bool:
+        return False  # no operator, so never a second Backspace (ADR 099)
+
+    # --- Missiles-empty strategy (HLDD 015) ---
+    # Shipped config enables pursuit mode, but this stub models the eject
+    # strategy: fire_eject() asks here which one to start, and both run inside
+    # the same GAME_BATTLE_EJECT state, so the FSM path under test is the same.
+    def pursuit_mode_enabled(self) -> bool:
+        return False
+
+    def is_pursuing(self) -> bool:
+        return False
+
+    def eject_flight_active(self) -> bool:
+        return False  # nothing is ever really flying
+
+    def pursue_and_engage(self, on_complete=None, weapon_already_switched=False,
+                          defer_switch_until_empty=False) -> None:
+        # Unreachable while pursuit_mode_enabled() is False; mirrors
+        # eject_and_dive so a future caller still drives the FSM the same way.
+        self.eject_and_dive(on_complete=on_complete)
+
+    # --- Per-tick telemetry hooks (tick_handlers.py) ---
+    # The real controller turns these into held keys; the stub has none.
+    def padlock_state(self):
+        return None  # ADR 140: unknown, so no padlock-off branch fires
+
+    def note_padlock_center_dot(self, frame, is_respawning=False, now=None) -> None:
+        pass
+
+    def note_afterburner_cruise(self, game_state, mission_running) -> None:
+        pass
+
+    def note_incoming(self, detected, now=None) -> None:
+        pass
+
+    def note_stall_prevention(self, game_state) -> None:
+        pass
+
+    def note_boundary(self, dist, forward) -> None:
+        pass
+
+    def stop_boundary_turn(self) -> None:
+        pass
+
+    def orient_pitch_to_target(self, error_norm_y, **_kwargs) -> None:
+        pass
 
     def eject_and_dive(self, on_complete=None) -> None:
         self._mission_running = False
@@ -498,6 +561,16 @@ def _run_replay(
     monkeypatch.setattr(wingman_main, "GameStateAnalyzer", _TrackerAnalyzer)
     monkeypatch.setattr(wingman_main, "Controller", FakeController)
     monkeypatch.setattr(wingman_main, "PerformanceTracker", _TrackerPerf)
+    # SAF-014's lock under its own name per run, as _claim_single_instance's
+    # docstring asks of tests. On the production name this test failed whenever
+    # a real session was flying, and a run that raised inside main() kept the
+    # lock (pytest holds the traceback, so main()'s frame and its socket stay
+    # alive) and turned the next replay into "Another wingman instance is
+    # already running".
+    _orig_claim = wingman_main._claim_single_instance
+    monkeypatch.setattr(
+        wingman_main, "_claim_single_instance",
+        lambda: _orig_claim(f"wingman-replay-test-{path_name}-{tmp_path.name}"))
 
     old_argv = sys.argv
     sys.argv = [

@@ -20,20 +20,24 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.8.11"
-WINGMAN_VERSION_DETAILS = "ACS and F2T2EA: Find, fix, track , target, engage, Assess: attacks using any missile types"
+WINGMAN_VERSION = "1.9.0"
+WINGMAN_VERSION_DETAILS = "ACS: Auto resupply"
 
 from . import capture_budget
 from .capture import Capture
-from .config_schema import assert_valid_config
+from .config_schema import assert_valid_config, schema_default
 from .icon_steering import IconSteeringConfig
 from .controller_config import ControllerConfig
 from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON,
                          set_focus_guard)
 from .close_button import GenericCloseRecovery, click_region
 from .crop_region import CropCoords
-from .analyzer import (GameStateAnalyzer, GameState, GameEvent, POPUP_DISMISS_STATES,
-                       BATTLE_STATES)
+from .analyzer import GameStateAnalyzer, POPUP_DISMISS_STATES
+from .state import GameState, GameEvent, BATTLE_STATES
+from .config_local import (local_path as local_config_path, merge as merge_config,
+                           overlay_keys, read_overlay)
+from .suppressed import suppressed_counts
+from .transition_queue import TransitionQueue
 from .hud import HudRenderer
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -63,6 +67,7 @@ from .replay import (
     ScreenshotReplayCapture,
     build_required_screenshot_dictionary,
     find_missing_screenshots,
+    load_replay_config_overrides,
     load_replay_paths,
     select_replay_path,
     write_required_screenshot_report,
@@ -74,7 +79,7 @@ class RespawnState(Enum):
     RESPAWNING = auto()      # Respawn screen active; restart fires on health return
 
 
-def load_config(path, *, validate: bool = True):
+def load_config(path, *, validate: bool = True, local_overlay: bool = False):
     """Load config.yaml and validate it against the declared schema.
 
     Validation is fail-fast by design (Future 002 A-03): an unknown or
@@ -82,11 +87,21 @@ def load_config(path, *, validate: bool = True):
     default, which has already shipped a wrong value to production once.
     Pass validate=False only for tooling that intentionally works on a
     partial config.
+
+    `local_overlay=True` merges the operator's untracked config.local.yaml
+    over the shipped file first (CR-018-16), and the merged result is what is
+    validated. Only a live run asks for it.
     """
     with open(path, "r") as f:
         cfg = yaml.safe_load(f)
+    source = str(path)
+    if local_overlay:
+        overlay = read_overlay(path)
+        if overlay:
+            cfg = merge_config(cfg, overlay)
+            source = f"{path} + {local_config_path(path)}"
     if validate:
-        assert_valid_config(cfg, source=str(path))
+        assert_valid_config(cfg, source=source)
     return cfg
 
 
@@ -152,6 +167,46 @@ def _invite_click_target(accept_invite: bool, crops) -> "str | None":
     """
     target = "INVITED" if accept_invite else "REJECT"
     return target if target in crops else None
+
+
+# Seconds between choosing a reward card and pressing SELECT ONE: the button
+# is inert until the card is chosen. Named guess, not measured.
+CHOOSE_REWARDS_ACCEPT_DELAY_S = 1.5
+_CHOOSE_REWARDS_STATES = (GameState.GAME_LOBBY, GameState.GAME_UNKNOWN,
+                          GameState.GAME_STARTING_STALLED)
+
+
+def _choose_middle_reward(ctrl, analyzer, logger,
+                          delay_s: float = CHOOSE_REWARDS_ACCEPT_DELAY_S):
+    """Anomaly 006: take the middle reward on the CHOOSE REWARDS overlay.
+
+    Operator, 2026-10-02: "it should always choose the reward in the middle of
+    the screen then accept". Clicks the middle card now and SELECT ONE after
+    `delay_s`, from a thread so the main loop is not held; the second click is
+    dropped if the game has moved on. Returns the thread, or None when a crop
+    is missing and nothing was clicked.
+    """
+    missing = [name for name in ("STALL_CHOOSE_REWARDS_PICK", "STALL_CHOOSE_REWARDS_ACCEPT")
+               if name not in analyzer.crops]
+    if missing:
+        logger.warning("Stall recovery: %s not calibrated — the reward is left "
+                       "for the operator", " and ".join(missing))
+        return None
+    ctrl.click_crop(analyzer.crops["STALL_CHOOSE_REWARDS_PICK"], block=False,
+                    count=1, region_name="STALL_CHOOSE_REWARDS_PICK")
+
+    def _accept():
+        time.sleep(delay_s)
+        if analyzer.game_state not in _CHOOSE_REWARDS_STATES:
+            logger.debug("CHOOSE REWARDS accept suppressed — state is %s",
+                         analyzer.game_state)
+            return
+        ctrl.click_crop(analyzer.crops["STALL_CHOOSE_REWARDS_ACCEPT"], block=False,
+                        count=1, region_name="STALL_CHOOSE_REWARDS_ACCEPT")
+
+    thread = threading.Thread(target=_accept, daemon=True)
+    thread.start()
+    return thread
 
 
 def _alive_transition_disposition(state, alive_after_observed_death: bool) -> str:
@@ -465,8 +520,26 @@ def main():
     )
     logger = logging.getLogger("wingman")
 
-    cfg = load_config(args.config)
+    # CR-018-16: a live run takes the operator's local overlay; replay and
+    # capture runs must not depend on one machine's settings.
+    _live_run = not (args.replay_config or args.capture_path_config)
+    cfg = load_config(args.config, local_overlay=_live_run)
     logger.info("Configuration loaded from %s", args.config)
+    if args.replay_config:
+        # A replay path pins the configuration it models (its config_overrides),
+        # validated like any other config.
+        _replay_overrides = load_replay_config_overrides(Path(args.replay_config))
+        if _replay_overrides:
+            cfg = merge_config(cfg, _replay_overrides)
+            assert_valid_config(cfg, source=f"{args.config} + {args.replay_config}")
+            logger.info("Replay: %s overrides %s", args.replay_config,
+                        ", ".join(overlay_keys(_replay_overrides)))
+    if _live_run:
+        _overlay = read_overlay(args.config)
+        if _overlay:
+            logger.info("Configuration: local overlay %s sets %s",
+                        local_config_path(args.config),
+                        ", ".join(overlay_keys(_overlay)))
 
     # Cross-session disk safety net: capture features cap themselves per
     # session only, and rotated logs were never deleted (2026-09-24: about
@@ -501,10 +574,11 @@ def main():
     # note in input_linux.set_injection_display.
     _nested = cfg.get("nested", {}) or {}
     _nested_on = bool(_nested.get("enabled", False))
-    # The ADR 037/045 replay and live-capture lanes drive the REAL screen: the
-    # live lane presents screenshots on the operator's display and never starts
-    # a nested server. Routing injection to a display that does not exist made
-    # every keypress fail — 51 "Can't connect to display :3" errors, and the
+    # The ADR 037/045 replay and live-capture lanes drive DISPLAY, never the
+    # nested server: the live lane presents screenshots there. Under make that
+    # is a private Xvfb (scripts/gate-display.sh, ADR 153); `make newpaths`
+    # keeps the session display, where the real game runs. Routing injection
+    # to a display that does not exist made every keypress fail — 51 "Can't connect to display :3" errors, and the
     # ADR 045 gate red, because the lane inherited nested.enabled from config.
     # Derived from args here rather than the replay_mode/capture_mode locals,
     # which are computed further down — this has to settle before the focus
@@ -512,8 +586,9 @@ def main():
     _lane_drives_real_screen = bool(args.replay_config or args.capture_path_config)
     if _nested_on and _lane_drives_real_screen:
         logger.info("ADR 099: nested lane disabled for the %s lane — it drives "
-                    "the real display",
-                    "replay" if args.replay_config else "capture")
+                    "DISPLAY %s",
+                    "replay" if args.replay_config else "capture",
+                    os.environ.get("DISPLAY", "(unset)"))
         _nested_on = False
     _nested_override = os.environ.get("WINGMAN_NESTED", "").strip().lower()
     if _nested_override in ("0", "false", "no"):
@@ -521,6 +596,11 @@ def main():
     elif _nested_override in ("1", "true", "yes"):
         _nested_on = True
     nested_display = None
+    # ADR 156: the display whose host-pointer devices clicks may detach, so the
+    # shutdown path can make sure they are attached again.
+    pointer_isolated_display = None
+    # ADR 157: the guard that releases modifiers left held on the nested display.
+    stuck_modifier_guard = None
     if _nested_on and sys.platform != "win32":
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import (set_injection_display, set_injected_keys,
@@ -559,6 +639,32 @@ def main():
         logger.info("ADR 099: nested lane ACTIVE - capture and injection on %s, "
                     "hotkeys observed on %s", nested_display,
                     ", ".join(_observe_display_names()))
+        # ADR 156 / Anomaly 009: Xwayland 24.1.10 delivers XTest clicks to a
+        # window only while the operator's mouse is over the nested window. A
+        # click detaches the server's host-pointer devices for as long as it
+        # takes and reattaches them, so the operator's mouse keeps working in
+        # the game window. Reattach here too: a session that was killed
+        # mid-click may have left them detached on a server that is still up.
+        if bool(_nested.get("isolate_pointer",
+                            schema_default("nested.isolate_pointer"))):
+            from .input_linux import set_pointer_isolation_display
+            from .pointer_isolation import set_host_pointer_isolated
+            pointer_isolated_display = nested_display
+            set_pointer_isolation_display(nested_display)
+            _leftover = set_host_pointer_isolated(nested_display, False)
+            logger.info("ADR 156: clicks on %s detach the host pointer only while "
+                        "they are sent%s", nested_display,
+                        (" (reattached leftover: %s)" % ", ".join(_leftover))
+                        if _leftover else "")
+        # ADR 157: Alt left held when the operator Alt+Tabs away turns their
+        # next Enter into Alt+Enter, and the game drops to a framed window.
+        if bool(_nested.get("release_stuck_modifiers",
+                            schema_default("nested.release_stuck_modifiers"))):
+            from .input_linux import StuckModifierGuard
+            stuck_modifier_guard = StuckModifierGuard(nested_display)
+            stuck_modifier_guard.start()
+            logger.info("ADR 157: releasing modifier keys held on %s for more "
+                        "than 1.5s", nested_display)
 
     # ADR 098: gate injection on the game having focus. Installed process-wide
     # because the injection sites are module-level in controller.
@@ -808,6 +914,10 @@ def main():
         on_auto_mission_key=_on_auto_mission_key,
         crops=analyzer.crops,
     )
+    # CR-018-13: the operator hotkeys, formerly registered inside Controller's
+    # constructor. Same moment in startup; the controller skips it in replay and
+    # capture modes (disable_hotkeys).
+    ctrl.register_hotkeys()
     # ADR 136: give the eject heatdive addition a tracker to call directly —
     # Controller cannot construct its own, TargetTracker is owned/configured
     # alongside HudRenderer above.
@@ -1028,6 +1138,15 @@ def main():
                 ctrl.press_escape(hold_seconds=0.05, block=False)
             return
 
+        if crop == "STALL_CHOOSE_REWARDS":
+            # Anomaly 006. Not a dismiss: this commits a reward, on the
+            # operator's rule of 2026-10-02 (the middle one, then accept).
+            logger.warning(
+                "\033[93m🔧 Stall recovery: '%s' — choosing the middle reward, "
+                "then SELECT ONE (state=%s)\033[0m", crop, current.name)
+            _choose_middle_reward(ctrl, analyzer, logger)
+            return
+
         if crop == "STALL_AIRCRAFT":
             # Unchanged (ADR 084): no adjacent destructive button, ESC works.
             logger.warning("\033[93m🔧 Stall recovery: '%s' — pressing ESC (state=%s)\033[0m",
@@ -1150,7 +1269,6 @@ def main():
 
     # Mission restart state machine
     last_click_to_alert_ts = 0.0
-    last_game_state = None
     game_end_b_since = 0.0    # timestamp of GAME_END_B entry; used by stall timeout guard
     # ADR 094: when the final continue click landed. Written by the click-through
     # daemon thread, read by the deferred-exit check. A one-element list because
@@ -1246,6 +1364,11 @@ def main():
     game_watch = GamePresenceWatch(
         process_name=(cfg.get("resource_monitor", {}) or {}).get(
             "game_process_name", "Metalstorm.exe"))
+
+    # CR-018-14: every FSM transition from here on, for the state-change pass in
+    # the loop. Created last before the loop, as the first comparison used to run
+    # on the first tick; the state at this moment arrives as (None, state).
+    state_changes = TransitionQueue(analyzer)
 
     def _stop_lobby_escape_loop():
         nonlocal lobby_escape_stop, lobby_escape_thread
@@ -1431,16 +1554,19 @@ def main():
             else:
                 unknown_state_since = 0.0
 
-            if current_game_state != last_game_state:
+            # CR-018-14: one pass per FSM transition, in order (TransitionQueue).
+            # This compared this tick's state with the last tick's, which merged
+            # two transitions in one tick into one: 2 of 260 on 2026-09-27, one an
+            # EJECT round trip during a takeover handback. The rest of the tick
+            # still acts on the state this tick read.
+            for prev_game_state, new_game_state in state_changes.drain():
                 liveness.note_progress("state change")
                 logger.info("\033[96m🎮 Game state: %s → %s\033[0m",
-                            last_game_state.name if last_game_state else "UNKNOWN",
-                            current_game_state.name if current_game_state else "UNKNOWN")
-                prev_game_state = last_game_state
-                last_game_state = current_game_state
-                if current_game_state != GameState.GAME_UNKNOWN:
+                            prev_game_state.name if prev_game_state else "UNKNOWN",
+                            new_game_state.name)
+                if new_game_state != GameState.GAME_UNKNOWN:
                     startup_classification_complete = True
-                if current_game_state == GameState.GAME_END_B:
+                if new_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
                     # GAME_END_B is not a respawn flow; clear the respawn latch
                     # and any pending alive event so the match-end click-through
@@ -1456,7 +1582,7 @@ def main():
                     ctrl.stop_eject_sequence(reason="match_ended")
                 else:
                     game_end_b_since = 0.0
-                if current_game_state == GameState.GAME_LOBBY:
+                if new_game_state == GameState.GAME_LOBBY:
                     if prev_game_state is not None:
                         ctrl.cancel_mission()
                     try:
@@ -1500,17 +1626,17 @@ def main():
                     lobby_escape_thread.start()
                 else:
                     _stop_lobby_escape_loop()
-                waiting_fallback.on_state_change(current_game_state, prev_game_state)
-                enemy_presence.on_state_change(current_game_state, prev_game_state)
-                unknown_anomaly.on_state_change(current_game_state, prev_game_state)
-                behavior_tree.on_state_change(current_game_state, prev_game_state)
-                ammo_events.on_state_change(current_game_state, prev_game_state)
-                tracking_hud.on_state_change(current_game_state, prev_game_state)
-                if current_game_state == GameState.GAME_STARTING_STALLED:
+                waiting_fallback.on_state_change(new_game_state, prev_game_state)
+                enemy_presence.on_state_change(new_game_state, prev_game_state)
+                unknown_anomaly.on_state_change(new_game_state, prev_game_state)
+                behavior_tree.on_state_change(new_game_state, prev_game_state)
+                ammo_events.on_state_change(new_game_state, prev_game_state)
+                tracking_hud.on_state_change(new_game_state, prev_game_state)
+                if new_game_state == GameState.GAME_STARTING_STALLED:
                     game_starting_stalled_since = time.time()
                 else:
                     game_starting_stalled_since = 0.0
-                if current_game_state == GameState.GAME_BATTLE:
+                if new_game_state == GameState.GAME_BATTLE:
                     battle_ever_reached = True
 
             # Watchdog: if GAME_BATTLE is not entered within the stall window, exit
@@ -1783,7 +1909,24 @@ def main():
                 hud_renderer.close()
             except Exception as e:
                 logger.warning("HudRenderer: close failed: %s", e)
+        # ADR 157: stop the guard before the key cleanup below, so it cannot
+        # inject a release into a display that is being torn down.
+        if stuck_modifier_guard is not None:
+            stuck_modifier_guard.stop()
         ctrl.cleanup(keep_hotkeys=standby_armed)
+        # ADR 156: make sure the operator's mouse is attached. A click normally
+        # reattaches it itself; this covers one that was cut short by the exit.
+        if pointer_isolated_display is not None:
+            try:
+                from .input_linux import set_pointer_isolation_display
+                from .pointer_isolation import set_host_pointer_isolated
+                set_pointer_isolation_display(None)
+                _restored = set_host_pointer_isolated(pointer_isolated_display, False)
+                if _restored:
+                    logger.info("ADR 156: host pointer reattached on %s (%s)",
+                                pointer_isolated_display, ", ".join(_restored))
+            except Exception as e:
+                logger.warning("ADR 156: host pointer restore failed: %s", e)
         # ADR 095: the run file is written from inside analyzer.cleanup(), via
         # on_session_end() once the OCR pool has joined. load_end has to be taken
         # BEFORE that call or it misses the file entirely — the 2026-08-26 14:37
@@ -1800,6 +1943,7 @@ def main():
                 if shadow_summary is not None:
                     extra["respawn_shadow"] = shadow_summary
                 extra["health_dropouts"] = dropout_summary
+                extra["suppressed_failures"] = suppressed_counts()   # CR-018-17
                 stats_tracker.finalize(run_id=tracker.run_id, extra=extra or None)
                 stats_tracker.print_summary()
             except Exception as e:

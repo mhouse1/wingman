@@ -18,9 +18,11 @@ from wingman.controller import (
     Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY,
     ROLL_LEFT_KEY, ROLL_RIGHT_KEY, SWITCH_WEAPON,
 )
+from tests.perception_fake import PerceptionFake
+from wingman.resupply import ResupplyMarker
 
 
-class _AnalyzerStub:
+class _AnalyzerStub(PerceptionFake):
     def __init__(self, ammo=2):
         self.ammo = ammo
 
@@ -90,7 +92,9 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 eject_max_s=0.2, heatdive_enabled=False, ammo_zero_grace_s=0.0,
                 sustained_hold_enabled=False, search_resume_delay_s=0.0,
                 empty_confirm_reads=3, search_resume_centre_err=0.15,
-                search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None):
+                search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None,
+                resupply_priority_enabled=True, resupply_priority_actuate=False,
+                rearm_climb_s=0.0, search_climb_alt_m=0.0):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -129,6 +133,17 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 "search_resume_centre_err": search_resume_centre_err,
                 "search_resume_centre_delay_s": search_resume_centre_delay_s,
                 "empty_confirm_reads": empty_confirm_reads,
+                "resupply_priority": {
+                    "enabled": resupply_priority_enabled,
+                    "actuate": resupply_priority_actuate,
+                    # 0.0 by default here (not config.yaml's shipped 3.0), so
+                    # steering resumes on the tick after a rearm; the climb-out's
+                    # own tests set it.
+                    "rearm_climb_s": rearm_climb_s,
+                },
+                # 0.0 by default here (not config.yaml's shipped 7000): the blind
+                # search rolls, as before; the climb's own tests set it.
+                "search_climb_alt_m": search_climb_alt_m,
                 **({"icon_steering": icon_steering} if icon_steering is not None else {}),
                 **({"dive_safety": dive_safety} if dive_safety is not None else {}),
             },
@@ -253,6 +268,165 @@ def test_ammo_exhausted_falls_through_to_eject_and_dive(monkeypatch):
     assert ctrl._eject_thread is not None, "ammo-exhausted should fall through to eject_and_dive"
     assert ("key_press", FIRE_ACTIVE_WEAPON) not in _keys(ctrl), \
         "must not fire on a tick that already reads ammo == 0"
+
+
+def test_zero_ammo_actuation_seeks_marker_without_firing_or_diving(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame, **_kw: marker)
+    analyzer = _AnalyzerStub(ammo=0)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True,
+        icon_steering={
+            "enabled": True,
+            "wings_level": True,
+            "actuate_pitch": True,
+            "actuate_turn": True,
+        })
+    assert ctrl._resupply_priority_actuate
+    assert ctrl._pursuit_ammo_grace_s == 0.0
+    ammo_reads = []
+    monkeypatch.setattr(analyzer, "get_ammo_missiles",
+                        lambda: ammo_reads.append(time.time()) or 0)
+    tracker = _TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0)
+    ctrl.set_target_tracker(tracker)
+
+    ctrl.pursue_and_engage()
+    try:
+        time.sleep(0.6)
+        pursuing = ctrl.is_pursuing()
+        eject_thread = ctrl._eject_thread
+        reads = list(ammo_reads)
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert pursuing, "confirmed zero must continue in resupply-seeking mode"
+    assert eject_thread is None, "zero ammo must not fall through to eject_and_dive"
+    assert reads
+    assert "maximum urgency reached" in logs
+    assert "proposed=True seeking=True mode=actuate" in logs
+    assert ("key_press", ROLL_RIGHT_KEY) in keys, "steer toward the marker on the right"
+    roll_presses = [key for action, key in keys
+                    if action == "key_press" and key in (ROLL_LEFT_KEY, ROLL_RIGHT_KEY)]
+    assert roll_presses[-1] == ROLL_RIGHT_KEY, (
+        "resupply steering supersedes the initial target correction")
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert ("key_press", FIRE_ACTIVE_WEAPON) not in keys
+
+
+def test_zero_ammo_without_marker_searches_for_resupply_not_targets(monkeypatch, caplog):
+    """Operator, 2026-10-02: with every rack empty the pursuit searches for
+    resupply instead of targets, so a visible opponent is not steered at."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    scans = []
+    monkeypatch.setattr(
+        controller_module, "find_resupply_marker",
+        lambda _frame, **_kw: scans.append(1) or None)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_AnalyzerStub(ammo=0), capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=True))
+
+    ctrl.pursue_and_engage()
+    try:
+        time.sleep(0.9)
+        pursuing = ctrl.is_pursuing()
+        eject_thread = ctrl._eject_thread
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert pursuing
+    assert eject_thread is None
+    assert scans, "keep scanning for the marker"
+    empty_at = logs.index("searching for resupply, targets ignored until rearm")
+    assert "search=True" in logs[empty_at:]
+    assert "roll_right - pressing" not in logs[empty_at:], (
+        "the visible opponent is not steered at once every rack is empty")
+    assert ("key_press", FIRE_ACTIVE_WEAPON) not in keys
+
+
+def test_shadow_mode_keeps_tracking_the_opponent_at_zero_ammo(monkeypatch, caplog):
+    """Without actuation nothing about steering changes: no resupply search."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    monkeypatch.setattr(
+        controller_module, "find_resupply_marker", lambda _frame, **_kw: None)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_AnalyzerStub(ammo=0), capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0, ammo_zero_grace_s=30.0,
+        empty_confirm_reads=1, resupply_priority_actuate=False)
+    ctrl.set_target_tracker(_TrackerStub(visible=True))
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    time.sleep(0.6)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert "search=True" not in caplog.text
+    assert ("key_press", ROLL_RIGHT_KEY) in _keys(ctrl)
+
+
+def test_target_nearer_the_centre_than_the_resupply_icon_is_attacked(monkeypatch, caplog):
+    """Operator, 2026-10-02: with two missiles spent and weapons left, the
+    pursuit goes for whichever is nearer the screen centre and keeps firing."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 40, 40, 300, 0)      # 440 px right of centre
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame, **_kw: marker)
+    monkeypatch.setattr(controller_module.cv2, "imwrite", lambda path, frame: True)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer([4, 2]), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    # 0.2 of the half width: 192 px left of centre, nearer than the marker.
+    ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=-0.2, error_norm_y=0.0))
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    time.sleep(1.2)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    keys = _keys(ctrl)
+    assert "RESUPPLY: spent=2 empty=False" in caplog.text
+    assert "proposed=False" in caplog.text and "target_nearer=True" in caplog.text
+    assert "rearm focus begins" not in caplog.text
+    assert ("key_press", ROLL_LEFT_KEY) in keys, "the nearer target is the one steered at"
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys, "the farther resupply icon is not"
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys
+
+
+def test_resupply_icon_nearer_the_centre_than_the_target_is_flown_to_and_firing_goes_on(
+        monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1100, 600, 40, 40, 300, 0)      # 140 px right of centre
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame, **_kw: marker)
+    monkeypatch.setattr(controller_module.cv2, "imwrite", lambda path, frame: True)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer([4, 2]), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0))
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(1.2)
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    focus_at = logs.index("RESUPPLY: urgency overtook pursuit at spent=2")
+    assert "roll_right - pressing" in logs[focus_at:], "steer toward the nearer resupply icon"
+    assert "search=False" in logs[focus_at:]
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys, "weapons remain, so firing goes on"
 
 
 def test_ammo_zero_within_grace_period_does_not_fall_through(monkeypatch):
@@ -612,6 +786,255 @@ def test_deferred_switch_grace_is_measured_from_the_switch(monkeypatch, caplog):
     assert "max duration" in caplog.text
 
 
+def test_stale_zero_during_switch_grace_does_not_hide_missiles_spent(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    analyzer = _SequenceAnalyzer([0, 0, 2, 2, 1, 1])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        ammo_zero_grace_s=3.0, empty_confirm_reads=1)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(1.4)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert "RESUPPLY: spent=1 empty=False" in caplog.text
+    assert "terminal_zero=True" not in caplog.text
+
+
+def test_empty_primary_rack_contributes_spent_missiles_before_switch(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    analyzer = _SequenceAnalyzer([3, 3, 3, 0, 0, 0])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=3)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(1.8)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert "switching to the secondary" in caplog.text
+    assert "RESUPPLY: spent=3" in caplog.text
+
+
+class _SlowReadAnalyzer(_SequenceAnalyzer):
+    """One OCR read is polled twice, as live: the count's read number moves
+    every second poll."""
+
+    def get_ammo_missiles_read_seq(self):
+        return (self._n - 1) // 2
+
+
+def test_emptied_primary_rack_is_tallied_when_the_switch_beats_the_ocr_reads(
+        monkeypatch, caplog):
+    """2026-10-02: the switch needs three zero polls (about a second), the
+    tally three OCR reads, so the primary's last missiles were never counted
+    and "two spent, weapons left" was logged on 3 ticks in a 46-minute session."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    analyzer = _SlowReadAnalyzer([2] * 6 + [0] * 3 + [2] * 40)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=8.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=3)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(3.6)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert "switching to the secondary" in caplog.text
+    assert "RESUPPLY: spent=2 empty=False" in caplog.text
+
+
+def test_resupply_does_not_override_a_locked_opponent_while_ammo_remains(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame, **_kw: marker)
+    analyzer = _SequenceAnalyzer([3, 2])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    tracker = _TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0)
+    ctrl.set_target_tracker(tracker)
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    time.sleep(1.0)
+    ctrl._eject_stop.set()
+    _wait_for_pursuit_to_settle(ctrl)
+
+    keys = _keys(ctrl)
+    assert "RESUPPLY: spent=1" in caplog.text
+    assert "marker=(1400,600)" in caplog.text
+    assert "proposed=False seeking=False mode=actuate" in caplog.text
+    assert ("key_press", ROLL_LEFT_KEY) in keys, "the locked opponent remains the target"
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys, "do not steer toward resupply under lock"
+
+
+def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monkeypatch, caplog, tmp_path):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    detector_calls = 0
+
+    def detect_marker_with_dropout(_frame, **_kw):
+        nonlocal detector_calls
+        detector_calls += 1
+        return marker if detector_calls == 1 else None
+
+    monkeypatch.setattr(
+        controller_module, "find_resupply_marker", detect_marker_with_dropout)
+    capture = _FrameCapture()
+    saved_frames = []
+    monkeypatch.setattr(controller_module, "_RESUPPLY_SAMPLE_DIR", tmp_path)
+    monkeypatch.setattr(
+        controller_module.cv2, "imwrite",
+        lambda path, frame: saved_frames.append((path, frame)) or True)
+    analyzer = _SequenceAnalyzer([4, 2, 2, 6, 6])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=capture,
+        pursuit_enabled=True, pursuit_max_duration_s=5.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    class _HudCapture:
+        def __init__(self):
+            self.calls = []
+
+        def maybe_render(self, *args, **kwargs):
+            self.calls.append(kwargs)
+
+    hud_renderer = _HudCapture()
+    ctrl.set_hud_renderer(hud_renderer)
+    tracker = _TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.0)
+    ctrl.set_target_tracker(tracker)
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(1.7)
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert "RESUPPLY: urgency overtook pursuit at spent=2" in logs
+    assert "proposed=True seeking=True mode=actuate" in logs
+    assert "marker_stale=True" in logs
+    assert any(
+        kwargs.get("steering_label") == "RESUPPLYING"
+        and kwargs.get("steering_target") == (marker.x, marker.y)
+        for kwargs in hud_renderer.calls)
+    assert len(saved_frames) == 1
+    assert saved_frames[0][1] is capture.frame
+    rearm_at = logs.index("RESUPPLY: confirmed ammo=6; urgency reset, resuming target pursuit")
+    assert "roll_left - pressing" in logs[rearm_at:], (
+        "target attack resumes after the confirmed ammo increase")
+    assert ("key_press", ROLL_RIGHT_KEY) in keys, "resupply focus steers toward the marker"
+
+
+def _rearm_with_a_target_low_and_left(monkeypatch, **ctrl_kwargs):
+    """Two missiles spent, a marker seen once, then the count rises to 6. The
+    target sits low and left, so target steering rolls left and pushes down."""
+    seen = []
+    monkeypatch.setattr(
+        controller_module, "find_resupply_marker",
+        lambda _frame, **_kw: (seen.append(1) or len(seen) == 1)
+        and ResupplyMarker(1400, 600, 70, 70, 1500, 0) or None)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2, 6, 6]), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=8.0, empty_confirm_reads=1,
+        **ctrl_kwargs)
+    ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.5))
+    return ctrl
+
+
+def test_a_rearm_is_followed_by_a_nose_up_hold_then_steering_resumes(monkeypatch, caplog):
+    """Operator, 2026-10-02: "crashes can be avoided by immediately applying
+    nose up manuver on rearm". The resupply point sits near terrain."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    ctrl = _rearm_with_a_target_low_and_left(
+        monkeypatch, resupply_priority_actuate=True, rearm_climb_s=0.6)
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(2.8)
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    rearm_at = logs.index("RESUPPLY: confirmed ammo=6")
+    climb_at = logs.index("RESUPPLY: rearm climb-out, nose up for 0.6s")
+    over_at = logs.index("up -> None (rearm climb-out over)")
+    assert rearm_at < climb_at < over_at
+    climb = logs[climb_at:over_at]
+    assert "-> up (rearm climb-out)" in climb
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert "roll_left - pressing" not in climb, "the target is not rolled at during the climb-out"
+    assert "nose_down - pressing" not in climb, "the target is not dived at during the climb-out"
+    assert "roll_left - pressing" in logs[over_at:], "target steering resumes after it"
+
+
+def test_shadow_mode_rearm_has_no_climb_out(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    ctrl = _rearm_with_a_target_low_and_left(
+        monkeypatch, resupply_priority_actuate=False, rearm_climb_s=0.6)
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(1.9)
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert "RESUPPLY: confirmed ammo=6" in logs
+    assert "climb-out" not in logs
+    assert ("key_press", NOSE_UP_KEY) not in keys
+
+
+def test_after_a_rearm_the_other_rack_is_used_before_declaring_exhaustion(monkeypatch, caplog):
+    """2026-10-02: a resupply refilled both racks (2/2 and 2/2), the
+    selected one emptied, and the pursuit went into resupply mode with two
+    missiles on the other rack."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    monkeypatch.setattr(
+        controller_module, "find_resupply_marker", lambda _frame, **_kw: None)
+    # Secondary selected and empty; rearm; secondary empty again; primary 2, 2, then empty.
+    analyzer = _SequenceAnalyzer([0, 2, 0, 2, 2, 0])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=8.0,
+        ammo_zero_grace_s=0.0, empty_confirm_reads=1, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(2.6)
+        logs = caplog.text
+        keys = _keys(ctrl)
+        selected_secondary = ctrl._eject_weapon_switched
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    rearm_at = logs.index("RESUPPLY: confirmed ammo=2")
+    back_at = logs.index("switching to the primary, reloaded by the rearm")
+    assert rearm_at < back_at
+    assert "missiles exhausted" not in logs[rearm_at:back_at], (
+        "an empty selected rack after a rearm is not exhaustion")
+    assert "fire_active_weapon - pressing" in logs[back_at:], "the reloaded primary is fired"
+    assert "missiles exhausted" in logs[back_at:], "both racks empty is exhaustion"
+    assert keys.count(("key_press", SWITCH_WEAPON)) == 1, "no switch back to the spent secondary"
+    assert selected_secondary is False
+
+
 def test_max_duration_before_empty_does_not_switch_weapons(monkeypatch):
     """Regression (operator, 2026-09-24, 'v' screenshot 08:20:14): the pursuit
     cap fell through to eject_and_dive with the primary still loaded (6/6) and
@@ -843,10 +1266,11 @@ class _FrameCapture(_CaptureStub):
         return self.frame
 
 
-def _icon_pursuit(monkeypatch, caplog, script, icon_steering=None, **kw):
+def _icon_pursuit(monkeypatch, caplog, script, icon_steering=None, capture=None, **kw):
     # Uncapped and ended by a respawn: a cap would fall through into the dive,
     # whose own descent control presses NOSE_DOWN.
-    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_FrameCapture(),
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2),
+                       capture=capture or _FrameCapture(),
                        pursuit_enabled=True, pursuit_max_duration_s=0.0,
                        icon_steering=icon_steering, **kw)
     ctrl.set_target_tracker(_ScriptedTracker(script))
@@ -881,6 +1305,44 @@ def test_icon_shadow_waits_after_a_lock_like_roll_on_miss(monkeypatch, caplog):
                                  icon_steering={"enabled": True}, search_resume_delay_s=30.0)
     assert "rung=track" in lines[0]
     assert all("rung=wait" in ln for ln in lines[1:]), lines
+
+
+_NEAR = {"visible": True, "error_norm": 0.05, "error_norm_y": 0.0, "mode": "TRACKING"}
+
+
+def _wait_cuts(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("ICONWAIT:")]
+
+
+def test_active_icon_points_end_the_near_centre_wait_after_the_base_delay(monkeypatch, caplog):
+    """2026-09-27 18:51:45 (cycle 11): a target shot near the centre left a 6 s
+    neutral wait with the next enemy's icon on the ring the whole time. The base
+    delay still waits; the near-centre extension gives way to active points."""
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_NEAR, _MISS],
+                                 icon_steering={"enabled": True},
+                                 search_resume_delay_s=0.2, search_resume_centre_delay_s=30.0)
+    assert "rung=track" in lines[0]
+    assert "rung=wait" in lines[1], lines
+    assert "rung=icon" in lines[-1], lines
+    assert len(_wait_cuts(caplog)) == 1, "logged once per lost lock"
+
+
+def test_active_icon_points_do_not_end_the_base_delay(monkeypatch, caplog):
+    """The base delay is the lock dropping for a scan or two with the target
+    still on screen: 696 of 798 reacquisitions over 30 logs came inside it."""
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_NEAR, _MISS],
+                                 icon_steering={"enabled": True},
+                                 search_resume_delay_s=30.0, search_resume_centre_delay_s=60.0)
+    assert all("rung=wait" in ln for ln in lines[1:]), lines
+    assert _wait_cuts(caplog) == []
+
+
+def test_without_an_icon_the_near_centre_wait_runs_its_course(monkeypatch, caplog):
+    _ctrl, lines = _icon_pursuit(monkeypatch, caplog, [_NEAR, _MISS],
+                                 icon_steering={"enabled": True}, capture=_BlankCapture(),
+                                 search_resume_delay_s=0.2, search_resume_centre_delay_s=30.0)
+    assert all("rung=wait" in ln for ln in lines[1:]), lines
+    assert _wait_cuts(caplog) == []
 
 
 def test_icon_shadow_off_logs_nothing_and_leaves_the_summary_alone(monkeypatch, caplog):
@@ -956,11 +1418,12 @@ class _TelemetryAnalyzer(_AnalyzerStub):
     with a new altitude timestamp; False repeats one sample. `rate` is the
     altitude rate in m/s."""
 
-    def __init__(self, new_samples=True, rate=0.0, alt=4000.0):
+    def __init__(self, new_samples=True, rate=0.0, alt=4000.0, stable=None):
         super().__init__(ammo=2)
         self.new_samples = new_samples
         self.rate = rate
         self.alt = alt
+        self.stable = alt if stable is None else stable
         self.calls = 0
 
     def get_telemetry(self):
@@ -970,21 +1433,21 @@ class _TelemetryAnalyzer(_AnalyzerStub):
         sample_ts = now if self.new_samples else 1000.0
         return TelemetrySnapshot(
             speed=TelemetrySignal(value=900, stable_value=900.0, ts=now, rate=0.0),
-            altitude=TelemetrySignal(value=int(self.alt), stable_value=float(self.alt),
+            altitude=TelemetrySignal(value=int(self.alt), stable_value=float(self.stable),
                                      ts=sample_ts, rate=self.rate),
             taken_at_s=now, stale_after_s=6.0)
 
 
 def _step_2b(monkeypatch, caplog, capture, *, angle=-5.0, guard=None, actuate_pitch=True,
-             analyzer=None, actuate_turn=False, push_floor_m=None):
+             analyzer=None, actuate_turn=False, push_floor_m=None, script=None, **kw):
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer or _TelemetryAnalyzer(), capture=capture,
                        pursuit_enabled=True, pursuit_max_duration_s=0.0,
                        sustained_hold_enabled=True,
                        icon_steering={"enabled": True, "wings_level": True,
                                       "actuate_pitch": actuate_pitch,
                                       "actuate_turn": actuate_turn,
-                                      "push_floor_m": push_floor_m})
-    ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
+                                      "push_floor_m": push_floor_m}, **kw)
+    ctrl.set_target_tracker(_ScriptedTracker(script or [_MISS]))
     look_downs = []
     monkeypatch.setattr(ctrl, "_search_look_down", lambda: look_downs.append(1) or False)
     monkeypatch.setattr(ctrl, "_telemetry_path_angle_deg", lambda: angle)
@@ -1044,8 +1507,11 @@ def test_dive_guard_never_trips_with_dive_safety_off(monkeypatch):
     assert ctrl._dive_guard_ttg_tripped is False
 
 
-def test_emergency_climb_does_not_start_inside_a_pursuit_with_dive_safety_off(monkeypatch, caplog):
+def test_emergency_climb_does_not_start_inside_a_pursuit_with_crash_recovery_off(monkeypatch, caplog):
+    """pursuit_mode.crash_recovery (2026-10-02) lets the hard emergency through with
+    dive_safety off; tests/test_pursuit_recovery.py pins that side."""
     ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=False)
+    ctrl._pursuit_crash_recovery = False
     ctrl._pursuing.set()
     with caplog.at_level("INFO", logger="wingman.controller"):
         ctrl.climb_mode(target_alt=5000.0, emergency=True)
@@ -1179,6 +1645,45 @@ def test_step_2b_blind_rung_keeps_the_left_roll_and_the_look_down(monkeypatch, c
     assert look_downs
 
 
+def test_blind_search_climbs_to_the_search_altitude_instead_of_rolling_left(
+        monkeypatch, caplog):
+    """Operator, 2026-10-02: "currently it continuously flies left when no
+    targets are sighted, modify it to fly up to 7000 altitude or until target
+    sighted"."""
+    keys, _lines, look_downs = _step_2b(
+        monkeypatch, caplog, _BlankCapture(), angle=0.0, search_climb_alt_m=7000)
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert look_downs == [], "no look-down taps while climbing"
+    assert "SEARCH CLIMB — no target, climbing from 4000 m to 7000 m" in caplog.text
+    assert caplog.text.count("SEARCH CLIMB — no target") == 1, "logged once per climb"
+
+
+def test_search_climb_holds_no_nose_up_at_the_climb_angle(monkeypatch, caplog):
+    keys, _lines, _look_downs = _step_2b(
+        monkeypatch, caplog, _BlankCapture(), angle=35.0, search_climb_alt_m=7000)
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", NOSE_UP_KEY) not in keys
+
+
+def test_at_the_search_altitude_the_left_roll_and_look_down_resume(monkeypatch, caplog):
+    keys, _lines, look_downs = _step_2b(
+        monkeypatch, caplog, _BlankCapture(), angle=0.0, search_climb_alt_m=7000,
+        analyzer=_TelemetryAnalyzer(alt=7200.0))
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) not in keys
+    assert look_downs
+    assert "SEARCH CLIMB — 7200 m reached, the roll search resumes" in caplog.text
+
+
+def test_a_sighted_target_ends_the_search_climb(monkeypatch, caplog):
+    keys, _lines, _look_downs = _step_2b(
+        monkeypatch, caplog, _BlankCapture(), angle=0.0, search_climb_alt_m=7000,
+        script=[_SEEN])
+    assert "SEARCH CLIMB" not in caplog.text
+    assert ("key_press", ROLL_RIGHT_KEY) in keys, "the target on the right is steered at"
+
+
 def test_step_2a_setting_presses_no_icon_pitch(monkeypatch, caplog):
     keys, _lines, look_downs = _step_2b(monkeypatch, caplog, _FrameCapture(),
                                         actuate_pitch=False)
@@ -1236,6 +1741,61 @@ def test_step_3_banks_and_pulls_toward_a_side_icon(monkeypatch, caplog):
     assert any("act=bankleft+up" in ln for ln in lines), lines
 
 
+class _ResupplyPinCapture(_CaptureStub):
+    """A black 1920x1200 frame holding the live crop of the resupply pin at
+    9 o'clock on the indicator ring (2026-10-02)."""
+
+    def __init__(self):
+        super().__init__()
+        import cv2
+        import numpy as np
+        from pathlib import Path
+        crop = cv2.imread(str(Path(__file__).parent / "fixtures" / "resupply_pin_left.png"))
+        self.frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
+        self.frame[557:557 + crop.shape[0], 716:716 + crop.shape[1]] = crop
+
+    def grab_from_thread(self):
+        self.grabs += 1
+        return self.frame
+
+
+def test_resupply_mode_turns_toward_the_resupply_pin_not_the_visible_target(monkeypatch, caplog):
+    """2026-10-02: with every rack empty the search was a blind roll, and all 8
+    resupply-mode episodes of one session ended in a respawn within 22 s.
+    The yellow pin on the indicator ring says where the resupply point is."""
+    analyzer = _TelemetryAnalyzer()
+    analyzer.ammo = 0
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_ResupplyPinCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0, sustained_hold_enabled=True,
+        empty_confirm_reads=1, resupply_priority_actuate=True,
+        icon_steering={"enabled": True, "wings_level": True,
+                       "actuate_pitch": True, "actuate_turn": True})
+    # A target well to the right: resupply mode must not steer at it.
+    ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=0.5, error_norm_y=0.0))
+    monkeypatch.setattr(ctrl, "_search_look_down", lambda: False)
+    monkeypatch.setattr(ctrl, "_telemetry_path_angle_deg", lambda: -5.0)
+    monkeypatch.setattr(ctrl, "_pursuit_dive_guard", lambda target_visible=False: None)
+    monkeypatch.setattr(ctrl, "_dive_guard_pullout", lambda: None)
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(weapon_already_switched=True)
+        time.sleep(1.6)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+
+    messages = [r.getMessage() for r in caplog.records]
+    empty_at = next(i for i, m in enumerate(messages) if "searching for resupply" in m)
+    after = messages[empty_at:]
+    assert any(m.startswith("RESUPPLY: spent") and "search=True" in m and "pin=-179" in m
+               for m in after), "the pin at 9 o'clock is read"
+    assert any(m.startswith("ICONPTS:") and "act=bankleft+up" in m for m in after), (
+        "bank toward the pin and pull")
+    assert not any("-> right/target" in m for m in after if m.startswith("HOLD[roll]")), (
+        "the visible target is not steered at")
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+    assert ("key_press", FIRE_ACTIVE_WEAPON) not in _keys(ctrl)
+
+
 def test_step_2b_setting_flies_a_side_icon_straight(monkeypatch, caplog):
     keys, _lines, _ = _step_2b(monkeypatch, caplog, _upper_left(), actuate_turn=False)
     assert ("key_press", ROLL_LEFT_KEY) not in keys
@@ -1273,3 +1833,99 @@ def test_an_icon_below_the_horizon_pushes_with_the_wings_level(monkeypatch, capl
     assert ("key_press", NOSE_DOWN_KEY) in keys
     assert ("key_press", NOSE_UP_KEY) not in keys
     assert ("key_press", ROLL_LEFT_KEY) not in keys
+
+
+def test_below_the_push_floor_a_side_icon_is_turned_toward_not_flown_past(monkeypatch, caplog):
+    """2026-09-27 18:51:51: an enemy icon left and just below the horizon at 822 m.
+    The law wanted a push, push_floor_m (1500) refused it, and with the wings held
+    level the jet flew straight at a cliff for 17 s. Now the refused push banks
+    toward the icon and pulls. The archived icon sits at 172 deg, left."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                              analyzer=_TelemetryAnalyzer(alt=1200.0), push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) not in keys, "the floor still refuses the push"
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert any("intent=down" in ln and "withheld=alt " in ln and "act=bankleft+up" in ln
+               for ln in lines), lines
+
+
+def test_after_a_near_centre_kill_the_next_icon_is_flown_toward_within_the_base_delay(
+        monkeypatch, caplog):
+    """The 18:51:45 sequence end to end: a lock near the centre is lost, the
+    archived left icon is on the ring, and the jet banks toward it once the base
+    delay is over instead of flying neutral for the whole 6 s extension. On the
+    old code nothing but the fire key was pressed inside the 0.9 s run."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                              analyzer=_TelemetryAnalyzer(alt=1200.0), push_floor_m=1500,
+                              script=[_NEAR, _MISS], search_resume_delay_s=0.2,
+                              search_resume_centre_delay_s=30.0)
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert any("rung=wait" in ln for ln in lines) and "act=bankleft+up" in lines[-1], lines
+
+
+def test_a_fast_dive_is_refused_the_push_the_smoothed_altitude_would_allow(monkeypatch, caplog):
+    """Cycle 12, the 20:19:27 state: last reading 1929 m, smoothed 2248 m, 200 m/s
+    down. Three seconds on it is below the 1500 m floor, so no push; the old
+    floor read the smoothed 2248 m and pushed, down to the ground at 20:19:36."""
+    keys, lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                              analyzer=_TelemetryAnalyzer(alt=1929.0, stable=2248.0,
+                                                          rate=-200.0),
+                              push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) not in keys
+    assert any("withheld=alt " in ln for ln in lines), lines
+
+
+def test_the_same_altitude_in_level_flight_still_pushes(monkeypatch, caplog):
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                               analyzer=_TelemetryAnalyzer(alt=1929.0, stable=2248.0, rate=0.0),
+                               push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+
+
+def test_above_the_push_floor_the_same_icon_still_pushes(monkeypatch, caplog):
+    keys, _lines, _ = _step_2b(monkeypatch, caplog, _LeftIconCapture(), actuate_turn=True,
+                               analyzer=_TelemetryAnalyzer(alt=2000.0), push_floor_m=1500)
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+
+
+# ---------------------------------------------------------------------------
+# SAF-001 during a pursuit (operator, 2026-09-27 20:48-04:25 run): Enter did
+# nothing while the pursuit flew and worked only after a respawn. The missions
+# release the mission lock when they hand the aircraft to pursue_and_engage,
+# and the takeover gate did not count the pursuit as commanded flight.
+# ---------------------------------------------------------------------------
+
+def _pursuit_in_eject_state(monkeypatch):
+    from wingman.state import GameState
+    analyzer = _AnalyzerStub(ammo=2)
+    analyzer.game_state = GameState.GAME_BATTLE_EJECT
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0)
+    ctrl.set_target_tracker(_ScriptedTracker([_MISS]))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    deadline = time.time() + 1.0
+    while not ctrl.is_pursuing() and time.time() < deadline:
+        time.sleep(0.01)
+    assert ctrl.is_pursuing()
+    return ctrl, analyzer
+
+
+def test_enter_during_a_pursuit_takes_over(monkeypatch, caplog):
+    from wingman.state import GameState
+    ctrl, analyzer = _pursuit_in_eject_state(monkeypatch)
+    assert not ctrl.is_mission_running(), "the mission has handed the aircraft over"
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        assert ctrl._handle_maneuver_key_press("enter", display=":3") is True
+    _wait_for_pursuit_to_settle(ctrl)
+    assert analyzer.game_state == GameState.GAME_BATTLE_MANUAL
+    assert any("entering GAME_BATTLE_MANUAL" in r.getMessage() for r in caplog.records)
+
+
+def test_a_takeover_key_with_nothing_flying_is_ignored_and_says_so(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        assert ctrl._handle_maneuver_key_press("enter", display=":3") is False
+    assert any("maneuver key 'enter' ignored — no commanded flight" in r.getMessage()
+               for r in caplog.records)

@@ -36,6 +36,9 @@ STALL_CASES = [
     ("STALL_PARTS_CONFIRM",   "STALL_PARTS_CONFIRM.png",   "CONFIRM"),
     # Anomaly 005: reward-crate screen at session start, same parts flow.
     ("STALL_PARTS_CRATE",     "STALL_PARTS_CRATE.png",     "PARTS"),
+    # Anomaly 006: the CHOOSE REWARDS overlay. The reference frame is a
+    # half-resolution capture (2026-10-02) scaled back up to 1920x1200.
+    ("STALL_CHOOSE_REWARDS",  "STALL_CHOOSE_REWARDS.png",  "CHOOSEREWARDS"),
     # Squad-leave confirmation, scanned only after the STALL_MULTI_PLAYER
     # red-X click (2026-09-10: some squads confirm with a second dialog).
     ("LEAVE",                 "LEAVE.png",                 "LEAVE"),

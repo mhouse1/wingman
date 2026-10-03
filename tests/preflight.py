@@ -83,6 +83,33 @@ def check_xwd_tools():
     return results
 
 
+def check_gi():
+    """Check PyGObject imports from the venv and finds Gst (ADR 154, Linux only).
+
+    Imports rather than only finding the spec: the Ubuntu 26.04 failure was a
+    gi package that was found (through the old system_gi_bridge.pth) but built
+    for another Python, so it broke on import.
+    """
+    if sys.platform != "linux":
+        return []
+    try:
+        import gi
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst  # noqa: F401
+    except Exception as e:
+        return [_line(FAIL, "gi", f"{type(e).__name__}: {e} — run: make upgrade-linux")]
+    return [_line(PASS, "gi", f"{gi.__version__} (Gst 1.0, PipeWire capture)")]
+
+
+def check_xvfb():
+    """Check Xvfb is on PATH for the make tp gate lanes (ADR 153, Linux only)."""
+    if sys.platform != "linux":
+        return []
+    if not shutil.which("Xvfb"):
+        return [_line(FAIL, "Xvfb", "not found — run: make upgrade-linux")]
+    return [_line(PASS, "Xvfb", "(gate lanes, ADR 153)")]
+
+
 def check_keyboard():
     if importlib.util.find_spec("keyboard") is None:
         return _line(FAIL, "keyboard", "not importable — run: uv sync")
@@ -123,6 +150,8 @@ def main():
         check_package("plotly"),
         check_package("pandas"),
         *check_xwd_tools(),
+        *check_gi(),
+        *check_xvfb(),
     ]
 
     for _, line in results:

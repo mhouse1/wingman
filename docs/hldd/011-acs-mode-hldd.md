@@ -482,7 +482,13 @@ implementation begins):
 - **An extension to SAF-001's manual-takeover scope**: boresight nose-tracking
   adds continuous, higher-frequency pitch *and* roll actuation together, and
   must not weaken manual-takeover responsiveness during that combined
-  actuation. **Largely inherited for free (2026-09-21 reconciliation):**
+  actuation. **Superseded 2026-09-27 (CR-018-09):** the reasoning below held
+  when it was written, but HLDD 005's Sustained-Hold Actuation (2026-09-23)
+  moved tracking onto `_press_tracking_key`, which presses through
+  `_climb_key`. That path applies the programmatic-key bracket but has no
+  SAF-001 refusal at press time, so tracking relies on
+  `release_for_manual_takeover()` stopping it and releasing its holds.
+  **Largely inherited for free (2026-09-21 reconciliation):**
   because `NoseTrack` calls Design 005's `orient_nose_to_target`/
   `orient_pitch_to_target` rather than a bespoke key-press path, and both of
   those already route through `Controller._execute_key_press`'s existing

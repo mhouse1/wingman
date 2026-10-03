@@ -40,6 +40,12 @@ class ConfigError(ValueError):
     """Raised when config.yaml does not match the declared schema."""
 
 
+# CR-018-16: a leaf may carry its key's one default. The schema still injects
+# nothing into the loaded config (see the module docstring); a reader asks for the
+# default with `schema_default("section.key")` instead of writing its own literal.
+NO_DEFAULT = object()
+
+
 @dataclass(frozen=True)
 class Leaf:
     """A scalar or list value."""
@@ -51,6 +57,7 @@ class Leaf:
     item_types: tuple | None = None   # for lists: allowed element types
     length: int | None = None         # for lists: exact required length
     allow_none: bool = False
+    default: object = NO_DEFAULT      # CR-018-16: this key's one default
 
 
 @dataclass(frozen=True)
@@ -530,7 +537,8 @@ SCHEMA = Section(
         "tracking": Section(children={
             "enabled": BOOL,
             "actuate": BOOL,
-            "acquisition_region_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "acquisition_region_pct": Leaf(types=(list,), item_types=NUMBER, length=4,
+                                           default=[0.0, 0.09, 1.0, 0.95]),
             "deadband": FRACTION,
             "kp": _num(0),
             "min_hold_sec": SECONDS,
@@ -621,6 +629,10 @@ SCHEMA = Section(
             "search_resume_delay_s": SECONDS,
             "search_resume_centre_err": FRACTION,
             "search_resume_centre_delay_s": SECONDS,
+            # Operator, 2026-09-28: hold the machine gun while the tracked target
+            # is within gun_centre_err of the screen centre on both axes.
+            "gun_on_centre": Leaf(types=(bool,), default=False),
+            "gun_centre_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.05),
             "empty_confirm_reads": _int(1),
             "steer_interval_s": SECONDS,    # CR-018-01
             "engage_interval_s": SECONDS,   # CR-018-01
@@ -630,10 +642,18 @@ SCHEMA = Section(
             "dive_guard_pullout_interval_s": SECONDS,
             "dive_guard_level_rate_mps": _num(0),
             "search_floor_m": _num(0),                  # look-down search
+            "resupply_priority": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                "actuate": Leaf(types=(bool,), default=False),
+                "rearm_climb_s": Leaf(types=NUMBER, minimum=0, default=3.0),
+            }),
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,
             "search_look_down_min_deg": _num(-90, 0),
+            "search_climb_alt_m": Leaf(types=NUMBER, minimum=0, default=0.0),
+            "search_climb_max_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=30.0),
             "dive_safety": BOOL,   # operator, 2026-09-26
+            "crash_recovery": Leaf(types=(bool,), default=True),   # operator, 2026-10-02
             # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
             "icon_steering": Section(children={
                 "enabled": BOOL,
@@ -659,6 +679,11 @@ SCHEMA = Section(
                 "icon_min_path_deg": Leaf(types=NUMBER, minimum=-90, maximum=0,
                                           allow_none=True),
                 "push_floor_m": Leaf(types=NUMBER, minimum=0, allow_none=True),
+                # Cycle 12 (2026-09-27): push_floor_m is checked against the last
+                # altitude reading projected this far ahead (about one reading
+                # interval), so a push cannot carry below the floor before the
+                # next reading arrives. Named guess.
+                "push_floor_lookahead_s": Leaf(types=NUMBER, minimum=0, default=3.0),
                 "blind_search_after_s": SECONDS,
             }),
         }),
@@ -710,6 +735,8 @@ SCHEMA = Section(
             "enabled": BOOL,
             "display": STR,
             "size": STR,
+            "isolate_pointer": Leaf(types=(bool,), default=True),   # ADR 156
+            "release_stuck_modifiers": Leaf(types=(bool,), default=True),  # ADR 157
         }),
 
         # ADR 098: focus guard for key injection
@@ -742,7 +769,9 @@ SCHEMA = Section(
             "stale_after_s": SECONDS,
             "trend_min_alt_rate_fps": _num(0),
             "trend_min_speed_rate_mph_s": _num(0),
-            "steep_dive_min_sin": FRACTION,
+            # CR-018-16: the eject controller (0.8) and TelemetryProcessor (0.5)
+            # used to default this differently; both now read this one.
+            "steep_dive_min_sin": Leaf(types=NUMBER, minimum=0.0, maximum=1.0, default=0.8),
             "level_max_sin": FRACTION,
             "ocr_every_n_ticks": _int(1),
             "eject_closed_loop": Section(children={
@@ -925,6 +954,20 @@ def validate_config(cfg, *, schema: Section = SCHEMA) -> list[str]:
     errors: list[str] = []
     _check(schema, cfg, "", errors)
     return sorted(errors)
+
+
+def schema_default(path: str, schema: Section = SCHEMA):
+    """The default the schema declares for a dotted key, e.g.
+    ``schema_default("telemetry.steep_dive_min_sin")``. KeyError when the key is
+    unknown or declares no default, so a reader cannot silently get None."""
+    node = schema
+    for part in path.split("."):
+        if not isinstance(node, Section) or part not in node.children:
+            raise KeyError(f"{path}: not a key in the config schema")
+        node = node.children[part]
+    if not isinstance(node, Leaf) or node.default is NO_DEFAULT:
+        raise KeyError(f"{path}: the schema declares no default")
+    return node.default
 
 
 def assert_valid_config(cfg, *, source: str = "config", schema: Section = SCHEMA) -> None:

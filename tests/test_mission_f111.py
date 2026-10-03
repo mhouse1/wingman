@@ -37,6 +37,7 @@ from wingman.config_schema import validate_config
 from wingman.controller import Controller, WINGSWEEP_KEY
 from wingman.controller_config import ControllerConfig
 from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
+from tests.perception_fake import PerceptionFake
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -56,7 +57,7 @@ def _snap(alt, angle_deg=0.0, ts=None, taken_at=None):
     )
 
 
-class _Analyzer:
+class _Analyzer(PerceptionFake):
     """Scripted telemetry: each get_telemetry() consumes one (alt, angle) entry
     (the last repeats) stamped with a NEW timestamp, unless ``same_ts`` pins
     every sample to one timestamp, or ``stale`` ages every sample out."""
@@ -503,7 +504,7 @@ def _restart_ctrl(monkeypatch, **cfg):
     launched = []
     for name in ("j20", "su30", "jas39", "f111", "loiter"):
         monkeypatch.setattr(ctrl, f"mission_{name}",
-                            lambda _n=name: launched.append(_n))
+                            lambda _n=name, **_: launched.append(_n))
     return ctrl, launched
 
 

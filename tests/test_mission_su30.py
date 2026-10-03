@@ -30,6 +30,7 @@ from wingman.config_schema import validate_config
 from wingman.controller import Controller, MISSION_SU30_KEY
 from wingman.controller_config import ControllerConfig
 from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
+from tests.perception_fake import PerceptionFake
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -53,7 +54,7 @@ def _snap(alt, angle_deg=0.0, ts=None):
     )
 
 
-class _Analyzer:
+class _Analyzer(PerceptionFake):
     """Scripted telemetry. Each get_telemetry() call consumes one entry (the
     last repeats), stamped with a NEW timestamp so the nose-angle step, which
     acts only on fresh samples, sees each one as new evidence."""
@@ -778,7 +779,7 @@ class _ThreadStub:
         _ThreadStub.started.append((self._target, self._kwargs))
 
 
-class _StateAnalyzer:
+class _StateAnalyzer(PerceptionFake):
     def __init__(self, state):
         self.game_state = state
         self.trigger_calls = []
@@ -795,6 +796,7 @@ def _hotkey_ctrl(monkeypatch, state):
     monkeypatch.setattr(controller_module.threading, "Thread", _ThreadStub)
     analyzer = _StateAnalyzer(state)
     ctrl = Controller((0, 0, 1920, 1200), analyzer=analyzer)
+    ctrl.register_hotkeys()   # CR-018-13: no longer done by __init__
     _ThreadStub.started = []
     return ctrl, keyboard, analyzer
 
@@ -832,9 +834,9 @@ def _restart_ctrl(monkeypatch, **cfg):
     ctrl = Controller((0, 0, 1920, 1200),
                       config=ControllerConfig(disable_hotkeys=True, **cfg))
     launched = []
-    monkeypatch.setattr(ctrl, "mission_j20", lambda: launched.append("j20"))
-    monkeypatch.setattr(ctrl, "mission_su30", lambda: launched.append("su30"))
-    monkeypatch.setattr(ctrl, "mission_loiter", lambda: launched.append("loiter"))
+    monkeypatch.setattr(ctrl, "mission_j20", lambda **_: launched.append("j20"))
+    monkeypatch.setattr(ctrl, "mission_su30", lambda **_: launched.append("su30"))
+    monkeypatch.setattr(ctrl, "mission_loiter", lambda **_: launched.append("loiter"))
     return ctrl, launched
 
 

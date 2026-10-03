@@ -26,7 +26,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .config_schema import schema_default
+
 MPH_TO_FPS = 5280.0 / 3600.0
+# CR-018-16: telemetry.steep_dive_min_sin's one default lives in the config schema.
+# The eject controller (0.8) and TelemetryProcessor (0.5) used to disagree; the
+# shipped 0.8 hid it, and any run without the key split the two components.
+STEEP_DIVE_MIN_SIN_DEFAULT = schema_default("telemetry.steep_dive_min_sin")
 # The HUD telemetry block is actually metric (speed "KPH", altitude "m") —
 # see pitch_angle_deg(). The mph/ft naming across this module and its config
 # keys predates that discovery; the filter envelopes are tuned in raw display
@@ -90,6 +96,21 @@ class TelemetrySnapshot:
 
     def altitude_fresh(self) -> bool:
         return self.altitude.is_fresh(self.taken_at_s, self.stale_after_s)
+
+    def altitude_ahead(self, ahead_s: float) -> float | None:
+        """The last accepted altitude reading, carried to `ahead_s` past this
+        snapshot at the last measured rate, descending only; None when stale.
+
+        Not ``stable_value``: the mean of the last readings trails a fast dive
+        by hundreds of metres (2026-09-27 20:19:28, HUD 1403 m against a mean of
+        1873 m), and a climb the other way. The rate is only ever applied
+        downward, so a climb never raises the result above the last reading.
+        """
+        if not self.altitude_fresh() or self.altitude.value is None:
+            return None
+        age = self.altitude.age_s(self.taken_at_s) or 0.0
+        return float(self.altitude.value) + min(0.0, self.altitude.rate or 0.0) * (
+            age + max(0.0, ahead_s))
 
     def _ratio_speed(self) -> "float | None":
         """Speed for the flight-path ratio: the LAST ACCEPTED reading, not the
@@ -266,7 +287,7 @@ class TelemetryProcessor:
         self.stale_after_s = float(cfg.get("stale_after_s", 6.0))
         self.trend_min_alt_rate_fps = float(cfg.get("trend_min_alt_rate_fps", 20.0))
         self.trend_min_speed_rate_mph_s = float(cfg.get("trend_min_speed_rate_mph_s", 15.0))
-        self.steep_min_sin = float(cfg.get("steep_dive_min_sin", 0.5))
+        self.steep_min_sin = float(cfg.get("steep_dive_min_sin", STEEP_DIVE_MIN_SIN_DEFAULT))
         self.level_max_sin = float(cfg.get("level_max_sin", 0.15))
 
         self._speed = TelemetrySignal()
@@ -436,7 +457,12 @@ class TelemetryProcessor:
             # (ADR 097 D3), and clearing would make the next misread the seed.
             # digit_drop_window_s bounds the hold.
             return self._reject(signal, hist, raw, now_s, seedable=False, hold=True)
-        if seed_usable:
+        # The same anchor gates the next read too (ADR 148 amendment, 2026-10-02): at the
+        # 3 s cadence one rejected read makes the next good one 6 s old, past
+        # stale_after_s, and the bypass below cleared the history, so a dive lost its rate
+        # for two reads. 22:18:36.9: 14210 rejected, 1162 then accepted with no rate and
+        # no time to ground until 455 m. A gap with no rejections still reseeds.
+        if seed_usable or drop_anchor_usable:
             dt = max(seed_age, 0.1)  # guard duplicate timestamps
             # Cap the dt multiplier per-gate (see the two call sites above):
             # acceleration-envelope gates must not widen when the sampler is

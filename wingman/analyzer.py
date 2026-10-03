@@ -8,7 +8,6 @@ import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import time
-from enum import Enum, auto
 from pathlib import Path
 
 HEALTH_WINDOW_SIZE  = 10   # readings kept in rolling window (~10 s at 1 Hz)
@@ -18,18 +17,18 @@ from transitions import Machine, MachineError
 
 from .crop_region import CropCoords, get_crop, load_crops, draw_crops
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
-
-
-class GameState(Enum):
-    GAME_UNKNOWN         = auto()  # Startup state; classify current frame before normal runtime flow
-    GAME_BATTLE          = auto()  # Active gameplay (default); respawn/incoming scanning active
-    GAME_END_B           = auto()  # "Click to Continue" detected; clicking in progress
-    GAME_LOBBY           = auto()  # Final continue (region 64) clicked; waiting in lobby
-    GAME_WAITING         = auto()  # PLAY clicked; waiting for CANCEL crop to confirm matchmaking
-    GAME_STARTING        = auto()  # Matchmaking confirmed; waiting for "Good Luck" before launching mission
-    GAME_STARTING_STALLED = auto() # GAME_STARTING timed out without "Good Luck" detection
-    GAME_BATTLE_MANUAL   = auto()  # Player took manual control; auto-mission restart suppressed
-    GAME_BATTLE_EJECT    = auto()  # Eject sequence active (missiles empty); respawn detection only
+# CR-018-15: the FSM vocabulary lives in the leaf module .state, so code that
+# needs only these names does not import EasyOCR through this module. Every
+# name stays importable from here for existing callers.
+from .state import (
+    BATTLE_STATES as BATTLE_STATES,
+    FSM_TRANSITIONS as _FSM_TRANSITIONS,
+    NOSE_DOWN,
+    NOSE_UNKNOWN,
+    NOSE_UP,
+    GameEvent,
+    GameState,
+)
 
 
 # ADR 074: states where the popup quick-scan runs and dismissal actions are
@@ -65,16 +64,7 @@ STARTING_MIN_CONFIRMED_HEALTH = 20
 # If PLAY/READY remains visible after a click, retry instead of leaving the
 # lobby stalled indefinitely. A successful click leaves GAME_LOBBY promptly.
 LOBBY_PLAY_RETRY_S = 10.0
-
-# States where a round is genuinely under way and stopping would abandon an
-# aircraft in flight. ADR 094's deferred exit waits these out; everything else
-# — including GAME_UNKNOWN before the first classification, and GAME_END_B once
-# the round is scored — is a safe moment to stop.
-BATTLE_STATES = frozenset({
-    GameState.GAME_BATTLE,
-    GameState.GAME_BATTLE_MANUAL,
-    GameState.GAME_BATTLE_EJECT,
-})
+EVENT_REFRESH_RECHECK_S = 30.0
 
 # ADR 084: states where the FSM has lost the screen and a recovery action is
 # warranted. Deliberately EXCLUDES GAME_LOBBY / GAME_WAITING — unlike the popup
@@ -84,33 +74,13 @@ STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
 # Scan order: most specific screen first. The batch stops at the first hit, so a
 # generic match must never pre-empt a precise one.
-STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_PARTS_CRATE", "STALL_RETRY",
-                        "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
+STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_PARTS_CRATE", "STALL_CHOOSE_REWARDS",
+                        "STALL_RETRY", "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
 
 # Gated on UNREADY dwell rather than state dwell: UNREADY makes
 # scan_region_for_play_button return None, which makes _classify_unknown_state
 # fail forever, so this screen strands the FSM without ever looking like a popup.
 STALL_UNREADY_CROP = "STALL_MULTI_PLAYER"
-
-
-class GameEvent(Enum):
-    """Orchestration events the analyzer publishes (ADR 060 Phase 1).
-
-    Replaces ADR 039's single-slot `set_on_*` setters: subscribing to a
-    nonexistent event is an AttributeError at wiring time rather than a silent
-    runtime no-op, and every event fans out to any number of subscribers.
-    Payloads are documented per event; `emit()` passes them through verbatim.
-    """
-    CANCEL_MISSION = auto()            # ()          — transition requires mission cancel
-    START_GAME_STARTING_LOOP = auto()  # ()          — entered GAME_STARTING
-    LOBBY_PLAY_CLICK = auto()          # (crop, frame)
-    MANUAL_TAKEOVER = auto()           # SAF-001: operator has the aircraft
-    LOBBY_POPUP_CLICK = auto()         # (crop,)
-    LOBBY_POPUP_ABSENT = auto()        # ()          — popup batch completed, none detected
-    STALL_RECOVERY_ACTION = auto()     # (crop,)     — stall-recovery screen detected (ADR 084)
-    LOBBY_STALL = auto()               # ()          — no lobby crops detected for the stall window
-    FSM_TRANSITION = auto()            # (trigger, prev_state_name, next_state_name, ts)
-    RESPAWN_DETECTED = auto()          # (frame,)    — fired from the background OCR thread
 
 
 try:
@@ -804,41 +774,6 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
 }
 
 
-# ============================================================================
-# FSM Transition Table (ADR 025)
-# ============================================================================
-
-_FSM_TRANSITIONS = [
-    {"trigger": "unknown_to_end_detected",    "source": "GAME_UNKNOWN",          "dest": "GAME_END_B"},
-    {"trigger": "unknown_to_lobby_detected",  "source": "GAME_UNKNOWN",          "dest": "GAME_LOBBY"},
-    {"trigger": "unknown_to_battle_detected", "source": "GAME_UNKNOWN",          "dest": "GAME_BATTLE"},
-    {"trigger": "play_clicked",        "source": "GAME_LOBBY",            "dest": "GAME_WAITING"},
-    {"trigger": "cancel_detected",    "source": "GAME_LOBBY",            "dest": "GAME_STARTING"},
-    {"trigger": "cancel_detected",    "source": "GAME_WAITING",          "dest": "GAME_STARTING"},
-    {"trigger": "waiting_timeout",    "source": "GAME_WAITING",          "dest": "GAME_LOBBY"},
-    {"trigger": "good_luck_detected", "source": "GAME_STARTING",         "dest": "GAME_BATTLE"},
-    {"trigger": "starting_timeout",   "source": "GAME_STARTING",         "dest": "GAME_STARTING_STALLED"},
-    # ADR 102: the match never began — PLAY is still on screen.
-    {"trigger": "starting_play_visible", "source": "GAME_STARTING",      "dest": "GAME_LOBBY"},
-    {"trigger": "starting_stalled_reclassify", "source": "GAME_STARTING_STALLED", "dest": "GAME_UNKNOWN"},
-    {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
-    {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
-    {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL", "GAME_BATTLE_EJECT"], "dest": "GAME_END_B"},
-    {"trigger": "manual_takeover",    "source": ["GAME_BATTLE", "GAME_BATTLE_EJECT"], "dest": "GAME_BATTLE_MANUAL"},
-    {"trigger": "respawn_reset",      "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
-    # SAF-001: the operator hands the aircraft back explicitly. Without
-    # this, takeover survived only until the next death — measured
-    # 2026-08-30 at 15 s and 85 s, both ended by respawn detection.
-    {"trigger": "manual_release",     "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},
-    {"trigger": "eject_started",      "source": "GAME_BATTLE",            "dest": "GAME_BATTLE_EJECT"},
-    {"trigger": "eject_complete",     "source": "GAME_BATTLE_EJECT",      "dest": "GAME_BATTLE"},
-    {"trigger": "manual_force_battle", "source": "*",                    "dest": "GAME_BATTLE"},
-    {"trigger": "manual_reset",       "source": "*",                     "dest": "GAME_LOBBY"},
-    {"trigger": "continue_clicked",   "source": ["GAME_END_B", "GAME_BATTLE_MANUAL"], "dest": "GAME_LOBBY"},
-    {"trigger": "respawn_detected",   "source": "GAME_END_B",            "dest": "GAME_BATTLE"},
-]
-
-
 def _minimap_circle_mask(width: int, height: int, radius_px: float) -> np.ndarray:
     """uint8 disc mask (255 inside) centred on the crop (Design 003).
 
@@ -988,15 +923,6 @@ def _scan_minimap_red(
 # ============================================================================
 # GameStateAnalyzer Class
 # ============================================================================
-
-
-# --- ADR 123: nose direction ------------------------------------------------
-# A continuously maintained answer to "is the nose up or down", derived from the
-# altitude rate. Kept as STATE rather than recomputed on demand because the
-# consumer needs it at an instant the telemetry may not have refreshed on.
-NOSE_UP = "up"
-NOSE_DOWN = "down"
-NOSE_UNKNOWN = "unknown"
 
 
 class GameStateAnalyzer:
@@ -1278,6 +1204,7 @@ class GameStateAnalyzer:
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
         self._shutting_down = False
         self._last_lobby_play_click_ts = 0.0  # reset on GAME_LOBBY re-entry
+        self._event_refresh_recheck_after = 0.0
         self._waiting_cancel_baseline_gray: "np.ndarray | None" = None
         self._waiting_cancel_baseline_shape: "tuple[int, int] | None" = None
         self._waiting_cancel_baseline_lock = threading.Lock()
@@ -1403,6 +1330,9 @@ class GameStateAnalyzer:
         # Ammo sub-state (GAME_BATTLE only)
         self._ammo_flares: "int | None" = None   # Last known flare count from OCR
         self._ammo_missiles: "int | None" = None  # Last known missile count from OCR
+        # ADR 152 D2: one step per stored missile read. The pursuit loop polls the
+        # count several times per OCR cycle and must not confirm one read as three.
+        self._ammo_missiles_read_seq = 0
         self._ammo_lock = threading.Lock()
         self._last_logged_flares = None
         self._last_logged_missiles = None
@@ -1663,6 +1593,22 @@ class GameStateAnalyzer:
         """
         self._controller = controller
 
+    def note_lobby_click(self) -> None:
+        """The controller clicked PLAY/READY itself (the 'm' hotkey).
+
+        Stamps the cooldown the lobby quick-scan checks before its own click, so
+        it does not re-click the same button about a second later and undo this
+        one. CR-018-15: replaces the controller writing _last_lobby_play_click_ts.
+        """
+        self._last_lobby_play_click_ts = time.time()
+
+    def note_battle_event(self) -> None:
+        """A mission started, so the aircraft is in battle now.
+
+        CR-018-15: replaces the controller writing _last_battle_event_ts.
+        """
+        self._last_battle_event_ts = time.time()
+
     def trigger_event(self, name: str) -> bool:
         """Dispatch an FSM trigger via the thread-safe trigger wrapper."""
         return self._trigger(name)
@@ -1674,6 +1620,21 @@ class GameStateAnalyzer:
             return None
         try:
             return self._ammo_missiles
+        finally:
+            if self._ammo_lock.locked():
+                self._ammo_lock.release()
+
+    def get_ammo_missiles_read_seq(self):
+        """Return how many missile counts OCR has stored (ADR 152 D2).
+
+        Unchanged between two calls means get_ammo_missiles() is still
+        returning the same read, not a second read that agrees with it.
+        """
+        if not self._ammo_lock.acquire(timeout=1.0):
+            logger.warning("get_ammo_missiles_read_seq: _ammo_lock timeout — returning no value")
+            return None
+        try:
+            return self._ammo_missiles_read_seq
         finally:
             if self._ammo_lock.locked():
                 self._ammo_lock.release()
@@ -3138,6 +3099,7 @@ class GameStateAnalyzer:
                         if missile_value is not None:
                             with self._ammo_lock:
                                 self._ammo_missiles = missile_value
+                                self._ammo_missiles_read_seq += 1
                             if missile_value != self._last_logged_missiles:
                                 logger.info("Ammo missiles: %d", missile_value)
                                 self._last_logged_missiles = missile_value
@@ -3400,6 +3362,16 @@ class GameStateAnalyzer:
                 and "STALL_PROFILE" in self.crops
                 and "STALL_PROFILE" not in targets):
             targets.insert(0, "STALL_PROFILE")
+        # Anomaly 006: the "CHOOSE REWARDS" overlay opens over a lobby that
+        # still classifies as GAME_LOBBY, so it needs this gate too (2026-10-02:
+        # the lobby sat behind it until the operator picked by hand).
+        # It is not a de-escalating dismiss: it commits a reward. The operator
+        # decided the choice on 2026-10-02 (the middle one, then accept).
+        if (self._lobby_blackout_since
+                and now - self._lobby_blackout_since >= self._stall_action_after_s
+                and "STALL_CHOOSE_REWARDS" in self.crops
+                and "STALL_CHOOSE_REWARDS" not in targets):
+            targets.insert(0, "STALL_CHOOSE_REWARDS")
         # Anomaly 004 (2026-09-13): STALL_PARTS_CONFIRM is calibrated (below,
         # config.yaml) and OCR-verified (tests/test_stall_crops_ocr.py) for
         # DETECTION, but deliberately NOT added to this auto-click gate yet.
@@ -3419,6 +3391,15 @@ class GameStateAnalyzer:
                 and STALL_UNREADY_CROP in self.crops):
             targets.append(STALL_UNREADY_CROP)
         return targets
+
+    def _event_refresh_holds_lobby(self, state):
+        return state == GameState.GAME_LOBBY and self._event_refresh_recheck_after > 0.0
+
+    def _popup_crops_for_scan(self, popup_crops, now):
+        if (self._event_refresh_recheck_after > 0.0
+                and now < self._event_refresh_recheck_after):
+            return [crop for crop in popup_crops if crop != "event_refresh"]
+        return popup_crops
 
     def _run_game_lobby_quick_scan(self):
         """Scan lobby crops every 1s while in a POPUP_DISMISS_STATES state.
@@ -3459,6 +3440,9 @@ class GameStateAnalyzer:
         while not self._lobby_quick_scan_stop.wait(timeout=1.0):
             cycle_start = time.time()
             state = self.game_state
+            if state != GameState.GAME_LOBBY:
+                self._event_refresh_recheck_after = 0.0
+            event_refresh_holds_lobby = self._event_refresh_holds_lobby(state)
             if state != GameState.GAME_LOBBY:
                 # Stall tracking only applies while continuously in GAME_LOBBY — clear it
                 # here so a later re-entry (e.g. after a GAME_WAITING excursion) starts
@@ -3502,7 +3486,7 @@ class GameStateAnalyzer:
                 play_clicked_this_cycle = False
 
                 if state == GameState.GAME_LOBBY:
-                    crops_to_scan = lobby_crops
+                    crops_to_scan = [] if event_refresh_holds_lobby else lobby_crops
                 elif state == GameState.GAME_WAITING:
                     crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
                 elif state in LOBBY_RECHECK_STATES:
@@ -3730,6 +3714,11 @@ class GameStateAnalyzer:
                 # --- Popup crops (both states, every 5s) ---
                 popup_futures = {}
                 popup_scan_start = None
+                event_refresh_recheck_due = (
+                    self._event_refresh_recheck_after > 0.0
+                    and time.time() >= self._event_refresh_recheck_after
+                )
+                popup_scan_crops = self._popup_crops_for_scan(popup_crops, time.time())
                 if do_popup_scan:
                     with self._click_to_frame_lock:
                         popup_frame = self._click_to_latest_frame
@@ -3745,7 +3734,7 @@ class GameStateAnalyzer:
                         else:
                             last_popup_scan_ts = time.time()
                             popup_scan_start = time.time()
-                            for crop in popup_crops:
+                            for crop in popup_scan_crops:
                                 popup_futures[crop] = executor.submit(     # ADR 103
                                     _process_text_region,
                                     _crop_for_ocr(popup_frame, self.crops[crop][:4]),
@@ -3769,17 +3758,27 @@ class GameStateAnalyzer:
 
                 if popup_futures:
                     popup_detected = False
-                    for crop in popup_crops:
+                    event_refresh_checked = False
+                    event_refresh_detected = False
+                    for crop in popup_scan_crops:
                         if crop not in popup_futures:
                             continue
                         try:
                             detected, _, text = popup_futures[crop].result(timeout=20)
+                            if crop == "event_refresh":
+                                event_refresh_checked = True
                             if detected:
                                 logger.info(
                                     "Lobby quick-scan: popup '%s' detected (text='%s')",
                                     crop, text,
                                 )
+                                if crop == "event_refresh":
+                                    event_refresh_detected = True
                                 self.emit(GameEvent.LOBBY_POPUP_CLICK, crop)
+                                if crop == "event_refresh":
+                                    self._event_refresh_recheck_after = (
+                                        time.time() + EVENT_REFRESH_RECHECK_S
+                                    )
                                 popup_detected = True
                                 break
                             logger.debug("Lobby quick-scan: popup '%s' not found", crop)
@@ -3793,7 +3792,16 @@ class GameStateAnalyzer:
                         # The screen is popup-free: tells the ADR 074 recorder a
                         # prior dismissal actually worked, so a continuing stall
                         # is not blamed on popup handling.
-                        self.emit(GameEvent.LOBBY_POPUP_ABSENT)
+                        if not self._event_refresh_recheck_after or event_refresh_checked:
+                            self.emit(GameEvent.LOBBY_POPUP_ABSENT)
+
+                    if (event_refresh_recheck_due and event_refresh_checked
+                            and not event_refresh_detected):
+                        self._event_refresh_recheck_after = 0.0
+                        logger.info(
+                            "Lobby quick-scan: event_refresh absent after 30s; "
+                            "lobby scan resumed"
+                        )
 
                     if popup_scan_start is not None:
                         logger.debug(

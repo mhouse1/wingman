@@ -173,6 +173,15 @@ def xtest_env(monkeypatch):
     monkeypatch.setitem(sys.modules, "Xlib.display", fake_display_mod)
     monkeypatch.setitem(sys.modules, "Xlib.XK", fake_xk)
     monkeypatch.setitem(sys.modules, "Xlib.ext.xtest", fake_xtest_mod)
+    # `from Xlib import display` prefers an attribute already set on the package
+    # over sys.modules, and any test that imported the real submodule earlier in
+    # the run has set one. Patch those too, or these fakes are silently bypassed
+    # and the outcome depends on test order.
+    import Xlib
+    import Xlib.ext
+    monkeypatch.setattr(Xlib, "display", fake_display_mod, raising=False)
+    monkeypatch.setattr(Xlib, "XK", fake_xk, raising=False)
+    monkeypatch.setattr(Xlib.ext, "xtest", fake_xtest_mod, raising=False)
     monkeypatch.setattr(input_linux, "_ensure_xauthority", lambda: None)
     monkeypatch.setattr(input_linux, "_shared_display", None, raising=False)
 
@@ -730,3 +739,272 @@ def test_enter_on_the_desktop_needs_ctrl_alt_and_numlock_does_not_break_it():
         assert il.should_deliver_hotkey(":0", "enter", CTRL_ALT | NUMLOCK) is True
     finally:
         il.set_injection_display(None)
+
+
+# --- Anomaly 009: _linux_click reads the pointer back before every click -----
+
+class _FakePointerDisplay:
+    """An X display whose pointer only moves when something moves it.
+
+    Reply fields are python-xlib's own (`QueryPointer`: root_x, root_y). `drift`
+    models something else moving the pointer after a click (a game recentring
+    it); `deaf` models a server that ignores the XTest motion altogether.
+    """
+
+    def __init__(self, start=(0, 0), drift=None, deaf=False, over_window=True,
+                 host_mouse_path=None):
+        self.pointer = start
+        self.drift = drift
+        self.deaf = deaf
+        # Anomaly 009: the server reports the pointer over a window only while
+        # the operator's mouse is over the nested window, or while the host
+        # pointer devices are detached (ADR 156).
+        self.host_mouse_over = over_window
+        self.isolated = False
+        # Positions the operator's moving mouse drags the pointer to, one per
+        # XTest move, while it is over the window and its devices are attached.
+        self.host_mouse_path = list(host_mouse_path or [])
+        self.events = []
+        self.delivered = []     # per press: did it reach a window?
+        self.closed = False
+
+    def screen(self):
+        display = self
+
+        class _Root:
+            def query_pointer(self):
+                return mock.Mock(root_x=display.pointer[0], root_y=display.pointer[1],
+                                 child=mock.Mock() if (display.host_mouse_over
+                                                       or display.isolated) else None)
+
+        return mock.Mock(root=_Root())
+
+    def sync(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def _click_with(monkeypatch, fake, x, y, count, sleep=lambda _s: None):
+    from Xlib import X
+    import Xlib.display
+    import Xlib.ext.xtest
+
+    def fake_input(d, event_type, detail=0, time=0, root=0, x=0, y=0):
+        if event_type == X.MotionNotify:
+            d.events.append(("move", x, y))
+            if not d.deaf:
+                d.pointer = (x, y)
+            if d.host_mouse_path and d.host_mouse_over and not d.isolated:
+                d.pointer = d.host_mouse_path.pop(0)
+        elif event_type == X.ButtonPress:
+            if getattr(d, "fail_on_press", False):
+                raise RuntimeError("X connection lost")
+            d.events.append(("press", d.pointer))
+            d.delivered.append(d.host_mouse_over or d.isolated)
+        elif event_type == X.ButtonRelease:
+            d.events.append(("release", d.pointer))
+            if d.drift is not None:
+                d.pointer = d.drift
+
+    monkeypatch.setattr(Xlib.display, "Display", lambda name: fake)
+    monkeypatch.setattr(Xlib.ext.xtest, "fake_input", fake_input)
+    monkeypatch.setattr(input_linux, "_ensure_xauthority", lambda: None)
+    monkeypatch.setattr(input_linux.time, "sleep", sleep)
+    input_linux._linux_click(x, y, count)
+
+
+def test_click_on_target_moves_once_and_logs_where_each_click_landed(monkeypatch, caplog):
+    fake = _FakePointerDisplay(start=(5, 5))
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 3)
+
+    assert [e for e in fake.events if e[0] == "move"] == [("move", 939, 1094)]
+    assert [e for e in fake.events if e[0] == "press"] == [("press", (939, 1094))] * 3
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "pointer at each click: (939,1094) (939,1094) (939,1094)" in caplog.text
+    assert fake.closed
+
+
+def test_click_reaims_and_reports_a_pointer_that_moved_between_clicks(monkeypatch, caplog):
+    """The 2026-09-29 signature this was written for: seven clicks sent, the
+    log silent about where they landed. If something drags the pointer away
+    after a click, every later click must be re-aimed and the real position
+    logged."""
+    fake = _FakePointerDisplay(drift=(960, 600))
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 3)
+
+    assert [e for e in fake.events if e[0] == "press"] == [("press", (939, 1094))] * 3
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2  # clicks 2 and 3; the first was aimed fresh
+    assert "pointer at (960, 600), not the (939, 1094)" in warnings[0]
+    assert "re-aimed, now (939, 1094)" in warnings[0]
+    assert "STILL OFF TARGET" not in warnings[0]
+
+
+def test_click_says_so_when_the_pointer_will_not_move(monkeypatch, caplog):
+    fake = _FakePointerDisplay(start=(100, 200), deaf=True)
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 2)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2
+    assert all("STILL OFF TARGET" in w and "now (100, 200)" in w for w in warnings)
+    # The clicks still go out: a blind click is no worse than before, and the
+    # log now says where it landed.
+    assert [e for e in fake.events if e[0] == "press"] == [("press", (100, 200))] * 2
+    assert "pointer at each click: (100,200) (100,200)" in caplog.text
+
+
+# --- ADR 156: the host pointer is detached only while a click needs it --------
+
+@pytest.fixture
+def isolation(monkeypatch):
+    """Arm per-click isolation on ':3' against a recording fake of the device
+    switch. Returns (calls, attach) where attach(fake) wires a display to it."""
+    from wingman import pointer_isolation
+    calls = []
+    displays = []
+
+    def set_isolated(display_name, isolated):
+        calls.append((display_name, isolated))
+        for fake in displays:
+            fake.isolated = isolated
+        return ["xwayland-pointer:16"]
+
+    monkeypatch.setattr(pointer_isolation, "set_host_pointer_isolated", set_isolated)
+    monkeypatch.setattr(input_linux, "_inject_display_name", lambda: ":3")
+    monkeypatch.setattr(input_linux, "_isolate_pointer_display", ":3")
+    monkeypatch.setattr(input_linux, "_isolation_holders", 0)
+    return calls, displays.append
+
+
+def test_click_with_the_operators_mouse_elsewhere_detaches_then_reattaches(
+        monkeypatch, caplog, isolation):
+    """Anomaly 009: 81 bursts were sent on target with the server reporting the
+    pointer over no window. The click must detach the host pointer, land, and
+    give the operator's mouse back when it is done."""
+    calls, attach = isolation
+    fake = _FakePointerDisplay(over_window=False)
+    attach(fake)
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 3)
+
+    assert calls == [(":3", True), (":3", False)]
+    assert fake.delivered == [True, True, True]
+    assert fake.isolated is False
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "(host pointer detached for this click: pointer over no window)" in caplog.text
+
+
+def test_click_with_the_operators_mouse_over_the_window_touches_no_device(
+        monkeypatch, caplog, isolation):
+    """The operator is using the game window: clicks already land, and their
+    mouse must keep working, so no device is detached at any point."""
+    calls, attach = isolation
+    fake = _FakePointerDisplay(over_window=True)
+    attach(fake)
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 3)
+
+    assert calls == []
+    assert fake.delivered == [True, True, True]
+    assert "detached" not in caplog.text
+
+
+def test_click_detaches_when_the_mouse_leaves_the_window_mid_burst(
+        monkeypatch, isolation):
+    """The operator moves their mouse off the game window between two clicks of
+    a burst: the remaining clicks must still land."""
+    calls, attach = isolation
+    fake = _FakePointerDisplay(over_window=True)
+    attach(fake)
+
+    def mouse_leaves_after_the_first_click(_s):
+        if len(fake.delivered) == 1:
+            fake.host_mouse_over = False
+
+    _click_with(monkeypatch, fake, 939, 1094, 3,
+                sleep=mouse_leaves_after_the_first_click)
+
+    assert calls == [(":3", True), (":3", False)]
+    assert fake.delivered == [True, True, True]
+
+
+def test_click_wins_over_the_operators_mouse_moving_in_the_window(
+        monkeypatch, caplog, isolation):
+    """2026-10-02 06:25: with the operator's mouse moving over the game window
+    a PLAY click read back at (210, 382), re-aimed, read (360, 486) and went
+    out there. Wingman then believed it was matchmaking and refused 'm' seven
+    times. The click must take the pointer for as long as it needs it."""
+    calls, attach = isolation
+    fake = _FakePointerDisplay(over_window=True,
+                               host_mouse_path=[(210, 382), (360, 486), (500, 590)])
+    attach(fake)
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 1751, 1096, 1)
+
+    assert [e for e in fake.events if e[0] == "press"] == [("press", (1751, 1096))]
+    assert calls == [(":3", True), (":3", False)]
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "operator's mouse had it at (210,382)" in caplog.text
+
+
+def test_the_operators_mouse_at_rest_in_the_window_is_left_alone(monkeypatch, isolation):
+    """Their mouse is over the window and not moving: the click lands without
+    touching a device, and their mouse stays live throughout."""
+    calls, attach = isolation
+    fake = _FakePointerDisplay(over_window=True, start=(400, 300))
+    attach(fake)
+    _click_with(monkeypatch, fake, 1751, 1096, 2)
+
+    assert calls == []
+    assert [e for e in fake.events if e[0] == "press"] == [("press", (1751, 1096))] * 2
+
+
+def test_the_host_pointer_is_reattached_when_the_click_fails_part_way(
+        monkeypatch, caplog, isolation):
+    calls, attach = isolation
+    fake = _FakePointerDisplay(over_window=False)
+    fake.fail_on_press = True
+    attach(fake)
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 2)
+
+    assert calls == [(":3", True), (":3", False)]
+    assert "Linux click at (939, 1094) failed" in caplog.text
+
+
+def test_overlapping_clicks_reattach_only_when_the_last_one_finishes(isolation):
+    """The lobby scanner clicks from its own thread while the main loop is
+    mid-burst (seen 2026-10-02 05:10:30). The first to finish must not hand the
+    mouse back under the other."""
+    calls, _ = isolation
+    assert input_linux._hold_host_pointer_away(":3") is True
+    assert input_linux._hold_host_pointer_away(":3") is True
+    assert calls == [(":3", True)]
+    input_linux._release_host_pointer(":3")
+    assert calls == [(":3", True)]
+    input_linux._release_host_pointer(":3")
+    assert calls == [(":3", True), (":3", False)]
+
+
+def test_click_over_no_window_only_reports_when_isolation_is_off(monkeypatch, caplog):
+    """Off the nested lane, or with nested.isolate_pointer off, the click must
+    not touch any device. It still says each click is going nowhere."""
+    from wingman import pointer_isolation
+    fake = _FakePointerDisplay(over_window=False)
+    monkeypatch.setattr(pointer_isolation, "set_host_pointer_isolated",
+                        lambda *_a: pytest.fail("must not detach devices"))
+    monkeypatch.setattr(input_linux, "_inject_display_name", lambda: ":0")
+    monkeypatch.setattr(input_linux, "_isolate_pointer_display", None)
+    with caplog.at_level("DEBUG", logger=input_linux.logger.name):
+        _click_with(monkeypatch, fake, 939, 1094, 2)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2
+    assert all("pointer is over no window at (939, 1094)" in w
+               and "nested.isolate_pointer is off" in w for w in warnings)
+    assert fake.delivered == [False, False]

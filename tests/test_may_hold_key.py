@@ -34,9 +34,29 @@ def test_cruise_may_hold_absent_both():
     assert _ctrl()._may_hold_key(AFTERBURNER_KEY, requester="cruise") is True
 
 
-@pytest.mark.parametrize("requester", ["climb", "missile_evade", "afterburner_evade", "eject"])
+def test_afterburner_evade_yields_to_manual_takeover():
+    """CR-018-07 (SAF-001): the first requester changed after D4. Background
+    OCR keeps reporting incoming while the operator flies, so an unconditional
+    evade re-pressed the throttle over the operator's release."""
+    assert _ctrl(manual_takeover=True)._may_hold_key(
+        AFTERBURNER_KEY, requester="afterburner_evade") is False
+
+
+def test_afterburner_evade_yields_to_climb_emergency():
+    """CR-018-08: ADR 137 holds the airbrake through an emergency climb and keeps
+    the afterburner off "regardless of fuel or an incoming missile". The evade
+    re-pressed the throttle over it: 2 presses in 1.5 s in the review's probe."""
+    assert _ctrl(climb_emergency=True)._may_hold_key(
+        AFTERBURNER_KEY, requester="afterburner_evade") is False
+
+
+def test_afterburner_evade_may_hold_absent_both():
+    assert _ctrl()._may_hold_key(AFTERBURNER_KEY, requester="afterburner_evade") is True
+
+
+@pytest.mark.parametrize("requester", ["climb", "missile_evade", "eject"])
 def test_other_requesters_are_unconditional_today(requester):
-    """Direct audit found none of these four check manual takeover or climb
+    """Direct audit found none of these three check manual takeover or climb
     emergency — this pins that as the current, replicated behavior, not an
     oversight introduced by the consolidation."""
     c = _ctrl(manual_takeover=True, climb_emergency=True)

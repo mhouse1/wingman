@@ -21,6 +21,7 @@ import wingman.controller as controller_module
 from wingman.controller_config import ControllerConfig
 from wingman.analyzer import GameState
 from wingman.controller import Controller
+from tests.perception_fake import PerceptionFake
 
 
 class _FakeKeyboard:
@@ -31,7 +32,7 @@ class _FakeKeyboard:
         pass
 
 
-class _FakeFSMAnalyzer:
+class _FakeFSMAnalyzer(PerceptionFake):
     def __init__(self, state):
         self.game_state = state
         self.triggered = []
@@ -110,6 +111,21 @@ def test_non_battle_press_forces_lobby_immediately(monkeypatch):
     ctrl = _make_ctrl(monkeypatch, analyzer)
     ctrl._on_auto_mission_hotkey()
     assert analyzer.triggered == ["manual_reset"]
+
+
+def test_press_during_matchmaking_preserves_startup_sequence(monkeypatch):
+    for state in (GameState.GAME_WAITING, GameState.GAME_STARTING):
+        analyzer = _FakeFSMAnalyzer(state)
+        ctrl = _make_ctrl(monkeypatch, analyzer)
+        clicked = []
+        ctrl._crops = {"PLAY": (0, 0, 1, 1)}
+        ctrl.click_crop = lambda *args, _clicked=clicked, **kwargs: _clicked.append(args)
+
+        ctrl._on_auto_mission_hotkey()
+
+        assert analyzer.game_state == state
+        assert analyzer.triggered == []
+        assert clicked == []
 
 
 def test_key_repeat_debounce_ignored_outright(monkeypatch):

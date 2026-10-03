@@ -45,7 +45,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -122,6 +122,18 @@ RR_LIVE_PATH1_PRESENTER_GRACE_S ?= 8.0
 lint:
 	uv run ruff check .
 	@echo "PASS: ruff lint clean"
+
+# HLDD 016 Part 3 (CR-018-11): opt in to the versioned pre-push hook, which runs
+# `make lint` and `make test` before every push. `git push --no-verify` skips it;
+# `git config --unset core.hooksPath` removes it.
+hooks:
+	git config core.hooksPath .githooks
+	@echo "pre-push hook installed: make lint and make test run before every push (skip one with git push --no-verify)"
+
+# Linux only: bring the venv up to date after a pull or an Ubuntu release upgrade
+# (PyGObject build headers, stale venv, old gi bridge). Calls sudo for apt.
+upgrade-linux:
+	bash scripts/upgrade-linux.sh
 
 # One-time (then routine) formatter pass — review the diff before committing.
 format:
@@ -279,6 +291,11 @@ leak-check-gate:
 # code" is answerable by running something instead of re-reading both.
 tree:
 	@$(PYTHON_RUN) scripts/render-behavior-tree.py $(BT_ARGS)
+
+# CR-018-14: the game FSM as Mermaid, generated from wingman/state.py, and the
+# generated block in docs/architecture.md refreshed to match.
+fsm:
+	@$(PYTHON_RUN) scripts/render-fsm.py --write-doc
 
 # The gate set both preview targets must run. Shared so the two cannot drift:
 # tp-full is documented as "tp + the ADR037 real-OCR lane" (CLAUDE.md), and it
@@ -666,10 +683,10 @@ wait-game:
 	       $(PYTHON_RUN) scripts/nested-display.py stop || true; \
 	       exit 1; }
 	@echo "Metalstorm.exe detected — waiting $(GAME_LOBBY_WAIT_S) s for game window to appear…"
-	@sleep $(GAME_LOBBY_WAIT_S)
-	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)" \
+	@$(MAKE) undecorate-game-window NESTED_ENV="$(NESTED_ENV)" GAME_WINDOW_WAIT_S="$(GAME_LOBBY_WAIT_S)" \
 	  || { echo "ERROR: game window never appeared after $(GAME_LOBBY_WAIT_S) s — the launch did not complete"; \
 	       echo "       launch log: /tmp/wingman-game-launch.log"; \
+	       $(PYTHON_RUN) -c 'from wingman.game_shutdown import close_game; close_game()'; \
 	       echo "Closing the nested display it would have been hosted on (ADR 105)…"; \
 	       $(PYTHON_RUN) scripts/nested-display.py stop || true; \
 	       exit 1; }
@@ -705,7 +722,7 @@ move-game-window:
 # blocked every subsequent launch attempt, `make` and manual alike, until
 # manually SIGKILLed).
 undecorate-game-window:
-	@$(NESTED_ENV) $(PYTHON_RUN) -m wingman.move_game_window --undecorate
+	@$(NESTED_ENV) $(PYTHON_RUN) -m wingman.move_game_window --undecorate --wait $(or $(GAME_WINDOW_WAIT_S),0)
 
 # Capture a frame with MetalStorm on screen and overlay a coordinate grid.
 # Open /tmp/wingman_grid.png to find the game window's top-left (x,y) offset,
@@ -742,6 +759,7 @@ ti:
 rr-path1:
 	mkdir -p tests/test-output
 	rm -f $(RR_PATH1_LOG) $(RR_PATH1_ASSERTIONS) $(RR_PATH1_INTENTS) $(RR_PATH1_REPORT) $(RR_PATH1_SUMMARY)
+	. scripts/gate-display.sh; \
 	$(WINGMAN_ENV) $(PYTHON_RUN) -m wingman.main \
 		--config wingman/config.yaml \
 		--replay-config $(RR_PATH1_CONFIG) \
@@ -764,10 +782,14 @@ rr-validate-path1:
 # ADR044 phase 1 gate: execute runtime lane and fail fast on validator mismatch.
 rr-path1-gate: rr-path1 rr-validate-path1
 
-# ADR045 live lane: present timed screenshots on desktop while Wingman captures real monitor frames.
+# ADR045 live lane: present timed screenshots on a display while Wingman captures it.
+# Both gate lanes run on a private Xvfb (scripts/gate-display.sh, ADR 153): on
+# GNOME 50 every XTest client on the session display raises a portal dialog.
+# WINGMAN_GATE_DISPLAY=real runs a lane on the session display instead.
 rr-live-path1:
 	mkdir -p tests/test-output $(RR_LIVE_PATH1_CAPTURE_DIR)
 	rm -f $(RR_LIVE_PATH1_LOG) $(RR_LIVE_PATH1_CAPTURE_SUMMARY) $(RR_LIVE_PATH1_VALIDATION_SUMMARY) $(RR_LIVE_PATH1_PRESENTER_LOG)
+	. scripts/gate-display.sh; \
 	$(PYTHON_RUN) tests/live_screen_presenter.py \
 		--config wingman/config.yaml \
 		--path-config $(RR_LIVE_PATH1_CAPTURE_CONFIG) \

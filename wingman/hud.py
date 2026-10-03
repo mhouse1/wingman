@@ -9,6 +9,7 @@ Usage:
     renderer.maybe_render(frame, tracking_obs, state_name, health, missiles, flares)
 """
 
+import atexit
 import logging
 import os
 import subprocess
@@ -113,6 +114,12 @@ class HudRenderer:
                 stderr=subprocess.DEVNULL,
             )
             logger.info("HudRenderer: feh launched (%s)", geometry)
+            # Backstop for every exit that skips the shutdown sequence's
+            # close(). main() builds the renderer well before its main-loop
+            # try/finally, so an exception in between orphaned the window
+            # (2026-10-02: three feh windows left open by crashed replay
+            # tests). close() is idempotent and unregisters this itself.
+            atexit.register(self.close)
         except FileNotFoundError:
             logger.warning("HudRenderer: feh not found — install with: sudo apt install feh")
 
@@ -127,6 +134,8 @@ class HudRenderer:
         alone under Xwayland (observed live, 2026-09-23).
         """
         proc = self._feh_process
+        if proc is not None:
+            atexit.unregister(self.close)
         if proc is None or proc.poll() is not None:
             return  # never launched, or already exited on its own
         try:
@@ -188,6 +197,10 @@ class HudRenderer:
         health: "int | None",
         missiles: "int | None",
         flares: "int | None",
+        *,
+        steering_target: "tuple[float, float] | None" = None,
+        steering_label: "str | None" = None,
+        steering_stale: bool = False,
     ) -> "threading.Thread | None":
         """Render and write on a background thread if the cadence interval has elapsed.
 
@@ -205,7 +218,8 @@ class HudRenderer:
         self._last_ts = now
         thread = threading.Thread(
             target=self._render_async,
-            args=(frame, tracking_obs, game_state_name, health, missiles, flares, now),
+            args=(frame, tracking_obs, game_state_name, health, missiles, flares,
+                  now, steering_target, steering_label, steering_stale),
             daemon=True,
             name="HudRenderer-write",
         )
@@ -221,9 +235,13 @@ class HudRenderer:
         missiles: "int | None",
         flares: "int | None",
         ts: float,
+        steering_target: "tuple[float, float] | None",
+        steering_label: "str | None",
+        steering_stale: bool,
     ) -> None:
         try:
-            self._render(frame, obs, state, health, missiles, flares, ts)
+            self._render(frame, obs, state, health, missiles, flares, ts,
+                         steering_target, steering_label, steering_stale)
         except Exception as exc:
             logger.debug("HudRenderer: render error: %s", exc)
         finally:
@@ -243,6 +261,9 @@ class HudRenderer:
         missiles: "int | None",
         flares: "int | None",
         ts: float,
+        steering_target: "tuple[float, float] | None" = None,
+        steering_label: "str | None" = None,
+        steering_stale: bool = False,
     ) -> None:
         canvas = frame.copy()
         h, w = canvas.shape[:2]
@@ -255,6 +276,10 @@ class HudRenderer:
         mis_str = str(missiles) if missiles is not None else "?"
         fla_str = str(flares) if flares is not None else "?"
         _txt(canvas, f"HP:{hp_str}  Mis:{mis_str}  Fla:{fla_str}", 8, 44, _WHITE)
+
+        default_steering_target = None
+        default_steering_label = None
+        default_steering_stale = False
 
         # ── Tracking overlay ─────────────────────────────────────────────
         if obs is not None:
@@ -282,18 +307,9 @@ class HudRenderer:
             # known position during LOST_GRACE, so the HUD doesn't imply a
             # fresh detection that didn't happen.
             if cx is not None and cy_ is not None:
-                px, py = int(cx), int(cy_)
-                # Steering vector (2026-09-23, direct instruction): center of
-                # screen to the current steer target (the aircraft below the
-                # chosen nameplate) — drawn first so the marker below sits on
-                # top of it at the target end.
-                cv2.line(canvas, (scx, scy), (px, py), _PURSUIT, 1, cv2.LINE_AA)
-                thick = 2 if visible else 1
-                cv2.circle(canvas, (px, py), 16, _DARK, thick + 2, cv2.LINE_AA)
-                cv2.circle(canvas, (px, py), 16, _PURSUIT, thick, cv2.LINE_AA)
-                cv2.drawMarker(canvas, (px, py), _PURSUIT, cv2.MARKER_CROSS, 26, thick, cv2.LINE_AA)
-                label = "PURSUING" if visible else "PURSUING (lost)"
-                _txt(canvas, label, px + 20, py - 14, _PURSUIT, scale=0.42)
+                default_steering_target = (cx, cy_)
+                default_steering_label = "PURSUING"
+                default_steering_stale = not visible
 
             # Horizontal error bar at bottom of frame
             if err is not None:
@@ -305,6 +321,19 @@ class HudRenderer:
                 cv2.circle(canvas, (bar_px, bar_y), 6, dot_color, -1, cv2.LINE_AA)
                 _txt(canvas, "L", 4, bar_y + 5, _GREY, scale=0.4)
                 _txt(canvas, "R", w - 14, bar_y + 5, _GREY, scale=0.4)
+
+        selected_target = steering_target or default_steering_target
+        selected_label = steering_label or default_steering_label
+        selected_stale = steering_stale if steering_target is not None else default_steering_stale
+        if selected_target is not None and selected_label is not None:
+            px, py = map(int, selected_target)
+            cv2.line(canvas, (scx, scy), (px, py), _PURSUIT, 1, cv2.LINE_AA)
+            thick = 1 if selected_stale else 2
+            cv2.circle(canvas, (px, py), 16, _DARK, thick + 2, cv2.LINE_AA)
+            cv2.circle(canvas, (px, py), 16, _PURSUIT, thick, cv2.LINE_AA)
+            cv2.drawMarker(canvas, (px, py), _PURSUIT, cv2.MARKER_CROSS, 26, thick, cv2.LINE_AA)
+            label = f"{selected_label} (lost)" if selected_stale else selected_label
+            _txt(canvas, label, px + 20, py - 14, _PURSUIT, scale=0.42)
 
         # ── Acquisition region outline ───────────────────────────────────
         acq_x1, acq_y1, acq_x2, acq_y2 = self._acq_pct

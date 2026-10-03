@@ -411,13 +411,100 @@ supports that it does, consistently, across every true positive
 inspected — that is the case for graduating to active, not proof of the
 downstream crash-rate effect, which can only be measured after.
 
+## Phase 2 — looming from frame-to-frame motion (design and spike, 2026-10-03, wingman 1.9.0)
+
+Status of this section: Draft. Nothing here runs live.
+
+**Why now.** Phase 1's sky test is a colour test. On 2026-10-03 00:07 it actuated on a night map, read a sky
+fraction of 0.000 to 0.001 while the aircraft climbed into open sky, and held terrain ahead true continuously
+([ADR 148](../adr/148-a-dive-recovery-flies-through-a-pursuit.md), change 5 reverted). The operator's proposal
+the same night: follow ground structure outlines, treat an outline that slides sideways as off the flight path,
+and treat a pattern that stays in the centre and grows as a collision.
+
+**Design.** That is looming, measured from motion instead of colour:
+
+- Track many corner points in the forward view between two frames, with the HUD and the own aircraft masked
+  out. One outline is fragile (it can be an enemy, smoke or a flare); a few hundred points vote.
+- Fit one similarity transform to the tracked points with outlier rejection: a zoom and a slide.
+- The zoom gives a time to contact, `tau`: the frame interval divided by the zoom minus one. It needs neither
+  distance nor speed and is in seconds, the same unit as ADR 086's time to ground, so it feeds
+  `ClimbCondition.update_emergency` as a third term beside time to ground and Phase 1's sky fraction.
+- The slide answers "is it in the flight path": the transform has one point that does not move, the point the
+  picture expands from. Inside a box around the screen centre, the aircraft is flying at it. Outside, the
+  structure passes to that side, which is also the direction a lateral avoidance would turn away from.
+- No trackable texture (sky, water, a dark night sky) gives no verdict, never "terrain ahead".
+
+```mermaid
+flowchart TD
+    A[Two frames a short time apart] --> B[Mask HUD and own aircraft]
+    B --> C[Track corner points]
+    C --> D{Enough points agree}
+    D -->|no| E[No verdict]
+    D -->|yes| F[Zoom and slide]
+    F --> G[Time to contact from zoom]
+    F --> H[Expansion point from slide]
+    G --> I{Short time and point in path box}
+    H --> I
+    I -->|yes for several pairs| J[Terrain ahead]
+    I -->|no| K[Clear]
+```
+
+Conditions, in words: "enough points agree" is a minimum count of tracked points consistent with one transform;
+"short time" is `tau` under a threshold; "several pairs" is a confirm count, as in Phase 1.
+
+**Frames.** The main loop's 1.5 s tick is too coarse (see the spike). The pursuit loop already grabs a frame
+about every 0.14 s, so a chase has the pairs; elsewhere, two grabs about 0.1 s apart inside one tick. No
+separate vision thread (the reason in "Why the original design doesn't fit" stands).
+
+**Overlay.** `tests/test-output/live_hud.png` (HLDD 005) gains the tracked points, the path box, the expansion
+point, `tau` and the verdict colour.
+
+### Spike (measured, `scripts/terrain-loom-spike.py`)
+
+Input: `logs/session_20260916_021132_acct1.mp4` (960 by 600, one frame per 0.506 s, 44.1 minutes, canyon and
+ice maps) and its `bt_trace`, whose changes to `RespawnWait` mark deaths. OpenCV corner tracking and
+`estimateAffinePartial2D`, about 78 s of CPU wall time for the session.
+
+- 68% of the 5,222 frame pairs were readable (25 or more points agreeing).
+- The trace lists 20 changes to `RespawnWait`. Labelled by eye from the frame 2.5 s before each: 2 are not
+  deaths (match-end screen, lobby), about 5 are clearly terrain, about 4 possibly terrain, about 9 enemy fire.
+  The trace's time trails the impact by several seconds (the RESPAWN banner is already up at t minus 2.5 s in
+  one), so warnings are scored within 13 s before it.
+- A countdown is visible before terrain deaths: at t=1956.8 s `tau` read 13, 7, 5, 5, 4, 4, 3, 3, 2, 2;
+  at t=2272.3 s 21, 10, 8, 7, 7, 5, 5, 4. A straight dive at t=466 s (HUD 3299 m, 2084 kph, about 5.7 s to the
+  ground by arithmetic) read `tau` 4.1 s.
+- Warning rule `tau` under 8 s on 3 consecutive pairs, any direction: 30 warnings, 5 of the 20 trace deaths
+  warned (4 of them on the terrain or possibly-terrain list), 24 warnings not followed by a death within 15 s.
+  With the path-box test (`tau` under 6 s, 2 pairs): 19 warnings, 1 death warned. The expansion point is too
+  noisy at this frame rate to gate on.
+- Missed: t=1339 (two readable pairs, then the ground filled the view and tracking stopped) and t=93 (`tau`
+  only fell to 10).
+- False alarm seen: at t=1142 s, in a steep climb at 7089 m, the camera swings and the own aircraft fills the
+  view against featureless sky, so every tracked point is on the own airframe.
+- The ten frame pairs saved 1.5 s apart at recovery starts on 2026-10-02 (ADR 148) were unreadable in 9 of 10:
+  a pull-up rotates the picture too far between frames. The cliff deaths of that night were not recorded on
+  video, so they are not evaluated.
+
+**What the spike says.** The signal exists and is colour-free. It is not ready to act: at 2 fps the rule that
+catches most terrain deaths also fires 24 times in 44 minutes without one, and the path test cannot be trusted.
+
+### Open before any shadow stage
+
+1. A recording at the pursuit loop's frame interval on the canyon map (the session recorder's `fps`), to
+   re-measure readability, the expansion point and the false-alarm rate where frames are 0.14 s apart.
+2. The own aircraft: a mask that follows it, or a rule that the agreeing points must cover the view.
+3. The unlabelled 24: how many were dives that were pulled out of (true, survived) against false alarms.
+4. Hard manoeuvres: hold the last verdict, or no verdict, while the picture rotates faster than tracking allows.
+5. Night maps: whether canyon rock at night has enough texture to track. Not measured.
+
 ## Phase 2+ (not designed here, explicitly deferred)
 
 - **Lateral avoidance.** Phase 1 only pitches up. A wall too tall to climb
   over, or terrain that a roll would clear faster, needs the original
   document's sector/lateral-delta idea — revisit once Phase 1's pitch-only
   response has live data showing how often it's insufficient alone.
-- **Looming (rate-of-growth).** The original secondary signal, useful for
+- **Looming (rate-of-growth).** Now designed above as Phase 2 (2026-10-03), from motion
+  rather than from the sky fraction. The original note follows. The original secondary signal, useful for
   catching a fast, shallow approach a static sky-fraction threshold might
   miss. Needs Phase 1's frame-by-frame sky fraction already being computed
   as its input, so it's a cheap add-on once Phase 1 has live data to tune

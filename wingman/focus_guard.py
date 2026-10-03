@@ -20,6 +20,8 @@ import re
 import subprocess
 import time
 
+from .suppressed import log_suppressed
+
 logger = logging.getLogger(__name__)
 
 GAME_PROCESS_NAME = "Metalstorm.exe"
@@ -91,6 +93,32 @@ def game_session_pids(process_name: str = GAME_PROCESS_NAME) -> "set[int]":
             cur = _ppid_of(cur)
             depth += 1
     return session
+
+
+def game_session_windows(d, session_pids: "set[int] | None" = None) -> list:
+    """Top-level X windows owned by the game's Wine session, largest first."""
+    from Xlib import Xatom
+
+    session = game_session_pids() if session_pids is None else session_pids
+    if not session:
+        return []
+    net_wm_pid = d.intern_atom("_NET_WM_PID")
+    found = []
+    try:
+        children = d.screen().root.query_tree().children
+    except Exception:
+        return found
+    for window in children:
+        try:
+            prop = window.get_full_property(net_wm_pid, Xatom.CARDINAL)
+            if not prop or not prop.value or int(prop.value[0]) not in session:
+                continue
+            geom = window.get_geometry()
+            found.append((geom.width * geom.height, window))
+        except Exception:
+            continue
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [window for _, window in found]
 
 
 def config_for_display(cfg, injection_display):
@@ -212,7 +240,7 @@ class FocusGuard:
             try:
                 self._focus = self._probe()
             except Exception as e:           # noqa: BLE001 - guard must not raise
-                logger.debug("FocusGuard: probe failed: %s", e)
+                log_suppressed(logger, "FocusGuard probe", e)
                 self._focus = FOCUS_UNKNOWN
             self._focus_at = now
         return self._focus

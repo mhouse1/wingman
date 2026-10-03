@@ -715,6 +715,28 @@ class TestHudRendererFehClose:
         fake_proc.terminate.assert_called_once()
         fake_proc.kill.assert_called_once()
 
+    def test_launch_registers_close_at_exit_and_close_unregisters_it(self, tmp_path):
+        """A crash between construction and main()'s shutdown finally must
+        still close the window: atexit is the backstop (2026-10-02)."""
+        from wingman.hud import HudRenderer
+        fake_proc = Mock()
+        fake_proc.poll.return_value = None
+        with patch("wingman.hud.subprocess.Popen", return_value=fake_proc), \
+                patch("wingman.hud.atexit") as fake_atexit:
+            renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0,
+                                    feh_geometry="800x600+0+0")
+            fake_atexit.register.assert_called_once_with(renderer.close)
+            renderer.close()
+            fake_atexit.unregister.assert_called_once_with(renderer.close)
+
+    def test_no_atexit_hook_without_a_feh_window(self, tmp_path):
+        from wingman.hud import HudRenderer
+        with patch("wingman.hud.atexit") as fake_atexit:
+            renderer = HudRenderer(str(tmp_path / "hud.png"), interval_sec=0.0)
+            renderer.close()
+        fake_atexit.register.assert_not_called()
+        fake_atexit.unregister.assert_not_called()
+
     def test_close_is_a_noop_when_feh_already_exited(self, tmp_path):
         from wingman.hud import HudRenderer
         fake_proc = Mock()
@@ -969,3 +991,39 @@ class TestHudRendererSteeringLine:
         pursuit_bgr = (255, 60, 220)
         dist = sum(abs(a - b) for a, b in zip(midpoint, pursuit_bgr, strict=True))
         assert dist >= 100, "no steer target -> no line should be drawn"
+
+    def test_resupply_target_replaces_pursuit_annotation(self, tmp_path, monkeypatch):
+        import wingman.hud as hud
+
+        labels = []
+        original_txt = hud._txt
+
+        def record_label(canvas, text, *args, **kwargs):
+            labels.append(text)
+            original_txt(canvas, text, *args, **kwargs)
+
+        monkeypatch.setattr(hud, "_txt", record_label)
+        archive_dir = tmp_path / "archive"
+        renderer = hud.HudRenderer(
+            str(tmp_path / "hud.png"), interval_sec=0.0,
+            archive_enabled=True, archive_dir=str(archive_dir))
+        frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        obs = {
+            "mode": "TRACKING", "visible": True,
+            "centroid_x": 350.0, "centroid_y": 150.0,
+            "error_norm": 0.9, "error_norm_y": 0.0,
+        }
+
+        thread = renderer.maybe_render(
+            frame, obs, "PURSUIT_MODE", None, None, None,
+            steering_target=(50.0, 150.0), steering_label="RESUPPLYING")
+        thread.join(timeout=5)
+
+        canvas = cv2.imread(str(next(archive_dir.glob("*.png"))))
+        pursuit_bgr = (255, 60, 220)
+        near_resupply = tuple(int(c) for c in canvas[150, 125])
+        near_opponent = tuple(int(c) for c in canvas[150, 275])
+        assert sum(abs(a - b) for a, b in zip(near_resupply, pursuit_bgr, strict=True)) < 100
+        assert sum(abs(a - b) for a, b in zip(near_opponent, pursuit_bgr, strict=True)) >= 100
+        assert "RESUPPLYING" in labels
+        assert "PURSUING" not in labels
