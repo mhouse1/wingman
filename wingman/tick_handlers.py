@@ -2080,6 +2080,16 @@ class BehaviorTreeHandler:
         if self._climb_hard_emergency_fn is not None:
             self._ctrl.set_climb_emergency(bool(self._climb_hard_emergency_fn()))
 
+    def _push_climb_emergency(self) -> None:
+        """Push this tick's HARD verdict into a running climb hold, whatever leaf
+        the tree selects (ADR 148 amendment, 2026-10-02 23:36). `_update_climb`
+        only runs while Climb is selected; once Idle won, the hold kept a stale
+        emergency and flew 30 s to its cap instead of handing the chase back."""
+        is_climbing = getattr(self._ctrl, "is_climbing", None)
+        if (self._climb_hard_emergency_fn is not None and callable(is_climbing)
+                and is_climbing()):
+            self._ctrl.set_climb_emergency(bool(self._climb_hard_emergency_fn()))
+
     def _start_disengage(self) -> None:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence
         clock — the legacy handler's fire-once-and-reset semantics, so the
@@ -2279,6 +2289,7 @@ class BehaviorTreeHandler:
                 self._climb_emergency_update_fn(snap, now)
             except Exception as exc:
                 log_suppressed(logger, "climb_emergency_update_fn", exc)
+        self._push_climb_emergency()
         # HLDD 001 Phase 1: capture evidence on the FALSE->TRUE edge, right
         # after the update above refreshes terrain_ahead_active for THIS
         # tick and before the tree consumes it — mirrors the emergency

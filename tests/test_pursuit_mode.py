@@ -1507,8 +1507,11 @@ def test_dive_guard_never_trips_with_dive_safety_off(monkeypatch):
     assert ctrl._dive_guard_ttg_tripped is False
 
 
-def test_emergency_climb_does_not_start_inside_a_pursuit_with_dive_safety_off(monkeypatch, caplog):
+def test_emergency_climb_does_not_start_inside_a_pursuit_with_crash_recovery_off(monkeypatch, caplog):
+    """pursuit_mode.crash_recovery (2026-10-02) lets the hard emergency through with
+    dive_safety off; tests/test_pursuit_recovery.py pins that side."""
     ctrl = _make_ctrl(monkeypatch, pursuit_enabled=True, dive_safety=False)
+    ctrl._pursuit_crash_recovery = False
     ctrl._pursuing.set()
     with caplog.at_level("INFO", logger="wingman.controller"):
         ctrl.climb_mode(target_alt=5000.0, emergency=True)

@@ -653,6 +653,7 @@ SCHEMA = Section(
             "search_climb_alt_m": Leaf(types=NUMBER, minimum=0, default=0.0),
             "search_climb_max_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=30.0),
             "dive_safety": BOOL,   # operator, 2026-09-26
+            "crash_recovery": Leaf(types=(bool,), default=True),   # operator, 2026-10-02
             # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
             "icon_steering": Section(children={
                 "enabled": BOOL,

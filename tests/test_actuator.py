@@ -303,8 +303,10 @@ def test_the_climb_reevaluates_the_throttle_where_the_emergency_starts():
     src = pathlib.Path("wingman/controller.py").read_text(encoding="utf-8")
     hold = src[src.index("    def _run_climb_hold"):]
     hold = hold[:hold.index("\n    def ", 10)]
-    assert hold.count("self._climb_emergency_active = True") == 2
-    assert hold.count("_actuator.reevaluate(AFTERBURNER_KEY)") == 2
+    # Start, mid-hold escalation, and the path-below-level re-brake (2026-10-02):
+    # every place the airbrake goes on re-evaluates the throttle.
+    assert hold.count("self._climb_emergency_active = True") == 3
+    assert hold.count("_actuator.reevaluate(AFTERBURNER_KEY)") == 3
 
 
 def test_the_policy_table_is_what_may_hold_key_answers():

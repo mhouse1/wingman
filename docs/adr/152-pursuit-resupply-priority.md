@@ -410,6 +410,13 @@ pursuit steering resumed here). Every new pursuit after respawn resets urgency.
   followed by a respawn within 30 s, 20 of 28 before this change. Two tests
   added; `make lint` passed and `make test` passed with 2,597 passed and 35
   skipped.
+- **V5v. Spent, searching, and into a cliff (2026-10-02 20:20).** Missiles ran
+  out at 20:20:00.277 in a -19 deg dive at 902 m with no marker in view; the
+  search tapped nose-down and the aircraft hit terrain about 3 s later. The
+  tree had requested its emergency climb from 20:19:47 and the pursuit
+  refused it (`dive_safety` off). Fixed outside this ADR, as crash recovery
+  for the whole pursuit: [ADR 148](148-a-dive-recovery-flies-through-a-pursuit.md)
+  amendment of 2026-10-02 (`pursuit_mode.crash_recovery`).
 - **The resupply pin (operator, 2026-10-02).** "The small resupply yellow icon
   near the center of the screen behaves similar to the aircraft indicator
   icon, pointing to the general direction of the resupply icon." Measured on

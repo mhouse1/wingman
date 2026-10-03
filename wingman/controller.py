@@ -801,6 +801,11 @@ class Controller:
         # one. To be redesigned later around a predicted trajectory. The
         # altitude-floor climb (ADR 147) is untouched.
         self._pursuit_dive_safety = bool(_pm.get("dive_safety", True))
+        # Operator, 2026-10-02: that redesign. With dive_safety off, a HARD emergency
+        # (predicted time to ground; terrain ahead once out of shadow) still flies ADR 148's airbrake
+        # and nose-up recovery through the pursuit, and only while it holds.
+        self._pursuit_crash_recovery = bool(_pm.get(
+            "crash_recovery", schema_default("pursuit_mode.crash_recovery")))
         self._dive_recovery_suppressed_log_ts = 0.0
         self._search_look_down_pulse_s = float(_pm.get("search_look_down_pulse_s", 0.0))
         self._search_look_down_interval_s = float(_pm.get("search_look_down_interval_s", 1.0))
@@ -5156,7 +5161,8 @@ class Controller:
         if self._missile_evading.is_set():
             logger.info("Controller: climb suppressed — missile evade in progress")
             return
-        if self._pursuing.is_set() and not self._pursuit_dive_safety:
+        if (self._pursuing.is_set() and not self._pursuit_dive_safety
+                and not (emergency and self._pursuit_crash_recovery)):
             # Operator, 2026-09-26: the pursuit owns the airframe; a dive
             # recovery would take pitch and roll from the icons and the tracker.
             # The floor climb too (HLDD 015, 2026-09-26 18:15): inside a pursuit
@@ -5170,6 +5176,18 @@ class Controller:
                             "the airframe (pursuit_mode.dive_safety off)",
                             "dive recovery" if emergency else "climb")
             return
+        if self._pursuing.is_set() and not self._pursuit_dive_safety and emergency:
+            # The hand-back rule at the start too (2026-10-02 23:40): a fresh path at
+            # or above level overrides the tree's lagging mean, or every tick of that
+            # lag would start a hold, tap the airbrake and hand straight back.
+            _path = self._telemetry_path_angle_deg()
+            if _path is not None and _path >= 0.0:
+                now = time.time()
+                if now - self._dive_recovery_suppressed_log_ts >= 10.0:
+                    self._dive_recovery_suppressed_log_ts = now
+                    logger.info("Controller: crash recovery not started — path %+.0f deg "
+                                "is level or climbing", _path)
+                return
         exit_alt = target_alt if target_alt is not None else self._climb_exit_alt
         if exit_alt is None:
             logger.warning("Controller: climb_mode disabled — exit_above_alt unset")
@@ -5891,16 +5909,46 @@ class Controller:
                             "Controller: climb — emergency CLEARED mid-hold "
                             "(ADR 137 D9) — resuming normal fuel-floor logic")
                     emergency_now = _requested_emergency
+                # Brake only while the path points down (ADR 148 amendment,
+                # 2026-10-02). The tree's altitude is a 3-read mean, so its
+                # emergency outlives the descent: at 20:44:40 the airbrake was
+                # still held at +24 deg and the aircraft stalled at 45 kph and
+                # 143 m. At or above level the airbrake comes off and the fuel
+                # logic below may light the burner; below level it goes back on.
+                # No angle keeps the current state: at 21:32:32.7 a `Nose: n/a`
+                # read at 18 kph near vertical put the airbrake back on.
+                if last_angle is None:
+                    _braking = emergency_now and self._climb_emergency_active
+                else:
+                    _braking = emergency_now and last_angle < 0.0
+                if _braking != self._climb_emergency_active:
+                    if _braking:
+                        if ab_held:
+                            self._climb_key(AFTERBURNER_KEY, press=False)
+                            ab_held = False
+                        self._climb_key(AIRBRAKE_KEY, press=True,
+                                        action="climb_emergency")
+                        self._climb_emergency_active = True
+                        _actuator.reevaluate(AFTERBURNER_KEY)
+                        logger.info("Controller: climb — path below level again, "
+                                    "airbrake on")
+                    else:
+                        self._climb_key(AIRBRAKE_KEY, press=False,
+                                        action="climb_emergency")
+                        self._climb_emergency_active = False
+                        logger.info("Controller: climb — path %+.0f deg, at or above "
+                                    "level: airbrake released, thrust allowed",
+                                    last_angle)
                 # ADR 075 burner gate: release at the floor (a held key at 0%
                 # blocks recharge; the sustain floor keeps the evade reserve),
                 # re-press only after the rearm margin refills. ADR 137:
-                # entirely skipped in the emergency case — see above.
+                # entirely skipped while the airbrake is held — see above.
                 fuel = self._read_fuel_pct()
                 # ADR 139 D4: explicit consolidation-point call — always True
                 # today (climb has no manual-takeover check of its own; see
                 # `_may_hold_key`), kept visible so a future change to the
                 # shared gate is not silently bypassed here.
-                if (fuel is not None and not emergency_now
+                if (fuel is not None and not self._climb_emergency_active
                         and self._may_hold_key(AFTERBURNER_KEY, requester="climb")):
                     _incoming = self._incoming_now()
                     if ab_held and fuel <= fuel_floor_pct and not _incoming:
@@ -5960,11 +6008,34 @@ class Controller:
                         # it, not flying something wingman lost. Only that one case
                         # is exempt; the operator's takeover moves the state to
                         # GAME_BATTLE_MANUAL and the pursuit ends, so SAF-001 stands.
+                        # pursuit_mode.crash_recovery (operator, 2026-10-02) keeps this
+                        # with dive_safety off, for the hard emergency only. It hands
+                        # the chase back once the emergency has cleared AND the path
+                        # points up: clearing alone would return a still-falling
+                        # aircraft to a chase that dives (the latch's reason below).
                         _recovering = (_st == GameState.GAME_BATTLE_EJECT
                                        and self._pursuing.is_set()
-                                       and self._pursuit_dive_safety
+                                       and (self._pursuit_dive_safety
+                                            or self._pursuit_crash_recovery)
                                        and self._pursuit_recovery_max_s > 0
                                        and (recovery_since is not None or emergency_now))
+                        # Operator, 2026-10-02 23:40: a fresh path at or above level
+                        # hands back whatever the tree's 3-read mean still says; that
+                        # lag kept holds pulling to +90 deg at 132-245 kph. With no
+                        # angle, the cleared emergency and a climbing rate still do.
+                        _climbing_now = (last_angle >= 0.0 if last_angle is not None
+                                         else (not emergency_now and last_rate is not None
+                                               and last_rate >= 0.0))
+                        if (_recovering and recovery_since is not None
+                                and _climbing_now
+                                and not self._pursuit_dive_safety):
+                            logger.info(
+                                "Controller: climb — crash no longer predicted after "
+                                "%.1fs (path %s), handing the airframe back to the chase",
+                                time.time() - recovery_since,
+                                "n/a" if last_angle is None else "%+.0f deg" % last_angle)
+                            exit_reason = "crash_cleared"
+                            break
                         if _recovering and recovery_since is None:
                             recovery_since = time.time()
                             self._pursuit_recovery.set()
@@ -6154,7 +6225,7 @@ class Controller:
             # press of 'l' is mistaken for an echo.
             self._climb_key(NOSE_UP_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
-            if emergency_now:
+            if emergency_now or self._climb_emergency_active:
                 self._climb_key(AIRBRAKE_KEY, press=False, action="climb_emergency")
                 self._climb_emergency_active = False
             # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE
