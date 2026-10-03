@@ -315,6 +315,15 @@ changes 6 and 7 stay. Terrain ahead needs a detector that handles night maps (a 
 own brightness, or treating a uniformly dark crop as unreadable) before it actuates again; that design is the
 operator's call.
 
+**Changes 1-4, 6 and 7 live (run 00:11:36 to the operator's `z` at 01:09:50, lobby stop 01:14:00, measured).**
+1h 02m, 11 matches, 29 respawns (2.6 per match; the earlier fixed runs were 1.7 to 2.8, the 19:26 session 5.2).
+75 in-pursuit recoveries: 58 ended `crash_cleared`, none `recovery_cap` (two in the hour before change 7), 30
+starts declined on a level or climbing path. Hand-back speeds: median 321 kph (267 to 283 before change 6), 28 of
+58 still below 300. A respawn followed 24 of the 75 within 25 s (11 of 39 and 2 of 15 in earlier runs): not
+better, and not attributable, since the maps differed (this run began on the night map) and the samples are small.
+The summary's died-armed split: 4 terrain crashes, 2 enemy fire, 1 unclassified. Terrain ahead stays the open
+problem; its motion-based redesign is HLDD 001 Phase 2.
+
 **Recoveries overshoot to vertical (measured).** 23:06:07: -39 deg at 1033 kph, +12 at 700, +90 at 224 within 6 s;
 earlier hand-backs at +90 deg and 245, 177 and 175 kph. `climb.max_pitch_deg` is 80, and the 3-read mean keeps the
 emergency on after the path has turned up, so the hold keeps pulling. Proposed, not made: in crash-recovery mode,
