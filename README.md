@@ -58,8 +58,11 @@ One full match cycle:
    handles navigation, climb and disengage, and ACS chases the enemies it can
    see (see [Roadmap](#roadmap)).
 3. Incoming missile: flare bursts plus an evasive manoeuvre ([ADR 070](docs/adr/070-missile-evade-tactic.md)).
-4. Missiles empty: ACS pursuit on the secondary weapon, then an eject-and-dive
-   for a rearmed respawn.
+4. Missiles empty: ACS pursuit on the secondary weapon. With every rack empty
+   it flies to the resupply point to rearm
+   ([ADR 152](docs/adr/152-pursuit-resupply-priority.md), in live trial). The
+   eject-and-dive for a rearmed respawn remains when pursuit is off or its
+   time cap expires.
 5. Respawn detection (dual-sensor, [ADR 064](docs/adr/064-dual-sensor-respawn-detection.md)) and immediate restart the moment
    health returns.
 6. Match-end click-through and return to lobby, then the loop repeats.
@@ -78,6 +81,9 @@ mission, so the aircraft is never left flying uncommanded.
 | Incoming-missile detection (template matching with OCR fallback) and flare response ([ADR 046](docs/adr/046-incoming-template-matching-replacement.md)) | ✅ |
 | Dual-sensor respawn detection and immediate restart when health returns (ADR [064](docs/adr/064-dual-sensor-respawn-detection.md)/[059](docs/adr/059-health-gated-immediate-mission-restart.md)) | ✅ |
 | Missiles-empty eject with a telemetry-verified dive (ADR [056](docs/adr/056-game-battle-eject-fsm-state.md)/[069](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md)) | ✅ |
+| Resupply priority in pursuit: steers to the resupply point as missiles run out, and rearms instead of ejecting ([ADR 152](docs/adr/152-pursuit-resupply-priority.md)) | ⚙️ live trial |
+| Ground-crash recovery: airbrake and nose-up when altitude and descent rate predict an impact, including inside an ACS pursuit (ADR [086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md)/[137](docs/adr/137-emergency-climb-airbrake-and-crash-instrument.md)/[148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md)) | ✅ |
+| Terrain-ahead detection: a sky-occlusion check that logs only; a colour-free, motion-based replacement is designed and spiked offline ([Design 001](docs/hldd/001-terrain-avoidance-hldd.md)) | ⚙️ shadow only |
 | Metric HUD telemetry (altitude, speed, flight-path angle) feeding eject, evade and climb (ADR [038](docs/adr/038-game-battle-altitude-speed-signals-for-phase3-and-eject-dive.md)/[067](docs/adr/067-metric-hud-units-pitch-normalization-recalibration.md)) | ✅ |
 | Manual takeover at any moment, and no key ever left held on exit ([SAF-001](docs/requirements/001-safety.md), [SAF-007](docs/requirements/001-safety.md)) | ✅ |
 | Per-mission and per-session statistics, including per-engagement survival (ADR [055](docs/adr/055-mission-level-statistics-tracker.md)/[070](docs/adr/070-missile-evade-tactic.md)) | ✅ |
@@ -343,8 +349,8 @@ The behavior tree ([ADR 024](docs/adr/024-phase3-behavior-tree-architecture.md),
 
 - **Engage** — minimap ring-engage geometry: steer toward contacts, orbit when merged ([ADR 024](docs/adr/024-phase3-behavior-tree-architecture.md) 3.1a, [ADR 028](docs/adr/028-enemy-quadrant-detection-and-nose-orientation.md))
 - **MissileEvade** — evasive manoeuvre on incoming-missile detection ([ADR 070](docs/adr/070-missile-evade-tactic.md)); live sessions measure 90% vs 68% ten-second survival with the evade on (n=122 engagements)
-- **Climb** — terrain avoidance and closed-loop climb-to-operating-altitude, including the mission-start climb prologue ([ADR 073](docs/adr/073-climb-tactic-shadow-first.md))
-- **Eject** — the missiles-empty response: ACS pursuit on the secondary weapon, then an eject-and-dive to trade the empty airframe for a rearmed respawn (ADR [056](docs/adr/056-game-battle-eject-fsm-state.md)/[069](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md))
+- **Climb** — closed-loop climb-to-operating-altitude, including the mission-start climb prologue ([ADR 073](docs/adr/073-climb-tactic-shadow-first.md)), and ground-crash recovery: when altitude over descent rate predicts an impact, it holds the airbrake and pulls up, and that recovery also flies through an ACS pursuit, handing the chase back once the flight path is level ([ADR 086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md), [ADR 148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md)). Terrain ahead of the nose is detected in shadow only; [Design 001](docs/hldd/001-terrain-avoidance-hldd.md) has the motion-based redesign
+- **Eject** — the missiles-empty response: ACS pursuit on the secondary weapon, a flight to the resupply point once every rack is empty ([ADR 152](docs/adr/152-pursuit-resupply-priority.md)), and the eject-and-dive that trades an empty airframe for a rearmed respawn (ADR [056](docs/adr/056-game-battle-eject-fsm-state.md)/[069](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md))
 - **Disengage / Idle / RespawnWait** — supporting tactics and selection-only states
 
 New tactics enter through a **shadow-first pipeline** ([ADR 073](docs/adr/073-climb-tactic-shadow-first.md)): a candidate tactic first runs selection-only, logging what it *would* do against live data; only after shadow evidence holds up does it get actuation. Per-engagement survival stats (ADR [055](docs/adr/055-mission-level-statistics-tracker.md)/[070](docs/adr/070-missile-evade-tactic.md)) close the loop with A/B evidence from unattended soaks.
@@ -397,6 +403,9 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 |---|---|
 | [`docs/adr/070-missile-evade-tactic.md`](docs/adr/070-missile-evade-tactic.md) | MISSILE_EVADE_MODE tactic (d1–d13, live V5 survival evidence) |
 | [`docs/adr/073-climb-tactic-shadow-first.md`](docs/adr/073-climb-tactic-shadow-first.md) | Climb tactic and the shadow-first validation pipeline for new tactics |
+| [`docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md`](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md) | Dive recovery on predicted time to ground |
+| [`docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md`](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md) | Ground-crash recovery inside an ACS pursuit: airbrake, pull-up, hand-back, with live evidence |
+| [`docs/adr/152-pursuit-resupply-priority.md`](docs/adr/152-pursuit-resupply-priority.md) | Resupply priority in pursuit: rearm at the resupply point instead of ejecting |
 | [`docs/adr/056-game-battle-eject-fsm-state.md`](docs/adr/056-game-battle-eject-fsm-state.md) | Eject as a first-class FSM state |
 | [`docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md`](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md) | Eject descent: impulse rotation + ballistic phase |
 | [`docs/adr/059-health-gated-immediate-mission-restart.md`](docs/adr/059-health-gated-immediate-mission-restart.md) | One restart path: mission restarts when health returns |
@@ -408,6 +417,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | [`docs/hldd/011-acs-mode-hldd.md`](docs/hldd/011-acs-mode-hldd.md) | **ACS**: the airframe-independent combat layer: what exists, what is still to build |
 | [`docs/hldd/015-target-tracking-pursuit-mode-hldd.md`](docs/hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search, with rollout evidence and open questions |
 | [`docs/hldd/005-target-tracking-hldd.md`](docs/hldd/005-target-tracking-hldd.md) | ACS target tracker: finding and locking enemy nameplates on screen |
+| [`docs/hldd/001-terrain-avoidance-hldd.md`](docs/hldd/001-terrain-avoidance-hldd.md) | Terrain avoidance: the shadow sky-occlusion check, and the motion-based looming design with its offline spike |
 | [`docs/hldd/009-nested-display-isolation-hldd.md`](docs/hldd/009-nested-display-isolation-hldd.md) | Nested display lane: the four `DISPLAY` consumers and the takeover-key listener |
 | [`docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md`](docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md) | **A GPU-accelerated real-time profile** — batched GPU OCR, per-frame missile detection, and what must not regress. Design only; the CPU path stays the default |
 

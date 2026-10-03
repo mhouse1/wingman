@@ -2,7 +2,7 @@
 
 | Status | Date | Wingman Version |
 |---|---|---|
-| Active | 2026-09-27 | 1.8.11 |
+| Active | 2026-10-03 | 1.9.0 |
 
 ## Overview
 
@@ -38,11 +38,24 @@ detail:
   f111) are expected to merge into one ACS mode. Lock confirmation, the
   `BoresightEngage` leaf chosen by the jet profile, and objective selection are
   not built. See [ACS](#acs--autonomy-core-system-design-011-partly-built).
-- **ACS pursuit terrain risk** (Design 015) — dive recovery is off inside a
-  pursuit (`pursuit_mode.dive_safety: false`). In recent sessions, pursuits
-  lost more aircraft to terrain than to enemy fire. The icon push floor
-  (`icon_steering.push_floor_m`, 1500 m) is an estimate that has not been
-  measured yet.
+- **ACS pursuit terrain risk** (Design 015, ADR 148) — the dive guard is off
+  inside a pursuit (`pursuit_mode.dive_safety: false`), but since 2026-10-02
+  the ground-crash recovery flies through it (`pursuit_mode.crash_recovery`):
+  respawns per match fell from 5.2 to 1.7-2.8 over small samples. What it
+  cannot see is terrain ahead of the nose: canyon walls and mesas, which the
+  time to ground (counted from 0 m) does not predict. The sky-occlusion check
+  that could see them stays in shadow, because it reads a night sky as terrain.
+  Design 001 Phase 2 replaces it with motion-based looming; an offline spike
+  shows the signal but not yet a usable false-alarm rate. Recoveries also end
+  slow (half of the hand-backs below 300 kph), which costs aircraft to
+  missiles. The icon push floor (`icon_steering.push_floor_m`, 1500 m) is an
+  estimate that has not been measured yet.
+- **Resupply in pursuit** (ADR 152, Draft) — actuated and in live trial. With
+  no marker or pin detected and no pursuit time cap, an empty aircraft
+  searches until a respawn. The resupply point sits near terrain.
+- **Takeover-key listener watchdog** (SAF-001) — on 2026-10-02 the `:3`
+  listener was judged deaf, restarted, and stayed silent for the rest of a
+  50-minute session (ADR 148, "Found, not changed"). Not fixed.
 - **ACS pursuit and the arena edge** (Design 015, open question 3) — no
   behavior-tree tactic acts inside `GAME_BATTLE_EJECT` except Climb's
   emergency, and pursuits have no time cap. A long search is therefore not
@@ -75,7 +88,7 @@ flowchart LR
 | `capture.py` | Screen capture. `mss` on Windows; PipeWire screencast via the desktop portal on Linux Wayland, with xwininfo game-window auto-detect and offset correction. No logic. |
 | `crop_region.py` | `CropCoords` (fractions of the frame, 0.0–1.0) and helpers. No internal imports. |
 | `analyzer.py` | Perception: parallel EasyOCR, incoming template matching (ADR 046), FSM ownership, dual-sensor respawn detection (ADR 064), health confirmation filter (ADR 063), startup classification (ADR 042), result caches. No input. |
-| `telemetry.py` | Altitude/speed OCR signals with plausibility filtering and flight-path angle (ADR 038/067, metric units). |
+| `telemetry.py` | Altitude/speed OCR signals with plausibility filtering and flight-path angle (ADR 038/067, metric units). The altitude gate is an absolute rate ceiling (ADR 097) with digit-drop rejection (ADR 150); a gap caused only by rejected reads keeps its anchor, so the descent rate survives one misread (ADR 148). |
 | `controller.py` | Actuation: keyboard/mouse via XTest (Linux) or `keyboard` (Windows), missions, eject descent control (ADR 069), missile evade hold (ADR 070), cruise afterburner (ADR 134), hotkeys, key-release guarantees (SAF-007). No perception. |
 | `controller_config.py` | Typed frozen-dataclass constructor parameters for `Controller` — `from_config` is the single place mapping a `config.yaml` block to a controller setting. |
 | `config_schema.py` | Declarative schema and startup validation for `config.yaml`: rejects an unknown key, a wrong type, an out-of-range value or a missing required key before the process starts. |
@@ -340,6 +353,10 @@ accepts an `update_fn(snapshot)` (ADR 137 D9), called on every tick a tactic
 is already `RUNNING` (never on the same tick as `start_fn`) — the channel
 Climb uses to react to a mid-hold emergency escalation or de-escalation
 instead of only ever seeing the value frozen in at selection time.
+`BehaviorTreeHandler._push_climb_emergency` pushes the same hard verdict into a
+running climb hold on every tick whatever leaf is selected (ADR 148): once
+another leaf won, `update_fn` stopped running and a hold kept a stale
+emergency to its cap.
 
 A sibling gap on the other side of the same flag: BoundaryTurn's
 `yields_to_fn` reads `ClimbCondition.emergency_active`, but py-trees never
@@ -364,7 +381,7 @@ outside the one gap it closes.
 | BoundaryTurn *(opt-in)* | aircraft approaching the map edge (hue-based boundary detector), release hysteresis on distance recovered; yields to Climb's emergency band | banked turn away from the edge (ADR 107) |
 | Evade | health threshold — unset, selection-only | none (uncalibrated; `ConditionTactic` never gets a `start_fn`) |
 | Disengage | all rings empty 30 s (MinimumHold) | `disengage_roll_right` |
-| Climb *(opt-in)* | altitude below the emergency band, or predicted time-to-ground short, or (ADR 075) armed sustain band while missiles remain | `climb_mode` (ADR 073/086/075) |
+| Climb *(opt-in)* | altitude below the emergency band, or predicted time-to-ground short, or (ADR 075) armed sustain band while missiles remain. Terrain ahead (Design 001) is computed and logged but in shadow, so it does not select | `climb_mode` (ADR 073/086/075); the hard emergency also flies inside a pursuit (ADR 148) |
 | Engage | any minimap ring occupied | ring-engage geometry (`engage_nav.py`) |
 | Regroup *(opt-in)* | friendly icons visible and no enemy (ADR 028 rev 4) | steer to the aggregate friendly centroid |
 | AttackSupport | always | fallback |
@@ -479,7 +496,7 @@ and stall prevention still re-press every tick, which now only renews their leas
 | Owner | Kind | Yields to | Holds over | Source |
 |---|---|---|---|---|
 | `stall_prevention` | per-tick reflex | manual takeover | the emergency airbrake: releases it | operator directive |
-| `climb_emergency` | climb hold, emergency only | stall prevention | cruise and the afterburner evade, which yield to it | ADR 137 |
+| `climb_emergency` | climb hold, emergency only, and only while the flight path is below level: at or above level it is released and thrust is allowed; a missing angle keeps the current state | stall prevention | cruise and the afterburner evade, which yield to it | ADR 137, ADR 148 |
 
 **Pitch, `NOSE_UP_KEY` and `NOSE_DOWN_KEY`.**
 
@@ -488,7 +505,7 @@ and stall prevention still re-press every tick, which now only renews their leas
 | `eject_and_dive` | eject sequence | nothing; every tactic below refuses to start during an eject | ADR 056, ADR 070 d11 |
 | `missile_evade` | tactic hold (the pitch_down variant) | eject | ADR 070 d13 |
 | `boundary` | tactic hold | eject, missile evade, the turn guard (ADR 132) | ADR 107 |
-| `climb` | tactic hold | eject, missile evade, a running pursuit unless `pursuit_mode.dive_safety`; a hard emergency inside a pursuit flies through and the pursuit yields, capped | ADR 073, ADR 148 |
+| `climb` | tactic hold | eject, missile evade, a running pursuit unless `pursuit_mode.dive_safety`; a hard emergency inside a pursuit flies through and the pursuit yields (`pursuit_mode.crash_recovery`), until a fresh flight path is level or climbing, capped by `recovery_max_s` | ADR 073, ADR 148 |
 | `spawn_guard` | tactic hold from death to hand-off | a running climb hold, which owns the pitch key | ADR 076 |
 | `tracking_pitch` | pursuit tracking hold | stopped with the mission on cancel | HLDD 005 |
 | mission steps (`nose_up`, `nose_down` verbs) | mission scripts | refused in manual; a mission cancel | ADR 144, ADR 149, ADR 109 |
@@ -583,15 +600,36 @@ pulls, since a bank without a pull does not turn the flight path (ADR 101).
 The push is withheld below `push_floor_m` and without a fresh altitude and
 flight-path angle.
 
-**The pursuit owns the airframe.** With `dive_safety` off (shipped),
-`climb_mode` refuses every climb and `_climb_exit_push` presses nothing while
-a pursuit flies. At start, the pursuit stops a running boundary turn or climb.
-The keyboard library keeps one state per key, not one per tactic, so another
-tactic's key release would otherwise drop a key the pursuit is holding.
+**The pursuit owns the airframe, except for a predicted crash.** With
+`dive_safety` off (shipped), `climb_mode` refuses the floor and sustain climbs
+and `_climb_exit_push` presses nothing while a pursuit flies. At start, the
+pursuit stops a running boundary turn or climb. The keyboard library keeps one
+state per key, not one per tactic, so another tactic's key release would
+otherwise drop a key the pursuit is holding.
 
-**Termination (Design 015 D3).** When the secondary weapon is confirmed empty,
-or `pursuit_max_duration_s` elapses (shipped `0`, meaning no cap), the pursuit
-falls through to `eject_and_dive`. A respawn, manual takeover or shutdown
+**Crash recovery (ADR 148, `pursuit_mode.crash_recovery`, shipped on).** The
+tree's hard emergency (time to ground from altitude over descent rate) still
+starts `climb_mode(emergency=True)` inside a pursuit. The hold flies through
+`GAME_BATTLE_EJECT`, sets the `recovery` rung so the pursuit, the resupply
+search and its look-down taps write neither axis, holds the airbrake while the
+path is below level, and hands back at the first fresh flight-path angle at or
+above level, whatever the tree's lagging altitude mean still says. The same
+rule stops a recovery from starting on a level or climbing path.
+`recovery_max_s` caps it.
+
+**Resupply priority (ADR 152, Draft, actuated).** The pursuit counts confirmed
+missiles spent per rack. From two spent, a yellow resupply marker in the
+acquisition region competes with a visible target for the steering; with every
+rack empty the pursuit is in resupply mode: firing stops, targets are ignored,
+and it steers at the marker, or by the resupply pin on the indicator ring, or
+flies the search when neither is in view. A confirmed rearm ends it with a
+short nose-up hold (`rearm_climb_s`) and ordinary pursuit resumes.
+
+**Termination (Design 015 D3).** When `pursuit_max_duration_s` elapses
+(shipped `0`, meaning no cap), the pursuit falls through to `eject_and_dive`.
+A confirmed-empty secondary weapon does the same only while
+`resupply_priority.actuate` is off; with it on (shipped), the empty pursuit
+stays in resupply mode instead. A respawn, manual takeover or shutdown
 (`_eject_stop`) stops it at once with no fall-through.
 
 ---
@@ -807,7 +845,7 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `loiter_mission` | Survival hold: `target_alt`, hysteresis, orbit cadence and hold |
 | `jet_profile` | ACS (Design 011): the active airframe profile and its `has_padlock`, meaning whether the jet uses the padlock to fire. Read at startup; nothing branches on it yet |
 | `tracking` | ACS target tracker (Design 005): acquisition region, HUD exclusion zones, nameplate cluster gates, roll and pitch gains. `actuate: false` keeps it sensing only in normal battle. `battle_priority_shadow` logs `BATTLEPRI:` |
-| `pursuit_mode` | ACS pursuit (Design 015): `enabled`, `pursuit_max_duration_s` (0 = no cap), steering and engage cadences, search-resume delays, ammo confirmation, `dive_safety`, and the `icon_steering` block |
+| `pursuit_mode` | ACS pursuit (Design 015): `enabled`, `pursuit_max_duration_s` (0 = no cap), steering and engage cadences, search-resume delays, ammo confirmation, `dive_safety`, `crash_recovery` and `recovery_max_s` (ADR 148), the `resupply_priority` block (ADR 152), and the `icon_steering` block |
 | `su30_mission`, `f111_mission`, `jas39_mission` | Per-jet mission scripts (interim, see Per-jet missions): climb and nose-angle numbers, `yield_to_target` (su30), wing sweep (f111), cloak interval (jas39) |
 | `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `su30` (shipped), `j20`, `jas39` or `f111` (ADR 145) |
 | `hud` | Live HUD snapshot output path and archive |
@@ -873,8 +911,12 @@ AMMO_MISSILE OCR reads 0 (debounced: consecutive confirmations + grace windows)
   → FSM: GAME_BATTLE → GAME_BATTLE_EJECT (eject_started)
   → pursuit_mode.enabled (shipped): pursue_and_engage (Design 015)
       → switch to the secondary weapon, chase on both axes (see ACS, Pursuit)
-      → secondary confirmed empty → falls through to eject_and_dive
-  → otherwise, or on that fall-through: eject_and_dive
+      → every rack confirmed empty → resupply mode (ADR 152): fly to the
+        resupply point, rearm, resume the chase
+      → a predicted crash at any point → crash recovery (ADR 148), then the
+        chase resumes
+      → pursuit time cap (shipped 0, none) → falls through to eject_and_dive
+  → pursuit off, or on that fall-through: eject_and_dive
   → descent control (ADR 069): impulse rotations → dive confirmed → ballistic,
     afterburner gated on descending flight
   → respawn detected (overlay OCR, or health evidence after an observed death)
@@ -1043,10 +1085,12 @@ held afterburner and pitch key, and the operator could not fly.
 | [145](adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md) | mission_jas39 (J20 plus cloak); `u` launches the configured mission |
 | [146](adr/146-generic-close-button-recovery-for-stuck-game-unknown.md) | Generic close-button recovery for a stuck GAME_UNKNOWN |
 | [147](adr/147-mission-su30-flies-its-own-altitude-doctrine.md) | mission_su30 flies its own altitude doctrine |
-| [148](adr/148-a-dive-recovery-flies-through-a-pursuit.md) | A dive recovery flies through a pursuit |
+| [148](adr/148-a-dive-recovery-flies-through-a-pursuit.md) | A dive recovery flies through a pursuit; the 2026-10-02 crash-recovery amendments |
 | [149](adr/149-mission-f111-su30-plus-wing-sweep.md) | mission_f111: the Su-30 script plus the F-111 wing sweep |
 | [150](adr/150-reject-digit-dropped-altitude-reads.md) | Reject digit-dropped altitude reads |
 | [151](adr/151-one-actuator-and-throttle-leases.md) | One Actuator, and leases for the throttle (CR-018-09) |
+| [152](adr/152-pursuit-resupply-priority.md) | Escalating resupply priority in pursuit mode |
+| [Design 001](hldd/001-terrain-avoidance-hldd.md) | Terrain avoidance: shadow sky-occlusion check, and the Phase 2 motion-based looming design |
 | [Design 011](hldd/011-acs-mode-hldd.md) | ACS: the airframe-independent combat layer |
 | [Design 015](hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search |
 
