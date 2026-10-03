@@ -48,7 +48,6 @@ Useful additional checks:
 ```bash
 make test1
 make test2
-make test-perf
 ```
 
 If your change touches OCR, mission timing, or controller input, include:

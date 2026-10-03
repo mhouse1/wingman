@@ -1516,6 +1516,26 @@ class TestUnknownAnomalyRecorder:
         cfg.update(cfg_overrides)
         return UnknownAnomalyRecorder(cfg, clock=clock)
 
+    def test_the_shipped_config_captures_a_stuck_screen(self, tmp_path):
+        """2026-10-03 07:41: wingman sat on the game's Invite Players screen
+        for five minutes and saved nothing, because config.yaml had carried
+        max_per_episode: 0 since 2026-09-21. The recorder logged "screenshot
+        cap 0 reached" and the only picture was one grabbed by hand."""
+        import yaml
+        from pathlib import Path
+        from wingman.tick_handlers import UnknownAnomalyRecorder
+        shipped = yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / "wingman" / "config.yaml").read_text(
+                encoding="utf-8"))["unknown_anomaly"]
+        assert shipped["max_per_episode"] >= 1
+        now = [1000.0]
+        recorder = UnknownAnomalyRecorder(dict(shipped, dir=str(tmp_path)),
+                                          clock=lambda: now[0])
+        recorder.tick(self._frame(), GameState.GAME_UNKNOWN)
+        now[0] += float(shipped["screenshot_after_s"]) + 1.0
+        recorder.tick(self._frame(), GameState.GAME_UNKNOWN)
+        assert len(list(tmp_path.glob("*.png"))) == 1
+
     @staticmethod
     def _frame():
         import numpy as np

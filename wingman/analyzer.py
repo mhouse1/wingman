@@ -4281,19 +4281,33 @@ class GameStateAnalyzer:
         not here — this method is instrumentation only, same division of
         responsibility as `detect_map_boundary`.
         """
-        if self.crops is None or "TERRAIN_FORWARD" not in self.crops:
-            return None
         try:
-            crop = get_crop(frame, *self.crops["TERRAIN_FORWARD"][:4])
-            if crop.size == 0:
+            mask = self.terrain_sky_mask(frame)
+            if mask is None:
                 return None
-            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(
-                hsv, self._terrain_sky_hsv_lower, self._terrain_sky_hsv_upper)
             return float(np.count_nonzero(mask)) / float(mask.size)
         except Exception as e:
             logger.warning("Analyzer: detect_terrain_ahead failed: %s", e)
             return None
+
+    def terrain_sky_mask(self, frame) -> "np.ndarray | None":
+        """The sky-like pixels of the TERRAIN_FORWARD crop, as a 0/255 mask.
+
+        The one place the sky test is computed: `detect_terrain_ahead` takes
+        its fraction from this mask and the live HUD tints the same pixels
+        (HLDD 001 Phase 1, "Overlay"), so what the operator sees is what the
+        detector counted. None when the crop is missing or empty. Raises on
+        a bad frame; callers own the handling. Reads only its argument and
+        startup config, so the HUD's render thread may call it.
+        """
+        if self.crops is None or "TERRAIN_FORWARD" not in self.crops:
+            return None
+        crop = get_crop(frame, *self.crops["TERRAIN_FORWARD"][:4])
+        if crop.size == 0:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        return cv2.inRange(
+            hsv, self._terrain_sky_hsv_lower, self._terrain_sky_hsv_upper)
 
     def detect_return_to_battle(self, frame) -> bool:
         """True while the RETURN TO BATTLE banner is on screen (Design 010).

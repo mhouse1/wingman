@@ -532,6 +532,55 @@ SCHEMA = Section(
         "terrain_avoidance": Section(children={
             "crop": STR,
             "sky_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
+            # HLDD 001 Phase 2 — looming from frame-to-frame motion. Shadow
+            # only: it measures, logs and draws; nothing reads it to actuate.
+            # Defaults are the values scripts/terrain-loom-spike.py measured.
+            "loom": Section(children={
+                "enabled": Leaf(types=(bool,), default=False),
+                "pair_interval_s": Leaf(types=NUMBER, minimum=0.02, maximum=0.5,
+                                        default=0.12),
+                # The game sometimes holds one picture for longer than the
+                # pair interval. How long to wait for it to change before
+                # calling the pair same-frame; 0 never waits.
+                "same_frame_wait_s": Leaf(types=NUMBER, minimum=0, maximum=1.0,
+                                          default=0.25),
+                # Readings per tick, from consecutive frames (N pairs take
+                # N+1 grabs). More than one lets the confirm streak complete
+                # inside a tick instead of across several.
+                "pairs_per_tick": Leaf(types=(int,), minimum=1, maximum=6, default=1),
+                "min_points": Leaf(types=(int,), minimum=4, default=25),
+                "tau_warn_s": Leaf(types=NUMBER, minimum=0, default=8.0),
+                "confirm_pairs": Leaf(types=(int,), minimum=1, default=3),
+                "view_pct": Leaf(types=(list,), item_types=NUMBER, length=4,
+                                 default=[0.20, 0.12, 0.80, 0.60]),
+                "path_box_pct": Leaf(types=(list,), item_types=NUMBER, length=4,
+                                     default=[0.38, 0.30, 0.62, 0.62]),
+                # In a descent the flight path is below where the camera
+                # points, so the picture expands from below the box, often
+                # from below the frame. True counts everything under the
+                # box's top edge, within its width, as on course.
+                "path_open_below": Leaf(types=(bool,), default=True),
+                # HUD strokes by colour: nameplates, markers and the lock
+                # circle move, so the learned static-edge mask misses them.
+                # Ranges measured on 85 frames, 2026-10-03 (HLDD 001 Phase 2).
+                # Red wraps the hue circle, so it takes two ranges.
+                "hud_mask": Section(children={
+                    "enabled": Leaf(types=(bool,), default=True),
+                    "margin_px": Leaf(types=(int,), minimum=0, maximum=31, default=3),
+                    "red_lower": Leaf(types=(list,), item_types=(int,), length=3,
+                                      default=[0, 150, 190]),
+                    "red_upper": Leaf(types=(list,), item_types=(int,), length=3,
+                                      default=[7, 255, 255]),
+                    "red_wrap_lower": Leaf(types=(list,), item_types=(int,), length=3,
+                                           default=[174, 150, 190]),
+                    "red_wrap_upper": Leaf(types=(list,), item_types=(int,), length=3,
+                                           default=[179, 255, 255]),
+                    "green_lower": Leaf(types=(list,), item_types=(int,), length=3,
+                                        default=[50, 70, 195]),
+                    "green_upper": Leaf(types=(list,), item_types=(int,), length=3,
+                                        default=[65, 255, 255]),
+                }),
+            }),
         }),
 
         "tracking": Section(children={

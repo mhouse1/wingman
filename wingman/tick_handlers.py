@@ -28,6 +28,7 @@ import time
 from . import capture_budget
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
+from .terrain_loom import fmt_tau, fmt_taus
 from .behavior_tree import (
     TACTIC_ATTACK_SUPPORT,
     TACTIC_CLIMB,
@@ -126,6 +127,17 @@ def _fmt_incoming_age(since_incoming: float) -> str:
 def _fmt_rate(rate) -> str:
     """Altitude rate for the BT log line, or why it is missing (ADR 086 d2)."""
     return "n/a" if rate is None else f"{rate:+.0f}m/s"
+
+
+def _fmt_sky(sky_frac) -> str:
+    """Forward sky fraction for the BT log line (HLDD 001 Phase 1).
+
+    Logged every tick for the same reason as ttg below: TERRAIN AHEAD is
+    written only on its rising edge, so the log could not say how often the
+    reading sat under the threshold, or at what altitude. "n/a" is a tick
+    that took no reading (not in battle, or padlock not confirmed off).
+    """
+    return "n/a" if sky_frac is None else f"{sky_frac:.2f}"
 
 
 def _fmt_ttg(alt, rate) -> str:
@@ -1874,6 +1886,18 @@ class BehaviorTreeHandler:
         self._terrain_capture_dir = str(
             _terrain_capture_cfg.get("capture_dir", "test_screenshots/terrain_ahead"))
         self._terrain_captures = 0
+        # HLDD 001 Phase 1 overlay: the live HUD shows this trigger's reading.
+        # Wired late by set_hud_renderer(); None means no HUD.
+        self._hud = None
+        # HLDD 001 Phase 2 (shadow): the looming measurement and the grab it
+        # needs for its second frame. Both None until set_terrain_loom().
+        self._loom = None
+        self._loom_grab_fn = None
+        self._terrain_hud_cfg = (
+            bool(_terrain_capture_cfg.get("enabled", False)),
+            float(_terrain_capture_cfg.get("sky_min_frac", 0.55)),
+            bool(_terrain_capture_cfg.get("shadow", True)),
+        )
         self._climb_shadow_active = False
         self._climb_shadow_since = 0.0
         self._climb_band = (climb_cfg.get("enter_below_alt"),
@@ -1950,6 +1974,123 @@ class BehaviorTreeHandler:
                 self._tree, "climb_emergency_update_fn", None)
             self._climb_terrain_ahead_fn = getattr(
                 self._tree, "climb_terrain_ahead_fn", None)
+
+    def set_hud_renderer(self, hud_renderer) -> None:
+        """Wire in the HudRenderer so live_hud.png shows the terrain reading.
+
+        HLDD 001 Phase 1, "Overlay". Late-bound like Controller's own
+        set_hud_renderer: main builds the renderer before this handler. The
+        overlay stays off when the trigger is disabled or the crop is absent.
+        """
+        self._hud = hud_renderer
+        enabled, sky_min_frac, shadow = self._terrain_hud_cfg
+        crops = getattr(self._analyzer, "crops", None) or {}
+        if hud_renderer is None or not enabled or "TERRAIN_FORWARD" not in crops:
+            return
+        hud_renderer.set_terrain_source(
+            self._analyzer.terrain_sky_mask, crops["TERRAIN_FORWARD"],
+            sky_min_frac, shadow)
+
+    def set_terrain_loom(self, loom, grab_fn) -> None:
+        """Wire in the Phase 2 looming measurement (HLDD 001, shadow only).
+
+        `grab_fn` returns a fresh frame on the main-loop thread. Live runs
+        only: a replay capture would hand out its next scripted screenshot,
+        so main does not wire this in replay or capture mode.
+        """
+        self._loom = loom if loom is not None and loom.enabled else None
+        self._loom_grab_fn = grab_fn
+        if self._hud is not None and self._loom is not None:
+            self._hud.set_loom_source(self._loom.path_box_pct, self._loom.tau_warn_s,
+                                      self._loom.path_open_below)
+
+    def _grab_loom_timed(self):
+        """One grab and the time at its midpoint."""
+        t0 = time.monotonic()
+        frame = self._loom_grab_fn()
+        return frame, (t0 + time.monotonic()) / 2
+
+    def _grab_loom_pairs(self, count: int):
+        """([(first, second, seconds between them), ...], seconds spent waiting
+        on a frozen picture). Up to `count` pairs from consecutive frames, so
+        `count` pairs cost `count` + 1 grabs. Stops early when a grab fails.
+
+        The game sometimes holds one picture for longer than the pair
+        interval (measured 2026-10-03: 20 percent of pairs, frozen 0.13 to
+        0.17 s). When the next grab shows the same view, wait for the
+        picture to change and start that pair again from the changed frame:
+        the moment of change is observed, so the interval stays known.
+        Stretching the pair would not do, because how long the first picture
+        had already been on screen is unknown. The wait is budgeted per
+        tick (`same_frame_wait_s`). A view that never changes (a static
+        screen) is returned as it is and reads `same-frame`.
+        """
+        interval = self._loom.pair_interval_s
+        budget = self._loom.same_frame_wait_s
+        waited = 0.0
+        pairs = []
+        anchor, t_anchor = self._grab_loom_timed()
+        while anchor is not None and len(pairs) < count:
+            time.sleep(interval)
+            nxt, t_nxt = self._grab_loom_timed()
+            if nxt is None:
+                break
+            if self._loom.same_view(anchor, nxt) and waited < budget:
+                wait_started = time.monotonic()
+                changed = None
+                while time.monotonic() - wait_started < budget - waited:
+                    time.sleep(0.02)
+                    probe, t_probe = self._grab_loom_timed()
+                    if probe is None:
+                        break
+                    if not self._loom.same_view(nxt, probe):
+                        changed = (probe, t_probe)
+                        break
+                waited += time.monotonic() - wait_started
+                if changed is not None:
+                    anchor, t_anchor = changed
+                    time.sleep(interval)
+                    nxt, t_nxt = self._grab_loom_timed()
+                    if nxt is None:
+                        break
+            pairs.append((anchor, nxt, t_nxt - t_anchor))
+            anchor, t_anchor = nxt, t_nxt
+        return pairs, waited
+
+    def _measure_loom(self, current_game_state):
+        """This tick's looming readings, in order; empty when none was taken.
+
+        Grabs its own frames `pair_interval_s` apart: the tick's frame is up
+        to a tick old by now and the next one is 1.5 s away, too far apart to
+        track (HLDD 001 Phase 2, "Frames"). `pairs_per_tick` readings come
+        from consecutive frames. Same gates as the sky test: a battle state,
+        and the padlock camera confirmed off (ADR 142).
+        """
+        if (self._loom is None or self._loom_grab_fn is None
+                or current_game_state not in _BATTLE_STATES
+                or self._ctrl.padlock_state() is not False):
+            return []
+        readings = []
+        try:
+            started = time.monotonic()
+            pairs, waited = self._grab_loom_pairs(self._loom.pairs_per_tick)
+            for k, (first, second, dt) in enumerate(pairs, start=1):
+                reading = self._loom.measure(first, second, dt)
+                readings.append(reading)
+                logger.debug(
+                    "LOOM: pair=%d/%d status=%s dt=%.3fs scale=%s tau=%s on_course=%s "
+                    "pts=%d/%d fixed=%s hud=%.1f%% waited=%.0fms cost=%.0fms",
+                    k, len(pairs), reading.status, reading.dt,
+                    "n/a" if reading.scale is None else f"{reading.scale:.4f}",
+                    fmt_tau(reading), reading.on_course, reading.inliers,
+                    reading.tracked,
+                    "n/a" if reading.fixed is None
+                    else f"({reading.fixed[0]:.0f},{reading.fixed[1]:.0f})",
+                    100.0 * reading.hud_frac, waited * 1000.0,
+                    (time.monotonic() - started) * 1000.0)
+        except Exception as exc:
+            log_suppressed(logger, "terrain_loom", exc)
+        return readings
 
     def _capture_terrain_frame(self, frame, now: "float | None" = None) -> None:
         """Save the tick's frame at a terrain-ahead FALSE->TRUE edge.
@@ -2301,6 +2442,9 @@ class BehaviorTreeHandler:
             if terrain_ahead_now and not self._terrain_ahead_prev:
                 self._capture_terrain_frame(frame, now)
             self._terrain_ahead_prev = terrain_ahead_now
+        if self._hud is not None and current_game_state in _BATTLE_STATES:
+            self._hud.set_terrain_reading(
+                _terrain_sky_frac, self._terrain_ahead_prev, now)
         self._tree.tick()
         selection = selected_tactic(self._tree)
         if selection != self._last_selection:
@@ -2316,13 +2460,27 @@ class BehaviorTreeHandler:
                 self._trace_writer.record(self._last_selection, selection,
                                           tree_status_dict(self._tree))
             self._last_selection = selection
+        # HLDD 001 Phase 2 (shadow): measured after the tree has acted, so the
+        # two grabs it waits between never delay this tick's decision.
+        loom_readings = self._measure_loom(current_game_state)
+        if self._loom is not None:
+            # Each reading advances the confirm streak in order; a tick with
+            # none resets it, once.
+            loom_warn = False
+            for loom_reading in loom_readings or [None]:
+                loom_warn = self._loom.update(loom_reading) or loom_warn
+            if self._hud is not None and current_game_state in _BATTLE_STATES:
+                self._hud.set_loom_reading(
+                    loom_readings[-1] if loom_readings else None, loom_warn, time.time())
         logger.debug(
             "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
-            "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s padlock=%s",
+            "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s padlock=%s "
+            "sky=%s tau=%s",
             self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
             snap.ring_long, absent_s, snap.is_respawning, altitude,
             _fmt_rate(altitude_rate), _fmt_ttg(altitude, altitude_rate),
             snap.fuel_pct, snap.mission_running, self._ctrl.padlock_state(),
+            _fmt_sky(snap.terrain_sky_frac), fmt_taus(loom_readings),
         )
         if self._climb_shadow is not None:
             # Outside GAME_BATTLE the Idle leaf would own selection, and the

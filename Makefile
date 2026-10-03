@@ -5,11 +5,8 @@
 #   make test2       -> run region 9 INCO-text OCR test
 #   make docker-test -> run make test in the Docker image (own Xvfb display, no host X needed)
 #   make docker-shell -> interactive shell in that image
-#   make test-perf   -> run tests + generate CSV + chart
 #   make tp              -> run fast preview (tests + ADR044/ADR045 runtime gates + charts)
 #   make tp-full         -> run full preview (tp + ADR037 PATH1/PATH2 OCR lane)
-#   make test-perf-csv   -> generate performance CSV from local history
-#   make test-perf-chart -> generate performance visualization chart
 #   make runtime-perf-csv-release -> generate runtime release aggregate CSV
 #   make runtime-perf-csv-preview -> generate runtime preview aggregate CSV
 #   make runtime-perf-release -> generate runtime release chart artifacts
@@ -17,7 +14,7 @@
 #   make report      -> run tests and generate HTML report
 #   make session-report -> one-page report on wingman.log (or LOG=logs/<file>); alias: make sr
 #   make clean       -> remove test output and screenshots
-#   make wrelease    -> record performance.json locally and commit with current version
+#   make wrelease    -> promote the runtime baseline and commit with current version
 #   make status      -> git status
 #   make diff        -> git diff
 #   make commit      -> commit all changes with a default message
@@ -45,7 +42,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -171,7 +168,12 @@ TEST_EXCLUDED_FILES := \
 	tests/test_stall_crops_ocr.py \
 	tests/test_telemetry_corpus.py
 
+# Runs on a private Xvfb like the gate lanes (scripts/gate-display.sh, ADR 153):
+# the session-end key release in tests/conftest.py injects through XTest, which
+# raises a portal dialog on the GNOME 50 session display.
+# WINGMAN_GATE_DISPLAY=real runs the suite on the session display instead.
 test:
+	. scripts/gate-display.sh; \
 	$(PYTEST_RUN) tests/ $(addprefix --ignore=,$(TEST_EXCLUDED_FILES)) --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
@@ -222,18 +224,9 @@ docker-test: docker-build
 docker-shell: docker-build
 	$(DOCKER_RUN) -it $(DOCKER_IMAGE) bash
 
-# Performance reports are generated on veda only (ADR 100 D8): both histories
-# they read - tests/perf-history/ and docs/performance/release/ - are untracked
-# and exist nowhere else, so these targets carry require-veda.
-
-# Generate CSV with performance trends from the local history
-# (tests/perf-history/, untracked - lives on veda only)
-test-perf-csv: require-veda
-	$(PYTHON_RUN) tests/performance_tracking.py --csv
-
-# Generate HTML visualization of performance trends
-test-perf-chart: require-veda
-	$(PYTHON_RUN) tests/performance_tracking.py --chart
+# Performance reports are generated on veda only (ADR 100 D8): the history they
+# read - docs/performance/release/ - is untracked and exists nowhere else, so
+# these targets carry require-veda.
 
 # Generate runtime aggregate CSV from release run_*.json
 runtime-perf-csv-release: require-veda
@@ -250,16 +243,6 @@ runtime-perf-release: require-veda
 # Generate runtime preview artifacts (preview CSV + preview chart)
 runtime-perf-preview: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --all
-
-# Run full workflow: test → CSV → chart
-# performance.json is not tracked in git; `make wrelease` appends it to the local
-# history in tests/perf-history/. View trends in tests/test-output/performance-trends.html
-test-perf: require-veda test test-perf-csv test-perf-chart
-	@echo ""
-	@echo "✅ Performance test complete!"
-	@echo "📊 View trends: tests/test-output/performance-trends.html"
-	@echo "📈 CSV data: tests/test-output/performance-history.csv"
-	@echo ""
 
 # Preview performance trends including current uncommitted data
 # Includes ADR044 PATH1 runtime replay gate and ADR045 live-screen gate.
@@ -322,12 +305,9 @@ require-veda:
 	fi
 
 tp: require-veda $(TP_GATES)
-	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
 	@echo "✅ Performance preview complete (lint + test + ADR044/ADR045 runtime gates + runtime metrics)!"
-	@echo "📊 View trends: tests/test-output/performance-trends.html"
-	@echo "📈 CSV data: tests/test-output/performance-history.csv"
 	@echo "📊 Runtime preview: docs/performance/runtime-performance-trends.preview.html"
 	@echo "📈 Runtime CSV: docs/performance/current/runtime-performance-preview.csv"
 	@echo ""
@@ -337,12 +317,9 @@ tp: require-veda $(TP_GATES)
 
 # Full preview including ADR037 PATH1/PATH2 real-OCR integration tests.
 tp-full: require-veda $(TP_GATES) ocr
-	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
 	@echo "✅ Full performance preview complete (test + ADR037 + ADR044/ADR045 runtime gates + runtime metrics)!"
-	@echo "📊 View trends: tests/test-output/performance-trends.html"
-	@echo "📈 CSV data: tests/test-output/performance-history.csv"
 	@echo "📊 Runtime preview: docs/performance/runtime-performance-trends.preview.html"
 	@echo "📈 Runtime CSV: docs/performance/current/runtime-performance-preview.csv"
 	@echo ""
@@ -365,11 +342,9 @@ clean:
 	rm -f tests/test-output/*.png
 	rm -rf test_screenshots
 
-# Record performance.json to the local history, commit the version, then regenerate charts
-# Assumes you've already updated the version in wingman/main.py and ran make test-perf or make tp,
-# otherwise performance.json won't reflect the latest changes. The test-performance history is
-# local-only (tests/perf-history/, untracked) - it is never committed. The runtime
-# baseline in docs/performance/release/ is local to veda as well (ADR 100 D8):
+# Promote the runtime baseline, commit the version, then regenerate the runtime chart
+# Assumes you've already updated the version in wingman/main.py and ran make tp.
+# The runtime baseline in docs/performance/release/ is local to veda (ADR 100 D8):
 # wrelease promotes current/ into it but never stages it.
 # once you ran wrelease you can then run make p to push the commit with the new version to GitHub
 wrelease: require-veda
@@ -395,7 +370,6 @@ wrelease: require-veda
 			exit 1; \
 		fi; \
 	fi
-	$(PYTHON_RUN) tests/performance_tracking.py --record
 	git add wingman/main.py
 	mkdir -p docs/performance/release
 	cp docs/performance/current/run_*.json docs/performance/release/ 2>/dev/null; true
@@ -405,7 +379,6 @@ wrelease: require-veda
 	test -n "$$version" || (echo "Could not parse WINGMAN_VERSION from wingman/main.py" && exit 1); \
 	test -n "$$details" || (echo "Could not parse WINGMAN_VERSION_DETAILS from wingman/main.py" && exit 1); \
 	git diff --cached --quiet && echo "No staged changes to commit" || git commit -m "v$${version}: $${details}"
-	@$(MAKE) test-perf-chart
 	@$(MAKE) runtime-perf-release
 	@echo ""
 	@echo "✅ Version committed and charts updated!"

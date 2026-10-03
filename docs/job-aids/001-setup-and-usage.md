@@ -86,7 +86,6 @@ Common commands:
 make test
 make test1
 make test2
-make test-perf
 ```
 
 Direct pytest example:

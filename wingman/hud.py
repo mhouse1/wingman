@@ -47,6 +47,15 @@ _PURSUIT = (255, 60, 220)
 # further change if that ever ships.
 _TARGET_TRACKING_ARCHIVE_STATES = frozenset({"GAME_BATTLE_EJECT", "PURSUIT_MODE"})
 
+# HLDD 001 Phase 1 overlay: a terrain reading older than this is drawn grey.
+# Two main-loop ticks (1.5 s each) plus slack — the pursuit loops render far
+# more often than the tick that takes the reading.
+_TERRAIN_STALE_S = 4.0
+# Brightness left on pixels the looming colour mask excluded as HUD.
+_LOOM_MASKED_DIM = 0.3
+# Tint strength for the pixels the sky test accepted.
+_TERRAIN_TINT_ALPHA = 0.35
+
 
 def _txt(canvas: np.ndarray, text: str, x: int, y: int,
          color=_WHITE, scale: float = 0.52, thick: int = 1) -> None:
@@ -103,6 +112,19 @@ class HudRenderer:
         # Popen() returned, which is why the window used to survive wingman
         # exiting — nothing ever held a reference to kill it).
         self._feh_process: "subprocess.Popen | None" = None
+        # HLDD 001 Phase 1 overlay. Off until set_terrain_source() wires it.
+        # _terrain_reading is replaced whole by the main loop and read whole
+        # by the render thread, so it needs no lock.
+        self._terrain_mask_fn = None
+        self._terrain_crop = (0.0, 0.0, 1.0, 1.0)
+        self._terrain_sky_min_frac = 0.0
+        self._terrain_shadow = True
+        self._terrain_reading: "tuple[float | None, bool, float] | None" = None
+        # HLDD 001 Phase 2 overlay (shadow). Off until set_loom_source().
+        self._loom_path_box: "tuple[float, ...] | None" = None
+        self._loom_tau_warn_s = 0.0
+        self._loom_open_below = False
+        self._loom_reading = None    # (LoomReading | None, warn, ts), replaced whole
         if feh_geometry:
             self._launch_feh(feh_geometry)
 
@@ -148,6 +170,160 @@ class HudRenderer:
             proc.wait(timeout=2.0)
         except Exception as e:
             logger.warning("HudRenderer: feh close failed (%s: %s)", type(e).__name__, e)
+
+    def set_terrain_source(self, mask_fn, crop, sky_min_frac: float,
+                           shadow: bool) -> None:
+        """Turn on the terrain overlay (HLDD 001 Phase 1).
+
+        `mask_fn(frame)` is the analyzer's own `terrain_sky_mask`, so the tint
+        shows the pixels the detector counted and not a second implementation
+        of the sky test. `crop` is the TERRAIN_FORWARD crop the mask covers
+        (fractions, x before y). `sky_min_frac` and `shadow` are the trigger's
+        settings, for the status line.
+        """
+        self._terrain_mask_fn = mask_fn
+        self._terrain_crop = tuple(float(v) for v in crop[:4])
+        self._terrain_sky_min_frac = float(sky_min_frac)
+        self._terrain_shadow = bool(shadow)
+
+    def set_terrain_reading(self, sky_frac: "float | None", ahead: bool,
+                            ts: float) -> None:
+        """Record this tick's terrain reading for whichever caller renders next.
+
+        `sky_frac` is None when the tick took no reading (padlock camera not
+        confirmed forward, or a perception gap); the overlay says so instead
+        of repeating an old number.
+        """
+        self._terrain_reading = (sky_frac, bool(ahead), float(ts))
+
+    def set_loom_source(self, path_box_pct, tau_warn_s: float,
+                        open_below: bool = False) -> None:
+        """Turn on the looming overlay (HLDD 001 Phase 2, shadow)."""
+        self._loom_path_box = tuple(float(v) for v in path_box_pct[:4])
+        self._loom_tau_warn_s = float(tau_warn_s)
+        self._loom_open_below = bool(open_below)
+
+    def set_loom_reading(self, reading, warn: bool, ts: float) -> None:
+        """Record this tick's looming reading; None when the tick took none."""
+        self._loom_reading = (reading, bool(warn), float(ts))
+
+    def _draw_loom(self, canvas: np.ndarray, ts: float) -> None:
+        """Tracked points, flight-path box, expansion point and time to contact.
+
+        The points are the ones that agreed on the zoom-and-slide, at their
+        positions in the second frame of the pair. They belong to that pair,
+        not to the frame drawn here, so they vanish with a stale reading
+        instead of sitting on a picture that has moved on.
+        """
+        if self._loom_path_box is None:
+            return
+        h, w = canvas.shape[:2]
+        entry = self._loom_reading
+        age = None if entry is None else ts - entry[2]
+        reading = None if entry is None else entry[0]
+        if entry is None or age > _TERRAIN_STALE_S:
+            color = _GREY
+            text = "no reading yet" if entry is None else f"stale {age:.0f}s"
+            reading = None
+        elif reading is None:
+            color, text = _GREY, "no reading"
+        elif not reading.readable:
+            color, text = _GREY, f"no reading ({reading.status})"
+        elif reading.tau is None:
+            color, text = _GREEN, f"not closing  pts {reading.inliers}/{reading.tracked}"
+        else:
+            closing = reading.tau < self._loom_tau_warn_s and reading.on_course
+            color = _RED if entry[1] else (_YELLOW if closing else _GREEN)
+            text = (f"contact {reading.tau:.1f}s  "
+                    f"{'on course' if reading.on_course else 'passing'}  "
+                    f"pts {reading.inliers}/{reading.tracked}"
+                    f"{'  TERRAIN CLOSING' if entry[1] else ''}")
+        if reading is not None and reading.hud_mask is not None:
+            # What the colour mask left out of the tracking, darkened: the HUD
+            # strokes it took for HUD, and any terrain it took by mistake.
+            ox, oy = reading.hud_origin
+            mh = int(round(reading.hud_mask.shape[0] / reading.hud_scale))
+            mw = int(round(reading.hud_mask.shape[1] / reading.hud_scale))
+            roi = canvas[oy:oy + mh, ox:ox + mw]
+            masked = cv2.resize(reading.hud_mask, (roi.shape[1], roi.shape[0]),
+                                interpolation=cv2.INTER_NEAREST) > 0
+            roi[masked] = (roi[masked] * _LOOM_MASKED_DIM).astype(np.uint8)
+            text += f"  hud {100.0 * reading.hud_frac:.1f}%"
+        _txt(canvas, f"Loom[SHADOW]: {text}", 8, 110, color)
+        x1, y1, x2, y2 = self._loom_path_box
+        left, top, right, bottom = int(w * x1), int(h * y1), int(w * x2), int(h * y2)
+        if self._loom_open_below:
+            # No bottom edge: the sides run to the foot of the frame, with a
+            # tick where the closed box used to end.
+            cv2.line(canvas, (left, top), (right, top), color, 2)
+            cv2.line(canvas, (left, top), (left, h - 1), color, 2)
+            cv2.line(canvas, (right, top), (right, h - 1), color, 2)
+            cv2.line(canvas, (left, bottom), (left + 12, bottom), color, 2)
+            cv2.line(canvas, (right - 12, bottom), (right, bottom), color, 2)
+        else:
+            cv2.rectangle(canvas, (left, top), (right, bottom), color, 2)
+        _txt(canvas, "path", left + 4, bottom - 6, color, scale=0.38)
+        if reading is None or not reading.readable:
+            return
+        for px, py in reading.points:
+            cv2.circle(canvas, (int(px), int(py)), 3, _DARK, -1)
+            cv2.circle(canvas, (int(px), int(py)), 2, _WHITE, -1)
+        if reading.fixed is not None and reading.tau is not None:
+            fx, fy = int(reading.fixed[0]), int(reading.fixed[1])
+            if 0 <= fx < w and 0 <= fy < h:
+                cv2.circle(canvas, (fx, fy), 14, _DARK, 4, cv2.LINE_AA)
+                cv2.circle(canvas, (fx, fy), 14, color, 2, cv2.LINE_AA)
+                cv2.drawMarker(canvas, (fx, fy), color, cv2.MARKER_TILTED_CROSS,
+                               14, 2, cv2.LINE_AA)
+
+    def _draw_terrain(self, canvas: np.ndarray, frame: np.ndarray, ts: float) -> None:
+        """Box, sky tint and status line for the forward sky-occlusion detector.
+
+        Two numbers, kept apart on purpose: `sky` is what the detector read
+        on its last tick, `view` is the same test on the frame drawn here.
+        They differ when the reading is a tick old or was skipped.
+        """
+        if self._terrain_mask_fn is None:
+            return
+        mask = self._terrain_mask_fn(frame)
+        if mask is None:
+            return
+        h, w = canvas.shape[:2]
+        mh, mw = mask.shape[:2]
+        # Same truncation as crop_region.get_crop, which cut the mask.
+        x1, y1 = int(w * self._terrain_crop[0]), int(h * self._terrain_crop[1])
+        roi = canvas[y1:y1 + mh, x1:x1 + mw]
+        sky = mask > 0
+        tint = np.empty_like(roi)
+        tint[:] = _GREEN
+        blended = cv2.addWeighted(roi, 1.0 - _TERRAIN_TINT_ALPHA, tint,
+                                  _TERRAIN_TINT_ALPHA, 0.0)
+        roi[sky] = blended[sky]
+        view = float(np.count_nonzero(mask)) / float(mask.size)
+
+        reading = self._terrain_reading
+        thr = self._terrain_sky_min_frac
+        mode = "SHADOW" if self._terrain_shadow else "ACTIVE"
+        age = None if reading is None else ts - reading[2]
+        if reading is None or age > _TERRAIN_STALE_S:
+            color = _GREY
+            text = "no reading yet" if reading is None else f"stale {age:.0f}s"
+        elif reading[0] is None:
+            color = _GREY
+            text = "no reading"
+        else:
+            sky_frac, ahead, _ = reading
+            if ahead:
+                color, text = _RED, f"sky {sky_frac:.2f}  TERRAIN AHEAD"
+            elif sky_frac < thr:
+                color, text = _YELLOW, f"sky {sky_frac:.2f}  low"
+            else:
+                color, text = _GREEN, f"sky {sky_frac:.2f}  clear"
+        _txt(canvas, f"Terrain[{mode}]: {text}  view {view:.2f}  min {thr:.2f}",
+             8, 88, color)
+        cv2.rectangle(canvas, (x1, y1), (x1 + mw, y1 + mh), _DARK, 4)
+        cv2.rectangle(canvas, (x1, y1), (x1 + mw, y1 + mh), color, 2)
+        _txt(canvas, "terrain", x1 + 4, y1 + mh - 6, color, scale=0.38)
 
     @classmethod
     def from_config(cls, config: dict) -> "HudRenderer | None":
@@ -268,6 +444,18 @@ class HudRenderer:
         canvas = frame.copy()
         h, w = canvas.shape[:2]
         scx, scy = w // 2, h // 2
+
+        # ── Terrain overlay (HLDD 001 Phase 1) — first, so every marker
+        # below is drawn over the sky tint. Its own failure must not cost
+        # the rest of the HUD. ────────────────────────────────────────────
+        try:
+            self._draw_terrain(canvas, frame, ts)
+        except Exception as exc:
+            logger.debug("HudRenderer: terrain overlay error: %s", exc)
+        try:
+            self._draw_loom(canvas, ts)
+        except Exception as exc:
+            logger.debug("HudRenderer: loom overlay error: %s", exc)
 
         # ── Status strip (top-left) ──────────────────────────────────────
         ts_str = time.strftime("%H:%M:%S", time.localtime(ts))

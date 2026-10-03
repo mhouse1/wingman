@@ -39,6 +39,7 @@ from .config_local import (local_path as local_config_path, merge as merge_confi
 from .suppressed import suppressed_counts
 from .transition_queue import TransitionQueue
 from .hud import HudRenderer
+from .terrain_loom import TerrainLoom
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler, read_loadavg
@@ -1297,6 +1298,16 @@ def main():
         jet_profile_cfg=cfg.get("jet_profile", {}),
         trace_writer=bt_trace_writer,
     )
+    # HLDD 001 Phase 1 overlay: the terrain reading on live_hud.png.
+    if hud_renderer is not None:
+        behavior_tree.set_hud_renderer(hud_renderer)
+    # HLDD 001 Phase 2 (shadow): looming needs a second frame a moment after
+    # the first. Live only: a replay capture would hand out its next scripted
+    # screenshot, and the capture lane's frames are timed by its presenter.
+    if not replay_mode and not capture_mode:
+        behavior_tree.set_terrain_loom(
+            TerrainLoom((cfg.get("terrain_avoidance") or {}).get("loom")),
+            cap.grab_from_thread)
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
         nav_source=behavior_tree,

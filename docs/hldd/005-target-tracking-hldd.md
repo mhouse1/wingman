@@ -333,6 +333,9 @@ Atomic write sequence:
 
 This prevents preview tools from showing partially-written images.
 
+Since 2026-10-03 the same frame also carries the terrain detector's box, sky tint and status line. That
+overlay is specified in [Design 001](001-terrain-avoidance-hldd.md), "Overlay on the live HUD".
+
 ### Minimum telemetry payload
 
 1. Timestamp and loop FPS/interval.

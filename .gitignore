@@ -1,7 +1,7 @@
 # Ignore test output directory
 tests/test-output/
-# Test-performance history (performance.json snapshots appended by `make wrelease`).
-# Local to veda; charts are generated from this file, never from git history.
+# Test-performance history from the retired per-test chart (ADR 158). Nothing
+# writes it any more; the entry stays so a leftover copy on veda is not staged.
 tests/perf-history/
 # Runtime performance data — accumulates between releases
 docs/performance/current/

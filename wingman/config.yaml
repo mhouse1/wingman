@@ -349,15 +349,14 @@ stall_recovery:
   leave_click_delay_s: 1.0    # after clicking LEAVE (squad-leave confirmation), before re-scanning PLAY/READY
   cooldown_s: 20.0            # per-crop minimum between recovery actions
 
-unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 0,
+unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 5,
   dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies,
-  # max_per_episode: 0 (2026-09-21, operator request): stop writing PNGs for
-  # disk growth during long target-tracking sessions — UnknownAnomalyRecorder
-  # .tick()'s own `self._captured >= self._max_per_episode` guard makes this
-  # a clean no-op (0 >= 0 immediately), and per ADR 093 the WARNING log line
-  # keeps firing on its doubling interval regardless, so a real GAME_UNKNOWN
-  # stranding still gets noticed — it just won't have a screenshot attached
-  # until this is raised again.
+  # max_per_episode: 5 again (2026-10-03, operator request). It was 0 from
+  # 2026-09-21 to save disk during long target-tracking sessions, and the
+  # 07:41 stall on the Invite Players screen that day left no frame at all:
+  # the recorder logged "screenshot cap 0 reached". Disk growth is now bounded
+  # by the capture budget (oldest files pruned per directory, nothing written
+  # under the free-space floor), so a stuck episode costs at most 5 PNGs.
   # ADR 093: keep warning after the capture cap — silence must mean healthy.
   stuck_warn_interval_s: 300.0, stuck_warn_max_interval_s: 1800.0}
 # ADR 146 (2026-09-24): click a window's white-cross close button when GAME_UNKNOWN has
@@ -947,6 +946,43 @@ terrain_avoidance:
   sky_hsv:
     lower: [98, 20, 180]
     upper: [115, 100, 255]
+  # HLDD 001 Phase 2: looming from frame-to-frame motion, shadow only. Two
+  # grabs pair_interval_s apart on each battle tick; logged as tau= on the BT
+  # line and drawn on live_hud.png. Nothing acts on it. Live runs only: replay
+  # and capture lanes never grab the extra frames.
+  loom:
+    enabled: true
+    pair_interval_s: 0.12
+    # 20 percent of pairs showed the same picture twice (2026-10-03): the game
+    # held a frame 0.13 to 0.17 s. Wait up to this long for the picture to
+    # change, then take the pair from that moment.
+    same_frame_wait_s: 0.25
+    # Three readings a tick from four consecutive frames, so confirm_pairs can
+    # be met inside one tick. At one reading per 1.5 s tick the confirm needed
+    # 3 to 4.5 s of unbroken agreement and never fired before 10 terrain
+    # deaths (2026-10-03).
+    pairs_per_tick: 3
+    min_points: 25
+    tau_warn_s: 8.0
+    confirm_pairs: 3
+    view_pct: [0.20, 0.12, 0.80, 0.60]
+    path_box_pct: [0.38, 0.30, 0.62, 0.62]
+    # The box has no bottom edge. Measured 2026-10-03 on 3,426 pairs: with the
+    # closed box 3 of 5 terrain deaths were warned; open below, 5 of 5, and
+    # warnings with nothing after them stayed at 1.
+    path_open_below: true
+    # HUD strokes are left out of the tracking by colour. Measured on 85 frames
+    # (2026-10-03): 29 percent of trackable corner points sat on these colours;
+    # the masks remove about 1.5 percent of the view and leave canyon rock alone.
+    hud_mask:
+      enabled: true
+      margin_px: 3
+      red_lower: [0, 150, 190]
+      red_upper: [7, 255, 255]
+      red_wrap_lower: [174, 150, 190]
+      red_wrap_upper: [179, 255, 255]
+      green_lower: [50, 70, 195]
+      green_upper: [65, 255, 255]
 # Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
 # acted on — it appears only after the crossing, so it measures the
 # outcome rather than preventing it.
