@@ -61,7 +61,40 @@ Same shape as Anomaly 004's table:
 
 ## Disposition
 
-**Operator decision (2026-09-13): leave unautomated.** Same treatment as
+**Operator decision (2026-10-02): "it should always choose the reward in the
+middle of the screen then accept."** This replaces the decision of 2026-09-13
+below, which is kept for the record.
+
+- **Recurrence (measured).** 2026-10-02: `GAME_END_B` to `GAME_LOBBY`, then
+  the overlay with three token rewards (Ideal Maneuvering, Efficient
+  Afterburners, Streak Armor). The state stayed
+  `GAME_LOBBY`, so only the lobby-blackout crops were scanned (`STALL_PROFILE`
+  and `STALL_EXIT_TO_DESKTOP`, both `not found`), and the liveness guard
+  logged its 300 s warning five minutes after the lobby was entered. The
+  operator chose by hand about a minute later and the session carried on. No
+  frame of the overlay was saved by wingman; the only capture is a half-resolution grab of the nested display
+  taken just before that choice.
+- **What wingman does now.** `STALL_CHOOSE_REWARDS` (the title, text
+  `CHOOSEREWARDS`) is a stall-recovery crop, eligible both in an
+  unclassifiable state and on a sustained `GAME_LOBBY` blackout. On
+  detection `_choose_middle_reward` (`wingman/main.py`) clicks
+  `STALL_CHOOSE_REWARDS_PICK`, the middle of the three cards, and 1.5 s later
+  `STALL_CHOOSE_REWARDS_ACCEPT`, the SELECT ONE button; the second click is
+  dropped if the game has left the lobby. The usual stall dwell (15 s) and
+  cooldown (20 s) apply.
+- **What is measured and what is not.** The three crops were measured on the
+  half-resolution capture, so to about 2 px at full size. The real OCR reads
+  the title from that capture scaled back up
+  (`tests/test_stall_crops_ocr.py`, reference `test_screenshots/
+  STALL_CHOOSE_REWARDS.png`, which is local and not tracked) and does not
+  fire on an ordinary lobby frame. Not yet seen live: the click sequence
+  itself, the 1.5 s delay (a named guess), and whether the blueprint variant
+  of 2026-09-13 has the same layout. The first live occurrence should be
+  checked against the log line `Stall recovery: 'STALL_CHOOSE_REWARDS'`.
+- This is the only stall-recovery action that commits something instead of
+  dismissing it; `STALL_PARTS_CONFIRM` (Anomaly 004) remains unautomated.
+
+**Operator decision (2026-09-13), superseded: leave unautomated.** Same treatment as
 Anomaly 004 — detect and document, never auto-select. The liveness
 guard's 900s hard limit remains the sole recovery path; this is an
 accepted, bounded cost, not something to fix by guessing a default.

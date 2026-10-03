@@ -537,7 +537,8 @@ SCHEMA = Section(
         "tracking": Section(children={
             "enabled": BOOL,
             "actuate": BOOL,
-            "acquisition_region_pct": Leaf(types=(list,), item_types=NUMBER, length=4),
+            "acquisition_region_pct": Leaf(types=(list,), item_types=NUMBER, length=4,
+                                           default=[0.0, 0.09, 1.0, 0.95]),
             "deadband": FRACTION,
             "kp": _num(0),
             "min_hold_sec": SECONDS,
@@ -644,10 +645,13 @@ SCHEMA = Section(
             "resupply_priority": Section(children={
                 "enabled": Leaf(types=(bool,), default=True),
                 "actuate": Leaf(types=(bool,), default=False),
+                "rearm_climb_s": Leaf(types=NUMBER, minimum=0, default=3.0),
             }),
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,
             "search_look_down_min_deg": _num(-90, 0),
+            "search_climb_alt_m": Leaf(types=NUMBER, minimum=0, default=0.0),
+            "search_climb_max_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=30.0),
             "dive_safety": BOOL,   # operator, 2026-09-26
             # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
             "icon_steering": Section(children={

@@ -245,6 +245,25 @@ crops:
     coords:
     - [0.6365, 0.5608]
     - [0.701, 0.7075]
+  # Anomaly 006: the "CHOOSE REWARDS - SELECT ONE 0/1" overlay after a round.
+  # Operator, 2026-10-02: "it should always choose the reward in the middle of
+  # the screen then accept". STALL_CHOOSE_REWARDS is the title (detection),
+  # _PICK the middle of the three cards, _ACCEPT the SELECT ONE button, which
+  # is inert until a card is chosen. Measured on a half-resolution capture of
+  # the overlay (2026-10-02, token rewards), so to within about 2 px.
+  STALL_CHOOSE_REWARDS:
+    coords:
+    - [0.3177, 0.03]
+    - [0.6823, 0.1033]
+    text: [CHOOSEREWARDS]
+  STALL_CHOOSE_REWARDS_PICK:
+    coords:
+    - [0.3563, 0.355]
+    - [0.6271, 0.605]
+  STALL_CHOOSE_REWARDS_ACCEPT:
+    coords:
+    - [0.7427, 0.84]
+    - [0.9531, 0.9383]
   REJECT:
     coords:
     - [0.3451, 0.58]
@@ -1168,6 +1187,12 @@ pursuit_mode:
   resupply_priority:
     enabled: true
     actuate: true
+    # Operator, 2026-10-02: "crashes can be avoided by immediately applying
+    # nose up manuver on rearm". On a confirmed rearm the pursuit holds nose-up
+    # this long with the roll released, then steering resumes. Measured on the
+    # session before it: 20 of 28 rearms were followed by a respawn within
+    # 30 s. Named guess; 0 = off. Actuated mode only.
+    rearm_climb_s: 3.0
   # Named guess, not measured — a live shadow trial should correct it, same
   # status as HLDD 015's own Configuration Additions section.
   # Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching and
@@ -1305,6 +1330,16 @@ pursuit_mode:
   search_look_down_pulse_s: 0.15
   search_look_down_interval_s: 1.0
   search_look_down_min_deg: -20
+  # Operator, 2026-10-02: "currently it continuously flies left when no targets
+  # are sighted, modify it to fly up to 7000 altitude or until target sighted".
+  # With no target, ring icon or lock to wait out, the search climbs with the
+  # roll released and NOSE_UP held while the flight-path angle is below
+  # search_climb_max_deg, until the altitude reaches search_climb_alt_m (m);
+  # then the left roll and the look-down resume until a target is next seen.
+  # Resupply mode keeps its own search. No fresh altitude flies the roll as
+  # before. The angle is a named guess. Logged as `SEARCH CLIMB`. 0 = off.
+  search_climb_alt_m: 7000
+  search_climb_max_deg: 30
   # Operator, 2026-09-26: "prioritize pursuit via icons over dive recovery". false
   # switches off, for the whole pursuit (icons and the tracker's locked chase): the
   # dive guard above (no withheld nose-down, no pull-out pulses), ADR 148's recovery

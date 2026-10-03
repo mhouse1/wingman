@@ -69,15 +69,22 @@ class TestStallGate:
         a session for 110 minutes with nothing eligible to dismiss it.
 
         The invariant ADR 087 was really protecting is unchanged and is what
-        this test now asserts: both eligible crops are a single de-escalating
+        this test now asserts: both of those crops are a single de-escalating
         click, and the INVASIVE ones stay gated on a genuinely unclassifiable
         state. Widening this set again needs the same argument.
+
+        STALL_CHOOSE_REWARDS (Anomaly 006) is the one exception and is not
+        de-escalating: it commits a reward. It is here on the operator's
+        decision of 2026-10-02 ("always choose the reward in the middle of the
+        screen then accept"), after the overlay stalled a lobby that still
+        classified as GAME_LOBBY.
         """
         analyzer._stall_state_since = 0.0
         analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
         targets = analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
-        assert set(targets) == {"STALL_PROFILE", "STALL_EXIT_TO_DESKTOP"}, \
-            f"lobby blackout must open exactly the de-escalating crops, got {targets}"
+        assert set(targets) == {"STALL_PROFILE", "STALL_EXIT_TO_DESKTOP",
+                                "STALL_CHOOSE_REWARDS"}, \
+            f"lobby blackout must open exactly these crops, got {targets}"
         for invasive in ("STALL_RETRY", "STALL_AIRCRAFT"):
             assert invasive not in targets, \
                 f"{invasive} must stay gated on an unclassifiable state (ADR 084)"
@@ -272,3 +279,72 @@ class TestStuckWarningPersists:
                        rec._stuck_warn_max_s)
         assert interval <= rec._stuck_warn_max_s, "interval must stay capped"
         assert rec._stuck_warns >= 10, "a long stall must keep complaining"
+
+
+class TestChooseRewards:
+    """Anomaly 006: the middle reward, then SELECT ONE (operator, 2026-10-02)."""
+
+    class _Ctrl:
+        def __init__(self):
+            self.clicks = []
+
+        def click_crop(self, crop, *, block, count, region_name):
+            self.clicks.append((region_name, crop))
+
+    class _Analyzer:
+        def __init__(self, crops, state=GameState.GAME_LOBBY):
+            self.crops = crops
+            self.game_state = state
+
+    @staticmethod
+    def _crops():
+        crops = load_config()["crops"]
+        return {name: crops[name] for name in
+                ("STALL_CHOOSE_REWARDS", "STALL_CHOOSE_REWARDS_PICK",
+                 "STALL_CHOOSE_REWARDS_ACCEPT")}
+
+    def test_the_pick_crop_is_the_card_under_the_screen_centre(self):
+        (x1, y1), (x2, y2) = self._crops()["STALL_CHOOSE_REWARDS_PICK"]["coords"]
+        assert x1 < 0.5 < x2, "the middle card spans the middle of the screen"
+        assert abs((x1 + x2) / 2 - 0.5) < 0.02
+        assert 0.3 < y1 < y2 < 0.7
+
+    def test_the_accept_crop_is_clear_of_the_cards(self):
+        (ax1, ay1), _ = self._crops()["STALL_CHOOSE_REWARDS_ACCEPT"]["coords"]
+        _, (_px2, py2) = self._crops()["STALL_CHOOSE_REWARDS_PICK"]["coords"]
+        assert ay1 > py2, "SELECT ONE sits below the cards"
+        assert ax1 > 0.7
+
+    def test_clicks_the_middle_card_then_accept(self):
+        import logging
+        from wingman.main import _choose_middle_reward
+        ctrl, analyzer = self._Ctrl(), self._Analyzer(self._crops())
+
+        thread = _choose_middle_reward(ctrl, analyzer, logging.getLogger("test"), delay_s=0.05)
+
+        assert [name for name, _ in ctrl.clicks] == ["STALL_CHOOSE_REWARDS_PICK"], (
+            "the card is chosen first, the button waits")
+        thread.join(timeout=2.0)
+        assert [name for name, _ in ctrl.clicks] == [
+            "STALL_CHOOSE_REWARDS_PICK", "STALL_CHOOSE_REWARDS_ACCEPT"]
+
+    def test_accept_is_dropped_when_the_game_has_moved_on(self):
+        import logging
+        from wingman.main import _choose_middle_reward
+        ctrl, analyzer = self._Ctrl(), self._Analyzer(self._crops())
+
+        thread = _choose_middle_reward(ctrl, analyzer, logging.getLogger("test"), delay_s=0.05)
+        analyzer.game_state = GameState.GAME_BATTLE
+        thread.join(timeout=2.0)
+
+        assert [name for name, _ in ctrl.clicks] == ["STALL_CHOOSE_REWARDS_PICK"]
+
+    def test_nothing_is_clicked_without_both_crops(self):
+        import logging
+        from wingman.main import _choose_middle_reward
+        crops = self._crops()
+        del crops["STALL_CHOOSE_REWARDS_ACCEPT"]
+        ctrl = self._Ctrl()
+
+        assert _choose_middle_reward(ctrl, self._Analyzer(crops), logging.getLogger("test")) is None
+        assert ctrl.clicks == []
