@@ -169,6 +169,46 @@ def _invite_click_target(accept_invite: bool, crops) -> "str | None":
     return target if target in crops else None
 
 
+# Seconds between choosing a reward card and pressing SELECT ONE: the button
+# is inert until the card is chosen. Named guess, not measured.
+CHOOSE_REWARDS_ACCEPT_DELAY_S = 1.5
+_CHOOSE_REWARDS_STATES = (GameState.GAME_LOBBY, GameState.GAME_UNKNOWN,
+                          GameState.GAME_STARTING_STALLED)
+
+
+def _choose_middle_reward(ctrl, analyzer, logger,
+                          delay_s: float = CHOOSE_REWARDS_ACCEPT_DELAY_S):
+    """Anomaly 006: take the middle reward on the CHOOSE REWARDS overlay.
+
+    Operator, 2026-10-02: "it should always choose the reward in the middle of
+    the screen then accept". Clicks the middle card now and SELECT ONE after
+    `delay_s`, from a thread so the main loop is not held; the second click is
+    dropped if the game has moved on. Returns the thread, or None when a crop
+    is missing and nothing was clicked.
+    """
+    missing = [name for name in ("STALL_CHOOSE_REWARDS_PICK", "STALL_CHOOSE_REWARDS_ACCEPT")
+               if name not in analyzer.crops]
+    if missing:
+        logger.warning("Stall recovery: %s not calibrated — the reward is left "
+                       "for the operator", " and ".join(missing))
+        return None
+    ctrl.click_crop(analyzer.crops["STALL_CHOOSE_REWARDS_PICK"], block=False,
+                    count=1, region_name="STALL_CHOOSE_REWARDS_PICK")
+
+    def _accept():
+        time.sleep(delay_s)
+        if analyzer.game_state not in _CHOOSE_REWARDS_STATES:
+            logger.debug("CHOOSE REWARDS accept suppressed — state is %s",
+                         analyzer.game_state)
+            return
+        ctrl.click_crop(analyzer.crops["STALL_CHOOSE_REWARDS_ACCEPT"], block=False,
+                        count=1, region_name="STALL_CHOOSE_REWARDS_ACCEPT")
+
+    thread = threading.Thread(target=_accept, daemon=True)
+    thread.start()
+    return thread
+
+
 def _alive_transition_disposition(state, alive_after_observed_death: bool) -> str:
     """Classify an alive (dead→alive health) transition by FSM state (ADR 061).
 
@@ -1096,6 +1136,15 @@ def main():
                 logger.warning("Stall recovery: STALL_PARTS_CRATE_DISMISS not "
                                "calibrated — pressing ESC instead")
                 ctrl.press_escape(hold_seconds=0.05, block=False)
+            return
+
+        if crop == "STALL_CHOOSE_REWARDS":
+            # Anomaly 006. Not a dismiss: this commits a reward, on the
+            # operator's rule of 2026-10-02 (the middle one, then accept).
+            logger.warning(
+                "\033[93m🔧 Stall recovery: '%s' — choosing the middle reward, "
+                "then SELECT ONE (state=%s)\033[0m", crop, current.name)
+            _choose_middle_reward(ctrl, analyzer, logger)
             return
 
         if crop == "STALL_AIRCRAFT":

@@ -74,8 +74,8 @@ STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
 # Scan order: most specific screen first. The batch stops at the first hit, so a
 # generic match must never pre-empt a precise one.
-STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_PARTS_CRATE", "STALL_RETRY",
-                        "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
+STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_PARTS_CRATE", "STALL_CHOOSE_REWARDS",
+                        "STALL_RETRY", "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
 
 # Gated on UNREADY dwell rather than state dwell: UNREADY makes
 # scan_region_for_play_button return None, which makes _classify_unknown_state
@@ -3362,6 +3362,16 @@ class GameStateAnalyzer:
                 and "STALL_PROFILE" in self.crops
                 and "STALL_PROFILE" not in targets):
             targets.insert(0, "STALL_PROFILE")
+        # Anomaly 006: the "CHOOSE REWARDS" overlay opens over a lobby that
+        # still classifies as GAME_LOBBY, so it needs this gate too (2026-10-02:
+        # the lobby sat behind it until the operator picked by hand).
+        # It is not a de-escalating dismiss: it commits a reward. The operator
+        # decided the choice on 2026-10-02 (the middle one, then accept).
+        if (self._lobby_blackout_since
+                and now - self._lobby_blackout_since >= self._stall_action_after_s
+                and "STALL_CHOOSE_REWARDS" in self.crops
+                and "STALL_CHOOSE_REWARDS" not in targets):
+            targets.insert(0, "STALL_CHOOSE_REWARDS")
         # Anomaly 004 (2026-09-13): STALL_PARTS_CONFIRM is calibrated (below,
         # config.yaml) and OCR-verified (tests/test_stall_crops_ocr.py) for
         # DETECTION, but deliberately NOT added to this auto-click gate yet.
