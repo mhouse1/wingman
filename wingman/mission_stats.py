@@ -113,6 +113,9 @@ class MissionStatsTracker:
         # bucket, not a bug — see ADR 143 Non-Goal 5.
         self._total_died_armed_enemy_fire = 0
         self._total_died_armed_terrain = 0
+        # Both signals recent: a missile alert and a hard emergency. Neither
+        # decides the cause, so it is counted apart from both (2026-10-03).
+        self._total_died_armed_contested = 0
         self._total_died_armed_unclassified = 0
 
         # Operator directive: confirmed map-boundary crossings (the RETURN
@@ -192,6 +195,9 @@ class MissionStatsTracker:
 
         elif event_name == "died_armed_terrain":
             self._total_died_armed_terrain += 1
+
+        elif event_name == "died_armed_contested":
+            self._total_died_armed_contested += 1
 
         elif event_name == "died_armed_unclassified":
             self._total_died_armed_unclassified += 1
@@ -339,6 +345,7 @@ class MissionStatsTracker:
             "total_crashes_with_missiles": self._total_crashes_with_missiles,
             "total_died_armed_enemy_fire": self._total_died_armed_enemy_fire,
             "total_died_armed_terrain": self._total_died_armed_terrain,
+            "total_died_armed_contested": self._total_died_armed_contested,
             "total_died_armed_unclassified": self._total_died_armed_unclassified,
             "total_rtb_with_missiles": self._total_rtb_with_missiles,
             "spawn_crashes": {
@@ -406,6 +413,8 @@ class MissionStatsTracker:
             f"(missiles unused at death; ADR 143)",
             f"  enemy fire      : {s.get('total_died_armed_enemy_fire', 0)}",
             f"  terrain crash   : {s.get('total_died_armed_terrain', 0)}",
+            f"  contested       : {s.get('total_died_armed_contested', 0)}  "
+            f"(missile alert and dive emergency both recent)",
             f"  unclassified    : {s.get('total_died_armed_unclassified', 0)}",
             f"RTB w/ missiles   : {s.get('total_rtb_with_missiles', 0)}  "
             f"(confirmed map-boundary crossings with primary missiles"

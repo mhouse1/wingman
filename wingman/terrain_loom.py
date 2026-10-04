@@ -93,6 +93,7 @@ class TerrainLoom:
         self.path_box_pct = tuple(
             float(v) for v in cfg.get("path_box_pct", _d("path_box_pct")))
         self.path_open_below = bool(cfg.get("path_open_below", _d("path_open_below")))
+        self.path_open_sides = bool(cfg.get("path_open_sides", _d("path_open_sides")))
         hud = cfg.get("hud_mask") or {}
 
         def _h(key):
@@ -103,8 +104,12 @@ class TerrainLoom:
         self._hud_ranges = [(_h("red_lower"), _h("red_upper")),
                             (_h("red_wrap_lower"), _h("red_wrap_upper")),
                             (_h("green_lower"), _h("green_upper"))]
+        self.shapes_cfg = cfg.get("shapes") or {}
         self._edge_sum: "np.ndarray | None" = None
         self._edge_n = 0
+        # The learned HUD mask as last computed, for `terrain_shapes`; None
+        # until the warm-up is over.
+        self.static_mask: "np.ndarray | None" = None
         self._streak = 0
         self.warn = False
 
@@ -178,7 +183,8 @@ class TerrainLoom:
             return None
         static = (self._edge_sum / self._edge_n) > _STATIC_EDGE_FRAC
         static = cv2.dilate(static.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
-        return np.where(static, 0, 255).astype(np.uint8)
+        self.static_mask = np.where(static, 0, 255).astype(np.uint8)
+        return self.static_mask
 
     def in_path_box(self, point, frame_shape) -> bool:
         """Whether the expansion point says the aircraft is flying at the view.
@@ -188,12 +194,20 @@ class TerrainLoom:
         points, so the picture expands from below the box, often from below
         the frame itself. A closed box classed those readings as passing
         while the aircraft flew at the ground (HLDD 001, 2026-10-03 05:36).
+
+        With `path_open_sides` it has no left or right edge either: banked or
+        turning near terrain, the point wanders sideways while the time to
+        contact stays short (06:22, 06:33 and 06:44 the same day). What stays
+        off course is a point above the top edge, where a pull-up's rotation
+        puts it.
         """
         if point is None:
             return False
         h, w = frame_shape[:2]
         x1, y1, x2, y2 = self.path_box_pct
-        if not (x1 * w <= point[0] <= x2 * w and y1 * h <= point[1]):
+        if point[1] < y1 * h:
+            return False
+        if not self.path_open_sides and not x1 * w <= point[0] <= x2 * w:
             return False
         return self.path_open_below or point[1] <= y2 * h
 

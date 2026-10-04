@@ -971,9 +971,36 @@ terrain_avoidance:
     # closed box 3 of 5 terrain deaths were warned; open below, 5 of 5, and
     # warnings with nothing after them stayed at 1.
     path_open_below: true
+    # Nor left and right edges: only an expansion point above the box's top
+    # edge is off course (a pull-up rotates the picture and pushes it there).
+    # Replayed on two sessions, 155 minutes, 2026-10-03: open below warned 13
+    # of 21 terrain deaths, this warns 17 of 21, with 9 of 84 warning episodes
+    # followed by nothing against 6 of 47.
+    path_open_sides: true
     # HUD strokes are left out of the tracking by colour. Measured on 85 frames
     # (2026-10-03): 29 percent of trackable corner points sat on these colours;
     # the masks remove about 1.5 percent of the view and leave canyon rock alone.
+    # Outlines of what is on the screen: the border of each textured region
+    # (rock, ground) against smooth (sky, haze). An outline that covers the
+    # middle and grows for confirm_ticks ticks is a threat; the way out is the
+    # nearest smooth gap, left or right, and up only when the gap above is
+    # clearly nearest. Growth is taken from the dots inside the outline; with
+    # too few dots the verdict is "blind", not clear; so is a tick straight
+    # after a threat that finds nothing and follows under lost_dots dots. Logged as shape= on the
+    # BT line and drawn on live_hud.png. Shadow only.
+    shapes:
+      enabled: true
+      texture_energy: 14.0
+      texture_blur_px: 15
+      min_area_frac: 0.01
+      min_dots: 8
+      centre_cover: 0.25
+      tau_warn_s: 8.0
+      confirm_ticks: 2
+      up_bias: 0.5
+      edge_margin_px: 6
+      gap_min_px: 24
+      lost_dots: 25
     hud_mask:
       enabled: true
       margin_px: 3

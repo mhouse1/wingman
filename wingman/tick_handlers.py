@@ -29,6 +29,7 @@ from . import capture_budget
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
 from .terrain_loom import fmt_tau, fmt_taus
+from .terrain_shapes import TerrainShapes, fmt_middle, fmt_shape
 from .behavior_tree import (
     TACTIC_ATTACK_SUPPORT,
     TACTIC_CLIMB,
@@ -555,7 +556,7 @@ class RespawnHandler:
     # -- died-armed classification ---------------------------------------------
 
     def _classify_died_armed(self, now: float) -> "tuple[str, float]":
-        """ADR 143: enemy_fire / terrain / unclassified for one
+        """ADR 143: enemy_fire / terrain / contested / unclassified for one
         crash_with_missiles occurrence, plus the incoming-alert age (for the
         per-occurrence log line).
 
@@ -565,11 +566,16 @@ class RespawnHandler:
         1.5-3.0s earlier via the BT tactic's own log lines — a single-tick
         OCR sample inherits OCR's ordinary miss rate, unlike the two signals
         used here (a confirmed detection event; a computed, already-live-
-        validated verdict). `terrain` is checked first: an active hard
-        emergency (ttg/terrain — "hitting the ground is certain") is direct,
-        mechanism-level evidence a crash was already in progress, stronger
-        than inferring enemy fire from the mere absence of a recent missile
-        alert.
+        validated verdict).
+
+        When both signals are recent the death is `contested`: neither one
+        decides it. `terrain` used to win that tie, on the reasoning that a
+        hard emergency means "hitting the ground is certain". Measured
+        2026-10-03 over five sessions: 5 of 35 terrain-labelled deaths had a
+        missile alert active right up to the death, and in 3 of them the
+        aircraft had 16 s or more to the ground or was climbing. A dive that
+        is being recovered still carries the emergency, so a missile kill
+        during the pull-out was being counted as a terrain crash.
         """
         last_incoming_ts = self._ammo_events.last_incoming_alert_ts
         since_incoming = now - last_incoming_ts if last_incoming_ts else float("inf")
@@ -577,9 +583,13 @@ class RespawnHandler:
             self._behavior_tree.climb_last_hard_emergency_ts()
             if self._behavior_tree is not None else 0.0)
         since_terrain = now - last_hard_emergency_ts
-        if since_terrain <= self._terrain_lookback_s:
+        terrain_recent = since_terrain <= self._terrain_lookback_s
+        enemy_fire_recent = since_incoming <= self._enemy_fire_lookback_s
+        if terrain_recent and enemy_fire_recent:
+            return "contested", since_incoming
+        if terrain_recent:
             return "terrain", since_incoming
-        if since_incoming <= self._enemy_fire_lookback_s:
+        if enemy_fire_recent:
             return "enemy_fire", since_incoming
         return "unclassified", since_incoming
 
@@ -1893,6 +1903,7 @@ class BehaviorTreeHandler:
         # needs for its second frame. Both None until set_terrain_loom().
         self._loom = None
         self._loom_grab_fn = None
+        self._shapes = None
         self._terrain_hud_cfg = (
             bool(_terrain_capture_cfg.get("enabled", False)),
             float(_terrain_capture_cfg.get("sky_min_frac", 0.55)),
@@ -2000,9 +2011,12 @@ class BehaviorTreeHandler:
         """
         self._loom = loom if loom is not None and loom.enabled else None
         self._loom_grab_fn = grab_fn
+        shapes = TerrainShapes(self._loom, self._loom.shapes_cfg) if self._loom else None
+        self._shapes = shapes if shapes is not None and shapes.enabled else None
         if self._hud is not None and self._loom is not None:
             self._hud.set_loom_source(self._loom.path_box_pct, self._loom.tau_warn_s,
-                                      self._loom.path_open_below)
+                                      self._loom.path_open_below,
+                                      self._loom.path_open_sides)
 
     def _grab_loom_timed(self):
         """One grab and the time at its midpoint."""
@@ -2064,11 +2078,16 @@ class BehaviorTreeHandler:
         to a tick old by now and the next one is 1.5 s away, too far apart to
         track (HLDD 001 Phase 2, "Frames"). `pairs_per_tick` readings come
         from consecutive frames. Same gates as the sky test: a battle state,
-        and the padlock camera confirmed off (ADR 142).
+        and the padlock camera confirmed off (ADR 142). One more: health is
+        being read, which is the proof that the battle HUD is on screen. The
+        state lags the screen: on 2026-10-03 the round-end MVP card was read
+        as terrain for 20 s while the state still said battle.
         """
+        self._shape_reading = None
         if (self._loom is None or self._loom_grab_fn is None
                 or current_game_state not in _BATTLE_STATES
-                or self._ctrl.padlock_state() is not False):
+                or self._ctrl.padlock_state() is not False
+                or not self._analyzer.game_battle_alive):
             return []
         readings = []
         try:
@@ -2088,9 +2107,34 @@ class BehaviorTreeHandler:
                     else f"({reading.fixed[0]:.0f},{reading.fixed[1]:.0f})",
                     100.0 * reading.hud_frac, waited * 1000.0,
                     (time.monotonic() - started) * 1000.0)
+            if self._shapes is not None and pairs:
+                self._shape_reading = self._measure_shapes(pairs)
         except Exception as exc:
             log_suppressed(logger, "terrain_loom", exc)
         return readings
+
+    def _measure_shapes(self, pairs):
+        """The tick's shapes, from the longest run of consecutive frames.
+
+        A frozen picture restarts a pair from a later frame, which breaks the
+        run; the frames after the last break are the ones that follow on.
+        """
+        started = time.monotonic()
+        frames = [pairs[-1][0], pairs[-1][1]]
+        span = pairs[-1][2]
+        for first, second, dt in reversed(pairs[:-1]):
+            if second is not frames[0]:
+                break
+            frames.insert(0, first)
+            span += dt
+        reading = self._shapes.measure(frames, span, pairs[-1][2])
+        logger.debug(
+            "SHAPE: status=%s frames=%d span=%.3fs shapes=%d dots=%d verdict=%s "
+            "middle=[%s] way_out=%s cost=%.0fms",
+            reading.status, reading.frames, reading.span_s, len(reading.shapes),
+            reading.tracked, fmt_shape(reading), fmt_middle(reading),
+            reading.avoid or "-", (time.monotonic() - started) * 1000.0)
+        return reading
 
     def _capture_terrain_frame(self, frame, now: "float | None" = None) -> None:
         """Save the tick's frame at a terrain-ahead FALSE->TRUE edge.
@@ -2472,15 +2516,21 @@ class BehaviorTreeHandler:
             if self._hud is not None and current_game_state in _BATTLE_STATES:
                 self._hud.set_loom_reading(
                     loom_readings[-1] if loom_readings else None, loom_warn, time.time())
+        shape_reading = getattr(self, "_shape_reading", None)
+        if self._shapes is not None:
+            shape_warn = self._shapes.update(shape_reading)
+            if self._hud is not None and current_game_state in _BATTLE_STATES:
+                self._hud.set_shape_reading(shape_reading, shape_warn, time.time())
         logger.debug(
             "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
             "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s padlock=%s "
-            "sky=%s tau=%s",
+            "sky=%s tau=%s shape=%s",
             self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
             snap.ring_long, absent_s, snap.is_respawning, altitude,
             _fmt_rate(altitude_rate), _fmt_ttg(altitude, altitude_rate),
             snap.fuel_pct, snap.mission_running, self._ctrl.padlock_state(),
             _fmt_sky(snap.terrain_sky_frac), fmt_taus(loom_readings),
+            fmt_shape(shape_reading),
         )
         if self._climb_shadow is not None:
             # Outside GAME_BATTLE the Idle leaf would own selection, and the

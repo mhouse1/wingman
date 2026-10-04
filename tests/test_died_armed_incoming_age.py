@@ -52,3 +52,16 @@ def test_a_hard_emergency_is_terrain_even_with_no_alert_ever():
 def test_an_old_alert_beyond_the_lookback_is_unclassified():
     now = 1_790_266_284.0
     assert _classify(now - 350.9, now=now)[0] == "unclassified"
+
+
+def test_an_alert_active_at_the_death_during_a_dive_recovery_is_contested():
+    """06:27:23 on 2026-10-03: a dive from 5,530 m was being recovered (38 s to
+    the ground) when a missile alert fired; the aircraft died 6.5 s later at
+    about 2,900 m and was logged `cause=terrain`."""
+    now = 1_790_266_284.0
+    assert _classify(now - 6.5, now=now, hard_emergency_ts=now - 9.0)[0] == "contested"
+
+
+def test_a_hard_emergency_with_only_an_old_alert_is_still_terrain():
+    now = 1_790_266_284.0
+    assert _classify(now - 245.7, now=now, hard_emergency_ts=now - 3.0)[0] == "terrain"

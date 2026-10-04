@@ -893,10 +893,10 @@ class TestDiedArmedClassification:
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
         assert "died_armed_terrain" in events
 
-    def test_terrain_wins_when_both_signals_are_recent(self):
-        """An active hard emergency is direct, mechanism-level evidence a
-        crash was in progress — stronger than inferring enemy fire from an
-        unrelated missile alert earlier in the same life."""
+    def test_both_signals_recent_is_contested_not_terrain(self):
+        """Terrain used to win this tie. On 2026-10-03, 5 of 35 terrain-labelled
+        deaths had a missile alert active up to the death, 3 of them with 16 s
+        or more to the ground: a missile kill during a dive recovery."""
         events = []
         clock = _FakeClock(1000.0)
         ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
@@ -906,7 +906,8 @@ class TestDiedArmedClassification:
                            clock=clock, behavior_tree=bt,
                            emit_capture_event=events.append)
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
-        assert "died_armed_terrain" in events
+        assert "died_armed_contested" in events
+        assert "died_armed_terrain" not in events
         assert "died_armed_enemy_fire" not in events
 
     def test_unclassified_when_neither_signal_is_recent(self):

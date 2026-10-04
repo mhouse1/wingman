@@ -560,10 +560,46 @@ SCHEMA = Section(
                 # from below the frame. True counts everything under the
                 # box's top edge, within its width, as on course.
                 "path_open_below": Leaf(types=(bool,), default=True),
+                # Banked or turning near terrain, the expansion point also
+                # wanders sideways while the time to contact stays short.
+                # True drops the box's left and right edges, so only a point
+                # above its top edge is off course.
+                "path_open_sides": Leaf(types=(bool,), default=True),
                 # HUD strokes by colour: nameplates, markers and the lock
                 # circle move, so the learned static-edge mask misses them.
                 # Ranges measured on 85 frames, 2026-10-03 (HLDD 001 Phase 2).
                 # Red wraps the hue circle, so it takes two ranges.
+                # The dots grouped into shapes, each with an outline (operator's
+                # design, 2026-10-03). A shape in the middle of the screen that
+                # grows is a threat, and its edges give the way out. Shadow only.
+                "shapes": Section(children={
+                    "enabled": Leaf(types=(bool,), default=False),
+                    # An outline is the border of a textured region: edge
+                    # strength averaged over texture_blur_px, above this level.
+                    # Measured on 104 frames, 2026-10-03.
+                    "texture_energy": Leaf(types=NUMBER, minimum=0, default=14.0),
+                    "texture_blur_px": Leaf(types=(int,), minimum=3, maximum=63, default=15),
+                    # Smaller than this share of the view is not a shape.
+                    "min_area_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.01),
+                    # Dots needed inside an outline to take its growth from them.
+                    "min_dots": Leaf(types=(int,), minimum=3, default=8),
+                    # Share of the path box an outline must cover to be "in the middle".
+                    "centre_cover": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.25),
+                    "tau_warn_s": Leaf(types=NUMBER, minimum=0, default=8.0),
+                    "confirm_ticks": Leaf(types=(int,), minimum=1, default=2),
+                    # Up is chosen only when the top edge is nearer than this
+                    # fraction of the nearer side edge.
+                    "up_bias": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.5),
+                    # An outline this near the view's border is cut off there.
+                    "edge_margin_px": Leaf(types=(int,), minimum=0, default=6),
+                    # An open gap narrower than this is a notch, not a way out
+                    # (at the tracking scale, where the view is 576 px wide).
+                    "gap_min_px": Leaf(types=(int,), minimum=1, default=24),
+                    # Straight after a threat, a tick with nothing in the middle
+                    # and fewer dots followed than this is unreadable ("blind"),
+                    # not clear. The same floor as loom.min_points.
+                    "lost_dots": Leaf(types=(int,), minimum=0, default=25),
+                }),
                 "hud_mask": Section(children={
                     "enabled": Leaf(types=(bool,), default=True),
                     "margin_px": Leaf(types=(int,), minimum=0, maximum=31, default=3),

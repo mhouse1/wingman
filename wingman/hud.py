@@ -124,7 +124,9 @@ class HudRenderer:
         self._loom_path_box: "tuple[float, ...] | None" = None
         self._loom_tau_warn_s = 0.0
         self._loom_open_below = False
+        self._loom_open_sides = False
         self._loom_reading = None    # (LoomReading | None, warn, ts), replaced whole
+        self._shape_reading = None   # (ShapeReading | None, warn, ts), replaced whole
         if feh_geometry:
             self._launch_feh(feh_geometry)
 
@@ -197,15 +199,70 @@ class HudRenderer:
         self._terrain_reading = (sky_frac, bool(ahead), float(ts))
 
     def set_loom_source(self, path_box_pct, tau_warn_s: float,
-                        open_below: bool = False) -> None:
+                        open_below: bool = False, open_sides: bool = False) -> None:
         """Turn on the looming overlay (HLDD 001 Phase 2, shadow)."""
         self._loom_path_box = tuple(float(v) for v in path_box_pct[:4])
         self._loom_tau_warn_s = float(tau_warn_s)
         self._loom_open_below = bool(open_below)
+        self._loom_open_sides = bool(open_sides)
 
     def set_loom_reading(self, reading, warn: bool, ts: float) -> None:
         """Record this tick's looming reading; None when the tick took none."""
         self._loom_reading = (reading, bool(warn), float(ts))
+
+    def set_shape_reading(self, reading, warn: bool, ts: float) -> None:
+        """Record this tick's shapes; None when the tick took none."""
+        self._shape_reading = (reading, bool(warn), float(ts))
+
+    def _draw_shapes(self, canvas: np.ndarray, ts: float) -> None:
+        """The outline around each group of dots, the threat's in colour, and
+        an arrow for the way out.
+
+        Like the dots, the outlines belong to the frames that were measured,
+        so a stale reading draws only its status line.
+        """
+        entry = self._shape_reading
+        if entry is None:
+            return
+        reading, warn, shape_ts = entry
+        h, w = canvas.shape[:2]
+        age = ts - shape_ts
+        if age > _TERRAIN_STALE_S:
+            _txt(canvas, f"Shape[SHADOW]: stale {age:.0f}s", 8, 132, _GREY)
+            return
+        if reading is None or not reading.readable:
+            why = "no reading" if reading is None else f"no reading ({reading.status})"
+            _txt(canvas, f"Shape[SHADOW]: {why}", 8, 132, _GREY)
+            return
+        threat = reading.threat
+        for shape in reading.shapes:
+            if shape is threat:
+                continue
+            pts = shape.outline.astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(canvas, [pts], True, _DARK, 3, cv2.LINE_AA)
+            cv2.polylines(canvas, [pts], True, _WHITE, 1, cv2.LINE_AA)
+        if threat is None:
+            if reading.blind:
+                _txt(canvas, f"Shape[SHADOW]: {len(reading.shapes)} shapes, the middle is "
+                             f"covered and its growth is unknown", 8, 132, _GREY)
+            else:
+                _txt(canvas, f"Shape[SHADOW]: {len(reading.shapes)} shapes, none growing "
+                             f"in the middle", 8, 132, _GREEN)
+            return
+        color = _RED if warn else _YELLOW
+        pts = threat.outline.astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(canvas, [pts], True, _DARK, 6, cv2.LINE_AA)
+        cv2.polylines(canvas, [pts], True, color, 3, cv2.LINE_AA)
+        cx, cy = w // 2, h // 2
+        reach = h // 6
+        tip = {"left": (cx - reach, cy), "right": (cx + reach, cy),
+               "up": (cx, cy - reach)}[reading.avoid]
+        cv2.arrowedLine(canvas, (cx, cy), tip, _DARK, 8, cv2.LINE_AA, tipLength=0.35)
+        cv2.arrowedLine(canvas, (cx, cy), tip, color, 4, cv2.LINE_AA, tipLength=0.35)
+        _txt(canvas, f"Shape[SHADOW]: {len(reading.shapes)} shapes, contact "
+                     f"{threat.tau:.1f}s, {threat.dots} dots, way out "
+                     f"{reading.avoid.upper()}{'  CONFIRMED' if warn else ''}",
+             8, 132, color)
 
     def _draw_loom(self, canvas: np.ndarray, ts: float) -> None:
         """Tracked points, flight-path box, expansion point and time to contact.
@@ -252,7 +309,13 @@ class HudRenderer:
         _txt(canvas, f"Loom[SHADOW]: {text}", 8, 110, color)
         x1, y1, x2, y2 = self._loom_path_box
         left, top, right, bottom = int(w * x1), int(h * y1), int(w * x2), int(h * y2)
-        if self._loom_open_below:
+        if self._loom_open_below and self._loom_open_sides:
+            # Only the top edge is left: a line across the frame, with the old
+            # box's corners marked on it. Below the line is on course.
+            cv2.line(canvas, (0, top), (w - 1, top), color, 2)
+            cv2.line(canvas, (left, top), (left, top + 12), color, 2)
+            cv2.line(canvas, (right, top), (right, top + 12), color, 2)
+        elif self._loom_open_below:
             # No bottom edge: the sides run to the foot of the frame, with a
             # tick where the closed box used to end.
             cv2.line(canvas, (left, top), (right, top), color, 2)
@@ -456,6 +519,10 @@ class HudRenderer:
             self._draw_loom(canvas, ts)
         except Exception as exc:
             logger.debug("HudRenderer: loom overlay error: %s", exc)
+        try:
+            self._draw_shapes(canvas, ts)
+        except Exception as exc:
+            logger.debug("HudRenderer: shape overlay error: %s", exc)
 
         # ── Status strip (top-left) ──────────────────────────────────────
         ts_str = time.strftime("%H:%M:%S", time.localtime(ts))

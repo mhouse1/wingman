@@ -116,13 +116,32 @@ now = self._clock()
 enemy_fire_recent = (now - self._ammo_events.last_incoming_alert_ts) <= self._enemy_fire_lookback_s
 terrain_recent = (now - climb.last_emergency_active_ts) <= self._terrain_lookback_s
 
-if terrain_recent:
+if terrain_recent and enemy_fire_recent:
+    cause = "contested"        # revised 2026-10-03, see below
+elif terrain_recent:
     cause = "terrain"
 elif enemy_fire_recent:
     cause = "enemy_fire"
 else:
     cause = "unclassified"
 ```
+
+**Revised 2026-10-03 (wingman 1.9.0): both signals recent is `contested`, not `terrain`.** The paragraph
+below is the original reasoning and is kept for the record. It had no live example of the overlap. Five
+sessions on 2026-10-03 (04:11 to 08:41, 51 armed deaths) supplied them:
+
+- 35 deaths were labelled `terrain`, 11 `enemy_fire`, 5 `unclassified`.
+- On every `enemy_fire` death the alert age was 6.2 to 6.9 s. That is the lag from the last alert to the death
+  being detected, so an age in that range means the alert was active up to the death.
+- 5 of the 35 `terrain` deaths carried that same age: 04:22:00, 04:51:56, 06:27:23, 07:27:06 and 08:30:11.
+- In 3 of the 5 the last telemetry showed 16 s or more to the ground or a climb (06:27:23: 2,873 m at
+  -76 m/s, 38 s to the ground, after a dive from 5,530 m that was being recovered).
+
+A dive that is being pulled out of still carries the hard emergency, so a missile kill during the recovery
+was counted as a terrain crash. Neither signal decides such a death, so it gets its own count
+(`died_armed_contested`, shown as `contested` in the session summary) and is left out of both. A terrain
+crash while evading a missile lands there too, which is the honest label for it. Evidence and per-event rows:
+[Design 001](../hldd/001-terrain-avoidance-hldd.md), Phase 2.
 
 `terrain_recent` is checked first: an active dive-recovery emergency is
 direct, mechanism-level evidence a crash was already in progress, which is
@@ -153,6 +172,8 @@ no churn to its existing consumers): `died_armed_enemy_fire`,
 `died_armed_terrain`, `died_armed_unclassified`, one of which fires every
 time `crash_with_missiles` does, through the same `_emit_capture_event`
 funnel.
+
+A fourth, `died_armed_contested`, was added on 2026-10-03 (D3 revision), with its own counter and summary line.
 
 **D5. `MissionStatsTracker` adds three new counters**
 (`_total_died_armed_enemy_fire`, `_total_died_armed_terrain`,

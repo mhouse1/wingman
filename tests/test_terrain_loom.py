@@ -96,8 +96,11 @@ def test_zoom_about_the_centre_reads_time_to_contact_on_course():
 
 
 def test_zoom_about_a_point_off_to_the_side_is_passing_not_on_course():
-    """The operator's rule: an outline that slides sideways is off the path."""
+    """The operator's first rule: an outline that slides sideways is off the
+    path. Still available as `path_open_sides: false`; no longer the shipped
+    setting, because live it blocked the warning before terrain deaths."""
     loom = _warm()
+    loom.path_open_sides = False
     a = _texture(2)
     reading = loom.measure(a, _zoomed(a, 1.03, (0.05 * _W, 0.4 * _H)), _DT)
     assert reading.readable and reading.tau is not None
@@ -186,6 +189,7 @@ def analyzer():
     with open(CONFIG_PATH, encoding="utf-8") as f:
         a = GameStateAnalyzer(yaml.safe_load(f))
     a.state = GameState.GAME_BATTLE.name
+    a._game_battle_alive = True         # health is being read: the battle HUD is up
     try:
         yield a
     finally:
@@ -204,6 +208,12 @@ def _handler(analyzer, padlock, grabs):
     return handler, grab
 
 
+def _field(line, name):
+    """One `name=value` field of the BT log line, wherever it sits."""
+    import re
+    return re.search(rf" {name}=(\S+)", line).group(1)
+
+
 def _bt_line(handler, caplog, state):
     with caplog.at_level(logging.DEBUG, logger="wingman.tick_handlers"):
         handler.tick(_texture(9), state, {"health": 100})
@@ -218,7 +228,7 @@ def test_tick_grabs_its_own_pair_and_logs_tau_on_the_bt_line(analyzer, caplog):
     handler, grab = _handler(analyzer, False, [a, _zoomed(a, 1.03, (_W / 2, 0.4 * _H))])
     line = _bt_line(handler, caplog, GameState.GAME_BATTLE)
     assert grab.call_count == 2
-    tau = line.rsplit("tau=", 1)[1]
+    tau = _field(line, "tau")
     assert tau.endswith("s") and 0.5 < float(tau[:-1]) < 20.0
 
 
@@ -231,7 +241,18 @@ def test_tick_takes_no_reading_outside_a_forward_battle_view(analyzer, caplog, s
     handler, grab = _handler(analyzer, padlock, [])
     line = _bt_line(handler, caplog, state)
     assert grab.call_count == 0
-    assert line.endswith("tau=n/a")
+    assert _field(line, "tau") == "n/a"
+
+
+def test_tick_takes_no_reading_while_health_is_not_being_read(analyzer, caplog):
+    """The round-end screen, a respawn, a kill-cam: the state can still say
+    battle, and what is on screen is not a forward view to measure."""
+    a = _texture(6)
+    handler, grab = _handler(analyzer, False, [a, _zoomed(a, 1.03, (_W / 2, 0.4 * _H))])
+    analyzer._game_battle_alive = False
+    line = _bt_line(handler, caplog, GameState.GAME_BATTLE)
+    assert grab.call_count == 0
+    assert _field(line, "tau") == "n/a" and _field(line, "shape") == "n/a"
 
 
 def test_a_handler_without_the_loom_grabs_nothing(analyzer, caplog):
@@ -240,7 +261,7 @@ def test_a_handler_without_the_loom_grabs_nothing(analyzer, caplog):
     ctrl = MagicMock()
     ctrl.padlock_state.return_value = False
     handler = BehaviorTreeHandler(analyzer, ctrl, bt_cfg)
-    assert _bt_line(handler, caplog, GameState.GAME_BATTLE).endswith("tau=n/a")
+    assert _field(_bt_line(handler, caplog, GameState.GAME_BATTLE), "tau") == "n/a"
 
 
 def test_main_wires_the_loom_for_live_runs_only():
@@ -480,7 +501,7 @@ def test_a_closing_view_confirms_inside_one_tick(analyzer, caplog):
     assert len(warned) == 1 and "SHADOW - not actuating" in warned[0]
     line = [r.getMessage() for r in caplog.records
             if r.getMessage().startswith("BT[") and "selected=" in r.getMessage()][0]
-    taus = line.rsplit("tau=", 1)[1].split(",")
+    taus = _field(line, "tau").split(",")
     assert len(taus) == 3 and all(t.endswith("s") for t in taus)
 
 
@@ -520,7 +541,7 @@ def test_a_descent_into_the_ground_is_on_course():
     """05:36:04 on 2026-10-03: `6.7s` with the expansion point at (958, 2165)
     on a 1920 by 1200 frame was classed as passing, eight readings in a row,
     and the aircraft hit the ground 10 s later."""
-    loom = TerrainLoom({"enabled": True})
+    loom = TerrainLoom({"enabled": True, "path_open_sides": False})
     frame = (1200, 1920)
     assert loom.in_path_box((958, 2165), frame)          # far below the frame
     assert loom.in_path_box((975, 1117), frame)          # below the old box
@@ -531,7 +552,8 @@ def test_a_descent_into_the_ground_is_on_course():
 
 
 def test_the_closed_box_is_still_available():
-    loom = TerrainLoom({"enabled": True, "path_open_below": False})
+    loom = TerrainLoom({"enabled": True, "path_open_below": False,
+                        "path_open_sides": False})
     assert not loom.in_path_box((958, 2165), (1200, 1920))
     assert loom.in_path_box((962, 576), (1200, 1920))
 
@@ -548,7 +570,7 @@ def test_a_zoom_about_a_point_below_the_view_reads_on_course():
 def test_hud_draws_the_open_box_without_a_bottom_edge(tmp_path):
     renderer = HudRenderer(str(tmp_path / "live_hud.png"), interval_sec=0.0)
     loom = TerrainLoom({"enabled": True})
-    renderer.set_loom_source(loom.path_box_pct, loom.tau_warn_s, loom.path_open_below)
+    renderer.set_loom_source(loom.path_box_pct, loom.tau_warn_s, open_below=True)
     renderer.set_loom_reading(_reading_with_points(), True, 100.0)
     canvas = np.zeros((_H, _W, 3), np.uint8)
     renderer._draw_loom(canvas, 100.0)
@@ -557,3 +579,372 @@ def test_hud_draws_the_open_box_without_a_bottom_edge(tmp_path):
     assert tuple(int(c) for c in canvas[top, left + 60]) == red          # top edge
     assert tuple(int(c) for c in canvas[_H - 5, left]) == red            # side runs to the foot
     assert tuple(int(c) for c in canvas[bottom, left + 100]) == (0, 0, 0)  # no bottom edge
+
+
+# ---------------------------------------------------------------------------
+# No left or right edge either: only a point above the top edge is off course.
+# ---------------------------------------------------------------------------
+
+def test_an_expansion_point_off_to_a_side_is_on_course():
+    """06:22, 06:33 and 06:44 on 2026-10-03: low and manoeuvring, short times
+    to contact with the expansion point just left of the box at x 730, classed
+    as passing until the aircraft hit the ground."""
+    loom = TerrainLoom({"enabled": True})
+    frame = (1200, 1920)
+    for point in ((724, 735), (395, 1024), (664, 1000), (556, 1719),   # 06:22
+                  (1, 968), (473, 1490), (707, 791),                   # 06:33
+                  (1588, 790)):                                        # right of the box
+        assert loom.in_path_box(point, frame), point
+    for point in ((606, 128), (883, 330), (949, 138), (1313, -2)):     # above the top edge
+        assert not loom.in_path_box(point, frame), point
+
+
+def test_a_zoom_about_a_point_low_and_to_the_side_reads_on_course():
+    loom = _warm()
+    a = _texture(41)
+    reading = loom.measure(a, _zoomed(a, 1.03, (0.08 * _W, 0.9 * _H)), _DT)
+    assert reading.readable and reading.tau is not None
+    assert reading.on_course
+
+
+def test_a_zoom_about_a_point_above_the_view_is_still_passing():
+    loom = _warm()
+    a = _texture(42)
+    reading = loom.measure(a, _zoomed(a, 1.03, (_W / 2, -0.5 * _H)), _DT)
+    assert reading.readable and reading.tau is not None
+    assert not reading.on_course
+
+
+def test_hud_draws_only_the_top_edge_when_the_sides_are_open(tmp_path):
+    renderer = HudRenderer(str(tmp_path / "live_hud.png"), interval_sec=0.0)
+    loom = TerrainLoom({"enabled": True})
+    renderer.set_loom_source(loom.path_box_pct, loom.tau_warn_s,
+                             loom.path_open_below, loom.path_open_sides)
+    renderer.set_loom_reading(_reading_with_points(), True, 100.0)
+    canvas = np.zeros((_H, _W, 3), np.uint8)
+    renderer._draw_loom(canvas, 100.0)
+    left, top = int(_W * 0.38), int(_H * 0.30)
+    red = hud_module._RED
+    assert tuple(int(c) for c in canvas[top, 30]) == red              # runs the full width
+    assert tuple(int(c) for c in canvas[top, _W - 30]) == red
+    assert tuple(int(c) for c in canvas[_H - 5, left]) == (0, 0, 0)   # no side edges
+
+
+# ---------------------------------------------------------------------------
+# Shapes: the dots grouped into objects with outlines (operator's design).
+# An object here is a patch of clutter on a plain background, like a mesa
+# against open sky: the background has nothing to track.
+# ---------------------------------------------------------------------------
+
+from wingman.terrain_shapes import ShapeReading, TerrainShapes, fmt_shape  # noqa: E402
+
+_SKY = (200, 150, 90)       # plain, and not a HUD colour
+
+
+def _rock(seed: int) -> np.ndarray:
+    """Dense clutter with no flat patch wider than a few pixels, as rock has.
+
+    `_texture` leaves flat areas tens of pixels across. To an outline finder
+    those are gaps, and an object made of it reads as several objects.
+    """
+    rng = np.random.default_rng(seed)
+    img = rng.integers(60, 200, (_H // 6, _W // 6), dtype=np.uint8)
+    img = cv2.resize(img, (_W, _H), interpolation=cv2.INTER_NEAREST)
+    for _ in range(1500):
+        x, y = int(rng.integers(0, _W)), int(rng.integers(0, _H))
+        w, h = int(rng.integers(4, 14)), int(rng.integers(4, 14))
+        cv2.rectangle(img, (x, y), (x + w, y + h), int(rng.integers(30, 230)), -1)
+    return cv2.cvtColor(cv2.GaussianBlur(img, (3, 3), 0), cv2.COLOR_GRAY2BGR)
+
+
+def _scene(*rects, seed=50):
+    """Plain background with rock inside each (x1, y1, x2, y2) rectangle."""
+    clutter = _rock(seed)
+    out = np.full((_H, _W, 3), _SKY, np.uint8)
+    for x1, y1, x2, y2 in rects:
+        out[y1:y2, x1:x2] = clutter[y1:y2, x1:x2]
+    return out
+
+
+def _growing(scene, about, steps=4, rate=0.02):
+    """`steps` frames in which the scene grows about a point, `rate` a frame."""
+    return [_zoomed(scene, 1.0 + rate * k, about) for k in range(steps)]
+
+
+def _shapes(**cfg):
+    loom = _warm()
+    settings = {"enabled": True}
+    settings.update(cfg)
+    return TerrainShapes(loom, settings)
+
+
+_SPAN = 3 * _DT
+
+
+def test_a_growing_object_in_the_middle_is_a_threat_with_its_time_to_contact():
+    scene = _scene((380, 130, 620, 300))
+    reading = _shapes().measure(_growing(scene, (500, 215)), _SPAN)
+    assert reading.readable and len(reading.shapes) == 1
+    threat = reading.threat
+    assert threat is not None and threat.centred
+    # 2 percent a frame for three frames is 6 percent over the span.
+    assert threat.tau == pytest.approx(_SPAN / 0.06, rel=0.25)
+    assert threat.area_last > threat.area_first
+    xs, ys = threat.outline[:, 0], threat.outline[:, 1]
+    assert 360 < xs.min() < 420 and 590 < xs.max() < 650      # the outline hugs the object
+    assert 110 < ys.min() < 170 and 270 < ys.max() < 330
+
+
+def test_an_object_that_is_not_growing_is_not_a_threat():
+    scene = _scene((380, 130, 620, 300))
+    frames = [_shifted(scene, 2 * k, 0) for k in range(4)]      # slides, same size
+    reading = _shapes().measure(frames, _SPAN)
+    assert reading.readable and len(reading.shapes) == 1
+    assert reading.threat is None and fmt_shape(reading) == "clear"
+
+
+def test_a_growing_object_off_to_the_side_is_not_a_threat():
+    """The operator's rule: it has to be in the middle of the screen."""
+    scene = _scene((210, 130, 330, 260))
+    reading = _shapes().measure(_growing(scene, (270, 195)), _SPAN)
+    assert reading.readable and reading.shapes
+    assert any(sh.tau is not None for sh in reading.shapes)      # it is growing
+    assert not any(sh.centred for sh in reading.shapes)          # but not in the middle
+    assert reading.threat is None
+
+
+def test_two_objects_are_two_shapes_with_their_own_growth():
+    """One zoom fitted to every dot would average these; each has its own."""
+    scene = _scene((210, 120, 330, 240), (420, 140, 600, 300))
+    # Only the middle one grows: zoom the scene about its centre, then put the
+    # left one back where it was.
+    frames = []
+    for k in range(4):
+        f = _zoomed(scene, 1.0 + 0.02 * k, (510, 220))
+        f[100:260, 190:350] = scene[100:260, 190:350]
+        frames.append(f)
+    reading = _shapes().measure(frames, _SPAN)
+    assert len(reading.shapes) == 2
+    still, growing = sorted(reading.shapes, key=lambda sh: sh.outline[:, 0].mean())
+    assert still.tau is None
+    assert growing.tau is not None and reading.threat is growing
+
+
+@pytest.mark.parametrize("rect, about, way", [
+    ((440, 110, 700, 300), (570, 205), "left"),     # left edge is the near one
+    ((260, 110, 520, 300), (390, 205), "right"),    # right edge is the near one
+])
+def test_the_way_out_is_past_the_nearest_side_edge(rect, about, way):
+    reading = _shapes().measure(_growing(_scene(rect), about), _SPAN)
+    assert reading.threat is not None
+    assert reading.avoid == way
+
+
+def test_up_only_when_the_top_edge_is_clearly_the_nearest():
+    """Pulling up is what the aircraft already does; it is not the default."""
+    low_wide = _scene((250, 200, 710, 330))         # wide, top edge just above centre
+    reading = _shapes().measure(_growing(low_wide, (480, 265)), _SPAN)
+    assert reading.threat is not None and reading.avoid == "up"
+    tall = _scene((400, 90, 640, 330))              # top edge far above centre
+    reading = _shapes().measure(_growing(tall, (520, 210)), _SPAN)
+    assert reading.threat is not None and reading.avoid in ("left", "right")
+
+
+def test_an_edge_at_the_border_of_the_view_is_not_a_way_out():
+    """The view is x 192 to 768. A shape that runs off its left border only
+    left the picture there; the object goes on."""
+    scene = _scene((150, 110, 560, 300))
+    reading = _shapes().measure(_growing(scene, (380, 205)), _SPAN)
+    assert reading.threat is not None
+    assert reading.threat.clipped[0] is True
+    assert reading.avoid == "right"
+
+
+def test_a_shape_that_fills_the_view_leaves_only_up():
+    scene = _scene((100, 60, 860, 420))
+    reading = _shapes().measure(_growing(scene, (480, 240)), _SPAN)
+    assert reading.threat is not None and reading.avoid == "up"
+
+
+def test_plain_sky_has_no_shapes_and_is_never_a_threat():
+    sky = np.full((_H, _W, 3), _SKY, np.uint8)
+    frames = [sky.copy() + k for k in range(4)]
+    reading = _shapes().measure(frames, _SPAN)
+    assert reading.readable and reading.shapes == () and reading.threat is None
+    assert fmt_shape(reading) == "clear"
+
+
+def test_no_shapes_until_the_hud_mask_has_warmed_up():
+    shapes = TerrainShapes(TerrainLoom({"enabled": True}), {"enabled": True})
+    scene = _scene((380, 130, 620, 300))
+    assert shapes.measure(_growing(scene, (500, 215)), _SPAN).status == "warming"
+
+
+def test_the_threat_must_stay_for_consecutive_ticks(caplog):
+    shapes = _shapes()
+    scene = _scene((380, 130, 620, 300))
+    reading = shapes.measure(_growing(scene, (500, 215)), _SPAN)
+    with caplog.at_level(logging.WARNING, logger="wingman.terrain_shapes"):
+        assert shapes.update(reading) is False          # first sight
+        assert shapes.update(reading) is True           # still there, same place
+        assert shapes.update(reading) is True
+    lines = [r.getMessage() for r in caplog.records]
+    assert len(lines) == 1
+    assert "way out" in lines[0] and "SHADOW - not actuating" in lines[0]
+
+
+def test_a_gap_or_a_different_object_starts_the_count_again():
+    shapes = _shapes()
+    middle = shapes.measure(_growing(_scene((380, 130, 620, 300)), (500, 215)), _SPAN)
+    shapes.update(middle)
+    assert shapes.update(None) is False                 # a tick with no reading
+    assert shapes.update(middle) is False
+    assert shapes.update(ShapeReading(status="few-points")) is False
+    assert shapes.update(middle) is False
+
+
+def test_tick_logs_the_shape_verdict_on_the_bt_line(analyzer, caplog):
+    scene = _scene((380, 130, 620, 300))
+    handler, grab = _handler(analyzer, False, _growing(scene, (500, 215)))
+    handler._loom.pairs_per_tick = 3
+    handler._shapes = TerrainShapes(handler._loom, {"enabled": True})
+    line = _bt_line(handler, caplog, GameState.GAME_BATTLE)
+    assert grab.call_count == 4
+    verdict = _field(line, "shape")
+    tau, way = verdict.split(":")
+    assert tau.endswith("s") and 1.0 < float(tau[:-1]) < 12.0
+    assert way in ("left", "right", "up")
+
+
+def test_tick_without_shapes_logs_no_reading(analyzer, caplog):
+    handler, _ = _handler(analyzer, None, [])
+    assert _field(_bt_line(handler, caplog, GameState.GAME_BATTLE), "shape") == "n/a"
+
+
+def test_hud_draws_the_threat_outline_and_the_way_out(tmp_path):
+    shapes = _shapes()
+    scene = _scene((440, 110, 700, 300))
+    frames = _growing(scene, (570, 205))
+    reading = shapes.measure(frames, _SPAN)
+    renderer = HudRenderer(str(tmp_path / "live_hud.png"), interval_sec=0.0)
+    renderer.set_shape_reading(reading, True, 100.0)
+    canvas = frames[-1].copy()
+    renderer._draw_shapes(canvas, 100.0)
+    red = np.all(canvas == hud_module._RED, axis=2)
+    ys, xs = np.nonzero(red)
+    assert red.sum() > 400
+    assert xs.min() < _W // 2 - 60                    # the arrow reaches left of centre
+    assert xs.max() > 640                             # and the outline's right side is drawn
+    stale = frames[-1].copy()
+    renderer._draw_shapes(stale, 100.0 + hud_module._TERRAIN_STALE_S + 1.0)
+    assert not np.all(stale == hud_module._RED, axis=2).any()
+
+
+# ---------------------------------------------------------------------------
+# Outlines from the picture itself, not a loose line round the dots.
+# ---------------------------------------------------------------------------
+
+from wingman.terrain_shapes import fmt_middle  # noqa: E402
+
+
+def _ellipse_scene(centre, axes, seed=60):
+    rock = _rock(seed)
+    out = np.full((_H, _W, 3), _SKY, np.uint8)
+    inside = np.zeros((_H, _W), np.uint8)
+    cv2.ellipse(inside, centre, axes, 0, 0, 360, 255, -1)
+    out[inside > 0] = rock[inside > 0]
+    return out
+
+
+def test_the_outline_follows_the_objects_own_edge():
+    """An ellipse is outlined as an ellipse. A line round the dots, or a
+    bounding box, would enclose a quarter more area."""
+    centre, axes = (480, 220), (130, 80)
+    reading = _shapes().measure(_growing(_ellipse_scene(centre, axes), centre), _SPAN)
+    assert len(reading.shapes) == 1
+    shape = reading.shapes[0]
+    ellipse_area = np.pi * axes[0] * axes[1] * 1.06 ** 2          # after three frames of growth
+    assert shape.area_last == pytest.approx(ellipse_area, rel=0.2)
+    box_area = (2 * axes[0]) * (2 * axes[1]) * 1.06 ** 2
+    assert shape.area_last < 0.9 * box_area
+    assert len(shape.outline) > 8                                  # a curve, not four corners
+
+
+def test_a_smooth_patch_inside_an_object_is_not_a_way_out():
+    """A shadowed face or a snowfield inside a mesa is not sky. The way out is
+    still past the object's real edge."""
+    scene = _scene((300, 110, 560, 310))          # right edge is the near one
+    scene[190:240, 430:470] = _SKY                # a smooth patch just left of the middle
+    reading = _shapes().measure(_growing(scene, (430, 210)), _SPAN)
+    assert reading.threat is not None
+    assert reading.avoid == "right"
+
+
+def test_an_object_in_the_middle_with_no_dots_to_follow_is_blind_not_clear():
+    """Near the ground the dots stop tracking. That is not the same as nothing
+    being there, and the verdict must not read as clear."""
+    frames = _growing(_scene((380, 130, 620, 300)), (500, 215))
+    # The frame before the last is smeared, as motion blur does at speed: no
+    # corner in it is sharp enough to follow into the last one.
+    frames[-2] = cv2.GaussianBlur(frames[-2], (0, 0), 12)
+    reading = _shapes().measure(frames, _SPAN)
+    assert reading.middle.dots < 8
+    assert reading.readable and reading.middle is not None
+    assert reading.threat is None and reading.blind is True
+    assert fmt_shape(reading) == "blind"
+    assert _shapes().update(reading) is False
+
+
+def test_a_view_that_goes_unreadable_straight_after_a_threat_is_blind_not_clear():
+    """2026-10-03: before 4 of 6 terrain deaths a confirmed threat was followed
+    by ticks that found no outline and followed under a dozen dots, and the
+    verdict read `clear`. A threat does not vanish between ticks."""
+    shapes = _shapes()
+    threat = shapes.measure(_growing(_scene((380, 130, 620, 300)), (500, 215)), _SPAN)
+    assert threat.threat is not None
+    shapes.update(threat)
+    smear = [cv2.GaussianBlur(f, (0, 0), 25) for f in _growing(_scene((380, 130, 620, 300)), (500, 215))]
+    reading = shapes.measure(smear, _SPAN)
+    assert reading.middle is None and reading.tracked < 25
+    assert reading.lost is True and fmt_shape(reading) == "blind"
+    shapes.update(reading)
+    assert fmt_shape(shapes.measure(smear, _SPAN)) == "blind"      # and it stays so while unreadable
+
+
+def test_an_unreadable_view_with_no_threat_before_it_is_clear():
+    """Plain sky also has nothing to follow. Without a threat just before, it is clear."""
+    smear = [cv2.GaussianBlur(f, (0, 0), 25) for f in _growing(_scene((380, 130, 620, 300)), (500, 215))]
+    reading = _shapes().measure(smear, _SPAN)
+    assert reading.middle is None and reading.lost is False
+    assert fmt_shape(reading) == "clear"
+
+
+def test_a_readable_open_view_ends_the_wait_after_a_threat():
+    shapes = _shapes()
+    shapes.update(shapes.measure(_growing(_scene((380, 130, 620, 300)), (500, 215)), _SPAN))
+    off_to_the_side = _growing(_scene((40, 130, 200, 300)), (120, 215))
+    reading = shapes.measure(off_to_the_side, _SPAN)
+    assert reading.middle is None and reading.tracked >= 25 and reading.lost is False
+    shapes.update(reading)
+    smear = [cv2.GaussianBlur(f, (0, 0), 25) for f in off_to_the_side]
+    assert fmt_shape(shapes.measure(smear, _SPAN)) == "clear"
+
+
+def test_hud_strokes_on_plain_sky_make_no_shapes():
+    sky = np.full((_H, _W, 3), _SKY, np.uint8)
+    frames = [_with_moving_hud(sky, 5 * k) for k in range(4)]
+    reading = _shapes().measure(frames, _SPAN)
+    assert reading.readable and reading.shapes == ()
+
+
+def test_the_log_carries_both_growth_figures_for_what_covers_the_middle():
+    """So `clear` can be told from "measured slow" and from "not measured"."""
+    scene = _scene((380, 130, 620, 300))
+    still = [_shifted(scene, 2 * k, 0) for k in range(4)]
+    reading = _shapes().measure(still, _SPAN)
+    assert fmt_shape(reading) == "clear"
+    text = fmt_middle(reading)
+    assert text.startswith("outline ") and " dots - " in text and " n=" in text
+    growing = _shapes().measure(_growing(scene, (500, 215)), _SPAN)
+    assert " dots 6." in fmt_middle(growing) or " dots 5." in fmt_middle(growing)
+    assert fmt_middle(None) == "none"
