@@ -23,6 +23,14 @@ nested:
   # operator Alt+Tabs away, and the game then reads the next Enter as Alt+Enter
   # and drops to a framed window that shifts every crop.
   release_stuck_modifiers: true
+  # ADR 099 V3: the nested display is a window on the desktop, and while the
+  # desktop is not drawing it (covered, minimised, another workspace) the game
+  # falls to one frame a second: measured 2026-10-04 11:27, covered by a
+  # browser, FPS 1 and three deaths. true holds one black pixel on top of the
+  # game at the top-left corner of the nested display, which should keep its
+  # frames on Xwayland's fast path whatever the desktop does. Off until a
+  # flight with the window covered for more than five minutes confirms it.
+  block_page_flips: false
 
 # Design 011 (ACS Mode), step 1: which weapon-employment tactic the active
 # airframe supports. Read once at startup into AnalyzerSnapshot.has_padlock.
@@ -439,7 +447,9 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # recorded yet). j20 = the adaptive J20 mission, su30 = the scripted Su-30
   # sequence (su30_mission: below), jas39 = J20 plus the cloak loop
   # (jas39_mission: below), f111 = the su30 script plus the wing sweep
-  # (f111_mission: below, ADR 149). ADR 145: the 'u' hotkey launches this same mission,
+  # (f111_mission: below, ADR 149), survey = straight passes across the arena for
+  # mapping, with no weapons (survey_mission: below, Design 017 phase 4b).
+  # ADR 145: the 'u' hotkey launches this same mission,
   # so this key is how a mission is chosen; 'o' still starts su30 regardless.
   # Respawn restarts whichever mission ran last.
   # Set to su30 by the operator on 2026-09-24; set j20 to launch J20 at battle
@@ -500,6 +510,48 @@ debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, ca
 # speed by altitude: 4-5 km 1154 KPH, 5-6 km 876, 6-7 km 369 (min 84), 7-8 km
 # 576. The old band (6500-7500) sat in the aircraft's worst-performing region,
 # so the climb plateaued below it and the orbit had no energy to hold a turn.
+# mission_survey (Design 017 phase 4b): fly the arena in straight passes so the
+# pictures can be turned into a map. Holds target_alt, holds a compass heading
+# read from the minimap, and turns back when the arena edge is ahead; each turn
+# goes towards the `sweep` side of the first pass, so the passes lie side by
+# side. target_alt is 3500, not higher: the first flight (2026-10-04) stalled
+# every time the nose-up climb passed about 4000 m and never got above 4321 m.
+# While it flies the tree's climb to 5000 m is refused for the same reason, and
+# the tree's boundary turn is allowed only as a last resort (backstop_frac):
+# both hold the nose up for seconds, which takes this aircraft over the top.
+# The survey controls pitch by the measured climb rate: one press sized to the
+# gap, then a wait (the keys under "climb_rate_ms" in the schema).
+# No weapons, no pursuit, padlock left alone. For a mode with no
+# opponents: nothing in it defends the aircraft. Chosen with
+# mission.default_mission: survey; `make survey` switches that on and off for
+# this machine in config.local.yaml. Each battle starts its passes
+# heading_step_deg further round than the last (0, 45, 90, ...), so one session
+# flies crossing passes; 0 keeps every battle on heading_deg.
+survey_mission: {target_alt: 3500, hysteresis_m: 500, climb_rate_ms: 60, descent_rate_ms: 30,
+  alt_tau_s: 10, rate_deadband_ms: 15, rate_per_press_s: 150, rate_gain: 0.5, pitch_interval_s: 3.0,
+  press_min_s: 0.08, press_max_s: 0.35, turn_climb_max_ms: -30, takeover_alt_m: 1200,
+  backstop_frac: 0.3, altitude_deadband_m: 150, level_band_deg: 25,
+  heading_deg: 0, heading_step_deg: 45, sweep: right, heading_deadband_deg: 8, heading_release_deg: 3,
+  turn_release_deg: 25, turn_max_s: 40, edge_turn_frac: 0.7, edge_cone_cos: 0.7,
+  edge_close_frac: 0.35, edge_closing_frac: 0.03, edge_holdoff_s: 30,
+  boundary_max_age_s: 4.0, min_leg_s: 20,
+  tick_s: 0.3, pulse_s: 0.3, lock_timeout_s: 5.0, status_every_s: 5.0,
+  map_look_every_s: 15, map_first_look_s: 5, map_wait_s: 2.0, map_poll_s: 0.1, map_key_hold_s: 0.05,
+  edge_radius_frac: 0.8, edge_backstop_radius_frac: 0.97, position_max_age_s: 90,
+  arena_radius_m: 9400, lane_spacing_frac: 0.3, lane_limit_frac: 0.6, cross_max_s: 40, cross_edge_radius_frac: 0.85}
+# The game's full map (Design 017, "The full map"), opened with the m key: a
+# north-up disc in the middle of the screen with the aircraft's own icon at its
+# true place. The survey opens it for about a second every map_look_every_s of
+# cruise and logs where it is ("SURVEY POS"). The survey's turn back at the
+# edge is judged from that position (survey_mission.edge_radius_frac). The
+# numbers are the disc's and its markings' sizes and colours, measured on two
+# pictures on 2026-10-04 (wingman/full_map.py, and the schema for each key).
+full_map: {enabled: true, radius_frac: 0.3944, n_offset_frac: 1.052, n_window_frac: 0.09,
+  n_hsv_lower: [15, 160, 180], n_hsv_upper: [25, 255, 255], n_min_area_frac: 0.002,
+  n_max_area_frac: 0.008, n_clear_frac: 0.2, n_around_max: 0.25, ring_inner_frac: 1.035, ring_outer_frac: 1.075, ring_dark_v: 120,
+  ring_dark_share: 0.6, icon_max_s: 30, icon_min_v: 235, icon_min_area_frac: 0.00018,
+  icon_max_area_frac: 0.0027, cone_hsv_lower: [35, 60, 60], cone_hsv_upper: [85, 255, 255],
+  cone_min_area_frac: 0.004, cone_max_dist_frac: 0.45}
 loiter_mission: {target_alt: 5000, hysteresis_m: 500, orbit_direction: right,
   orbit_roll_interval_s: 3.0, orbit_roll_hold_s: 0.6, tick_s: 1.0,
   # ADR 112: pitch is a CLOSED LOOP on altitude, not a nudge on every roll.
@@ -845,6 +897,14 @@ minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   # ADR 108: saturation floor lowered from 120. The line is thin and
   # antialiased on the post-2026-09-02 minimap, so its edge pixels sit
   # well below 120 — at 120 the detector read nothing on 81% of ticks.
+  # Design 017 phase 4: compass heading from the orange N on the minimap rim,
+  # logged as hdg= on the BT line. Shadow: nothing steers on it. The letter is
+  # a small blob of one hue at one distance from the centre; rock seen through
+  # the rim is redder and enemy markers are yellower. Two candidates read as
+  # nothing. Fractions are of the MINIMAP crop's radius (area: of its square).
+  compass: {enabled: true, n_hsv_lower: [15, 160, 180], n_hsv_upper: [25, 255, 255],
+    rim_inner_frac: 0.88, rim_outer_frac: 1.0, letter_min_area_frac: 0.002,
+    letter_max_area_frac: 0.005},
   boundary_hsv: {lower: [8, 60, 120], upper: [28, 255, 255]},
   # ONE closing pass, not two. Two bridges a 12 px speckle grid into a lattice
   # whose thinness (0.019) is indistinguishable from the real line's (0.018) —

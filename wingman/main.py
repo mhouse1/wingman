@@ -602,6 +602,7 @@ def main():
     pointer_isolated_display = None
     # ADR 157: the guard that releases modifiers left held on the nested display.
     stuck_modifier_guard = None
+    present_copy_guard = None
     if _nested_on and sys.platform != "win32":
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import (set_injection_display, set_injected_keys,
@@ -666,6 +667,12 @@ def main():
             stuck_modifier_guard.start()
             logger.info("ADR 157: releasing modifier keys held on %s for more "
                         "than 1.5s", nested_display)
+        # ADR 099 V3: the game falls to one frame a second while its window on
+        # the desktop is not shown (measured 2026-10-04 11:27). Off by default.
+        if bool(_nested.get("block_page_flips", schema_default("nested.block_page_flips"))):
+            from .present_copy_guard import PresentCopyGuard
+            present_copy_guard = PresentCopyGuard(nested_display)
+            present_copy_guard.start()
 
     # ADR 098: gate injection on the game having focus. Installed process-wide
     # because the injection sites are module-level in controller.
@@ -1924,6 +1931,8 @@ def main():
         # inject a release into a display that is being torn down.
         if stuck_modifier_guard is not None:
             stuck_modifier_guard.stop()
+        if present_copy_guard is not None:
+            present_copy_guard.stop()
         ctrl.cleanup(keep_hotkeys=standby_armed)
         # ADR 156: make sure the operator's mouse is attached. A click normally
         # reattaches it itself; this covers one that was cut short by the exit.

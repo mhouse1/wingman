@@ -36,6 +36,18 @@ versions it targets (46 to 50). The installer adds the running Shell's major
 version when it's missing and says so. The next GNOME upgrade then can't
 silently mark the extension OUT OF DATE, which is how 26.04 broke it.
 
+**D5. The extension keeps the window drawn at full rate while it is hidden.**
+Added 2026-10-04 as version 4. Behind another window the game fell to one frame a
+second: mutter sends a hidden window no word that its frame was shown, and
+Xwayland then waits a second per frame
+([ADR 099](099-nested-display-lane-for-unattended-operation.md), V3). Mutter
+exempts a window that has a copy of itself on the desktop, so `_keepShown` holds
+one for as long as the window lives: a `Clutter.Clone` of the window, one pixel
+in the corner of the screen, see-through and taking no input. It is made when
+the window's first frame arrives and destroyed when the window closes or the
+extension is disabled. Only the Shell can do this, which is why it lives here
+and not in wingman.
+
 ## Consequences
 
 - After `make upgrade-linux` and one logout/login, the `Xwayland on :3` window
@@ -46,6 +58,14 @@ silently mark the extension OUT OF DATE, which is how 26.04 broke it.
 - D4 can declare a GNOME version the extension was never run on. If a future
   Shell changes the placement API, the extension fails to load and the window
   falls back to Mutter's default placement. Nothing worse happens.
+- With D5 the desktop does a frame for every frame the game draws, whether or
+  not the window can be seen. That is the point of it, and it is also a cost:
+  a hidden game window no longer lets the desktop idle.
+- D5 rests on one condition in mutter's source (`has_mapped_clones` in
+  `meta_surface_actor_wayland_is_view_primary`, read in 50.1). A later mutter
+  can change it without notice, and the sign is the one-a-second picture coming
+  back. The journal line `holding a one-pixel copy` says only that the copy was
+  made, not that mutter still honours it.
 - GNOME Shell's journal records each move:
   `journalctl --user -b _COMM=gnome-shell | grep wingman-window-left`.
 
@@ -81,6 +101,15 @@ ran, and the occasional top-left placement was Mutter's own.
 - [x] VEDA, 2026-10-02 05:26: the journal shows
       `wingman-window-left: moved "Xwayland on :9" from 1553,516 to 67,32`
       (the work-area origin: right of the dock, below the top bar).
+- [x] VEDA, 2026-10-04 13:11: after a re-login `gnome-extensions info` shows
+      `Version: 4`, `State: ACTIVE`, and at 13:12:04 the journal shows
+      `holding a one-pixel copy of "Xwayland on :3" ... (mapped=yes)`.
+- [x] VEDA, 2026-10-04 13:12 to 13:19, D5: a battle of 6 min 38 s flown with the
+      window fully covered by the editor. Picture rate median 41.7 a second,
+      lowest reading 27.5, no deaths. Without the copy the same cover gave 0.8 a
+      second (12:27 the same day). Figures: Design 001, the rows for 12:27 and 13:12.
+- [ ] D5 with the window minimised, on another workspace, behind the lock
+      screen, and with the monitor off.
 - [ ] VEDA: the operator confirms by eye that `make r` opens the
       `Xwayland on :3` window at the top-left.
 - [ ] A second Linux PC, after `make upgrade-linux` and a logout.

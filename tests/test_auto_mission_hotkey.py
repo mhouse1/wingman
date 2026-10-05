@@ -1,4 +1,7 @@
-"""AUTO_MISSION_KEY ('m') battle-state guard (2026-08-17 incident).
+"""AUTO_MISSION_KEY battle-state guard (2026-08-17 incident).
+
+The key was 'm' when this was written and is 'n' since 2026-10-04, when it
+moved off the game's full-map key; the incident and the guard are the same.
 
 A single 'm' press during a battle state must NOT force GAME_LOBBY: at
 04:15:41 on 2026-08-17, 'm' pressed mid-manual-flight forced the FSM to

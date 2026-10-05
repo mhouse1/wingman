@@ -167,6 +167,189 @@ SCHEMA = Section(
                 "boundary_max_age_s": _num(0),
             "tick_s": SECONDS,
         }),
+        # mission_survey: straight passes across the arena for mapping
+        # (Design 017 phase 4b). Chosen with mission.default_mission: survey.
+        "survey_mission": Section(children={
+            # The passes' altitude. Not 5000: on the first flight (2026-10-04) the
+            # nose-up climb stalled the aircraft every time it passed about
+            # 4000 m and it never got higher than 4321 m. 3500 m is reached in
+            # half a minute and is 1300 m above the highest terrain measured.
+            "target_alt": Leaf(types=NUMBER, minimum=0, default=3500),
+            # Below target minus this the survey only climbs; it steers above it.
+            "hysteresis_m": Leaf(types=NUMBER, minimum=0, default=500),
+            # Pitch. This aircraft keeps the nose where a press leaves it, so
+            # presses on a timer add up (a 74 degree dive, a vertical zoom:
+            # 2026-10-04). The climb rate wanted is the altitude error over
+            # alt_tau_s, held between -descent_rate_ms and climb_rate_ms. One
+            # press at most every pitch_interval_s, sized as the gap between
+            # that and the measured rate over rate_per_press_s (metres a second
+            # of climb rate changed by a second of press), and none inside
+            # rate_deadband_ms.
+            "climb_rate_ms": Leaf(types=NUMBER, minimum=0, default=60),
+            "descent_rate_ms": Leaf(types=NUMBER, minimum=0, default=30),
+            "alt_tau_s": Leaf(types=NUMBER, minimum=1, default=10),
+            "rate_deadband_ms": Leaf(types=NUMBER, minimum=0, default=15),
+            "rate_per_press_s": Leaf(types=NUMBER, minimum=1, default=150),
+            # The share of the climb-rate gap one press corrects. 1 corrects it
+            # all, which over-corrects on a rate that is seconds old: the
+            # eighth flight swung by a median 499 m in the settled part of a
+            # pass (2026-10-04).
+            "rate_gain": Leaf(types=NUMBER, minimum=0.05, maximum=1, default=0.5),
+            "pitch_interval_s": Leaf(types=NUMBER, minimum=0, default=3.0),
+            "press_min_s": Leaf(types=NUMBER, minimum=0, default=0.08),
+            "press_max_s": Leaf(types=NUMBER, minimum=0, default=0.35),
+            # A turn pulls only while the climb rate is under this. Negative:
+            # only to hold up a turn that is sinking. At +20 the pull at the
+            # end of a turn, with the wings rolling level, went straight into
+            # pitch: 970 m gained in 8 s to a stall at 229 KPH, and the dive
+            # out of it was not recovered (2026-10-04 18:31). Pulling does not
+            # make the turn faster: 7.0 s to come round with almost none
+            # against 6.5 s with a pull for most of it.
+            "turn_climb_max_ms": Leaf(types=NUMBER, minimum=-200, default=-30),
+            # Above this altitude a climb that is not an emergency is stopped
+            # while a survey flies; below it the low-altitude climb that lifts
+            # a fresh spawn is left to finish.
+            "takeover_alt_m": Leaf(types=NUMBER, minimum=0, default=1200),
+            # The tree's boundary turn holds its pull for 12 s, which took the
+            # nose to 84 degrees up (2026-10-04). While a survey flies it is
+            # allowed only as the last resort: the edge ahead and nearer than
+            # this, in minimap radii.
+            "backstop_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.3),
+            # A steering turn does not pull above target plus this.
+            "altitude_deadband_m": Leaf(types=NUMBER, minimum=0, default=150),
+            # Nose further than this from level: no bank until it is back.
+            "level_band_deg": Leaf(types=NUMBER, minimum=0, default=25),
+            # Compass heading of the first pass; the next is flown the other way.
+            "heading_deg": Leaf(types=NUMBER, minimum=0, maximum=360, default=0),
+            # How far round each new battle's first pass is from the last
+            # battle's. 0 flies every battle on heading_deg, which is what the
+            # first 27 mission starts did (2026-10-04): one set of lanes, seen
+            # from one direction. 45 gives four pass axes, each flown from
+            # both ends, over eight battles.
+            "heading_step_deg": Leaf(types=NUMBER, minimum=0, maximum=180, default=45),
+            # Which side of the first pass the later passes move over to.
+            "sweep": Leaf(types=(str,), choices=("right", "left"), default="right"),
+            # A correction starts on two reads in a row further off than the
+            # deadband, and is flown until the heading is inside the release.
+            "heading_deadband_deg": Leaf(types=NUMBER, minimum=0, default=8),
+            "heading_release_deg": Leaf(types=NUMBER, minimum=0, default=3),
+            # A turn back at the edge is flown one way until the heading is this
+            # close, then the ordinary steering finishes it.
+            "turn_release_deg": Leaf(types=NUMBER, minimum=0, default=25),
+            "turn_max_s": Leaf(types=NUMBER, minimum=0, default=40),
+            # Turn back when the arena edge is ahead and nearer than this, in
+            # minimap radii. Further out than the tree's boundary turn (0.50),
+            # so the survey's own turn usually comes first and the tree's is
+            # the backstop. Measured turn rate 6.7 degrees a second: half a
+            # turn takes about 27 s.
+            "edge_turn_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.7),
+            # With a position from the full map, the edge is judged from it
+            # and not from the minimap: a pass turns back this far from the
+            # arena's centre, in arena radii, while still heading out. The
+            # tree's boundary turn is refused inside edge_backstop_radius_frac.
+            # A position is used for position_max_age_s after its fix, carried
+            # by heading and speed over an arena of arena_radius_m (measured
+            # 8.8 to 10.3 km on 2026-10-04).
+            "edge_radius_frac": Leaf(types=NUMBER, minimum=0.2, maximum=1, default=0.8),
+            "edge_backstop_radius_frac": Leaf(types=NUMBER, minimum=0.2, maximum=1.2,
+                                              default=0.97),
+            "position_max_age_s": Leaf(types=NUMBER, minimum=5, default=90),
+            # With a position, a turn back puts the next pass this far over
+            # from the last, in arena radii: half the turn, a step across the
+            # passes, the other half. 0 turns straight round, which moves the
+            # pass over by the width of the turn only (0.05 to 0.2 radii
+            # measured). The step is given up after cross_max_s, and cut short
+            # when it reaches cross_edge_radius_frac still heading out, which
+            # also sends the lanes back the other way.
+            "lane_spacing_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.3),
+            # The furthest a pass may lie from the line through the arena's
+            # centre, in radii. A step that would put the next pass beyond it
+            # is made to the other side instead: out there a pass is short, or
+            # runs along the rim.
+            "lane_limit_frac": Leaf(types=NUMBER, minimum=0.1, maximum=1, default=0.6),
+            "cross_max_s": Leaf(types=NUMBER, minimum=1, default=40),
+            "cross_edge_radius_frac": Leaf(types=NUMBER, minimum=0.2, maximum=1.1, default=0.85),
+            "arena_radius_m": Leaf(types=NUMBER, minimum=1000, default=9400),
+            # "Ahead" is the nearest point of the rim within this cone about the
+            # nose (0.7 is 45 degrees either side). Beside the aircraft it is
+            # not a reason to turn, unless it is nearer than edge_close_frac.
+            "edge_cone_cos": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.7),
+            "edge_close_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.35),
+            # And in either case only while the rim is getting nearer: by at
+            # least this much over three readings.
+            "edge_closing_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.03),
+            # After turning back, the edge is not looked at again for this long.
+            "edge_holdoff_s": Leaf(types=NUMBER, minimum=0, default=30),
+            "boundary_max_age_s": Leaf(types=NUMBER, minimum=0, default=4.0),
+            # Two passes in a row shorter than this: the arena has run out on
+            # this side, and the passes move back the other way.
+            "min_leg_s": Leaf(types=NUMBER, minimum=0, default=20),
+            # The loop's period, and how long one bank-and-pull press lasts.
+            "tick_s": Leaf(types=NUMBER, minimum=0, default=0.3),
+            "pulse_s": Leaf(types=NUMBER, minimum=0, default=0.3),
+            "lock_timeout_s": Leaf(types=NUMBER, minimum=0, default=5.0),
+            # One SURVEY status line this often while nothing changes.
+            "status_every_s": Leaf(types=NUMBER, minimum=0, default=5.0),
+            # The look at the full map (Design 017, "The full map"): how often
+            # in cruise the survey opens it to read where it is (0 never
+            # looks), how long it watches the picture for the map to come or go
+            # after a key before deciding the key did nothing, how often it
+            # looks while it waits, and how long the key is held. The game
+            # answers the key in 0.2 s to more than 0.7 s, so the wait is long
+            # and nothing is pressed twice inside it.
+            "map_look_every_s": Leaf(types=NUMBER, minimum=0, default=15),
+            # While there is no position, a look is tried this often and in
+            # a climb too, so a battle's first passes are not left to the
+            # minimap's rim.
+            "map_first_look_s": Leaf(types=NUMBER, minimum=1, default=5),
+            "map_wait_s": Leaf(types=NUMBER, minimum=0.5, default=2.0),
+            "map_poll_s": Leaf(types=NUMBER, minimum=0.02, default=0.1),
+            "map_key_hold_s": Leaf(types=NUMBER, minimum=0.02, default=0.05),
+        }),
+        # The game's full map, opened with `m`: a north-up disc in the middle
+        # of the screen with the own icon at its true place (wingman/full_map.py).
+        # Sizes are fractions of the frame height (radius_frac) or of the disc's
+        # radius; areas are fractions of the radius squared. Measured on two
+        # pictures at 1920 by 1200, 2026-10-04 03:19 and 16:43.
+        "full_map": Section(children={
+            "enabled": Leaf(types=(bool,), default=True),
+            "radius_frac": Leaf(types=NUMBER, minimum=0.1, maximum=0.5, default=0.3944),
+            # The orange N at the top of the rim: where its middle is, how wide
+            # a window to look in, its colour and its size.
+            "n_offset_frac": Leaf(types=NUMBER, minimum=1, maximum=1.3, default=1.052),
+            "n_window_frac": Leaf(types=NUMBER, minimum=0.01, maximum=0.3, default=0.09),
+            "n_hsv_lower": Leaf(types=(list,), item_types=(int,), length=3,
+                                default=[15, 160, 180]),
+            "n_hsv_upper": Leaf(types=(list,), item_types=(int,), length=3,
+                                default=[25, 255, 255]),
+            "n_min_area_frac": Leaf(types=NUMBER, minimum=0, default=0.002),
+            "n_max_area_frac": Leaf(types=NUMBER, minimum=0, default=0.008),
+            # The N must be alone: out to n_clear_frac from its middle there
+            # may be no more orange than n_around_max of the N's own area.
+            # That is what tells it from canyon rock at the top of the screen.
+            "n_clear_frac": Leaf(types=NUMBER, minimum=0.05, maximum=0.5, default=0.2),
+            "n_around_max": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.25),
+            # The compass ring round the disc, for `covering` only. It is
+            # see-through: 0.80 to 0.92 of it reads dark over a dark scene and
+            # about 0.6 over bright cloud, against 0.10 or less with no map.
+            "ring_inner_frac": Leaf(types=NUMBER, minimum=1, maximum=1.3, default=1.035),
+            "ring_outer_frac": Leaf(types=NUMBER, minimum=1, maximum=1.3, default=1.075),
+            "ring_dark_v": Leaf(types=(int,), minimum=0, maximum=255, default=120),
+            "ring_dark_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.6),
+            # The own icon: pure white, about 0.0005 of the radius squared.
+            "icon_max_s": Leaf(types=(int,), minimum=0, maximum=255, default=30),
+            "icon_min_v": Leaf(types=(int,), minimum=0, maximum=255, default=235),
+            "icon_min_area_frac": Leaf(types=NUMBER, minimum=0, default=0.00018),
+            "icon_max_area_frac": Leaf(types=NUMBER, minimum=0, default=0.0027),
+            # The green view cone, for the heading. Friendly markers are green
+            # too, and far smaller.
+            "cone_hsv_lower": Leaf(types=(list,), item_types=(int,), length=3,
+                                   default=[35, 60, 60]),
+            "cone_hsv_upper": Leaf(types=(list,), item_types=(int,), length=3,
+                                   default=[85, 255, 255]),
+            "cone_min_area_frac": Leaf(types=NUMBER, minimum=0, default=0.004),
+            "cone_max_dist_frac": Leaf(types=NUMBER, minimum=0, default=0.45),
+        }),
         "enemy_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
         # Design 010 instrumentation
         "return_to_battle": Section(children={
@@ -282,7 +465,7 @@ SCHEMA = Section(
             # ADR 144: which mission battle entry launches; ADR 145 adds jas39
             # and makes the 'u' hotkey launch it too; ADR 149 adds f111
             "default_mission": Leaf(types=(str,),
-                                    choices=("j20", "su30", "jas39", "f111")),
+                                    choices=("j20", "su30", "jas39", "f111", "survey")),
             "padlock_spread_missiles": _int(0),
             # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
             # pre_crash_lookback_s added D8
@@ -503,6 +686,28 @@ SCHEMA = Section(
             # ADR 028 revision 4
             "regroup_enabled": BOOL,
             "friendly_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
+            # Design 017 phase 4: compass heading from the orange N on the rim.
+            # Shadow: logged as hdg= on the BT line, nothing steers on it.
+            "compass": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                # The letter's orange. Rock seen through the rim is redder
+                # (hue 8 to 13) and enemy markers are yellower (hue 26 on).
+                "n_hsv_lower": Leaf(types=(list,), item_types=(int,), length=3,
+                                    default=[15, 160, 180]),
+                "n_hsv_upper": Leaf(types=(list,), item_types=(int,), length=3,
+                                    default=[25, 255, 255]),
+                # The letters' ring, as fractions of the minimap crop's radius.
+                "rim_inner_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.88),
+                "rim_outer_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=1.0),
+                # The letter's size, as fractions of the radius squared. The N
+                # measures 0.0027 to 0.0036 (68 to 90 px on a 320 px crop).
+                # Pieces of the markers that sit on the rim are orange too and
+                # measure 0.0006 to 0.0015: with the floor at 0.0006 they
+                # counted as second candidates and the heading went unread,
+                # for 56 s on 2026-10-04 18:15. The floor is above them now.
+                "letter_min_area_frac": Leaf(types=NUMBER, minimum=0, default=0.002),
+                "letter_max_area_frac": Leaf(types=NUMBER, minimum=0, default=0.005),
+            }),
             # Design 010 instrumentation
             "boundary_hsv": Section(children={"lower": _HSV, "upper": _HSV}),
             "boundary_min_px": _int(0),
@@ -822,6 +1027,10 @@ SCHEMA = Section(
             "size": STR,
             "isolate_pointer": Leaf(types=(bool,), default=True),   # ADR 156
             "release_stuck_modifiers": Leaf(types=(bool,), default=True),  # ADR 157
+            # ADR 099 V3: hold one pixel on top of the game so its frames are
+            # copied, not swapped, and it keeps drawing while its window on the
+            # desktop is not shown. Off until a covered-window flight confirms it.
+            "block_page_flips": Leaf(types=(bool,), default=False),
         }),
 
         # ADR 098: focus guard for key injection

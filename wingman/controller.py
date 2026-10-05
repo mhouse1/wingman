@@ -15,6 +15,8 @@ from .state import GameState, NOSE_DOWN
 from .perception import Perception
 from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT
 from .config_schema import schema_default
+from .full_map import fmt_fix
+from .survey import SurveyPlan, battle_heading, carry_position, first_battle_index, radial
 from . import keybindings as _keybindings
 from .actuator import Actuator
 from .hold_tactic import HoldTactic
@@ -144,6 +146,7 @@ from .keybindings import (                                          # noqa: F401
     ALT_FLIGHT_KEYS,
     MANUAL_TAKEOVER_KEY,
     AUTO_MISSION_KEY,
+    FULL_MAP_KEY,
     CANCEL_MISSION_KEY,
     CAPTURE_SCREEN_SHOT,
     DEPLOY_FLARES_KEY,
@@ -1005,6 +1008,51 @@ class Controller:
         self._loiter_boundary_max_age_s = float(
             _lo.get("boundary_max_age_s", 4.0))
         self._loiter_tick_s = float(_lo.get("tick_s", 1.0))
+        # Design 017 phase 4b: mission_survey. The decisions and their numbers
+        # live in SurveyPlan (wingman/survey.py); these are only the loop's own.
+        self._survey_cfg = dict(getattr(config, "survey", None) or {})
+        self._survey_tick_s = float(self._survey_cfg.get(
+            "tick_s", schema_default("survey_mission.tick_s")))
+        self._survey_pulse_s = float(self._survey_cfg.get(
+            "pulse_s", schema_default("survey_mission.pulse_s")))
+        self._survey_lock_timeout_s = float(self._survey_cfg.get(
+            "lock_timeout_s", schema_default("survey_mission.lock_timeout_s")))
+        self._survey_status_every_s = float(self._survey_cfg.get(
+            "status_every_s", schema_default("survey_mission.status_every_s")))
+        self._survey_backstop_frac = float(self._survey_cfg.get(
+            "backstop_frac", schema_default("survey_mission.backstop_frac")))
+        self._survey_boundary_max_age_s = float(self._survey_cfg.get(
+            "boundary_max_age_s", schema_default("survey_mission.boundary_max_age_s")))
+        self._survey_takeover_alt_m = float(self._survey_cfg.get(
+            "takeover_alt_m", schema_default("survey_mission.takeover_alt_m")))
+        self._survey_heading_step_deg = float(self._survey_cfg.get(
+            "heading_step_deg", schema_default("survey_mission.heading_step_deg")))
+        self._survey_map_look_every_s = float(self._survey_cfg.get(
+            "map_look_every_s", schema_default("survey_mission.map_look_every_s")))
+        self._survey_map_wait_s = float(self._survey_cfg.get(
+            "map_wait_s", schema_default("survey_mission.map_wait_s")))
+        self._survey_arena_radius_m = float(self._survey_cfg.get(
+            "arena_radius_m", schema_default("survey_mission.arena_radius_m")))
+        self._survey_position_max_age_s = float(self._survey_cfg.get(
+            "position_max_age_s", schema_default("survey_mission.position_max_age_s")))
+        self._survey_edge_backstop_radius = float(self._survey_cfg.get(
+            "edge_backstop_radius_frac",
+            schema_default("survey_mission.edge_backstop_radius_frac")))
+        # (distance from the arena's centre in radii, outwardness, when), from
+        # the survey's own position; None while it has none. Read by the
+        # tree's thread when it asks for a boundary turn.
+        self._survey_radial = None
+        self._survey_map_poll_s = float(self._survey_cfg.get(
+            "map_poll_s", schema_default("survey_mission.map_poll_s")))
+        self._survey_map_first_look_s = float(self._survey_cfg.get(
+            "map_first_look_s", schema_default("survey_mission.map_first_look_s")))
+        self._survey_map_key_hold_s = float(self._survey_cfg.get(
+            "map_key_hold_s", schema_default("survey_mission.map_key_hold_s")))
+        # Battles the survey has been started for. Each takes the next pass
+        # heading; a respawn restarts the same battle's and does not count.
+        # A session starts part-way round, by the clock, so short sessions do
+        # not all fly the first heading.
+        self._survey_battles = first_battle_index(time.time(), self._survey_heading_step_deg)
         # ADR 144: mission_su30's block. Which mission battle entry launches
         # comes from the same ControllerConfig; unknown names fall back to j20
         # (the schema already restricts the YAML to j20/su30/jas39/f111).
@@ -1107,6 +1155,9 @@ class Controller:
         self._boundary_turn_thread: "threading.Thread | None" = None
         self._boundary_turn_stop = threading.Event()
         self._loitering = threading.Event()   # ADR 109: survival hold active
+        self._surveying = threading.Event()   # Design 017 4b: a survey owns roll and the turns
+        self._survey_turning = False          # the survey is flying its own turn back
+        self._survey_boundary = None          # (dist, fwd, ts, lateral)
         self._loiter_boundary = None          # ADR 111: (dist, fwd, ts)
         self._loiter_window_min = None
         self._loiter_prev_window_min = None
@@ -1210,8 +1261,9 @@ class Controller:
         """AUTO_MISSION_KEY handler: force GAME_LOBBY, then click PLAY/READY.
 
         From a battle state (GAME_BATTLE, GAME_BATTLE_MANUAL,
-        GAME_BATTLE_EJECT) a single press is REFUSED: 'm' can be hit as a game
-        binding mid-flight, and forcing the FSM to GAME_LOBBY from a live
+        GAME_BATTLE_EJECT) a single press is REFUSED: the key can be hit by
+        accident mid-flight (it was 'm', the game's own map key, until
+        2026-10-04), and forcing the FSM to GAME_LOBBY from a live
         battle clicks PLAY into the battlefield and sets the lobby quick-scan
         pressing ESC against the running game (2026-08-17 04:15 incident). A
         second press within 2 s still forces it — the deliberate stuck-state
@@ -1234,7 +1286,7 @@ class Controller:
             return
         # SAF-001: in manual this key means "wingman, take it back" — a single
         # press, because the operator is deliberately flying and asking. The
-        # double-press guard below exists for the OTHER battle states, where 'm'
+        # double-press guard below exists for the OTHER battle states, where the key
         # can be an accidental game binding mid-flight.
         if current_state == GameState.GAME_BATTLE_MANUAL:
             self._release_manual_if_active()
@@ -1602,6 +1654,112 @@ class Controller:
                     max(0.0, self._turn_guard_until - time.monotonic()))
         return True
 
+    def is_surveying(self) -> bool:
+        """True while mission_survey owns the aircraft (Design 017 phase 4b)."""
+        return self._surveying.is_set()
+
+    def _survey_owns_turns(self, what: str) -> bool:
+        """Gate for every turn commanded by something other than the survey.
+
+        A survey flies straight passes and makes its own turns at the arena
+        edge. The navigators and the no-enemy roll each want to turn the
+        aircraft for reasons that do not apply to it, and either bends a pass.
+        The boundary turn has its own rule (`_survey_refuses_boundary_turn`).
+        Fails open, like the turn guard: a partially built Controller reports
+        "not surveying".
+        """
+        try:
+            if not self._surveying.is_set():
+                return False
+        except AttributeError:
+            return False
+        logger.debug("Controller: %s suppressed — a survey is flying (Design 017)", what)
+        return True
+
+    def _survey_refuses_boundary_turn(self) -> bool:
+        """While a survey flies, the tree's boundary turn is a last resort only.
+
+        Refused outright on the first flight (2026-10-04 09:22), it was asked
+        for 66 times while the aircraft flew out of the arena: the survey then
+        had no edge handling of its own in a climb. Allowed freely on the
+        fourth (10:15), it held its pull for 12 s, took the nose to 84 degrees
+        up and the aircraft over the top, and the emergency recovery that
+        followed zoomed it to a stall. The survey now turns back itself, at
+        0.7 of a minimap radius; this turn is kept for when that has not
+        happened and the edge is ahead and inside `backstop_frac`, and it is
+        never allowed while the survey is flying a turn back of its own.
+        """
+        try:
+            if not self._surveying.is_set():
+                return False
+            if self._survey_turning:
+                # One thing turns the aircraft at a time. On the sixth flight
+                # (2026-10-04 10:58) this turn fired five times in eighty
+                # seconds in the middle of the survey's own, each picking its
+                # own side, and the two took turns undoing each other along
+                # the rim while the height went from 3500 to 4660 m.
+                logger.debug("Controller: boundary turn refused — the survey is flying "
+                             "its own turn back (Design 017)")
+                return True
+            where = self._survey_radial
+            if where is not None and time.time() - where[2] <= 2.0:
+                # The survey knows where it is. Near the arena's middle the
+                # minimap reader sees a rim that is not the edge (eleventh
+                # flight, 2026-10-04: this turn was the selected tactic on
+                # every tick of a battle flown within 0.35 radii of the
+                # centre), so the position decides, not the reading.
+                if where[0] < self._survey_edge_backstop_radius:
+                    logger.debug("Controller: boundary turn refused — the survey is %.2f "
+                                 "radii from the arena's centre (Design 017)", where[0])
+                    return True
+                return False
+            reading = self._loiter_boundary
+            if reading:
+                dist, forward, ts = reading
+                if (dist is not None and forward is not None and forward > 0.0
+                        and dist <= self._survey_backstop_frac
+                        and time.time() - ts <= self._survey_boundary_max_age_s):
+                    return False
+        except AttributeError:          # partially built Controller
+            return False
+        logger.debug("Controller: boundary turn refused — a survey is flying and the edge "
+                     "is not inside its last-resort range (Design 017)")
+        return True
+
+    def _survey_refuses_climb(self, target_alt, emergency: bool) -> bool:
+        """While a survey flies, the tree's climb to its sustain altitude is refused.
+
+        Measured on the first survey flight, 2026-10-04 09:22 to 09:25: that
+        climb held the nose up towards 5000 m, the aircraft ran out of
+        afterburner fuel near 4000 m, stalled and fell back to about 3500 m,
+        five times in three minutes, and never rose above 4321 m. The survey
+        keeps its own altitude and climbs by itself. Still allowed: a hard
+        emergency, the low-altitude band's climb (no `target_alt`), and any
+        climb while the aircraft is below `takeover_alt_m` or its altitude is
+        not known, which is what lifts a fresh spawn off the ground.
+        """
+        try:
+            surveying = self._surveying.is_set()
+        except AttributeError:          # partially built Controller
+            return False
+        if not surveying or emergency or target_alt is None:
+            return False
+        # Low down the climb is what lifts a fresh spawn, whichever band the
+        # tree calls it from. Fifth flight, 2026-10-04 10:41: at 550 m the
+        # tree's only climb was the one to 5000 m, it was refused here eight
+        # times, and the aircraft stayed at 550 m and hit the terrain. The
+        # survey stops that climb itself once it is above `takeover_alt_m`.
+        try:
+            snap = self._analyzer.get_telemetry() if self._analyzer is not None else None
+            alt = snap.altitude.stable_value if snap is not None and snap.altitude_fresh() else None
+        except Exception:
+            alt = None
+        if alt is None or alt < self._survey_takeover_alt_m:
+            return False
+        logger.debug("Controller: climb to %.0f m refused — a survey is flying "
+                     "(Design 017)", float(target_alt))
+        return True
+
     def set_target_tracker(self, tracker) -> None:
         """Wire in the TargetTracker instance (ADR 136).
 
@@ -1629,14 +1787,14 @@ class Controller:
 
     def roll_left(self, hold_seconds: float = 0.3, block: bool = True, ignore_cancel: bool = False):
         """Roll left by holding the configured roll-left key."""
-        if self._turn_blocked("roll_left"):
+        if self._turn_blocked("roll_left") or self._survey_owns_turns("roll_left"):
             return
         self._execute_key_press(ROLL_LEFT_KEY, hold_seconds=hold_seconds, block=block,
                                  action_name='roll_left', ignore_cancel=ignore_cancel)
 
     def roll_right(self, hold_seconds: float = 0.3, block: bool = True, ignore_cancel: bool = False):
         """Roll right by holding the configured roll-right key."""
-        if self._turn_blocked("roll_right"):
+        if self._turn_blocked("roll_right") or self._survey_owns_turns("roll_right"):
             return
         self._execute_key_press(ROLL_RIGHT_KEY, hold_seconds=hold_seconds, block=block,
                                  action_name='roll_right', ignore_cancel=ignore_cancel)
@@ -4580,7 +4738,7 @@ class Controller:
         """
         # ADR 132: also presses the roll key directly rather than through
         # roll_right(), so it needs its own check.
-        if self._turn_blocked("disengage roll"):
+        if self._turn_blocked("disengage roll") or self._survey_owns_turns("disengage roll"):
             return
         logger.info("\033[93m↩ No enemy for 30s — cancelling mission and rolling right for %.0fs\033[0m", duration)
         self.cancel_mission()
@@ -5014,7 +5172,7 @@ class Controller:
         # aircraft orbits instead of flying into the arena. Checked here rather
         # than only in roll_right() because this tactic presses the roll key
         # through _climb_key and would bypass that gate entirely.
-        if self._turn_blocked("boundary turn"):
+        if self._turn_blocked("boundary turn") or self._survey_refuses_boundary_turn():
             return
         if self._boundary_turning.is_set():
             logger.debug("Controller: boundary turn already in progress")
@@ -5152,6 +5310,8 @@ class Controller:
 
         @relation(FR-007, scope=function)
         """
+        if self._survey_refuses_climb(target_alt, emergency):
+            return
         if self._climbing.is_set():
             logger.debug("Controller: climb_mode already in progress")
             return
@@ -6537,14 +6697,19 @@ class Controller:
                     "edge (%.2fR after %.2fR), orbiting %s instead\033[0m",
                     cur, prev, self._loiter_orbit_direction)
 
-    def note_boundary(self, dist, forward) -> None:
-        """Latest map-boundary reading, for the loiter orbit (ADR 111).
+    def note_boundary(self, dist, forward, lateral=None) -> None:
+        """Latest map-boundary reading, for the loiter orbit (ADR 111) and the
+        survey (Design 017).
 
         Instrumentation only in the sense that nothing here steers on it
         directly — the orbit uses it to decide WHICH WAY to circle, which is the
-        one boundary decision loiter can make for itself.
+        one boundary decision loiter can make for itself. The survey also takes
+        `lateral` (positive: the rim's nearest point is to the right), to turn
+        away from the rim when it meets it at a slant.
         """
-        self._loiter_boundary = (dist, forward, time.time())
+        now = time.time()
+        self._loiter_boundary = (dist, forward, now)
+        self._survey_boundary = (dist, forward, now, lateral)
 
     def is_survival_hold(self) -> bool:
         """True while mission_loiter owns the aircraft.
@@ -6879,6 +7044,375 @@ class Controller:
                 logger.info("Controller: exit requested, aborting mission wait")
                 self.cancel_mission()
                 break
+
+    def mission_survey(self, token: "int | None" = None):
+        """Fly the arena in straight passes, for mapping (Design 017 phase 4b).
+
+        For a mode with no opponents: it carries no weapon loop, no pursuit and
+        no defence. Each tick it reads the altitude, the compass heading from
+        the minimap rim and the latest boundary reading, asks `SurveyPlan` what
+        to do, and presses the keys:
+
+          arena edge ahead      -> turn back, towards the sweep side (in any state)
+          below the band        -> climb, by the measured climb rate
+          off the pass heading  -> bank towards it, pulling while not climbing
+          on heading            -> hold the altitude, by the measured climb rate
+          no fresh altitude     -> command nothing
+
+        A turn is a bank with a pull, the boundary turn's idiom (ADR 107): a
+        bank alone does not turn the flight path. While it runs, the navigators
+        and the no-enemy roll are refused (`_survey_owns_turns`) and so is the
+        tree's nose-up climb to its sustain altitude, which stalls the aircraft
+        (`_survey_refuses_climb`). The tree's boundary turn is allowed only as
+        a last resort close to the edge (`_survey_refuses_boundary_turn`), and
+        the survey stands off while it runs.
+
+        The plan is rebuilt on every start, so a respawn begins again on the
+        battle's first pass heading from wherever the aircraft spawned. Each
+        battle takes the next heading, `heading_step_deg` further round, so a
+        session flies crossing passes and not the same lanes every time.
+
+        @relation(SAF-001, scope=function)
+        """
+        if token is not None and token != self.mission_token():
+            logger.info("Controller: mission_survey - cancelled before it started, "
+                        "not starting")
+            return
+        if self._mission_lock.locked():
+            logger.info("\033[93mController: mission_survey - cancelling the "
+                        "running mission to fly the survey\033[0m")
+            self.cancel_mission()
+        if not self._mission_lock.acquire(timeout=self._survey_lock_timeout_s):
+            # Two missions on one airframe is worse than none.
+            logger.warning("\033[91mController: mission_survey - mission lock not "
+                           "released within %.0fs, survey not started\033[0m",
+                           self._survey_lock_timeout_s)
+            return
+
+        first = battle_heading(
+            float(self._survey_cfg.get("heading_deg", schema_default("survey_mission.heading_deg"))),
+            self._survey_heading_step_deg, self._survey_battles - 1)
+        plan = SurveyPlan(dict(self._survey_cfg, heading_deg=first))
+        logger.info("\033[92mController: mission_survey - passes on %03.0f and %03.0f "
+                    "at %.0f m, moving %s (Design 017)\033[0m", plan.first_heading,
+                    (plan.first_heading + 180.0) % 360.0, plan.target_alt,
+                    "right" if plan.sweep_side > 0 else "left")
+        self._surveying.set()
+        self._mission_complete.clear()
+        self._claim_mission_cancel("mission_survey", None)   # its own preemption, above
+
+        def _mission_runner():
+            last_state = None
+            last_status = 0.0
+            last_look = 0.0
+            map_seen = 0
+            position = None         # [east, north] in arena radii, carried between fixes
+            position_fix = 0.0      # when the full map last gave it
+            carried_at = time.time()
+            last_heading = None
+            try:
+                while not self._mission_cancel.is_set():
+                    if self._mission_exit_requested():
+                        break
+                    now = time.time()
+                    snap = (self._analyzer.get_telemetry()
+                            if self._analyzer is not None else None)
+                    fresh = snap is not None and snap.altitude_fresh()
+                    alt = self._survey_altitude_now(snap) if fresh else None
+                    heading = self._survey_read_heading()
+                    if heading is None and self._survey_map_look_every_s > 0:
+                        # No compass: the full map may be over it. One left
+                        # open flies the aircraft blind until something
+                        # closes it.
+                        map_seen = self._survey_close_stray_map(map_seen)
+                    else:
+                        map_seen = 0
+                    # Attitude, from the altitude rate against speed (ADR 114);
+                    # None until the telemetry has two reads to work with.
+                    try:
+                        pitch_deg = snap.pitch_angle_deg() if fresh else None
+                    except Exception:
+                        pitch_deg = None
+                    alt_rate = snap.altitude.rate if fresh else None
+                    alt_ts = snap.altitude.ts if fresh else None
+                    # Where the aircraft is: the last fix from the full map,
+                    # carried here by heading and speed.
+                    if heading is not None:
+                        last_heading = heading
+                    where = None
+                    if position is not None and last_heading is not None:
+                        kph = (snap.speed.value if snap is not None and snap.speed_fresh()
+                               else None)
+                        if kph is not None:
+                            position = list(carry_position(
+                                position[0], position[1], last_heading, float(kph),
+                                min(1.0, now - carried_at), self._survey_arena_radius_m))
+                        if now - position_fix <= self._survey_position_max_age_s:
+                            where = radial(position[0], position[1], last_heading)
+                    carried_at = now
+                    self._survey_radial = None if where is None else (where[0], where[1], now)
+                    cmd = plan.step(now, alt, heading, self._survey_boundary, pitch_deg,
+                                    alt_rate, alt_ts, where,
+                                    None if where is None else (position[0], position[1]))
+                    self._survey_turning = cmd.state == "reverse"
+                    # Who has the aircraft this tick. The plan has run either
+                    # way, so a pass turned round at the edge stays turned.
+                    standing_off = None
+                    low = alt is not None and alt < self._survey_takeover_alt_m
+                    if self._boundary_turning.is_set():
+                        # The tree's boundary turn is flying the aircraft away
+                        # from the edge. It chooses its own side; a bank from
+                        # here could be the opposite one.
+                        standing_off = "boundary-turn"
+                    elif cmd.state == "reverse" and low:
+                        # Too low to turn: height first. Fifth flight, 10:41: a
+                        # turn back flown at 550 m, fifteen seconds after the
+                        # spawn, went into the terrain. Outside the edge there
+                        # are still some seconds; among the rocks there are
+                        # none. The pass is already turned round, and the turn
+                        # is flown once the aircraft is above the takeover
+                        # altitude.
+                        standing_off = "low"
+                    elif self._climbing.is_set():
+                        if cmd.state == "reverse":
+                            # Above that, the edge outranks any climb.
+                            self._climb_stop.set()
+                        elif self._climb_emergency_requested:
+                            # A dive or terrain: the tree's recovery has it.
+                            standing_off = "emergency-climb"
+                        elif alt is not None and alt >= self._survey_takeover_alt_m:
+                            # A climb with no emergency behind it, above the
+                            # height where a fresh spawn needs one: an
+                            # emergency that has cleared carries on, nose up,
+                            # towards 5000 m, and that is what takes this
+                            # aircraft over the top or stalls it (second and
+                            # third flights). The survey climbs by itself.
+                            self._climb_stop.set()
+                            standing_off = "climb-ending"
+                        else:
+                            # The low-altitude climb that lifts a fresh spawn.
+                            standing_off = "low-climb"
+                    state = cmd.state if standing_off is None else f"yield({standing_off})"
+                    if cmd.new_leg:
+                        logger.info("\033[93mSURVEY: edge ahead, pass %d on %03.0f%s, turning %s"
+                                    " (%s)\033[0m", cmd.leg,
+                                    cmd.target if cmd.then is None else cmd.then,
+                                    "" if cmd.then is None
+                                    else " after a step across on %03.0f" % cmd.target,
+                                    cmd.roll or "-",
+                                    "by the minimap's rim" if where is None
+                                    else "by position, r=%.2f" % where[0])
+                    if state != last_state or now - last_status >= self._survey_status_every_s:
+                        logger.info(
+                            "SURVEY: state=%s pass=%d target=%03.0f hdg=%s err=%s alt=%s r=%s",
+                            state, cmd.leg, cmd.target,
+                            "n/a" if heading is None else f"{heading:.0f}",
+                            "n/a" if cmd.error is None else f"{cmd.error:+.0f}",
+                            "n/a" if alt is None else f"{alt:.0f}",
+                            "n/a" if where is None else f"{where[0]:.2f}")
+                        last_state = state
+                        last_status = now
+                    # With no position yet, the first look is taken as soon as
+                    # nothing is being turned or pressed, climb included: on
+                    # the thirteenth flight a battle's first two passes were
+                    # turned back on the minimap's false rim in the forty
+                    # seconds before its first look.
+                    settled = (cmd.state in ("cruise", "cross", "not-level")
+                               and cmd.error is not None
+                               and abs(cmd.error) <= plan.heading_deadband_deg)
+                    first = where is None and cmd.state in ("cruise", "cross", "not-level",
+                                                            "climb")
+                    # Never without the compass read on this very tick: that
+                    # reading is the proof that the flight HUD is what is on
+                    # screen. On the fifteenth flight (2026-10-04 18:50:24) the
+                    # game's scoreboard menu was up, the compass was unread,
+                    # a look was allowed without it, and `m` pressed into that
+                    # menu was followed by the match being exited 2 s later.
+                    if (standing_off is None and (settled or first)
+                            and heading is not None and cmd.pitch is None
+                            and cmd.roll is None
+                            and self._survey_map_look_every_s > 0
+                            and now - last_look >= (self._survey_map_first_look_s
+                                                    if first and not settled
+                                                    else self._survey_map_look_every_s)):
+                        # On the pass heading with nothing to press this tick:
+                        # a look at the full map, to know where on the arena
+                        # this is. Also with the nose off level: on the twelfth
+                        # flight looks made only in level cruise came 15 to 66 s
+                        # apart, and the position has to last between them.
+                        last_look = now
+                        fix = self._survey_look_at_map()
+                        if fix is not None:
+                            position = [fix.east, fix.north]
+                            position_fix = carried_at = time.time()
+                        logger.info("SURVEY POS: %s hdg=%s pass=%d target=%03.0f",
+                                    fmt_fix(fix),
+                                    "n/a" if heading is None else f"{heading:.0f}",
+                                    cmd.leg, cmd.target)
+                    elif standing_off == "low" and not self._climbing.is_set():
+                        # Nothing else is climbing it: one press of its own.
+                        self.nose_up(hold_seconds=self._survey_pulse_s, block=True)
+                    elif standing_off is not None:
+                        self._mission_cancel.wait(timeout=self._survey_tick_s)
+                    elif cmd.roll is not None:
+                        # Pressed directly: roll_left/roll_right refuse while a
+                        # survey flies, which is what keeps everything else off
+                        # the turn. The pull blocks, so it paces the loop.
+                        self._execute_key_press(
+                            ROLL_RIGHT_KEY if cmd.roll == "right" else ROLL_LEFT_KEY,
+                            hold_seconds=self._survey_pulse_s, block=False,
+                            action_name="survey_roll")
+                        if cmd.pull:
+                            self.nose_up(hold_seconds=self._survey_pulse_s, block=True)
+                        else:
+                            self._mission_cancel.wait(timeout=self._survey_pulse_s)
+                    else:
+                        if cmd.pitch == "up":
+                            self.nose_up(hold_seconds=cmd.pitch_s, block=False)
+                        elif cmd.pitch == "down":
+                            self.nose_down(hold_seconds=cmd.pitch_s, block=False)
+                        self._mission_cancel.wait(timeout=self._survey_tick_s)
+                logger.info("\033[91mController: mission_survey - ended after %d "
+                            "pass(es)\033[0m", plan.leg + 1)
+                self._survey_radial = None
+            except Exception:
+                logger.exception("Controller: mission_survey failed")
+            finally:
+                # Every exit path drops the flag, or the turns stay refused for
+                # an aircraft the survey no longer flies.
+                self._surveying.clear()
+                self._survey_turning = False
+                self._climb_stop.set()
+                self._mission_complete.set()
+                if self._mission_lock.locked():
+                    self._mission_lock.release()
+
+        threading.Thread(target=_mission_runner, daemon=True,
+                         name="MissionSurvey").start()
+
+        while not self._mission_complete.wait(timeout=0.05):
+            if self._mission_exit_requested():
+                logger.info("Controller: exit requested, aborting mission wait")
+                self.cancel_mission()
+                break
+
+    def _survey_map_wait(self, want_open: bool):
+        """Watch the picture until the full map is there (or gone), or the wait runs out.
+
+        Returns the last frame looked at. The game answers the key in anything
+        from 0.2 s to more than 0.7 s (eleventh flight, 2026-10-04 17:04:36: a
+        check 0.72 s after the key found no map, and the map came up after it
+        and stayed for 28 s). So nothing here waits a fixed time and presses
+        again: it looks until it sees what the key should have done.
+        """
+        deadline = time.time() + self._survey_map_wait_s
+        while True:
+            time.sleep(self._survey_map_poll_s)
+            frame = self._capture.grab_from_thread()
+            if self._analyzer.full_map_shown(frame) is want_open or time.time() >= deadline:
+                return frame
+
+    def _survey_close_map(self) -> bool:
+        """Press the map away and watch it go; press again only if it is still
+        there after the whole wait. True when it was seen gone."""
+        for attempt in range(3):
+            # Closed even when the mission has just been cancelled: a map left
+            # open covers the view for whatever flies next.
+            self._execute_key_press(FULL_MAP_KEY, hold_seconds=self._survey_map_key_hold_s,
+                                    block=True, action_name="survey_map_close",
+                                    ignore_cancel=True)
+            if not self._analyzer.full_map_shown(self._survey_map_wait(want_open=False)):
+                return True
+            logger.warning("mission_survey: the full map is still open %.1f s after closing "
+                           "press %d", self._survey_map_wait_s, attempt + 1)
+        return False
+
+    def _survey_look_at_map(self):
+        """Open the game's full map, read where the aircraft is, and close it.
+
+        Design 017, "The full map". The map covers the forward view and the
+        speed and altitude readouts, so this is a look of about a second, made
+        in cruise only. Returns a `FullMapFix`, or None when the map did not
+        open or the own icon was not the one white mark in it.
+
+        `m` toggles the map, so a press that is one too many leaves the view
+        covered. Every press is therefore followed by watching the picture
+        until it shows what the press should have done, and a closing press is
+        only made for a map that is seen.
+        """
+        if self._analyzer is None or self._capture is None:
+            return None
+        frame = self._capture.grab_from_thread()
+        if not self._analyzer.full_map_shown(frame):
+            self._execute_key_press(FULL_MAP_KEY, hold_seconds=self._survey_map_key_hold_s,
+                                    block=True, action_name="survey_map_open")
+            frame = self._survey_map_wait(want_open=True)
+        fix = None
+        if self._analyzer.full_map_shown(frame):
+            fix = self._analyzer.read_full_map(frame)
+        elif not self._analyzer.full_map_covering(frame):
+            # Nothing came up in the whole wait. If it comes up later still,
+            # the loop's own check closes it (`_survey_close_stray_map`).
+            logger.info("mission_survey: the full map did not open, nothing read")
+            return None
+        self._survey_close_map()
+        return fix
+
+    def _survey_close_stray_map(self, seen: int) -> int:
+        """Close a full map that is open when no look is in progress.
+
+        Called from the loop when the compass was not read. `seen` counts the
+        loop's consecutive sightings; the map is closed on the second, so one
+        of the survey's own looks caught half-way does not count. Returns the
+        new count.
+        """
+        try:
+            shown = self._analyzer.full_map_shown(self._capture.grab_from_thread())
+        except Exception:
+            logger.debug("mission_survey: full map check unavailable", exc_info=True)
+            return 0
+        if not shown:
+            return 0
+        if seen < 1:
+            return seen + 1
+        logger.warning("mission_survey: the full map is open and no look is in progress; "
+                       "closing it")
+        self._survey_close_map()
+        return 0
+
+    @staticmethod
+    def _survey_altitude_now(snap) -> "float | None":
+        """The last accepted altitude reading, carried to now at the last measured rate.
+
+        Not `stable_value`: that is the mean of the last three readings, about
+        nine seconds of them, and it trails a climb or a descent by hundreds of
+        metres (`TelemetrySnapshot.altitude_ahead` says the same of a dive).
+        The survey held its altitude on it until 2026-10-04 and swung by a
+        median 499 m in the settled part of a pass.
+        """
+        signal = snap.altitude
+        if signal.value is None:
+            return signal.stable_value
+        age = signal.age_s(snap.taken_at_s) or 0.0
+        return float(signal.value) + (signal.rate or 0.0) * age
+
+    def _survey_read_heading(self) -> "float | None":
+        """The compass heading for the survey, from a frame of its own.
+
+        The tick loop reads the heading every 1.5 s, which is too slow to stop
+        a turn on. None when there is no frame, when the padlock camera is
+        confirmed on (the minimap then follows the camera, not the nose), or
+        when the letter is not read.
+        """
+        if self._analyzer is None or self._capture is None:
+            return None
+        try:
+            if self.padlock_state() is True:
+                return None
+            return self._analyzer.read_compass_heading(self._capture.grab_from_thread())
+        except Exception:
+            logger.debug("mission_survey: heading unavailable", exc_info=True)
+            return None
 
     def mission_j20(self, token: "int | None" = None):
         """Fully adaptive J20 mission (ADR 075): the behavior tree owns every
@@ -7996,7 +8530,8 @@ class Controller:
             _Writer("missions and weapon loop", lambda _reason: self.cancel_mission(),
                     lambda: (),
                     ("mission_j20", "mission_su30", "mission_f111", "mission_jas39",
-                     "mission_loiter", "start_weapon_loop", "_start_default_mission",
+                     "mission_loiter", "mission_survey", "start_weapon_loop",
+                     "_start_default_mission",
                      "restart_last_mission", "start_loiter_mission",
                      "start_su30_mission")),
             # Explicit, independent of cancel_mission()'s own call: the blanket
@@ -8321,8 +8856,11 @@ class Controller:
         import time. An unknown name falls back to j20.
         """
         missions = {"j20": self.mission_j20, "su30": self.mission_su30,
-                    "jas39": self.mission_jas39, "f111": self.mission_f111}
+                    "jas39": self.mission_jas39, "f111": self.mission_f111,
+                    "survey": self.mission_survey}
         name = self._default_mission if self._default_mission in missions else "j20"
+        if name == "survey":
+            self._survey_battles += 1    # a new battle: the next pass heading
         self._set_last_mission(name)
         # CR-018-19: taken before the thread starts, so a cancel that lands
         # before the mission reaches its entry is not swallowed there.
@@ -8375,6 +8913,11 @@ class Controller:
         if mission == "loiter":
             logger.info("Controller: restarting last mission (loiter)")
             threading.Thread(target=self.mission_loiter, kwargs={"token": token},
+                             daemon=True).start()
+            return True
+        if mission == "survey":
+            logger.info("Controller: restarting last mission (survey)")
+            threading.Thread(target=self.mission_survey, kwargs={"token": token},
                              daemon=True).start()
             return True
         if mission == "su30":

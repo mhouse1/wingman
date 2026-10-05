@@ -15,6 +15,8 @@ HEALTH_SPIKE_FACTOR = 1.5  # reject readings more than 50 % above the establishe
 
 from transitions import Machine, MachineError
 
+from .compass import CompassReader
+from .full_map import FullMapReader
 from .crop_region import CropCoords, get_crop, load_crops, draw_crops
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
 # CR-018-15: the FSM vocabulary lives in the leaf module .state, so code that
@@ -976,6 +978,10 @@ class GameStateAnalyzer:
         # MINIMAP red-icon scan parameters (Design 003 / ADR 028)
         minimap_cfg = config.get("minimap", {})
         self._minimap_mask_radius_frac = float(minimap_cfg.get("mask_radius_frac", 0.93))
+        # Design 017 phase 4: compass heading from the rim's orange N (shadow).
+        self._compass = CompassReader(minimap_cfg.get("compass"))
+        # Design 017, "The full map": position from the map the m key opens.
+        self._full_map = FullMapReader(config.get("full_map"))
         # ADR 028 revision 4: friendly / objective icons, used only when no
         # enemy is on the minimap. Measured on the Design 010 frames at hue
         # 40-85; deliberately NOT the enemy bounds and never hue-wrapped.
@@ -4259,6 +4265,58 @@ class GameStateAnalyzer:
         except Exception as e:
             logger.warning("Analyzer: detect_map_boundary failed: %s", e)
             self._last_boundary_had_thin_component = False
+            return None
+
+    def full_map_shown(self, frame) -> bool:
+        """The game's full map is open on this frame and has finished drawing."""
+        if not self._full_map.enabled:
+            return False
+        try:
+            return self._full_map.shown(frame)
+        except Exception as e:
+            logger.warning("Analyzer: full_map_shown failed: %s", e)
+            return False
+
+    def full_map_covering(self, frame) -> bool:
+        """Something with the full map's dark ring is on this frame, read or not."""
+        if not self._full_map.enabled:
+            return False
+        try:
+            return self._full_map.covering(frame)
+        except Exception as e:
+            logger.warning("Analyzer: full_map_covering failed: %s", e)
+            return False
+
+    def read_full_map(self, frame):
+        """Where the aircraft is on the full map, as a `FullMapFix`, or None.
+
+        Design 017, "The full map". INSTRUMENTATION ONLY: the survey logs it,
+        nothing steers on it yet. None when the map is not open, has not
+        finished drawing, or the own icon is not the one white mark in it.
+        """
+        if not self._full_map.enabled:
+            return None
+        try:
+            return self._full_map.read(frame)
+        except Exception as e:
+            logger.warning("Analyzer: read_full_map failed: %s", e)
+            return None
+
+    def read_compass_heading(self, frame) -> "float | None":
+        """Compass heading of the top of the minimap, 0 to 360, or None.
+
+        Design 017 phase 4, INSTRUMENTATION ONLY: nothing steers on this yet.
+        Read from the orange N on the minimap rim (`wingman/compass.py`). With
+        the padlock camera off, the top of the minimap is the nose and this is
+        the aircraft's heading; with it on, it is the camera's bearing, so the
+        caller decides whether to use it.
+        """
+        if not self._compass.enabled or self.crops is None or "MINIMAP" not in self.crops:
+            return None
+        try:
+            return self._compass.heading(get_crop(frame, *self.crops["MINIMAP"][:4]))
+        except Exception as e:
+            logger.warning("Analyzer: read_compass_heading failed: %s", e)
             return None
 
     def detect_terrain_ahead(self, frame) -> "float | None":

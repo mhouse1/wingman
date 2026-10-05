@@ -103,6 +103,9 @@ The main loop runs in `wingman/main.py` (`main()`). Each 1.5-second tick capture
 - `wingman/actuator.py` — `Actuator`: the only code that calls the keyboard backend's `press`/`release`/`press_and_release` (CR-018-09). Every press names its owner; `tests/test_actuator.py` fails if any other module calls `keyboard_module.press` or `.release`.
 - `wingman/performance.py` — `PerformanceTracker`: records per-crop OCR timings and incoming→flare latency into bucketed histograms; writes `run_*.json` to `docs/performance/current/`.
 - `wingman/replay.py` — `ScreenshotReplayCapture` (injects pre-recorded screenshots in place of live frames), `ReplayAssertionEngine` (records FSM state + timing for validator), `LivePathCaptureEngine` (captures real monitor frames during ADR045 live-screen test lane). Driven by YAML path configs under `tests/replay_paths/`.
+- `wingman/compass.py` — `CompassReader`: the compass heading from the orange N on the minimap's rim (Design 017). Logged as `hdg=` on the tick line; the survey mission steers on it.
+- `wingman/full_map.py` — `FullMapReader`: the aircraft's position in the arena, in arena radii, read from the game's full map (the `m` key). Only the survey mission opens the map, and only on a tick whose compass was read: `m` pressed on another game screen is not safe (Design 017, fifteenth flight).
+- `wingman/survey.py` — `SurveyPlan`: the survey mission's decisions (passes, turn-backs, lane steps, altitude hold), with no I/O; `Controller.mission_survey` is its loop. For a match with no opponent. `docs/hldd/017-terrain-map-from-flight-footage-hldd.md`, "Where this stands", has the match setup and the current state. `make survey` switches it on and off for one machine.
 
 **FSM states** (defined in `state.py`):
 
@@ -112,7 +115,7 @@ Manual takeover (`i/j/k/l` keys) moves to `GAME_BATTLE_MANUAL`. `GAME_STARTING_S
 
 **Configuration:** `wingman/config.yaml` defines the capture region, monitor index, all named crop coordinates (`crops:`), OCR/detection parameters, and performance regression thresholds. Crop coordinates use fractional screen positions and are edited by the calibration tooling.
 
-Per-machine settings (for example `make invite`) go in the untracked `wingman/config.local.yaml`, which a live run merges over `config.yaml` and validates with the same schema (CR-018-16). Tests and replay runs read only the shipped file, so never put operator state in `config.yaml`.
+Per-machine settings (for example `make invite` and `make survey`) go in the untracked `wingman/config.local.yaml`, which a live run merges over `config.yaml` and validates with the same schema (CR-018-16). Tests and replay runs read only the shipped file, so never put operator state in `config.yaml`.
 
 A new config key declares its default once, in `wingman/config_schema.py` (`Leaf(..., default=...)`), and code reads it with `schema_default("section.key")` instead of writing its own literal in `cfg.get(key, default)` (CR-018-16). `tests/test_config_defaults.py` checks every declared default against its own leaf.
 

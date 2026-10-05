@@ -39,10 +39,12 @@
 #   make newpaths    -> capture screenshots for PATH1 or PATH2 using live Wingman play
 #   make leak-check  -> ADR 092 leak gate over logs/ (0 pass, 1 fail, 2 insufficient)
 #   make invite      -> toggle whether Wingman accepts or rejects party invites
+#   make survey      -> toggle the survey mission (Design 017) on or off for this machine;
+#                       off goes back to the mission config.yaml ships
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite survey launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -488,6 +490,9 @@ rd: $(GAME_LAUNCH_DEPS)
 
 invite:
 	$(PYTHON_RUN) scripts/toggle-invite.py $(if $(CONFIG),--config "$(CONFIG)",)
+
+survey:
+	$(PYTHON_RUN) scripts/toggle-survey.py $(if $(CONFIG),--config "$(CONFIG)",)
 
 # ---------------------------------------------------------------------------
 # Per-account run targets (Research 005)

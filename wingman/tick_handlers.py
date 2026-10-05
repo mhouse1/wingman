@@ -26,6 +26,7 @@ import threading
 import time
 
 from . import capture_budget
+from .compass import fmt_heading
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
 from .terrain_loom import fmt_tau, fmt_taus
@@ -2071,6 +2072,26 @@ class BehaviorTreeHandler:
             anchor, t_anchor = nxt, t_nxt
         return pairs, waited
 
+    def _read_heading(self, frame, current_game_state) -> str:
+        """This tick's compass heading for the BT line (Design 017 phase 4, shadow).
+
+        Read only in a battle state with health being read, as the looming
+        and shape detectors are: the state lags the screen, and health is the
+        proof that the battle HUD, and so the minimap, is up. With the padlock
+        camera on or unconfirmed the minimap follows the camera, so what the
+        compass gives is not the aircraft's heading and is not logged as one.
+        """
+        if current_game_state not in _BATTLE_STATES or not self._analyzer.game_battle_alive:
+            return fmt_heading(None)
+        if self._ctrl.padlock_state() is not False:
+            return fmt_heading(None, "padlock")
+        try:
+            heading = self._analyzer.read_compass_heading(frame)
+        except Exception as exc:
+            log_suppressed(logger, "read_compass_heading", exc)
+            return fmt_heading(None)
+        return fmt_heading(heading, None if heading is not None else "unread")
+
     def _measure_loom(self, current_game_state):
         """This tick's looming readings, in order; empty when none was taken.
 
@@ -2389,7 +2410,7 @@ class BehaviorTreeHandler:
         # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
         # control loop, so it needs the reading rather than the tactic.
         try:
-            self._ctrl.note_boundary(_b_dist, _b_fwd)
+            self._ctrl.note_boundary(_b_dist, _b_fwd, _b_lat)
         except Exception as exc:
             log_suppressed(logger, "note_boundary", exc)
         # ADR 140 D4/D6: drives Controller's padlock_state() tri-state.
@@ -2524,13 +2545,13 @@ class BehaviorTreeHandler:
         logger.debug(
             "BT[%s]: selected=%s missiles=%s rings=%d/%d/%d absent=%.0fs "
             "respawn=%s alt=%s alt_rate=%s ttg=%s fuel=%s mission=%s padlock=%s "
-            "sky=%s tau=%s shape=%s",
+            "sky=%s tau=%s shape=%s hdg=%s",
             self._mode, selection, snap.missiles, snap.ring_short, snap.ring_mid,
             snap.ring_long, absent_s, snap.is_respawning, altitude,
             _fmt_rate(altitude_rate), _fmt_ttg(altitude, altitude_rate),
             snap.fuel_pct, snap.mission_running, self._ctrl.padlock_state(),
             _fmt_sky(snap.terrain_sky_frac), fmt_taus(loom_readings),
-            fmt_shape(shape_reading),
+            fmt_shape(shape_reading), self._read_heading(frame, current_game_state),
         )
         if self._climb_shadow is not None:
             # Outside GAME_BATTLE the Idle leaf would own selection, and the

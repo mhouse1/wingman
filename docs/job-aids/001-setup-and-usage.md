@@ -43,7 +43,7 @@ Default hotkeys are defined in `wingman/controller.py`.
 
 | Key | Action |
 |-----|--------|
-| `m` | Start unattended mode (clicks play, waits for game start, auto-launches the mission `mission.default_mission` names: SU-30 as shipped, or `j20` / `jas39` / `f111`) |
+| `n` | Start unattended mode (clicks play, waits for game start, auto-launches the mission `mission.default_mission` names: SU-30 as shipped, or `j20` / `jas39` / `f111`) |
 | `u` | Start the configured mission (`mission.default_mission`) manually |
 | `y` | Start loiter mission manually |
 | `o` | Start SU-30 mission manually (takes over from a running mission) |
@@ -71,10 +71,61 @@ Main config file: `wingman/config.yaml`
 | `respawn_detection.ocr_cooldown` | OCR scheduling interval |
 | `mission.restart_delay_after_unlock` | Delay before mission restart after respawn (default 4s) |
 | `mission.weapon_loop_interval` | Firing loop interval |
-| `mission.default_mission` | Mission launched at battle entry, by `u` and by the no-prior-mission restart: `su30` (shipped), `j20`, `jas39` or `f111` (the F-111: the su30 sequence plus the wing sweep on `w`, ADR 149). A respawn restarts whichever ran last (`_last_mission`: also `loiter`) |
+| `mission.default_mission` | Mission launched at battle entry, by `u` and by the no-prior-mission restart: `su30` (shipped), `j20`, `jas39`, `survey` (see Survey Flights below; set with `make survey`) or `f111` (the F-111: the su30 sequence plus the wing sweep on `w`, ADR 149). A respawn restarts whichever ran last (`_last_mission`: also `loiter`) |
 | `f111_mission` | F-111 mission numbers: level-off `climb_alt_m`, nose angle, `unsweep_alt_m`, `unsweep_timeout_s` (30 s), `alt_floor_m` (ADR 147 per-mission floor) |
 
 If detection is unstable, verify the capture region and grid indices first.
+
+---
+
+## Survey Flights
+
+A survey flight flies an arena in straight passes so that the recording can be turned into a terrain map
+([Design 017](../hldd/017-terrain-map-from-flight-footage-hldd.md); its "Where this stands" section has
+the current state). The survey carries no weapons and no defence, so it is only for a match with nobody
+else in it.
+
+Setup, as flown on 2026-10-04:
+
+| | |
+|---|---|
+| Aircraft | MiG-29 |
+| Match | A custom 1 on 1 match with "Fill with bots" turned off |
+| Mode and map | Team Deathmatch on Crimson Canyon |
+
+Steps:
+
+1. `make survey` switches survey mode on for this machine and prints `Survey mode: ON`. Run it again to go
+   back to the normal mission. It only writes the untracked `wingman/config.local.yaml`, and a session
+   already running keeps the mission it started with.
+2. Set up the match above in the game, then `make r1 v`. The `v` records the session; the recording is the
+   survey's footage.
+3. Stop with `z`, as for any session. Wingman finishes the round and exits at the lobby.
+
+What to expect while it flies:
+
+- Every 15 s on a pass wingman opens the game's full map (`m`) for about a second to read where the aircraft
+  is, and logs `SURVEY POS: east=... north=... r=...`. `m` is the game's own key. If you open the map
+  yourself during a survey, wingman closes it again within a second or so, because a map left open hides
+  the instruments it flies on.
+- Each battle flies its passes 45 degrees further round than the last, and each turn back at the edge moves
+  the next pass about a third of the arena's radius over.
+- `SURVEY:` lines in `wingman.log` give the state, pass, heading, altitude and distance from the arena's
+  centre every five seconds.
+
+After a flight, from the repository root:
+
+```bash
+uv run --project scripts/mapping-spike python scripts/mapping-spike/survey_track.py track.png wingman.log
+scripts/mapping-spike/survey_swing.sh wingman.log
+```
+
+The first draws where the passes went and prints the share of the arena covered. The second prints how much
+the altitude swung inside each pass.
+
+The game window may be behind other windows while this runs, provided version 4 of the
+`wingman-window-left` desktop extension is loaded (`gnome-extensions info wingman-window-left@wingman.local`
+shows `Version: 4`; it loads at login). Without it the game drops to one frame a second when covered.
 
 ---
 
