@@ -94,7 +94,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 empty_confirm_reads=3, search_resume_centre_err=0.15,
                 search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None,
                 resupply_priority_enabled=True, resupply_priority_actuate=False,
-                rearm_climb_s=0.0, search_climb_alt_m=0.0):
+                rearm_climb_s=0.0, search_climb_alt_m=0.0, save_candidate_frames=None):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -140,6 +140,9 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                     # steering resumes on the tick after a rearm; the climb-out's
                     # own tests set it.
                     "rearm_climb_s": rearm_climb_s,
+                    # Left out unless a test sets it, so the schema default applies.
+                    **({"save_candidate_frames": save_candidate_frames}
+                       if save_candidate_frames is not None else {}),
                 },
                 # 0.0 by default here (not config.yaml's shipped 7000): the blind
                 # search rolls, as before; the climb's own tests set it.
@@ -936,6 +939,38 @@ def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monke
     assert ("key_press", ROLL_RIGHT_KEY) in keys, "resupply focus steers toward the marker"
 
 
+def test_candidate_frames_off_saves_nothing_and_still_seeks_the_marker(
+        monkeypatch, caplog, tmp_path):
+    """Operator, 2026-10-05: the resupply_candidate_*.png captures off. The
+    switch stops the file, not the resupply focus."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame, **_kw: marker)
+    saved_frames = []
+    monkeypatch.setattr(controller_module, "_RESUPPLY_SAMPLE_DIR", tmp_path)
+    monkeypatch.setattr(
+        controller_module.cv2, "imwrite",
+        lambda path, frame: saved_frames.append(path) or True)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2]), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0, empty_confirm_reads=1,
+        resupply_priority_actuate=True, save_candidate_frames=False)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(1.2)
+        logs = caplog.text
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert "proposed=True seeking=True mode=actuate" in logs
+    assert saved_frames == []
+    assert "candidate frame saved" not in logs
+    assert list(tmp_path.iterdir()) == []
+
+
 def _rearm_with_a_target_low_and_left(monkeypatch, **ctrl_kwargs):
     """Two missiles spent, a marker seen once, then the count rises to 6. The
     target sits low and left, so target steering rolls left and pushes down."""
@@ -1002,7 +1037,8 @@ def test_shadow_mode_rearm_has_no_climb_out(monkeypatch, caplog):
 def test_after_a_rearm_the_other_rack_is_used_before_declaring_exhaustion(monkeypatch, caplog):
     """2026-10-02: a resupply refilled both racks (2/2 and 2/2), the
     selected one emptied, and the pursuit went into resupply mode with two
-    missiles on the other rack."""
+    missiles on the other rack. Since 2026-10-05 the primary running out
+    presses the switch as well: every rack that goes from a count to zero does."""
     caplog.set_level("DEBUG", logger="wingman.controller")
     monkeypatch.setattr(
         controller_module, "find_resupply_marker", lambda _frame, **_kw: None)
@@ -1025,14 +1061,114 @@ def test_after_a_rearm_the_other_rack_is_used_before_declaring_exhaustion(monkey
         _wait_for_pursuit_to_settle(ctrl)
 
     rearm_at = logs.index("RESUPPLY: confirmed ammo=2")
-    back_at = logs.index("switching to the primary, reloaded by the rearm")
+    back_at = logs.index("switching to the primary")
     assert rearm_at < back_at
     assert "missiles exhausted" not in logs[rearm_at:back_at], (
         "an empty selected rack after a rearm is not exhaustion")
     assert "fire_active_weapon - pressing" in logs[back_at:], "the reloaded primary is fired"
-    assert "missiles exhausted" in logs[back_at:], "both racks empty is exhaustion"
-    assert keys.count(("key_press", SWITCH_WEAPON)) == 1, "no switch back to the spent secondary"
-    assert selected_secondary is False
+    again_at = logs.index("switching to the secondary", back_at)
+    assert "missiles exhausted" in logs[again_at:], "both racks empty is exhaustion"
+    assert keys.count(("key_press", SWITCH_WEAPON)) == 2, (
+        "the primary going from 2 to 0 presses the switch too")
+    assert selected_secondary is True
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-05: "anytime any weapon goes from a number to zero it
+# presses 'g', this way if resupply happened it would auto switch to new
+# inventory". 11:18:45-11:19:18 that day: the primary ran out, the pursuit
+# switched to the secondary (2/2) and flew through the resupply point. A
+# resupply refills both racks, but the selected one was already full, so no
+# count changed. When the secondary ran out nothing pressed the switch, and the
+# aircraft searched for a resupply for 39 s with a reloaded primary.
+# ---------------------------------------------------------------------------
+
+def _pursue_until(ctrl, done, *, timeout=8.0, **pursue_kwargs):
+    """Run a pursuit until `done()` or the timeout, then stop it from outside."""
+    ctrl.pursue_and_engage(**pursue_kwargs)
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline and ctrl.is_pursuing() and not done():
+            time.sleep(0.02)
+        return done()
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+
+def test_the_secondary_running_out_switches_back_to_a_primary_reloaded_unseen(
+        monkeypatch, caplog):
+    caplog.set_level("INFO", logger="wingman.controller")
+    # Primary 3 then empty; the stale 0 after the switch, secondary 2, 2 then
+    # empty; the stale 0 again, then the primary the resupply refilled.
+    analyzer = _SequenceAnalyzer([3, 0, 0, 0, 2, 2, 0, 0, 0, 6])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=2, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    def _reloaded_primary_fired():
+        keys = _keys(ctrl)
+        presses = [i for i, k in enumerate(keys) if k == ("key_press", SWITCH_WEAPON)]
+        return len(presses) >= 2 and ("key_press", FIRE_ACTIVE_WEAPON) in keys[presses[1]:]
+
+    assert _pursue_until(ctrl, _reloaded_primary_fired, defer_switch_until_empty=True), (
+        "the reloaded primary was never selected and fired")
+    logs = caplog.text
+    first = logs.index("switching to the secondary")
+    second = logs.index("switching to the primary")
+    assert first < second
+    assert len(_switch_presses(_keys(ctrl))) == 2
+    assert not ctrl.is_secondary_weapon_active(), "the count read is the primary's again"
+    assert "missiles exhausted" not in logs
+    assert "RESUPPLY: confirmed" not in logs[:second], (
+        "the switch back must not depend on the count having shown the rearm")
+
+
+def test_the_missiles_empty_pursuit_switches_back_too(monkeypatch):
+    """The default path presses the switch at its start; its secondary running
+    out presses it again."""
+    analyzer = _SequenceAnalyzer([0, 2, 2, 0, 0, 0, 6])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=2, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    assert _pursue_until(ctrl, lambda: len(_switch_presses(_keys(ctrl))) >= 2), (
+        "the secondary going from 2 to 0 pressed nothing")
+    assert not ctrl.is_secondary_weapon_active()
+
+
+def test_two_empty_racks_do_not_toggle_back_and_forth(monkeypatch, caplog):
+    """SWITCH_WEAPON is a toggle. A rack that shows no count after it is selected
+    did not go from a number to zero, so it presses nothing: two presses, then
+    the ordinary both-racks-empty ending, and the dive does not press a third."""
+    caplog.set_level("INFO", logger="wingman.controller")
+    analyzer = _SequenceAnalyzer([2, 0, 0, 2, 0, 0, 0])
+    ctrl, keys = _run_deferred_pursuit(
+        monkeypatch, analyzer, confirm=2, ammo_grace=0.3, max_s=6.0, heatdive=True)
+    logs = caplog.text
+    assert "ammo exhausted, falling through" in logs
+    assert logs.index("switching to the primary") < logs.index("ammo exhausted")
+    assert len(_switch_presses(keys)) == 2, "no third press, in the pursuit or the dive"
+    assert not ctrl.is_secondary_weapon_active()
+
+
+def test_a_rack_with_no_count_yet_is_not_switched_away_from(monkeypatch):
+    """After a switch the HUD holds the old rack's 0 for seconds. That 0 is
+    not the new rack running out."""
+    analyzer = _SequenceAnalyzer([2, 0, 0, 0, 0, 0, 0, 0, 0, 2])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=2)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    assert _pursue_until(ctrl, lambda: analyzer._n >= 12, defer_switch_until_empty=True)
+    assert len(_switch_presses(_keys(ctrl))) == 1
+    assert ctrl.is_secondary_weapon_active()
 
 
 def test_max_duration_before_empty_does_not_switch_weapons(monkeypatch):

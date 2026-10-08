@@ -841,6 +841,10 @@ class Controller:
         self._resupply_rearm_climb_s = float(_resupply_cfg.get(
             "rearm_climb_s",
             schema_default("pursuit_mode.resupply_priority.rearm_climb_s")))
+        # The resupply_candidate_*.png written when a marker first appears.
+        self._resupply_save_candidate_frames = bool(_resupply_cfg.get(
+            "save_candidate_frames",
+            schema_default("pursuit_mode.resupply_priority.save_candidate_frames")))
         # Operator, 2026-10-02: the resupply icon counts when it appears in
         # the tracker's acquisition region, so both read the same key.
         self._resupply_region_pct = tuple(float(v) for v in (_c.tracking or {}).get(
@@ -1137,6 +1141,12 @@ class Controller:
         # at 24 KPH and hit the ground with missiles still racked. None
         # disables the push (pre-ADR-086 behaviour).
         self._climb_pitch_lead_s = float(_cl_cfg.get("pitch_lead_s", 3.0))
+        # ADR 159: the emergency climb's airbrake is for a steep dive only. A
+        # flight path steeper than this brakes; shallower, the nose-up carries
+        # the afterburner. None: the emergency climb never brakes.
+        self._climb_brake_below_deg = _cl_cfg.get(
+            "emergency_airbrake_below_deg",
+            schema_default("behavior_tree.climb.emergency_airbrake_below_deg"))
         # ADR 088: abort a dive whose premise (empty rack) has expired.
         self._eject_abort_on_rearm = bool(_ecl.get("abort_on_rearm", True))
         # ADR 107: duration cap for the boundary turn. Bounded for the same
@@ -3784,7 +3794,7 @@ class Controller:
 
         defer_switch_until_empty: mission_su30's hand-off (ADR 144 D4, revised
         2026-09-24). Pursue with whatever weapon is selected and press
-        SWITCH_WEAPON only once, when its ammo has read 0 for
+        SWITCH_WEAPON when its ammo has read 0 for
         `pursuit_mode.empty_confirm_reads` consecutive cycles. Nothing is
         pressed at the start and the flag is not reset (it is the only record
         of whether a switch already happened this life). After that switch
@@ -3793,6 +3803,12 @@ class Controller:
         since the HUD count lags a switch (see _pursuit_ammo_grace_s). The
         toggle is why the confirmation matters: one misread 0 would swap away
         a rack that still has missiles, and the only undo is a second press.
+
+        In both modes, every later rack that goes from a count to zero presses
+        SWITCH_WEAPON again (operator, 2026-10-05): a resupply refills the
+        rack that is not selected without the HUD showing it. A rack that
+        shows no count after it is selected presses nothing, and the ammo==0
+        handling above applies to it, its grace measured from that switch.
 
         Why this can use pitch and eject_and_dive's own heatdive addition
         cannot: nothing here runs _eject_descent_control, so nothing else is
@@ -3915,14 +3931,19 @@ class Controller:
                 last_seen_ts = None
                 last_visible_err = None
                 zero_reads = 0
-                # 2026-10-02: a resupply refills both racks (a saved frame shows 2/2
-                # and 2/2), so after a confirmed rearm the rack that is not selected is
-                # loaded again and the next empty read means "switch", not "out".
-                other_rack_rearmed = False
+                # Operator, 2026-10-05: "anytime any weapon goes from a number to
+                # zero it presses 'g'". `rack_loaded` is that number: the selected
+                # rack has shown a count above zero since it was selected. The
+                # deferred start presumes it, as it always has. A resupply refills
+                # both racks (a saved frame of 2026-10-02 shows 2/2 and 2/2), and
+                # the HUD shows only the selected one, so the other rack can be
+                # full again with nothing to say so: 11:18:45-11:19:18, a resupply
+                # with the full secondary selected changed no count, and when the
+                # secondary ran out the reloaded primary was never selected.
+                rack_loaded = rack_id == 0
                 rearm_climb_until = 0.0   # nose-up after a rearm ends at this time
                 self._search_climb_reached = False
                 self._search_climbing = False
-                secondary_spent = False
                 switched_at = start if switched_here or weapon_already_switched else None
                 yielding = False   # ADR 148: a dive-recovery climb owns pitch and roll
                 self._dive_guard_reason = None
@@ -3983,7 +4004,8 @@ class Controller:
                                 detected_resupply_marker, time.monotonic(),
                                 seeking=(resupply_seeking
                                          or resupply_priority_eligible)))
-                        if (marker_visible and not last_resupply_marker_visible
+                        if (self._resupply_save_candidate_frames
+                                and marker_visible and not last_resupply_marker_visible
                                 and resupply_samples_saved < 2):
                             sample_path = _RESUPPLY_SAMPLE_DIR / (
                                 f"resupply_candidate_{time.time_ns()}_"
@@ -4261,66 +4283,57 @@ class Controller:
                         tally.scan(visible, ammo)
                         priority_ammo_reading = ammo
                         priority_rack_id = rack_id
-                        # mission_su30 (ADR 144 D4, 2026-09-24): the switch is
-                        # deferred until the selected weapon runs out. Only a
+                        # Every rack that goes from a count to zero presses
+                        # SWITCH_WEAPON (operator, 2026-10-05; before that only
+                        # mission_su30's deferred first switch, ADR 144 D4, and
+                        # one switch after a rearm the count had shown). Only a
                         # run of consecutive 0 reads counts — SWITCH_WEAPON is
                         # a toggle, so one misread 0 would swap away a rack
                         # that still has missiles. None (unreadable) leaves the
                         # run as it is, matching the fail-open fire rule below.
-                        primary_pending = (
-                            (defer_switch_until_empty
-                             and not self._eject_weapon_switched
-                             and not secondary_spent)
-                            or other_rack_rearmed)
-                        if primary_pending:
-                            if ammo == 0:
-                                zero_reads += 1
-                            elif ammo is not None:
-                                zero_reads = 0
-                            if zero_reads >= self._pursuit_empty_confirm_reads:
-                                # After a rearm the secondary is the selected rack,
-                                # so the loaded one is the primary.
-                                back_to_primary = other_rack_rearmed and rack_id == 1
-                                logger.info(
-                                    "Controller: pursue_and_engage — selected weapon "
-                                    "empty (%d consecutive zero reads), switching to "
-                                    "the %s", zero_reads,
-                                    "primary, reloaded by the rearm" if back_to_primary
-                                    else "secondary")
-                                self.switch_weapon(
-                                    hold_seconds=0.1, block=True, ignore_cancel=True)
-                                # The tally needs three OCR reads to confirm a
-                                # count and this switch takes about a second, so
-                                # the rack's last missiles are credited here.
-                                missile_priority = missile_urgency.rack_emptied(rack_id)
-                                if back_to_primary:
-                                    # AMMO_MISSILE reads the primary again.
-                                    self._eject_weapon_switched = False
-                                    secondary_spent = True
-                                    rack_id = 0
-                                else:
-                                    self._eject_weapon_switched = True
-                                    rack_id = 1
-                                other_rack_rearmed = False
-                                zero_reads = 0
-                                switched_at = time.time()
-                                switched_here = True
-                                primary_pending = False
-                                # The count just read belongs to the rack that was
-                                # switched away from; the HUD needs a moment to
-                                # show the new one, so it is not acted on as if it
-                                # were the secondary's.
-                                ammo = None
+                        # A rack that has shown no count since it was selected
+                        # presses nothing: the stale 0 the HUD holds after a
+                        # switch, and two empty racks, are not "a number to
+                        # zero", so the toggle cannot ping-pong.
+                        if ammo is not None and ammo > 0:
+                            rack_loaded = True
+                            zero_reads = 0
+                        elif ammo == 0 and rack_loaded:
+                            zero_reads += 1
+                        if rack_loaded and zero_reads >= self._pursuit_empty_confirm_reads:
+                            logger.info(
+                                "Controller: pursue_and_engage — selected weapon "
+                                "empty (%d consecutive zero reads), switching to "
+                                "the %s", zero_reads,
+                                "primary" if rack_id == 1 else "secondary")
+                            self.switch_weapon(
+                                hold_seconds=0.1, block=True, ignore_cancel=True)
+                            # The tally needs three OCR reads to confirm a
+                            # count and this switch takes about a second, so
+                            # the rack's last missiles are credited here.
+                            missile_priority = missile_urgency.rack_emptied(rack_id)
+                            rack_id = 1 - rack_id
+                            # The flag says which rack AMMO_MISSILE reads.
+                            self._eject_weapon_switched = rack_id == 1
+                            rack_loaded = False
+                            zero_reads = 0
+                            switched_at = time.time()
+                            switched_here = True
+                            # The count just read belongs to the rack that was
+                            # switched away from; the HUD needs a moment to
+                            # show the new one, so it is not acted on as if it
+                            # were the new rack's.
+                            ammo = None
                         terminal_zero = False
-                        if ammo == 0 and not primary_pending:
+                        if ammo == 0 and not rack_loaded:
                             grace_from = switched_at if switched_at is not None else start
                             terminal_zero = (
                                 time.time() - grace_from >= self._pursuit_ammo_grace_s)
                         if self._resupply_priority_enabled and ammo == 0:
                             logger.debug(
-                                "RESUPPLY AMMO: rack=%s primary_pending=%s "
+                                "RESUPPLY AMMO: rack=%s switch_pending=%s "
                                 "terminal_zero=%s grace=%.1fs",
-                                rack_id, primary_pending, terminal_zero,
+                                rack_id, rack_loaded, terminal_zero,
                                 self._pursuit_ammo_grace_s)
                         was_empty = missile_priority.empty
                         priority_ammo = priority_ammo_reading
@@ -4343,9 +4356,6 @@ class Controller:
                             resupply_seeking = False
                             resupply_marker_memory.clear()
                             if self._resupply_priority_actuate:
-                                other_rack_rearmed = True
-                                secondary_spent = False
-                                zero_reads = 0
                                 if self._resupply_rearm_climb_s > 0:
                                     rearm_climb_until = (
                                         time.time() + self._resupply_rearm_climb_s)
@@ -4438,7 +4448,9 @@ class Controller:
                     # R-74 secondary selected; five such presses in that log).
                     # Now the dive is told the switch is still deferred, and its
                     # heatdive loop makes it once the weapon is empty.
-                    _switched = self._eject_weapon_switched
+                    # `switched_here` too: a pursuit that switched twice ends on
+                    # the primary with the flag down, and its switching is done.
+                    _switched = self._eject_weapon_switched or switched_here
                     self.eject_and_dive(
                         on_complete=on_complete,
                         weapon_already_switched=(_switched if defer_switch_until_empty else True),
@@ -5294,13 +5306,14 @@ class Controller:
 
         ``emergency`` (ADR 086 d2 forced-climb case, live-measured 2026-09-09:
         a -419 m/s dive accelerated to -807 m/s and crashed ~9s after Climb
-        took over, using the routine pulse/observe cadence): holds
-        AIRBRAKE_KEY instead of AFTERBURNER_KEY (ADR 137 — holding both
-        cancels the airbrake's own deceleration, so the emergency case never
-        touches afterburner at all, regardless of fuel or an incoming
-        missile) and removes the observe gap between pitch pulses so nose-up
-        re-applies every poll tick instead of waiting ``pulse_observe_s`` —
-        see ``_run_climb_hold``.
+        took over, using the routine pulse/observe cadence): removes the
+        observe gap between pitch pulses so nose-up re-applies every poll tick
+        instead of waiting ``pulse_observe_s``, and, while the flight path is
+        steeper than ``emergency_airbrake_below_deg``, holds AIRBRAKE_KEY
+        instead of AFTERBURNER_KEY (ADR 137: holding both cancels the
+        airbrake's own deceleration). Shallower than that the nose-up carries
+        the afterburner like any other climb (ADR 159) — see
+        ``_run_climb_hold``.
 
         Termination: ``confirm_reads`` consecutive FRESH telemetry reads at or
         above the target (a fresh read = the stable value's timestamp
@@ -5360,10 +5373,9 @@ class Controller:
         self._climb_emergency_requested = bool(emergency)
         self._climbing.set()
         self._climb_stop.clear()
-        logger.info("\033[95m⬆️  CLIMB — holding nose up + %s "
+        logger.info("\033[95m⬆️  CLIMB — holding nose up + afterburner%s "
                     "(target alt %.0f, cap %.0fs)\033[0m",
-                    "airbrake (EMERGENCY, afterburner suppressed)" if emergency
-                    else "afterburner",
+                    " (EMERGENCY, airbrake only in a steep dive)" if emergency else "",
                     float(exit_alt), cap_s)
 
         def _run():
@@ -5935,14 +5947,19 @@ class Controller:
         eject dive controller's pulse/observe pattern, inverted.
 
         ``emergency`` (live-measured 2026-09-09: a dive that reached -807 m/s
-        outran the routine cadence and crashed): holds AIRBRAKE_KEY alongside
-        the existing keys to shed the dive's speed directly, rather than only
-        fighting it with pitch, and removes the ``pulse_observe_s`` gap
-        between pulses — each pulse still ends and reassesses rate/ceiling
-        before the next one starts (so a recovered rate or a hit pitch
-        ceiling still stops or reverses it; the oscillation risk above is a
-        continuously HELD key with no reassessment, not a tightened pulse
-        cadence), it just no longer waits idle between pulses.
+        outran the routine cadence and crashed): removes the
+        ``pulse_observe_s`` gap between pulses — each pulse still ends and
+        reassesses rate/ceiling before the next one starts (so a recovered
+        rate or a hit pitch ceiling still stops or reverses it; the
+        oscillation risk above is a continuously HELD key with no
+        reassessment, not a tightened pulse cadence), it just no longer waits
+        idle between pulses. While the flight path is steeper than
+        ``emergency_airbrake_below_deg`` it also holds AIRBRAKE_KEY in place
+        of the afterburner, to shed the dive's speed directly rather than only
+        fighting it with pitch. Shallower than that, or with no angle yet, the
+        nose-up carries the afterburner (ADR 159, operator 2026-10-05): braking
+        a shallow dive took 1100 KPH to 250 KPH in 6 s, and 47 of 54 stall
+        trips in one session followed it.
 
         @relation(SAF-001, scope=function)
         @relation(SAF-008, scope=function)
@@ -6003,29 +6020,42 @@ class Controller:
                 return False
             return last_angle + pitch_rate * self._climb_pitch_lead_s >= ceiling
 
+        def _steep_dive(angle: "float | None") -> bool:
+            """True when the path is steep enough for the airbrake (ADR 159).
+
+            An unknown angle is not a steep dive: the nose-up then carries the
+            afterburner, which is what the operator asked for.
+            """
+            limit = self._climb_brake_below_deg
+            return limit is not None and angle is not None and angle < float(limit)
+
         guarded_keys = tuple(k for k in (NOSE_UP_KEY, NOSE_DOWN_KEY, AFTERBURNER_KEY)
                              if k in _WATCHED_MANEUVER_KEYS)
         for _key in guarded_keys:
             self._inc_programmatic_key(_key)
         try:
             fuel = self._read_fuel_pct()
-            if emergency_now:
+            # The hold's own `last_angle` is None until its first fresh sample,
+            # up to 3 s away, so the start reads the path the HUD already has.
+            _entry_angle = self._telemetry_path_angle_deg() if emergency_now else None
+            if _steep_dive(_entry_angle):
                 # ADR 137: airbrake and afterburner cancel each other out
                 # (operator observation, 2026-09-09 — drag vs. thrust working
-                # against each other) — airbrake owns deceleration for the
-                # whole emergency hold, afterburner stays off regardless of
-                # fuel level. The fuel-floor/incoming-missile logic below is
-                # skipped entirely for the same reason, including the ADR 088
-                # missile override: outrunning a missile is moot if holding
-                # afterburner also cancels the airbrake that is trying to
-                # keep the aircraft off the ground in the first place.
+                # against each other) — while the airbrake is held the
+                # afterburner stays off regardless of fuel level. The
+                # fuel-floor/incoming-missile logic below is skipped for the
+                # same reason, including the ADR 088 missile override:
+                # outrunning a missile is moot if holding afterburner also
+                # cancels the airbrake that is trying to keep the aircraft off
+                # the ground in the first place.
                 self._climb_key(AIRBRAKE_KEY, press=True, action="climb_emergency")
                 self._climb_emergency_active = True
                 # Phase 2: cruise or the evade may hold a throttle lease; they
                 # yield to this, so the burn goes now, not on their next tick.
                 _actuator.reevaluate(AFTERBURNER_KEY)
-                logger.info("Controller: climb — EMERGENCY: airbrake held, "
-                            "afterburner suppressed (cruise-afterburner yields too)")
+                logger.info("Controller: climb — EMERGENCY: path %+.0f deg is a steep "
+                            "dive: airbrake held, afterburner suppressed "
+                            "(cruise-afterburner yields too)", _entry_angle)
             elif fuel is None or fuel > fuel_floor_pct:
                 self._climb_key(AFTERBURNER_KEY, press=True)
                 ab_held = True
@@ -6044,10 +6074,38 @@ class Controller:
                 # changed mid-hold. Measured live twice, 2026-09-10 08:15/08:16.
                 _requested_emergency = self._climb_emergency_requested
                 if _requested_emergency != emergency_now:
+                    # The pulse cadence follows `emergency_now` at once. The
+                    # airbrake follows it through the steep-dive rule just
+                    # below: an escalation brakes only a steep dive, and a
+                    # de-escalation always lets go (ADR 159).
                     if _requested_emergency:
-                        # Escalation. Airbrake and afterburner cancel each
-                        # other out (ADR 137 D1/D3), so afterburner must come
-                        # down before airbrake goes up.
+                        logger.warning(
+                            "Controller: climb — emergency ESCALATED mid-hold "
+                            "(ADR 137 D9) — nose-up pulses with no observe gap")
+                    else:
+                        logger.warning(
+                            "Controller: climb — emergency CLEARED mid-hold "
+                            "(ADR 137 D9) — resuming normal fuel-floor logic")
+                    emergency_now = _requested_emergency
+                # Brake only in a steep dive (ADR 159, operator 2026-10-05:
+                # "when it applies nose up it should activate afterburner to
+                # prevent stall"). The rule before this one braked whenever the
+                # path pointed down (ADR 148 amendment, 2026-10-02), and that
+                # was the stall: 02:42:33-02:42:39, 1116 KPH at -22 deg, 624 at
+                # -31, 266 at +3. Steeper than `emergency_airbrake_below_deg`
+                # the airbrake goes on and the burner off; shallower it comes
+                # off and the fuel logic below lights the burner.
+                # No angle keeps the current state: at 21:32:32.7 a `Nose: n/a`
+                # read at 18 kph near vertical put the airbrake back on.
+                if last_angle is None:
+                    _braking = emergency_now and self._climb_emergency_active
+                else:
+                    _braking = emergency_now and _steep_dive(last_angle)
+                if _braking != self._climb_emergency_active:
+                    if _braking:
+                        # Airbrake and afterburner cancel each other out (ADR
+                        # 137 D1/D3), so the burner comes down before the
+                        # airbrake goes up.
                         if ab_held:
                             self._climb_key(AFTERBURNER_KEY, press=False)
                             ab_held = False
@@ -6055,50 +6113,18 @@ class Controller:
                                         action="climb_emergency")
                         self._climb_emergency_active = True
                         _actuator.reevaluate(AFTERBURNER_KEY)   # as at the start
-                        logger.warning(
-                            "Controller: climb — emergency ESCALATED mid-hold "
-                            "(ADR 137 D9) — airbrake engaged, afterburner "
-                            "suppressed")
-                    else:
-                        # De-escalation. Release airbrake; normal fuel-floor
-                        # logic resumes on the next iteration below.
-                        self._climb_key(AIRBRAKE_KEY, press=False,
-                                        action="climb_emergency")
-                        self._climb_emergency_active = False
-                        logger.warning(
-                            "Controller: climb — emergency CLEARED mid-hold "
-                            "(ADR 137 D9) — resuming normal fuel-floor logic")
-                    emergency_now = _requested_emergency
-                # Brake only while the path points down (ADR 148 amendment,
-                # 2026-10-02). The tree's altitude is a 3-read mean, so its
-                # emergency outlives the descent: at 20:44:40 the airbrake was
-                # still held at +24 deg and the aircraft stalled at 45 kph and
-                # 143 m. At or above level the airbrake comes off and the fuel
-                # logic below may light the burner; below level it goes back on.
-                # No angle keeps the current state: at 21:32:32.7 a `Nose: n/a`
-                # read at 18 kph near vertical put the airbrake back on.
-                if last_angle is None:
-                    _braking = emergency_now and self._climb_emergency_active
-                else:
-                    _braking = emergency_now and last_angle < 0.0
-                if _braking != self._climb_emergency_active:
-                    if _braking:
-                        if ab_held:
-                            self._climb_key(AFTERBURNER_KEY, press=False)
-                            ab_held = False
-                        self._climb_key(AIRBRAKE_KEY, press=True,
-                                        action="climb_emergency")
-                        self._climb_emergency_active = True
-                        _actuator.reevaluate(AFTERBURNER_KEY)
-                        logger.info("Controller: climb — path below level again, "
-                                    "airbrake on")
+                        logger.info("Controller: climb — path %+.0f deg is a steep "
+                                    "dive: airbrake on, afterburner off", last_angle)
                     else:
                         self._climb_key(AIRBRAKE_KEY, press=False,
                                         action="climb_emergency")
                         self._climb_emergency_active = False
-                        logger.info("Controller: climb — path %+.0f deg, at or above "
-                                    "level: airbrake released, thrust allowed",
-                                    last_angle)
+                        # A still-requested emergency reaches here only on a
+                        # known angle; no angle keeps the brake (above).
+                        logger.info("Controller: climb — %s: airbrake released, "
+                                    "afterburner allowed",
+                                    "path %+.0f deg is no longer a steep dive" % last_angle
+                                    if emergency_now else "emergency cleared")
                 # ADR 075 burner gate: release at the floor (a held key at 0%
                 # blocks recharge; the sustain floor keeps the evade reserve),
                 # re-press only after the rearm margin refills. ADR 137:
@@ -6385,7 +6411,9 @@ class Controller:
             # press of 'l' is mistaken for an echo.
             self._climb_key(NOSE_UP_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
-            if emergency_now or self._climb_emergency_active:
+            # Only a hold that braked lets the airbrake go: most emergency
+            # holds never press it now (ADR 159), and the key is not leased.
+            if self._climb_emergency_active:
                 self._climb_key(AIRBRAKE_KEY, press=False, action="climb_emergency")
                 self._climb_emergency_active = False
             # ADR 086 d1 / SAF-010: nose down into the flyable band BEFORE

@@ -630,6 +630,11 @@ SCHEMA = Section(
                 "exit_lead_s": SECONDS,
                 "fuel_reserve_pct": _num(0, 100),
                 "alt_floor_m": Leaf(types=NUMBER, allow_none=True),
+                # ADR 159: the emergency climb brakes only while the flight path
+                # is steeper than this; anywhere else its nose-up carries the
+                # afterburner. null: never brake.
+                "emergency_airbrake_below_deg": Leaf(
+                    types=NUMBER, minimum=-90, maximum=0, allow_none=True, default=-40.0),
                 "spawn_guard": Section(children={
                     "enabled": BOOL,
                     "max_hold_s": SECONDS,
@@ -936,6 +941,9 @@ SCHEMA = Section(
                 "enabled": Leaf(types=(bool,), default=True),
                 "actuate": Leaf(types=(bool,), default=False),
                 "rearm_climb_s": Leaf(types=NUMBER, minimum=0, default=3.0),
+                # The frame in which a resupply marker first appears, saved to
+                # tests/test-output/target_tracking, two per pursuit at most.
+                "save_candidate_frames": Leaf(types=(bool,), default=True),
             }),
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,

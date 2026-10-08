@@ -63,10 +63,10 @@ class _FakeTelemetryAnalyzer(PerceptionFake):
     # starting state, GAME_UNKNOWN).
     game_state = GameState.GAME_BATTLE
 
-    def __init__(self, stable_value=None, ts=None, fresh=True, fuel=None):
+    def __init__(self, stable_value=None, ts=None, fresh=True, fuel=None, angle=None):
         self._lock = threading.Lock()
         self._fuel = fuel
-        self.set(stable_value, ts, fresh)
+        self.set(stable_value, ts, fresh, angle)
 
     def set(self, stable_value, ts, fresh=True, angle=None):
         with self._lock:
@@ -169,40 +169,130 @@ def test_max_climb_backstop(monkeypatch):
         assert _releases(kb, key), f"'{key}' never released"
 
 
-def test_emergency_holds_and_releases_airbrake(monkeypatch):
-    """ADR 137: the emergency case (only) holds AIRBRAKE_KEY alongside the
-    existing keys, released unconditionally when the climb ends."""
+# --- ADR 159: the emergency climb's nose-up carries the afterburner ------------
+# Operator, 2026-10-05: "when it applies nose up it should activate afterburner to
+# prevent stall". Measured 02:36-03:39 that night: 47 of 54 stall-prevention trips
+# followed an emergency climb that held the airbrake through a shallow dive
+# (1116 KPH at -22 deg, 624 at -31, 266 at +3). The airbrake is now for a steep
+# dive only: a path below `emergency_airbrake_below_deg` (-40 by default).
+
+def test_emergency_nose_up_carries_the_afterburner(monkeypatch):
+    """The shallow dive the pursuit recoveries start from: nose-up and the burner,
+    and the airbrake is never touched, pressed or released."""
     t0 = time.time()
-    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0)
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-22.0)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.climb_mode(emergency=True)
+    time.sleep(0.45)   # the first pitch pulse fires on the first 0.25 s poll
+    assert _presses(kb, NOSE_UP_KEY), "emergency climb never pulled up"
+    assert _presses(kb, AFTERBURNER_KEY), "nose-up without the afterburner"
+    assert not ctrl._climb_emergency_active, "cruise and the evade would yield for nothing"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+    assert not _presses(kb, AIRBRAKE_KEY), "airbrake pressed in a shallow dive"
+    assert not _releases(kb, AIRBRAKE_KEY), "released an airbrake the hold never held"
+
+
+def test_emergency_with_no_angle_carries_the_afterburner(monkeypatch):
+    """No angle is not a steep dive (a fresh respawn has none for several seconds)."""
+    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False, fuel=100)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    ctrl.climb_mode(emergency=True)
+    time.sleep(0.3)
+    assert _presses(kb, AFTERBURNER_KEY), "nose-up without the afterburner"
+    assert not _presses(kb, AIRBRAKE_KEY)
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_emergency_in_a_steep_dive_holds_and_releases_airbrake(monkeypatch):
+    """ADR 137, kept for the dive it was written for: steeper than the limit the
+    hold brakes instead of burning, and lets the airbrake go when it ends."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-60.0)
     kb = _FakeKeyboard()
     ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
 
     ctrl.climb_mode(emergency=True)
     assert ctrl.is_climbing()
     time.sleep(0.3)
-    assert _presses(kb, AIRBRAKE_KEY), "emergency climb never pressed airbrake"
+    assert _presses(kb, AIRBRAKE_KEY), "steep dive never pressed airbrake"
+    assert not _presses(kb, AFTERBURNER_KEY), "afterburner pressed against the airbrake"
+    assert ctrl._climb_emergency_active
 
-    analyzer.set(1100.0, t0 + 0.1)
+    analyzer.set(1100.0, t0 + 0.1, angle=-60.0)
     time.sleep(0.3)
-    analyzer.set(1150.0, t0 + 0.2)
+    analyzer.set(1150.0, t0 + 0.2, angle=-60.0)
     assert _wait_done(ctrl), "emergency climb did not end on altitude recovery"
     assert _releases(kb, AIRBRAKE_KEY), "airbrake never released at climb end"
+    assert not ctrl._climb_emergency_active
 
 
-def test_emergency_never_presses_afterburner(monkeypatch):
-    """ADR 137: holding airbrake and afterburner together cancels the
-    airbrake's own deceleration (operator observation, 2026-09-09) — the
-    emergency case must never press AFTERBURNER_KEY, even with plentiful
-    fuel (fuel=100 would press it in the routine case)."""
+def test_the_airbrake_gives_way_to_the_afterburner_as_the_dive_shallows(monkeypatch, caplog):
+    """The pull-out: once the path is shallower than the limit the airbrake comes
+    off and the burner lights, well before level (it used to wait for level)."""
     t0 = time.time()
-    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100)
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-70.0)
     kb = _FakeKeyboard()
     ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
 
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        time.sleep(0.3)
+        assert _presses(kb, AIRBRAKE_KEY) and not _presses(kb, AFTERBURNER_KEY)
+
+        analyzer.set(250.0, t0 + 0.1, angle=-19.0)
+        time.sleep(0.6)
+    assert _releases(kb, AIRBRAKE_KEY), "airbrake still held in a shallow dive"
+    assert _presses(kb, AFTERBURNER_KEY), "the burner never lit after the airbrake"
+    assert not ctrl._climb_emergency_active
+    assert any("no longer a steep dive" in r.getMessage() for r in caplog.records)
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_a_dive_that_steepens_trades_the_afterburner_for_the_airbrake(monkeypatch, caplog):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-20.0)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        time.sleep(0.3)
+        assert _presses(kb, AFTERBURNER_KEY) and not _presses(kb, AIRBRAKE_KEY)
+
+        analyzer.set(250.0, t0 + 0.1, angle=-64.0)
+        time.sleep(0.6)
+    assert _presses(kb, AIRBRAKE_KEY), "a steep dive never braked"
+    burner_off = _releases(kb, AFTERBURNER_KEY)
+    assert burner_off, "the burner stayed lit against the airbrake"
+    assert burner_off[0][2] <= _presses(kb, AIRBRAKE_KEY)[0][2], \
+        "airbrake went on before the burner came off"
+    assert any("is a steep dive" in r.getMessage() for r in caplog.records)
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_emergency_airbrake_below_deg_null_never_brakes(monkeypatch):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-85.0)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer,
+                      dict(CFG, emergency_airbrake_below_deg=None))
+
     ctrl.climb_mode(emergency=True)
-    time.sleep(0.3)
-    assert _presses(kb, AIRBRAKE_KEY), "emergency climb never pressed airbrake"
-    assert not _presses(kb, AFTERBURNER_KEY), "afterburner pressed during emergency climb"
+    time.sleep(0.6)
+    assert _presses(kb, AFTERBURNER_KEY)
+    assert not _presses(kb, AIRBRAKE_KEY)
 
     ctrl._climb_stop.set()
     assert _wait_done(ctrl)
@@ -210,8 +300,9 @@ def test_emergency_never_presses_afterburner(monkeypatch):
 
 def test_non_emergency_never_presses_airbrake(monkeypatch):
     """The routine (non-emergency) altitude-band/sustain climb is unchanged —
-    no airbrake, ever."""
-    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False)
+    no airbrake, ever, however steep the path."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, angle=-70.0)
     kb = _FakeKeyboard()
     cfg = dict(CFG, max_climb_s=0.5)
     ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
@@ -223,10 +314,11 @@ def test_non_emergency_never_presses_airbrake(monkeypatch):
 
 
 def test_emergency_escalates_mid_hold(monkeypatch, caplog):
-    """ADR 137 D9: a non-emergency hold that gets a live escalation mid-hold
-    engages airbrake and suppresses afterburner without needing to restart
-    the hold — the "Third Live Trial" gap this decision closes."""
-    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False, fuel=100)
+    """ADR 137 D9: a non-emergency hold learns of a live escalation without a
+    restart. ADR 159: in a shallow dive that changes the pulse cadence only; the
+    burner it already holds stays lit."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-20.0)
     kb = _FakeKeyboard()
     cfg = dict(CFG, max_climb_s=5.0)
     ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
@@ -234,16 +326,36 @@ def test_emergency_escalates_mid_hold(monkeypatch, caplog):
     ctrl.climb_mode()   # emergency=False
     time.sleep(0.1)
     assert _presses(kb, AFTERBURNER_KEY), "routine climb never pressed afterburner"
-    assert not _presses(kb, AIRBRAKE_KEY)
 
     with caplog.at_level("WARNING"):
         ctrl.set_climb_emergency(True)
         time.sleep(0.4)   # let the 0.25s poll loop pick up the escalation
 
-    assert _presses(kb, AIRBRAKE_KEY), "escalation never engaged airbrake"
-    assert _releases(kb, AFTERBURNER_KEY), "escalation never released afterburner"
+    assert not _presses(kb, AIRBRAKE_KEY), "escalation braked a shallow dive"
+    assert not _releases(kb, AFTERBURNER_KEY), "escalation cut the burner under the nose-up"
     escalated = [r for r in caplog.records if "ESCALATED" in r.message]
     assert len(escalated) == 1, "escalation logged once per transition, not per poll tick"
+
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_emergency_escalating_in_a_steep_dive_brakes(monkeypatch):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-60.0)
+    kb = _FakeKeyboard()
+    cfg = dict(CFG, max_climb_s=5.0)
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
+
+    ctrl.climb_mode()   # emergency=False: steep, but not an emergency yet
+    time.sleep(0.4)
+    assert _presses(kb, AFTERBURNER_KEY)
+    assert not _presses(kb, AIRBRAKE_KEY)
+
+    ctrl.set_climb_emergency(True)
+    time.sleep(0.4)
+    assert _presses(kb, AIRBRAKE_KEY), "escalation never engaged airbrake"
+    assert _releases(kb, AFTERBURNER_KEY), "escalation never released afterburner"
 
     ctrl._climb_stop.set()
     assert _wait_done(ctrl)
@@ -252,21 +364,23 @@ def test_emergency_escalates_mid_hold(monkeypatch, caplog):
 
 def test_emergency_de_escalates_mid_hold(monkeypatch, caplog):
     """ADR 137 D9: an emergency hold that clears mid-hold releases airbrake
-    and resumes normal fuel-floor logic."""
-    analyzer = _FakeTelemetryAnalyzer(stable_value=None, ts=None, fresh=False, fuel=100)
+    and resumes normal fuel-floor logic, steep path or not."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-60.0)
     kb = _FakeKeyboard()
     cfg = dict(CFG, max_climb_s=5.0)
     ctrl = _make_ctrl(monkeypatch, kb, analyzer, cfg)
 
     ctrl.climb_mode(emergency=True)
     time.sleep(0.1)
-    assert _presses(kb, AIRBRAKE_KEY), "emergency climb never pressed airbrake"
+    assert _presses(kb, AIRBRAKE_KEY), "steep emergency climb never pressed airbrake"
 
     with caplog.at_level("WARNING"):
         ctrl.set_climb_emergency(False)
         time.sleep(0.4)
 
     assert _releases(kb, AIRBRAKE_KEY), "de-escalation never released airbrake"
+    assert _presses(kb, AFTERBURNER_KEY), "the burner never came back after the airbrake"
     cleared = [r for r in caplog.records if "CLEARED" in r.message]
     assert len(cleared) == 1, "de-escalation logged once per transition, not per poll tick"
 

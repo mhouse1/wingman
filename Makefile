@@ -635,6 +635,14 @@ UMU_RUN        ?= $(HOME)/.local/bin/umu-run
 # Extra Unity player args, e.g. GAME_ARGS=-force-d3d11 to work around a
 # graphics-backend crash on some GPUs. Empty by default — no effect unless set.
 GAME_ARGS      ?=
+# umu-launcher checks Valve's runtime server on every launch and downloads the
+# whole Steam runtime (195 MB) inside the launch when the server names a version
+# the installed one does not list. wait-game allows the window 20 s, so the
+# launch fails. 2026-10-05 10:33: the server's VERSION.txt named an older build
+# than its own archive, so every launch downloaded, and that download failed its
+# digest. 0 launches on the installed runtime and never asks; a first install is
+# not affected. `make rd UMU_RUNTIME_UPDATE=1` lets umu update again.
+UMU_RUNTIME_UPDATE ?= 0
 launch-game:
 	@_p=Metalstorm; \
 	 if pgrep -f "$${_p}.exe" > /dev/null 2>&1; then \
@@ -644,6 +652,7 @@ launch-game:
 	 fi
 	@rm -f /tmp/wingman-game-prerunning
 	@$(NESTED_ENV) GAMEID=umu-0 PROTONPATH="$(PROTON_ROOT)" WINEPREFIX="$(WINE_PREFIX)" \
+	  UMU_RUNTIME_UPDATE="$(UMU_RUNTIME_UPDATE)" \
 	  "$(UMU_RUN)" "$(GAME_EXE)" $(GAME_ARGS) > /tmp/wingman-game-launch.log 2>&1 & \
 	echo "MetalStorm launching via umu-run (log: /tmp/wingman-game-launch.log)"
 

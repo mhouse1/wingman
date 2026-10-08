@@ -368,6 +368,18 @@ same confirmation). This replaced a first version that let the dive make its own
 switch, which switched away from a loaded rack on every capped pursuit (operator,
 2026-09-24). The default form, used by the missiles-empty trigger, is unchanged.
 
+**Every rack that runs out presses the switch (operator, 2026-10-05).** In both
+forms, after the first switch the pursuit presses `SWITCH_WEAPON` again each time
+the selected rack goes from a count to `empty_confirm_reads` zero reads. A
+resupply refills both racks and the HUD shows only the selected one. On
+2026-10-05 11:18:45 the pursuit switched to a full secondary (2 of 2) and flew
+through the resupply point, no count changed, and when the secondary ran out at
+11:19:18 the reloaded primary stayed unselected for the 39 s to the respawn. A
+rack that shows no count after it is selected presses nothing, so the stale 0
+the HUD holds after a switch and two empty racks do not toggle; the ammo-zero
+handling then applies to that rack, its grace measured from the last switch.
+This replaces the single switch back that a rearm seen in the count used to arm.
+
 **No time cap (operator decision, 2026-09-24).** `pursuit_mode.pursuit_max_duration_s` ships as `0`,
 which means no cap: the pursuit keeps searching (roll, and pitch once it has a lock) and firing until the
 ammo is exhausted, when it still falls through to `eject_and_dive` to trade for a rearmed airframe, or

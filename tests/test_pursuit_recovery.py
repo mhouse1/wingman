@@ -21,8 +21,8 @@ import time
 import wingman.controller as controller_module
 from wingman.analyzer import GameState
 from wingman.controller import (
-    AIRBRAKE_KEY, Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY,
-    ROLL_RIGHT_KEY,
+    AFTERBURNER_KEY, AIRBRAKE_KEY, Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY,
+    ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
 )
 from wingman.controller_config import ControllerConfig
 from wingman.telemetry import TelemetrySignal
@@ -268,22 +268,42 @@ def test_the_predicate_needs_the_pursuit_too(monkeypatch):
 # 20:19:47-20:20:03: with dive_safety off the tree requested the emergency climb from
 # 30 s to ground down to the impact, and every request was refused because the pursuit
 # owned the airframe ("dive recovery suppressed"); the resupply search kept pushing the
-# nose down. The hard emergency now flies through with dive_safety off, airbrake and
-# nose-up, and gives the chase back only once it has cleared with the path pointing up.
+# nose down. The hard emergency now flies through with dive_safety off and gives the
+# chase back only once it has cleared with the path pointing up. ADR 159 (operator,
+# 2026-10-05): its nose-up carries the afterburner, and the airbrake is for a dive
+# steeper than `emergency_airbrake_below_deg` only.
 
 def _crash_ctrl(monkeypatch, analyzer, **extra):
     return _ctrl(monkeypatch, analyzer, dive_safety=False, **extra)
 
 
-def test_a_predicted_crash_brakes_and_pulls_up_inside_a_pursuit_with_dive_safety_off(
+def test_a_predicted_crash_pulls_up_on_the_afterburner_inside_a_pursuit_with_dive_safety_off(
         monkeypatch):
+    """02:42:32, 03:29:01 and 45 more that night: a chase diving at about -20 deg was
+    braked from 1100 kph to 250 kph while the hold pulled up, and stalled."""
     ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-19.0))
     ctrl._pursuing.set()
     ctrl.climb_mode(emergency=True)
     try:
         assert _wait(ctrl.pursuit_recovery_active), "the emergency was suppressed again"
         assert _wait(lambda: ("key_press", NOSE_UP_KEY) in _keys(ctrl))
+        assert ("key_press", AFTERBURNER_KEY) in _keys(ctrl), "nose-up without the afterburner"
+        assert ("key_press", AIRBRAKE_KEY) not in _keys(ctrl), "braked a shallow dive"
+    finally:
+        _stop(ctrl)
+
+
+def test_a_predicted_crash_in_a_steep_dive_still_brakes_inside_a_pursuit(monkeypatch):
+    """03:27:31-03:27:40: -70 deg at 166 m and 910 kph, out at 59 m. The airbrake stays
+    for that dive."""
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-70.0))
+    ctrl._pursuing.set()
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active), "the emergency was suppressed again"
+        assert _wait(lambda: ("key_press", NOSE_UP_KEY) in _keys(ctrl))
         assert ("key_press", AIRBRAKE_KEY) in _keys(ctrl)
+        assert ("key_press", AFTERBURNER_KEY) not in _keys(ctrl)
     finally:
         _stop(ctrl)
 
@@ -338,11 +358,13 @@ def test_a_cleared_emergency_climbing_hands_the_chase_back(monkeypatch, caplog):
     assert "crash no longer predicted" in text and "crash_cleared" in text
 
 
-def test_the_airbrake_comes_off_above_level_while_the_emergency_lasts(monkeypatch, caplog):
+def test_the_airbrake_comes_off_as_the_dive_shallows_while_the_emergency_lasts(
+        monkeypatch, caplog):
     """20:44:32-20:44:41: the tree's 3-read mean kept the emergency on after the path
     turned up, the airbrake stayed held at +24 deg and the aircraft stalled at 45 kph and
-    143 m. Brake while the path points down only, and brake again if it drops back."""
-    analyzer = _Analyzer(altitude=300.0, angle=-8.0)
+    143 m. ADR 159 moved the line from level to the steep-dive limit: brake in a steep
+    dive only, let go while the path is still below level, and brake again if it steepens."""
+    analyzer = _Analyzer(altitude=300.0, angle=-60.0)
     # dive_safety on: the latched recovery keeps flying above level, so the
     # airbrake rule is seen apart from the crash-recovery hand-back.
     ctrl = _ctrl(monkeypatch, analyzer)
@@ -351,31 +373,34 @@ def test_the_airbrake_comes_off_above_level_while_the_emergency_lasts(monkeypatc
         ctrl.climb_mode(emergency=True)
         try:
             assert _wait(ctrl.pursuit_recovery_active)
-            assert ctrl._climb_emergency_active, "no airbrake in the dive"
-            analyzer.angle = 24.0
+            assert ctrl._climb_emergency_active, "no airbrake in the steep dive"
+            analyzer.angle = -20.0
             assert _wait(lambda: not ctrl._climb_emergency_active), \
-                "airbrake still held with the path above level"
+                "airbrake still held in a shallow dive"
             assert ctrl.is_climbing() and ctrl._climb_emergency_requested, \
                 "the emergency itself must not be cleared by this"
             assert ("key_release", AIRBRAKE_KEY) in _keys(ctrl)
-            analyzer.angle = -5.0
+            assert _wait(lambda: ("key_press", AFTERBURNER_KEY) in _keys(ctrl)), \
+                "the burner never lit under the nose-up"
+            analyzer.angle = -64.0
             assert _wait(lambda: ctrl._climb_emergency_active), "no airbrake back in the dive"
         finally:
             _stop(ctrl)
     text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "airbrake released, thrust allowed" in text
-    assert "path below level again, airbrake on" in text
+    assert "no longer a steep dive: airbrake released, afterburner allowed" in text
+    assert "is a steep dive: airbrake on, afterburner off" in text
 
 
 def test_a_missing_angle_does_not_put_the_airbrake_back_on(monkeypatch):
     """21:32:32.7: the HUD read `Nose: n/a` at 18 kph just after +90 deg, and the
     hold took no angle for below level and braked again."""
-    analyzer = _Analyzer(altitude=300.0, angle=-20.0)   # below the 1000 m exit
+    analyzer = _Analyzer(altitude=300.0, angle=-60.0)   # below the 1000 m exit
     ctrl = _ctrl(monkeypatch, analyzer)                    # latched: see above
     ctrl._pursuing.set()
     ctrl.climb_mode(emergency=True)
     try:
         assert _wait(ctrl.pursuit_recovery_active)
+        assert ctrl._climb_emergency_active, "no airbrake in the steep dive"
         analyzer.angle = 90.0
         assert _wait(lambda: not ctrl._climb_emergency_active)
         analyzer.angle = None

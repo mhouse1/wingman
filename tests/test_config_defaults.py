@@ -58,10 +58,14 @@ def test_resupply_priority_defaults_to_shadow_and_ships_actuation_trial():
     assert schema_default("pursuit_mode.resupply_priority.enabled") is True
     assert schema_default("pursuit_mode.resupply_priority.actuate") is False
     assert schema_default("pursuit_mode.resupply_priority.rearm_climb_s") == 3.0
+    # The candidate-frame capture is on without the key, off as shipped
+    # (operator, 2026-10-05).
+    assert schema_default("pursuit_mode.resupply_priority.save_candidate_frames") is True
     assert shipped["pursuit_mode"]["resupply_priority"] == {
         "enabled": True,
         "actuate": True,
         "rearm_climb_s": 3.0,
+        "save_candidate_frames": False,
     }
 
 

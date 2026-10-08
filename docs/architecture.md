@@ -229,9 +229,13 @@ Rules the scripted missions share:
   the `_scripted_*` helpers. The pursuit cancels the mission, so a script ends
   at the hand-off.
 - **Weapon switch.** The spawn weapon stays selected until it reads empty.
-  `SWITCH_WEAPON` is a toggle, so it is pressed at most once per life: by the
-  missiles-empty response, or by the pursuit (`defer_switch_until_empty`)
-  after `pursuit_mode.empty_confirm_reads` consecutive zero reads.
+  `SWITCH_WEAPON` is a toggle. It is pressed by the missiles-empty response, or
+  by the pursuit (`defer_switch_until_empty`) after
+  `pursuit_mode.empty_confirm_reads` consecutive zero reads, and after that by
+  the pursuit every time the selected rack goes from a count to zero (operator,
+  2026-10-05): a resupply refills the rack that is not selected without the HUD
+  showing it. A rack that shows no count after it is selected presses nothing,
+  so two empty racks do not toggle.
 - **Altitude floor (ADR 147).** While su30 or f111 is in play, the tree's hard
   floor is the mission's own `alt_floor_m`, and the armed sustain climb stands
   aside (`altitude_floor_override_m`, `sustain_climb_suppressed`).
@@ -485,9 +489,9 @@ and stall prevention still re-press every tick, which now only renews their leas
 | Owner | Kind | Yields to | Holds over | How it wins | Source |
 |---|---|---|---|---|---|
 | `stall_prevention` | per-tick reflex | manual takeover | everything, including the emergency airbrake | re-press every tick | operator directive, Phase 1 |
-| `cruise` | per-tick reflex | manual takeover, emergency climb | climb, missile evade, eject | re-press every tick | ADR 134 D9 |
-| `evade` (afterburner evade) | per-tick reflex | manual takeover, emergency climb | climb | re-press every 1 s | ADR 128 D7, D8 |
-| `climb` | tactic hold | stops on its stop event; emergency swaps it for the airbrake | nothing | presses at start | ADR 073, ADR 137 D1 |
+| `cruise` | per-tick reflex | manual takeover, the emergency climb's airbrake | climb, missile evade, eject | re-press every tick | ADR 134 D9, ADR 159 |
+| `evade` (afterburner evade) | per-tick reflex | manual takeover, the emergency climb's airbrake | climb | re-press every 1 s | ADR 128 D7, D8, ADR 159 |
+| `climb` | tactic hold | stops on its stop event; an emergency in a steep dive swaps it for the airbrake | nothing | presses at start, emergency or not | ADR 073, ADR 159 |
 | `missile_evade` | tactic hold | eject (ADR 070 d11) | nothing | presses at start | ADR 070, ADR 075 |
 | `eject_and_dive` | eject sequence | nothing | nothing; its descent control cuts the burner | presses at phase start | ADR 056, ADR 134 D9 |
 
@@ -496,7 +500,7 @@ and stall prevention still re-press every tick, which now only renews their leas
 | Owner | Kind | Yields to | Holds over | Source |
 |---|---|---|---|---|
 | `stall_prevention` | per-tick reflex | manual takeover | the emergency airbrake: releases it | operator directive |
-| `climb_emergency` | climb hold, emergency only, and only while the flight path is below level: at or above level it is released and thrust is allowed; a missing angle keeps the current state | stall prevention | cruise and the afterburner evade, which yield to it | ADR 137, ADR 148 |
+| `climb_emergency` | climb hold, emergency only, and only while the flight path is steeper than `climb.emergency_airbrake_below_deg` (-40): shallower than that it is released and the nose-up carries the afterburner; a missing angle keeps the current state, and a hold that starts with none does not brake | stall prevention | cruise and the afterburner evade, which yield to it | ADR 137, ADR 159 |
 
 **Pitch, `NOSE_UP_KEY` and `NOSE_DOWN_KEY`.**
 
@@ -611,9 +615,10 @@ otherwise drop a key the pursuit is holding.
 tree's hard emergency (time to ground from altitude over descent rate) still
 starts `climb_mode(emergency=True)` inside a pursuit. The hold flies through
 `GAME_BATTLE_EJECT`, sets the `recovery` rung so the pursuit, the resupply
-search and its look-down taps write neither axis, holds the airbrake while the
-path is below level, and hands back at the first fresh flight-path angle at or
-above level, whatever the tree's lagging altitude mean still says. The same
+search and its look-down taps write neither axis, pulls up on the afterburner
+(the airbrake only while the path is steeper than
+`climb.emergency_airbrake_below_deg`, ADR 159), and hands back at the first
+fresh flight-path angle at or above level, whatever the tree's lagging altitude mean still says. The same
 rule stops a recovery from starting on a level or climbing path.
 `recovery_max_s` caps it.
 
@@ -1090,6 +1095,7 @@ held afterburner and pitch key, and the operator could not fly.
 | [150](adr/150-reject-digit-dropped-altitude-reads.md) | Reject digit-dropped altitude reads |
 | [151](adr/151-one-actuator-and-throttle-leases.md) | One Actuator, and leases for the throttle (CR-018-09) |
 | [152](adr/152-pursuit-resupply-priority.md) | Escalating resupply priority in pursuit mode |
+| [159](adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md) | The emergency climb's nose-up carries the afterburner; the airbrake is for a steep dive only |
 | [Design 001](hldd/001-terrain-avoidance-hldd.md) | Terrain avoidance: shadow sky-occlusion check, and the Phase 2 motion-based looming design |
 | [Design 011](hldd/011-acs-mode-hldd.md) | ACS: the airframe-independent combat layer |
 | [Design 015](hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search |

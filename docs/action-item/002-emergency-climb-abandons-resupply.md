@@ -1,0 +1,1 @@
+review logs in the last few days, the climb is causing missed resupply and pursuit, recomment changing climb to after target destroyed and no targets remain
