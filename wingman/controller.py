@@ -24,6 +24,7 @@ from .hotkeys import register_hotkeys as _register_hotkeys
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
+from .priority_target import find_priority_marker, find_priority_ring_icons
 from .resupply import (
     MissileUrgency,
     RESUPPLY_MIN_MISSILES_SPENT,
@@ -852,6 +853,15 @@ class Controller:
         self._resupply_rearm_climb_s = float(_resupply_cfg.get(
             "rearm_climb_s",
             schema_default("pursuit_mode.resupply_priority.rearm_climb_s")))
+        # Operator, 2026-10-09: steer to the priority target, the crown objective
+        # the game marks with a yellow icon and, off screen, a pin on the ring.
+        # `enabled` scans for both and logs; `actuate` lets them steer.
+        _priority_cfg = _pm.get("priority_target") or {}
+        self._priority_target_enabled = bool(_priority_cfg.get(
+            "enabled", schema_default("pursuit_mode.priority_target.enabled")))
+        self._priority_target_actuate = (
+            self._priority_target_enabled and bool(_priority_cfg.get(
+                "actuate", schema_default("pursuit_mode.priority_target.actuate"))))
         # The resupply_candidate_*.png written when a marker first appears.
         self._resupply_save_candidate_frames = bool(_resupply_cfg.get(
             "save_candidate_frames",
@@ -3947,6 +3957,12 @@ class Controller:
                 # Resupply mode steers by the yellow resupply pin with points of
                 # its own, so an enemy's direction never leaks into the search.
                 resupply_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
+                # So does the priority target's pin (operator, 2026-10-09).
+                priority_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
+                priority_marker_memory = ResupplyMarkerMemory()
+                priority_state = None     # "marker" or "pin" while one is being followed
+                priority_last_ts = 0.0
+                priority_error_logged = False
                 missile_urgency = MissileUrgency(self._pursuit_empty_confirm_reads)
                 missile_priority = missile_urgency.snapshot()
                 resupply_seeking = False
@@ -4091,8 +4107,74 @@ class Controller:
                                 missile_priority.missiles_spent,
                                 "actuating" if self._resupply_priority_actuate else "shadow")
                         resupply_seeking = resupply_seeking or resupply_proposed
+                        # Operator, 2026-10-09: the priority target, the crown
+                        # objective. Its marker in view is flown at as the
+                        # resupply marker is; off screen, its pin on the ring
+                        # feeds the icon law in place of the red icons. The
+                        # resupply comes first, and with every rack empty the
+                        # priority target is not looked for at all.
+                        priority_marker = None
+                        priority_marker_stale = False
+                        priority_pins = []
+                        if self._priority_target_enabled and not resupply_search:
+                            try:
+                                priority_marker, priority_marker_stale = (
+                                    priority_marker_memory.resolve(
+                                        find_priority_marker(
+                                            frame, region_pct=self._resupply_region_pct),
+                                        time.monotonic(), seeking=True))
+                                if priority_marker is None:
+                                    priority_pins = find_priority_ring_icons(frame)
+                            except Exception:
+                                if not priority_error_logged:
+                                    logger.exception(
+                                        "Controller: priority target scan failed")
+                                    priority_error_logged = True
+                        # Against a visible target the marker has the steering
+                        # when it is the nearer of the two to the screen centre,
+                        # the rule the resupply marker follows (2026-10-02).
+                        priority_proposed = (
+                            priority_marker is not None and not resupply_control
+                            and not (bool(visible) and err is not None
+                                     and not marker_nearer_than_target(
+                                         priority_marker, err, err_y,
+                                         frame.shape[1], frame.shape[0])))
+                        priority_control = self._priority_target_actuate and priority_proposed
+                        # The pin steers only while the tracker has no target.
+                        priority_search = (
+                            self._priority_target_actuate and priority_points is not None
+                            and not resupply_control and not resupply_search
+                            and not priority_control and not bool(visible)
+                            and (bool(priority_pins)
+                                 or priority_points.intent()[0] != "none"
+                                 or priority_points.icon_seen_within(
+                                     self._icon_cfg.blind_search_after_s)))
+                        if (priority_points is not None and not priority_search
+                                and (bool(visible) or yielding or priority_control)):
+                            # As the red icons' points do on a lock or a recovery.
+                            priority_points.reset()
+                        priority_now = ("marker" if priority_proposed
+                                        else "pin" if priority_pins or priority_search
+                                        else None)
+                        if priority_now is not None:
+                            priority_last_ts = time.time()
+                            if priority_state is None:
+                                logger.info(
+                                    "PRIORITY TARGET: %s (%s)",
+                                    "marker in view at (%.0f,%.0f)" % (
+                                        priority_marker.x, priority_marker.y)
+                                    if priority_now == "marker" else
+                                    "pin on the ring at %+.0f deg" % priority_pins[0].angle_deg
+                                    if priority_pins else "pin's direction held",
+                                    "steering to it" if self._priority_target_actuate
+                                    else "shadow")
+                            priority_state = priority_now
+                        elif (priority_state is not None
+                              and time.time() - priority_last_ts >= 2.0):
+                            logger.info("PRIORITY TARGET: out of view for 2.0s")
+                            priority_state = None
                         control_visible = (bool(visible) and not resupply_control
-                                           and not resupply_search)
+                                           and not resupply_search and not priority_control)
                         # What the crash recovery waits on: the thing this cycle
                         # steers at, when it can see it.
                         self._note_pursuit_objective(
@@ -4101,17 +4183,22 @@ class Controller:
                         icon_state = None
                         # In resupply mode the icon law runs on the resupply pin:
                         # no lock to wait out, so no last-seen time either.
-                        steer_points = resupply_points if resupply_search else icon_points
+                        steer_points = (resupply_points if resupply_search
+                                        else priority_points if priority_search
+                                        else icon_points)
                         search_seen_ts = None if resupply_search else last_seen_ts
                         search_seen_err = None if resupply_search else last_visible_err
-                        if steer_points is not None and not resupply_control:
+                        if (steer_points is not None and not resupply_control
+                                and not priority_control):
                             try:
                                 icon_state = self._icon_rung(
                                     frame, steer_points, visible=control_visible,
                                     yielding=yielding, last_seen_ts=search_seen_ts,
                                     last_err=search_seen_err,
+                                    # The priority pins were found above.
                                     find=(find_resupply_ring_icons if resupply_search
-                                          else None))
+                                          else (lambda _frame, _cfg, _pins=priority_pins: _pins)
+                                          if priority_search else None))
                             except Exception:
                                 if not icon_error_logged:
                                     logger.exception("Controller: icon shadow tick failed")
@@ -4165,6 +4252,15 @@ class Controller:
                             self.orient_nose_to_target(
                                 error_x, ignore_cancel=True,
                                 sustained_hold=self._sustained_hold_enabled)
+                        elif priority_control and not yielding:
+                            hud_steering_target = (priority_marker.x, priority_marker.y)
+                            hud_steering_label = "PRIORITY TARGET"
+                            hud_steering_stale = priority_marker_stale
+                            error_x = ((priority_marker.x - frame.shape[1] / 2)
+                                       / (frame.shape[1] / 2))
+                            self.orient_nose_to_target(
+                                error_x, ignore_cancel=True,
+                                sustained_hold=self._sustained_hold_enabled)
                         elif control_visible and err is not None:
                             last_seen_ts = time.time()
                             last_visible_err = err
@@ -4174,7 +4270,7 @@ class Controller:
                                     err, ignore_cancel=True,
                                     sustained_hold=self._sustained_hold_enabled)
                         elif (self._sustained_hold_enabled and not yielding
-                            and not resupply_control):
+                            and not resupply_control and not priority_control):
                             if wings_level:
                                 # Step 3: the law's roll ("turn", or "up" with a
                                 # side) when actuate_turn is on; otherwise, and for
@@ -4218,6 +4314,16 @@ class Controller:
                             if error_y > 0 and guard:
                                 self.release_pitch_hold(
                                     why="dive guard resupply err_y=%+.3f" % error_y)
+                            else:
+                                self.orient_pitch_to_target(
+                                    error_y, ignore_cancel=True,
+                                    sustained_hold=self._sustained_hold_enabled)
+                        elif priority_control and not yielding:
+                            error_y = ((priority_marker.y - frame.shape[0] / 2)
+                                       / (frame.shape[0] / 2))
+                            if error_y > 0 and guard:
+                                self.release_pitch_hold(
+                                    why="dive guard priority target err_y=%+.3f" % error_y)
                             else:
                                 self.orient_pitch_to_target(
                                     error_y, ignore_cancel=True,
@@ -4424,6 +4530,20 @@ class Controller:
                                 "-" if not resupply_search or icon_state is None
                                 or icon_state.get("icon") is None
                                 else "%.0f" % icon_state["icon"].angle_deg)
+                        if self._priority_target_enabled and (
+                                priority_marker is not None or priority_pins
+                                or priority_search):
+                            # Also when a nearer target keeps the steering.
+                            logger.debug(
+                                "PRIORITY: marker=%s stale=%s pin=%s proposed=%s "
+                                "control=%s search=%s mode=%s",
+                                "-" if priority_marker is None else "(%.0f,%.0f)" % (
+                                    priority_marker.x, priority_marker.y),
+                                priority_marker_stale,
+                                "-" if not priority_pins
+                                else "%+.0f" % priority_pins[0].angle_deg,
+                                priority_proposed, priority_control, priority_search,
+                                "actuate" if self._priority_target_actuate else "shadow")
                         if terminal_zero and not self._resupply_priority_actuate:
                                 logger.info(
                                     "Controller: pursue_and_engage — ammo exhausted, "

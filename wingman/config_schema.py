@@ -945,6 +945,11 @@ SCHEMA = Section(
                 # tests/test-output/target_tracking, two per pursuit at most.
                 "save_candidate_frames": Leaf(types=(bool,), default=False),
             }),
+            # Operator, 2026-10-09: the crown objective's marker and ring pin.
+            "priority_target": Section(children={
+                "enabled": Leaf(types=(bool,), default=False),
+                "actuate": Leaf(types=(bool,), default=False),
+            }),
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,
             "search_look_down_min_deg": _num(-90, 0),

@@ -638,6 +638,16 @@ and it steers at the marker, or by the resupply pin on the indicator ring, or
 flies the search when neither is in view. A confirmed rearm ends it with a
 short nose-up hold (`rearm_climb_s`) and ordinary pursuit resumes.
 
+**Priority target (operator, 2026-10-09, `pursuit_mode.priority_target`,
+actuated).** The crown objective, which the game marks as it marks the
+resupply point: a yellow disc with a crown when it is in view, a crown pin on
+the indicator ring when it is not (`wingman/priority_target.py`). The marker is
+flown at as the resupply marker is, unless the resupply has the steering or a
+visible target is nearer the screen centre. The pin feeds the icon law in place
+of the red icons while the tracker has no target. With every rack empty the
+priority target is not looked for. Design 015, "Priority target", has the
+measurements.
+
 **Termination (Design 015 D3).** When `pursuit_max_duration_s` elapses
 (shipped `0`, meaning no cap), the pursuit falls through to `eject_and_dive`.
 A confirmed-empty secondary weapon does the same only while

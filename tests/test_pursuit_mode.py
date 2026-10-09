@@ -94,7 +94,8 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 empty_confirm_reads=3, search_resume_centre_err=0.15,
                 search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None,
                 resupply_priority_enabled=True, resupply_priority_actuate=False,
-                rearm_climb_s=0.0, search_climb_alt_m=0.0, save_candidate_frames=None):
+                rearm_climb_s=0.0, search_climb_alt_m=0.0, save_candidate_frames=None,
+                priority_target=None):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -147,6 +148,8 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 # 0.0 by default here (not config.yaml's shipped 7000): the blind
                 # search rolls, as before; the climb's own tests set it.
                 "search_climb_alt_m": search_climb_alt_m,
+                # Left out unless a test sets it: off is the schema default.
+                **({"priority_target": priority_target} if priority_target is not None else {}),
                 **({"icon_steering": icon_steering} if icon_steering is not None else {}),
                 **({"dive_safety": dive_safety} if dive_safety is not None else {}),
             },
@@ -2097,3 +2100,311 @@ def test_a_takeover_key_with_nothing_flying_is_ignored_and_says_so(monkeypatch, 
         assert ctrl._handle_maneuver_key_press("enter", display=":3") is False
     assert any("maneuver key 'enter' ignored — no commanded flight" in r.getMessage()
                for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-09: "similar to the resupply icon ... implement steering
+# towards prioritytarget defined by the yellow icon, where the small icon near
+# the center of the screen indicates direction to steer towards". The priority
+# target is the crown objective: its marker in view is flown at as the resupply
+# marker is, and off screen its pin on the ring feeds the icon law in place of
+# the red icons. The detectors have their own tests (test_priority_target.py);
+# these replace them and pin what the pursuit does with what they return.
+# ---------------------------------------------------------------------------
+
+_PT_ON = {"enabled": True, "actuate": True}
+_ICON_ALL = {"enabled": True, "wings_level": True, "actuate_pitch": True, "actuate_turn": True}
+
+
+def _priority_marker(x, y):
+    from wingman.priority_target import PriorityMarker
+    return PriorityMarker(x, y, 20, 20, 70, 0.0)
+
+
+def _priority_pursuit(monkeypatch, caplog, *, marker=None, pins=(), tracker=None,
+                      priority_target=_PT_ON, analyzer=None, run_s=1.0, capture=None,
+                      pursue_kwargs=None, **ctrl_kwargs):
+    calls = {"marker": 0, "pins": 0}
+
+    def find_marker(_frame, **_kw):
+        calls["marker"] += 1
+        return marker
+
+    def find_pins(_frame, _cfg=None):
+        calls["pins"] += 1
+        return list(pins)
+
+    monkeypatch.setattr(controller_module, "find_priority_marker", find_marker)
+    monkeypatch.setattr(controller_module, "find_priority_ring_icons", find_pins)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer or _AnalyzerStub(ammo=2),
+        capture=capture or _BlankCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        priority_target=priority_target, **ctrl_kwargs)
+    ctrl.set_target_tracker(tracker or _TrackerStub(visible=False))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(**(pursue_kwargs or {"defer_switch_until_empty": True}))
+        time.sleep(run_s)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records], calls
+
+
+def test_the_priority_marker_in_view_is_flown_at(monkeypatch, caplog):
+    """Right of the centre and below it: roll right, nose down."""
+    ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800))
+
+    keys = _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) in keys
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert "PRIORITY TARGET: marker in view at (1400,800) (steering to it)" in messages
+    assert any(m.startswith("PRIORITY: marker=(1400,800)") and "control=True" in m
+               and "mode=actuate" in m for m in messages)
+
+
+def test_the_hud_names_the_priority_target_it_steers_at(monkeypatch, caplog):
+    class _HudCapture:
+        def __init__(self):
+            self.calls = []
+
+        def maybe_render(self, *args, **kwargs):
+            self.calls.append(kwargs)
+
+    hud = _HudCapture()
+    monkeypatch.setattr(controller_module, "find_priority_marker",
+                        lambda _frame, **_kw: _priority_marker(1400, 800))
+    monkeypatch.setattr(controller_module, "find_priority_ring_icons", lambda _f, _c=None: [])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0, priority_target=_PT_ON)
+    ctrl.set_hud_renderer(hud)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.8)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert any(kwargs.get("steering_label") == "PRIORITY TARGET"
+               and kwargs.get("steering_target") == (1400, 800) for kwargs in hud.calls)
+
+
+def test_shadow_mode_logs_the_priority_marker_and_does_not_steer_at_it(monkeypatch, caplog):
+    ctrl, messages, calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800),
+        priority_target={"enabled": True, "actuate": False})
+
+    assert calls["marker"] > 0
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+    assert ("key_press", NOSE_DOWN_KEY) not in _keys(ctrl)
+    assert "PRIORITY TARGET: marker in view at (1400,800) (shadow)" in messages
+    assert any(m.startswith("PRIORITY: marker=(1400,800)") and "proposed=True" in m
+               and "control=False" in m and "mode=shadow" in m for m in messages)
+
+
+def test_priority_target_off_scans_nothing(monkeypatch, caplog):
+    """Off is what a config without the key gets."""
+    ctrl, messages, calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800), priority_target=None)
+
+    assert calls == {"marker": 0, "pins": 0}
+    assert not any(m.startswith("PRIORITY") for m in messages)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+def test_a_visible_target_nearer_the_centre_keeps_the_steering(monkeypatch, caplog):
+    """The resupply marker's rule (operator, 2026-10-02): whichever of the two is
+    nearer the screen centre. The target is 190 px left, the marker 740 px right."""
+    ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1700, 600),
+        tracker=_TrackerStub(visible=True, error_norm=-0.2, error_norm_y=0.0))
+
+    keys = _keys(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) in keys, "the locked target is still steered at"
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys
+    assert any(m.startswith("PRIORITY: marker=(1700,600)") and "proposed=False" in m
+               for m in messages)
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys
+
+
+def test_the_marker_nearer_the_centre_than_the_target_takes_the_steering(monkeypatch, caplog):
+    """The target is 860 px left, the marker 340 px right. Firing carries on."""
+    ctrl, _messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1300, 600),
+        tracker=_TrackerStub(visible=True, error_norm=-0.9, error_norm_y=0.0))
+
+    keys = _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys
+
+
+def test_the_resupply_marker_comes_before_the_priority_target(monkeypatch, caplog):
+    """Two missiles spent and the resupply marker in view on the left, the
+    priority target on the right: the resupply has the steering."""
+    monkeypatch.setattr(controller_module, "find_resupply_marker",
+                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    _ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 600),
+        analyzer=_SequenceAnalyzer([4, 2, 2]), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=1.4,
+        pursue_kwargs={"weapon_already_switched": True})
+
+    focus_at = next(i for i, m in enumerate(messages) if "rearm focus begins" in m)
+    after = "\n".join(messages[focus_at:])
+    assert "roll_left - pressing" in after
+    assert "roll_right - pressing" not in after
+
+
+def _pin(angle_deg):
+    import math
+    from wingman.icon_steering import RingIcon
+    return RingIcon(960 + 203 * math.cos(math.radians(angle_deg)),
+                    600 + 203 * math.sin(math.radians(angle_deg)),
+                    90, 18, 24, float(angle_deg), 26)
+
+
+def _pin_pursuit(monkeypatch, caplog, **kwargs):
+    ctrl, messages, calls = _priority_pursuit(
+        monkeypatch, caplog, sustained_hold_enabled=True, icon_steering=_ICON_ALL,
+        analyzer=kwargs.pop("analyzer", None) or _TelemetryAnalyzer(), **kwargs)
+    return ctrl, messages, calls
+
+
+def _quiet_search(monkeypatch):
+    """Keep the blind search's own taps and the dive guard out of the key log."""
+    monkeypatch.setattr(Controller, "_search_look_down", lambda self: False)
+    monkeypatch.setattr(Controller, "_telemetry_path_angle_deg", lambda self: -5.0)
+    monkeypatch.setattr(Controller, "_pursuit_dive_guard",
+                        lambda self, target_visible=False: None)
+    monkeypatch.setattr(Controller, "_dive_guard_pullout", lambda self: None)
+
+
+def test_the_priority_pin_turns_the_search_toward_it(monkeypatch, caplog):
+    """No target and no marker in view: the pin at 9 o'clock is what the icon
+    law flies, bank left and pull."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _pin_pursuit(monkeypatch, caplog, pins=[_pin(180)], run_s=1.6)
+
+    assert "PRIORITY TARGET: pin on the ring at +180 deg (steering to it)" in messages
+    assert any(m.startswith("ICONPTS:") and "act=bankleft+up" in m for m in messages), (
+        "bank toward the pin and pull")
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+    assert any(m.startswith("PRIORITY: marker=- ") and "pin=+180" in m and "search=True" in m
+               for m in messages)
+
+
+def test_the_priority_pin_outranks_a_red_icon(monkeypatch, caplog):
+    """The frame holds the reference red icon (nose down 5, left 1). With the
+    crown pin at 3 o'clock the law flies the pin: right, not down."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _pin_pursuit(
+        monkeypatch, caplog, pins=[_pin(0)], capture=_FrameCapture(), run_s=1.6)
+
+    acts = [m for m in messages if m.startswith("ICONPTS:") and "rung=icon" in m]
+    assert acts and all("act=bankright" in m for m in acts), acts[:3]
+    assert ("key_press", ROLL_RIGHT_KEY) in _keys(ctrl)
+    assert ("key_press", NOSE_DOWN_KEY) not in _keys(ctrl)
+
+
+def test_a_target_in_view_is_tracked_whatever_the_pin_says(monkeypatch, caplog):
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _pin_pursuit(
+        monkeypatch, caplog, pins=[_pin(180)],
+        tracker=_TrackerStub(visible=True, error_norm=0.5, error_norm_y=0.0))
+
+    assert any(m.startswith("HOLD[roll]") and "-> right/target" in m for m in messages)
+    assert not any(m.startswith("ICONPTS:") and "rung=icon" in m for m in messages)
+    assert any(m.startswith("PRIORITY: marker=- ") and "search=False" in m for m in messages)
+
+
+def test_shadow_mode_leaves_the_search_to_the_red_icons(monkeypatch, caplog):
+    """Enabled without actuate: the pin is logged and the blind search flies."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, calls = _pin_pursuit(
+        monkeypatch, caplog, pins=[_pin(0)],
+        priority_target={"enabled": True, "actuate": False})
+
+    assert calls["pins"] > 0
+    assert "PRIORITY TARGET: pin on the ring at +0 deg (shadow)" in messages
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+def test_with_every_rack_empty_the_priority_target_is_not_looked_for(monkeypatch, caplog):
+    """Resupply mode ignores targets until a rearm, the priority target too."""
+    analyzer = _TelemetryAnalyzer()
+    analyzer.ammo = 0
+    _quiet_search(monkeypatch)
+    ctrl, messages, calls = _pin_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800), pins=[_pin(0)],
+        analyzer=analyzer, empty_confirm_reads=1, resupply_priority_actuate=True,
+        run_s=1.6, pursue_kwargs={"weapon_already_switched": True})
+
+    # The cycle that confirms the racks empty had already scanned; from the next
+    # one on (the first to log search=True) nothing is.
+    search_at = next(i for i, m in enumerate(messages)
+                     if m.startswith("RESUPPLY: spent") and "search=True" in m)
+    assert any(m.startswith("PRIORITY") for m in messages[:search_at]), "it was followed before"
+    assert not any(m.startswith("PRIORITY") for m in messages[search_at:])
+    assert any(m.startswith("HOLD[roll]") and "right/target -> left/search" in m
+               for m in messages), "the roll toward the marker was not given up"
+
+
+class _CropCapture(_CaptureStub):
+    """A black 1920x1200 frame holding one fixture crop at its own place."""
+
+    def __init__(self, name, origin):
+        super().__init__()
+        import cv2
+        import numpy as np
+        from pathlib import Path
+        crop = cv2.imread(str(Path(__file__).parent / "fixtures" / name))
+        self.frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
+        left, top = origin
+        self.frame[top:top + crop.shape[0], left:left + crop.shape[1]] = crop
+
+    def grab_from_thread(self):
+        self.grabs += 1
+        return self.frame
+
+
+def _real_priority_pursuit(monkeypatch, caplog, capture, run_s=1.6):
+    """The real detectors on a real crop, through the real loop."""
+    _quiet_search(monkeypatch)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_TelemetryAnalyzer(), capture=capture,
+        pursuit_enabled=True, pursuit_max_duration_s=0.0, sustained_hold_enabled=True,
+        icon_steering=_ICON_ALL, priority_target=_PT_ON)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(run_s)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records]
+
+
+def test_the_crown_marker_of_2026_10_09_is_flown_at_end_to_end(monkeypatch, caplog):
+    """screenshot_20261009_033345: the marker 176 px right of the centre and
+    59 px below it."""
+    ctrl, messages = _real_priority_pursuit(
+        monkeypatch, caplog, _CropCapture("priority_marker_near.png", (1056, 579)))
+
+    assert any(m.startswith("PRIORITY TARGET: marker in view at (1136,65") for m in messages)
+    assert any(m.startswith("HOLD[roll]") and "-> right/target" in m for m in messages)
+    assert ("key_press", ROLL_RIGHT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+
+
+def test_the_crown_pin_of_2026_10_09_steers_the_search_end_to_end(monkeypatch, caplog):
+    """prioritytarget_direction.png: the pin at +110 deg, below the centre and
+    a little left of it. The icon law reads it and flies it."""
+    ctrl, messages = _real_priority_pursuit(
+        monkeypatch, caplog, _CropCapture("priority_pin_cloud.png", (852, 748)))
+
+    assert "PRIORITY TARGET: pin on the ring at +110 deg (steering to it)" in messages
+    flown = [m for m in messages if m.startswith("ICONPTS:") and "rung=icon" in m]
+    assert flown, "the pin never drove the icon law"
+    assert all("intent=down" in m or "intent=turn" in m for m in flown), flown[:3]
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)

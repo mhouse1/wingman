@@ -1346,6 +1346,20 @@ pursuit_mode:
     # in which a resupply marker first appears, two per pursuit at most. Off
     # (operator, 2026-10-05); the detector's evidence is in docs/anomaly/011.
     save_candidate_frames: false
+  # Operator, 2026-10-09: "similar to the resupply icon ... implement steering
+  # towards prioritytarget defined by the yellow icon, where the small icon near
+  # the center of the screen indicates direction to steer towards". The priority
+  # target is the crown objective: a yellow disc with a crown in view, and off
+  # screen a crown pin on the ring the red icons use (wingman/priority_target.py).
+  # enabled scans for both and logs PRIORITY lines; actuate lets them steer. The
+  # marker is flown at as the resupply marker is, unless the resupply has the
+  # steering or a visible target is nearer the screen centre; the pin feeds the
+  # icon law in place of the red icons while the tracker has no target. On 2,225
+  # archived frames the marker was found in 22 and the pin in 95, and all 22
+  # markers and 44 of 44 sampled pins were the crown.
+  priority_target:
+    enabled: true
+    actuate: true
   # Named guess, not measured — a live shadow trial should correct it, same
   # status as HLDD 015's own Configuration Additions section.
   # Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching and

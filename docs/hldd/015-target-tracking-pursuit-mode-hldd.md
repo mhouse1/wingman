@@ -1565,6 +1565,97 @@ keys=NOSE_DOWN`) and presses no steering key; points stay zero while the tracker
 
 ---
 
+## Priority Target: Steering to the Crown Objective (2026-10-09)
+
+Operator, 2026-10-09: "similar to the resupply icon ... implement steering
+towards prioritytarget defined by the yellow icon, where the small icon near the
+center of the screen indicates direction to steer towards."
+
+### What the game draws
+
+Seven screenshots of that day (`tests/test-output/priority-target/`) and the
+crown crops of 2026-10-02 show two things, the same two the resupply point has:
+
+- **In view:** a dark disc with a yellow outline and a yellow crown inside,
+  ringed by four arcs with arrowheads. The disc measured 15 to 39 px across.
+- **Off screen:** a yellow pin on the ring the red aircraft icons use, about
+  203 px from the screen centre. It is the resupply pin with a crown in place of
+  the crossed missiles. Its place on the ring is the direction.
+
+The game also draws one or two solid yellow arrowheads that travel from the
+screen centre toward the objective. They are not used: the marker and the pin
+give the same direction, and whether the arrowheads belong to this objective
+alone is not known.
+
+### Telling the crown from the resupply point
+
+Both have the same disc and the same pin. The glyph decides (measured):
+
+| | Crown | Crossed missiles |
+|---|---|---|
+| Marker: glyph share of the disc's box | 12% to 14% | 6% to 9% |
+| Marker: glyph width over height | 1.3 to 1.6 | 1.0 to 1.1 |
+| Marker: glyph fill of its own box | 63% to 80% | 18% to 28% |
+| Pin: share of the glyph in the corners of the hole | 11% to 16% | 47% to 59% |
+
+`find_priority_marker` and `find_priority_ring_icons` (`wingman/priority_target.py`)
+apply these. `resupply.ring_pins` finds the pins for both objectives. On 2,225
+archived frames the marker was found in 22 and the pin in 95; all 22 markers and
+44 of 44 sampled pins were the crown. Together the two scans cost 3.3 ms a
+frame.
+
+### Where it sits in the steering tick
+
+```mermaid
+flowchart TD
+    A[Steering tick] --> B{Dive recovery or rearm climb-out}
+    B -->|yes| R[That owns both axes]
+    B -->|no| C{Resupply has the steering}
+    C -->|yes| S[Fly at the resupply marker or its pin]
+    C -->|no| D{Crown marker in view}
+    D -->|yes| E{Visible target nearer the centre}
+    E -->|yes| T[Steer at the tracked target]
+    E -->|no| P[Fly at the crown marker]
+    D -->|no| F{Tracker has a target}
+    F -->|yes| T
+    F -->|no| G{Crown pin on the ring}
+    G -->|yes| H[Icon law on the crown pin]
+    G -->|no| I[Icon law on the red icons then the blind search]
+```
+
+- The marker against a visible target follows the resupply marker's rule
+  (operator, 2026-10-02): whichever is nearer the screen centre. Firing carries
+  on either way.
+- The pin steers only while the tracker has no target. Its points are its own,
+  as the resupply pin's are, and reset on a lock or a dive recovery.
+- The resupply comes first, and with every rack empty the priority target is
+  not looked for.
+
+### Configuration
+
+`pursuit_mode.priority_target`: `enabled` scans and logs, `actuate` steers. The
+schema default is off for both; the shipped config has both on.
+
+### Logging
+
+- `PRIORITY TARGET: marker in view at (1400,800) (steering to it)`, or
+  `pin on the ring at +110 deg`, when one is first followed, and
+  `PRIORITY TARGET: out of view for 2.0s` when it is lost.
+- `PRIORITY: marker=… stale=… pin=… proposed=… control=… search=… mode=…` at
+  DEBUG on every engage cycle with a marker or a pin in view.
+- The HUD labels the marker `PRIORITY TARGET` while it has the steering.
+
+### Not done
+
+- A live session.
+- Who holds the crown is not read. The marker and the pin are followed whether
+  the objective is neutral, held by an enemy or held by a teammate. The score
+  bar's middle box changes color with the holder and could say which.
+- The crash recovery waits for a target or a resupply marker in view
+  ([Action Item 002](../action-item/002-emergency-climb-abandons-resupply.md)),
+  not for the priority target, so it can still take the airframe during an
+  approach to the crown.
+
 ## Validation Strategy
 
 Shadow-first, matching this codebase's standing convention, with one
