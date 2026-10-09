@@ -1378,20 +1378,24 @@ pursuit_mode:
   # Operator, 2026-10-09: "at round end it prints how many air superiority targets,
   # resupply, and priority targets are captured ... it should not read the score
   # bar, only track when wingman flies through the targets". The round's end logs
-  # one ROUND OBJECTIVES line. An objective counts as flown through when its disc
-  # was followed for half a second or more, was at least near_px across when last
-  # seen, and was then gone for a second. The game draws the disc larger the
-  # nearer it is: on 2,240 archived frames it is 19 to 25 px (control point), 24 to
-  # 40 px (resupply) and 14 to 20 px (crown) at the usual distances and 56, 68 and
+  # one ROUND OBJECTIVES line. A control point counts as flown through when its
+  # disc was followed for half a second or more, reached near_px across, and was
+  # then gone for a second (operator, the same day: "based on if the marker
+  # reached large size then disappeared"). The crown counts when its disc was
+  # near_px across when last seen, and then gone. The game draws
+  # the disc larger the nearer it is: on 2,240 archived frames it is 19 to 25 px
+  # (control point) and 14 to 20 px (crown) at the usual distances and 56 and
   # 39 px at the nearest caught. Named guesses between the two, in px at 1200 px
-  # of frame height: no frame of the moment of passing through was at hand. The
-  # confirmed rearms printed beside the resupply count are the check on them.
-  # centre_px: the marker must also be within this of the screen centre when it is
-  # last seen. First live session, 2026-10-09 05:52: the resupply point followed by
-  # a rearm was last seen 61 px from the centre; the crown the aircraft passed at
-  # 51 px across was last seen 562 px out and was counted before this was added.
+  # of frame height: no frame of the moment of passing through was at hand.
+  # centre_px: the crown's marker must also be within this of the screen centre
+  # when it is last seen. First live session, 2026-10-09 05:52: the crown the aircraft passed
+  # at 51 px across was last seen 562 px out and was counted before this was added.
+  # The resupply point has no size here. It counts when the pursuit confirms a
+  # rearm, and by nothing else: on 2026-10-09 a rearm followed a marker last seen
+  # dead ahead at 25 px, and none followed markers last seen dead ahead at 56 and
+  # 51 px.
   objective_tally:
-    near_px: {air_superiority: 40, resupply: 48, priority_target: 30}
+    near_px: {air_superiority: 40, priority_target: 30}
     centre_px: 300
   # Named guess, not measured — a live shadow trial should correct it, same
   # status as HLDD 015's own Configuration Additions section.

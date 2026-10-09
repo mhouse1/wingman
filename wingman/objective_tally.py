@@ -5,12 +5,28 @@ targets, resupply, and priority targets are captured ... it should not read
 the score bar, only track when wingman flies through the targets."
 
 Nothing here looks at the game's own account of who holds what. A capture is
-counted from what the pursuit already sees: the marker of an objective, which
-the game draws larger the nearer the aircraft is. A marker that was followed
-until it was last seen at close range and ahead of the nose, and then was
-gone, was flown through. A marker lost while still small was turned away from,
-or hidden. A marker lost at close range out at the side of the screen was
-passed beside.
+counted from what the pursuit already sees.
+
+For an air superiority point and the priority target that is the marker, which
+the game draws larger the nearer the aircraft is.
+
+An air superiority point (operator, 2026-10-09: "the evidence for
+airsuperiority marker fly through should be based on if the marker reached
+large size then disappeared"): its marker was followed, reached close-range
+size, and was then gone. Where on the screen it went does not matter. A point
+that is taken turns blue and stops being found wherever it is, and one flown
+through leaves by the edge.
+
+The priority target: its marker was followed until it was last seen at close
+range and ahead of the nose, and then was gone. Lost at close range out at the
+side of the screen, it was passed beside. Either kind's marker lost while
+still small was turned away from, or hidden.
+
+For the resupply point it is the ammo count going up, which only flying
+through the point gives. Its marker is not used: in the first live sessions,
+2026-10-09, the marker's size at last sight was wrong both ways. A rearm
+followed a marker lost dead ahead at 25 px across, and no rearm followed
+markers lost dead ahead at 56 px and at 51 px.
 
 No I/O beyond the log line, and no clock of its own: the pursuit passes the time.
 """
@@ -34,23 +50,24 @@ _NAMES = {
     RESUPPLY: "resupply",
     PRIORITY_TARGET: "priority targets",
 }
+# The kinds counted from their marker. The resupply point is counted from its rearm.
+_BY_MARKER = (AIR_SUPERIORITY, PRIORITY_TARGET)
 
 # The disc's size, in px at 1200 px of frame height, from which the aircraft
 # counts as at the objective: `pursuit_mode.objective_tally.near_px`. Measured
-# on 2,240 archived frames, the discs are 19 to 25 px (control point), 24 to
-# 40 px (resupply) and 14 to 20 px (crown) across at the distances a pursuit
-# usually sees them, and 56, 68 and 39 px at the nearest caught. The defaults
-# sit between the two. Named guesses: no frame of the moment of passing
-# through was available to measure.
+# on 2,240 archived frames, the discs are 19 to 25 px (control point) and 14
+# to 20 px (crown) across at the distances a pursuit usually sees them, and 56
+# and 39 px at the nearest caught. The defaults sit between the two. Named
+# guesses: no frame of the moment of passing through was available to measure.
 NEAR_PX = {kind: float(schema_default("pursuit_mode.objective_tally.near_px." + kind))
-           for kind in _NAMES}
-# How far from the screen centre, in the same px, the marker may be when it is
-# last seen: `pursuit_mode.objective_tally.centre_px`. An objective flown
-# through stays ahead of the nose to the end; one passed beside slides to the
-# edge. First live session, 2026-10-09: the resupply point that was followed
-# by a rearm was last seen 61 px from the centre (61 to 110 px over its last
-# second), and the crown the aircraft passed at 51 px across was last seen
-# 562 px out (440 to 562 px). Named guess between the two.
+           for kind in _BY_MARKER}
+# How far from the screen centre, in the same px, the crown's marker may be
+# when it is last seen: `pursuit_mode.objective_tally.centre_px`. A crown
+# flown at stays ahead of the nose to the end; one passed beside slides to the
+# edge. First live session, 2026-10-09: the crown the aircraft passed at 51 px
+# across was last seen 562 px out (440 to 562 px over its last second), and
+# the two crowns it flew at were last seen 55 and 220 px out. Named guess
+# between the two.
 CENTRE_PX = float(schema_default("pursuit_mode.objective_tally.centre_px"))
 # A marker not seen for this long is gone (the pursuit's own marker memory
 # bridges 0.5 s of missed scans).
@@ -81,13 +98,13 @@ class ObjectiveTally:
     def __init__(self, near_px: "dict | None" = None,
                  centre_px: "float | None" = None) -> None:
         self._near_px = {kind: float((near_px or {}).get(kind, NEAR_PX[kind]))
-                         for kind in _NAMES}
+                         for kind in _BY_MARKER}
         self._centre_px = CENTRE_PX if centre_px is None else float(centre_px)
         self._start_round()
 
     def _start_round(self) -> None:
         self._counts = dict.fromkeys(_NAMES, 0)
-        self._rearms = 0
+        self._resupply_sight: "tuple[float, float, float] | None" = None
         self._approach: "dict[str, _Approach]" = {}
         self._counted_ts: "dict[str, float]" = {}
         self._seen_anything = False
@@ -98,6 +115,10 @@ class ObjectiveTally:
         """This scan found `kind`'s marker in view, `size_px` across and
         `off_centre_px` from the screen centre, both at 1200 px of frame height."""
         self._seen_anything = True
+        if kind == RESUPPLY:
+            # Not an approach to judge: only what the rearm's line says of it.
+            self._resupply_sight = (now, float(size_px), float(off_centre_px))
+            return
         approach = self._approach.get(kind)
         if approach is None:
             self._approach[kind] = _Approach(
@@ -118,8 +139,15 @@ class ObjectiveTally:
             if now - approach.last_ts < LOST_S:
                 continue
             del self._approach[kind]
-            near = approach.last_px >= self._near_px[kind]
-            ahead = approach.last_off_px <= self._centre_px
+            if kind == AIR_SUPERIORITY:
+                # Reached the size, at any point of the approach, and then gone.
+                near = approach.max_px >= self._near_px[kind]
+                ahead = True
+                small = "never reached close range (%.0f px)" % self._near_px[kind]
+            else:
+                near = approach.last_px >= self._near_px[kind]
+                ahead = approach.last_off_px <= self._centre_px
+                small = "not at close range (%.0f px)" % self._near_px[kind]
             followed = (approach.sightings >= MIN_SIGHTINGS
                         and approach.last_ts - approach.first_ts >= MIN_FOLLOWED_S)
             recent = now - self._counted_ts.get(kind, float("-inf")) < REFRACTORY_S
@@ -127,17 +155,25 @@ class ObjectiveTally:
                 self._counts[kind] += 1
                 self._counted_ts[kind] = now
                 flown.append(kind)
-                logger.info(
-                    "OBJECTIVE: flew through %s, %.0f px across and %.0f px off the "
-                    "centre at last sight (%d this round)", _singular(kind),
-                    approach.last_px, approach.last_off_px, self._counts[kind])
+                if kind == AIR_SUPERIORITY:
+                    logger.info(
+                        "OBJECTIVE: flew through an air superiority point: its marker "
+                        "reached %.0f px across and was gone, last seen at %.0f px and "
+                        "%.0f px off the centre (%d this round)", approach.max_px,
+                        approach.last_px, approach.last_off_px, self._counts[kind])
+                else:
+                    logger.info(
+                        "OBJECTIVE: flew through %s, %.0f px across and %.0f px off the "
+                        "centre at last sight (%d this round)", _singular(kind),
+                        approach.last_px, approach.last_off_px, self._counts[kind])
             else:
                 logger.debug(
-                    "OBJECTIVE: %s lost at %.0f px, %.0f px off the centre, after %d "
-                    "sightings in %.1fs — %s",
+                    "OBJECTIVE: %s lost at %.0f px, %.0f px off the centre, largest "
+                    "%.0f px, after %d sightings in %.1fs — %s",
                     _singular(kind), approach.last_px, approach.last_off_px,
-                    approach.sightings, approach.last_ts - approach.first_ts,
-                    "not at close range (%.0f px)" % self._near_px[kind] if not near
+                    approach.max_px, approach.sightings,
+                    approach.last_ts - approach.first_ts,
+                    small if not near
                     else "passed beside it (ahead is within %.0f px)" % self._centre_px
                     if not ahead
                     else "not followed long enough" if not followed
@@ -149,11 +185,19 @@ class ObjectiveTally:
         at that moment was not flown through."""
         self._approach.clear()
 
-    def note_rearm(self) -> None:
-        """The pursuit confirmed a rearm from the ammo count. Kept beside the
-        resupply fly-throughs, not added to them: it is the check on them."""
+    def note_rearm(self, now: float) -> None:
+        """The pursuit confirmed a rearm from the ammo count: the resupply
+        point was flown through. This is the resupply point's only count."""
         self._seen_anything = True
-        self._rearms += 1
+        self._counts[RESUPPLY] += 1
+        sight = self._resupply_sight
+        if sight is None:
+            marker = "its marker not seen this round"
+        else:
+            marker = ("its marker last seen %.1f s before, %.0f px across and %.0f px "
+                      "off the centre" % (now - sight[0], sight[1], sight[2]))
+        logger.info("OBJECTIVE: flew through the resupply point, rearm confirmed, %s "
+                    "(%d this round)", marker, self._counts[RESUPPLY])
 
     def note_round_activity(self) -> None:
         """A pursuit ran, so the round has a line to print even with no
@@ -165,18 +209,9 @@ class ObjectiveTally:
     def counts(self) -> "dict[str, int]":
         return dict(self._counts)
 
-    def rearms(self) -> int:
-        return self._rearms
-
     def round_line(self) -> str:
-        parts = []
-        for kind, name in _NAMES.items():
-            text = "%s %d" % (name, self._counts[kind])
-            if kind == RESUPPLY:
-                text += " (%d rearm%s confirmed)" % (
-                    self._rearms, "" if self._rearms == 1 else "s")
-            parts.append(text)
-        return "ROUND OBJECTIVES — flown through: " + ", ".join(parts)
+        return "ROUND OBJECTIVES — flown through: " + ", ".join(
+            "%s %d" % (name, self._counts[kind]) for kind, name in _NAMES.items())
 
     def end_round(self) -> "str | None":
         """The round's line, or None when no pursuit ran in it. Starts the
@@ -187,5 +222,5 @@ class ObjectiveTally:
 
 
 def _singular(kind: str) -> str:
-    return {AIR_SUPERIORITY: "an air superiority point", RESUPPLY: "the resupply point",
+    return {AIR_SUPERIORITY: "an air superiority point",
             PRIORITY_TARGET: "the priority target"}[kind]

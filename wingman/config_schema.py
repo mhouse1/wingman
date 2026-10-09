@@ -952,15 +952,15 @@ SCHEMA = Section(
             }),
             # Same day: the round's count of objectives flown through. An
             # objective's disc at least this many px across (at 1200 px of frame
-            # height) when it was last seen is one the aircraft was at.
+            # height) when it was last seen is one the aircraft was at. The
+            # resupply point has no size here: it is counted by its rearm.
             "objective_tally": Section(children={
                 "near_px": Section(children={
                     "air_superiority": Leaf(types=NUMBER, minimum=1, default=40.0),
-                    "resupply": Leaf(types=NUMBER, minimum=1, default=48.0),
                     "priority_target": Leaf(types=NUMBER, minimum=1, default=30.0),
                 }),
-                # And no further than this from the screen centre: an objective
-                # flown through is ahead of the nose to the end.
+                # The crown's marker, and no further than this from the screen
+                # centre: a crown flown at is ahead of the nose to the end.
                 "centre_px": Leaf(types=NUMBER, minimum=1, default=300.0),
             }),
             # Same day: the control points A, B and C the enemy holds (red).

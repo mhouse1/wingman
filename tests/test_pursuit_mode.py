@@ -2669,13 +2669,14 @@ def test_a_control_point_flown_through_is_counted_and_printed_at_the_rounds_end(
         marker=lambda scan: _point(960, 600, 20 + 4 * scan) if scan <= 10 else None,
         run_s=3.2)
 
-    assert any(m.startswith("OBJECTIVE: flew through an air superiority point, 60 px")
+    assert any(m.startswith("OBJECTIVE: flew through an air superiority point: its marker "
+                            "reached 60 px across and was gone")
                and "(1 this round)" in m for m in messages)
     lines = _round_line(ctrl, caplog)
     assert len(lines) == 1
     assert lines[0].endswith(
         "ROUND OBJECTIVES — flown through: air superiority points 1, "
-        "resupply 0 (0 rearms confirmed), priority targets 0\x1b[0m")
+        "resupply 0, priority targets 0\x1b[0m")
     assert _round_line(ctrl, caplog) == [], "the lobby after the end screen prints nothing"
 
 
@@ -2691,20 +2692,21 @@ def test_a_control_point_turned_away_from_is_not_counted(monkeypatch, caplog):
     assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
 
 
-def test_a_control_point_passed_beside_is_not_counted(monkeypatch, caplog):
-    """The first live session's crown, 2026-10-09 05:56:42, as a control point:
-    the disc grows to 60 px while it slides from the centre to the left edge,
-    and is gone. The aircraft went past it, not through it."""
+def test_a_control_point_that_grew_large_and_left_by_the_edge_is_counted(monkeypatch, caplog):
+    """Operator, 2026-10-09: "the evidence for airsuperiority marker fly through
+    should be based on if the marker reached large size then disappeared." The
+    disc grows to 60 px while it slides from the centre to the left edge, and
+    is gone."""
     ctrl, messages, _calls = _airsup_pursuit(
         monkeypatch, caplog,
         marker=lambda scan: (_point(960 - 56 * scan, 600, 20 + 4 * scan)
                              if scan <= 10 else None),
         run_s=3.2)
 
-    assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
-    assert any(m.startswith("OBJECTIVE: an air superiority point lost at 60 px, 560 px off")
-               and "passed beside it" in m for m in messages)
-    assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
+    assert any(m.startswith("OBJECTIVE: flew through an air superiority point: its marker "
+                            "reached 60 px across and was gone, last seen at 60 px and 560 px")
+               for m in messages)
+    assert "air superiority points 1" in _round_line(ctrl, caplog)[0]
 
 
 def test_the_priority_target_flown_through_is_counted(monkeypatch, caplog):
@@ -2735,19 +2737,20 @@ def test_the_priority_target_flown_through_is_counted(monkeypatch, caplog):
     assert _round_line(ctrl, caplog)[0].endswith("priority targets 1\x1b[0m")
 
 
-def test_the_resupply_point_flown_through_and_the_rearm_are_counted_apart(monkeypatch, caplog):
-    """The marker grows to 62 px and is gone, and the count then goes from 2
-    to 6: one fly-through, one confirmed rearm, shown side by side."""
+def _resupply_round(monkeypatch, caplog, marker_px, ammo_reads):
+    """A pursuit on the resupply marker dead ahead, `marker_px(scan)` across for
+    nine scans and then gone, with `ammo_reads` as the count's readings. Returns
+    the controller and what was logged."""
     scans = {"n": 0}
 
     def find_marker(_frame, **_kw):
         scans["n"] += 1
-        size = 26 + 4 * scans["n"]
+        size = marker_px(scans["n"])
         return ResupplyMarker(960, 600, size, size, 300, 0) if scans["n"] <= 9 else None
 
     monkeypatch.setattr(controller_module, "find_resupply_marker", find_marker)
     ctrl = _make_ctrl(
-        monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2, 2, 2, 2, 2, 6, 6]),
+        monkeypatch, analyzer=_SequenceAnalyzer(ammo_reads),
         capture=_BlankCapture(), pursuit_enabled=True, pursuit_max_duration_s=0.0,
         empty_confirm_reads=1, resupply_priority_actuate=True)
     ctrl.set_target_tracker(_TrackerStub(visible=False))
@@ -2756,11 +2759,34 @@ def test_the_resupply_point_flown_through_and_the_rearm_are_counted_apart(monkey
         time.sleep(4.5)
         ctrl.stop_eject_sequence("respawn_detected")
         _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records]
 
-    messages = [r.getMessage() for r in caplog.records]
-    assert any(m.startswith("OBJECTIVE: flew through the resupply point") for m in messages)
+
+def test_a_rearm_counts_the_resupply_point_whatever_its_marker_did(monkeypatch, caplog):
+    """2026-10-09 06:04:01, the first live session: the marker dead ahead was
+    lost while still 25 px across, and the count then went up. The rearm is the
+    fly-through, and its line says where the marker was last."""
+    ctrl, messages = _resupply_round(
+        monkeypatch, caplog, lambda _scan: 25, [4, 2, 2, 2, 2, 2, 2, 6, 6])
+
     assert any(m.startswith("RESUPPLY: confirmed ammo=6") for m in messages)
-    assert "resupply 1 (1 rearm confirmed)" in _round_line(ctrl, caplog)[0]
+    counted = [m for m in messages if m.startswith("OBJECTIVE: flew through the resupply point")]
+    assert len(counted) == 1, counted
+    assert "rearm confirmed, its marker last seen" in counted[0]
+    assert "25 px across and 0 px off the centre (1 this round)" in counted[0]
+    assert "resupply 1, priority targets 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_the_resupply_marker_gone_at_close_range_with_no_rearm_is_not_counted(
+        monkeypatch, caplog):
+    """2026-10-09 06:13:20 and 06:15:10: the marker grew to 56 px and to 51 px
+    dead ahead and was gone, and the count never went up. Not a fly-through."""
+    ctrl, messages = _resupply_round(
+        monkeypatch, caplog, lambda scan: 26 + 4 * scan, [4, 2, 2, 2, 2, 2, 2, 2, 2])
+
+    assert not any(m.startswith("RESUPPLY: confirmed ammo") for m in messages)
+    assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
+    assert "resupply 0, priority targets 0" in _round_line(ctrl, caplog)[0]
 
 
 def test_a_marker_in_view_when_the_aircraft_dies_is_not_counted(monkeypatch, caplog):
@@ -2785,7 +2811,7 @@ def test_a_round_whose_pursuit_met_no_objective_prints_its_zeros(monkeypatch, ca
 
     assert _round_line(ctrl, caplog) == [
         "\x1b[96m🏁 ROUND OBJECTIVES — flown through: air superiority points 0, "
-        "resupply 0 (0 rearms confirmed), priority targets 0\x1b[0m"]
+        "resupply 0, priority targets 0\x1b[0m"]
 
 
 def test_a_round_with_no_pursuit_prints_no_objective_line(monkeypatch, caplog):

@@ -661,9 +661,13 @@ red one. Design 015, "Air superiority".
 the round's end the main loop calls `Controller.log_round_objectives()`, which
 logs one `ROUND OBJECTIVES` line: how many air superiority points, resupply
 points and priority targets the pursuit flew through. Nothing reads the score
-bar. An objective counts when its marker was followed, was at least
-`pursuit_mode.objective_tally.near_px` across when last seen, and was then
-gone. Design 015, "Objectives flown through".
+bar. A control point counts when its marker was followed, reached
+`pursuit_mode.objective_tally.near_px` across, and was then gone (operator,
+the same day). The crown counts when its marker was followed, was at least
+`near_px` across and within `pursuit_mode.objective_tally.centre_px` of the
+screen centre when last seen, and was then gone. The resupply point counts
+when the pursuit confirms a rearm from the ammo count, and by nothing else.
+Design 015, "Objectives flown through".
 
 **Termination (Design 015 D3).** When `pursuit_max_duration_s` elapses
 (shipped `0`, meaning no cap), the pursuit falls through to `eject_and_dive`.

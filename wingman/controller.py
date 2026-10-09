@@ -4604,7 +4604,7 @@ class Controller:
                             resupply_seeking = False
                             resupply_marker_memory.clear()
                             with self._objective_tally_lock:
-                                self._objective_tally.note_rearm()
+                                self._objective_tally.note_rearm(time.time())
                             if self._resupply_priority_actuate:
                                 if self._resupply_rearm_climb_s > 0:
                                     rearm_climb_until = (

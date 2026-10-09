@@ -1749,20 +1749,48 @@ score bar, only track when wingman flies through the targets."
 ### The rule
 
 `wingman/objective_tally.py`. The count uses only what the pursuit already
-sees, the marker of each objective, and the fact that the game draws a marker
-larger the nearer the aircraft is. An objective counts as flown through when:
+sees. Each of the three objectives has its own evidence.
+
+**An air superiority point.** Operator, 2026-10-09: "the evidence for
+airsuperiority marker fly through should be based on if the marker reached
+large size then disappeared." The game draws a marker larger the nearer the
+aircraft is. The point counts when:
 
 - its marker was seen on three scans or more over half a second or more,
-- it was at least `near_px` across the last time it was seen,
-- it was within `centre_px` of the screen centre that last time, and
+- it reached `near_px` across at some point of that, and
 - it was then gone for a second.
 
-A marker lost while still small was turned away from or hidden, and does not
-count. A marker lost at close range out at the side of the screen was passed
-beside, and does not count either (added after the first live round, see the
-live trial below). Nor does a marker still in view when the pursuit ends, which
-is a death at the point. After a count the same kind does not count again for 5 s, because
-the disc can show once more as the aircraft passes.
+Where on the screen the marker went does not matter. A point that is taken
+turns blue and stops being found wherever it is, and one flown through leaves
+by the edge. A marker that never reached the size was turned away from or
+hidden, and does not count.
+
+**The priority target.** The same three conditions, with the size judged at
+the last sighting, and one more: the marker was within `centre_px` of the
+screen centre that last time. A crown lost at close range out at the side of
+the screen was passed beside (added after the first live round, see the live
+trial below).
+
+For both, a marker still in view when the pursuit ends does not count: that is
+a death at the point. After a count the same kind does not count again for
+5 s, because the disc can show once more as the aircraft passes.
+
+**The resupply point.** Counted by the rearm the pursuit confirms from the
+ammo count, which only flying through the point gives, and by nothing else.
+Its marker was tried first, with a `near_px` of 48, and was wrong both
+ways in the first two live sessions (2026-10-09, live trial below):
+
+| Marker at last sight | Counted by the marker | Rearm |
+|---|---|---|
+| 05:55:43, 53 px across, 61 px off the centre | yes | confirmed 3.5 s later |
+| 05:56:44, 48 px, 95 px off | yes | none read, death 6 s later |
+| 06:00:22, 49 px, 603 px off | yes (before `centre_px`) | none |
+| 06:03:57, 25 px, 60 px off | no | confirmed 3.7 s later |
+| 06:13:20, 56 px, 46 px off | yes | none; the marker was followed again 6 s later |
+| 06:15:10, 51 px, 8 px off | yes | none; the aircraft died within a second (HUD digits gone at 06:15:10.3, a missile inbound) |
+
+One of the two rearms was counted, and of five counts one was a rearm. The
+rearm's own line says where the marker was last, so the table can grow.
 
 ### The sizes
 
@@ -1771,17 +1799,16 @@ the disc can show once more as the aircraft passes.
 | Objective | Disc at the usual distances | Largest caught | `near_px` |
 |---|---|---|---|
 | Air superiority point | 19 to 25 px | 56 px | 40 |
-| Resupply point | 24 to 40 px | 68 px | 48 |
 | Priority target | 14 to 20 px | 39 px | 30 |
 
-Measured on 2,240 archived frames (41, 49 and 27 discs). The three values are
-named guesses between the two columns: no frame of the moment of passing
-through was at hand.
+Measured on 2,240 archived frames (41 and 27 discs). The two values are named
+guesses between the two columns: no frame of the moment of passing through was
+at hand. The resupply point has no size (above).
 
 `pursuit_mode.objective_tally.centre_px` is 300, in the same px. In the first
-live round the resupply point that a rearm followed was last seen 61 px from
-the centre (61 to 110 px over its last second), and the two crowns the aircraft
-passed were last seen 562 and 761 px out. A named guess between the two.
+live session the two crowns the aircraft passed were last seen 562 and 761 px
+out, and two it flew at were last seen 55 and 220 px out. A named guess
+between the two.
 
 ### What is printed
 
@@ -1789,31 +1816,43 @@ When the main loop enters `GAME_END_B`, or the lobby for a round whose end
 screen was never read:
 
 ```
-🏁 ROUND OBJECTIVES — flown through: air superiority points 2, resupply 1 (1 rearm confirmed), priority targets 0
+🏁 ROUND OBJECTIVES — flown through: air superiority points 2, resupply 1, priority targets 0
 ```
 
-Each fly-through also logs its own line when it is counted, with the size it
-was last seen at: `OBJECTIVE: flew through an air superiority point, 58 px
-across at last sight (2 this round)`. A marker that was lost without counting
-says why at DEBUG.
+Each fly-through also logs its own line when it is counted: `OBJECTIVE: flew
+through an air superiority point: its marker reached 58 px across and was gone,
+last seen at 58 px and 310 px off the centre (2 this round)`, and `OBJECTIVE:
+flew through the priority target, 35 px across and 55 px off the centre at last
+sight (1 this round)`. A marker that was lost without counting says why at
+DEBUG, with its last size and place and the largest it was seen at.
 
-The confirmed rearms are the pursuit's existing reading of the ammo count going
-up. They are printed beside the resupply fly-throughs and not added to them:
-they are the one independent check on the rule, and the first thing to compare
-when tuning `near_px`.
+The resupply count is the pursuit's existing reading of the ammo count going
+up, the same event as `RESUPPLY: confirmed ammo=`. Its line: `OBJECTIVE: flew
+through the resupply point, rearm confirmed, its marker last seen 3.7 s before,
+25 px across and 60 px off the centre (1 this round)`.
 
 ### Limits
 
-- Flown through is not the game's "captured". A point can need holding, and the
-  rule cannot tell passing through a disc from passing within `centre_px` of
-  it. In the first live round the crown's marker crossed the screen and went
+- Flown through is not the game's "captured". A point can need holding, and a
+  teammate can take it: at 06:35:36 on 2026-10-09 the game announced "A
+  SECURED" while A was a pin at 3 o'clock on the ring, off the screen. The air
+  superiority rule also counts a point approached to the size and then turned
+  away from while still in view, and a point whose marker went because the
+  aircraft died there in the second before the HUD went (seen once on the
+  resupply marker, 06:15:10).
+- `near_px` for the air superiority point (40) is still the guess from the
+  archived frames. In the first live air superiority round (06:32:40) the
+  largest marker lost was 36 px, after 5.2 s of following, and the rest were
+  19 to 24 px.
+- In the first live round the crown's marker crossed the screen and went
   by at close range twice, which a marker fixed in the world does not do, so
   the crown appears to be carried by an aircraft once it is taken (inferred,
   not seen). For the priority target a count then means the aircraft flew at
   the carrier to close range, not that it took the crown.
 - Only a pursuit counts. A round with no pursuit prints no line.
-- The resupply marker is looked for only once missiles are spent, so a
-  resupply point flown through with full racks is not counted.
+- A resupply point flown through with full racks gives no rearm and is not
+  counted. Nor is one flown through just before a death, when the new count is
+  never read.
 - A marker hidden at close range for more than a second, and then seen again
   within 5 s, is one count, not two.
 
@@ -1825,7 +1864,8 @@ crown or the control points only in the rounds that happen to be those modes.
 | Session | Code state | Game UI | Rounds | `PRIORITY TARGET` lines | `AIR SUPERIORITY` lines | `ROUND OBJECTIVES` lines | Failures | Verdict |
 |---------|------------|---------|-------:|------:|------:|------:|----------|---------|
 | 2026-10-09 03:38-05:22, four operator sessions, 14.0 min of battle | priority target from the 04:36 session (f893a38), air superiority in the 05:15 session only, no round count | post-update | 3 | 0 | 0 | none (not written yet) | none: no `loop cycle failed`, no traceback | No evidence. No `PRIORITY TARGET` line in the two rounds flown with the crown code, and the 05:17 round, the one flown with the air superiority code, was not that mode (one stale control-point marker on two DEBUG lines while a nearer target kept the steering, and no pin in 4.3 min). |
-| 2026-10-09 05:52 on, `make r1`, pid 345223 | air superiority and the round count, uncommitted on f893a38 | post-update | running | | | | | running. Round 1 (05:53:44) is a crown round and the first live evidence for the priority target: at 05:54:33 the pin was read at +148 deg and the icon law pushed nose-down on it for 29 ticks (`rung=icon act=level+down`); at 05:54:38 a tracked target took the steering with the pin still read; at 05:54:39 the crown's marker came into view and at 05:54:40 it had the steering for the scans in which it was nearer the centre than the target. First check of the fly-through rule against a rearm, 1 for 1: the resupply marker was followed from 05:55:31 for 12 s, was 53 px across when last seen, and `OBJECTIVE: flew through the resupply point` was logged at 05:55:43.98; the ammo count read 2 at 05:55:44.3 and the rearm was confirmed at 05:55:47.5. Two earlier losses of that marker in the same approach, at 26 px and at 38 px, were not counted and no rearm followed either. The approach was a 32 to 36 deg dive from 2,776 m with the crash recovery held off twice (05:55:30, 05:55:41); the recovery took over at 05:55:45.8, 1.8 s after the count, and the lowest read was 403 m at 1,431 KPH. |
+| 2026-10-09 05:52-06:05, `make r1`, 13.1 min, stopped with `z` | air superiority and the round count without `centre_px` (4560806 less that rule) | post-update | 2 | 47 | 0 | 2 | none: no `loop cycle failed`, no `scan failed`, no traceback | Priority target steering works live; the round count was wrong in both directions. Both rounds were crown rounds: 14 pin episodes and 10 marker episodes (measured). Round 1 (05:53:44) is a crown round and the first live evidence for the priority target: at 05:54:33 the pin was read at +148 deg and the icon law pushed nose-down on it for 29 ticks (`rung=icon act=level+down`); at 05:54:38 a tracked target took the steering with the pin still read; at 05:54:39 the crown's marker came into view and at 05:54:40 it had the steering for the scans in which it was nearer the centre than the target. First check of the fly-through rule against a rearm, 1 for 1: the resupply marker was followed from 05:55:31 for 12 s, was 53 px across when last seen, and `OBJECTIVE: flew through the resupply point` was logged at 05:55:43.98; the ammo count read 2 at 05:55:44.3 and the rearm was confirmed at 05:55:47.5. Two earlier losses of that marker in the same approach, at 26 px and at 38 px, were not counted and no rearm followed either. The approach was a 32 to 36 deg dive from 2,776 m with the crash recovery held off twice (05:55:30, 05:55:41); the recovery took over at 05:55:45.8, 1.8 s after the count, and the lowest read was 403 m at 1,431 KPH. The round lines: `resupply 2 (1 rearm confirmed), priority targets 2` at 05:58:42 and `resupply 1 (1 rearm confirmed), priority targets 4` at 06:05:21. All 9 counts checked against the marker's last place in the log (measured). Resupply, 3 counted: 05:55:43 was the rearm above (61 px off the centre); 05:56:44 was 95 px off the centre with no rearm read and a death 6 s later (unconfirmed); 06:00:22 was 603 px off the centre with no rearm, a pass beside. Priority target, 6 counted, last seen 562, 761, 55, 399, 315 and 220 px off the centre: the first two crossed the screen and were passes beside. That is what `centre_px` (300) was added for. Applied to these 9 it keeps 4: the resupply counts at 61 and 95 px and the priority target counts at 55 and 220 px (worked out from the log; the next row is the measurement). One fly-through was missed: the rearm confirmed at 06:04:01 had no count. Its marker was followed for 8.5 s over 55 sightings, was last seen 60 px off the centre and 25 px across at 06:03:57.3, under `near_px` (48), and the rearm came 3.7 s later. So the size at last sight does not separate a resupply fly-through from a turn away (53 px and 25 px for the two confirmed ones); the rearm does. Open: count a confirmed rearm with no count just before it as the fly-through. Also seen, not acted on: at 06:03:30 the resupply marker was reported at (963,789) for two scans while the crown's marker, 60 px across, was at (972,770) and (952,820), larger than any crown on the archived frames (39 px), so the crown's disc appears to pass as the resupply disc at that size (inferred, no frame kept). It was one sighting and was not counted. |
+| 2026-10-09 06:11 on, `make r1`, pid 368393 | 4560806: the same with `centre_px` | post-update | running | | | | | running. |
 
 ## Validation Strategy
 
