@@ -1360,6 +1360,39 @@ pursuit_mode:
   priority_target:
     enabled: true
     actuate: true
+  # Operator, 2026-10-09: "similar to prioritytarget ... implement steering towards
+  # air superiority icons A, B, or C, if the icons are red, the small icons
+  # indicates the direction to steer towards ... it flies towards the A mark
+  # because it is a target on screen and closer rather than steer towards B, it
+  # should fly through A then proceed with B". The control points of air
+  # superiority while the enemy holds them: a red disc with the letter in view, a
+  # red pin on the ring off screen (wingman/air_superiority.py). Same two
+  # switches and the same place in the steering as the priority target. A disc in
+  # view comes before any pin, and of several discs the largest is flown at. A
+  # point turns blue once it is taken and is then no longer found, which leaves
+  # the next red one. On 2,232 archived frames the disc was found in 37 and a pin
+  # in 245, and all 37 discs and 60 of 60 sampled pins were control points.
+  air_superiority:
+    enabled: true
+    actuate: true
+  # Operator, 2026-10-09: "at round end it prints how many air superiority targets,
+  # resupply, and priority targets are captured ... it should not read the score
+  # bar, only track when wingman flies through the targets". The round's end logs
+  # one ROUND OBJECTIVES line. An objective counts as flown through when its disc
+  # was followed for half a second or more, was at least near_px across when last
+  # seen, and was then gone for a second. The game draws the disc larger the
+  # nearer it is: on 2,240 archived frames it is 19 to 25 px (control point), 24 to
+  # 40 px (resupply) and 14 to 20 px (crown) at the usual distances and 56, 68 and
+  # 39 px at the nearest caught. Named guesses between the two, in px at 1200 px
+  # of frame height: no frame of the moment of passing through was at hand. The
+  # confirmed rearms printed beside the resupply count are the check on them.
+  # centre_px: the marker must also be within this of the screen centre when it is
+  # last seen. First live session, 2026-10-09 05:52: the resupply point followed by
+  # a rearm was last seen 61 px from the centre; the crown the aircraft passed at
+  # 51 px across was last seen 562 px out and was counted before this was added.
+  objective_tally:
+    near_px: {air_superiority: 40, resupply: 48, priority_target: 30}
+    centre_px: 300
   # Named guess, not measured — a live shadow trial should correct it, same
   # status as HLDD 015's own Configuration Additions section.
   # Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching and

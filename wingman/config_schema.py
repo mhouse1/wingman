@@ -950,6 +950,24 @@ SCHEMA = Section(
                 "enabled": Leaf(types=(bool,), default=False),
                 "actuate": Leaf(types=(bool,), default=False),
             }),
+            # Same day: the round's count of objectives flown through. An
+            # objective's disc at least this many px across (at 1200 px of frame
+            # height) when it was last seen is one the aircraft was at.
+            "objective_tally": Section(children={
+                "near_px": Section(children={
+                    "air_superiority": Leaf(types=NUMBER, minimum=1, default=40.0),
+                    "resupply": Leaf(types=NUMBER, minimum=1, default=48.0),
+                    "priority_target": Leaf(types=NUMBER, minimum=1, default=30.0),
+                }),
+                # And no further than this from the screen centre: an objective
+                # flown through is ahead of the nose to the end.
+                "centre_px": Leaf(types=NUMBER, minimum=1, default=300.0),
+            }),
+            # Same day: the control points A, B and C the enemy holds (red).
+            "air_superiority": Section(children={
+                "enabled": Leaf(types=(bool,), default=False),
+                "actuate": Leaf(types=(bool,), default=False),
+            }),
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,
             "search_look_down_min_deg": _num(-90, 0),

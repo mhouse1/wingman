@@ -648,6 +648,23 @@ of the red icons while the tracker has no target. With every rack empty the
 priority target is not looked for. Design 015, "Priority target", has the
 measurements.
 
+**Air superiority (operator, 2026-10-09, `pursuit_mode.air_superiority`,
+actuated).** The control points A, B and C while the enemy holds them: a red
+disc with the letter in view, a red pin on the indicator ring off screen
+(`wingman/air_superiority.py`). They go through the priority target's place in
+the steering (`Controller._scan_marked_objective`). A disc in view comes before
+any pin, and of several discs the largest, which is the nearest, is flown at. A
+point that is taken turns blue and is no longer found, which leaves the next
+red one. Design 015, "Air superiority".
+
+**The round's count (operator, 2026-10-09, `wingman/objective_tally.py`).** At
+the round's end the main loop calls `Controller.log_round_objectives()`, which
+logs one `ROUND OBJECTIVES` line: how many air superiority points, resupply
+points and priority targets the pursuit flew through. Nothing reads the score
+bar. An objective counts when its marker was followed, was at least
+`pursuit_mode.objective_tally.near_px` across when last seen, and was then
+gone. Design 015, "Objectives flown through".
+
 **Termination (Design 015 D3).** When `pursuit_max_duration_s` elapses
 (shipped `0`, meaning no cap), the pursuit falls through to `eject_and_dive`.
 A confirmed-empty secondary weapon does the same only while

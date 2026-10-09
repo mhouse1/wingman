@@ -1600,6 +1600,15 @@ def main():
                     ctrl.stop_eject_sequence(reason="match_ended")
                 else:
                     game_end_b_since = 0.0
+                if new_game_state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
+                    # The round is over: how many objectives wingman flew
+                    # through (operator, 2026-10-09). The lobby is the second
+                    # chance for a round whose end screen was never read, and
+                    # prints nothing when the end screen already did.
+                    try:
+                        ctrl.log_round_objectives()
+                    except Exception as e:
+                        logger.warning("Controller: log_round_objectives failed: %s", e)
                 if new_game_state == GameState.GAME_LOBBY:
                     if prev_game_state is not None:
                         ctrl.cancel_mission()

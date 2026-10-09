@@ -133,16 +133,30 @@ RESUPPLY_PIN_MIN_CORNER_SHARE = 0.30
 _PIN_MIN_AREA_PX = 60.0
 
 
-def ring_pins(frame, min_area_px: float = _PIN_MIN_AREA_PX) -> "list[tuple[RingIcon, float]]":
-    """Yellow pins on the indicator ring, with each one's glyph corner share.
+def red_mask(hsv):
+    """The red the game draws an enemy's objectives in: hue 2 to 3 for the
+    outline and the letter of a control point, measured on 4 discs and 6
+    pins (2026-10-09). The dark red inside the disc (hue 175 to 179) is too dim to
+    pass, as is the blue of a point the own team holds (hue 113 to 118)."""
+    return (cv2.inRange(hsv, np.array([0, 110, 150], dtype=np.uint8),
+                        np.array([6, 255, 255], dtype=np.uint8))
+            | cv2.inRange(hsv, np.array([172, 110, 150], dtype=np.uint8),
+                          np.array([180, 255, 255], dtype=np.uint8)))
 
-    The game draws a small yellow pin on the ring the red aircraft icons use
-    for an objective that is off screen: a circle around a glyph, with a solid
+
+def ring_pins(frame, min_area_px: float = _PIN_MIN_AREA_PX,
+              color: str = "yellow") -> "list[tuple[RingIcon, float]]":
+    """Pins of one color on the indicator ring, with each one's glyph corner share.
+
+    The game draws a small pin on the ring the red aircraft icons use for an
+    objective that is off screen: a circle around a glyph, with a solid
     pointer. Its place on the ring is the direction. A pin is told from
-    exhaust glow on the ring by the hole its circle encloses. Which objective
-    it is, the glyph says: the second value is the share of the glyph's
-    pixels in the corners of the hole. `min_area_px` is the outline's area
-    floor at 1200 px of frame height.
+    exhaust glow and from the aircraft icons on the ring by the hole its
+    circle encloses. Which objective it is, the color and the glyph say:
+    yellow for the resupply point and the crown, red for a control point the
+    enemy holds (`air_superiority`). The second value is the share of the
+    glyph's pixels in the corners of the hole. `min_area_px` is the outline's
+    area floor at 1200 px of frame height.
     """
     if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] < 3:
         return []
@@ -158,11 +172,14 @@ def ring_pins(frame, min_area_px: float = _PIN_MIN_AREA_PX) -> "list[tuple[RingI
     if x2 <= x1 or y2 <= y1:
         return []
     hsv = cv2.cvtColor(np.ascontiguousarray(frame[y1:y2, x1:x2, :3]), cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(
-        hsv,
-        np.array([22, 150, 190], dtype=np.uint8),
-        np.array([32, 255, 255], dtype=np.uint8),
-    )
+    if color == "red":
+        mask = red_mask(hsv)
+    else:
+        mask = cv2.inRange(
+            hsv,
+            np.array([22, 150, 190], dtype=np.uint8),
+            np.array([32, 255, 255], dtype=np.uint8),
+        )
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
     pins: "list[tuple[RingIcon, float]]" = []
     for index in range(1, count):

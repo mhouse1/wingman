@@ -79,6 +79,9 @@ class FakeController:
     def set_on_manual_takeover_frame(self, _cb):
         pass
 
+    def log_round_objectives(self):
+        pass
+
     def cancel_mission(self):
         pass
 

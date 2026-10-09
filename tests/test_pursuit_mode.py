@@ -95,7 +95,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None,
                 resupply_priority_enabled=True, resupply_priority_actuate=False,
                 rearm_climb_s=0.0, search_climb_alt_m=0.0, save_candidate_frames=None,
-                priority_target=None):
+                priority_target=None, air_superiority=None):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -150,6 +150,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 "search_climb_alt_m": search_climb_alt_m,
                 # Left out unless a test sets it: off is the schema default.
                 **({"priority_target": priority_target} if priority_target is not None else {}),
+                **({"air_superiority": air_superiority} if air_superiority is not None else {}),
                 **({"icon_steering": icon_steering} if icon_steering is not None else {}),
                 **({"dive_safety": dive_safety} if dive_safety is not None else {}),
             },
@@ -2408,3 +2409,386 @@ def test_the_crown_pin_of_2026_10_09_steers_the_search_end_to_end(monkeypatch, c
     assert flown, "the pin never drove the icon law"
     assert all("intent=down" in m or "intent=turn" in m for m in flown), flown[:3]
     assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-09: "similar to prioritytarget ... implement steering
+# towards air superiority icons A, B, or C, if the icons are red, the small
+# icons indicates the direction to steer towards ... it flies towards the A
+# mark because it is a target on screen and closer rather than steer towards B,
+# it should fly through A then proceed with B". The control points go through
+# the priority target's place in the steering. The detectors have their own
+# tests (test_air_superiority.py); these replace them, except the last three.
+# ---------------------------------------------------------------------------
+
+def _point(x, y, size=40):
+    from wingman.air_superiority import ControlPointMarker
+    return ControlPointMarker(x, y, size, size, 300, 0.0)
+
+
+def _airsup_pursuit(monkeypatch, caplog, *, marker=None, pins=(), tracker=None,
+                    air_superiority=_PT_ON, run_s=1.0, capture=None, **ctrl_kwargs):
+    """`marker` and `pins` may be callables of the scan number, for a point
+    that is taken part way through."""
+    calls = {"marker": 0, "pins": 0}
+
+    def find_marker(_frame, **_kw):
+        calls["marker"] += 1
+        return marker(calls["marker"]) if callable(marker) else marker
+
+    def find_pins(_frame, _cfg=None):
+        calls["pins"] += 1
+        return list(pins(calls["pins"]) if callable(pins) else pins)
+
+    monkeypatch.setattr(controller_module, "find_control_point_marker", find_marker)
+    monkeypatch.setattr(controller_module, "find_control_point_ring_icons", find_pins)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=ctrl_kwargs.pop("analyzer", None) or _AnalyzerStub(ammo=2),
+        capture=capture or _BlankCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        air_superiority=air_superiority, **ctrl_kwargs)
+    ctrl.set_target_tracker(tracker or _TrackerStub(visible=False))
+    # "wingman", not the controller alone: the fly-through tally logs from its
+    # own module.
+    with caplog.at_level("DEBUG", logger="wingman"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(run_s)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records], calls
+
+
+def test_a_red_control_point_in_view_is_flown_at(monkeypatch, caplog):
+    """Left of the centre and above it: roll left, nose up."""
+    ctrl, messages, _calls = _airsup_pursuit(monkeypatch, caplog, marker=_point(600, 300))
+
+    keys = _keys(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys
+    assert "AIR SUPERIORITY: marker in view at (600,300) (steering to it)" in messages
+    assert any(m.startswith("AIRSUP: marker=(600,300)") and "control=True" in m
+               and "mode=actuate" in m for m in messages)
+
+
+def test_the_point_in_view_is_flown_at_whatever_the_pins_say(monkeypatch, caplog):
+    """prioritize_direct_target.png: A is on screen, B's pin is on the ring at
+    9 o'clock. "It flies towards the A mark because it is a target on screen
+    and closer rather than steer towards B." Here A is to the right."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(1400, 600), pins=[_pin(180)],
+        sustained_hold_enabled=True, icon_steering=_ICON_ALL, analyzer=_TelemetryAnalyzer())
+
+    assert any(m.startswith("HOLD[roll]") and "-> right/target" in m for m in messages)
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+    assert calls["pins"] == 0, "with a point in view the pins are not even read"
+    assert not any(m.startswith("ICONPTS:") and "rung=icon" in m for m in messages)
+
+
+def test_once_the_point_in_view_is_taken_the_next_pin_steers(monkeypatch, caplog):
+    """"It should fly through A then proceed with B." A taken turns blue and is
+    no longer found; B's red pin is at 9 o'clock."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog,
+        marker=lambda scan: _point(1400, 600) if scan <= 4 else None, pins=[_pin(180)],
+        sustained_hold_enabled=True, icon_steering=_ICON_ALL, analyzer=_TelemetryAnalyzer(),
+        run_s=3.0)
+
+    first_right = next(i for i, m in enumerate(messages)
+                       if m.startswith("HOLD[roll]") and "-> right/target" in m)
+    bank_left = [i for i, m in enumerate(messages)
+                 if m.startswith("ICONPTS:") and "act=bankleft+up" in m]
+    assert bank_left and bank_left[0] > first_right, "A first, then toward B's pin"
+    assert any(m.startswith("AIRSUP: marker=- ") and "pin=+180" in m and "search=True" in m
+               for m in messages)
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+
+
+def test_the_hud_names_the_control_point_it_steers_at(monkeypatch, caplog):
+    class _HudCapture:
+        def __init__(self):
+            self.calls = []
+
+        def maybe_render(self, *args, **kwargs):
+            self.calls.append(kwargs)
+
+    hud = _HudCapture()
+    monkeypatch.setattr(controller_module, "find_control_point_marker",
+                        lambda _frame, **_kw: _point(600, 300))
+    monkeypatch.setattr(controller_module, "find_control_point_ring_icons",
+                        lambda _f, _c=None: [])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0, air_superiority=_PT_ON)
+    ctrl.set_hud_renderer(hud)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.8)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert any(kwargs.get("steering_label") == "CONTROL POINT"
+               and kwargs.get("steering_target") == (600, 300) for kwargs in hud.calls)
+
+
+def test_air_superiority_in_shadow_logs_and_does_not_steer(monkeypatch, caplog):
+    ctrl, messages, calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(600, 300),
+        air_superiority={"enabled": True, "actuate": False})
+
+    assert calls["marker"] > 0
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+    assert ("key_press", NOSE_UP_KEY) not in _keys(ctrl)
+    assert "AIR SUPERIORITY: marker in view at (600,300) (shadow)" in messages
+
+
+def test_air_superiority_off_scans_nothing(monkeypatch, caplog):
+    ctrl, messages, calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(600, 300), pins=[_pin(180)], air_superiority=None)
+
+    assert calls == {"marker": 0, "pins": 0}
+    assert not any(m.startswith("AIR") for m in messages)
+
+
+def test_a_red_pin_turns_the_search_toward_the_point(monkeypatch, caplog):
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog, pins=[_pin(180)], sustained_hold_enabled=True,
+        icon_steering=_ICON_ALL, analyzer=_TelemetryAnalyzer(), run_s=1.6)
+
+    assert "AIR SUPERIORITY: pin on the ring at +180 deg (steering to it)" in messages
+    assert any(m.startswith("ICONPTS:") and "act=bankleft+up" in m for m in messages)
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+def test_the_crown_is_looked_for_before_the_control_points(monkeypatch, caplog):
+    """Two game modes, so never both; with both switched on the crown's marker
+    is the one flown at."""
+    monkeypatch.setattr(controller_module, "find_priority_marker",
+                        lambda _frame, **_kw: _priority_marker(1400, 800))
+    monkeypatch.setattr(controller_module, "find_priority_ring_icons", lambda _f, _c=None: [])
+    ctrl, messages, calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(600, 300), priority_target=_PT_ON)
+
+    assert calls["marker"] == 0
+    assert "PRIORITY TARGET: marker in view at (1400,800) (steering to it)" in messages
+    assert ("key_press", ROLL_RIGHT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+
+
+def _real_airsup_pursuit(monkeypatch, caplog, capture, run_s=1.6):
+    """The real detectors on real crops, through the real loop."""
+    _quiet_search(monkeypatch)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_TelemetryAnalyzer(), capture=capture,
+        pursuit_enabled=True, pursuit_max_duration_s=0.0, sustained_hold_enabled=True,
+        icon_steering=_ICON_ALL, priority_target=_PT_ON, air_superiority=_PT_ON)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(run_s)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records]
+
+
+class _CropsCapture(_CropCapture):
+    """Several fixture crops in one frame."""
+
+    def __init__(self, *placed):
+        name, origin = placed[0]
+        super().__init__(name, origin)
+        import cv2
+        from pathlib import Path
+        for name, (left, top) in placed[1:]:
+            crop = cv2.imread(str(Path(__file__).parent / "fixtures" / name))
+            self.frame[top:top + crop.shape[0], left:left + crop.shape[1]] = crop
+
+
+def test_the_operators_frame_flies_at_a_and_not_toward_bs_pin(monkeypatch, caplog):
+    """prioritize_direct_target.png end to end: the A disc 24 px left of the
+    centre, and a red pin on the ring at 3 o'clock standing in for B's, which
+    in the screenshot lies under C's blue pin. A is nearly dead ahead, so the
+    aircraft holds its course at it and does not bank toward the pin."""
+    ctrl, messages = _real_airsup_pursuit(monkeypatch, caplog, _CropsCapture(
+        ("airsup_marker_reticle.png", (836, 502)), ("airsup_pin_right.png", (1126, 625))))
+
+    assert any(m.startswith("AIR SUPERIORITY: marker in view at (936,60") for m in messages)
+    assert any(m.startswith("AIRSUP: marker=(936,60") and "control=True" in m for m in messages)
+    assert not any(m.startswith("ICONPTS:") and "rung=icon" in m for m in messages)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl), "banked toward the pin"
+
+
+def test_a_control_point_of_2026_10_09_is_flown_at_end_to_end(monkeypatch, caplog):
+    """screenshot_20261009_044142: the A disc 86 px left of the centre and
+    98 px above it."""
+    ctrl, messages = _real_airsup_pursuit(
+        monkeypatch, caplog, _CropCapture("airsup_marker_mid.png", (804, 432)))
+
+    assert any(m.startswith("AIR SUPERIORITY: marker in view at (874,50") for m in messages)
+    assert any(m.startswith("HOLD[pitch]") and "-> up" in m for m in messages)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+    assert ("key_press", NOSE_DOWN_KEY) not in _keys(ctrl)
+
+
+def test_a_red_pin_of_2026_10_09_steers_the_search_end_to_end(monkeypatch, caplog):
+    """screenshot_20261009_044324: A's pin at -170 deg, left of the centre."""
+    ctrl, messages = _real_airsup_pursuit(
+        monkeypatch, caplog, _CropCapture("airsup_pin_left.png", (728, 536)))
+
+    assert "AIR SUPERIORITY: pin on the ring at -170 deg (steering to it)" in messages
+    assert any(m.startswith("ICONPTS:") and "act=bankleft" in m for m in messages)
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-09: "at round end it prints how many air superiority
+# targets, resupply, and priority targets are captured ... it should not read
+# the score bar, only track when wingman flies through the targets". The rule
+# has its own tests (test_objective_tally.py); these pin that the pursuit
+# reports what it sees and that the round's end prints the line once.
+# ---------------------------------------------------------------------------
+
+def _round_line(ctrl, caplog):
+    """What the main loop's call at the round's end logs."""
+    caplog.clear()
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.log_round_objectives()
+    return [r.getMessage() for r in caplog.records if "ROUND OBJECTIVES" in r.getMessage()]
+
+
+def test_a_control_point_flown_through_is_counted_and_printed_at_the_rounds_end(
+        monkeypatch, caplog):
+    """The disc dead ahead grows from 24 to 60 px over ten scans and is then
+    gone: the aircraft went through it."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog,
+        marker=lambda scan: _point(960, 600, 20 + 4 * scan) if scan <= 10 else None,
+        run_s=3.2)
+
+    assert any(m.startswith("OBJECTIVE: flew through an air superiority point, 60 px")
+               and "(1 this round)" in m for m in messages)
+    lines = _round_line(ctrl, caplog)
+    assert len(lines) == 1
+    assert lines[0].endswith(
+        "ROUND OBJECTIVES — flown through: air superiority points 1, "
+        "resupply 0 (0 rearms confirmed), priority targets 0\x1b[0m")
+    assert _round_line(ctrl, caplog) == [], "the lobby after the end screen prints nothing"
+
+
+def test_a_control_point_turned_away_from_is_not_counted(monkeypatch, caplog):
+    """In view for ten scans at 22 px, never near, then gone."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog,
+        marker=lambda scan: _point(960, 600, 22) if scan <= 10 else None, run_s=3.2)
+
+    assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
+    assert any(m.startswith("OBJECTIVE: an air superiority point lost at 22 px")
+               for m in messages)
+    assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_a_control_point_passed_beside_is_not_counted(monkeypatch, caplog):
+    """The first live session's crown, 2026-10-09 05:56:42, as a control point:
+    the disc grows to 60 px while it slides from the centre to the left edge,
+    and is gone. The aircraft went past it, not through it."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog,
+        marker=lambda scan: (_point(960 - 56 * scan, 600, 20 + 4 * scan)
+                             if scan <= 10 else None),
+        run_s=3.2)
+
+    assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
+    assert any(m.startswith("OBJECTIVE: an air superiority point lost at 60 px, 560 px off")
+               and "passed beside it" in m for m in messages)
+    assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_the_priority_target_flown_through_is_counted(monkeypatch, caplog):
+    def crown(scan):
+        from wingman.priority_target import PriorityMarker
+        size = 14 + 3 * scan
+        return PriorityMarker(960, 600, size, size, 70, 0.0) if scan <= 10 else None
+
+    calls = {"n": 0}
+
+    def find_marker(_frame, **_kw):
+        calls["n"] += 1
+        return crown(calls["n"])
+
+    monkeypatch.setattr(controller_module, "find_priority_marker", find_marker)
+    monkeypatch.setattr(controller_module, "find_priority_ring_icons", lambda _f, _c=None: [])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0, priority_target=_PT_ON)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    with caplog.at_level("INFO", logger="wingman"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(3.2)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert any(r.getMessage().startswith("OBJECTIVE: flew through the priority target, 44 px")
+               for r in caplog.records)
+    assert _round_line(ctrl, caplog)[0].endswith("priority targets 1\x1b[0m")
+
+
+def test_the_resupply_point_flown_through_and_the_rearm_are_counted_apart(monkeypatch, caplog):
+    """The marker grows to 62 px and is gone, and the count then goes from 2
+    to 6: one fly-through, one confirmed rearm, shown side by side."""
+    scans = {"n": 0}
+
+    def find_marker(_frame, **_kw):
+        scans["n"] += 1
+        size = 26 + 4 * scans["n"]
+        return ResupplyMarker(960, 600, size, size, 300, 0) if scans["n"] <= 9 else None
+
+    monkeypatch.setattr(controller_module, "find_resupply_marker", find_marker)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2, 2, 2, 2, 2, 6, 6]),
+        capture=_BlankCapture(), pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    with caplog.at_level("INFO", logger="wingman"):
+        ctrl.pursue_and_engage(weapon_already_switched=True)
+        time.sleep(4.5)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("OBJECTIVE: flew through the resupply point") for m in messages)
+    assert any(m.startswith("RESUPPLY: confirmed ammo=6") for m in messages)
+    assert "resupply 1 (1 rearm confirmed)" in _round_line(ctrl, caplog)[0]
+
+
+def test_a_marker_in_view_when_the_aircraft_dies_is_not_counted(monkeypatch, caplog):
+    """The pursuit ends with the disc at 60 px still on screen: a death at the
+    point, not a capture."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=lambda scan: _point(960, 600, min(60, 20 + 4 * scan)),
+        run_s=2.0)
+
+    assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
+    assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_a_round_whose_pursuit_met_no_objective_prints_its_zeros(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.4)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert _round_line(ctrl, caplog) == [
+        "\x1b[96m🏁 ROUND OBJECTIVES — flown through: air superiority points 0, "
+        "resupply 0 (0 rearms confirmed), priority targets 0\x1b[0m"]
+
+
+def test_a_round_with_no_pursuit_prints_no_objective_line(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture())
+
+    assert _round_line(ctrl, caplog) == []

@@ -24,6 +24,9 @@ from .hotkeys import register_hotkeys as _register_hotkeys
 from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
+from .air_superiority import find_control_point_marker, find_control_point_ring_icons
+from .objective_tally import RESUPPLY as TALLY_RESUPPLY
+from .objective_tally import ObjectiveTally
 from .priority_target import find_priority_marker, find_priority_ring_icons
 from .resupply import (
     MissileUrgency,
@@ -862,6 +865,21 @@ class Controller:
         self._priority_target_actuate = (
             self._priority_target_enabled and bool(_priority_cfg.get(
                 "actuate", schema_default("pursuit_mode.priority_target.actuate"))))
+        # Same day: the control points A, B and C of air superiority while the
+        # enemy holds them (red), marked the same two ways.
+        _airsup_cfg = _pm.get("air_superiority") or {}
+        self._air_superiority_enabled = bool(_airsup_cfg.get(
+            "enabled", schema_default("pursuit_mode.air_superiority.enabled")))
+        self._air_superiority_actuate = (
+            self._air_superiority_enabled and bool(_airsup_cfg.get(
+                "actuate", schema_default("pursuit_mode.air_superiority.actuate"))))
+        # Operator, 2026-10-09: how many objectives wingman flew through, printed
+        # at the end of the round. The pursuit thread writes it; the main loop
+        # reads it at the round's end.
+        _tally_cfg = _pm.get("objective_tally") or {}
+        self._objective_tally = ObjectiveTally(
+            near_px=_tally_cfg.get("near_px"), centre_px=_tally_cfg.get("centre_px"))
+        self._objective_tally_lock = threading.Lock()
         # The resupply_candidate_*.png written when a marker first appears.
         self._resupply_save_candidate_frames = bool(_resupply_cfg.get(
             "save_candidate_frames",
@@ -3768,6 +3786,78 @@ class Controller:
         .fire_eject(), the single choke point both strategies share."""
         return self._pursuit_mode_enabled
 
+    # The objectives the pursuit follows by a marker in view and a pin on the
+    # ring: what each is called in the log, in the DEBUG line and on the HUD.
+    _MARKED_OBJECTIVES = {
+        "priority_target": ("PRIORITY TARGET", "PRIORITY", "PRIORITY TARGET"),
+        "air_superiority": ("AIR SUPERIORITY", "AIRSUP", "CONTROL POINT"),
+    }
+
+    def _scan_marked_objective(self, frame) -> "tuple[str | None, object, list]":
+        """This cycle's marked objective: (kind, marker, pins).
+
+        A marker in view comes before any pin, of either kind (operator,
+        2026-10-09: "it flies towards the A mark because it is a target on
+        screen and closer rather than steer towards B"). The crown is looked
+        for before the control points; the two are different game modes.
+        """
+        region = self._resupply_region_pct
+        if self._priority_target_enabled:
+            marker = find_priority_marker(frame, region_pct=region)
+            if marker is not None:
+                return "priority_target", marker, []
+        if self._air_superiority_enabled:
+            marker = find_control_point_marker(frame, region_pct=region)
+            if marker is not None:
+                return "air_superiority", marker, []
+        if self._priority_target_enabled:
+            pins = find_priority_ring_icons(frame)
+            if pins:
+                return "priority_target", None, pins
+        if self._air_superiority_enabled:
+            pins = find_control_point_ring_icons(frame)
+            if pins:
+                return "air_superiority", None, pins
+        return None, None, []
+
+    def _tally_objective_seen(self, kind: str, marker, frame) -> None:
+        """Tell the round's tally that `kind`'s marker is in view this scan.
+
+        Its size and its distance from the screen centre are scaled to 1200 px
+        of frame height, the scale the tally's sizes are in. A frame with no
+        size to read is taken as 1920 x 1200: a count must never cost the
+        steering cycle it rides in.
+        """
+        try:
+            frame_height, frame_width = int(frame.shape[0]), int(frame.shape[1])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            frame_height, frame_width = 1200, 1920
+        scale = 1200.0 / max(1, frame_height)
+        size_px = max(marker.width, marker.height) * scale
+        off_centre_px = math.hypot(marker.x - frame_width / 2,
+                                   marker.y - frame_height / 2) * scale
+        with self._objective_tally_lock:
+            self._objective_tally.see(kind, size_px, time.time(), off_centre_px)
+
+    def log_round_objectives(self) -> None:
+        """Print how many objectives wingman flew through this round, and start
+        the next round's count (operator, 2026-10-09). Called by the main loop
+        at the round's end; a second call in the same round prints nothing."""
+        if not self._objective_tally_lock.acquire(timeout=2.0):
+            logger.warning("Controller: objective tally busy — round line skipped")
+            return
+        try:
+            line = self._objective_tally.end_round()
+        finally:
+            if self._objective_tally_lock.locked():
+                self._objective_tally_lock.release()
+        if line:
+            logger.info("\033[96m🏁 %s\033[0m", line)
+
+    def _marked_objective_actuates(self, kind: "str | None") -> bool:
+        return {"priority_target": self._priority_target_actuate,
+                "air_superiority": self._air_superiority_actuate}.get(kind, False)
+
     def _note_pursuit_objective(self, kind: "str | None") -> None:
         """The pursuit loop's report, every steering cycle: what it is flying at
         and can see ("target" or "resupply marker"), or None."""
@@ -3953,6 +4043,8 @@ class Controller:
                 tally = _EngagementTally()
                 tally.gun_enabled = self._pursuit_gun_on_centre
                 self._gun_fired_s = 0.0
+                with self._objective_tally_lock:
+                    self._objective_tally.note_round_activity()
                 icon_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
                 # Resupply mode steers by the yellow resupply pin with points of
                 # its own, so an enemy's direction never leaks into the search.
@@ -3961,6 +4053,7 @@ class Controller:
                 priority_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
                 priority_marker_memory = ResupplyMarkerMemory()
                 priority_state = None     # "marker" or "pin" while one is being followed
+                priority_kind = None      # whose: "priority_target" or "air_superiority"
                 priority_last_ts = 0.0
                 priority_error_logged = False
                 missile_urgency = MissileUrgency(self._pursuit_empty_confirm_reads)
@@ -4074,6 +4167,9 @@ class Controller:
                                         "Controller: resupply candidate frame save failed")
                                     resupply_error_logged = True
                         last_resupply_marker_visible = marker_visible
+                        if marker_visible:
+                            self._tally_objective_seen(
+                                TALLY_RESUPPLY, detected_resupply_marker, frame)
                         enemy_strength = (0.0 if icon_points is None else
                                           math.hypot(icon_points.turn_pts,
                                                      icon_points.pitch_pts))
@@ -4107,29 +4203,41 @@ class Controller:
                                 missile_priority.missiles_spent,
                                 "actuating" if self._resupply_priority_actuate else "shadow")
                         resupply_seeking = resupply_seeking or resupply_proposed
-                        # Operator, 2026-10-09: the priority target, the crown
-                        # objective. Its marker in view is flown at as the
-                        # resupply marker is; off screen, its pin on the ring
-                        # feeds the icon law in place of the red icons. The
-                        # resupply comes first, and with every rack empty the
-                        # priority target is not looked for at all.
+                        # Operator, 2026-10-09: the marked objectives, the crown
+                        # (the priority target) and the control points of air
+                        # superiority the enemy holds. A marker in view is flown
+                        # at as the resupply marker is; off screen, the pin on
+                        # the ring feeds the icon law in place of the red icons.
+                        # The resupply comes first, and with every rack empty
+                        # neither is looked for at all.
                         priority_marker = None
                         priority_marker_stale = False
                         priority_pins = []
-                        if self._priority_target_enabled and not resupply_search:
+                        if ((self._priority_target_enabled or self._air_superiority_enabled)
+                                and not resupply_search):
                             try:
+                                _kind, _marker, priority_pins = (
+                                    self._scan_marked_objective(frame))
+                                if _kind is not None:
+                                    priority_kind = _kind
+                                if _marker is not None:
+                                    self._tally_objective_seen(_kind, _marker, frame)
                                 priority_marker, priority_marker_stale = (
                                     priority_marker_memory.resolve(
-                                        find_priority_marker(
-                                            frame, region_pct=self._resupply_region_pct),
-                                        time.monotonic(), seeking=True))
-                                if priority_marker is None:
-                                    priority_pins = find_priority_ring_icons(frame)
+                                        _marker, time.monotonic(), seeking=True))
                             except Exception:
                                 if not priority_error_logged:
                                     logger.exception(
-                                        "Controller: priority target scan failed")
+                                        "Controller: marked objective scan failed")
                                     priority_error_logged = True
+                        # A marker last seen at close range and now gone was
+                        # flown through (operator, 2026-10-09).
+                        with self._objective_tally_lock:
+                            self._objective_tally.tick(time.time())
+                        priority_actuate = self._marked_objective_actuates(priority_kind)
+                        priority_name, priority_tag, priority_hud = (
+                            self._MARKED_OBJECTIVES.get(
+                                priority_kind, self._MARKED_OBJECTIVES["priority_target"]))
                         # Against a visible target the marker has the steering
                         # when it is the nearer of the two to the screen centre,
                         # the rule the resupply marker follows (2026-10-02).
@@ -4139,10 +4247,10 @@ class Controller:
                                      and not marker_nearer_than_target(
                                          priority_marker, err, err_y,
                                          frame.shape[1], frame.shape[0])))
-                        priority_control = self._priority_target_actuate and priority_proposed
+                        priority_control = priority_actuate and priority_proposed
                         # The pin steers only while the tracker has no target.
                         priority_search = (
-                            self._priority_target_actuate and priority_points is not None
+                            priority_actuate and priority_points is not None
                             and not resupply_control and not resupply_search
                             and not priority_control and not bool(visible)
                             and (bool(priority_pins)
@@ -4160,18 +4268,17 @@ class Controller:
                             priority_last_ts = time.time()
                             if priority_state is None:
                                 logger.info(
-                                    "PRIORITY TARGET: %s (%s)",
+                                    "%s: %s (%s)", priority_name,
                                     "marker in view at (%.0f,%.0f)" % (
                                         priority_marker.x, priority_marker.y)
                                     if priority_now == "marker" else
                                     "pin on the ring at %+.0f deg" % priority_pins[0].angle_deg
                                     if priority_pins else "pin's direction held",
-                                    "steering to it" if self._priority_target_actuate
-                                    else "shadow")
+                                    "steering to it" if priority_actuate else "shadow")
                             priority_state = priority_now
                         elif (priority_state is not None
                               and time.time() - priority_last_ts >= 2.0):
-                            logger.info("PRIORITY TARGET: out of view for 2.0s")
+                            logger.info("%s: out of view for 2.0s", priority_name)
                             priority_state = None
                         control_visible = (bool(visible) and not resupply_control
                                            and not resupply_search and not priority_control)
@@ -4254,7 +4361,7 @@ class Controller:
                                 sustained_hold=self._sustained_hold_enabled)
                         elif priority_control and not yielding:
                             hud_steering_target = (priority_marker.x, priority_marker.y)
-                            hud_steering_label = "PRIORITY TARGET"
+                            hud_steering_label = priority_hud
                             hud_steering_stale = priority_marker_stale
                             error_x = ((priority_marker.x - frame.shape[1] / 2)
                                        / (frame.shape[1] / 2))
@@ -4496,6 +4603,8 @@ class Controller:
                                 ammo)
                             resupply_seeking = False
                             resupply_marker_memory.clear()
+                            with self._objective_tally_lock:
+                                self._objective_tally.note_rearm()
                             if self._resupply_priority_actuate:
                                 if self._resupply_rearm_climb_s > 0:
                                     rearm_climb_until = (
@@ -4530,20 +4639,18 @@ class Controller:
                                 "-" if not resupply_search or icon_state is None
                                 or icon_state.get("icon") is None
                                 else "%.0f" % icon_state["icon"].angle_deg)
-                        if self._priority_target_enabled and (
-                                priority_marker is not None or priority_pins
-                                or priority_search):
+                        if priority_marker is not None or priority_pins or priority_search:
                             # Also when a nearer target keeps the steering.
                             logger.debug(
-                                "PRIORITY: marker=%s stale=%s pin=%s proposed=%s "
-                                "control=%s search=%s mode=%s",
+                                "%s: marker=%s stale=%s pin=%s proposed=%s "
+                                "control=%s search=%s mode=%s", priority_tag,
                                 "-" if priority_marker is None else "(%.0f,%.0f)" % (
                                     priority_marker.x, priority_marker.y),
                                 priority_marker_stale,
                                 "-" if not priority_pins
                                 else "%+.0f" % priority_pins[0].angle_deg,
                                 priority_proposed, priority_control, priority_search,
-                                "actuate" if self._priority_target_actuate else "shadow")
+                                "actuate" if priority_actuate else "shadow")
                         if terminal_zero and not self._resupply_priority_actuate:
                                 logger.info(
                                     "Controller: pursue_and_engage — ammo exhausted, "
@@ -4573,6 +4680,9 @@ class Controller:
                 # if this pursuit is handing off to it, and must not inherit
                 # a roll/pitch key this loop was holding.
                 self.release_tracking_holds(why="pursuit loop exit")
+                # A marker in view when the pursuit ends was not flown through.
+                with self._objective_tally_lock:
+                    self._objective_tally.drop_approaches()
                 if tally is not None:
                     tally.gun_s = self._gun_fired_s
                     logger.info(tally.line(

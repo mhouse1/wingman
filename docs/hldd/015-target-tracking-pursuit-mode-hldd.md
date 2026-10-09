@@ -1655,6 +1655,177 @@ schema default is off for both; the shipped config has both on.
   ([Action Item 002](../action-item/002-emergency-climb-abandons-resupply.md)),
   not for the priority target, so it can still take the airframe during an
   approach to the crown.
+- One archived frame shows the crown's disc drawn in red beside an enemy's name
+  tag. Only the yellow one is looked for.
+
+## Air Superiority: Steering to the Enemy's Control Points (2026-10-09)
+
+Operator, 2026-10-09: "similar to prioritytarget ... implement steering towards
+air superiority icons A, B, or C, if the icons are red, the small icons indicates
+the direction to steer towards, see `prioritize_direct_target.png`: in this case
+it flies towards the A mark because it is a target on screen and closer rather
+than steer towards B, it should fly through A then proceed with B."
+
+### What the game draws
+
+Eight screenshots of that day (`tests/test-output/air-superiority/`). The mode
+has three control points, A, B and C. Each is drawn in the color of the team
+that holds it, red for the enemy and blue for the own team, in three places:
+
+- **The score bar:** the three circled letters, above the acquisition region.
+- **In view:** a dark disc with an outline and the letter, ringed by four arcs
+  with arrowheads. The red discs measured 22 to 56 px across. A nearer point is
+  drawn larger.
+- **Off screen:** a pin on the ring the red aircraft icons use: a circle around
+  the letter with a pointer, the resupply pin's shape in the holder's color.
+
+A point is taken by flying through it; the score bar then announces it
+(`C SECURED`) and its letter turns blue.
+
+### Finding the red ones
+
+`wingman/air_superiority.py`. Red here is hue 2 to 3 at full value (the 4 discs
+and 6 pins measured); the dark red inside a disc and the blue of an own point do
+not pass.
+
+- **`find_control_point_marker`:** the red at the rim of a square box has to go
+  all the way round, the red in the middle has to be the letter's share of the
+  box (14% to 16% measured) and no wider than it is tall, the corners of the box
+  have to be empty and the rest of the disc dark. Of several discs it returns
+  the largest. The four arcs fail the first test, a squad tag's boxed letter the
+  corners, and an enemy's red crown the letter's shape.
+- **`find_control_point_ring_icons`:** `resupply.ring_pins` with the red mask.
+  A solid aircraft icon encloses no hole and an outlined one is twice the pin's
+  size, so neither is a pin.
+
+On 2,232 archived frames the disc was found in 37 and a pin in 245; all 37 discs
+and 60 of 60 sampled pins were control points. The two scans cost 4.2 ms a frame.
+
+Not read: a pin that lies under another pin or touches an aircraft icon. Five
+of the eleven red pins in the screenshots are like that, B's in
+`prioritize_direct_target.png` among them; the other six are all found. The aircraft icon over such a pin
+points the same way, and the icon law keeps the last direction it had.
+
+### Where it sits in the steering tick
+
+The same place as the priority target, through the same code
+(`Controller._scan_marked_objective`). The diagram in the section above holds
+with "crown" read as "crown or red control point". What the operator's sentence
+adds is already its order:
+
+- **A disc in view comes before any pin.** With A on screen the pins are not
+  read at all, so B's pin cannot pull the aircraft off A.
+- **Fly through, then the next.** A taken turns blue and is no longer found.
+  What is left is the next red disc in view, or the red pins. With two red pins
+  the icon law picks one and keeps to the direction it has.
+- The crown is looked for before the control points. They are different game
+  modes, so the order only matters for the cost of the scan.
+
+### Configuration and logging
+
+`pursuit_mode.air_superiority`: `enabled` and `actuate`, as for the priority
+target; off in the schema, on as shipped. The log lines are the priority
+target's under another name: `AIR SUPERIORITY: marker in view at (936,602)
+(steering to it)`, `AIR SUPERIORITY: pin on the ring at -170 deg`, and `AIRSUP:
+marker=… pin=… control=… search=…` at DEBUG. The HUD label is `CONTROL POINT`.
+
+### Not done
+
+- A live session.
+- Which letter a disc or a pin carries is not read, so the log cannot say "A
+  then B", and nothing chooses between two red pins by letter.
+- A point nobody holds was not in the screenshots. If the game draws it in a
+  third color it is not found.
+- Control points sit low among terrain in these frames (A at 1,800 m between
+  rock pillars). The crash recovery does not wait for them, as it does not for
+  the crown.
+
+## Objectives Flown Through: The Round's Count (2026-10-09)
+
+Operator, 2026-10-09: "at round end it prints how many air superiority targets,
+resupply, and priority targets are captured", and then: "it should not read the
+score bar, only track when wingman flies through the targets."
+
+### The rule
+
+`wingman/objective_tally.py`. The count uses only what the pursuit already
+sees, the marker of each objective, and the fact that the game draws a marker
+larger the nearer the aircraft is. An objective counts as flown through when:
+
+- its marker was seen on three scans or more over half a second or more,
+- it was at least `near_px` across the last time it was seen,
+- it was within `centre_px` of the screen centre that last time, and
+- it was then gone for a second.
+
+A marker lost while still small was turned away from or hidden, and does not
+count. A marker lost at close range out at the side of the screen was passed
+beside, and does not count either (added after the first live round, see the
+live trial below). Nor does a marker still in view when the pursuit ends, which
+is a death at the point. After a count the same kind does not count again for 5 s, because
+the disc can show once more as the aircraft passes.
+
+### The sizes
+
+`pursuit_mode.objective_tally.near_px`, in px at 1200 px of frame height:
+
+| Objective | Disc at the usual distances | Largest caught | `near_px` |
+|---|---|---|---|
+| Air superiority point | 19 to 25 px | 56 px | 40 |
+| Resupply point | 24 to 40 px | 68 px | 48 |
+| Priority target | 14 to 20 px | 39 px | 30 |
+
+Measured on 2,240 archived frames (41, 49 and 27 discs). The three values are
+named guesses between the two columns: no frame of the moment of passing
+through was at hand.
+
+`pursuit_mode.objective_tally.centre_px` is 300, in the same px. In the first
+live round the resupply point that a rearm followed was last seen 61 px from
+the centre (61 to 110 px over its last second), and the two crowns the aircraft
+passed were last seen 562 and 761 px out. A named guess between the two.
+
+### What is printed
+
+When the main loop enters `GAME_END_B`, or the lobby for a round whose end
+screen was never read:
+
+```
+🏁 ROUND OBJECTIVES — flown through: air superiority points 2, resupply 1 (1 rearm confirmed), priority targets 0
+```
+
+Each fly-through also logs its own line when it is counted, with the size it
+was last seen at: `OBJECTIVE: flew through an air superiority point, 58 px
+across at last sight (2 this round)`. A marker that was lost without counting
+says why at DEBUG.
+
+The confirmed rearms are the pursuit's existing reading of the ammo count going
+up. They are printed beside the resupply fly-throughs and not added to them:
+they are the one independent check on the rule, and the first thing to compare
+when tuning `near_px`.
+
+### Limits
+
+- Flown through is not the game's "captured". A point can need holding, and the
+  rule cannot tell passing through a disc from passing within `centre_px` of
+  it. In the first live round the crown's marker crossed the screen and went
+  by at close range twice, which a marker fixed in the world does not do, so
+  the crown appears to be carried by an aircraft once it is taken (inferred,
+  not seen). For the priority target a count then means the aircraft flew at
+  the carrier to close range, not that it took the crown.
+- Only a pursuit counts. A round with no pursuit prints no line.
+- The resupply marker is looked for only once missiles are spent, so a
+  resupply point flown through with full racks is not counted.
+- A marker hidden at close range for more than a second, and then seen again
+  within 5 s, is one count, not two.
+
+### Live trial: the priority target, air superiority and the round's count
+
+Which mode a round is in is the matchmaker's choice, so a session shows the
+crown or the control points only in the rounds that happen to be those modes.
+
+| Session | Code state | Game UI | Rounds | `PRIORITY TARGET` lines | `AIR SUPERIORITY` lines | `ROUND OBJECTIVES` lines | Failures | Verdict |
+|---------|------------|---------|-------:|------:|------:|------:|----------|---------|
+| 2026-10-09 03:38-05:22, four operator sessions, 14.0 min of battle | priority target from the 04:36 session (f893a38), air superiority in the 05:15 session only, no round count | post-update | 3 | 0 | 0 | none (not written yet) | none: no `loop cycle failed`, no traceback | No evidence. No `PRIORITY TARGET` line in the two rounds flown with the crown code, and the 05:17 round, the one flown with the air superiority code, was not that mode (one stale control-point marker on two DEBUG lines while a nearer target kept the steering, and no pin in 4.3 min). |
+| 2026-10-09 05:52 on, `make r1`, pid 345223 | air superiority and the round count, uncommitted on f893a38 | post-update | running | | | | | running. Round 1 (05:53:44) is a crown round and the first live evidence for the priority target: at 05:54:33 the pin was read at +148 deg and the icon law pushed nose-down on it for 29 ticks (`rung=icon act=level+down`); at 05:54:38 a tracked target took the steering with the pin still read; at 05:54:39 the crown's marker came into view and at 05:54:40 it had the steering for the scans in which it was nearer the centre than the target. First check of the fly-through rule against a rearm, 1 for 1: the resupply marker was followed from 05:55:31 for 12 s, was 53 px across when last seen, and `OBJECTIVE: flew through the resupply point` was logged at 05:55:43.98; the ammo count read 2 at 05:55:44.3 and the rearm was confirmed at 05:55:47.5. Two earlier losses of that marker in the same approach, at 26 px and at 38 px, were not counted and no rearm followed either. The approach was a 32 to 36 deg dive from 2,776 m with the crash recovery held off twice (05:55:30, 05:55:41); the recovery took over at 05:55:45.8, 1.8 s after the count, and the lowest read was 403 m at 1,431 KPH. |
 
 ## Validation Strategy
 
