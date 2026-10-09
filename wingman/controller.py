@@ -810,6 +810,17 @@ class Controller:
         self._pursuit_crash_recovery = bool(_pm.get(
             "crash_recovery", schema_default("pursuit_mode.crash_recovery")))
         self._dive_recovery_suppressed_log_ts = 0.0
+        # Operator, 2026-10-08: the crash recovery flies only once the pursuit
+        # has nothing in view. The pursuit loop stamps each cycle in which it
+        # steers at a visible target or resupply marker; the climb reads the age.
+        _clear_view = _pm.get(
+            "crash_recovery_clear_view_s",
+            schema_default("pursuit_mode.crash_recovery_clear_view_s"))
+        self._pursuit_recovery_clear_view_s = (
+            None if _clear_view is None else max(0.0, float(_clear_view)))
+        self._pursuit_objective_ts = 0.0
+        self._pursuit_objective_kind = ""
+        self._recovery_held_log_ts = 0.0
         self._search_look_down_pulse_s = float(_pm.get("search_look_down_pulse_s", 0.0))
         self._search_look_down_interval_s = float(_pm.get("search_look_down_interval_s", 1.0))
         self._search_look_down_min_deg = float(_pm.get("search_look_down_min_deg", -20.0))
@@ -3747,6 +3758,24 @@ class Controller:
         .fire_eject(), the single choke point both strategies share."""
         return self._pursuit_mode_enabled
 
+    def _note_pursuit_objective(self, kind: "str | None") -> None:
+        """The pursuit loop's report, every steering cycle: what it is flying at
+        and can see ("target" or "resupply marker"), or None."""
+        if kind:
+            self._pursuit_objective_kind = kind
+            self._pursuit_objective_ts = time.time()
+
+    def _pursuit_objective_in_view(self) -> "str | None":
+        """What the pursuit had in view within `crash_recovery_clear_view_s`, or
+        None once it has been gone that long (operator, 2026-10-08: the crash
+        recovery executes only after the target or the resupply disappears)."""
+        clear_s = self._pursuit_recovery_clear_view_s
+        if not clear_s or not self._pursuing.is_set():
+            return None
+        if time.time() - self._pursuit_objective_ts < clear_s:
+            return self._pursuit_objective_kind
+        return None
+
     def pursuit_recovery_active(self) -> bool:
         """True while a hard-emergency climb hold is flying the airframe inside a
         pursuit (ADR 148). The pursuit loop yields pitch and roll for as long as this
@@ -3948,6 +3977,7 @@ class Controller:
                 yielding = False   # ADR 148: a dive-recovery climb owns pitch and roll
                 self._dive_guard_reason = None
                 self._dive_guard_next_pullout_ts = 0.0
+                self._pursuit_objective_ts = 0.0   # nothing in view yet
                 next_engage_ts = 0.0   # CR-018-01: first cycle engages at once
                 while not self._eject_stop.wait(timeout=self._pursuit_steer_interval_s):
                     if (self._pursuit_max_duration_s > 0
@@ -4063,6 +4093,11 @@ class Controller:
                         resupply_seeking = resupply_seeking or resupply_proposed
                         control_visible = (bool(visible) and not resupply_control
                                            and not resupply_search)
+                        # What the crash recovery waits on: the thing this cycle
+                        # steers at, when it can see it.
+                        self._note_pursuit_objective(
+                            "resupply marker" if resupply_control
+                            else "target" if control_visible else None)
                         icon_state = None
                         # In resupply mode the icon law runs on the resupply pin:
                         # no lock to wait out, so no last-seen time either.
@@ -5361,6 +5396,18 @@ class Controller:
                     logger.info("Controller: crash recovery not started — path %+.0f deg "
                                 "is level or climbing", _path)
                 return
+            # Operator, 2026-10-08: "change the climb to execute only after target
+            # or resupply disappears". 460 of 657 recoveries in four days started
+            # with one of them in view, and 310 of 316 targets were gone at the
+            # hand-back.
+            _objective = self._pursuit_objective_in_view()
+            if _objective is not None:
+                now = time.time()
+                if now - self._recovery_held_log_ts >= 10.0:
+                    self._recovery_held_log_ts = now
+                    logger.info("Controller: crash recovery held off — the pursuit has "
+                                "the %s in view", _objective)
+                return
         exit_alt = target_alt if target_alt is not None else self._climb_exit_alt
         if exit_alt is None:
             logger.warning("Controller: climb_mode disabled — exit_above_alt unset")
@@ -6212,6 +6259,19 @@ class Controller:
                         _climbing_now = (last_angle >= 0.0 if last_angle is not None
                                          else (not emergency_now and last_rate is not None
                                                and last_rate >= 0.0))
+                        # Operator, 2026-10-08: the recovery flies only while the
+                        # pursuit has nothing in view, so a target or a resupply
+                        # marker that comes into view takes the airframe back.
+                        _objective = (self._pursuit_objective_in_view()
+                                      if _recovering and recovery_since is not None
+                                      and not self._pursuit_dive_safety else None)
+                        if _objective is not None:
+                            logger.info(
+                                "Controller: climb — the pursuit has the %s in view "
+                                "after %.1fs, handing the airframe back to the chase",
+                                _objective, time.time() - recovery_since)
+                            exit_reason = "objective_in_view"
+                            break
                         if (_recovering and recovery_since is not None
                                 and _climbing_now
                                 and not self._pursuit_dive_safety):

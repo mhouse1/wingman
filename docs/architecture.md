@@ -622,6 +622,14 @@ fresh flight-path angle at or above level, whatever the tree's lagging altitude 
 rule stops a recovery from starting on a level or climbing path.
 `recovery_max_s` caps it.
 
+The recovery executes only after the target or the resupply disappears (operator,
+2026-10-08, `pursuit_mode.crash_recovery_clear_view_s`, shipped at 1.0). Each
+steering cycle the pursuit reports what it is flying at and can see: its target,
+or the resupply marker when the resupply has the steering. The recovery does
+not start until neither has been in view for that long, and a recovery that is
+flying hands back when one comes into view. Evidence and the cost:
+[Action Item 002](action-item/002-emergency-climb-abandons-resupply.md).
+
 **Resupply priority (ADR 152, Draft, actuated).** The pursuit counts confirmed
 missiles spent per rack. From two spent, a yellow resupply marker in the
 acquisition region competes with a visible target for the steering; with every

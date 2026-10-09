@@ -943,7 +943,7 @@ SCHEMA = Section(
                 "rearm_climb_s": Leaf(types=NUMBER, minimum=0, default=3.0),
                 # The frame in which a resupply marker first appears, saved to
                 # tests/test-output/target_tracking, two per pursuit at most.
-                "save_candidate_frames": Leaf(types=(bool,), default=True),
+                "save_candidate_frames": Leaf(types=(bool,), default=False),
             }),
             "search_look_down_pulse_s": SECONDS,
             "search_look_down_interval_s": SECONDS,
@@ -952,6 +952,10 @@ SCHEMA = Section(
             "search_climb_max_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=30.0),
             "dive_safety": BOOL,   # operator, 2026-09-26
             "crash_recovery": Leaf(types=(bool,), default=True),   # operator, 2026-10-02
+            # Operator, 2026-10-08: that recovery waits until the target and the
+            # resupply marker have been out of view this long. 0 or null: no wait.
+            "crash_recovery_clear_view_s": Leaf(
+                types=NUMBER, minimum=0, allow_none=True, default=1.0),
             # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
             "icon_steering": Section(children={
                 "enabled": BOOL,

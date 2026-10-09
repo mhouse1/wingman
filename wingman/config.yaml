@@ -1511,6 +1511,16 @@ pursuit_mode:
   # in a death, and the 20:20 one had the emergency requested from 20:19:47 and
   # suppressed to impact. false restores the suppression.
   crash_recovery: true
+  # Operator, 2026-10-08: "change the climb to execute only after target or resupply
+  # disappears". The recovery above starts, and keeps the airframe, only while the
+  # pursuit has had neither its target nor the resupply marker it is flying to in
+  # view for this many seconds. Measured 2026-10-05 12:13 to 2026-10-08 08:00: 657
+  # recoveries flew 97 min of pursuit; 460 started with a target (316) or the marker
+  # (144) in view, at a median 2070 m and 20 s to ground. 310 of the 316 handed back
+  # with the target gone, and a 4 s or longer marker approach ended in a rearm 8% of
+  # the time when the climb took over against 22% when it did not. Named guess: long
+  # enough to bridge missed scans, short at 130 m/s of descent. 0 or null: no wait.
+  crash_recovery_clear_view_s: 1.0
   # HLDD 015 Icon-Directed Search (2026-09-26), SHADOW STAGE: each steering tick
   # finds the game's red ring icon (an arrowhead on a fixed ring around the screen
   # centre pointing at an off-screen enemy), adds points to a nose-down/up and a

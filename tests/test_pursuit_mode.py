@@ -159,6 +159,12 @@ def _wait_for_pursuit_to_settle(ctrl, timeout=3.0):
     while ctrl.is_pursuing() and time.time() < deadline:
         time.sleep(0.01)
     assert not ctrl.is_pursuing(), "pursue_and_engage did not finish in time"
+    # _pursuing clears before the thread hands off (on_complete, or building the
+    # dive's thread), so wait for the thread itself: under load a test read
+    # `done == []` in that gap (2026-10-05, test_cr019_handback, 1 run in 3).
+    pursuit_thread = getattr(ctrl, "_pursuing_thread", None)
+    if pursuit_thread is not None and pursuit_thread.is_alive():
+        pursuit_thread.join(timeout=timeout)
     # If it fell through, eject_and_dive's own thread needs to finish too.
     # _pursuing is cleared BEFORE eject_and_dive builds and start()s that
     # thread, so join() can land on a Thread that exists but has not started
@@ -902,7 +908,8 @@ def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monke
     ctrl = _make_ctrl(
         monkeypatch, analyzer=analyzer, capture=capture,
         pursuit_enabled=True, pursuit_max_duration_s=5.0,
-        empty_confirm_reads=1, resupply_priority_actuate=True)
+        empty_confirm_reads=1, resupply_priority_actuate=True,
+        save_candidate_frames=True)
     class _HudCapture:
         def __init__(self):
             self.calls = []
@@ -954,7 +961,7 @@ def test_candidate_frames_off_saves_nothing_and_still_seeks_the_marker(
     ctrl = _make_ctrl(
         monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2]), capture=_FrameCapture(),
         pursuit_enabled=True, pursuit_max_duration_s=5.0, empty_confirm_reads=1,
-        resupply_priority_actuate=True, save_candidate_frames=False)
+        resupply_priority_actuate=True)      # the key left out: off is the default
     ctrl.set_target_tracker(_TrackerStub(visible=False))
 
     ctrl.pursue_and_engage(weapon_already_switched=True)
@@ -969,6 +976,31 @@ def test_candidate_frames_off_saves_nothing_and_still_seeks_the_marker(
     assert saved_frames == []
     assert "candidate frame saved" not in logs
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_pursuit_reports_the_resupply_marker_it_flies_to(monkeypatch):
+    """Operator, 2026-10-08: the crash recovery waits while the resupply is in
+    view. This is the pursuit's half: what it reports while it steers at one."""
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame, **_kw: marker)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2]), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0, empty_confirm_reads=1,
+        resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=-0.9, error_norm_y=0.9))
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        deadline = time.time() + 3.0
+        while (ctrl._pursuit_objective_in_view() != "resupply marker"
+               and time.time() < deadline):
+            time.sleep(0.02)
+        reported = ctrl._pursuit_objective_in_view()
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+    assert reported == "resupply marker"
+    assert ctrl._pursuit_objective_in_view() is None, "nothing is in view once the pursuit ends"
 
 
 def _rearm_with_a_target_low_and_left(monkeypatch, **ctrl_kwargs):

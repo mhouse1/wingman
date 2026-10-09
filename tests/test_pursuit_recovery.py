@@ -448,6 +448,153 @@ def test_the_shipped_config_enables_crash_recovery():
     assert cfg["pursuit_mode"]["crash_recovery"] is True
 
 
+# --- pursuit_mode.crash_recovery_clear_view_s (operator, 2026-10-08) ---------------
+# "the climb we added last week is causing missed resupply and pursuit, change the climb
+# to execute only after target or resupply disappears". 2026-10-05 12:13 to 2026-10-08
+# 08:00: 657 recoveries flew 97 min of pursuit. 460 of them started with a target (316)
+# or the resupply marker (144) in view, at a median 2070 m and 20 s to ground; 310 of
+# the 316 handed back with the target gone, and a marker approach of 4 s or more ended
+# in a rearm 8% of the time when the climb took over, 22% when it did not.
+
+def _held_off(caplog):
+    return [r.getMessage() for r in caplog.records
+            if "crash recovery held off" in r.getMessage()]
+
+
+def test_no_recovery_starts_while_the_pursuit_has_its_target_in_view(monkeypatch, caplog):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        ctrl.climb_mode(emergency=True)      # the tree asks again every tick
+    assert not ctrl.is_climbing()
+    assert _held_off(caplog) == [
+        "Controller: crash recovery held off — the pursuit has the target in view"], \
+        "logged once, not once per tick"
+
+
+def test_no_recovery_starts_while_the_pursuit_flies_to_a_resupply_marker(monkeypatch, caplog):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("resupply marker")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    assert "the resupply marker in view" in _held_off(caplog)[0]
+
+
+def test_the_recovery_starts_once_the_view_has_been_clear_long_enough(monkeypatch):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0),
+                       crash_recovery_clear_view_s=0.3)
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing(), "started with the target just seen"
+    time.sleep(0.4)                          # the target has disappeared
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active), "no recovery with nothing in view"
+        assert _wait(lambda: ("key_press", NOSE_UP_KEY) in _keys(ctrl))
+    finally:
+        _stop(ctrl)
+
+
+def test_a_target_coming_into_view_takes_the_airframe_back(monkeypatch, caplog):
+    """A recovery that started with nothing in view does not fly the chase away
+    from a target that then appears."""
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pursuing.set()
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        try:
+            assert _wait(ctrl.pursuit_recovery_active)
+            time.sleep(0.6)
+            assert ctrl.is_climbing(), "handed back with nothing in view and the path down"
+            ctrl._note_pursuit_objective("target")
+            assert _wait(lambda: not ctrl.is_climbing(), timeout=2.0), \
+                "the recovery kept the airframe with the target in view"
+        finally:
+            _stop(ctrl)
+    assert not ctrl._pursuit_recovery.is_set()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the pursuit has the target in view after" in text
+    assert "objective_in_view" in text
+
+
+def test_clear_view_null_restores_the_recovery_that_does_not_wait(monkeypatch):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0),
+                       crash_recovery_clear_view_s=None)
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active)
+        ctrl._note_pursuit_objective("target")
+        time.sleep(0.8)
+        assert ctrl.is_climbing(), "handed back although the rule is off"
+    finally:
+        _stop(ctrl)
+
+
+def test_dive_safety_on_still_recovers_with_a_target_in_view(monkeypatch):
+    """`dive_safety: true` is the setting that puts the recovery first."""
+    ctrl = _ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active)
+        ctrl._note_pursuit_objective("target")
+        time.sleep(0.8)
+        assert ctrl.is_climbing()
+    finally:
+        _stop(ctrl)
+
+
+class _TogglingTracker(_Tracker):
+    seen = True
+
+    def update(self, frame):
+        obs = super().update(frame)
+        obs["visible"] = self.seen
+        return obs
+
+
+def test_the_real_chase_holds_the_recovery_off_until_its_target_disappears(monkeypatch):
+    """End to end: the pursuit loop reports what it sees, the climb reads it."""
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0),
+                       crash_recovery_clear_view_s=0.5)
+    tracker = _TogglingTracker()
+    ctrl.set_target_tracker(tracker)
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    try:
+        assert _wait(lambda: ctrl._pursuit_objective_in_view() == "target"), \
+            "the chase never reported its target"
+        ctrl.climb_mode(emergency=True)
+        assert not ctrl.is_climbing(), "the recovery took a chase that had its target"
+        tracker.seen = False
+        assert _wait(lambda: ctrl._pursuit_objective_in_view() is None, timeout=3.0)
+        ctrl.climb_mode(emergency=True)
+        assert _wait(ctrl.pursuit_recovery_active, timeout=2.0), \
+            "no recovery after the target disappeared"
+        tracker.seen = True
+        assert _wait(lambda: not ctrl.is_climbing(), timeout=3.0), \
+            "the recovery kept flying after the target came back"
+    finally:
+        _stop(ctrl)
+        _end_chase(ctrl)
+
+
+def test_the_shipped_config_makes_the_recovery_wait_for_a_clear_view():
+    import pathlib
+
+    import yaml
+    cfg = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / "wingman" / "config.yaml")
+                         .read_text(encoding="utf-8"))
+    assert cfg["pursuit_mode"]["crash_recovery_clear_view_s"] > 0
+
+
 # --- the chase ------------------------------------------------------------------
 
 def _start_chase(monkeypatch):
