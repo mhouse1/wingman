@@ -82,6 +82,9 @@ class FakeController:
     def log_round_objectives(self):
         pass
 
+    def objective_session_counts(self):
+        return None
+
     def cancel_mission(self):
         pass
 

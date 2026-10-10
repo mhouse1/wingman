@@ -571,6 +571,71 @@ class TestMissileEngagements:
 
 
 # ---------------------------------------------------------------------------
+# Operator, 2026-10-09: "i only want it to print total counts during wingman
+# session summary" — the objectives the pursuit flew through.
+# ---------------------------------------------------------------------------
+
+class TestObjectivesFlownThrough:
+    def test_the_summary_prints_the_sessions_totals(self, tmp_path, caplog):
+        """The 2026-10-09 10:49 session's own totals."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary(objectives={
+                "air_superiority": 29, "resupply": 23, "priority_target": 15})
+        assert "Objectives flown  : 67  (flown through in pursuit; Design 015)" in caplog.text
+        assert "\n  air superiority : 29\n" in caplog.text
+        assert "\n  resupply        : 23\n" in caplog.text
+        assert "\n  priority target : 15\n" in caplog.text
+
+    def test_the_totals_are_printed_at_zero(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary(objectives={"air_superiority": 0, "resupply": 0, "priority_target": 0})
+        assert "Objectives flown  : 0  " in caplog.text
+        assert "  air superiority : 0" in caplog.text
+
+    def test_a_kind_missing_from_the_totals_reads_zero(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary(objectives={"resupply": 2})
+        assert "Objectives flown  : 2  " in caplog.text
+        assert "  priority target : 0" in caplog.text
+
+    def test_no_totals_no_block(self, tmp_path, caplog):
+        """A replay lane, or a tally that could not be read at shutdown."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert "Objectives flown" not in caplog.text
+
+    def test_the_block_sits_in_the_summary_before_the_stats_path(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary(objectives={"air_superiority": 1, "resupply": 0, "priority_target": 0})
+        summary = next(r.getMessage() for r in caplog.records
+                       if "Wingman Session Summary" in r.getMessage())
+        assert summary.index("Objectives flown") < summary.index("Stats saved to")
+
+    def test_the_totals_are_not_written_to_the_stats_file(self, tmp_path):
+        """Printed only: the operator asked for the summary, not the file."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        result = t.finalize()
+        t.print_summary(objectives={"air_superiority": 3, "resupply": 1, "priority_target": 0})
+        assert not any("objective" in key for key in result)
+
+
+# ---------------------------------------------------------------------------
 # ADR 076 — spawn-crash instrument
 # ---------------------------------------------------------------------------
 

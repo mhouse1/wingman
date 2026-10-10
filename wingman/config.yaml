@@ -1377,8 +1377,11 @@ pursuit_mode:
     actuate: true
   # Operator, 2026-10-09: "at round end it prints how many air superiority targets,
   # resupply, and priority targets are captured ... it should not read the score
-  # bar, only track when wingman flies through the targets". The round's end logs
-  # one ROUND OBJECTIVES line. A control point counts as flown through when its
+  # bar, only track when wingman flies through the targets". The session's totals
+  # are printed in the Wingman Session Summary at exit, and the round's own
+  # ROUND OBJECTIVES line goes to DEBUG (operator, the same day: "i only want it
+  # to print total counts during wingman session summary"). A control point
+  # counts as flown through when its
   # disc was followed for half a second or more, reached near_px across, and was
   # then gone for a second (operator, the same day: "based on if the marker
   # reached large size then disappeared"). The crown counts when its disc was

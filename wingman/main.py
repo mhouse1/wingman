@@ -1601,10 +1601,11 @@ def main():
                 else:
                     game_end_b_since = 0.0
                 if new_game_state in (GameState.GAME_END_B, GameState.GAME_LOBBY):
-                    # The round is over: how many objectives wingman flew
+                    # The round is over: close its count of objectives flown
                     # through (operator, 2026-10-09). The lobby is the second
                     # chance for a round whose end screen was never read, and
-                    # prints nothing when the end screen already did.
+                    # logs nothing when the end screen already did. The totals
+                    # are printed in the session summary at exit.
                     try:
                         ctrl.log_round_objectives()
                     except Exception as e:
@@ -1974,7 +1975,14 @@ def main():
                 extra["health_dropouts"] = dropout_summary
                 extra["suppressed_failures"] = suppressed_counts()   # CR-018-17
                 stats_tracker.finalize(run_id=tracker.run_id, extra=extra or None)
-                stats_tracker.print_summary()
+                # Operator, 2026-10-09: the objectives flown through are
+                # printed here, as the session's totals, and nowhere else.
+                objectives = None
+                try:
+                    objectives = ctrl.objective_session_counts()
+                except Exception as e:
+                    logger.warning("Controller: objective_session_counts failed: %s", e)
+                stats_tracker.print_summary(objectives=objectives)
             except Exception as e:
                 logger.warning("MissionStatsTracker: finalize failed: %s", e)
         # Performance 008: growth rates and the leak-attribution verdict. Emitted

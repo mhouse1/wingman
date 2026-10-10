@@ -354,9 +354,73 @@ def test_an_approach_cut_short_by_the_round_does_not_carry_into_the_next(kind):
     assert tally.counts()[kind] == 0
 
 
-def test_the_main_loop_prints_the_line_at_the_rounds_end():
+def test_the_session_totals_span_the_rounds_and_the_round_in_progress():
+    """Operator, 2026-10-09: "i only want it to print total counts during
+    wingman session summary." The totals are every fly-through since wingman
+    started, whether or not its round has ended."""
+    tally = ObjectiveTally()
+    last = _approach(tally, AIR_SUPERIORITY, [24, 30, 40, 50, 60], start=100.0)
+    tally.tick(last + LOST_S)
+    tally.note_rearm(110.0)
+    tally.end_round()
+    last = _approach(tally, AIR_SUPERIORITY, [24, 30, 40, 50, 60], start=200.0)
+    tally.tick(last + LOST_S)
+    last = _approach(tally, PRIORITY_TARGET, [16, 19, 22, 30, 36], start=210.0)
+    tally.tick(last + LOST_S)
+    tally.end_round()
+    tally.note_rearm(300.0)
+
+    assert tally.counts() == {AIR_SUPERIORITY: 0, RESUPPLY: 1, PRIORITY_TARGET: 0}
+    assert tally.session_counts() == {AIR_SUPERIORITY: 2, RESUPPLY: 2, PRIORITY_TARGET: 1}
+
+
+def test_the_session_totals_start_at_zero_and_are_a_copy():
+    tally = ObjectiveTally()
+    totals = tally.session_counts()
+    assert totals == {AIR_SUPERIORITY: 0, RESUPPLY: 0, PRIORITY_TARGET: 0}
+
+    totals[RESUPPLY] = 9
+    assert tally.session_counts()[RESUPPLY] == 0
+
+
+def test_an_objective_that_was_not_counted_is_not_in_the_session_totals():
+    tally = ObjectiveTally()
+    last = _approach(tally, AIR_SUPERIORITY, [20, 21, 22, 22, 23])
+    tally.tick(last + LOST_S)
+    last = _approach(tally, RESUPPLY, [30, 40, 50, 56], start=200.0)
+    tally.tick(last + LOST_S)
+
+    assert tally.session_counts() == {AIR_SUPERIORITY: 0, RESUPPLY: 0, PRIORITY_TARGET: 0}
+
+
+def test_the_summarys_rows_are_the_tallys_kinds():
+    """`mission_stats` names the kinds as plain strings to stay free of the
+    pursuit's imports. They must be the tally's own."""
+    from wingman.mission_stats import _OBJECTIVE_ROWS
+
+    assert [kind for kind, _label in _OBJECTIVE_ROWS] == [
+        AIR_SUPERIORITY, RESUPPLY, PRIORITY_TARGET]
+    assert set(ObjectiveTally().session_counts()) == {kind for kind, _label in _OBJECTIVE_ROWS}
+
+
+def test_the_session_summary_is_given_the_totals_at_exit():
+    """The main loop's shutdown reads the controller's totals and hands them to
+    the summary. A count must never cost the summary: the read is guarded."""
+    from pathlib import Path
+
+    src = Path("wingman/main.py").read_text(encoding="utf-8")
+    block = src[src.index("stats_tracker.finalize(run_id=tracker.run_id"):]
+    block = block[:block.index("MissionStatsTracker: finalize failed")]
+
+    assert "objectives = ctrl.objective_session_counts()" in block
+    assert "stats_tracker.print_summary(objectives=objectives)" in block
+    assert block.index("try:") < block.index("ctrl.objective_session_counts()") < block.index(
+        "except Exception")
+
+
+def test_the_main_loop_closes_the_rounds_count_at_the_rounds_end():
     """The end screen is the round's end; the lobby is the second chance for a
-    round whose end screen was never read (`end_round` then prints nothing
+    round whose end screen was never read (`end_round` then gives nothing
     twice). The replay lanes run this pass with a fake controller."""
     from pathlib import Path
 

@@ -2649,13 +2649,16 @@ def test_a_red_pin_of_2026_10_09_steers_the_search_end_to_end(monkeypatch, caplo
 # targets, resupply, and priority targets are captured ... it should not read
 # the score bar, only track when wingman flies through the targets". The rule
 # has its own tests (test_objective_tally.py); these pin that the pursuit
-# reports what it sees and that the round's end prints the line once.
+# reports what it sees and that the round's end logs the line once. Later the
+# same day: "i only want it to print total counts during wingman session
+# summary", so the round's line is DEBUG and the session's totals are what the
+# summary prints.
 # ---------------------------------------------------------------------------
 
 def _round_line(ctrl, caplog):
-    """What the main loop's call at the round's end logs."""
+    """What the main loop's call at the round's end logs, at DEBUG."""
     caplog.clear()
-    with caplog.at_level("INFO", logger="wingman.controller"):
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
         ctrl.log_round_objectives()
     return [r.getMessage() for r in caplog.records if "ROUND OBJECTIVES" in r.getMessage()]
 
@@ -2676,8 +2679,11 @@ def test_a_control_point_flown_through_is_counted_and_printed_at_the_rounds_end(
     assert len(lines) == 1
     assert lines[0].endswith(
         "ROUND OBJECTIVES — flown through: air superiority points 1, "
-        "resupply 0, priority targets 0\x1b[0m")
-    assert _round_line(ctrl, caplog) == [], "the lobby after the end screen prints nothing"
+        "resupply 0, priority targets 0")
+    assert _round_line(ctrl, caplog) == [], "the lobby after the end screen logs nothing"
+    assert ctrl.objective_session_counts() == {
+        "air_superiority": 1, "resupply": 0, "priority_target": 0}, (
+        "the session's totals outlive the round")
 
 
 def test_a_control_point_turned_away_from_is_not_counted(monkeypatch, caplog):
@@ -2734,7 +2740,7 @@ def test_the_priority_target_flown_through_is_counted(monkeypatch, caplog):
 
     assert any(r.getMessage().startswith("OBJECTIVE: flew through the priority target, 44 px")
                for r in caplog.records)
-    assert _round_line(ctrl, caplog)[0].endswith("priority targets 1\x1b[0m")
+    assert _round_line(ctrl, caplog)[0].endswith("priority targets 1")
 
 
 def _resupply_round(monkeypatch, caplog, marker_px, ammo_reads):
@@ -2810,8 +2816,51 @@ def test_a_round_whose_pursuit_met_no_objective_prints_its_zeros(monkeypatch, ca
     _wait_for_pursuit_to_settle(ctrl)
 
     assert _round_line(ctrl, caplog) == [
-        "\x1b[96m🏁 ROUND OBJECTIVES — flown through: air superiority points 0, "
-        "resupply 0, priority targets 0\x1b[0m"]
+        "ROUND OBJECTIVES — flown through: air superiority points 0, "
+        "resupply 0, priority targets 0"]
+    assert ctrl.objective_session_counts() == {
+        "air_superiority": 0, "resupply": 0, "priority_target": 0}
+
+
+def test_the_rounds_line_is_not_printed_at_info(monkeypatch, caplog):
+    """Operator, 2026-10-09: "i only want it to print total counts during
+    wingman session summary." The round's end prints nothing an INFO console
+    shows."""
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.4)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="wingman"):
+        ctrl.log_round_objectives()
+    assert not any("ROUND OBJECTIVES" in r.getMessage() for r in caplog.records)
+
+
+def test_the_session_totals_are_not_read_while_the_tally_is_held(monkeypatch):
+    """A main-loop path: the lock is taken with a timeout, and a tally that is
+    busy costs the summary its block, not the shutdown."""
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture())
+    real_lock = ctrl._objective_tally_lock
+
+    class _HeldLock:
+        def acquire(self, timeout=None):
+            return False
+
+        def locked(self):
+            return True
+
+        def release(self):
+            raise AssertionError("released a lock that was never acquired")
+
+    ctrl._objective_tally_lock = _HeldLock()
+    try:
+        assert ctrl.objective_session_counts() is None
+    finally:
+        ctrl._objective_tally_lock = real_lock
 
 
 def test_a_round_with_no_pursuit_prints_no_objective_line(monkeypatch, caplog):

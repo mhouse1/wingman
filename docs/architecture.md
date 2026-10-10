@@ -657,11 +657,16 @@ any pin, and of several discs the largest, which is the nearest, is flown at. A
 point that is taken turns blue and is no longer found, which leaves the next
 red one. Design 015, "Air superiority".
 
-**The round's count (operator, 2026-10-09, `wingman/objective_tally.py`).** At
-the round's end the main loop calls `Controller.log_round_objectives()`, which
-logs one `ROUND OBJECTIVES` line: how many air superiority points, resupply
-points and priority targets the pursuit flew through. Nothing reads the score
-bar. A control point counts when its marker was followed, reached
+**The objectives flown through (operator, 2026-10-09,
+`wingman/objective_tally.py`).** The pursuit counts the air superiority points,
+resupply points and priority targets it flew through. The Wingman Session
+Summary prints the session's totals at exit
+(`Controller.objective_session_counts()` handed to
+`MissionStatsTracker.print_summary`); the operator asked for the totals there
+and nothing printed per round. At the round's end the main loop calls
+`Controller.log_round_objectives()`, which closes the round's count and logs
+its `ROUND OBJECTIVES` line at DEBUG. Nothing reads the score bar. A control
+point counts when its marker was followed, reached
 `pursuit_mode.objective_tally.near_px` across, and was then gone (operator,
 the same day). The crown counts when its marker was followed, was at least
 `near_px` across and within `pursuit_mode.objective_tally.centre_px` of the

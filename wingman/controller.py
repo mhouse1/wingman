@@ -3840,9 +3840,11 @@ class Controller:
             self._objective_tally.see(kind, size_px, time.time(), off_centre_px)
 
     def log_round_objectives(self) -> None:
-        """Print how many objectives wingman flew through this round, and start
-        the next round's count (operator, 2026-10-09). Called by the main loop
-        at the round's end; a second call in the same round prints nothing."""
+        """Close the round's count of objectives flown through and start the
+        next round's (operator, 2026-10-09). Called by the main loop at the
+        round's end; a second call in the same round logs nothing. The round's
+        line goes to DEBUG: the operator wants only the session's totals
+        printed, in the Wingman Session Summary (`objective_session_counts`)."""
         if not self._objective_tally_lock.acquire(timeout=2.0):
             logger.warning("Controller: objective tally busy — round line skipped")
             return
@@ -3852,7 +3854,19 @@ class Controller:
             if self._objective_tally_lock.locked():
                 self._objective_tally_lock.release()
         if line:
-            logger.info("\033[96m🏁 %s\033[0m", line)
+            logger.debug("%s", line)
+
+    def objective_session_counts(self) -> "dict[str, int] | None":
+        """The objectives flown through since wingman started, by kind, for the
+        Wingman Session Summary. None when the tally could not be read."""
+        if not self._objective_tally_lock.acquire(timeout=2.0):
+            logger.warning("Controller: objective tally busy — session totals skipped")
+            return None
+        try:
+            return self._objective_tally.session_counts()
+        finally:
+            if self._objective_tally_lock.locked():
+                self._objective_tally_lock.release()
 
     def _marked_objective_actuates(self, kind: "str | None") -> bool:
         return {"priority_target": self._priority_target_actuate,

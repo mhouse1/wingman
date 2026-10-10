@@ -1,8 +1,11 @@
-"""How many objectives wingman flew through in a round.
+"""How many objectives wingman flew through, by round and over the session.
 
 Operator, 2026-10-09: "at round end it prints how many air superiority
 targets, resupply, and priority targets are captured ... it should not read
-the score bar, only track when wingman flies through the targets."
+the score bar, only track when wingman flies through the targets." And later
+that day: "i only want it to print total counts during wingman session
+summary." The session's totals are what is printed, in the Wingman Session
+Summary; the round's line is kept at DEBUG.
 
 Nothing here looks at the game's own account of who holds what. A capture is
 counted from what the pursuit already sees.
@@ -91,15 +94,16 @@ class _Approach:
 
 
 class ObjectiveTally:
-    """Counts fly-throughs per kind for one round. Not thread-safe by itself:
-    the pursuit loop is its one writer, and the round line is read under the
-    controller's own lock."""
+    """Counts fly-throughs per kind, for the round and for the session. Not
+    thread-safe by itself: the pursuit loop is its one writer, and the round
+    line and the session's totals are read under the controller's own lock."""
 
     def __init__(self, near_px: "dict | None" = None,
                  centre_px: "float | None" = None) -> None:
         self._near_px = {kind: float((near_px or {}).get(kind, NEAR_PX[kind]))
                          for kind in _BY_MARKER}
         self._centre_px = CENTRE_PX if centre_px is None else float(centre_px)
+        self._session = dict.fromkeys(_NAMES, 0)
         self._start_round()
 
     def _start_round(self) -> None:
@@ -153,6 +157,7 @@ class ObjectiveTally:
             recent = now - self._counted_ts.get(kind, float("-inf")) < REFRACTORY_S
             if near and ahead and followed and not recent:
                 self._counts[kind] += 1
+                self._session[kind] += 1
                 self._counted_ts[kind] = now
                 flown.append(kind)
                 if kind == AIR_SUPERIORITY:
@@ -190,6 +195,7 @@ class ObjectiveTally:
         point was flown through. This is the resupply point's only count."""
         self._seen_anything = True
         self._counts[RESUPPLY] += 1
+        self._session[RESUPPLY] += 1
         sight = self._resupply_sight
         if sight is None:
             marker = "its marker not seen this round"
@@ -208,6 +214,11 @@ class ObjectiveTally:
 
     def counts(self) -> "dict[str, int]":
         return dict(self._counts)
+
+    def session_counts(self) -> "dict[str, int]":
+        """Every fly-through since wingman started, the round in progress
+        included. The Wingman Session Summary prints these."""
+        return dict(self._session)
 
     def round_line(self) -> str:
         return "ROUND OBJECTIVES — flown through: " + ", ".join(
