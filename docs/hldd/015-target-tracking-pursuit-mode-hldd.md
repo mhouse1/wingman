@@ -1610,13 +1610,17 @@ frame.
 flowchart TD
     A[Steering tick] --> B{Dive recovery or rearm climb-out}
     B -->|yes| R[That owns both axes]
-    B -->|no| C{Resupply has the steering}
-    C -->|yes| S[Fly at the resupply marker or its pin]
+    B -->|no| C{Resupply marker has the steering}
+    C -->|yes| S[Fly at the resupply marker]
     C -->|no| D{Crown marker in view}
-    D -->|yes| E{Visible target nearer the centre}
+    D -->|yes| K{Every rack empty}
+    K -->|yes| P[Fly at the crown marker]
+    K -->|no| E{Visible target nearer the centre}
     E -->|yes| T[Steer at the tracked target]
-    E -->|no| P[Fly at the crown marker]
-    D -->|no| F{Tracker has a target}
+    E -->|no| P
+    D -->|no| J{Every rack empty}
+    J -->|yes| Q[Resupply search on its own pin]
+    J -->|no| F{Tracker has a target}
     F -->|yes| T
     F -->|no| G{Crown pin on the ring}
     G -->|yes| H[Icon law on the crown pin]
@@ -1628,8 +1632,31 @@ flowchart TD
   on either way.
 - The pin steers only while the tracker has no target. Its points are its own,
   as the resupply pin's are, and reset on a lock or a dive recovery.
-- The resupply comes first, and with every rack empty the priority target is
-  not looked for.
+- The resupply marker comes first: in view and with the steering, it is flown
+  at whatever the crown's marker does.
+- With every rack empty (2026-10-10) the crown's marker in view is still flown
+  at. Flying through the crown takes no missile. No target is weighed against
+  it, because none is steered at then, and the gun stays off. Its pin is not
+  looked for: the resupply pin keeps the icon law until the rearm. Before that
+  day nothing of the crown was looked for with the racks empty.
+
+That rule came from one pass on 2026-10-10 (`wingman.log`, the round that began
+05:42):
+
+| Time | Log |
+|---|---|
+| 05:43:52.14 | Primary rack empty, switched to the secondary, which read 0. The 12 s ammo grace starts. |
+| 05:44:05.09 | `PRIORITY TARGET: marker in view at (738,695) (steering to it)`, `control=True` |
+| 05:44:06.47 | `PRIORITY: marker=(1012,562)`, 55 px across and 65 px off the centre. On the same engage cycle: `RESUPPLY: missiles exhausted … targets ignored until rearm` |
+| 05:44:06.60 | `HOLD[roll]: right/target -> left/search`, and a 0.15 s nose-down pulse. The marker was above and right of the centre. |
+| 05:44:07.62 | `OBJECTIVE: flew through the priority target, 55 px across and 65 px off the centre at last sight` |
+| 05:44:07.72 | The emergency climb takes the airframe (918 to 1,006 m read, 940 to 1,058 KPH). |
+
+The crown's minimap icon was still drawn in the operator's screenshot at
+05:44:15, behind and to the right of the aircraft. Whether the aircraft would
+have reached the crown with the steering kept is not known: the emergency
+climb came 1.1 s after the search took the roll. Not flown live since the
+change.
 
 ### Configuration
 
@@ -1720,6 +1747,9 @@ adds is already its order:
   the icon law picks one and keeps to the direction it has.
 - The crown is looked for before the control points. They are different game
   modes, so the order only matters for the cost of the scan.
+- The diagram's "Every rack empty" branch to the crown's marker is the crown's
+  alone (2026-10-10). With every rack empty neither a control point's disc nor
+  its pin is looked for, as before.
 
 ### Configuration and logging
 
@@ -1777,6 +1807,13 @@ For both, a marker still in view when the pursuit ends does not count: that is
 a death at the point. After a count the same kind does not count again for
 5 s, because the disc can show once more as the aircraft passes.
 
+Gone means looked for and not found (2026-10-10). With every rack empty the
+control points are no longer scanned for, and an approach to one that is open
+then is dropped, not counted. The crown's marker is scanned for throughout, so
+its rule is unchanged. Before that day the scan for both stopped with the racks
+empty, and the count at 05:44:07.62 in the table above was made a second later
+with the marker never seen to leave.
+
 **The resupply point.** Counted by the rearm the pursuit confirms from the
 ammo count, which only flying through the point gives, and by nothing else.
 Its marker was tried first, with a `near_px` of 48, and was wrong both
@@ -1815,7 +1852,7 @@ between the two.
 ### What is printed
 
 The session's totals, in the Wingman Session Summary at exit
-(`MissionStatsTracker.print_summary`), and nowhere else on the console:
+(`MissionStatsTracker.print_summary`):
 
 ```
 Objectives flown  : 67  (flown through in pursuit; Design 015)
@@ -1827,6 +1864,16 @@ Objectives flown  : 67  (flown through in pursuit; Design 015)
 The block is printed at zero too, and is left out only when the tally could
 not be read at shutdown. The totals include a round that was still in progress.
 They are not written to the `run_*_stats.json` file.
+
+The same block is printed in green each time a fly-through is counted, with
+the session's totals so far (operator, 2026-10-10: "when one of the objectives
+are flown I want it to print a block of green text, this will allow me to
+visually see if wingman registered it or wrongly registered it while it
+scrolls"). It follows the count's own `OBJECTIVE: flew through` line, at INFO,
+from `ObjectiveTally`. One formatter makes both blocks
+(`mission_stats.objectives_flown_lines`). Each line carries its own color
+codes. A marker lost without a count prints no block. Not seen on a live
+console yet.
 
 The round's own line is kept at DEBUG, for checking a count against the log.
 It is written when the main loop enters `GAME_END_B`, or the lobby for a round

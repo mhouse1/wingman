@@ -25,6 +25,7 @@ from .controller_config import ControllerConfig
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
 from .air_superiority import find_control_point_marker, find_control_point_ring_icons
+from .objective_tally import AIR_SUPERIORITY as TALLY_AIR_SUPERIORITY
 from .objective_tally import RESUPPLY as TALLY_RESUPPLY
 from .objective_tally import ObjectiveTally
 from .priority_target import find_priority_marker, find_priority_ring_icons
@@ -3793,19 +3794,26 @@ class Controller:
         "air_superiority": ("AIR SUPERIORITY", "AIRSUP", "CONTROL POINT"),
     }
 
-    def _scan_marked_objective(self, frame) -> "tuple[str | None, object, list]":
+    def _scan_marked_objective(self, frame, crown_marker_only: bool = False
+                               ) -> "tuple[str | None, object, list]":
         """This cycle's marked objective: (kind, marker, pins).
 
         A marker in view comes before any pin, of either kind (operator,
         2026-10-09: "it flies towards the A mark because it is a target on
         screen and closer rather than steer towards B"). The crown is looked
         for before the control points; the two are different game modes.
+
+        `crown_marker_only`: what is still looked for with every rack empty.
+        Flying through the crown takes no missile; its pin and the control
+        points wait for the rearm.
         """
         region = self._resupply_region_pct
         if self._priority_target_enabled:
             marker = find_priority_marker(frame, region_pct=region)
             if marker is not None:
                 return "priority_target", marker, []
+        if crown_marker_only:
+            return None, None, []
         if self._air_superiority_enabled:
             marker = find_control_point_marker(frame, region_pct=region)
             if marker is not None:
@@ -4222,31 +4230,43 @@ class Controller:
                         # superiority the enemy holds. A marker in view is flown
                         # at as the resupply marker is; off screen, the pin on
                         # the ring feeds the icon law in place of the red icons.
-                        # The resupply comes first, and with every rack empty
-                        # neither is looked for at all.
+                        # The resupply comes first. With every rack empty the
+                        # crown's marker in view is still flown at, and nothing
+                        # else of the two is looked for: on 2026-10-10 05:44:06
+                        # the racks were confirmed empty with the crown dead
+                        # ahead, 55 px across, the search took the roll and the
+                        # aircraft went by it.
                         priority_marker = None
                         priority_marker_stale = False
                         priority_pins = []
-                        if ((self._priority_target_enabled or self._air_superiority_enabled)
-                                and not resupply_search):
+                        if self._priority_target_enabled or self._air_superiority_enabled:
                             try:
                                 _kind, _marker, priority_pins = (
-                                    self._scan_marked_objective(frame))
+                                    self._scan_marked_objective(
+                                        frame, crown_marker_only=resupply_search))
                                 if _kind is not None:
                                     priority_kind = _kind
                                 if _marker is not None:
                                     self._tally_objective_seen(_kind, _marker, frame)
                                 priority_marker, priority_marker_stale = (
                                     priority_marker_memory.resolve(
-                                        _marker, time.monotonic(), seeking=True))
+                                        _marker, time.monotonic(),
+                                        # A control point's held marker is not
+                                        # carried into the resupply search.
+                                        seeking=(not resupply_search
+                                                 or priority_kind == "priority_target")))
                             except Exception:
                                 if not priority_error_logged:
                                     logger.exception(
                                         "Controller: marked objective scan failed")
                                     priority_error_logged = True
                         # A marker last seen at close range and now gone was
-                        # flown through (operator, 2026-10-09).
+                        # flown through (operator, 2026-10-09). One the search
+                        # has stopped looking for is not gone.
                         with self._objective_tally_lock:
+                            if resupply_search:
+                                self._objective_tally.drop_approaches(
+                                    (TALLY_AIR_SUPERIORITY,))
                             self._objective_tally.tick(time.time())
                         priority_actuate = self._marked_objective_actuates(priority_kind)
                         priority_name, priority_tag, priority_hud = (
@@ -4255,9 +4275,12 @@ class Controller:
                         # Against a visible target the marker has the steering
                         # when it is the nearer of the two to the screen centre,
                         # the rule the resupply marker follows (2026-10-02).
+                        # With every rack empty no target is steered at, so
+                        # none is weighed against it.
                         priority_proposed = (
                             priority_marker is not None and not resupply_control
-                            and not (bool(visible) and err is not None
+                            and not (not resupply_search
+                                     and bool(visible) and err is not None
                                      and not marker_nearer_than_target(
                                          priority_marker, err, err_y,
                                          frame.shape[1], frame.shape[0])))

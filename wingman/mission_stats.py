@@ -54,6 +54,16 @@ _OBJECTIVE_ROWS = (
 )
 
 
+def objectives_flown_lines(objectives: dict) -> "list[str]":
+    """The objectives block: the total, then a row for each kind, at zero too.
+    The session summary prints it, and the pursuit's tally prints it in green
+    each time it counts one (`ObjectiveTally`, operator 2026-10-10)."""
+    flown = [(label, int(objectives.get(kind, 0))) for kind, label in _OBJECTIVE_ROWS]
+    return [f"Objectives flown  : {sum(count for _label, count in flown)}  "
+            f"(flown through in pursuit; Design 015)"
+            ] + [f"  {label:<15} : {count}" for label, count in flown]
+
+
 def _fmt_duration(seconds: float) -> str:
     s = int(seconds)
     h, rem = divmod(s, 3600)
@@ -464,11 +474,7 @@ class MissionStatsTracker:
         # wingman session summary." Shown at zero too: a session that flew
         # through nothing is what the line is read for.
         if objectives is not None:
-            flown = [(label, int(objectives.get(kind, 0))) for kind, label in _OBJECTIVE_ROWS]
-            lines.append(
-                f"Objectives flown  : {sum(count for _label, count in flown)}  "
-                f"(flown through in pursuit; Design 015)")
-            lines += [f"  {label:<15} : {count}" for label, count in flown]
+            lines += objectives_flown_lines(objectives)
         # CR-018-17: a reflex that raised is otherwise invisible here.
         failures = s.get("suppressed_failures") or {}
         if failures:

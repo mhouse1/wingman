@@ -5,7 +5,9 @@ targets, resupply, and priority targets are captured ... it should not read
 the score bar, only track when wingman flies through the targets." And later
 that day: "i only want it to print total counts during wingman session
 summary." The session's totals are what is printed, in the Wingman Session
-Summary; the round's line is kept at DEBUG.
+Summary; the round's line is kept at DEBUG. The next day: "when one of the
+objectives are flown I want it to print a block of green text", so each count
+also prints the summary's block with the totals so far, in green.
 
 Nothing here looks at the game's own account of who holds what. A capture is
 counted from what the pursuit already sees.
@@ -25,6 +27,10 @@ range and ahead of the nose, and then was gone. Lost at close range out at the
 side of the screen, it was passed beside. Either kind's marker lost while
 still small was turned away from, or hidden.
 
+Gone means looked for and not found. A kind the pursuit stops scanning for
+(the control points, with every rack empty) has its approach dropped, not
+counted.
+
 For the resupply point it is the ammo count going up, which only flying
 through the point gives. Its marker is not used: in the first live sessions,
 2026-10-09, the marker's size at last sight was wrong both ways. A rearm
@@ -40,8 +46,11 @@ import logging
 from dataclasses import dataclass
 
 from .config_schema import schema_default
+from .mission_stats import objectives_flown_lines
 
 logger = logging.getLogger(__name__)
+
+_GREEN, _RESET = "\033[92m", "\033[0m"
 
 AIR_SUPERIORITY = "air_superiority"
 RESUPPLY = "resupply"
@@ -171,6 +180,7 @@ class ObjectiveTally:
                         "OBJECTIVE: flew through %s, %.0f px across and %.0f px off the "
                         "centre at last sight (%d this round)", _singular(kind),
                         approach.last_px, approach.last_off_px, self._counts[kind])
+                self._log_flown_block()
             else:
                 logger.debug(
                     "OBJECTIVE: %s lost at %.0f px, %.0f px off the centre, largest "
@@ -185,10 +195,19 @@ class ObjectiveTally:
                     else "counted a moment ago")
         return flown
 
-    def drop_approaches(self) -> None:
+    def drop_approaches(self, kinds: "tuple[str, ...] | None" = None) -> None:
         """The pursuit ended (a death, a takeover, the round): a marker in view
-        at that moment was not flown through."""
-        self._approach.clear()
+        at that moment was not flown through.
+
+        With `kinds`, only theirs: the pursuit has stopped looking for them
+        (every rack empty), and a marker nobody looks for is not gone. On
+        2026-10-10 05:44:07 the crown was counted a second after its scan was
+        switched off, with its marker 55 px across and dead ahead."""
+        if kinds is None:
+            self._approach.clear()
+            return
+        for kind in kinds:
+            self._approach.pop(kind, None)
 
     def note_rearm(self, now: float) -> None:
         """The pursuit confirmed a rearm from the ammo count: the resupply
@@ -204,6 +223,16 @@ class ObjectiveTally:
                       "off the centre" % (now - sight[0], sight[1], sight[2]))
         logger.info("OBJECTIVE: flew through the resupply point, rearm confirmed, %s "
                     "(%d this round)", marker, self._counts[RESUPPLY])
+        self._log_flown_block()
+
+    def _log_flown_block(self) -> None:
+        """Operator, 2026-10-10: "when one of the objectives are flown I want it
+        to print a block of green text, this will allow me to visually see if
+        wingman registered it or wrongly registered it while it scrolls." The
+        session summary's own block, with the totals so far. Every line carries
+        its own color codes, so one shown by itself (grep) is still green."""
+        logger.info("\n".join(
+            _GREEN + line + _RESET for line in objectives_flown_lines(self._session)))
 
     def note_round_activity(self) -> None:
         """A pursuit ran, so the round has a line to print even with no

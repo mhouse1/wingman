@@ -1354,7 +1354,10 @@ pursuit_mode:
   # enabled scans for both and logs PRIORITY lines; actuate lets them steer. The
   # marker is flown at as the resupply marker is, unless the resupply has the
   # steering or a visible target is nearer the screen centre; the pin feeds the
-  # icon law in place of the red icons while the tracker has no target. On 2,225
+  # icon law in place of the red icons while the tracker has no target. With
+  # every rack empty the marker in view is still flown at (2026-10-10 05:44:06:
+  # the resupply search took the roll with the crown dead ahead, 55 px across);
+  # the pin is not, the resupply pin has the search. On 2,225
   # archived frames the marker was found in 22 and the pin in 95, and all 22
   # markers and 44 of 44 sampled pins were the crown.
   priority_target:
@@ -1380,7 +1383,10 @@ pursuit_mode:
   # bar, only track when wingman flies through the targets". The session's totals
   # are printed in the Wingman Session Summary at exit, and the round's own
   # ROUND OBJECTIVES line goes to DEBUG (operator, the same day: "i only want it
-  # to print total counts during wingman session summary"). A control point
+  # to print total counts during wingman session summary"). Each count also
+  # prints the summary's block in green with the totals so far (operator,
+  # 2026-10-10: "when one of the objectives are flown I want it to print a block
+  # of green text"). A control point
   # counts as flown through when its
   # disc was followed for half a second or more, reached near_px across, and was
   # then gone for a second (operator, the same day: "based on if the marker

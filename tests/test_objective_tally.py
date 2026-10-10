@@ -27,6 +27,18 @@ from wingman.objective_tally import (
 )
 
 
+def _green_block(air_superiority, resupply, priority_target):
+    """The block a count prints: the session summary's, every line green."""
+    lines = [
+        "Objectives flown  : %d  (flown through in pursuit; Design 015)" % (
+            air_superiority + resupply + priority_target),
+        "  air superiority : %d" % air_superiority,
+        "  resupply        : %d" % resupply,
+        "  priority target : %d" % priority_target,
+    ]
+    return "\n".join("\033[92m" + line + "\033[0m" for line in lines)
+
+
 def _approach(tally, kind, sizes, start=100.0, step=0.15, off_centre=None):
     """One sighting per scan, the disc `sizes` px across in turn and, when
     given, `off_centre` px from the screen centre in turn. Returns the time of
@@ -50,7 +62,8 @@ def test_a_marker_followed_to_close_range_and_then_gone_was_flown_through(caplog
     assert tally.counts() == {AIR_SUPERIORITY: 1, RESUPPLY: 0, PRIORITY_TARGET: 0}
     assert caplog.messages == [
         "OBJECTIVE: flew through an air superiority point: its marker reached 58 px "
-        "across and was gone, last seen at 58 px and 0 px off the centre (1 this round)"]
+        "across and was gone, last seen at 58 px and 0 px off the centre (1 this round)",
+        _green_block(1, 0, 0)]
 
 
 def test_a_marker_lost_while_still_small_was_not_flown_through(caplog):
@@ -79,7 +92,8 @@ def test_an_air_superiority_point_counts_wherever_on_the_screen_its_marker_went(
 
     assert caplog.messages == [
         "OBJECTIVE: flew through an air superiority point: its marker reached 60 px "
-        "across and was gone, last seen at 60 px and 560 px off the centre (1 this round)"]
+        "across and was gone, last seen at 60 px and 560 px off the centre (1 this round)",
+        _green_block(1, 0, 0)]
 
 
 def test_an_air_superiority_marker_that_reached_large_size_counts_whatever_it_was_last(caplog):
@@ -233,6 +247,26 @@ def test_a_marker_in_view_when_the_pursuit_ends_was_not_flown_through():
     assert tally.counts()[AIR_SUPERIORITY] == 0
 
 
+def test_a_marker_the_pursuit_stopped_looking_for_is_not_gone():
+    """2026-10-10 05:44:07: the crown was counted a second after its scan was
+    switched off (every rack empty), its marker 55 px across and dead ahead.
+    Not scanned is not gone."""
+    tally = ObjectiveTally()
+    last = _approach(tally, AIR_SUPERIORITY, [24, 30, 40, 50, 60])
+    tally.drop_approaches((AIR_SUPERIORITY,))
+
+    assert tally.tick(last + LOST_S) == []
+    assert tally.counts()[AIR_SUPERIORITY] == 0
+
+
+def test_dropping_one_kind_leaves_the_other_kinds_approach_open():
+    tally = ObjectiveTally()
+    last = _approach(tally, PRIORITY_TARGET, [20, 26, 32, 38, 44])
+    tally.drop_approaches((AIR_SUPERIORITY,))
+
+    assert tally.tick(last + LOST_S) == [PRIORITY_TARGET]
+
+
 def test_the_round_line_names_the_three_in_the_operators_order():
     tally = ObjectiveTally()
     for start in (100.0, 120.0):
@@ -261,7 +295,8 @@ def test_a_rearm_is_the_resupply_points_fly_through(caplog):
     assert tally.counts() == {AIR_SUPERIORITY: 0, RESUPPLY: 1, PRIORITY_TARGET: 0}
     assert caplog.messages == [
         "OBJECTIVE: flew through the resupply point, rearm confirmed, its marker last "
-        "seen 3.7 s before, 25 px across and 60 px off the centre (1 this round)"]
+        "seen 3.7 s before, 25 px across and 60 px off the centre (1 this round)",
+        _green_block(0, 1, 0)]
 
 
 @pytest.mark.parametrize("size, off", [(56, 46), (51, 8)])
@@ -296,7 +331,8 @@ def test_a_rearm_with_no_marker_seen_says_so(caplog):
 
     assert caplog.messages == [
         "OBJECTIVE: flew through the resupply point, rearm confirmed, its marker not "
-        "seen this round (1 this round)"]
+        "seen this round (1 this round)",
+        _green_block(0, 1, 0)]
 
 
 def test_the_rearm_count_does_not_carry_into_the_next_round(caplog):
@@ -391,6 +427,80 @@ def test_an_objective_that_was_not_counted_is_not_in_the_session_totals():
     tally.tick(last + LOST_S)
 
     assert tally.session_counts() == {AIR_SUPERIORITY: 0, RESUPPLY: 0, PRIORITY_TARGET: 0}
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-10: "while wingman is running when one of the objectives
+# are flown I want it to print a block of green text, this will allow me to
+# visually see if wingman registered it or wrongly registered it while it
+# scrolls", with the session summary's block pasted as the text.
+# ---------------------------------------------------------------------------
+
+def test_each_count_prints_the_operators_block_in_green_with_the_sessions_totals(caplog):
+    """The pasted block: seven rearms and one crown, over two rounds. The
+    totals are the session's, so the round that ended is still in them."""
+    tally = ObjectiveTally()
+    for rearm in range(6):
+        tally.note_rearm(100.0 + rearm)
+    tally.end_round()
+    tally.note_rearm(200.0)
+
+    with caplog.at_level(logging.INFO, logger="wingman.objective_tally"):
+        last = _approach(tally, PRIORITY_TARGET, [20, 26, 32, 38, 44], start=300.0)
+        assert tally.tick(last + LOST_S) == [PRIORITY_TARGET]
+
+    line, block = caplog.messages
+    assert line.startswith("OBJECTIVE: flew through the priority target")
+    assert block == _green_block(0, 7, 1)
+    assert block.replace("\033[92m", "").replace("\033[0m", "") == (
+        "Objectives flown  : 8  (flown through in pursuit; Design 015)\n"
+        "  air superiority : 0\n"
+        "  resupply        : 7\n"
+        "  priority target : 1")
+    assert all(row.startswith("\033[92m") and row.endswith("\033[0m")
+               for row in block.split("\n")), "a line shown by itself is still green"
+
+
+def test_every_kind_of_count_prints_the_block(caplog):
+    tally = ObjectiveTally()
+    with caplog.at_level(logging.INFO, logger="wingman.objective_tally"):
+        last = _approach(tally, AIR_SUPERIORITY, [24, 30, 40, 50, 60])
+        tally.tick(last + LOST_S)
+        tally.note_rearm(last + 2.0)
+        last = _approach(tally, PRIORITY_TARGET, [20, 26, 32, 38, 44], start=200.0)
+        tally.tick(last + LOST_S)
+
+    blocks = [m for m in caplog.messages if m.startswith("\033[92mObjectives flown")]
+    assert blocks == [_green_block(1, 0, 0), _green_block(1, 1, 0), _green_block(1, 1, 1)]
+
+
+def test_a_marker_lost_without_a_count_prints_no_block(caplog):
+    """Turned away from, passed beside, or dropped: nothing was registered."""
+    tally = ObjectiveTally()
+    with caplog.at_level(logging.DEBUG, logger="wingman.objective_tally"):
+        last = _approach(tally, AIR_SUPERIORITY, [20, 21, 22, 22, 23])
+        tally.tick(last + LOST_S)
+        last = _approach(tally, PRIORITY_TARGET, [20, 30, 40, 44, 51], start=200.0,
+                         off_centre=[100, 200, 300, 440, 562])
+        tally.tick(last + LOST_S)
+        _approach(tally, AIR_SUPERIORITY, [24, 30, 40, 50, 60], start=300.0)
+        tally.drop_approaches()
+        tally.tick(400.0)
+
+    assert not any("Objectives flown" in m for m in caplog.messages)
+    assert tally.session_counts() == {AIR_SUPERIORITY: 0, RESUPPLY: 0, PRIORITY_TARGET: 0}
+
+
+def test_the_block_is_the_session_summarys_own(caplog):
+    """One formatter for both: what scrolls past is what the summary will say."""
+    from wingman.mission_stats import objectives_flown_lines
+
+    tally = ObjectiveTally()
+    with caplog.at_level(logging.INFO, logger="wingman.objective_tally"):
+        tally.note_rearm(100.0)
+
+    block = caplog.messages[-1].replace("\033[92m", "").replace("\033[0m", "")
+    assert block.split("\n") == objectives_flown_lines(tally.session_counts())
 
 
 def test_the_summarys_rows_are_the_tallys_kinds():

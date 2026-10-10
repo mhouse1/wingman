@@ -2332,24 +2332,90 @@ def test_shadow_mode_leaves_the_search_to_the_red_icons(monkeypatch, caplog):
     assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
 
 
-def test_with_every_rack_empty_the_priority_target_is_not_looked_for(monkeypatch, caplog):
-    """Resupply mode ignores targets until a rearm, the priority target too."""
+def _empty_racks():
     analyzer = _TelemetryAnalyzer()
     analyzer.ammo = 0
+    return analyzer
+
+
+def _empty_rack_pursuit(monkeypatch, caplog, **kwargs):
+    """A pin pursuit whose first ammo read confirms every rack empty. Returns
+    the controller, what was logged, the scan counts and where in the log the
+    racks were confirmed empty: the steering cycles after it are the resupply
+    search's."""
     _quiet_search(monkeypatch)
     ctrl, messages, calls = _pin_pursuit(
-        monkeypatch, caplog, marker=_priority_marker(1400, 800), pins=[_pin(0)],
-        analyzer=analyzer, empty_confirm_reads=1, resupply_priority_actuate=True,
-        run_s=1.6, pursue_kwargs={"weapon_already_switched": True})
+        monkeypatch, caplog, analyzer=_empty_racks(), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=1.6,
+        pursue_kwargs={"weapon_already_switched": True}, **kwargs)
+    empty_at = next(i for i, m in enumerate(messages)
+                    if m.startswith("RESUPPLY: missiles exhausted"))
+    return ctrl, messages, calls, empty_at
+
+
+def test_with_every_rack_empty_the_crown_marker_in_view_is_still_flown_at(monkeypatch, caplog):
+    """2026-10-10 05:44:06: the racks were confirmed empty with the crown's
+    marker dead ahead, 55 px across. The resupply search took the roll
+    (`right/target -> left/search`) and the aircraft went by it. Flying through
+    the crown takes no missile, so its marker keeps the steering."""
+    _ctrl, messages, _calls, empty_at = _empty_rack_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800), pins=[_pin(0)])
+
+    search_at = next(i for i, m in enumerate(messages)
+                     if m.startswith("RESUPPLY: spent") and "search=True" in m)
+    assert any(m.startswith("PRIORITY: marker=(1400,800)") and "control=True" in m
+               for m in messages[search_at:]), "the marker lost the steering to the search"
+    assert any(m.startswith("HOLD[roll]") and "-> right/target" in m for m in messages)
+    assert not any(m.startswith("HOLD[roll]") and "/search" in m for m in messages), (
+        "the roll toward the marker was given up")
+    assert not any(m.startswith("ICONPTS:") for m in messages[empty_at:]), (
+        "the resupply pin's law flew while the crown was in view")
+
+
+def test_with_every_rack_empty_no_target_takes_the_steering_from_the_crown(monkeypatch, caplog):
+    """The target is 190 px left of the centre, the marker 480 px from it, to
+    the right and below. With missiles the nearer target has the steering;
+    with every rack empty no target is steered at, and the marker has it."""
+    _ctrl, messages, _calls, empty_at = _empty_rack_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800),
+        tracker=_TrackerStub(visible=True, error_norm=-0.2, error_norm_y=0.0))
+
+    before = [m for m in messages[:empty_at] if m.startswith("HOLD[roll]")]
+    after = [m for m in messages[empty_at:]
+             if m.startswith("HOLD[roll]") and "loop exit" not in m]
+    assert before and all("-> left/target" in m for m in before), before
+    assert after and all("-> right/target" in m for m in after), after
+
+
+def test_with_every_rack_empty_the_resupply_marker_still_comes_first(monkeypatch, caplog):
+    """The resupply marker in view on the left, the crown's on the right: the
+    rearm is what the search is for."""
+    monkeypatch.setattr(controller_module, "find_resupply_marker",
+                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    _ctrl, messages, _calls, empty_at = _empty_rack_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 600))
+
+    after = [m for m in messages[empty_at:]
+             if m.startswith("HOLD[roll]") and "loop exit" not in m]
+    assert after and all("-> left/target" in m for m in after), after
+    assert any(m.startswith("PRIORITY: marker=(1400,600)") and "control=False" in m
+               for m in messages[empty_at:])
+
+
+def test_with_every_rack_empty_the_priority_pin_is_not_looked_for(monkeypatch, caplog):
+    """Only the marker in view is flown at with the racks empty. The pin on the
+    ring would turn the search away from the resupply point."""
+    _ctrl, messages, calls, _empty_at = _empty_rack_pursuit(
+        monkeypatch, caplog, pins=[_pin(0)])
 
     # The cycle that confirms the racks empty had already scanned; from the next
-    # one on (the first to log search=True) nothing is.
+    # one on (the first to log search=True) only the marker is.
     search_at = next(i for i, m in enumerate(messages)
                      if m.startswith("RESUPPLY: spent") and "search=True" in m)
     assert any(m.startswith("PRIORITY") for m in messages[:search_at]), "it was followed before"
     assert not any(m.startswith("PRIORITY") for m in messages[search_at:])
-    assert any(m.startswith("HOLD[roll]") and "right/target -> left/search" in m
-               for m in messages), "the roll toward the marker was not given up"
+    assert calls["pins"] <= 2 < calls["marker"], calls
+    assert any(m.startswith("HOLD[roll]") and "-> left/search" in m for m in messages)
 
 
 class _CropCapture(_CaptureStub):
@@ -2803,6 +2869,25 @@ def test_a_marker_in_view_when_the_aircraft_dies_is_not_counted(monkeypatch, cap
         run_s=2.0)
 
     assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
+    assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_a_marker_the_empty_rack_search_stops_looking_for_is_not_counted(monkeypatch, caplog):
+    """2026-10-10 05:44:07: `flew through the priority target` was logged a
+    second after the racks were confirmed empty, because the scan had stopped,
+    not because the marker had gone. The crown's marker is now scanned for
+    throughout; the control points are not, and their disc, 60 px across and
+    dead ahead when the search begins, is dropped and not counted."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(960, 600, 60),
+        analyzer=_SequenceAnalyzer([2, 2, 2, 0]), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=3.2)
+
+    empty_at = next(i for i, m in enumerate(messages)
+                    if m.startswith("RESUPPLY: missiles exhausted"))
+    assert any(m.startswith("AIRSUP: marker=(960,600)") for m in messages[:empty_at])
+    assert not any(m.startswith("OBJECTIVE:") for m in messages), (
+        "an approach was closed for a marker nobody was looking for")
     assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
 
 
