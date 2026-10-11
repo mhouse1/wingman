@@ -884,6 +884,18 @@ SCHEMA = Section(
             # config.yaml's own comment on this key for the phased rollout.
             "sustained_hold_enabled": BOOL,
             "pitch_lead_s": SECONDS,   # CR-018-01
+            # wingman/hold_model.py: a target hold timed from the lag between a
+            # key and the picture. See config.yaml's own comment for the
+            # measurement. Off without the key, so a config that predates it
+            # steers as it did.
+            "hold_model": Section(children={
+                "enabled": Leaf(types=(bool,), default=False),
+                "lag_s": Leaf(types=NUMBER, minimum=0, default=0.25),
+                # Half-frames of error a second of key takes off.
+                "pitch_rate": Leaf(types=NUMBER, minimum=0.01, default=1.15),
+                "roll_rate": Leaf(types=NUMBER, minimum=0.01, default=0.4),
+                "min_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.08),
+            }),
         }),
 
         # CR-018-04: only the red range remains (the nameplate mask).

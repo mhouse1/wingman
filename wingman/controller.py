@@ -1,5 +1,6 @@
 import contextlib
 import ctypes
+import functools
 import logging
 import math
 import sys
@@ -19,6 +20,7 @@ from .full_map import fmt_fix
 from .survey import SurveyPlan, battle_heading, carry_position, first_battle_index, radial
 from . import keybindings as _keybindings
 from .actuator import Actuator
+from .hold_model import HoldModel, PictureClock
 from .hold_tactic import HoldTactic
 from .hotkeys import register_hotkeys as _register_hotkeys
 from .controller_config import ControllerConfig
@@ -195,6 +197,39 @@ INJECTABLE_KEYS = (
     SWITCH_WEAPON,
     'escape',
 )
+
+# The steering axis each tracking key moves and its sign for wingman/hold_model.py:
+# +1 is the key that lowers a positive tracker error (target right of, or below,
+# the centre).
+_HOLD_AXIS_KEYS = {
+    ROLL_RIGHT_KEY: ("roll", 1), ROLL_LEFT_KEY: ("roll", -1),
+    NOSE_DOWN_KEY: ("pitch", 1), NOSE_UP_KEY: ("pitch", -1),
+}
+# The hold functions press and let go in milliseconds; a wait this long means
+# an injection call is stuck, and the caller moves on without the lock.
+_HOLD_LOCK_TIMEOUT_S = 2.0
+
+
+def _hold_state(method):
+    """Run a method that changes the tracking holds under `Controller._hold_lock`.
+
+    The timed release (`tracking.hold_model`) lets a key go from a timer thread
+    while the steering loop, a cancel or a takeover may be changing the same
+    hold. Without the lock a release landing between another thread's press and
+    its state write leaves a key down that nothing knows about.
+    """
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        if not self._hold_lock.acquire(timeout=_HOLD_LOCK_TIMEOUT_S):
+            logger.warning("Controller: %s skipped, hold lock busy for %.1fs",
+                           method.__name__, _HOLD_LOCK_TIMEOUT_S)
+            return None
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._hold_lock.release()
+    return locked
+
 
 # Region name constants — used as log labels in click_grid_region and elsewhere.
 # Defining them as constants means the string is written once; a rename is a
@@ -502,6 +537,27 @@ class Controller:
         self._pitch_lead_s = max(0.0, float((_c.tracking or {}).get("pitch_lead_s", 0.15)))
         # (timestamp, error_norm_y) of the previous pitch sample, for the rate.
         self._pitch_last_sample: "tuple[float, float] | None" = None
+        # tracking.hold_model (wingman/hold_model.py): the picture answers a
+        # steering key about a quarter of a second late, so a target hold is
+        # timed from the error and the key time not yet in the picture, and a
+        # timer lets the key go. Off, the holds end as before: in the deadband,
+        # or on pitch_lead_s above.
+        _hm = (_c.tracking or {}).get("hold_model") or {}
+
+        def _hm_get(key):
+            return _hm.get(key, schema_default("tracking.hold_model." + key))
+        self._hold_min_pulse_s = max(0.0, float(_hm_get("min_pulse_s")))
+        self._hold_models: "dict[str, HoldModel]" = {}
+        if bool(_hm_get("enabled")):
+            _lag = float(_hm_get("lag_s"))
+            self._hold_models = {
+                "roll": HoldModel(float(_hm_get("roll_rate")), _lag),
+                "pitch": HoldModel(float(_hm_get("pitch_rate")), _lag),
+            }
+        # Guards _roll_held, _roll_hold_reason, _pitch_held and the timers
+        # below (see _hold_state). Re-entrant: the hold methods call each other.
+        self._hold_lock = threading.RLock()
+        self._hold_timers: "dict[str, threading.Timer | None]" = {"roll": None, "pitch": None}
         # ADR 136: TargetTracker reference, wired in from main.py after both
         # objects exist (Controller cannot construct it — it needs the
         # Analyzer-independent HSV/contour config TrackingHudHandler owns).
@@ -1860,6 +1916,7 @@ class Controller:
         cooldown_sec: float = 0.15,
         ignore_cancel: bool = False,
         sustained_hold: bool = False,
+        seen_at: "float | None" = None,
     ) -> "str | None":
         """Apply roll correction toward a target.
 
@@ -1888,13 +1945,17 @@ class Controller:
                             error_norm re-enters the deadband or changes sign,
                             the same shape Controller.boundary_turn_mode
                             already uses — see _sustained_roll_hold.
+            seen_at:    time.monotonic() at which the picture error_norm was
+                        read from was first grabbed (PictureClock); None for a
+                        picture grabbed just now. Only tracking.hold_model
+                        reads it, under sustained_hold.
 
         Returns:
             'left', 'right', or None if suppressed by deadband (both modes)
             or cooldown (tap mode only).
         """
         if sustained_hold:
-            return self._sustained_roll_hold(error_norm, deadband)
+            return self._sustained_roll_hold(error_norm, deadband, seen_at)
         if abs(error_norm) <= deadband:
             return None
         now = time.time()
@@ -1919,6 +1980,8 @@ class Controller:
         cooldown_sec: float = 0.15,
         ignore_cancel: bool = False,
         sustained_hold: bool = False,
+        seen_at: "float | None" = None,
+        down_allowed: bool = True,
     ) -> "str | None":
         """Apply pitch correction toward a target (HLDD 005, 2026-09-21).
 
@@ -1959,13 +2022,19 @@ class Controller:
                             neutral here (release_pitch_hold), the operator
                             directive behind ROLL_LEFT_KEY's search hold was
                             roll-axis only.
+            seen_at:    See orient_nose_to_target's own docstring.
+            down_allowed: False while the caller's dive guard is active. Only
+                        tracking.hold_model reads it: with a target moving down
+                        the screen it may press nose-down before the error is
+                        positive, which a caller testing the error's sign
+                        would let through.
 
         Returns:
             'up', 'down', or None if suppressed by deadband (both modes)
             or cooldown (tap mode only).
         """
         if sustained_hold:
-            return self._sustained_pitch_hold(error_norm_y, deadband)
+            return self._sustained_pitch_hold(error_norm_y, deadband, seen_at, down_allowed)
         if abs(error_norm_y) <= deadband:
             return None
         now = time.time()
@@ -1994,37 +2063,117 @@ class Controller:
         if key in _WATCHED_MANEUVER_KEYS:
             self._inc_programmatic_key(key)
         self._climb_key(key, press=True, action=action)
+        self._note_hold_key(key, pressed=True)
 
     def _release_tracking_key(self, key: str, action: str) -> None:
         """Release a key `_press_tracking_key` pressed."""
         self._climb_key(key, press=False, action=action)
+        self._note_hold_key(key, pressed=False)
         if key in _WATCHED_MANEUVER_KEYS:
             self._arm_release_grace(key)
             self._dec_programmatic_key(key)
 
-    def _sustained_roll_hold(self, error_norm: float, deadband: float) -> "str | None":
+    def _note_hold_key(self, key: str, pressed: bool) -> None:
+        """Tell the axis's hold model a tracking key went down or came up. Every
+        hold on the axis counts, the search roll and the icon's included: the
+        nose is still moving from them when a target takes the axis."""
+        axis, sign = _HOLD_AXIS_KEYS.get(key, (None, 0))
+        model = self._hold_models.get(axis)
+        if model is not None:
+            model.key(sign if pressed else 0, time.monotonic())
+
+    def _hold_plan(self, axis: str, error: float, deadband: float,
+                   seen_at: "float | None"):
+        """The hold model's plan for `error` on `axis`, or None with the model
+        off (tracking.hold_model.enabled)."""
+        model = self._hold_models.get(axis)
+        if model is None:
+            return None
+        now = time.monotonic()
+        return model.plan(error, now if seen_at is None else seen_at, now,
+                          deadband=deadband, min_pulse_s=self._hold_min_pulse_s)
+
+    def _cancel_hold_timer(self, axis: str) -> None:
+        """Drop the axis's timed release. Called under _hold_lock."""
+        timer = self._hold_timers.get(axis)
+        if timer is not None:
+            timer.cancel()
+            self._hold_timers[axis] = None
+
+    def _arm_hold_timer(self, axis: str, seconds: float) -> None:
+        """Let the axis's target hold go `seconds` from now unless a later
+        steering tick decides again first. Called under _hold_lock.
+
+        A timer and not the next tick: a tick comes every 0.17 s at best and
+        the hold a small error needs is shorter than that."""
+        self._cancel_hold_timer(axis)
+        timer = threading.Timer(seconds, self._hold_timer_fired, args=(axis, seconds))
+        timer.daemon = True
+        timer.name = "hold-release-%s" % axis
+        self._hold_timers[axis] = timer
+        timer.start()
+
+    def _hold_timer_fired(self, axis: str, seconds: float) -> None:
+        timer = threading.current_thread()
+        if not self._hold_lock.acquire(timeout=_HOLD_LOCK_TIMEOUT_S):
+            logger.warning("Controller: timed %s release skipped, hold lock busy", axis)
+            return
+        try:
+            if self._hold_timers.get(axis) is not timer:
+                return      # a later decision replaced or cancelled this one
+            self._hold_timers[axis] = None
+            why = "timed %.2fs" % seconds
+            if axis == "roll":
+                self.release_roll_hold(why=why)
+            else:
+                self.release_pitch_hold(why=why)
+        finally:
+            self._hold_lock.release()
+
+    @_hold_state
+    def _sustained_roll_hold(self, error_norm: float, deadband: float,
+                             seen_at: "float | None" = None) -> "str | None":
         """Sustained-hold roll state machine (HLDD 005, 2026-09-23) — the
         `sustained_hold=True` branch of `orient_nose_to_target`. Holds a key
         until `error_norm` re-enters the deadband or changes sign, instead
         of computing a bounded tap; see that method's docstring for the
         public contract and this design's own HLDD section for why.
+
+        With tracking.hold_model on, the model decides instead: the hold ends
+        once the travel already commanded covers the error (`lead`), a timer
+        lets the key go after the time the rest needs (`timed`), and a target
+        moving across the screen may be led from inside the deadband.
         """
-        if abs(error_norm) <= deadband:
-            self.release_roll_hold(why="deadband err=%+.3f" % error_norm)
-            return None
-        desired = "left" if error_norm < 0 else "right"
-        if self._roll_held == desired and self._roll_hold_reason == "target":
-            return desired  # already holding the right key for the right reason
-        prev = (self._roll_held, self._roll_hold_reason)
-        if self._roll_held is not None:
-            self._release_tracking_key(
-                ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
-                "tracking_roll")
-        self._press_tracking_key(
-            ROLL_LEFT_KEY if desired == "left" else ROLL_RIGHT_KEY, "tracking_roll")
-        self._roll_held = desired
-        self._roll_hold_reason = "target"
-        self._log_roll_hold(prev, "target err=%+.3f" % error_norm)
+        plan = self._hold_plan("roll", error_norm, deadband, seen_at)
+        if plan is None:
+            if abs(error_norm) <= deadband:
+                self.release_roll_hold(why="deadband err=%+.3f" % error_norm)
+                return None
+            desired = "left" if error_norm < 0 else "right"
+            why = "target err=%+.3f" % error_norm
+        else:
+            if plan.sign == 0:
+                self.release_roll_hold(
+                    why="deadband err=%+.3f" % error_norm if abs(error_norm) <= deadband
+                    else "lead err=%+.3f pred=%+.3f" % (error_norm, plan.predicted))
+                return None
+            desired = "left" if plan.sign < 0 else "right"
+            why = "target err=%+.3f pred=%+.3f hold=%.2fs" % (
+                error_norm, plan.predicted, plan.seconds)
+        if not (self._roll_held == desired and self._roll_hold_reason == "target"):
+            # Not already holding the right key for the right reason.
+            prev = (self._roll_held, self._roll_hold_reason)
+            if self._roll_held is not None:
+                self._release_tracking_key(
+                    ROLL_LEFT_KEY if self._roll_held == "left" else ROLL_RIGHT_KEY,
+                    "tracking_roll")
+            self._press_tracking_key(
+                ROLL_LEFT_KEY if desired == "left" else ROLL_RIGHT_KEY, "tracking_roll")
+            self._roll_held = desired
+            self._roll_hold_reason = "target"
+            self._log_roll_hold(prev, why)
+        if plan is not None:
+            self._arm_hold_timer("roll", plan.seconds)
         return desired
 
     # A pitch sample older than this gives no usable rate (the ambient tick
@@ -2033,7 +2182,10 @@ class Controller:
     # Closer samples than this give a rate dominated by pixel noise.
     _PITCH_RATE_MIN_GAP_S = 0.02
 
-    def _sustained_pitch_hold(self, error_norm_y: float, deadband: float) -> "str | None":
+    @_hold_state
+    def _sustained_pitch_hold(self, error_norm_y: float, deadband: float,
+                              seen_at: "float | None" = None,
+                              down_allowed: bool = True) -> "str | None":
         """Pitch's own instance of `_sustained_roll_hold` — no hold-reason
         state, since pitch has no search default to distinguish from.
 
@@ -2042,7 +2194,33 @@ class Controller:
         known, and a hold is released
         once the error extrapolated `_pitch_lead_s` ahead is inside the
         deadband or past centre. No key is pressed in that case either: the
-        error is already closing fast enough on its own."""
+        error is already closing fast enough on its own.
+
+        With tracking.hold_model on, the model decides instead of the
+        two-sample rate (which reads zero on a repeated picture, and during
+        the lag after a press): a timer lets the key go after the time the
+        rest of the error needs (`timed`), and a target moving across the
+        screen may be led from inside the deadband. `down_allowed` False is
+        the caller's dive guard: the model may want nose-down with the target
+        still above the centre, which the caller's own test of the error's
+        sign does not catch."""
+        plan = self._hold_plan("pitch", error_norm_y, deadband, seen_at)
+        if plan is not None:
+            if plan.sign == 0:
+                self.release_pitch_hold(
+                    why="deadband err_y=%+.3f" % error_norm_y
+                    if abs(error_norm_y) <= deadband
+                    else "lead err_y=%+.3f pred=%+.3f" % (error_norm_y, plan.predicted))
+                return None
+            if plan.sign > 0 and not down_allowed:
+                self.release_pitch_hold(
+                    why="dive guard pred=%+.3f" % plan.predicted)
+                return None
+            return self._hold_pitch_toward(
+                "up" if plan.sign < 0 else "down",
+                "target err_y=%+.3f pred=%+.3f hold=%.2fs" % (
+                    error_norm_y, plan.predicted, plan.seconds),
+                plan.seconds)
         now = time.time()
         prev_sample = self._pitch_last_sample
         self._pitch_last_sample = (now, error_norm_y)
@@ -2058,20 +2236,28 @@ class Controller:
                     self.release_pitch_hold(
                         why="lead err_y=%+.3f pred=%+.3f" % (error_norm_y, predicted))
                     return None
-        desired = "up" if error_norm_y < 0 else "down"
-        if self._pitch_held == desired:
-            return desired
-        prev = self._pitch_held
-        if self._pitch_held is not None:
-            self._release_tracking_key(
-                NOSE_UP_KEY if self._pitch_held == "up" else NOSE_DOWN_KEY,
-                "tracking_pitch")
-        self._press_tracking_key(
-            NOSE_UP_KEY if desired == "up" else NOSE_DOWN_KEY, "tracking_pitch")
-        self._pitch_held = desired
-        logger.debug("HOLD[pitch]: %s -> %s (target err_y=%+.3f)", prev, desired, error_norm_y)
+        return self._hold_pitch_toward(
+            "up" if error_norm_y < 0 else "down", "target err_y=%+.3f" % error_norm_y)
+
+    def _hold_pitch_toward(self, desired: str, why: str,
+                           seconds: "float | None" = None) -> str:
+        """Hold the pitch key for `desired`, letting go of the other first, and
+        with `seconds` let it go by timer. Called under _hold_lock."""
+        if self._pitch_held != desired:
+            prev = self._pitch_held
+            if self._pitch_held is not None:
+                self._release_tracking_key(
+                    NOSE_UP_KEY if self._pitch_held == "up" else NOSE_DOWN_KEY,
+                    "tracking_pitch")
+            self._press_tracking_key(
+                NOSE_UP_KEY if desired == "up" else NOSE_DOWN_KEY, "tracking_pitch")
+            self._pitch_held = desired
+            logger.debug("HOLD[pitch]: %s -> %s (%s)", prev, desired, why)
+        if seconds is not None:
+            self._arm_hold_timer("pitch", seconds)
         return desired
 
+    @_hold_state
     def engage_roll_search(self, side: str = "left") -> None:
         """No target visible: hold the roll key for `side` until one reappears
         (operator directive, HLDD 005 Sustained-Hold Actuation, 2026-09-23)
@@ -2093,6 +2279,7 @@ class Controller:
         """
         side = "right" if side == "right" else "left"
         other = "left" if side == "right" else "right"
+        self._cancel_hold_timer("roll")     # a search hold is not timed
         prev = (self._roll_held, self._roll_hold_reason)
         if self._roll_held == other:
             self._release_tracking_key(
@@ -2144,9 +2331,11 @@ class Controller:
         else:
             self.engage_roll_search(side or "left")
 
+    @_hold_state
     def release_roll_hold(self, why: str = "release") -> None:
         """Release whatever roll key Sustained-Hold Actuation is holding,
         search or target, for any reason. Safe no-op if nothing is held."""
+        self._cancel_hold_timer("roll")
         if self._roll_held is None:
             return
         prev = (self._roll_held, self._roll_hold_reason)
@@ -2167,6 +2356,7 @@ class Controller:
             logger.debug("HOLD[roll]: %s/%s -> %s/%s (%s)",
                          prev[0], prev[1], cur[0], cur[1], why)
 
+    @_hold_state
     def release_pitch_hold(self, why: str = "release") -> None:
         """Release whatever pitch key Sustained-Hold Actuation is holding.
         Safe no-op if nothing is held.
@@ -2177,6 +2367,7 @@ class Controller:
         miss, dive-guard, yield or loop-exit release was silent, and 2 of 19
         holds in the 2026-09-25 21:23 session had no recorded end (one
         nose-down hold ran into a dive recovery)."""
+        self._cancel_hold_timer("pitch")
         if self._pitch_held is None:
             return
         prev = self._pitch_held
@@ -2186,6 +2377,7 @@ class Controller:
         self._pitch_held = None
         logger.debug("HOLD[pitch]: %s -> None (%s)", prev, why)
 
+    @_hold_state
     def hold_roll_for_icon(self, side: "str | None", why: str) -> None:
         """HLDD 015 step 3: hold ROLL_LEFT or ROLL_RIGHT for the icon (reason
         "icon"), or release the roll (None: wings level). Same held-key state as
@@ -2194,6 +2386,7 @@ class Controller:
         if side is None:
             self.release_roll_hold(why=why)
             return
+        self._cancel_hold_timer("roll")     # the icon's hold is not timed
         if self._roll_held == side and self._roll_hold_reason == "icon":
             return
         prev = (self._roll_held, self._roll_hold_reason)
@@ -2209,6 +2402,7 @@ class Controller:
         self._roll_hold_reason = "icon"
         self._log_roll_hold(prev, why)
 
+    @_hold_state
     def hold_pitch_for_icon(self, desired: "str | None", why: str) -> None:
         """HLDD 015 step 2b: hold NOSE_DOWN ("down"), NOSE_UP ("up") or neither
         (None) for the icon's points, on the same held-key primitives and
@@ -2219,6 +2413,7 @@ class Controller:
         if desired is None:
             self.release_pitch_hold(why=why)
             return
+        self._cancel_hold_timer("pitch")    # the icon's hold is not timed
         if self._pitch_held == desired:
             return
         prev = self._pitch_held
@@ -3072,10 +3267,12 @@ class Controller:
         zero_reads = 0
         switched_at: "float | None" = None
         tally = _EngagementTally()
+        picture_clock = PictureClock()
         try:
             while not stop_event.is_set() and not self._eject_stop.is_set():
                 try:
                     frame = self._capture.grab_from_thread()
+                    picture_ts = picture_clock.seen(frame, time.monotonic())
                     obs = self._target_tracker.update(frame)
                     err = obs.get("error_norm")
                     cmd = None
@@ -3089,7 +3286,8 @@ class Controller:
                         # first _mission_cancel.wait() poll (measured live,
                         # 2026-09-09: 0-11ms instead of the requested hold).
                         cmd = self.orient_nose_to_target(
-                            err, ignore_cancel=True, sustained_hold=self._sustained_hold_enabled)
+                            err, ignore_cancel=True, sustained_hold=self._sustained_hold_enabled,
+                            seen_at=picture_ts)
                     elif self._sustained_hold_enabled:
                         # HLDD 005 Sustained-Hold Actuation (2026-09-23): a
                         # miss tick under the old tap model needed no action —
@@ -4110,6 +4308,9 @@ class Controller:
                 self._dive_guard_next_pullout_ts = 0.0
                 self._pursuit_objective_ts = 0.0   # nothing in view yet
                 next_engage_ts = 0.0   # CR-018-01: first cycle engages at once
+                # A grab often returns the picture of the grab before; the
+                # steering is told when its picture was first seen.
+                picture_clock = PictureClock()
                 while not self._eject_stop.wait(timeout=self._pursuit_steer_interval_s):
                     if (self._pursuit_max_duration_s > 0
                             and time.time() - start >= self._pursuit_max_duration_s):
@@ -4122,6 +4323,7 @@ class Controller:
                         break
                     try:
                         frame = self._capture.grab_from_thread()
+                        picture_ts = picture_clock.seen(frame, time.monotonic())
                         obs = self._target_tracker.update(frame)
                         visible = obs.get("visible")
                         err = obs.get("error_norm")
@@ -4395,7 +4597,8 @@ class Controller:
                                        / (frame.shape[1] / 2))
                             self.orient_nose_to_target(
                                 error_x, ignore_cancel=True,
-                                sustained_hold=self._sustained_hold_enabled)
+                                sustained_hold=self._sustained_hold_enabled,
+                                seen_at=picture_ts)
                         elif priority_control and not yielding:
                             hud_steering_target = (priority_marker.x, priority_marker.y)
                             hud_steering_label = priority_hud
@@ -4404,7 +4607,8 @@ class Controller:
                                        / (frame.shape[1] / 2))
                             self.orient_nose_to_target(
                                 error_x, ignore_cancel=True,
-                                sustained_hold=self._sustained_hold_enabled)
+                                sustained_hold=self._sustained_hold_enabled,
+                                seen_at=picture_ts)
                         elif control_visible and err is not None:
                             last_seen_ts = time.time()
                             last_visible_err = err
@@ -4412,7 +4616,8 @@ class Controller:
                             if not yielding:
                                 self.orient_nose_to_target(
                                     err, ignore_cancel=True,
-                                    sustained_hold=self._sustained_hold_enabled)
+                                    sustained_hold=self._sustained_hold_enabled,
+                                    seen_at=picture_ts)
                         elif (self._sustained_hold_enabled and not yielding
                             and not resupply_control and not priority_control):
                             if wings_level:
@@ -4461,7 +4666,8 @@ class Controller:
                             else:
                                 self.orient_pitch_to_target(
                                     error_y, ignore_cancel=True,
-                                    sustained_hold=self._sustained_hold_enabled)
+                                    sustained_hold=self._sustained_hold_enabled,
+                                    seen_at=picture_ts, down_allowed=not guard)
                         elif priority_control and not yielding:
                             error_y = ((priority_marker.y - frame.shape[0] / 2)
                                        / (frame.shape[0] / 2))
@@ -4471,7 +4677,8 @@ class Controller:
                             else:
                                 self.orient_pitch_to_target(
                                     error_y, ignore_cancel=True,
-                                    sustained_hold=self._sustained_hold_enabled)
+                                    sustained_hold=self._sustained_hold_enabled,
+                                    seen_at=picture_ts, down_allowed=not guard)
                         elif control_visible and err_y is not None:
                             if not yielding:
                                 if err_y > 0 and guard:
@@ -4480,7 +4687,8 @@ class Controller:
                                 else:
                                     self.orient_pitch_to_target(
                                         err_y, ignore_cancel=True,
-                                        sustained_hold=self._sustained_hold_enabled)
+                                        sustained_hold=self._sustained_hold_enabled,
+                                        seen_at=picture_ts, down_allowed=not guard)
                         elif self._sustained_hold_enabled and not yielding:
                             if wings_level and self._icon_cfg.actuate_pitch:
                                 # HLDD 015 step 2b: the icon's points own pitch on

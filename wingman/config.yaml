@@ -1284,6 +1284,45 @@ tracking:
   # releases log as `HOLD[pitch]: <dir> -> None (lead ...)`. 0 turns it off.
   # Named guess: about one steering tick plus the key's lag.
   pitch_lead_s: 0.15
+  # Operator, 2026-10-11: in tracking and pursuit the "bore sight bounces up and
+  # down left and right, this often results in missing targets". Measured on four
+  # sessions of that day (logs/wingman_20261011_085656, _115105, _132850,
+  # _144211): the steered point's travel between two pictures fits the key time
+  # between them best when the key time is taken lag_s earlier (0.20 to 0.30 s
+  # on both axes; r 0.91 pitch and 0.84 roll on a control point, which does not
+  # move by itself), at 0.6 to 1.15 half-frames a second in pitch and 0.2 to 0.4
+  # in roll. A hold that ends when the picture shows the deadband (0.05) is
+  # therefore a quarter of a second late, 0.29 half-frames in pitch: 70 to 80
+  # percent of pitch presses and 62 to 78 percent of roll presses were the
+  # opposite of the one before, and 13 percent of locked ticks had the target
+  # inside the deadband on both axes. pitch_lead_s above cannot see it: its rate
+  # is zero for the lag after a press and on a repeated picture (with a steering
+  # key held, 23 to 26 percent of consecutive steering grabs showed the picture
+  # of the grab before, unchanged for up to 0.34 to 0.44 s at the 90th
+  # percentile; at 14:39:15 nose-down was held 0.5 s on one picture and the
+  # control point went from 34 px below the centre to 302 px above).
+  # With this on, a target hold (the tracker's target, the resupply marker, the
+  # crown, a control point) lasts error / rate, less the key time the picture
+  # does not show yet, and a timer lets the key go: a hold of 0.1 s is shorter
+  # than a steering tick. The search roll and the icon's holds are untouched,
+  # and pitch_lead_s is not read. The model also keeps the target's own motion
+  # across the screen (what the pictures show beyond the keys' doing) and leads
+  # it, from inside the deadband too: without that the hold trails a crossing
+  # target and never arrives (simulated at 0.4 half-frames a second, 0 percent
+  # of ticks in the deadband against 62 percent with it; tests/test_hold_model.py
+  # flies both). The rates are the highest measured: a slower airframe then
+  # closes in two or three holds, where a rate set too low overshoots.
+  # min_pulse_s is the shortest hold pressed (HLDD 005: 0.08 s taps moved the
+  # nose too little to count on anything shorter).
+  # The live check is the two shares above; the releases log as
+  # `HOLD[...]: <dir> -> None (timed <s>)` and `(lead ...)`. enabled: false
+  # restores the holds as they were.
+  hold_model:
+    enabled: true
+    lag_s: 0.25
+    pitch_rate: 1.15
+    roll_rate: 0.4
+    min_pulse_s: 0.08
 tracking_hsv:
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
