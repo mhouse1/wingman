@@ -528,12 +528,21 @@ ACCT2_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct2
 VIRTUAL_DESKTOP_SIZE ?= 1920x1200
 
 # Copy settings + keybindings from the main prefix into a per-account prefix,
-# WITHOUT copying identity (ADR 052 Open Question 3). Deliberately manual, not a
-# launch dependency: it overwrites the target's settings, so running it on every
-# launch would discard any per-account tweak.
-#   make sync-settings-1     # main prefix -> acct1
-#   make sync-settings-1 DRY=--dry-run
+# WITHOUT copying identity (ADR 052 Open Question 3). launch-game does this
+# before every launch of an account prefix (sync-account-settings), so g, g1 and
+# g2 fly the same bindings and settings: change one under `make g` and each
+# account picks it up at its next launch. A change made inside an account is
+# replaced at that account's next launch.
+#   make sync-settings-1 DRY=--dry-run   # list what would be copied to acct1
+#   make sync-settings-1                 # copy now, without launching
 SETTINGS_SRC_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
+
+# A prerequisite of launch-game, after stop-game: wineserver writes user.reg from
+# memory when it saves, so a copy made while the old game is up is lost. Does
+# nothing for the main prefix, and never fails a launch (--launch-step).
+sync-account-settings:
+	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
+	  "$(SETTINGS_SRC_PREFIX)" "$(WINE_PREFIX)" --launch-step
 
 sync-settings-1:
 	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
@@ -622,7 +631,7 @@ nested-status:
 nested-stop:
 	@$(PYTHON_RUN) scripts/nested-display.py stop
 
-.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2 nested-setup nested-focus nested-status nested-stop
+.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2 sync-account-settings stop-game nested-setup nested-focus nested-status nested-stop
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.
@@ -643,13 +652,15 @@ GAME_ARGS      ?=
 # digest. 0 launches on the installed runtime and never asks; a first install is
 # not affected. `make rd UMU_RUNTIME_UPDATE=1` lets umu update again.
 UMU_RUNTIME_UPDATE ?= 0
-launch-game:
+stop-game:
 	@_p=Metalstorm; \
 	 if pgrep -f "$${_p}.exe" > /dev/null 2>&1; then \
 	   echo "MetalStorm running — stopping before fresh launch…"; \
 	   pkill -f "$${_p}.exe" 2>/dev/null || true; \
 	   sleep 5; \
 	 fi
+
+launch-game: stop-game sync-account-settings
 	@rm -f /tmp/wingman-game-prerunning
 	@$(NESTED_ENV) GAMEID=umu-0 PROTONPATH="$(PROTON_ROOT)" WINEPREFIX="$(WINE_PREFIX)" \
 	  UMU_RUNTIME_UPDATE="$(UMU_RUNTIME_UPDATE)" \

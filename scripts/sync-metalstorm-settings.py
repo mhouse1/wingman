@@ -19,17 +19,26 @@ by a future game version is excluded by default rather than leaked by default.
 
 Handles the Wine `user.reg` value forms — `dword:`, `hex:`, `hex(4):` — including
 multi-line values continued with a trailing backslash, which is how the
-`inputBindingOverrides1` keybinding blob is stored.
+`liveBindings-*` and `inputBindingOverrides*` keybinding blobs are stored.
+
+`--launch-step` is how `make launch-game` runs it before every launch of an
+account prefix, so every prefix flies the source prefix's bindings and settings.
+In that mode it waits for the target's wineserver to exit, prints one line, and
+never fails: whatever stops the copy is reported and the launch goes ahead.
 
 Usage:
-    sync-metalstorm-settings.py SOURCE_PREFIX TARGET_PREFIX [--dry-run]
+    sync-metalstorm-settings.py SOURCE_PREFIX TARGET_PREFIX [--dry-run | --launch-step]
 """
 
+import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from wingman.wine_prefix import wait_until_free  # noqa: E402
 
 _SECTION = r"[Software\\Starform\\Metalstorm]"
 _HASH_SUFFIX = re.compile(r"_h\d+$")
@@ -37,7 +46,8 @@ _HASH_SUFFIX = re.compile(r"_h\d+$")
 # Allowlist of PlayerPrefs base names (the trailing _h<hash> is stripped first).
 _ALLOW_PREFIXES = (
     "air-combat-settings--default_",   # volumes, HUD colours, control scheme,
-                                       # and the inputBindingOverride* blobs
+                                       # and the liveBindings-* and
+                                       # inputBindingOverride* blobs
     "air-combat-hangar-default_",      # hangar sort preferences
     "Screenmanager ",                  # resolution, window position, fullscreen
 )
@@ -54,7 +64,19 @@ _DENY_EXACT = frozenset({
     # A "clear credentials on next start" flag — copying it can log the target
     # account out, which is the opposite of what this script is for.
     "air-combat-settings--default_clear-creds",
+    # What the last session did, not how the game is set up. They change every
+    # match, so copying them would rewrite the target before every launch, and
+    # the replay id points into the source account's match history.
+    "air-combat-settings--default_lastMatchAvFps",
+    "air-combat-settings--default_lastMatchAvgPing",
+    "air-combat-settings--default_lastMatchPercentBadFrames",
+    "air-combat-settings--default_lastPromptToReviewShowTime",
+    "air-combat-settings--default_replayMatchIdForAutoEnterMatch",
 })
+
+# How long --launch-step waits for the target's wineserver to exit. launch-game
+# stops the old game just before this runs, and wineserver outlives it briefly.
+_LAUNCH_WAIT_S = 20.0
 
 # Belt-and-braces: if any of these ever matched the allowlist it is a bug, so
 # assert rather than rely on the allowlist alone.
@@ -113,48 +135,44 @@ def parse_section(text: str):
     return entries, start, end
 
 
-def prefix_in_use(prefix: Path) -> bool:
-    try:
-        out = subprocess.run(["pgrep", "-af", "wineserver|Metalstorm.exe"],
-                             capture_output=True, text=True, timeout=10).stdout
-    except Exception:
-        return False
-    return str(prefix) in out
-
-
 def main(argv) -> int:
     args = [a for a in argv[1:] if not a.startswith("--")]
     dry = "--dry-run" in argv
+    launch = "--launch-step" in argv
     if len(args) != 2:
         print(__doc__)
         return 2
 
+    def refuse(reason: str) -> int:
+        """An error when run by hand. Before a launch, a note: the launch goes ahead."""
+        if launch:
+            print(f"settings sync skipped: {reason}")
+            return 0
+        print(f"ERROR: {reason}")
+        return 1
+
     src_reg = Path(args[0]).expanduser() / "user.reg"
     dst_prefix = Path(args[1]).expanduser()
     dst_reg = dst_prefix / "user.reg"
+    if src_reg.resolve() == dst_reg.resolve():
+        # launch-game runs this for every prefix, the source prefix included.
+        return 0 if launch else refuse("source and target are the same prefix")
     for p in (src_reg, dst_reg):
         if not p.is_file():
-            print(f"ERROR: {p} not found — is that a Wine prefix?")
-            return 1
-    if src_reg.resolve() == dst_reg.resolve():
-        print("ERROR: source and target are the same prefix")
-        return 1
-    if not dry and prefix_in_use(dst_prefix):
-        print(f"ERROR: {dst_prefix} is in use — quit the game first "
-              "(wineserver rewrites user.reg on exit and would discard this)")
-        return 1
+            return refuse(f"{p} not found — is that a Wine prefix?")
+    if not dry and not wait_until_free(dst_prefix, _LAUNCH_WAIT_S if launch else 0.0):
+        return refuse(f"{dst_prefix} is in use — quit the game first "
+                      "(wineserver rewrites user.reg on exit and would discard this)")
 
     src_text = src_reg.read_text(encoding="utf-8", errors="replace")
     dst_text = dst_reg.read_text(encoding="utf-8", errors="replace")
     src_entries, s_start, _ = parse_section(src_text)
     dst_entries, d_start, d_end = parse_section(dst_text)
     if s_start is None:
-        print("ERROR: source prefix has no Starform/Metalstorm key")
-        return 1
+        return refuse("source prefix has no Starform/Metalstorm key")
     if d_start is None:
-        print("ERROR: target prefix has no Starform/Metalstorm key — "
-              "launch the game once and log in first")
-        return 1
+        return refuse("target prefix has no Starform/Metalstorm key — "
+                      "launch the game once and log in first")
 
     copy = {k: v for k, v in src_entries.items() if is_allowed(k)}
     for k in copy:
@@ -164,14 +182,17 @@ def main(argv) -> int:
     skipped = sorted(base_name(k) for k in src_entries if k not in copy)
     changed = [k for k, v in copy.items() if dst_entries.get(k) != v]
 
-    print(f"source : {src_reg.parent.name}")
-    print(f"target : {dst_reg.parent.name}")
-    print(f"copying: {len(copy)} setting keys ({len(changed)} differ)")
-    print(f"holding back {len(skipped)} identity/diagnostic keys:")
-    for k in skipped:
-        print(f"    - {k}")
+    if not launch:
+        print(f"source : {src_reg.parent.name}")
+        print(f"target : {dst_reg.parent.name}")
+        print(f"copying: {len(copy)} setting keys ({len(changed)} differ)")
+        print(f"holding back {len(skipped)} identity/diagnostic keys:")
+        for k in skipped:
+            print(f"    - {k}")
     if not changed:
-        print("\nOK: target already matches — nothing to do")
+        print(f"settings sync: {dst_reg.parent.name} already matches "
+              f"{src_reg.parent.name}" if launch
+              else "\nOK: target already matches — nothing to do")
         return 0
     if dry:
         print(f"\n[dry-run] would update {len(changed)} keys")
@@ -206,6 +227,11 @@ def main(argv) -> int:
             body += "\n"
         body += "".join(added)
     dst_reg.write_text(body + "".join(tail), encoding="utf-8")
+    if launch:
+        print(f"settings sync: copied {len(changed)} settings from "
+              f"{src_reg.parent.name} into {dst_reg.parent.name} "
+              f"(backup: {backup.name})")
+        return 0
     print(f"\nOK: updated {len(changed)} keys ({len(added)} new). "
           f"Backup: {backup.name}")
     print("Restart the game for the bindings to take effect.")

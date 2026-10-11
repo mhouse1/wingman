@@ -454,6 +454,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | [`docs/job-aids/010-run-metalstorm-on-linux.md`](docs/job-aids/010-run-metalstorm-on-linux.md) | Linux setup: Heroic, umu-run, PipeWire grant |
 | [`docs/job-aids/011-wingman-keybindings.md`](docs/job-aids/011-wingman-keybindings.md) | In-game keybinding configuration (Linux) |
 | [`docs/job-aids/013-join-mobius-squadron.md`](docs/job-aids/013-join-mobius-squadron.md) | Mobius Squadron: where the name comes from, and how to join |
+| [`docs/job-aids/014-add-an-account-and-keep-bindings-in-sync.md`](docs/job-aids/014-add-an-account-and-keep-bindings-in-sync.md) | Add another game account (`make r2`), and keep bindings and settings the same across accounts |
 | [`docs/adr/049-linux-migration-game-and-automation-layer.md`](docs/adr/049-linux-migration-game-and-automation-layer.md) | Linux migration decisions and implementation summary |
 | [`docs/adr/050-wayland-screen-capture.md`](docs/adr/050-wayland-screen-capture.md) | PipeWire screen capture on GNOME Wayland |
 | [`docs/adr/053-linux-one-command-launch.md`](docs/adr/053-linux-one-command-launch.md) | Full Linux input stack: window detection, XTest, XRecord |

@@ -21,24 +21,18 @@ Refuses to edit a prefix that is in use — wineserver rewrites user.reg on
 shutdown and would discard the change.
 """
 
+import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from wingman.wine_prefix import prefix_in_use  # noqa: E402
+
 _EXPLORER = r"[Software\\Wine\\Explorer]"
 _DESKTOPS = r"[Software\\Wine\\Explorer\\Desktops]"
-
-
-def prefix_in_use(prefix: Path) -> bool:
-    """True when a wineserver or the game is live for this prefix."""
-    try:
-        out = subprocess.run(["pgrep", "-af", "wineserver|Metalstorm.exe"],
-                             capture_output=True, text=True, timeout=10).stdout
-    except Exception:
-        return False   # cannot tell; the backup below is the safety net
-    return str(prefix) in out
 
 
 def main(argv) -> int:
@@ -55,15 +49,17 @@ def main(argv) -> int:
     if not reg.is_file():
         print(f"ERROR: no user.reg under {prefix} — is that a Wine prefix?")
         return 1
-    if prefix_in_use(prefix):
-        print(f"ERROR: {prefix} is in use — quit the game first "
-              "(wineserver rewrites user.reg on exit and would discard this)")
-        return 1
 
     text = reg.read_text(encoding="utf-8", errors="replace")
     if _EXPLORER in text and _DESKTOPS in text:
         print(f"OK: virtual desktop already configured in {prefix.name}")
         return 0
+    # Only a write needs the prefix free, so a launch target run while the game
+    # is still up in an already configured prefix is not refused here.
+    if prefix_in_use(prefix):
+        print(f"ERROR: {prefix} is in use — quit the game first "
+              "(wineserver rewrites user.reg on exit and would discard this)")
+        return 1
 
     backup = reg.with_suffix(f".reg.bak-{time.strftime('%Y%m%d_%H%M%S')}")
     backup.write_text(text, encoding="utf-8")
