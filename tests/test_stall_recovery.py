@@ -9,14 +9,18 @@ Usage: uv run pytest tests/test_stall_recovery.py -q
 
 import copy
 import time
+from concurrent.futures import Future
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
+import wingman.analyzer as analyzer_module
 from wingman.analyzer import (GameStateAnalyzer, GameEvent, GameState,
                               STALL_ACTION_STATES, STALL_RECOVERY_CROPS,
                               STALL_UNREADY_CROP)
+from wingman.config_schema import schema_default
 from constants import CONFIG_PATH
 
 
@@ -78,16 +82,28 @@ class TestStallGate:
         decision of 2026-10-02 ("always choose the reward in the middle of the
         screen then accept"), after the overlay stalled a lobby that still
         classified as GAME_LOBBY.
+
+        STALL_INVITE_PLAYERS (2026-10-11) meets the original argument: the
+        screen is identified by its title and the action is one ESC, the same
+        ESC that already closed it once the ADR 093 ceiling passed.
         """
         analyzer._stall_state_since = 0.0
         analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
         targets = analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
         assert set(targets) == {"STALL_PROFILE", "STALL_EXIT_TO_DESKTOP",
-                                "STALL_CHOOSE_REWARDS"}, \
+                                "STALL_CHOOSE_REWARDS", "STALL_INVITE_PLAYERS"}, \
             f"lobby blackout must open exactly these crops, got {targets}"
         for invasive in ("STALL_RETRY", "STALL_AIRCRAFT"):
             assert invasive not in targets, \
                 f"{invasive} must stay gated on an unclassifiable state (ADR 084)"
+
+    def test_invite_players_is_closed_with_escape_not_a_click(self):
+        """Every button on that screen sends or cancels an invite."""
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        branch = src[src.index('if crop == "STALL_INVITE_PLAYERS":'):]
+        branch = branch[:branch.index("return")]
+        assert "ctrl.press_escape(" in branch
+        assert "click_crop" not in branch
 
     def test_lobby_blackout_within_dwell_is_shut(self, analyzer):
         """A brief blank patch between lobby frames is not a stall."""
@@ -201,6 +217,156 @@ class TestUnreadyGate:
     def test_cleared_unready_shuts_the_gate(self, analyzer):
         analyzer._unready_since = 0.0
         assert analyzer._stall_recovery_targets(GameState.GAME_LOBBY) == []
+
+
+class _InlineExecutor:
+    """Runs each OCR task at submit time, so the scan needs no thread pool."""
+
+    def submit(self, fn, *args):
+        future = Future()
+        future.set_result(fn(*args))
+        return future
+
+
+def _scan_play_button(analyzer, monkeypatch, **reads):
+    """scan_region_for_play_button with each lobby crop reading the given text.
+
+    Per crop, not per frame: on 2026-10-11 the UNREADY crop read nothing while
+    the READY crop read the ready state. The token match is production's.
+    """
+    def _read(_img, tokens):
+        text = reads.get(tokens[0])
+        hit = text is not None and any(t in text for t in tokens)
+        return (hit, 0.0, text if hit else None)
+
+    monkeypatch.setattr(analyzer_module, "_process_text_region", _read)
+    monkeypatch.setattr(type(analyzer), "ocr_executor",
+                        property(lambda self: _InlineExecutor()), raising=False)
+    return analyzer.scan_region_for_play_button(np.zeros((1200, 1920, 3), np.uint8))
+
+
+class TestUnreadyReadThroughTheReadyCrop:
+    """2026-10-11: the squad button read 'WAITING CLICK TO UNREADY' in the READY
+    crop and nothing in the UNREADY crop. Returned as READY, it was re-clicked
+    every 10 s (un-readying the player) and the dwell never started."""
+
+    def test_it_suppresses_the_click_and_starts_the_dwell(self, analyzer, monkeypatch):
+        assert _scan_play_button(analyzer, monkeypatch,
+                                 READY="WAITINGCLICKTOUNREADY") is None
+        assert analyzer._unready_since > 0.0
+
+    def test_a_repeat_read_does_not_restart_the_dwell(self, analyzer, monkeypatch):
+        started = time.time() - 30.0
+        analyzer._unready_since = started
+        _scan_play_button(analyzer, monkeypatch, READY="WAITINGCLICKTOUNREADY")
+        assert analyzer._unready_since == started
+
+    def test_the_unready_crop_still_works(self, analyzer, monkeypatch):
+        assert _scan_play_button(analyzer, monkeypatch, UNREADY="UNREADY") is None
+        assert analyzer._unready_since > 0.0
+
+    def test_a_plain_ready_is_still_clickable_and_clears_the_dwell(self, analyzer, monkeypatch):
+        analyzer._unready_since = time.time() - 30.0
+        assert _scan_play_button(analyzer, monkeypatch, READY="READY") == "READY"
+        assert analyzer._unready_since == 0.0
+
+    def test_a_hidden_button_clears_the_dwell(self, analyzer, monkeypatch):
+        """Unchanged: a miss on every crop is not an UNREADY read."""
+        analyzer._unready_since = time.time() - 30.0
+        assert _scan_play_button(analyzer, monkeypatch) is None
+        assert analyzer._unready_since == 0.0
+
+
+class TestSquadNoBattleGate:
+    """STALL_MULTI_PLAYER also opens for a squad lobby that produces no battle,
+    whatever the button reads. 2026-10-11: READY for 7h23m after an accepted
+    invite, most of it under a dialog that rejected every READY click."""
+
+    def test_squad_lobby_below_the_limit_is_shut(self, analyzer):
+        analyzer._squad_lobby_since = time.time()
+        assert analyzer._stall_recovery_targets(GameState.GAME_LOBBY) == []
+
+    @pytest.mark.parametrize("state", [GameState.GAME_LOBBY, GameState.GAME_WAITING,
+                                       GameState.GAME_STARTING])
+    def test_squad_lobby_past_the_limit_opens_the_gate(self, analyzer, state):
+        """The night's loop never dwelt in a stall state, so the gate cannot
+        depend on one."""
+        analyzer._squad_lobby_since = time.time() - (analyzer._stall_squad_no_battle_s + 1.0)
+        assert analyzer._stall_recovery_targets(state) == [STALL_UNREADY_CROP]
+
+    def test_both_gates_open_list_the_crop_once(self, analyzer):
+        analyzer._unready_since = time.time() - (analyzer._stall_unready_dwell_s + 1.0)
+        analyzer._squad_lobby_since = time.time() - (analyzer._stall_squad_no_battle_s + 1.0)
+        assert analyzer._stall_recovery_targets(GameState.GAME_LOBBY) == [STALL_UNREADY_CROP]
+
+    def test_solo_lobby_never_starts_the_clock(self, analyzer, monkeypatch):
+        assert _scan_play_button(analyzer, monkeypatch, PLAY="PLAY") == "PLAY"
+        assert analyzer._squad_lobby_since == 0.0
+
+    @pytest.mark.parametrize("text", ["READY", "WAITINGCLICKTOUNREADY"])
+    def test_a_squad_button_starts_the_clock(self, analyzer, monkeypatch, text):
+        _scan_play_button(analyzer, monkeypatch, READY=text)
+        assert analyzer._squad_lobby_since > 0.0
+
+    def test_later_squad_reads_do_not_restart_the_clock(self, analyzer, monkeypatch):
+        started = time.time() - 600.0
+        analyzer._squad_lobby_since = started
+        _scan_play_button(analyzer, monkeypatch, READY="READY")
+        _scan_play_button(analyzer, monkeypatch, READY="WAITINGCLICKTOUNREADY")
+        assert analyzer._squad_lobby_since == started
+
+    def test_a_hidden_button_keeps_the_clock(self, analyzer, monkeypatch):
+        """The dialog hid READY for 150 s of every 180 s cycle."""
+        started = time.time() - 600.0
+        analyzer._squad_lobby_since = started
+        _scan_play_button(analyzer, monkeypatch)
+        assert analyzer._squad_lobby_since == started
+
+    def test_a_play_read_clears_the_clock(self, analyzer, monkeypatch):
+        analyzer._squad_lobby_since = time.time() - 600.0
+        _scan_play_button(analyzer, monkeypatch, PLAY="PLAY")
+        assert analyzer._squad_lobby_since == 0.0
+
+    def test_a_battle_clears_the_clock(self, analyzer):
+        analyzer._squad_lobby_since = time.time() - 600.0
+        analyzer.on_enter_GAME_BATTLE()
+        assert analyzer._squad_lobby_since == 0.0
+
+    def test_leave_is_pending_only_past_the_limit(self, analyzer):
+        assert analyzer.squad_leave_pending() is False
+        analyzer._squad_lobby_since = time.time()
+        assert analyzer.squad_leave_pending() is False
+        analyzer._squad_lobby_since = time.time() - (analyzer._stall_squad_no_battle_s + 1.0)
+        assert analyzer.squad_leave_pending() is True
+
+    def test_leaving_the_squad_ends_the_pending_leave(self, analyzer, monkeypatch):
+        """The post-leave scan reads PLAY, which is what lets PLAY be clicked."""
+        analyzer._squad_lobby_since = time.time() - (analyzer._stall_squad_no_battle_s + 1.0)
+        assert _scan_play_button(analyzer, monkeypatch, PLAY="PLAY") == "PLAY"
+        assert analyzer.squad_leave_pending() is False
+
+    def test_a_pending_leave_holds_the_lobby_ready_click(self):
+        """Same shape as the finish-round guard: the hold sits at the click
+        site and ends at the `else:` that clicks, so neither the click nor the
+        FSM trigger is reachable from it."""
+        src = Path("wingman/analyzer.py").read_text(encoding="utf-8")
+        guard = src.index('elif crop == "READY" and self.squad_leave_pending():')
+        branch = src[guard:src.index("\n                        else:", guard)]
+        assert "handled = True" in branch
+        assert "emit(GameEvent.LOBBY_PLAY_CLICK" not in branch
+        assert 'self._trigger("play_clicked")' not in branch
+
+    def test_a_failed_leave_does_not_click_ready(self):
+        """main's post-leave click-through: READY after the red X means the
+        squad was not left, and clicking it would re-raise the dialog."""
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        hold = src.index('if ready == "READY" and analyzer.squad_leave_pending():')
+        click = src.index("clicking '%s' after squad exit", hold)
+        assert "return" in src[hold:click]
+
+    def test_the_limit_is_the_schema_default_and_the_shipped_value(self):
+        assert (schema_default("stall_recovery.squad_no_battle_s")
+                == load_config()["stall_recovery"]["squad_no_battle_s"] == 900.0)
 
 
 class TestCropsConfigured:

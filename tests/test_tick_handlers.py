@@ -16,12 +16,16 @@ from wingman.tick_handlers import WaitingFallbackHandler
 
 
 class _AnalyzerStub:
-    def __init__(self, *, cancel=False, play_crop=None, diff=None):
-        self.crops = {"CANCEL": object(), "PLAY": object()}
+    def __init__(self, *, cancel=False, play_crop=None, diff=None, leave_pending=False):
+        self.crops = {"CANCEL": object(), "PLAY": object(), "READY": object()}
         self._cancel = cancel
         self._play_crop = play_crop
         self._diff = diff
+        self._leave_pending = leave_pending
         self.triggers = []
+
+    def squad_leave_pending(self):
+        return self._leave_pending
 
     def scan_region_for_cancel(self, _frame):
         return self._cancel
@@ -133,6 +137,33 @@ class TestPlayReclick:
         h.on_state_change(GameState.GAME_WAITING)
         h.tick(object(), GameState.GAME_WAITING)
         assert ctrl.clicks == []
+
+    def test_visible_ready_is_reclicked_after_interval(self):
+        a = _AnalyzerStub(play_crop="READY")
+        ctrl = _CtrlStub()
+        h = _handler(a, ctrl, waiting_fallback_enabled=False, play_reclick_missed_interval=0.0)
+        h.on_state_change(GameState.GAME_WAITING)
+        h.tick(object(), GameState.GAME_WAITING)
+        assert ctrl.clicks == ["READY"]
+
+    def test_ready_is_not_reclicked_while_a_squad_leave_is_pending(self):
+        """2026-10-11: each READY click raised a dialog over the lobby, and the
+        red X that leaves the squad needs the lobby clear."""
+        a = _AnalyzerStub(play_crop="READY", leave_pending=True)
+        ctrl = _CtrlStub()
+        h = _handler(a, ctrl, waiting_fallback_enabled=False, play_reclick_missed_interval=0.0)
+        h.on_state_change(GameState.GAME_WAITING)
+        h.tick(object(), GameState.GAME_WAITING)
+        assert ctrl.clicks == []
+
+    def test_play_is_still_reclicked_while_a_squad_leave_is_pending(self):
+        """PLAY means the squad is already gone; only READY is held."""
+        a = _AnalyzerStub(play_crop="PLAY", leave_pending=True)
+        ctrl = _CtrlStub()
+        h = _handler(a, ctrl, waiting_fallback_enabled=False, play_reclick_missed_interval=0.0)
+        h.on_state_change(GameState.GAME_WAITING)
+        h.tick(object(), GameState.GAME_WAITING)
+        assert ctrl.clicks == ["PLAY"]
 
     def test_state_is_private_to_the_handler(self):
         """ADR 060 rule 2: no other concern can reach this handler's state."""

@@ -60,6 +60,7 @@ class _Stub:
         self._stall_action_after_s = after_s
         self._unready_since = 0.0
         self._unready_dwell_s = 30.0
+        self._squad_lobby_since = 0.0
 
 
 def _targets(stub, state):

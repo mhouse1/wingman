@@ -365,6 +365,9 @@ SCHEMA = Section(
         "stall_recovery": Section(children={
             "action_after_s": SECONDS,
             "unready_dwell_s": SECONDS,
+            # A squad lobby (READY shown, not PLAY) with no battle this long
+            # also leaves the squad, whatever the button reads.
+            "squad_no_battle_s": Leaf(types=NUMBER, minimum=0, default=900.0),
             "scan_interval_s": SECONDS,
             "play_click_delay_s": SECONDS,
             "leave_click_delay_s": SECONDS,

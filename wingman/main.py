@@ -28,8 +28,7 @@ from .capture import Capture
 from .config_schema import assert_valid_config, schema_default
 from .icon_steering import IconSteeringConfig
 from .controller_config import ControllerConfig
-from .controller import (Controller, REGION_CLICK_TO_CONTINUE, REGION_PLAY_BUTTON,
-                         set_focus_guard)
+from .controller import Controller, REGION_CLICK_TO_CONTINUE, set_focus_guard
 from .close_button import GenericCloseRecovery, click_region
 from .crop_region import CropCoords
 from .analyzer import GameStateAnalyzer, POPUP_DISMISS_STATES
@@ -113,37 +112,56 @@ def load_config(path, *, validate: bool = True, local_overlay: bool = False):
 FINISH_ROUND_SETTLE_S = 3.0
 
 
+# The end-of-round prompt takes up to this many clicks, this far apart. Until
+# 2026-10-11 they went out as one blind burst, followed by a blind click at the
+# PLAY position. Once the lobby was up, the burst's point (939, 1094) was a party
+# slot's "+", which opens INVITE PLAYERS, and the PLAY position there is the
+# bottom row's INVITE button: wingman invited whoever was listed last.
+GAME_END_MAX_CLICKS = 7
+GAME_END_CLICK_INTERVAL_S = 0.5
+
+
 def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
-                            sleep_fn=time.sleep, on_complete=None):
+                            sleep_fn=time.sleep, on_complete=None, grab_frame=None):
     """Click through GAME_END prompt and force transition to GAME_LOBBY.
 
-    Clicks the center prompt repeatedly, then clicks the lower-right continue
-    button. After the final click, explicitly flips state flags so the analyzer
+    Clicks the center prompt one click at a time. Before every click after the
+    first, the prompt is re-read on a fresh frame from `grab_frame`, and the
+    clicking stops as soon as it is gone. The lower-right CONTINUE button is
+    then clicked only if a fresh frame shows it; the lobby quick-scan handles a
+    CONTINUE that appears later. Without a frame nothing can be re-read, so only
+    the first click goes out.
+
+    The state is flipped whether or not CONTINUE was clicked, so the analyzer
     exits GAME_END_B even if OCR polling is currently skipping in that state.
 
-    `on_complete` fires only once the final click has actually gone out, so a
-    caller waiting to exit at the lobby can time its settle from the click
-    rather than from the state change. It is deliberately NOT called on the
-    missing-PLAY-crop path below: no click happened there, and a settle timed
-    from a click that never occurred would be a lie.
+    `on_complete` fires once the last click of the sequence has gone out, so a
+    caller waiting to exit at the lobby can time its settle from a click rather
+    than from the state change.
     """
-    ctrl.click_crop(
-        analyzer.crops["click_to"],
-        block=True,
-        count=7,
-        region_name=REGION_CLICK_TO_CONTINUE,
-    )
+    clicks = 0
+    while clicks < GAME_END_MAX_CLICKS:
+        if clicks:
+            frame = grab_frame() if grab_frame is not None else None
+            if frame is None or not analyzer.scan_region_for_click_to(frame):
+                break
+        ctrl.click_crop(
+            analyzer.crops["click_to"],
+            block=True,
+            count=1,
+            region_name=REGION_CLICK_TO_CONTINUE,
+        )
+        clicks += 1
+        sleep_fn(GAME_END_CLICK_INTERVAL_S)
     sleep_fn(settle_seconds)
-    play_crop = analyzer.crops.get("PLAY")
-    if play_crop is None:
-        logger.warning("_click_through_game_end: PLAY crop not configured — skipping final click")
-        return
-    ctrl.click_crop(
-        play_crop,
-        block=True,
-        count=1,
-        region_name=REGION_PLAY_BUTTON,
-    )
+    frame = grab_frame() if grab_frame is not None else None
+    if frame is not None and analyzer.scan_region_for_final_continue(frame):
+        ctrl.click_crop(
+            analyzer.crops["FINAL_CONTINUE"],
+            block=True,
+            count=1,
+            region_name="FINAL_CONTINUE",
+        )
     analyzer.trigger_event("continue_clicked")
     if on_complete is not None:
         try:
@@ -1162,6 +1180,15 @@ def main():
             ctrl.press_escape(hold_seconds=0.05, block=False)
             return
 
+        if crop == "STALL_INVITE_PLAYERS":
+            # Every button on this screen sends or cancels an invite, so the
+            # way out is ESC: it is what closed the screen each time the
+            # ADR 093 ceiling fired on it.
+            logger.warning("\033[93m🔧 Stall recovery: '%s' — pressing ESC (state=%s)\033[0m",
+                           crop, current.name)
+            ctrl.press_escape(hold_seconds=0.05, block=False)
+            return
+
         if crop == "STALL_RETRY":
             logger.warning("\033[93m🔧 Stall recovery: '%s' — clicking RETRY (state=%s)\033[0m",
                            crop, current.name)
@@ -1210,6 +1237,12 @@ def main():
                 if ctrl.finish_round_requested():
                     logger.info("🏁 FINISH ROUND: squad exited but exit is pending "
                                 "— not clicking '%s'", ready)
+                    return
+                if ready == "READY" and analyzer.squad_leave_pending():
+                    # A PLAY read would have cleared the pending leave, so
+                    # READY here means the red X did not take us out.
+                    logger.warning("STALL_MULTI_PLAYER: still in the squad after the "
+                                   "red X — not clicking READY")
                     return
                 logger.info("\033[92m🔧 Stall recovery: clicking '%s' after squad exit\033[0m", ready)
                 ctrl.click_crop(analyzer.crops[ready], block=False, count=1, region_name=ready)
@@ -1801,7 +1834,8 @@ def main():
                 threading.Thread(
                     target=_click_through_game_end,
                     args=(ctrl, analyzer, logger),
-                    kwargs={"on_complete": _note_final_continue},
+                    kwargs={"on_complete": _note_final_continue,
+                            "grab_frame": cap.grab_from_thread},
                     daemon=True,
                 ).start()
 

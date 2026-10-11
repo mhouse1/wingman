@@ -16,6 +16,7 @@ HEALTH_SPIKE_FACTOR = 1.5  # reject readings more than 50 % above the establishe
 from transitions import Machine, MachineError
 
 from .compass import CompassReader
+from .config_schema import schema_default
 from .full_map import FullMapReader
 from .crop_region import CropCoords, get_crop, load_crops, draw_crops
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
@@ -76,8 +77,9 @@ STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 
 # Scan order: most specific screen first. The batch stops at the first hit, so a
 # generic match must never pre-empt a precise one.
-STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_PARTS_CRATE", "STALL_CHOOSE_REWARDS",
-                        "STALL_RETRY", "STALL_EXIT_TO_DESKTOP", "STALL_AIRCRAFT")
+STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_INVITE_PLAYERS", "STALL_PARTS_CRATE",
+                        "STALL_CHOOSE_REWARDS", "STALL_RETRY", "STALL_EXIT_TO_DESKTOP",
+                        "STALL_AIRCRAFT")
 
 # Gated on UNREADY dwell rather than state dwell: UNREADY makes
 # scan_region_for_play_button return None, which makes _classify_unknown_state
@@ -1193,6 +1195,10 @@ class GameStateAnalyzer:
         self._stall_unready_dwell_s = float(_stall_cfg.get("unready_dwell_s", 30.0))
         self._stall_scan_interval_s = float(_stall_cfg.get("scan_interval_s", 5.0))
         self._unready_since = 0.0
+        self._stall_squad_no_battle_s = float(_stall_cfg.get(
+            "squad_no_battle_s", schema_default("stall_recovery.squad_no_battle_s")))
+        self._squad_lobby_since = 0.0      # squad lobby first seen, no battle since
+        self._squad_hold_log_ts = 0.0      # throttles the "not readying up" line
         self._stall_state_since = 0.0
         # ADR 094: predicate that suppresses automatic round-starting clicks.
         # Set by main() to the controller's pending finish-round exit. It must be
@@ -1952,6 +1958,8 @@ class GameStateAnalyzer:
         # Drop any in-flight OCR from the previous battle so its stale frame
         # cannot seed the freshly reset filter when battle resumes.
         self._telemetry_future = None
+        # A battle is the proof a squad lobby works; its clock starts over.
+        self._squad_lobby_since = 0.0
 
     def reset_health_for_respawn(self):
         """Clear health spike filter after a respawn so full-health readings aren't rejected.
@@ -3378,6 +3386,16 @@ class GameStateAnalyzer:
                 and "STALL_CHOOSE_REWARDS" in self.crops
                 and "STALL_CHOOSE_REWARDS" not in targets):
             targets.insert(0, "STALL_CHOOSE_REWARDS")
+        # The INVITE PLAYERS screen opens over a lobby the FSM still calls
+        # GAME_LOBBY (2026-10-11: a click on a party slot's "+"). Until now only
+        # the ADR 093 ESC ceiling closed it, about 130 s later each time. The
+        # action is that same ESC, on a screen identified by its title, so it
+        # is de-escalating like the two dismisses above.
+        if (self._lobby_blackout_since
+                and now - self._lobby_blackout_since >= self._stall_action_after_s
+                and "STALL_INVITE_PLAYERS" in self.crops
+                and "STALL_INVITE_PLAYERS" not in targets):
+            targets.append("STALL_INVITE_PLAYERS")
         # Anomaly 004 (2026-09-13): STALL_PARTS_CONFIRM is calibrated (below,
         # config.yaml) and OCR-verified (tests/test_stall_crops_ocr.py) for
         # DETECTION, but deliberately NOT added to this auto-click gate yet.
@@ -3396,7 +3414,57 @@ class GameStateAnalyzer:
                 and now - self._unready_since >= self._stall_unready_dwell_s
                 and STALL_UNREADY_CROP in self.crops):
             targets.append(STALL_UNREADY_CROP)
+        # Second gate for the same crop: a squad lobby that produces no battle.
+        # On 2026-10-11 the lobby showed READY for 7h23m after an accepted
+        # invite. The leader never launched, and for most of it a "...in
+        # progress, try again" dialog rejected every READY click, so the button
+        # never read UNREADY and the gate above could not open.
+        if (self._squad_lobby_since
+                and now - self._squad_lobby_since >= self._stall_squad_no_battle_s
+                and STALL_UNREADY_CROP in self.crops
+                and STALL_UNREADY_CROP not in targets):
+            targets.append(STALL_UNREADY_CROP)
         return targets
+
+    def _note_lobby_button(self, verdict: str) -> None:
+        """Track how long the lobby has been a squad lobby with no battle.
+
+        PLAY is the solo lobby's button; READY and UNREADY are the squad's. The
+        clock starts on the first squad read and later ones do not restart it: a
+        popup can hide the button for most of each matchmaking attempt. Only a
+        PLAY read or a battle (`on_enter_GAME_BATTLE`) clears it.
+        """
+        if verdict == "PLAY":
+            self._squad_lobby_since = 0.0
+        elif self._squad_lobby_since == 0.0:
+            self._squad_lobby_since = time.time()
+
+    def squad_leave_pending(self) -> bool:
+        """True once a squad lobby has gone `squad_no_battle_s` with no battle.
+
+        The red X is armed from then on (`_stall_recovery_targets`), so nothing
+        may click READY: on 2026-10-11 each READY click raised a dialog that
+        dimmed the lobby for the rest of the matchmaking attempt, leaving the
+        red X a few clear seconds in every three minutes.
+        """
+        since = self._squad_lobby_since
+        return bool(since) and time.time() - since >= self._stall_squad_no_battle_s
+
+    def _note_unready(self, text) -> None:
+        """Start or continue the UNREADY dwell behind the squad-leave gate.
+
+        ADR 084: tracked here rather than per-state. An UNREADY read makes
+        scan_region_for_play_button return None, which also makes
+        _classify_unknown_state fail, so a stuck UNREADY strands the FSM in
+        GAME_UNKNOWN indefinitely — the dwell has to accumulate across whatever
+        state we are in.
+        """
+        if self._unready_since == 0.0:
+            self._unready_since = time.time()
+        self._note_lobby_button("UNREADY")
+        logger.info(
+            "Analyzer: UNREADY detected (text='%s') — suppressing PLAY click (%.0fs)",
+            text, time.time() - self._unready_since)
 
     def _event_refresh_holds_lobby(self, state):
         return state == GameState.GAME_LOBBY and self._event_refresh_recheck_after > 0.0
@@ -3545,6 +3613,7 @@ class GameStateAnalyzer:
                                 # GAME_WAITING, not cancel_detected → GAME_STARTING.
                                 logger.info(
                                     "\033[93m📋 Lobby quick-scan: UNREADY detected — squad not ready yet → GAME_WAITING\033[0m")
+                                self._note_lobby_button("UNREADY")
                                 self._last_lobby_play_click_ts = time.time()
                                 self._trigger("play_clicked")
                             else:
@@ -3625,6 +3694,7 @@ class GameStateAnalyzer:
                             continue
                         if not detected:
                             continue
+                        self._note_lobby_button(crop)
                         if _lobby_crop_verdict(crop, text) == "UNREADY":
                             # ADR 102 rev 2: the READY crop now covers the whole
                             # button, so it also reads the UNREADY state. Same
@@ -3659,6 +3729,17 @@ class GameStateAnalyzer:
                                 "\033[93m🏁 FINISH ROUND: %s visible but exit is pending — "
                                 "not starting another round\033[0m", crop,
                             )
+                            handled = True
+                        elif crop == "READY" and self.squad_leave_pending():
+                            # Staying in GAME_LOBBY with the lobby undimmed is
+                            # what lets the stall batch below find the red X.
+                            if time.time() - self._squad_hold_log_ts >= 60.0:
+                                self._squad_hold_log_ts = time.time()
+                                logger.info(
+                                    "\033[93m📋 Lobby quick-scan: READY visible but this squad "
+                                    "has produced no battle for %.0f min — not readying up, "
+                                    "leaving it via the red X\033[0m",
+                                    (time.time() - self._squad_lobby_since) / 60.0)
                             handled = True
                         else:
                             self.capture_waiting_cancel_baseline(frame)
@@ -4580,26 +4661,28 @@ class GameStateAnalyzer:
             if "UNREADY" in futures:
                 detected, _, text = futures["UNREADY"].result(timeout=30)
                 if detected:
-                    # ADR 084: track dwell here rather than per-state. Returning
-                    # None also makes _classify_unknown_state fail, so a stuck
-                    # UNREADY strands the FSM in GAME_UNKNOWN indefinitely — the
-                    # dwell has to accumulate across whatever state we are in.
-                    if self._unready_since == 0.0:
-                        self._unready_since = time.time()
-                    logger.info(
-                        "Analyzer: UNREADY detected (text='%s') — suppressing PLAY click (%.0fs)",
-                        text, time.time() - self._unready_since)
+                    self._note_unready(text)
                     return None
-                self._unready_since = 0.0
                 logger.debug("Analyzer: UNREADY not found")
             for crop in ("PLAY", "READY"):
                 if crop not in futures:
                     continue
                 detected, _, text = futures[crop].result(timeout=30)
                 if detected:
+                    if _lobby_crop_verdict(crop, text) == "UNREADY":
+                        # ADR 102 rev 2: the READY crop covers the whole button,
+                        # so it reads the ready state too ('WAITING CLICK TO
+                        # UNREADY'). Returned as READY, it had the GAME_WAITING
+                        # re-click un-ready the player every 10 s and never
+                        # started the dwell (2026-10-11).
+                        self._note_unready(text)
+                        return None
+                    self._unready_since = 0.0
+                    self._note_lobby_button(crop)
                     logger.info("Analyzer: '%s' detected in %s crop (text='%s')", crop, crop, text)
                     return crop
                 logger.debug("Analyzer: '%s' not found in %s crop", crop, crop)
+            self._unready_since = 0.0
             return None
         except Exception as e:
             logger.warning("Analyzer: Play button scan failed: %s", e)
@@ -4631,6 +4714,34 @@ class GameStateAnalyzer:
             return detected
         except Exception as e:
             logger.warning("Analyzer: LEAVE scan failed: %s", e)
+            return False
+
+    def scan_region_for_final_continue(self, frame) -> bool:
+        """Synchronously scan the FINAL_CONTINUE crop — the end-of-round
+        screen's lower-right CONTINUE button.
+
+        Returns True if CONTINUE is visible, False if not found or the crop is
+        not configured.
+        """
+        if "FINAL_CONTINUE" not in self.crops:
+            logger.debug("Analyzer: FINAL_CONTINUE crop not configured — skipping scan")
+            return False
+        executor = self.ocr_executor
+        if executor is None:
+            logger.warning("Analyzer: OCR executor not available for FINAL_CONTINUE scan")
+            return False
+        try:
+            region_frame = get_crop(frame, *self.crops["FINAL_CONTINUE"][:4])
+            detected, _, text = executor.submit(
+                _process_text_region, region_frame, self.crops["FINAL_CONTINUE"].text or []
+            ).result(timeout=30)
+            if detected:
+                logger.info("Analyzer: CONTINUE button detected (text='%s')", text)
+            else:
+                logger.debug("Analyzer: CONTINUE button not found in FINAL_CONTINUE crop")
+            return detected
+        except Exception as e:
+            logger.warning("Analyzer: FINAL_CONTINUE scan failed: %s", e)
             return False
 
     def scan_region_for_cancel(self, frame) -> bool:

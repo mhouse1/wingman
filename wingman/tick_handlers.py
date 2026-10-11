@@ -2897,7 +2897,14 @@ class WaitingFallbackHandler:
             # Only re-click if PLAY/READY is actually visible — clicking PLAY while
             # matchmaking is in progress cancels it. If PLAY isn't visible the game
             # is still processing the previous click; leave it alone.
-            if visible_crop:
+            if visible_crop == "READY" and self._analyzer.squad_leave_pending():
+                # The red X is armed; a READY click now re-raises the dialog
+                # it needs out of the way.
+                logger.info(
+                    "GAME_WAITING: CANCEL not found (%.1fs) and READY visible — "
+                    "not re-clicking (squad leave pending)", elapsed_waiting)
+                self._last_reclick_ts = time.time()
+            elif visible_crop:
                 reason = "click missed" if not self._play_ever_absent else "returned from matchmaking"
                 logger.info(
                     "GAME_WAITING: CANCEL not found (%.1fs) and %s visible — re-clicking (%s)",
