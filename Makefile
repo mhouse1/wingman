@@ -20,6 +20,7 @@
 #   make commit      -> commit all changes with a default message
 #   make p           -> stage, commit (message "."), and push
 #   make p "msg"     -> stage, commit with "msg", and push
+#   make nb <name>   -> start a new branch from the remote main (run after a PR is merged)
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
@@ -44,7 +45,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite survey launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q nb g updater rd invite survey launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -430,6 +431,28 @@ squash:
 
 q:
 	git pull
+
+# Start a new branch from the remote main (e.g. make nb terrain-map). The repo
+# squash-merges, so a branch cut from an already-merged branch conflicts with
+# main in every file both touched (PR #82). --no-track leaves the new branch
+# without an upstream, so the first push creates origin/<name> instead of
+# pointing at main. The name is captured the same way as the message for 'p'.
+ifeq ($(firstword $(MAKECMDGOALS)),nb)
+  _NB_NAME := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  ifneq ($(_NB_NAME),)
+.DEFAULT:
+	@:
+  endif
+endif
+
+# The name is also a make goal, so a name that matches a target (test1, clean)
+# would run that target next. The grep refuses those before git does anything.
+nb:
+	@test -n "$(_NB_NAME)" || { echo "usage: make nb <branch-name>"; exit 1; }
+	@! grep -qE '^([^#[:space:]:=][^#:=]* )?$(_NB_NAME)( [^:=]*)?:([^=]|$$)' $(firstword $(MAKEFILE_LIST)) || \
+		{ echo "make nb: '$(_NB_NAME)' is also a make target and would run next. Pick another name."; exit 1; }
+	git fetch origin
+	git switch -c "$(_NB_NAME)" --no-track origin/main
 
 
 
