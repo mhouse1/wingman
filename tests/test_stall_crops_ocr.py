@@ -42,6 +42,8 @@ STALL_CASES = [
     # Squad-leave confirmation, scanned only after the STALL_MULTI_PLAYER
     # red-X click (2026-09-10: some squads confirm with a second dialog).
     ("LEAVE",                 "LEAVE.png",                 "LEAVE"),
+    # The INVITE PLAYERS screen a blind end-of-round click opened (2026-10-11).
+    ("STALL_INVITE_PLAYERS",  "STALL_INVITE_PLAYERS.png",  "INVITEPLAYERS"),
 ]
 
 

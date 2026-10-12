@@ -82,7 +82,9 @@ mission, so the aircraft is never left flying uncommanded.
 | Dual-sensor respawn detection and immediate restart when health returns (ADR [064](docs/adr/064-dual-sensor-respawn-detection.md)/[059](docs/adr/059-health-gated-immediate-mission-restart.md)) | ✅ |
 | Missiles-empty eject with a telemetry-verified dive (ADR [056](docs/adr/056-game-battle-eject-fsm-state.md)/[069](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md)) | ✅ |
 | Resupply priority in pursuit: steers to the resupply point as missiles run out, and rearms instead of ejecting ([ADR 152](docs/adr/152-pursuit-resupply-priority.md)) | ⚙️ live trial |
-| Ground-crash recovery: airbrake and nose-up when altitude and descent rate predict an impact, including inside an ACS pursuit (ADR [086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md)/[137](docs/adr/137-emergency-climb-airbrake-and-crash-instrument.md)/[148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md)) | ✅ |
+| Priority target in pursuit: steers to the crown objective's marker, and by its pin on the indicator ring when it is off screen ([Design 015](docs/hldd/015-target-tracking-pursuit-mode-hldd.md)) | ⚙️ live trial |
+| Air superiority in pursuit: flies through the control points the enemy holds, the one in view first, then by the red pins on the indicator ring ([Design 015](docs/hldd/015-target-tracking-pursuit-mode-hldd.md)) | ⚙️ live trial |
+| Ground-crash recovery: nose-up on the afterburner when altitude and descent rate predict an impact, with the airbrake in a steep dive, including inside an ACS pursuit (ADR [086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md)/[137](docs/adr/137-emergency-climb-airbrake-and-crash-instrument.md)/[148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md)/[159](docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md)) | ✅ |
 | Terrain-ahead detection: a sky-occlusion check that logs only; a colour-free, motion-based replacement is designed and spiked offline ([Design 001](docs/hldd/001-terrain-avoidance-hldd.md)) | ⚙️ shadow only |
 | Metric HUD telemetry (altitude, speed, flight-path angle) feeding eject, evade and climb (ADR [038](docs/adr/038-game-battle-altitude-speed-signals-for-phase3-and-eject-dive.md)/[067](docs/adr/067-metric-hud-units-pitch-normalization-recalibration.md)) | ✅ |
 | Manual takeover at any moment, and no key ever left held on exit ([SAF-001](docs/requirements/001-safety.md), [SAF-007](docs/requirements/001-safety.md)) | ✅ |
@@ -200,7 +202,7 @@ on your own display, and work bare when the nested game window has focus. See [A
 | `u` | Start the configured mission (`mission.default_mission`) — and, while in manual, hand control back to wingman |
 | `y` | Start the loiter mission — climb to the hold altitude and orbit to stay alive |
 | `o` | Start the SU-30 mission, taking the aircraft from a running mission |
-| `m` | Activate unattended mode (also auto-enabled from config) |
+| `n` | Activate unattended mode (also auto-enabled from config) |
 | `end` | Cancel active mission |
 | `i` / `j` / `k` / `l` | Manual takeover **from your own display** (needs `ctrl+alt` on the nested lane) — see below |
 | arrow keys | Manual takeover, at the game window or your own display |
@@ -349,7 +351,7 @@ The behavior tree ([ADR 024](docs/adr/024-phase3-behavior-tree-architecture.md),
 
 - **Engage** — minimap ring-engage geometry: steer toward contacts, orbit when merged ([ADR 024](docs/adr/024-phase3-behavior-tree-architecture.md) 3.1a, [ADR 028](docs/adr/028-enemy-quadrant-detection-and-nose-orientation.md))
 - **MissileEvade** — evasive manoeuvre on incoming-missile detection ([ADR 070](docs/adr/070-missile-evade-tactic.md)); live sessions measure 90% vs 68% ten-second survival with the evade on (n=122 engagements)
-- **Climb** — closed-loop climb-to-operating-altitude, including the mission-start climb prologue ([ADR 073](docs/adr/073-climb-tactic-shadow-first.md)), and ground-crash recovery: when altitude over descent rate predicts an impact, it holds the airbrake and pulls up, and that recovery also flies through an ACS pursuit, handing the chase back once the flight path is level ([ADR 086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md), [ADR 148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md)). Terrain ahead of the nose is detected in shadow only; [Design 001](docs/hldd/001-terrain-avoidance-hldd.md) has the motion-based redesign
+- **Climb** — closed-loop climb-to-operating-altitude, including the mission-start climb prologue ([ADR 073](docs/adr/073-climb-tactic-shadow-first.md)), and ground-crash recovery: when altitude over descent rate predicts an impact, it pulls up on the afterburner, braking only while the dive is steep, and that recovery also flies through an ACS pursuit once the pursuit has neither its target nor the resupply marker in view, handing the chase back when the flight path is level or one of them comes into view ([ADR 086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md), [ADR 148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md), [ADR 159](docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md), [Action Item 002](docs/action-item/002-emergency-climb-abandons-resupply.md)). Terrain ahead of the nose is detected in shadow only; [Design 001](docs/hldd/001-terrain-avoidance-hldd.md) has the motion-based redesign
 - **Eject** — the missiles-empty response: ACS pursuit on the secondary weapon, a flight to the resupply point once every rack is empty ([ADR 152](docs/adr/152-pursuit-resupply-priority.md)), and the eject-and-dive that trades an empty airframe for a rearmed respawn (ADR [056](docs/adr/056-game-battle-eject-fsm-state.md)/[069](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md))
 - **Disengage / Idle / RespawnWait** — supporting tactics and selection-only states
 
@@ -405,6 +407,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | [`docs/adr/073-climb-tactic-shadow-first.md`](docs/adr/073-climb-tactic-shadow-first.md) | Climb tactic and the shadow-first validation pipeline for new tactics |
 | [`docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md`](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md) | Dive recovery on predicted time to ground |
 | [`docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md`](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md) | Ground-crash recovery inside an ACS pursuit: airbrake, pull-up, hand-back, with live evidence |
+| [`docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md`](docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md) | The emergency climb pulls up on the afterburner; the airbrake is for a steep dive only |
 | [`docs/adr/152-pursuit-resupply-priority.md`](docs/adr/152-pursuit-resupply-priority.md) | Resupply priority in pursuit: rearm at the resupply point instead of ejecting |
 | [`docs/adr/056-game-battle-eject-fsm-state.md`](docs/adr/056-game-battle-eject-fsm-state.md) | Eject as a first-class FSM state |
 | [`docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md`](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md) | Eject descent: impulse rotation + ballistic phase |
@@ -418,6 +421,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | [`docs/hldd/015-target-tracking-pursuit-mode-hldd.md`](docs/hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search, with rollout evidence and open questions |
 | [`docs/hldd/005-target-tracking-hldd.md`](docs/hldd/005-target-tracking-hldd.md) | ACS target tracker: finding and locking enemy nameplates on screen |
 | [`docs/hldd/001-terrain-avoidance-hldd.md`](docs/hldd/001-terrain-avoidance-hldd.md) | Terrain avoidance: the shadow sky-occlusion check, and the motion-based looming design with its offline spike |
+| [`docs/hldd/017-terrain-map-from-flight-footage-hldd.md`](docs/hldd/017-terrain-map-from-flight-footage-hldd.md) | Terrain map from flight footage: position from the minimap and the full map, and the survey mission that flies an arena in passes (`make survey`). In progress; its "Where this stands" section has the state and the match setup |
 | [`docs/hldd/009-nested-display-isolation-hldd.md`](docs/hldd/009-nested-display-isolation-hldd.md) | Nested display lane: the four `DISPLAY` consumers and the takeover-key listener |
 | [`docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md`](docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md) | **A GPU-accelerated real-time profile** — batched GPU OCR, per-frame missile detection, and what must not regress. Design only; the CPU path stays the default |
 
@@ -450,6 +454,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | [`docs/job-aids/010-run-metalstorm-on-linux.md`](docs/job-aids/010-run-metalstorm-on-linux.md) | Linux setup: Heroic, umu-run, PipeWire grant |
 | [`docs/job-aids/011-wingman-keybindings.md`](docs/job-aids/011-wingman-keybindings.md) | In-game keybinding configuration (Linux) |
 | [`docs/job-aids/013-join-mobius-squadron.md`](docs/job-aids/013-join-mobius-squadron.md) | Mobius Squadron: where the name comes from, and how to join |
+| [`docs/job-aids/014-add-an-account-and-keep-bindings-in-sync.md`](docs/job-aids/014-add-an-account-and-keep-bindings-in-sync.md) | Add another game account (`make r2`), and keep bindings and settings the same across accounts |
 | [`docs/adr/049-linux-migration-game-and-automation-layer.md`](docs/adr/049-linux-migration-game-and-automation-layer.md) | Linux migration decisions and implementation summary |
 | [`docs/adr/050-wayland-screen-capture.md`](docs/adr/050-wayland-screen-capture.md) | PipeWire screen capture on GNOME Wayland |
 | [`docs/adr/053-linux-one-command-launch.md`](docs/adr/053-linux-one-command-launch.md) | Full Linux input stack: window detection, XTest, XRecord |

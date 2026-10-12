@@ -126,19 +126,37 @@ def find_resupply_marker(frame, region_pct=None) -> "ResupplyMarker | None":
 _INDICATOR_RADIUS_PCT = (0.158, 0.18)
 
 
-def find_resupply_ring_icons(frame, _cfg=None) -> "list[RingIcon]":
-    """The resupply direction icon on the indicator ring, as ring icons.
+# The crossed missiles put 40% or more of their glyph in the corners of the
+# pin's hole, the crown 5% to 22% (96 pins in the frames of 2026-10-02, 6 of
+# them crowns; 3 more crowns on 2026-10-09 at 11% to 16%).
+RESUPPLY_PIN_MIN_CORNER_SHARE = 0.30
+_PIN_MIN_AREA_PX = 60.0
 
-    With the resupply point off screen the game draws a small yellow pin on
-    the ring the red aircraft icons use, pointing toward it (operator,
-    2026-10-02): a circle around the crossed missiles with a solid pointer.
-    Its place on the ring is the direction, as for the red icons, so the
-    result feeds the same points law. It is told from exhaust glow on the
-    ring by the hole its circle encloses, and from the crown pin, which has
-    the same outline, by the glyph: the crossed missiles put 40% or more of
-    their pixels in the corners of the hole, the crown 5% to 22% (96 pins in
-    the frames of 2026-10-02, 6 of them crowns). The second argument is
-    ignored; it gives this the signature of `find_ring_icons`.
+
+def red_mask(hsv):
+    """The red the game draws an enemy's objectives in: hue 2 to 3 for the
+    outline and the letter of a control point, measured on 4 discs and 6
+    pins (2026-10-09). The dark red inside the disc (hue 175 to 179) is too dim to
+    pass, as is the blue of a point the own team holds (hue 113 to 118)."""
+    return (cv2.inRange(hsv, np.array([0, 110, 150], dtype=np.uint8),
+                        np.array([6, 255, 255], dtype=np.uint8))
+            | cv2.inRange(hsv, np.array([172, 110, 150], dtype=np.uint8),
+                          np.array([180, 255, 255], dtype=np.uint8)))
+
+
+def ring_pins(frame, min_area_px: float = _PIN_MIN_AREA_PX,
+              color: str = "yellow") -> "list[tuple[RingIcon, float]]":
+    """Pins of one color on the indicator ring, with each one's glyph corner share.
+
+    The game draws a small pin on the ring the red aircraft icons use for an
+    objective that is off screen: a circle around a glyph, with a solid
+    pointer. Its place on the ring is the direction. A pin is told from
+    exhaust glow and from the aircraft icons on the ring by the hole its
+    circle encloses. Which objective it is, the color and the glyph say:
+    yellow for the resupply point and the crown, red for a control point the
+    enemy holds (`air_superiority`). The second value is the share of the
+    glyph's pixels in the corners of the hole. `min_area_px` is the outline's
+    area floor at 1200 px of frame height.
     """
     if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] < 3:
         return []
@@ -154,17 +172,20 @@ def find_resupply_ring_icons(frame, _cfg=None) -> "list[RingIcon]":
     if x2 <= x1 or y2 <= y1:
         return []
     hsv = cv2.cvtColor(np.ascontiguousarray(frame[y1:y2, x1:x2, :3]), cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(
-        hsv,
-        np.array([22, 150, 190], dtype=np.uint8),
-        np.array([32, 255, 255], dtype=np.uint8),
-    )
+    if color == "red":
+        mask = red_mask(hsv)
+    else:
+        mask = cv2.inRange(
+            hsv,
+            np.array([22, 150, 190], dtype=np.uint8),
+            np.array([32, 255, 255], dtype=np.uint8),
+        )
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    icons: "list[RingIcon]" = []
+    pins: "list[tuple[RingIcon, float]]" = []
     for index in range(1, count):
         left, top, width, height, area = map(int, stats[index, :5])
         if not (14 * scale <= width <= 28 * scale and 14 * scale <= height <= 28 * scale
-                and 60 * scale * scale <= area <= 170 * scale * scale):
+                and min_area_px * scale * scale <= area <= 170 * scale * scale):
             continue
         x = x1 + float(centroids[index][0])
         y = y1 + float(centroids[index][1])
@@ -192,12 +213,28 @@ def find_resupply_ring_icons(frame, _cfg=None) -> "list[RingIcon]":
         dy = (rows - (hole_rows.min() + hole_rows.max()) / 2) / (
             (hole_rows.max() - hole_rows.min() + 1) / 2)
         corners = int((glyph & (np.abs(dx) > 0.3) & (np.abs(dy) > 0.3)).sum())
-        if corners < 0.30 * glyph_area:
-            continue
-        icons.append(RingIcon(
+        pins.append((RingIcon(
             x, y, area, width, height,
             math.degrees(math.atan2(y - centre_y, x - centre_x)),
-            int(np.median(hsv[labels == index][:, 0]))))
+            int(np.median(hsv[labels == index][:, 0]))), corners / glyph_area))
+    return pins
+
+
+def find_resupply_ring_icons(frame, _cfg=None) -> "list[RingIcon]":
+    """The resupply direction icon on the indicator ring, as ring icons.
+
+    With the resupply point off screen the game draws a small yellow pin on
+    the ring the red aircraft icons use, pointing toward it (operator,
+    2026-10-02): a circle around the crossed missiles with a solid pointer.
+    Its place on the ring is the direction, as for the red icons, so the
+    result feeds the same points law. `ring_pins` finds the pins; this keeps
+    the ones whose glyph is the crossed missiles, which leaves out the crown
+    pin of the priority target (`priority_target.find_priority_ring_icons`).
+    The second argument is ignored; it gives this the signature of
+    `find_ring_icons`.
+    """
+    icons = [icon for icon, corner_share in ring_pins(frame)
+             if corner_share >= RESUPPLY_PIN_MIN_CORNER_SHARE]
     icons.sort(key=lambda icon: icon.area, reverse=True)
     return icons
 

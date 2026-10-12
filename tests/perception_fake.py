@@ -55,6 +55,18 @@ class PerceptionFake:
     def nose_direction(self) -> str:
         return NOSE_UNKNOWN
 
+    def read_compass_heading(self, frame):
+        return None
+
+    def full_map_shown(self, frame) -> bool:
+        return False
+
+    def full_map_covering(self, frame) -> bool:
+        return False
+
+    def read_full_map(self, frame):
+        return None
+
     def scan_region_for_good_luck(self, frame) -> bool:
         return False
 

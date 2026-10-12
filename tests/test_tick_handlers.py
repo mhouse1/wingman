@@ -16,12 +16,16 @@ from wingman.tick_handlers import WaitingFallbackHandler
 
 
 class _AnalyzerStub:
-    def __init__(self, *, cancel=False, play_crop=None, diff=None):
-        self.crops = {"CANCEL": object(), "PLAY": object()}
+    def __init__(self, *, cancel=False, play_crop=None, diff=None, leave_pending=False):
+        self.crops = {"CANCEL": object(), "PLAY": object(), "READY": object()}
         self._cancel = cancel
         self._play_crop = play_crop
         self._diff = diff
+        self._leave_pending = leave_pending
         self.triggers = []
+
+    def squad_leave_pending(self):
+        return self._leave_pending
 
     def scan_region_for_cancel(self, _frame):
         return self._cancel
@@ -133,6 +137,33 @@ class TestPlayReclick:
         h.on_state_change(GameState.GAME_WAITING)
         h.tick(object(), GameState.GAME_WAITING)
         assert ctrl.clicks == []
+
+    def test_visible_ready_is_reclicked_after_interval(self):
+        a = _AnalyzerStub(play_crop="READY")
+        ctrl = _CtrlStub()
+        h = _handler(a, ctrl, waiting_fallback_enabled=False, play_reclick_missed_interval=0.0)
+        h.on_state_change(GameState.GAME_WAITING)
+        h.tick(object(), GameState.GAME_WAITING)
+        assert ctrl.clicks == ["READY"]
+
+    def test_ready_is_not_reclicked_while_a_squad_leave_is_pending(self):
+        """2026-10-11: each READY click raised a dialog over the lobby, and the
+        red X that leaves the squad needs the lobby clear."""
+        a = _AnalyzerStub(play_crop="READY", leave_pending=True)
+        ctrl = _CtrlStub()
+        h = _handler(a, ctrl, waiting_fallback_enabled=False, play_reclick_missed_interval=0.0)
+        h.on_state_change(GameState.GAME_WAITING)
+        h.tick(object(), GameState.GAME_WAITING)
+        assert ctrl.clicks == []
+
+    def test_play_is_still_reclicked_while_a_squad_leave_is_pending(self):
+        """PLAY means the squad is already gone; only READY is held."""
+        a = _AnalyzerStub(play_crop="PLAY", leave_pending=True)
+        ctrl = _CtrlStub()
+        h = _handler(a, ctrl, waiting_fallback_enabled=False, play_reclick_missed_interval=0.0)
+        h.on_state_change(GameState.GAME_WAITING)
+        h.tick(object(), GameState.GAME_WAITING)
+        assert ctrl.clicks == ["PLAY"]
 
     def test_state_is_private_to_the_handler(self):
         """ADR 060 rule 2: no other concern can reach this handler's state."""
@@ -893,10 +924,10 @@ class TestDiedArmedClassification:
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
         assert "died_armed_terrain" in events
 
-    def test_terrain_wins_when_both_signals_are_recent(self):
-        """An active hard emergency is direct, mechanism-level evidence a
-        crash was in progress — stronger than inferring enemy fire from an
-        unrelated missile alert earlier in the same life."""
+    def test_both_signals_recent_is_contested_not_terrain(self):
+        """Terrain used to win this tie. On 2026-10-03, 5 of 35 terrain-labelled
+        deaths had a missile alert active up to the death, 3 of them with 16 s
+        or more to the ground: a missile kill during a dive recovery."""
         events = []
         clock = _FakeClock(1000.0)
         ammo = SimpleNamespace(suppress_after_respawn=lambda s: None,
@@ -906,7 +937,8 @@ class TestDiedArmedClassification:
                            clock=clock, behavior_tree=bt,
                            emit_capture_event=events.append)
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
-        assert "died_armed_terrain" in events
+        assert "died_armed_contested" in events
+        assert "died_armed_terrain" not in events
         assert "died_armed_enemy_fire" not in events
 
     def test_unclassified_when_neither_signal_is_recent(self):
@@ -1515,6 +1547,26 @@ class TestUnknownAnomalyRecorder:
                "max_per_episode": 2, "dir": str(tmp_path)}
         cfg.update(cfg_overrides)
         return UnknownAnomalyRecorder(cfg, clock=clock)
+
+    def test_the_shipped_config_captures_a_stuck_screen(self, tmp_path):
+        """2026-10-03 07:41: wingman sat on the game's Invite Players screen
+        for five minutes and saved nothing, because config.yaml had carried
+        max_per_episode: 0 since 2026-09-21. The recorder logged "screenshot
+        cap 0 reached" and the only picture was one grabbed by hand."""
+        import yaml
+        from pathlib import Path
+        from wingman.tick_handlers import UnknownAnomalyRecorder
+        shipped = yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / "wingman" / "config.yaml").read_text(
+                encoding="utf-8"))["unknown_anomaly"]
+        assert shipped["max_per_episode"] >= 1
+        now = [1000.0]
+        recorder = UnknownAnomalyRecorder(dict(shipped, dir=str(tmp_path)),
+                                          clock=lambda: now[0])
+        recorder.tick(self._frame(), GameState.GAME_UNKNOWN)
+        now[0] += float(shipped["screenshot_after_s"]) + 1.0
+        recorder.tick(self._frame(), GameState.GAME_UNKNOWN)
+        assert len(list(tmp_path.glob("*.png"))) == 1
 
     @staticmethod
     def _frame():

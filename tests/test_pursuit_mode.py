@@ -94,7 +94,8 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 empty_confirm_reads=3, search_resume_centre_err=0.15,
                 search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None,
                 resupply_priority_enabled=True, resupply_priority_actuate=False,
-                rearm_climb_s=0.0, search_climb_alt_m=0.0):
+                rearm_climb_s=0.0, search_climb_alt_m=0.0, save_candidate_frames=None,
+                priority_target=None, air_superiority=None):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -140,10 +141,16 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                     # steering resumes on the tick after a rearm; the climb-out's
                     # own tests set it.
                     "rearm_climb_s": rearm_climb_s,
+                    # Left out unless a test sets it, so the schema default applies.
+                    **({"save_candidate_frames": save_candidate_frames}
+                       if save_candidate_frames is not None else {}),
                 },
                 # 0.0 by default here (not config.yaml's shipped 7000): the blind
                 # search rolls, as before; the climb's own tests set it.
                 "search_climb_alt_m": search_climb_alt_m,
+                # Left out unless a test sets it: off is the schema default.
+                **({"priority_target": priority_target} if priority_target is not None else {}),
+                **({"air_superiority": air_superiority} if air_superiority is not None else {}),
                 **({"icon_steering": icon_steering} if icon_steering is not None else {}),
                 **({"dive_safety": dive_safety} if dive_safety is not None else {}),
             },
@@ -156,6 +163,12 @@ def _wait_for_pursuit_to_settle(ctrl, timeout=3.0):
     while ctrl.is_pursuing() and time.time() < deadline:
         time.sleep(0.01)
     assert not ctrl.is_pursuing(), "pursue_and_engage did not finish in time"
+    # _pursuing clears before the thread hands off (on_complete, or building the
+    # dive's thread), so wait for the thread itself: under load a test read
+    # `done == []` in that gap (2026-10-05, test_cr019_handback, 1 run in 3).
+    pursuit_thread = getattr(ctrl, "_pursuing_thread", None)
+    if pursuit_thread is not None and pursuit_thread.is_alive():
+        pursuit_thread.join(timeout=timeout)
     # If it fell through, eject_and_dive's own thread needs to finish too.
     # _pursuing is cleared BEFORE eject_and_dive builds and start()s that
     # thread, so join() can land on a Thread that exists but has not started
@@ -899,7 +912,8 @@ def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monke
     ctrl = _make_ctrl(
         monkeypatch, analyzer=analyzer, capture=capture,
         pursuit_enabled=True, pursuit_max_duration_s=5.0,
-        empty_confirm_reads=1, resupply_priority_actuate=True)
+        empty_confirm_reads=1, resupply_priority_actuate=True,
+        save_candidate_frames=True)
     class _HudCapture:
         def __init__(self):
             self.calls = []
@@ -934,6 +948,63 @@ def test_resupply_interrupts_attack_before_zero_then_rearm_resumes_pursuit(monke
     assert "roll_left - pressing" in logs[rearm_at:], (
         "target attack resumes after the confirmed ammo increase")
     assert ("key_press", ROLL_RIGHT_KEY) in keys, "resupply focus steers toward the marker"
+
+
+def test_candidate_frames_off_saves_nothing_and_still_seeks_the_marker(
+        monkeypatch, caplog, tmp_path):
+    """Operator, 2026-10-05: the resupply_candidate_*.png captures off. The
+    switch stops the file, not the resupply focus."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame, **_kw: marker)
+    saved_frames = []
+    monkeypatch.setattr(controller_module, "_RESUPPLY_SAMPLE_DIR", tmp_path)
+    monkeypatch.setattr(
+        controller_module.cv2, "imwrite",
+        lambda path, frame: saved_frames.append(path) or True)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2]), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0, empty_confirm_reads=1,
+        resupply_priority_actuate=True)      # the key left out: off is the default
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(1.2)
+        logs = caplog.text
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert "proposed=True seeking=True mode=actuate" in logs
+    assert saved_frames == []
+    assert "candidate frame saved" not in logs
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_pursuit_reports_the_resupply_marker_it_flies_to(monkeypatch):
+    """Operator, 2026-10-08: the crash recovery waits while the resupply is in
+    view. This is the pursuit's half: what it reports while it steers at one."""
+    marker = ResupplyMarker(1400, 600, 70, 70, 1500, 0)
+    monkeypatch.setattr(controller_module, "find_resupply_marker", lambda _frame, **_kw: marker)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2]), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=5.0, empty_confirm_reads=1,
+        resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=-0.9, error_norm_y=0.9))
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        deadline = time.time() + 3.0
+        while (ctrl._pursuit_objective_in_view() != "resupply marker"
+               and time.time() < deadline):
+            time.sleep(0.02)
+        reported = ctrl._pursuit_objective_in_view()
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+    assert reported == "resupply marker"
+    assert ctrl._pursuit_objective_in_view() is None, "nothing is in view once the pursuit ends"
 
 
 def _rearm_with_a_target_low_and_left(monkeypatch, **ctrl_kwargs):
@@ -1002,7 +1073,8 @@ def test_shadow_mode_rearm_has_no_climb_out(monkeypatch, caplog):
 def test_after_a_rearm_the_other_rack_is_used_before_declaring_exhaustion(monkeypatch, caplog):
     """2026-10-02: a resupply refilled both racks (2/2 and 2/2), the
     selected one emptied, and the pursuit went into resupply mode with two
-    missiles on the other rack."""
+    missiles on the other rack. Since 2026-10-05 the primary running out
+    presses the switch as well: every rack that goes from a count to zero does."""
     caplog.set_level("DEBUG", logger="wingman.controller")
     monkeypatch.setattr(
         controller_module, "find_resupply_marker", lambda _frame, **_kw: None)
@@ -1025,14 +1097,114 @@ def test_after_a_rearm_the_other_rack_is_used_before_declaring_exhaustion(monkey
         _wait_for_pursuit_to_settle(ctrl)
 
     rearm_at = logs.index("RESUPPLY: confirmed ammo=2")
-    back_at = logs.index("switching to the primary, reloaded by the rearm")
+    back_at = logs.index("switching to the primary")
     assert rearm_at < back_at
     assert "missiles exhausted" not in logs[rearm_at:back_at], (
         "an empty selected rack after a rearm is not exhaustion")
     assert "fire_active_weapon - pressing" in logs[back_at:], "the reloaded primary is fired"
-    assert "missiles exhausted" in logs[back_at:], "both racks empty is exhaustion"
-    assert keys.count(("key_press", SWITCH_WEAPON)) == 1, "no switch back to the spent secondary"
-    assert selected_secondary is False
+    again_at = logs.index("switching to the secondary", back_at)
+    assert "missiles exhausted" in logs[again_at:], "both racks empty is exhaustion"
+    assert keys.count(("key_press", SWITCH_WEAPON)) == 2, (
+        "the primary going from 2 to 0 presses the switch too")
+    assert selected_secondary is True
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-05: "anytime any weapon goes from a number to zero it
+# presses 'g', this way if resupply happened it would auto switch to new
+# inventory". 11:18:45-11:19:18 that day: the primary ran out, the pursuit
+# switched to the secondary (2/2) and flew through the resupply point. A
+# resupply refills both racks, but the selected one was already full, so no
+# count changed. When the secondary ran out nothing pressed the switch, and the
+# aircraft searched for a resupply for 39 s with a reloaded primary.
+# ---------------------------------------------------------------------------
+
+def _pursue_until(ctrl, done, *, timeout=8.0, **pursue_kwargs):
+    """Run a pursuit until `done()` or the timeout, then stop it from outside."""
+    ctrl.pursue_and_engage(**pursue_kwargs)
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline and ctrl.is_pursuing() and not done():
+            time.sleep(0.02)
+        return done()
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+
+def test_the_secondary_running_out_switches_back_to_a_primary_reloaded_unseen(
+        monkeypatch, caplog):
+    caplog.set_level("INFO", logger="wingman.controller")
+    # Primary 3 then empty; the stale 0 after the switch, secondary 2, 2 then
+    # empty; the stale 0 again, then the primary the resupply refilled.
+    analyzer = _SequenceAnalyzer([3, 0, 0, 0, 2, 2, 0, 0, 0, 6])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=2, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    def _reloaded_primary_fired():
+        keys = _keys(ctrl)
+        presses = [i for i, k in enumerate(keys) if k == ("key_press", SWITCH_WEAPON)]
+        return len(presses) >= 2 and ("key_press", FIRE_ACTIVE_WEAPON) in keys[presses[1]:]
+
+    assert _pursue_until(ctrl, _reloaded_primary_fired, defer_switch_until_empty=True), (
+        "the reloaded primary was never selected and fired")
+    logs = caplog.text
+    first = logs.index("switching to the secondary")
+    second = logs.index("switching to the primary")
+    assert first < second
+    assert len(_switch_presses(_keys(ctrl))) == 2
+    assert not ctrl.is_secondary_weapon_active(), "the count read is the primary's again"
+    assert "missiles exhausted" not in logs
+    assert "RESUPPLY: confirmed" not in logs[:second], (
+        "the switch back must not depend on the count having shown the rearm")
+
+
+def test_the_missiles_empty_pursuit_switches_back_too(monkeypatch):
+    """The default path presses the switch at its start; its secondary running
+    out presses it again."""
+    analyzer = _SequenceAnalyzer([0, 2, 2, 0, 0, 0, 6])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=2, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    assert _pursue_until(ctrl, lambda: len(_switch_presses(_keys(ctrl))) >= 2), (
+        "the secondary going from 2 to 0 pressed nothing")
+    assert not ctrl.is_secondary_weapon_active()
+
+
+def test_two_empty_racks_do_not_toggle_back_and_forth(monkeypatch, caplog):
+    """SWITCH_WEAPON is a toggle. A rack that shows no count after it is selected
+    did not go from a number to zero, so it presses nothing: two presses, then
+    the ordinary both-racks-empty ending, and the dive does not press a third."""
+    caplog.set_level("INFO", logger="wingman.controller")
+    analyzer = _SequenceAnalyzer([2, 0, 0, 2, 0, 0, 0])
+    ctrl, keys = _run_deferred_pursuit(
+        monkeypatch, analyzer, confirm=2, ammo_grace=0.3, max_s=6.0, heatdive=True)
+    logs = caplog.text
+    assert "ammo exhausted, falling through" in logs
+    assert logs.index("switching to the primary") < logs.index("ammo exhausted")
+    assert len(_switch_presses(keys)) == 2, "no third press, in the pursuit or the dive"
+    assert not ctrl.is_secondary_weapon_active()
+
+
+def test_a_rack_with_no_count_yet_is_not_switched_away_from(monkeypatch):
+    """After a switch the HUD holds the old rack's 0 for seconds. That 0 is
+    not the new rack running out."""
+    analyzer = _SequenceAnalyzer([2, 0, 0, 0, 0, 0, 0, 0, 0, 2])
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        ammo_zero_grace_s=30.0, empty_confirm_reads=2)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+
+    assert _pursue_until(ctrl, lambda: analyzer._n >= 12, defer_switch_until_empty=True)
+    assert len(_switch_presses(_keys(ctrl))) == 1
+    assert ctrl.is_secondary_weapon_active()
 
 
 def test_max_duration_before_empty_does_not_switch_weapons(monkeypatch):
@@ -1929,3 +2101,854 @@ def test_a_takeover_key_with_nothing_flying_is_ignored_and_says_so(monkeypatch, 
         assert ctrl._handle_maneuver_key_press("enter", display=":3") is False
     assert any("maneuver key 'enter' ignored — no commanded flight" in r.getMessage()
                for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-09: "similar to the resupply icon ... implement steering
+# towards prioritytarget defined by the yellow icon, where the small icon near
+# the center of the screen indicates direction to steer towards". The priority
+# target is the crown objective: its marker in view is flown at as the resupply
+# marker is, and off screen its pin on the ring feeds the icon law in place of
+# the red icons. The detectors have their own tests (test_priority_target.py);
+# these replace them and pin what the pursuit does with what they return.
+# ---------------------------------------------------------------------------
+
+_PT_ON = {"enabled": True, "actuate": True}
+_ICON_ALL = {"enabled": True, "wings_level": True, "actuate_pitch": True, "actuate_turn": True}
+
+
+def _priority_marker(x, y):
+    from wingman.priority_target import PriorityMarker
+    return PriorityMarker(x, y, 20, 20, 70, 0.0)
+
+
+def _priority_pursuit(monkeypatch, caplog, *, marker=None, pins=(), tracker=None,
+                      priority_target=_PT_ON, analyzer=None, run_s=1.0, capture=None,
+                      pursue_kwargs=None, **ctrl_kwargs):
+    calls = {"marker": 0, "pins": 0}
+
+    def find_marker(_frame, **_kw):
+        calls["marker"] += 1
+        return marker
+
+    def find_pins(_frame, _cfg=None):
+        calls["pins"] += 1
+        return list(pins)
+
+    monkeypatch.setattr(controller_module, "find_priority_marker", find_marker)
+    monkeypatch.setattr(controller_module, "find_priority_ring_icons", find_pins)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=analyzer or _AnalyzerStub(ammo=2),
+        capture=capture or _BlankCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        priority_target=priority_target, **ctrl_kwargs)
+    ctrl.set_target_tracker(tracker or _TrackerStub(visible=False))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(**(pursue_kwargs or {"defer_switch_until_empty": True}))
+        time.sleep(run_s)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records], calls
+
+
+def test_the_priority_marker_in_view_is_flown_at(monkeypatch, caplog):
+    """Right of the centre and below it: roll right, nose down."""
+    ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800))
+
+    keys = _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) in keys
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert "PRIORITY TARGET: marker in view at (1400,800) (steering to it)" in messages
+    assert any(m.startswith("PRIORITY: marker=(1400,800)") and "control=True" in m
+               and "mode=actuate" in m for m in messages)
+
+
+def test_the_hud_names_the_priority_target_it_steers_at(monkeypatch, caplog):
+    class _HudCapture:
+        def __init__(self):
+            self.calls = []
+
+        def maybe_render(self, *args, **kwargs):
+            self.calls.append(kwargs)
+
+    hud = _HudCapture()
+    monkeypatch.setattr(controller_module, "find_priority_marker",
+                        lambda _frame, **_kw: _priority_marker(1400, 800))
+    monkeypatch.setattr(controller_module, "find_priority_ring_icons", lambda _f, _c=None: [])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0, priority_target=_PT_ON)
+    ctrl.set_hud_renderer(hud)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.8)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert any(kwargs.get("steering_label") == "PRIORITY TARGET"
+               and kwargs.get("steering_target") == (1400, 800) for kwargs in hud.calls)
+
+
+def test_shadow_mode_logs_the_priority_marker_and_does_not_steer_at_it(monkeypatch, caplog):
+    ctrl, messages, calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800),
+        priority_target={"enabled": True, "actuate": False})
+
+    assert calls["marker"] > 0
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+    assert ("key_press", NOSE_DOWN_KEY) not in _keys(ctrl)
+    assert "PRIORITY TARGET: marker in view at (1400,800) (shadow)" in messages
+    assert any(m.startswith("PRIORITY: marker=(1400,800)") and "proposed=True" in m
+               and "control=False" in m and "mode=shadow" in m for m in messages)
+
+
+def test_priority_target_off_scans_nothing(monkeypatch, caplog):
+    """Off is what a config without the key gets."""
+    ctrl, messages, calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800), priority_target=None)
+
+    assert calls == {"marker": 0, "pins": 0}
+    assert not any(m.startswith("PRIORITY") for m in messages)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+def test_a_visible_target_nearer_the_centre_keeps_the_steering(monkeypatch, caplog):
+    """The resupply marker's rule (operator, 2026-10-02): whichever of the two is
+    nearer the screen centre. The target is 190 px left, the marker 740 px right."""
+    ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1700, 600),
+        tracker=_TrackerStub(visible=True, error_norm=-0.2, error_norm_y=0.0))
+
+    keys = _keys(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) in keys, "the locked target is still steered at"
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys
+    assert any(m.startswith("PRIORITY: marker=(1700,600)") and "proposed=False" in m
+               for m in messages)
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys
+
+
+def test_the_marker_nearer_the_centre_than_the_target_takes_the_steering(monkeypatch, caplog):
+    """The target is 860 px left, the marker 340 px right. Firing carries on."""
+    ctrl, _messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1300, 600),
+        tracker=_TrackerStub(visible=True, error_norm=-0.9, error_norm_y=0.0))
+
+    keys = _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) in keys
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", FIRE_ACTIVE_WEAPON) in keys
+
+
+def test_the_resupply_marker_comes_before_the_priority_target(monkeypatch, caplog):
+    """Two missiles spent and the resupply marker in view on the left, the
+    priority target on the right: the resupply has the steering."""
+    monkeypatch.setattr(controller_module, "find_resupply_marker",
+                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    _ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 600),
+        analyzer=_SequenceAnalyzer([4, 2, 2]), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=1.4,
+        pursue_kwargs={"weapon_already_switched": True})
+
+    focus_at = next(i for i, m in enumerate(messages) if "rearm focus begins" in m)
+    after = "\n".join(messages[focus_at:])
+    assert "roll_left - pressing" in after
+    assert "roll_right - pressing" not in after
+
+
+def _pin(angle_deg):
+    import math
+    from wingman.icon_steering import RingIcon
+    return RingIcon(960 + 203 * math.cos(math.radians(angle_deg)),
+                    600 + 203 * math.sin(math.radians(angle_deg)),
+                    90, 18, 24, float(angle_deg), 26)
+
+
+def _pin_pursuit(monkeypatch, caplog, **kwargs):
+    ctrl, messages, calls = _priority_pursuit(
+        monkeypatch, caplog, sustained_hold_enabled=True, icon_steering=_ICON_ALL,
+        analyzer=kwargs.pop("analyzer", None) or _TelemetryAnalyzer(), **kwargs)
+    return ctrl, messages, calls
+
+
+def _quiet_search(monkeypatch):
+    """Keep the blind search's own taps and the dive guard out of the key log."""
+    monkeypatch.setattr(Controller, "_search_look_down", lambda self: False)
+    monkeypatch.setattr(Controller, "_telemetry_path_angle_deg", lambda self: -5.0)
+    monkeypatch.setattr(Controller, "_pursuit_dive_guard",
+                        lambda self, target_visible=False: None)
+    monkeypatch.setattr(Controller, "_dive_guard_pullout", lambda self: None)
+
+
+def test_the_priority_pin_turns_the_search_toward_it(monkeypatch, caplog):
+    """No target and no marker in view: the pin at 9 o'clock is what the icon
+    law flies, bank left and pull."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _pin_pursuit(monkeypatch, caplog, pins=[_pin(180)], run_s=1.6)
+
+    assert "PRIORITY TARGET: pin on the ring at +180 deg (steering to it)" in messages
+    assert any(m.startswith("ICONPTS:") and "act=bankleft+up" in m for m in messages), (
+        "bank toward the pin and pull")
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+    assert any(m.startswith("PRIORITY: marker=- ") and "pin=+180" in m and "search=True" in m
+               for m in messages)
+
+
+def test_the_priority_pin_outranks_a_red_icon(monkeypatch, caplog):
+    """The frame holds the reference red icon (nose down 5, left 1). With the
+    crown pin at 3 o'clock the law flies the pin: right, not down."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _pin_pursuit(
+        monkeypatch, caplog, pins=[_pin(0)], capture=_FrameCapture(), run_s=1.6)
+
+    acts = [m for m in messages if m.startswith("ICONPTS:") and "rung=icon" in m]
+    assert acts and all("act=bankright" in m for m in acts), acts[:3]
+    assert ("key_press", ROLL_RIGHT_KEY) in _keys(ctrl)
+    assert ("key_press", NOSE_DOWN_KEY) not in _keys(ctrl)
+
+
+def test_a_target_in_view_is_tracked_whatever_the_pin_says(monkeypatch, caplog):
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _pin_pursuit(
+        monkeypatch, caplog, pins=[_pin(180)],
+        tracker=_TrackerStub(visible=True, error_norm=0.5, error_norm_y=0.0))
+
+    assert any(m.startswith("HOLD[roll]") and "-> right/target" in m for m in messages)
+    assert not any(m.startswith("ICONPTS:") and "rung=icon" in m for m in messages)
+    assert any(m.startswith("PRIORITY: marker=- ") and "search=False" in m for m in messages)
+
+
+def test_shadow_mode_leaves_the_search_to_the_red_icons(monkeypatch, caplog):
+    """Enabled without actuate: the pin is logged and the blind search flies."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, calls = _pin_pursuit(
+        monkeypatch, caplog, pins=[_pin(0)],
+        priority_target={"enabled": True, "actuate": False})
+
+    assert calls["pins"] > 0
+    assert "PRIORITY TARGET: pin on the ring at +0 deg (shadow)" in messages
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+def _empty_racks():
+    analyzer = _TelemetryAnalyzer()
+    analyzer.ammo = 0
+    return analyzer
+
+
+def _empty_rack_pursuit(monkeypatch, caplog, **kwargs):
+    """A pin pursuit whose first ammo read confirms every rack empty. Returns
+    the controller, what was logged, the scan counts and where in the log the
+    racks were confirmed empty: the steering cycles after it are the resupply
+    search's."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, calls = _pin_pursuit(
+        monkeypatch, caplog, analyzer=_empty_racks(), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=1.6,
+        pursue_kwargs={"weapon_already_switched": True}, **kwargs)
+    empty_at = next(i for i, m in enumerate(messages)
+                    if m.startswith("RESUPPLY: missiles exhausted"))
+    return ctrl, messages, calls, empty_at
+
+
+def test_with_every_rack_empty_the_crown_marker_in_view_is_still_flown_at(monkeypatch, caplog):
+    """2026-10-10 05:44:06: the racks were confirmed empty with the crown's
+    marker dead ahead, 55 px across. The resupply search took the roll
+    (`right/target -> left/search`) and the aircraft went by it. Flying through
+    the crown takes no missile, so its marker keeps the steering."""
+    _ctrl, messages, _calls, empty_at = _empty_rack_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800), pins=[_pin(0)])
+
+    search_at = next(i for i, m in enumerate(messages)
+                     if m.startswith("RESUPPLY: spent") and "search=True" in m)
+    assert any(m.startswith("PRIORITY: marker=(1400,800)") and "control=True" in m
+               for m in messages[search_at:]), "the marker lost the steering to the search"
+    assert any(m.startswith("HOLD[roll]") and "-> right/target" in m for m in messages)
+    assert not any(m.startswith("HOLD[roll]") and "/search" in m for m in messages), (
+        "the roll toward the marker was given up")
+    assert not any(m.startswith("ICONPTS:") for m in messages[empty_at:]), (
+        "the resupply pin's law flew while the crown was in view")
+
+
+def test_with_every_rack_empty_no_target_takes_the_steering_from_the_crown(monkeypatch, caplog):
+    """The target is 190 px left of the centre, the marker 480 px from it, to
+    the right and below. With missiles the nearer target has the steering;
+    with every rack empty no target is steered at, and the marker has it."""
+    _ctrl, messages, _calls, empty_at = _empty_rack_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 800),
+        tracker=_TrackerStub(visible=True, error_norm=-0.2, error_norm_y=0.0))
+
+    before = [m for m in messages[:empty_at] if m.startswith("HOLD[roll]")]
+    after = [m for m in messages[empty_at:]
+             if m.startswith("HOLD[roll]") and "loop exit" not in m]
+    assert before and all("-> left/target" in m for m in before), before
+    assert after and all("-> right/target" in m for m in after), after
+
+
+def test_with_every_rack_empty_the_resupply_marker_still_comes_first(monkeypatch, caplog):
+    """The resupply marker in view on the left, the crown's on the right: the
+    rearm is what the search is for."""
+    monkeypatch.setattr(controller_module, "find_resupply_marker",
+                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    _ctrl, messages, _calls, empty_at = _empty_rack_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 600))
+
+    after = [m for m in messages[empty_at:]
+             if m.startswith("HOLD[roll]") and "loop exit" not in m]
+    assert after and all("-> left/target" in m for m in after), after
+    assert any(m.startswith("PRIORITY: marker=(1400,600)") and "control=False" in m
+               for m in messages[empty_at:])
+
+
+def test_with_every_rack_empty_the_priority_pin_is_not_looked_for(monkeypatch, caplog):
+    """Only the marker in view is flown at with the racks empty. The pin on the
+    ring would turn the search away from the resupply point."""
+    _ctrl, messages, calls, _empty_at = _empty_rack_pursuit(
+        monkeypatch, caplog, pins=[_pin(0)])
+
+    # The cycle that confirms the racks empty had already scanned; from the next
+    # one on (the first to log search=True) only the marker is.
+    search_at = next(i for i, m in enumerate(messages)
+                     if m.startswith("RESUPPLY: spent") and "search=True" in m)
+    assert any(m.startswith("PRIORITY") for m in messages[:search_at]), "it was followed before"
+    assert not any(m.startswith("PRIORITY") for m in messages[search_at:])
+    assert calls["pins"] <= 2 < calls["marker"], calls
+    assert any(m.startswith("HOLD[roll]") and "-> left/search" in m for m in messages)
+
+
+class _CropCapture(_CaptureStub):
+    """A black 1920x1200 frame holding one fixture crop at its own place."""
+
+    def __init__(self, name, origin):
+        super().__init__()
+        import cv2
+        import numpy as np
+        from pathlib import Path
+        crop = cv2.imread(str(Path(__file__).parent / "fixtures" / name))
+        self.frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
+        left, top = origin
+        self.frame[top:top + crop.shape[0], left:left + crop.shape[1]] = crop
+
+    def grab_from_thread(self):
+        self.grabs += 1
+        return self.frame
+
+
+def _real_priority_pursuit(monkeypatch, caplog, capture, run_s=1.6):
+    """The real detectors on a real crop, through the real loop."""
+    _quiet_search(monkeypatch)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_TelemetryAnalyzer(), capture=capture,
+        pursuit_enabled=True, pursuit_max_duration_s=0.0, sustained_hold_enabled=True,
+        icon_steering=_ICON_ALL, priority_target=_PT_ON)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(run_s)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records]
+
+
+def test_the_crown_marker_of_2026_10_09_is_flown_at_end_to_end(monkeypatch, caplog):
+    """screenshot_20261009_033345: the marker 176 px right of the centre and
+    59 px below it."""
+    ctrl, messages = _real_priority_pursuit(
+        monkeypatch, caplog, _CropCapture("priority_marker_near.png", (1056, 579)))
+
+    assert any(m.startswith("PRIORITY TARGET: marker in view at (1136,65") for m in messages)
+    assert any(m.startswith("HOLD[roll]") and "-> right/target" in m for m in messages)
+    assert ("key_press", ROLL_RIGHT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+
+
+def test_the_crown_pin_of_2026_10_09_steers_the_search_end_to_end(monkeypatch, caplog):
+    """prioritytarget_direction.png: the pin at +110 deg, below the centre and
+    a little left of it. The icon law reads it and flies it."""
+    ctrl, messages = _real_priority_pursuit(
+        monkeypatch, caplog, _CropCapture("priority_pin_cloud.png", (852, 748)))
+
+    assert "PRIORITY TARGET: pin on the ring at +110 deg (steering to it)" in messages
+    flown = [m for m in messages if m.startswith("ICONPTS:") and "rung=icon" in m]
+    assert flown, "the pin never drove the icon law"
+    assert all("intent=down" in m or "intent=turn" in m for m in flown), flown[:3]
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-09: "similar to prioritytarget ... implement steering
+# towards air superiority icons A, B, or C, if the icons are red, the small
+# icons indicates the direction to steer towards ... it flies towards the A
+# mark because it is a target on screen and closer rather than steer towards B,
+# it should fly through A then proceed with B". The control points go through
+# the priority target's place in the steering. The detectors have their own
+# tests (test_air_superiority.py); these replace them, except the last three.
+# ---------------------------------------------------------------------------
+
+def _point(x, y, size=40):
+    from wingman.air_superiority import ControlPointMarker
+    return ControlPointMarker(x, y, size, size, 300, 0.0)
+
+
+def _airsup_pursuit(monkeypatch, caplog, *, marker=None, pins=(), tracker=None,
+                    air_superiority=_PT_ON, run_s=1.0, capture=None, **ctrl_kwargs):
+    """`marker` and `pins` may be callables of the scan number, for a point
+    that is taken part way through."""
+    calls = {"marker": 0, "pins": 0}
+
+    def find_marker(_frame, **_kw):
+        calls["marker"] += 1
+        return marker(calls["marker"]) if callable(marker) else marker
+
+    def find_pins(_frame, _cfg=None):
+        calls["pins"] += 1
+        return list(pins(calls["pins"]) if callable(pins) else pins)
+
+    monkeypatch.setattr(controller_module, "find_control_point_marker", find_marker)
+    monkeypatch.setattr(controller_module, "find_control_point_ring_icons", find_pins)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=ctrl_kwargs.pop("analyzer", None) or _AnalyzerStub(ammo=2),
+        capture=capture or _BlankCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        air_superiority=air_superiority, **ctrl_kwargs)
+    ctrl.set_target_tracker(tracker or _TrackerStub(visible=False))
+    # "wingman", not the controller alone: the fly-through tally logs from its
+    # own module.
+    with caplog.at_level("DEBUG", logger="wingman"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(run_s)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records], calls
+
+
+def test_a_red_control_point_in_view_is_flown_at(monkeypatch, caplog):
+    """Left of the centre and above it: roll left, nose up."""
+    ctrl, messages, _calls = _airsup_pursuit(monkeypatch, caplog, marker=_point(600, 300))
+
+    keys = _keys(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert ("key_press", ROLL_RIGHT_KEY) not in keys
+    assert "AIR SUPERIORITY: marker in view at (600,300) (steering to it)" in messages
+    assert any(m.startswith("AIRSUP: marker=(600,300)") and "control=True" in m
+               and "mode=actuate" in m for m in messages)
+
+
+def test_the_point_in_view_is_flown_at_whatever_the_pins_say(monkeypatch, caplog):
+    """prioritize_direct_target.png: A is on screen, B's pin is on the ring at
+    9 o'clock. "It flies towards the A mark because it is a target on screen
+    and closer rather than steer towards B." Here A is to the right."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(1400, 600), pins=[_pin(180)],
+        sustained_hold_enabled=True, icon_steering=_ICON_ALL, analyzer=_TelemetryAnalyzer())
+
+    assert any(m.startswith("HOLD[roll]") and "-> right/target" in m for m in messages)
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+    assert calls["pins"] == 0, "with a point in view the pins are not even read"
+    assert not any(m.startswith("ICONPTS:") and "rung=icon" in m for m in messages)
+
+
+def test_once_the_point_in_view_is_taken_the_next_pin_steers(monkeypatch, caplog):
+    """"It should fly through A then proceed with B." A taken turns blue and is
+    no longer found; B's red pin is at 9 o'clock."""
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog,
+        marker=lambda scan: _point(1400, 600) if scan <= 4 else None, pins=[_pin(180)],
+        sustained_hold_enabled=True, icon_steering=_ICON_ALL, analyzer=_TelemetryAnalyzer(),
+        run_s=3.0)
+
+    first_right = next(i for i, m in enumerate(messages)
+                       if m.startswith("HOLD[roll]") and "-> right/target" in m)
+    bank_left = [i for i, m in enumerate(messages)
+                 if m.startswith("ICONPTS:") and "act=bankleft+up" in m]
+    assert bank_left and bank_left[0] > first_right, "A first, then toward B's pin"
+    assert any(m.startswith("AIRSUP: marker=- ") and "pin=+180" in m and "search=True" in m
+               for m in messages)
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+
+
+def test_the_hud_names_the_control_point_it_steers_at(monkeypatch, caplog):
+    class _HudCapture:
+        def __init__(self):
+            self.calls = []
+
+        def maybe_render(self, *args, **kwargs):
+            self.calls.append(kwargs)
+
+    hud = _HudCapture()
+    monkeypatch.setattr(controller_module, "find_control_point_marker",
+                        lambda _frame, **_kw: _point(600, 300))
+    monkeypatch.setattr(controller_module, "find_control_point_ring_icons",
+                        lambda _f, _c=None: [])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0, air_superiority=_PT_ON)
+    ctrl.set_hud_renderer(hud)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.8)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert any(kwargs.get("steering_label") == "CONTROL POINT"
+               and kwargs.get("steering_target") == (600, 300) for kwargs in hud.calls)
+
+
+def test_air_superiority_in_shadow_logs_and_does_not_steer(monkeypatch, caplog):
+    ctrl, messages, calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(600, 300),
+        air_superiority={"enabled": True, "actuate": False})
+
+    assert calls["marker"] > 0
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+    assert ("key_press", NOSE_UP_KEY) not in _keys(ctrl)
+    assert "AIR SUPERIORITY: marker in view at (600,300) (shadow)" in messages
+
+
+def test_air_superiority_off_scans_nothing(monkeypatch, caplog):
+    ctrl, messages, calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(600, 300), pins=[_pin(180)], air_superiority=None)
+
+    assert calls == {"marker": 0, "pins": 0}
+    assert not any(m.startswith("AIR") for m in messages)
+
+
+def test_a_red_pin_turns_the_search_toward_the_point(monkeypatch, caplog):
+    _quiet_search(monkeypatch)
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog, pins=[_pin(180)], sustained_hold_enabled=True,
+        icon_steering=_ICON_ALL, analyzer=_TelemetryAnalyzer(), run_s=1.6)
+
+    assert "AIR SUPERIORITY: pin on the ring at +180 deg (steering to it)" in messages
+    assert any(m.startswith("ICONPTS:") and "act=bankleft+up" in m for m in messages)
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+def test_the_crown_is_looked_for_before_the_control_points(monkeypatch, caplog):
+    """Two game modes, so never both; with both switched on the crown's marker
+    is the one flown at."""
+    monkeypatch.setattr(controller_module, "find_priority_marker",
+                        lambda _frame, **_kw: _priority_marker(1400, 800))
+    monkeypatch.setattr(controller_module, "find_priority_ring_icons", lambda _f, _c=None: [])
+    ctrl, messages, calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(600, 300), priority_target=_PT_ON)
+
+    assert calls["marker"] == 0
+    assert "PRIORITY TARGET: marker in view at (1400,800) (steering to it)" in messages
+    assert ("key_press", ROLL_RIGHT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_LEFT_KEY) not in _keys(ctrl)
+
+
+def _real_airsup_pursuit(monkeypatch, caplog, capture, run_s=1.6):
+    """The real detectors on real crops, through the real loop."""
+    _quiet_search(monkeypatch)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_TelemetryAnalyzer(), capture=capture,
+        pursuit_enabled=True, pursuit_max_duration_s=0.0, sustained_hold_enabled=True,
+        icon_steering=_ICON_ALL, priority_target=_PT_ON, air_superiority=_PT_ON)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(run_s)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records]
+
+
+class _CropsCapture(_CropCapture):
+    """Several fixture crops in one frame."""
+
+    def __init__(self, *placed):
+        name, origin = placed[0]
+        super().__init__(name, origin)
+        import cv2
+        from pathlib import Path
+        for name, (left, top) in placed[1:]:
+            crop = cv2.imread(str(Path(__file__).parent / "fixtures" / name))
+            self.frame[top:top + crop.shape[0], left:left + crop.shape[1]] = crop
+
+
+def test_the_operators_frame_flies_at_a_and_not_toward_bs_pin(monkeypatch, caplog):
+    """prioritize_direct_target.png end to end: the A disc 24 px left of the
+    centre, and a red pin on the ring at 3 o'clock standing in for B's, which
+    in the screenshot lies under C's blue pin. A is nearly dead ahead, so the
+    aircraft holds its course at it and does not bank toward the pin."""
+    ctrl, messages = _real_airsup_pursuit(monkeypatch, caplog, _CropsCapture(
+        ("airsup_marker_reticle.png", (836, 502)), ("airsup_pin_right.png", (1126, 625))))
+
+    assert any(m.startswith("AIR SUPERIORITY: marker in view at (936,60") for m in messages)
+    assert any(m.startswith("AIRSUP: marker=(936,60") and "control=True" in m for m in messages)
+    assert not any(m.startswith("ICONPTS:") and "rung=icon" in m for m in messages)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl), "banked toward the pin"
+
+
+def test_a_control_point_of_2026_10_09_is_flown_at_end_to_end(monkeypatch, caplog):
+    """screenshot_20261009_044142: the A disc 86 px left of the centre and
+    98 px above it."""
+    ctrl, messages = _real_airsup_pursuit(
+        monkeypatch, caplog, _CropCapture("airsup_marker_mid.png", (804, 432)))
+
+    assert any(m.startswith("AIR SUPERIORITY: marker in view at (874,50") for m in messages)
+    assert any(m.startswith("HOLD[pitch]") and "-> up" in m for m in messages)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+    assert ("key_press", NOSE_DOWN_KEY) not in _keys(ctrl)
+
+
+def test_a_red_pin_of_2026_10_09_steers_the_search_end_to_end(monkeypatch, caplog):
+    """screenshot_20261009_044324: A's pin at -170 deg, left of the centre."""
+    ctrl, messages = _real_airsup_pursuit(
+        monkeypatch, caplog, _CropCapture("airsup_pin_left.png", (728, 536)))
+
+    assert "AIR SUPERIORITY: pin on the ring at -170 deg (steering to it)" in messages
+    assert any(m.startswith("ICONPTS:") and "act=bankleft" in m for m in messages)
+    assert ("key_press", ROLL_LEFT_KEY) in _keys(ctrl)
+    assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-10-09: "at round end it prints how many air superiority
+# targets, resupply, and priority targets are captured ... it should not read
+# the score bar, only track when wingman flies through the targets". The rule
+# has its own tests (test_objective_tally.py); these pin that the pursuit
+# reports what it sees and that the round's end logs the line once. Later the
+# same day: "i only want it to print total counts during wingman session
+# summary", so the round's line is DEBUG and the session's totals are what the
+# summary prints.
+# ---------------------------------------------------------------------------
+
+def _round_line(ctrl, caplog):
+    """What the main loop's call at the round's end logs, at DEBUG."""
+    caplog.clear()
+    with caplog.at_level("DEBUG", logger="wingman.controller"):
+        ctrl.log_round_objectives()
+    return [r.getMessage() for r in caplog.records if "ROUND OBJECTIVES" in r.getMessage()]
+
+
+def test_a_control_point_flown_through_is_counted_and_printed_at_the_rounds_end(
+        monkeypatch, caplog):
+    """The disc dead ahead grows from 24 to 60 px over ten scans and is then
+    gone: the aircraft went through it."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog,
+        marker=lambda scan: _point(960, 600, 20 + 4 * scan) if scan <= 10 else None,
+        run_s=3.2)
+
+    assert any(m.startswith("OBJECTIVE: flew through an air superiority point: its marker "
+                            "reached 60 px across and was gone")
+               and "(1 this round)" in m for m in messages)
+    lines = _round_line(ctrl, caplog)
+    assert len(lines) == 1
+    assert lines[0].endswith(
+        "ROUND OBJECTIVES — flown through: air superiority points 1, "
+        "resupply 0, priority targets 0")
+    assert _round_line(ctrl, caplog) == [], "the lobby after the end screen logs nothing"
+    assert ctrl.objective_session_counts() == {
+        "air_superiority": 1, "resupply": 0, "priority_target": 0}, (
+        "the session's totals outlive the round")
+
+
+def test_a_control_point_turned_away_from_is_not_counted(monkeypatch, caplog):
+    """In view for ten scans at 22 px, never near, then gone."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog,
+        marker=lambda scan: _point(960, 600, 22) if scan <= 10 else None, run_s=3.2)
+
+    assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
+    assert any(m.startswith("OBJECTIVE: an air superiority point lost at 22 px")
+               for m in messages)
+    assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_a_control_point_that_grew_large_and_left_by_the_edge_is_counted(monkeypatch, caplog):
+    """Operator, 2026-10-09: "the evidence for airsuperiority marker fly through
+    should be based on if the marker reached large size then disappeared." The
+    disc grows to 60 px while it slides from the centre to the left edge, and
+    is gone."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog,
+        marker=lambda scan: (_point(960 - 56 * scan, 600, 20 + 4 * scan)
+                             if scan <= 10 else None),
+        run_s=3.2)
+
+    assert any(m.startswith("OBJECTIVE: flew through an air superiority point: its marker "
+                            "reached 60 px across and was gone, last seen at 60 px and 560 px")
+               for m in messages)
+    assert "air superiority points 1" in _round_line(ctrl, caplog)[0]
+
+
+def test_the_priority_target_flown_through_is_counted(monkeypatch, caplog):
+    def crown(scan):
+        from wingman.priority_target import PriorityMarker
+        size = 14 + 3 * scan
+        return PriorityMarker(960, 600, size, size, 70, 0.0) if scan <= 10 else None
+
+    calls = {"n": 0}
+
+    def find_marker(_frame, **_kw):
+        calls["n"] += 1
+        return crown(calls["n"])
+
+    monkeypatch.setattr(controller_module, "find_priority_marker", find_marker)
+    monkeypatch.setattr(controller_module, "find_priority_ring_icons", lambda _f, _c=None: [])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0, priority_target=_PT_ON)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    with caplog.at_level("INFO", logger="wingman"):
+        ctrl.pursue_and_engage(defer_switch_until_empty=True)
+        time.sleep(3.2)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+
+    assert any(r.getMessage().startswith("OBJECTIVE: flew through the priority target, 44 px")
+               for r in caplog.records)
+    assert _round_line(ctrl, caplog)[0].endswith("priority targets 1")
+
+
+def _resupply_round(monkeypatch, caplog, marker_px, ammo_reads):
+    """A pursuit on the resupply marker dead ahead, `marker_px(scan)` across for
+    nine scans and then gone, with `ammo_reads` as the count's readings. Returns
+    the controller and what was logged."""
+    scans = {"n": 0}
+
+    def find_marker(_frame, **_kw):
+        scans["n"] += 1
+        size = marker_px(scans["n"])
+        return ResupplyMarker(960, 600, size, size, 300, 0) if scans["n"] <= 9 else None
+
+    monkeypatch.setattr(controller_module, "find_resupply_marker", find_marker)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer(ammo_reads),
+        capture=_BlankCapture(), pursuit_enabled=True, pursuit_max_duration_s=0.0,
+        empty_confirm_reads=1, resupply_priority_actuate=True)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    with caplog.at_level("INFO", logger="wingman"):
+        ctrl.pursue_and_engage(weapon_already_switched=True)
+        time.sleep(4.5)
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+    return ctrl, [r.getMessage() for r in caplog.records]
+
+
+def test_a_rearm_counts_the_resupply_point_whatever_its_marker_did(monkeypatch, caplog):
+    """2026-10-09 06:04:01, the first live session: the marker dead ahead was
+    lost while still 25 px across, and the count then went up. The rearm is the
+    fly-through, and its line says where the marker was last."""
+    ctrl, messages = _resupply_round(
+        monkeypatch, caplog, lambda _scan: 25, [4, 2, 2, 2, 2, 2, 2, 6, 6])
+
+    assert any(m.startswith("RESUPPLY: confirmed ammo=6") for m in messages)
+    counted = [m for m in messages if m.startswith("OBJECTIVE: flew through the resupply point")]
+    assert len(counted) == 1, counted
+    assert "rearm confirmed, its marker last seen" in counted[0]
+    assert "25 px across and 0 px off the centre (1 this round)" in counted[0]
+    assert "resupply 1, priority targets 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_the_resupply_marker_gone_at_close_range_with_no_rearm_is_not_counted(
+        monkeypatch, caplog):
+    """2026-10-09 06:13:20 and 06:15:10: the marker grew to 56 px and to 51 px
+    dead ahead and was gone, and the count never went up. Not a fly-through."""
+    ctrl, messages = _resupply_round(
+        monkeypatch, caplog, lambda scan: 26 + 4 * scan, [4, 2, 2, 2, 2, 2, 2, 2, 2])
+
+    assert not any(m.startswith("RESUPPLY: confirmed ammo") for m in messages)
+    assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
+    assert "resupply 0, priority targets 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_a_marker_in_view_when_the_aircraft_dies_is_not_counted(monkeypatch, caplog):
+    """The pursuit ends with the disc at 60 px still on screen: a death at the
+    point, not a capture."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=lambda scan: _point(960, 600, min(60, 20 + 4 * scan)),
+        run_s=2.0)
+
+    assert not any(m.startswith("OBJECTIVE: flew through") for m in messages)
+    assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_a_marker_the_empty_rack_search_stops_looking_for_is_not_counted(monkeypatch, caplog):
+    """2026-10-10 05:44:07: `flew through the priority target` was logged a
+    second after the racks were confirmed empty, because the scan had stopped,
+    not because the marker had gone. The crown's marker is now scanned for
+    throughout; the control points are not, and their disc, 60 px across and
+    dead ahead when the search begins, is dropped and not counted."""
+    ctrl, messages, _calls = _airsup_pursuit(
+        monkeypatch, caplog, marker=_point(960, 600, 60),
+        analyzer=_SequenceAnalyzer([2, 2, 2, 0]), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=3.2)
+
+    empty_at = next(i for i, m in enumerate(messages)
+                    if m.startswith("RESUPPLY: missiles exhausted"))
+    assert any(m.startswith("AIRSUP: marker=(960,600)") for m in messages[:empty_at])
+    assert not any(m.startswith("OBJECTIVE:") for m in messages), (
+        "an approach was closed for a marker nobody was looking for")
+    assert "air superiority points 0" in _round_line(ctrl, caplog)[0]
+
+
+def test_a_round_whose_pursuit_met_no_objective_prints_its_zeros(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.4)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+
+    assert _round_line(ctrl, caplog) == [
+        "ROUND OBJECTIVES — flown through: air superiority points 0, "
+        "resupply 0, priority targets 0"]
+    assert ctrl.objective_session_counts() == {
+        "air_superiority": 0, "resupply": 0, "priority_target": 0}
+
+
+def test_the_rounds_line_is_not_printed_at_info(monkeypatch, caplog):
+    """Operator, 2026-10-09: "i only want it to print total counts during
+    wingman session summary." The round's end prints nothing an INFO console
+    shows."""
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                       pursuit_enabled=True, pursuit_max_duration_s=0.0)
+    ctrl.set_target_tracker(_TrackerStub(visible=False))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    time.sleep(0.4)
+    ctrl.stop_eject_sequence("respawn_detected")
+    _wait_for_pursuit_to_settle(ctrl)
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="wingman"):
+        ctrl.log_round_objectives()
+    assert not any("ROUND OBJECTIVES" in r.getMessage() for r in caplog.records)
+
+
+def test_the_session_totals_are_not_read_while_the_tally_is_held(monkeypatch):
+    """A main-loop path: the lock is taken with a timeout, and a tally that is
+    busy costs the summary its block, not the shutdown."""
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture())
+    real_lock = ctrl._objective_tally_lock
+
+    class _HeldLock:
+        def acquire(self, timeout=None):
+            return False
+
+        def locked(self):
+            return True
+
+        def release(self):
+            raise AssertionError("released a lock that was never acquired")
+
+    ctrl._objective_tally_lock = _HeldLock()
+    try:
+        assert ctrl.objective_session_counts() is None
+    finally:
+        ctrl._objective_tally_lock = real_lock
+
+
+def test_a_round_with_no_pursuit_prints_no_objective_line(monkeypatch, caplog):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture())
+
+    assert _round_line(ctrl, caplog) == []

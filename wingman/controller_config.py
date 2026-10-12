@@ -68,6 +68,8 @@ class ControllerConfig:
     # and `config` is this dataclass — so the guard was always False and the
     # whole section of config.yaml was dead.
     loiter: dict = field(default_factory=dict)
+    # Design 017 phase 4b: mission_survey's block.
+    survey: dict = field(default_factory=dict)
     # ADR 144: mission_su30's block (climb altitude, nose angle, pulse timing).
     su30: dict = field(default_factory=dict)
     # ADR 145: mission_jas39's block (turn guard, cloak press interval).
@@ -126,6 +128,7 @@ class ControllerConfig:
             stall_prevention=bt.get("stall_prevention", {}) or {},
             fuel=cfg.get("fuel", {}) or {},
             loiter=cfg.get("loiter_mission", {}) or {},
+            survey=cfg.get("survey_mission", {}) or {},
             su30=cfg.get("su30_mission", {}) or {},
             jas39=cfg.get("jas39_mission", {}) or {},
             f111=cfg.get("f111_mission", {}) or {},

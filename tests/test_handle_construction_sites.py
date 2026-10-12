@@ -40,6 +40,10 @@ _APPROVED_SITES = {
            "loop has started"),
     ("move_game_window.py", "_connect"): (
         1, "one-shot tooling, never on the tick path"),
+    ("present_copy_guard.py", "_open_display"): (
+        1, "once per session, on the guard's own thread (ADR 099 V3): the pixel it "
+           "holds on top of the game lives exactly as long as this connection, so it "
+           "cannot ride on the shared one, which reconnects on an error"),
 }
 
 _GUIDANCE = """

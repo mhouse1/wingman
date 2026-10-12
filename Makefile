@@ -5,11 +5,8 @@
 #   make test2       -> run region 9 INCO-text OCR test
 #   make docker-test -> run make test in the Docker image (own Xvfb display, no host X needed)
 #   make docker-shell -> interactive shell in that image
-#   make test-perf   -> run tests + generate CSV + chart
 #   make tp              -> run fast preview (tests + ADR044/ADR045 runtime gates + charts)
 #   make tp-full         -> run full preview (tp + ADR037 PATH1/PATH2 OCR lane)
-#   make test-perf-csv   -> generate performance CSV from local history
-#   make test-perf-chart -> generate performance visualization chart
 #   make runtime-perf-csv-release -> generate runtime release aggregate CSV
 #   make runtime-perf-csv-preview -> generate runtime preview aggregate CSV
 #   make runtime-perf-release -> generate runtime release chart artifacts
@@ -17,12 +14,13 @@
 #   make report      -> run tests and generate HTML report
 #   make session-report -> one-page report on wingman.log (or LOG=logs/<file>); alias: make sr
 #   make clean       -> remove test output and screenshots
-#   make wrelease    -> record performance.json locally and commit with current version
+#   make wrelease    -> promote the runtime baseline and commit with current version
 #   make status      -> git status
 #   make diff        -> git diff
 #   make commit      -> commit all changes with a default message
 #   make p           -> stage, commit (message "."), and push
 #   make p "msg"     -> stage, commit with "msg", and push
+#   make nb <name>   -> start a new branch from the remote main (run after a PR is merged)
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
@@ -42,10 +40,12 @@
 #   make newpaths    -> capture screenshots for PATH1 or PATH2 using live Wingman play
 #   make leak-check  -> ADR 092 leak gate over logs/ (0 pass, 1 fail, 2 insufficient)
 #   make invite      -> toggle whether Wingman accepts or rejects party invites
+#   make survey      -> toggle the survey mission (Design 017) on or off for this machine;
+#                       off goes back to the mission config.yaml ships
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell test-perf require-veda tp tp-full test-perf-csv test-perf-chart runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q g update r rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q nb g updater rd invite survey launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -171,7 +171,12 @@ TEST_EXCLUDED_FILES := \
 	tests/test_stall_crops_ocr.py \
 	tests/test_telemetry_corpus.py
 
+# Runs on a private Xvfb like the gate lanes (scripts/gate-display.sh, ADR 153):
+# the session-end key release in tests/conftest.py injects through XTest, which
+# raises a portal dialog on the GNOME 50 session display.
+# WINGMAN_GATE_DISPLAY=real runs the suite on the session display instead.
 test:
+	. scripts/gate-display.sh; \
 	$(PYTEST_RUN) tests/ $(addprefix --ignore=,$(TEST_EXCLUDED_FILES)) --html=tests/test-output/report.html --self-contained-html
 
 # Run region 33 OCR check for "lick to C" on continue screenshots
@@ -222,18 +227,9 @@ docker-test: docker-build
 docker-shell: docker-build
 	$(DOCKER_RUN) -it $(DOCKER_IMAGE) bash
 
-# Performance reports are generated on veda only (ADR 100 D8): both histories
-# they read - tests/perf-history/ and docs/performance/release/ - are untracked
-# and exist nowhere else, so these targets carry require-veda.
-
-# Generate CSV with performance trends from the local history
-# (tests/perf-history/, untracked - lives on veda only)
-test-perf-csv: require-veda
-	$(PYTHON_RUN) tests/performance_tracking.py --csv
-
-# Generate HTML visualization of performance trends
-test-perf-chart: require-veda
-	$(PYTHON_RUN) tests/performance_tracking.py --chart
+# Performance reports are generated on veda only (ADR 100 D8): the history they
+# read - docs/performance/release/ - is untracked and exists nowhere else, so
+# these targets carry require-veda.
 
 # Generate runtime aggregate CSV from release run_*.json
 runtime-perf-csv-release: require-veda
@@ -250,16 +246,6 @@ runtime-perf-release: require-veda
 # Generate runtime preview artifacts (preview CSV + preview chart)
 runtime-perf-preview: require-veda
 	$(PYTHON_RUN) tests/runtime_performance_tracking.py --mode preview --all
-
-# Run full workflow: test → CSV → chart
-# performance.json is not tracked in git; `make wrelease` appends it to the local
-# history in tests/perf-history/. View trends in tests/test-output/performance-trends.html
-test-perf: require-veda test test-perf-csv test-perf-chart
-	@echo ""
-	@echo "✅ Performance test complete!"
-	@echo "📊 View trends: tests/test-output/performance-trends.html"
-	@echo "📈 CSV data: tests/test-output/performance-history.csv"
-	@echo ""
 
 # Preview performance trends including current uncommitted data
 # Includes ADR044 PATH1 runtime replay gate and ADR045 live-screen gate.
@@ -322,12 +308,9 @@ require-veda:
 	fi
 
 tp: require-veda $(TP_GATES)
-	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
 	@echo "✅ Performance preview complete (lint + test + ADR044/ADR045 runtime gates + runtime metrics)!"
-	@echo "📊 View trends: tests/test-output/performance-trends.html"
-	@echo "📈 CSV data: tests/test-output/performance-history.csv"
 	@echo "📊 Runtime preview: docs/performance/runtime-performance-trends.preview.html"
 	@echo "📈 Runtime CSV: docs/performance/current/runtime-performance-preview.csv"
 	@echo ""
@@ -337,12 +320,9 @@ tp: require-veda $(TP_GATES)
 
 # Full preview including ADR037 PATH1/PATH2 real-OCR integration tests.
 tp-full: require-veda $(TP_GATES) ocr
-	$(PYTHON_RUN) tests/performance_tracking.py --include-current --chart
 	@$(MAKE) runtime-perf-preview
 	@echo ""
 	@echo "✅ Full performance preview complete (test + ADR037 + ADR044/ADR045 runtime gates + runtime metrics)!"
-	@echo "📊 View trends: tests/test-output/performance-trends.html"
-	@echo "📈 CSV data: tests/test-output/performance-history.csv"
 	@echo "📊 Runtime preview: docs/performance/runtime-performance-trends.preview.html"
 	@echo "📈 Runtime CSV: docs/performance/current/runtime-performance-preview.csv"
 	@echo ""
@@ -365,11 +345,9 @@ clean:
 	rm -f tests/test-output/*.png
 	rm -rf test_screenshots
 
-# Record performance.json to the local history, commit the version, then regenerate charts
-# Assumes you've already updated the version in wingman/main.py and ran make test-perf or make tp,
-# otherwise performance.json won't reflect the latest changes. The test-performance history is
-# local-only (tests/perf-history/, untracked) - it is never committed. The runtime
-# baseline in docs/performance/release/ is local to veda as well (ADR 100 D8):
+# Promote the runtime baseline, commit the version, then regenerate the runtime chart
+# Assumes you've already updated the version in wingman/main.py and ran make tp.
+# The runtime baseline in docs/performance/release/ is local to veda (ADR 100 D8):
 # wrelease promotes current/ into it but never stages it.
 # once you ran wrelease you can then run make p to push the commit with the new version to GitHub
 wrelease: require-veda
@@ -395,7 +373,6 @@ wrelease: require-veda
 			exit 1; \
 		fi; \
 	fi
-	$(PYTHON_RUN) tests/performance_tracking.py --record
 	git add wingman/main.py
 	mkdir -p docs/performance/release
 	cp docs/performance/current/run_*.json docs/performance/release/ 2>/dev/null; true
@@ -405,7 +382,6 @@ wrelease: require-veda
 	test -n "$$version" || (echo "Could not parse WINGMAN_VERSION from wingman/main.py" && exit 1); \
 	test -n "$$details" || (echo "Could not parse WINGMAN_VERSION_DETAILS from wingman/main.py" && exit 1); \
 	git diff --cached --quiet && echo "No staged changes to commit" || git commit -m "v$${version}: $${details}"
-	@$(MAKE) test-perf-chart
 	@$(MAKE) runtime-perf-release
 	@echo ""
 	@echo "✅ Version committed and charts updated!"
@@ -455,6 +431,28 @@ squash:
 
 q:
 	git pull
+
+# Start a new branch from the remote main (e.g. make nb terrain-map). The repo
+# squash-merges, so a branch cut from an already-merged branch conflicts with
+# main in every file both touched (PR #82). --no-track leaves the new branch
+# without an upstream, so the first push creates origin/<name> instead of
+# pointing at main. The name is captured the same way as the message for 'p'.
+ifeq ($(firstword $(MAKECMDGOALS)),nb)
+  _NB_NAME := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  ifneq ($(_NB_NAME),)
+.DEFAULT:
+	@:
+  endif
+endif
+
+# The name is also a make goal, so a name that matches a target (test1, clean)
+# would run that target next. The grep refuses those before git does anything.
+nb:
+	@test -n "$(_NB_NAME)" || { echo "usage: make nb <branch-name>"; exit 1; }
+	@! grep -qE '^([^#[:space:]:=][^#:=]* )?$(_NB_NAME)( [^:=]*)?:([^=]|$$)' $(firstword $(MAKEFILE_LIST)) || \
+		{ echo "make nb: '$(_NB_NAME)' is also a make target and would run next. Pick another name."; exit 1; }
+	git fetch origin
+	git switch -c "$(_NB_NAME)" --no-track origin/main
 
 
 
@@ -516,6 +514,9 @@ rd: $(GAME_LAUNCH_DEPS)
 invite:
 	$(PYTHON_RUN) scripts/toggle-invite.py $(if $(CONFIG),--config "$(CONFIG)",)
 
+survey:
+	$(PYTHON_RUN) scripts/toggle-survey.py $(if $(CONFIG),--config "$(CONFIG)",)
+
 # ---------------------------------------------------------------------------
 # Per-account run targets (Research 005)
 #
@@ -550,12 +551,21 @@ ACCT2_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct2
 VIRTUAL_DESKTOP_SIZE ?= 1920x1200
 
 # Copy settings + keybindings from the main prefix into a per-account prefix,
-# WITHOUT copying identity (ADR 052 Open Question 3). Deliberately manual, not a
-# launch dependency: it overwrites the target's settings, so running it on every
-# launch would discard any per-account tweak.
-#   make sync-settings-1     # main prefix -> acct1
-#   make sync-settings-1 DRY=--dry-run
+# WITHOUT copying identity (ADR 052 Open Question 3). launch-game does this
+# before every launch of an account prefix (sync-account-settings), so g, g1 and
+# g2 fly the same bindings and settings: change one under `make g` and each
+# account picks it up at its next launch. A change made inside an account is
+# replaced at that account's next launch.
+#   make sync-settings-1 DRY=--dry-run   # list what would be copied to acct1
+#   make sync-settings-1                 # copy now, without launching
 SETTINGS_SRC_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
+
+# A prerequisite of launch-game, after stop-game: wineserver writes user.reg from
+# memory when it saves, so a copy made while the old game is up is lost. Does
+# nothing for the main prefix, and never fails a launch (--launch-step).
+sync-account-settings:
+	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
+	  "$(SETTINGS_SRC_PREFIX)" "$(WINE_PREFIX)" --launch-step
 
 sync-settings-1:
 	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
@@ -644,7 +654,7 @@ nested-status:
 nested-stop:
 	@$(PYTHON_RUN) scripts/nested-display.py stop
 
-.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2 nested-setup nested-focus nested-status nested-stop
+.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2 sync-account-settings stop-game nested-setup nested-focus nested-status nested-stop
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.
@@ -657,15 +667,26 @@ UMU_RUN        ?= $(HOME)/.local/bin/umu-run
 # Extra Unity player args, e.g. GAME_ARGS=-force-d3d11 to work around a
 # graphics-backend crash on some GPUs. Empty by default — no effect unless set.
 GAME_ARGS      ?=
-launch-game:
+# umu-launcher checks Valve's runtime server on every launch and downloads the
+# whole Steam runtime (195 MB) inside the launch when the server names a version
+# the installed one does not list. wait-game allows the window 20 s, so the
+# launch fails. 2026-10-05 10:33: the server's VERSION.txt named an older build
+# than its own archive, so every launch downloaded, and that download failed its
+# digest. 0 launches on the installed runtime and never asks; a first install is
+# not affected. `make rd UMU_RUNTIME_UPDATE=1` lets umu update again.
+UMU_RUNTIME_UPDATE ?= 0
+stop-game:
 	@_p=Metalstorm; \
 	 if pgrep -f "$${_p}.exe" > /dev/null 2>&1; then \
 	   echo "MetalStorm running — stopping before fresh launch…"; \
 	   pkill -f "$${_p}.exe" 2>/dev/null || true; \
 	   sleep 5; \
 	 fi
+
+launch-game: stop-game sync-account-settings
 	@rm -f /tmp/wingman-game-prerunning
 	@$(NESTED_ENV) GAMEID=umu-0 PROTONPATH="$(PROTON_ROOT)" WINEPREFIX="$(WINE_PREFIX)" \
+	  UMU_RUNTIME_UPDATE="$(UMU_RUNTIME_UPDATE)" \
 	  "$(UMU_RUN)" "$(GAME_EXE)" $(GAME_ARGS) > /tmp/wingman-game-launch.log 2>&1 & \
 	echo "MetalStorm launching via umu-run (log: /tmp/wingman-game-launch.log)"
 

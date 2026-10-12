@@ -229,6 +229,60 @@ raised to 40 alongside it. Both are diagnostic tuning, not safety
 parameters — shrinking the evidence trail never changes what the trigger
 itself does.
 
+### Overlay on the live HUD (2026-10-03, wingman 1.9.0)
+
+`tests/test-output/live_hud.png` ([Design 005](005-target-tracking-hldd.md)) shows what this detector saw, so
+a reading can be judged against the picture while a session runs. Until now the only evidence was a log line
+and raw frames saved on the trigger's rising edge.
+
+- **Box**: the `TERRAIN_FORWARD` crop. Green is clear, yellow is below `sky_min_frac` but not yet confirmed,
+  red is terrain ahead, grey is no reading.
+- **Tint**: the pixels the sky test accepted, tinted green. It comes from `GameStateAnalyzer.terrain_sky_mask`,
+  the same mask `detect_terrain_ahead` takes its fraction from, not from a second copy of the test.
+- **Status line**: `Terrain[SHADOW]: sky 0.31  TERRAIN AHEAD  view 0.31  min 0.55`. `sky` is the detector's
+  reading from its last tick. `view` is the same test on the frame drawn. They differ when the reading is a
+  tick old, and `sky` is absent ("no reading") on ticks the padlock gate (ADR 142) skips.
+- **Stale**: the pursuit loops also write the HUD and render several times between readings. A reading older
+  than 4 s is drawn grey, so an old alarm is not shown as live.
+
+The saved evidence frames in `test_screenshots/terrain_ahead/` stay unannotated. The overlay is off when
+`behavior_tree.climb.terrain_avoidance.enabled` is false. It adds no config key.
+
+| Date | Code | Game | Observation | Label |
+|------|------|------|-------------|-------|
+| 2026-10-04 18:43 | survey mission flying ([Design 017](017-terrain-map-from-flight-footage-hldd.md)), no opponent, MiG-29 on Crimson Canyon | not recorded | **An emergency climb begun in a dive just after a spawn, lost.** Thirty-three seconds after a spawn the aircraft was at 2,054 m in a 60 degree dive at 1,230 KPH when the emergency climb began (18:43:13). It bottomed at about 380 m five seconds later, came up to 1,200 m with the speed down to 250 KPH and stall prevention on, levelled, and was at 900 m and 1,144 KPH going down again when it hit (18:43:41). Labelled `terrain`. The same shape as the two rows for 13:21 and 13:48 below: low just after a spawn, an emergency climb in progress, no height kept from it. | emergency climb, loss |
+| 2026-10-04 18:31 | same | not recorded | **A stall at 4,300 m, a dive, and an emergency climb that did not hold it.** The survey's own turn had pulled the aircraft up 970 m in 8 s to 229 KPH with the nose 49 degrees up, and its altitude hold then pressed nose down five times in 12 s (the survey's side of this is in Design 017, fourteenth flight). Nose angle on the status line after that: +5, -27, -47, -57, -78 degrees. The emergency climb, nose up and airbrake, began at 18:30:39 between the -47 and the -57, at about 3,500 m and 700 to 830 KPH with the climb rate at -141 m/s; the rate reached -194 m/s after it began. The aircraft was at 2,530 m five seconds later, came up to 2,839 m, went down again and hit at 18:31:08. Labelled `terrain`. For this design: about 1,000 m was lost between the emergency climb starting and the aircraft turning up, from a dive that began at altitude with nothing ahead of it, and the recovery did not last. | emergency climb, loss |
+| 2026-10-04 13:21 and 13:48 | survey mission flying, no opponent | not recorded | **Two deaths in the first minute after a spawn, each with an emergency climb in progress.** At 13:48 the aircraft was at about 1,800 m forty seconds into the battle, with emergency climbs that gained nothing: 1,855, 1,597 and 1,172 m on three readings in five seconds, then the ground (13:48:43). At 13:21 the same during the survey's first climb. Both labelled `terrain`. Neither was the slow picture: the rate was 26 to 46 a second. With the two rows above that is four of the day's deaths on survey flights with no opponent, all with the emergency climb running. | emergency climb, loss |
+| 2026-10-04 13:12 | same as 12:27, plus version 4 of the desktop extension | not recorded | **The slow picture under a covered window is fixed, by the desktop extension.** Version 4 of `wingman-window-left` holds a see-through, one-pixel copy of the game's window on the desktop (ADR 155, D5). The journal logged the copy at 13:12:04 (`mapped=yes`). Measured: the editor covered the window fully from 13:12:06 and no change was logged before the match ended at 13:19:31, so the whole battle (13:12:53 to 13:19:31, 6 min 38 s) was flown covered. Of 196 rate readings in the battle none was below 27.5 a second; the median was 41.7. No deaths, and the survey flew five passes. The 12:27 flight, with the same cover by the same editor and without the copy, fell to 0.8 a second in three seconds. The pixel from the 12:27 trial was still switched on, so the copy is the only difference between the two flights. The session flew on with the window still covered: the cover lasted until 13:34:16, 22 minutes and into a fourth battle. The 574 readings taken in battles in that time had a median of 41.7 a second and two were below 25: 23.3 at 13:21:00, and 9.2 at 13:25:38, three seconds before the second battle ended. One death in the second battle at 13:21:28, labelled `terrain`, during the survey's first climb with an emergency climb in progress; the rate around it was 26 to 39 a second, so it is not the slow picture. Not tested: the window minimised, on another workspace, behind the lock screen, or with the monitor off. One flight. | fix confirmed for a covered window |
+| 2026-10-04 12:27 | same, plus `nested.block_page_flips` on in the local config | not recorded | **Trial of a fix for the slow picture under a covered window.** Wingman holds one black pixel on top of the game at the top-left corner of the nested display (`wingman/present_copy_guard.py`), so that the game's frames are copied and not swapped (ADR 099, V3). Checked on the real nested display: the pixel is a 1 by 1 window above the game's, takes no focus, and goes when wingman stops. Session started 12:27 with the picture rate and the window state both logged. **Result: the fix does not work.** Measured: the editor and the browser covered the window fully at 12:29:24; the rate was 32.5 a second in that reading and 0.8 a second at 12:29:27, and stayed between 0.8 and 1.7 a second until the match ended at 12:33:31. Three deaths in that spell (12:30:14, 12:31:02, 12:32:37), all labelled `unclassified`. The pixel was in place throughout: a query of the nested display at 12:34:01 showed it above the game's window. Also measured, and not explained: from 12:26:59 to 12:28:48 the extension logged the window fully covered by the browser alone, and the rate held at 38 to 43 a second. Inferred: the extension works out `covered` from window rectangles, and the desktop decides from the parts of a window that declare themselves solid, so the two can disagree. Why the pixel could not have worked, read from the source of the installed versions and not from memory this time: in Xwayland 24.1.10 (`hw/xwayland/xwayland-present.c`) `xwl_present_queue_vblank` ties every presented frame, copied or swapped, to the desktop's reply, and `xwl_present_reset_timer` waits 1000 ms whenever a reply is outstanding. So a copied frame waits a second too. The session was stopped at the lobby at 12:34:25. What to try next is in ADR 099, V3. | fix refuted |
+| 2026-10-04 11:27 to 11:34 | survey mission flying, window-state logging live | not recorded | **The slow picture came back while the game's window was fully covered by a browser, and this time both were logged on one clock.** The desktop extension logged `shown=no covered=100% above=brave-browser` at 11:27:03 and nothing after it. The picture was normal until 11:30 (frozen shape ticks 0 of 40 a minute, then 4 of 40), then 19 of 40 at 11:31, 17 of 34 at 11:32 and 34 of 36 at 11:33, and the game's own counter read `FPS 1` at 11:33:44 ([picture](001-terrain-avoidance/game-reports-fps-1-while-covered-by-a-browser-20261004-113344.jpg)). So the slowdown began about four minutes after the window was covered. At one frame a second the aircraft stopped answering the controls: 100 bank presses in 44 s moved the heading 172 to 168, it flew out of the arena and died (11:32:18), and then died twice more just after respawning. This does not contradict the 02:47 row: that cover was by the editor and lasted 53 s, well short of four minutes. What is not known: whether it takes four minutes of being covered, or something the browser did at about 11:31 (the extension logs only on a change, and a browser going full-screen over an already covered window is not one). | measured; the delay's cause is not established |
+| 2026-10-04 03:34 to 04:12 | same, plus the compass heading in shadow | not recorded | **A session with nobody shooting: 35 deaths in 37 minutes, every one a crash, and the existing trigger fired once.** No incoming alert and no flare burst in the whole session, so no death was a missile; 6 missions. The classifier called 34 of the 35 `unclassified` and 1 `terrain`, because it names terrain only after a dive emergency and there was one emergency climb all session. Before each death the last altitude read was 550 to 1,977 m (median 1,725) with the rate at or near zero, `Climb` selected on 34 and time to ground not available: level flight into terrain that stands as high as the aircraft flies. A confirmed shape warning came in the 30 s before 32 of the 35 deaths, the first of them a median 15.5 s ahead (one in ten under 7 s). Of 49 warning episodes, 36 were followed by a death within 30 s and 13 were not. Read those two figures against chance: with a death every 65 s and a warning episode every 44 s, about half of each would line up by accident. The way out offered was up on 55 of 58 warnings. This mode is a clean test bed for terrain avoidance: every death is a crash. | measured |
+| 2026-10-04 02:48:28 to 02:48:52, from the recording | same | not recorded | **One emergency climb, frame by frame: the pursuit dived after a low target, and the nose-up hold then carried the aircraft over the top of a loop and into the ground.** ([pictures, 2 s apart](001-terrain-avoidance/emergency-climb-loops-into-the-ground-20261004-024828.jpg)). In the log the pursuit was holding nose down on a target below it with the gun firing and the afterburner on, until the emergency took the controls. In the pictures: level over the mesas at :28; nose down into a canyon at :30 to :34; health gone red at :38, after touching the terrain; nothing but sky at :40; the canyon seen upside down at :42; straight down at a river at :44 and :46; the explosion at :50. The controller's own nose angle through this read 15, 18 and 30 degrees down, from an altitude and speed readout that was misread four times in ten seconds (speed 11 and 4, altitude 17 and 7), so it kept pulsing nose-up through the whole loop. Two other climbs that ended in deaths were not loops: at 02:42:15 the emergency began two seconds before impact in a vertical dive with the afterburner on, and at 02:56:01 the aircraft had already struck a mesa while banked among the canyons. A count of loops from the sky fraction was tried and is not trustworthy: it missed this very case, where the sky was cloud. So one loop is seen, and how many of the other holds were loops is not known. Common to all three: the aircraft was diving or low among terrain under pursuit before the emergency began. | measured for these three; no rate |
+| 2026-10-04 02:40 to 02:57 | same; first session of the day at a normal picture rate throughout | not recorded | **The emergency climb is what loses the height: 24 emergency holds in 16 minutes, a median of over 1,200 m lost in each, and 11 of them followed by a death within 30 s.** Eight deaths, six logged `cause=terrain`; `Climb` was the selected tactic through the last 12 s of every one, with no sky in the view. Holds that ended in a death were entered at a median 1,729 m and 1,180 KPH and lost a median 1,422 m; holds that were survived were entered at 2,723 m and 1,495 KPH and still lost 1,219 m. One hold was entered at 3,916 m and 1,548 KPH, lost 3,050 m and died. At 02:48:34 the hold began at 1,225 m in a 15 degree dive, issued a nose-up pulse every 1.75 s, and the dive steepened to 18 and then 30 degrees before the crash 19 s later. The shape detector called a threat before five of the six terrain deaths and the `blind` rule fired in four, but nothing a detector says helps when the recovery that follows it costs more height than the aircraft has. Why the nose-up hold does not bring the nose up is not known: the log has no roll or bank reading, so a pull applied while banked or inverted cannot be told from a pull that is too weak. | measured; the cause of the height loss is not established |
+| 2026-10-04 02:47:10 to 02:48:03 | same | not recorded | **A covered window does not slow the picture: the 23:38 row's explanation is wrong, at least for this case.** The desktop extension logged the game's window `shown=no covered=100% above=code_code` for 53 s, the last 15 of them in live battle. The picture rate, logged every 2 s on `:3`, stayed at 36 to 44 changes a second throughout. An earlier 12 s covered spell in the lobby gave 28 to 55. So an editor window lying over the game's window is not what drops the game to one picture a second. Not yet tested: the window minimised, on another workspace, or the screen locked. The picture rate and the window state are now both logged on one clock for the rest of the session. | measured |
+| 2026-10-04 02:30 | same, plus window-state logging in the desktop extension | not recorded | **The desktop now says when the game's window stops being shown.** Wingman's GNOME extension (`wingman-window-left`) logs one journal line on each change: `shown=`, `covered=` as a percentage, `minimised=`, `workspace=`, `focus=` and which application is on top. Read with `journalctl --user -g wingman-window-left`. Checked against fake windows outside the Shell (open, half covered, fully covered, raised, minimised, other workspace, closed); the running Shell cannot load it, because GNOME on Wayland reads an extension only at login. The next time the picture drops to one a second, the journal line at that second confirms or rules out the covered-window explanation. **Live from 02:33 on 2026-10-04**, after the operator logged out and in: the Shell reports the extension at version 3, and opening the nested display with no game logged `shown=yes covered=0%`, a `focus=no` line when another window took the focus, and `closed`. | checked live with no game; not yet seen during a slow picture |
+| 2026-10-03 23:38:14 to 23:38:54 | same, health gate live | not recorded | **Forty seconds measured second by second in live battle: one picture change in every second, without exception.** Altitude 4,826 m, state `GAME_BATTLE_EJECT`, health on screen. The picture had been at 28 to 29 a second from 23:37:27 to about 23:37:50. An exact one a second, with no jitter, points at the display side and not the game: Xwayland falls back to a one-second timer for a window the desktop is not drawing. The desktop's window list cannot be read from outside the shell, so this is still not observed. The health gate held: all 105 shape readings of the session were taken with health being read, and none without. Stop requested with `z` at 23:39:38. | measured; the cause is inferred |
+| 2026-10-03 23:37:05 | same, health gate live | not recorded | **A third kind of slow picture: before the round starts.** 23 s into the session's first battle the probe measured 1.0 picture change a second; the screen ([picture](001-terrain-avoidance/game-reports-fps-2-before-the-round-starts-20261003-233705.png)) shows the match clock at 5:00, the score 0 to 0, a washed-out view and the game's counter at `FPS 2`. 22 s later the same measurement gave 29 changes a second and the counter read `FPS 29`. So the game itself runs slowly while it holds a round before the start, as it did on the round-end screen (19:27) and on joining a match in progress (19:38, with the Good Luck banner up). None of those three is a hidden window. What is still unexplained is the 19:11 session's last battles, which the recording shows at one picture a second for minutes at a time. Two background mapping jobs were running during this measurement, so 29 against the 49 measured at 19:25 is not a clean comparison. | measured; the cause of the long spells is not established |
+| 2026-10-03 22:58 | picture outlines, `lost`, plus the health gate | not recorded | **The looming and shape detectors now run only while health is being read.** Operator's rule of 2026-10-03, after the round-end MVP card was measured as terrain for 20 s at 19:27 while the state still said battle. The gate is the analyzer's own `game_battle_alive`, which goes false after 6 s without health digits, so up to four ticks of a new screen can still be read. Replayed on the two sessions before it: the gate would have removed 65 of 409 shape ticks (48 of them frozen) in the 18:18 session and 151 of 790 (64 frozen) in the 19:11 session. The sky test is not gated by it. Not yet run live. | measured from the earlier logs; unmeasured live |
+| 2026-10-03 19:38:00 | same | not recorded | **The slow picture is real: the game's own counter read `FPS 1` in live battle.** The probe measured 1.0 picture change a second and kept the screen ([picture](001-terrain-avoidance/game-reports-fps-1-in-battle-20261003-193800.png)): a live battle, 866 KPH at 853 m, flying at a mountain, with `FPS 1` in red at the bottom left. So the 19:27 row's doubt is withdrawn: the round-end screen there was also at one change a second, and the probe read 1.0 again at 19:31. The picture was at 49 a second at 19:25 and at 1 from about 19:27 on. On `:3` the Wine Desktop window held the input focus and was the only window, so focus inside the nested display is not the cause. The desktop was not blanked or locked. What is left is the host side: Xwayland paces a window the compositor is not showing at one frame a second, which matches the figure exactly, but whether the nested window was covered at the time was not observed. Stop requested with `z` at 19:38. | measured, except the cause, which is inferred |
+| 2026-10-03 19:27:01 | same | not recorded | **The first freeze caught by the probe was the round-end screen, not a slow game.** Ticks alternated frozen and readable from 19:27:01; the probe measured 1.0 picture change a second on `:3` (49 a second two minutes earlier) and kept the screen: the MVP card over a slow fly-past ([picture](001-terrain-avoidance/frozen-ticks-on-the-round-end-screen-20261003-192701.png)). Wingman was still in `GAME_BATTLE_EJECT` and did not reach `GAME_END_B` until 19:27:21, so the shape and looming detectors ran on that screen for 20 s. This is the same alternating pattern that the 16:10 and 18:22 rows read as the game dropping to one picture a second. Those rows are now in doubt: some or all of those ticks may have been screens like this one, read while the state still said battle. Not yet checked against those logs. | measured for this spell; the earlier rows are unverified |
+| 2026-10-03 19:19:05 | same | not recorded | **First live sight of the `lost` rule, before a death logged `cause=terrain`.** Tick by tick over the last 30 s: threat, threat, nothing found (127 dots, so read as clear), threat, then four ticks that found nothing with 18, 1, 7 and 5 dots, now `blind`; later threat, threat, then two more with 4 and 3 dots, `blind`. Before this change all six would have read `clear`. 20 of the session's first 420 shape ticks took the new verdict. The two terrain deaths before it (19:15:47, 19:16:40) had no such tick: each threat was followed by a shape still in the middle. One death, so no rate. | measured |
+| 2026-10-03 19:11 session | same | not recorded | **The frozen picture is real but comes and goes, and it is not tied to one game state.** Frozen share of shape ticks, `GAME_BATTLE` and `GAME_BATTLE_EJECT`: 15:06 session 13 and 17 percent; 18:18 session 42 and 51 percent; this session (first 14 minutes) 4 and 10 percent. Measured directly on `:3` at 19:25 in a healthy spell: 49 picture changes a second. One 30 s spell of wholly frozen ticks at 19:22:41 cleared without anything being done. The desktop was not blanked or locked at the time (power save 0, screensaver off). A probe now measures the real picture rate and keeps a screenshot the next time ticks freeze. Not the cause: a ten-minute desktop timer (`shell-cgroup-sampler`) ran 20 s before this spell but 3 minutes before the 18:22 one and after the 16:10 one. | measured; cause not established |
+| 2026-10-03 18:22 onward | same | not recorded | **The picture froze again four minutes into the session, so this run cannot judge the `lost` change.** 18:19 to 18:21: 0 of 93 shape ticks read `same-frame`. From 18:22: about half of every minute's ticks did (12 of 40, 22 of 40, 18 of 39, 19 of 38), each after a full frozen-picture wait of about 0.26 s per pair. The desktop was neither locked nor idle. The same thing happened at 16:10. `GAME_STARTING` then ran 2.5 minutes without a Good Luck read and timed out (18:27:27). Three deaths followed, none labelled terrain (two `enemy_fire`, one `unclassified`). Stop requested with `z` at 18:36:02. What makes the game's picture slow down is still not established (Design 009). | measured; cause not established |
+| 2026-10-03 18:18 | picture outlines, plus `lost` | not recorded | **A view that goes unreadable straight after a threat now reads `blind`, not `clear`.** From the 15:06 to 16:10 log: 58 of 199 threat ticks were followed by a tick that found no outline at all, and 57 percent of those followed under 25 dots. Before 4 of the 6 deaths logged `cause=terrain`, the last confirmed threat was followed by such ticks (9, 6, 0, 0, 6, 4, 6 and 11 dots) and the verdict read `clear`. The rule: straight after a threat, nothing in the middle and fewer than `shapes.lost_dots` (25) dots followed is `blind`, and stays so until a tick reads the view. With no threat before it the same picture stays `clear`, because plain sky also has nothing to follow. Shadow only; the confirm streak is unchanged. Session started 18:18 with recording on. No result from it yet. | measured from the earlier log; the fix is unmeasured live |
+| 2026-10-03 01:46 | `28d1def` plus the uncommitted overlay, 1.9.0 | not recorded | First live frame, night map, aircraft at 1406 m in open sky: box red, `sky 0.00`, `view 0.00`, no pixel tinted. The night failure of [ADR 148](../adr/148-a-dive-recovery-flies-through-a-pursuit.md) seen directly | measured, one frame |
+| 2026-10-03 (offline) | same | n/a | Rock-map reference frame `terrain_blackout_20260914_063746_stuck30s.png`: `sky 0.31`. The tint leaves out a bright cloud and the deeper blue at the top of the box, both real sky | measured, one frame |
+| 2026-10-03 01:45 to 02:13 | same | not recorded | 27 m 23 s, 4 missions: 1207 HUD writes with the overlay, 0 overlay errors, 0 render errors. 15 `TERRAIN AHEAD` lines, 1 terrain crash | measured |
+| 2026-10-03 02:15 to 02:16 | same plus `sky=` on the BT line, 1.9.0 | not recorded | First minute of battle on a canyon map: 47 readings, 46 below 0.55 (median 0.33, max 0.55). At 2000 m or higher: 15 of 15 below. One `TERRAIN AHEAD` line in that minute, because the trigger stayed latched | measured, one minute, one map |
+
+**The reading is on the log every tick (2026-10-03).** The per-tick `BT[...]: selected=` DEBUG line ends with
+`sky=0.34`, or `sky=n/a` for a tick that took no reading. `TERRAIN AHEAD` is written only on the rising edge,
+so counting those lines measures how often the trigger re-arms, not how long it holds. The 02:15 row shows the
+gap: one line, and a reading under the threshold on 46 of 47 ticks. Rates for this detector should be counted
+from `sky=` against `alt=` on the same line, per mission.
+
+Tests: `tests/test_hud_terrain_overlay.py`.
+
 ### Config
 
 Split across two blocks, mirroring the existing `minimap.boundary_hsv` (top
@@ -457,7 +511,7 @@ about every 0.14 s, so a chase has the pairs; elsewhere, two grabs about 0.1 s a
 separate vision thread (the reason in "Why the original design doesn't fit" stands).
 
 **Overlay.** `tests/test-output/live_hud.png` (HLDD 005) gains the tracked points, the path box, the expansion
-point, `tau` and the verdict colour.
+point, `tau` and the verdict colour, beside Phase 1's box and status line ("Overlay on the live HUD" above).
 
 ### Spike (measured, `scripts/terrain-loom-spike.py`)
 
@@ -488,14 +542,511 @@ ice maps) and its `bt_trace`, whose changes to `RespawnWait` mark deaths. OpenCV
 **What the spike says.** The signal exists and is colour-free. It is not ready to act: at 2 fps the rule that
 catches most terrain deaths also fires 24 times in 44 minutes without one, and the path test cannot be trusted.
 
+### Shadow implementation (2026-10-03, wingman 1.9.0)
+
+The measurement now runs live in shadow. It logs and draws; nothing reads it to actuate.
+
+- **Code**: `wingman/terrain_loom.py` (`TerrainLoom`), the spike's method and parameters. Config under
+  `terrain_avoidance.loom`, defaults declared in the schema.
+- **Frames**: on each battle tick with the padlock camera confirmed off (ADR 142), the behavior tree handler
+  grabs its own two frames `pair_interval_s` (0.12 s) apart, after the tree has acted, so the wait never delays
+  the tick's decision. Live runs only: replay and capture lanes are not wired, because a replay capture hands
+  out its next scripted screenshot on every grab.
+- **HUD mask**: learned while running. An edge at the same pixel in more than 35 percent of the views seen is a
+  HUD stroke and is not tracked. The first 10 pairs give no reading ("warming").
+- **Log**: the per-tick `BT[...]: selected=` line ends with `tau=`: seconds to contact (`4.2s`), `4.2s/off` when
+  the expansion point is outside the path box, `inf` when the view is not expanding, or `n/a(reason)`. A
+  `LOOM:` DEBUG line carries zoom, point counts, expansion point, pair interval and cost. `LOOM[shadow]:
+  terrain closing` is written when `tau` is under `tau_warn_s` (8 s) and on course for `confirm_pairs` (3)
+  consecutive ticks.
+- **Overlay** on `live_hud.png`: the tracked points that agreed, the path box, the expansion point and a
+  `Loom[SHADOW]:` status line, beside Phase 1's box. The points belong to the pair that was measured, so they
+  are dropped when the reading is older than 4 s.
+
+A featureless view (sky, water, a dark night) gives `n/a(few-points)`, never a warning. A tick with no reading
+resets the confirm streak.
+
+**Check against the spike's recording** (`logs/session_20260916_021132_acct1.mp4`, frames 0.506 s apart, the
+live class run offline):
+
+| Measure | Spike | Live class |
+|---------|-------|------------|
+| Frame pairs | 5,222 | 5,222 |
+| Readable | 68 percent | 64 percent (few points 1,537, too few agreeing 252, same frame 64, warming 9) |
+| `tau` before the death at t=1956.8 s | 13, 7, 5, 5, 4, 4, 3, 3, 2, 2 | 4, 3, 3, 2, 2, then not expanding |
+| `tau` before the death at t=2272.3 s | 21, 10, 8, 7, 7, 5, 5, 4 | 20, 10, 9, 8, 6, 5, 5, 4, 4, 4, 3, 2 |
+| Cost per pair | about 15 ms | median 5.1 ms, 95th percentile 9.0 ms |
+
+With the on-course test and 3 pairs the live class gave 17 warning episodes in the 44 minutes. That recording
+is at the spike's coarse frame interval, so this confirms the code matches the spike and says nothing yet about
+0.12 s pairs. The first live rows go in the table below.
+
+| Date | Code | Game | Observation | Label |
+|------|------|------|-------------|-------|
+| 2026-10-03 02:13 to 02:54 | `28d1def` plus the uncommitted Phase 1 overlay and `sky=`, 1.9.0, no looming | not recorded | 40 m 38 s, 7 missions, canyon map. Sky fraction below 0.55 on 1,270 of 1,335 readings: 106 of 109 under 1000 m, 573 of 613 from 1000 to 2000 m, 419 of 424 from 2000 to 4000 m. 28 `TERRAIN AHEAD` lines, 0 terrain crashes. The sky test reads low at every altitude on this map | measured |
+| 2026-10-03 02:55 to 02:56 | same plus looming shadow, 1.9.0 | not recorded | First 55 pairs, canyon map: 28 readable, 9 warming, 9 same frame, 8 few points, 1 too few agreeing. Pair interval median 0.12 s, maximum 0.14 s. Cost per tick median 155 ms including the 120 ms wait. Readable pairs tracked 42 to 390 points. 0 warnings, 0 errors. One HUD frame: 376 of 377 points on canyon rock, `contact 4.0s passing`, while the sky box read `sky 0.00 TERRAIN AHEAD` | measured, 90 seconds |
+| 2026-10-03 02:54 to 03:19 | same | not recorded | 24 minutes, 592 pairs: 354 readable (60 percent), 161 same frame (27 percent), 52 few points, 16 too few agreeing, 9 warming. Of the readable, 173 not expanding, 73 on course (25 under 8 s), 108 passing (38 under 8 s). 0 shadow warnings, 0 errors. Cost per tick median 159 ms, maximum 310 ms | measured |
+| 2026-10-03 03:20 | same | not recorded | Same-frame check from a separate process in live flight: 4 of 61 pairs 0.12 s apart were identical, the picture frozen 0.13 to 0.17 s each time. Wingman's own count over the same 40 s: 4 of 27. The game itself holds a picture longer than the pair interval; why it is commoner at wingman's grab moments is not explained | measured, 40 seconds |
+| 2026-10-03 02:54 to 03:41 | same (the whole session, no colour mask) | not recorded | 46 m 49 s, 7 missions, 24 respawns. 1,359 pairs: 880 readable (65 percent), 271 same frame, 155 few points, 44 too few agreeing, 9 warming. Readable: 440 not expanding, 194 on course (58 under 8 s), 246 passing (74 under 8 s). **7 deaths logged `cause=terrain`, 0 shadow warnings.** In the 24 s before each, a `tau` under 5 s appeared in 6 of the 7 (2.3, 4.5, 1.3, 0.6, 3.3, 1.3 s), never on three consecutive ticks: readings alternated between on course, passing and unreadable, and the last seconds were mostly `few-points`. The last altitude read before these deaths was 2,285 to 3,559 m in 4 of them, so the `cause=terrain` label itself is not verified here | measured; the label is the log's |
+| 2026-10-03 03:42 to 03:45 | same plus the HUD colour mask, 1.9.0 | not recorded | First 109 pairs, a daytime karst map: 46 readable, 28 few points, 24 same frame, 9 warming, 2 too few agreeing. The colour mask removed a median 4.0 percent of the view (maximum 11.0). Cost per tick median 166 ms. 0 errors. One HUD frame: the ladder, lock circle and reticle darkened as excluded | measured, 3 minutes |
+| 2026-10-03 03:41 to 03:59 | same plus the HUD colour mask (18 minutes of the session) | not recorded | 3 missions, 586 pairs: 291 readable (50 percent), 167 few points (28 percent), 95 same frame (16 percent), 24 too few agreeing, 9 warming. Colour mask share of the view median 3.9 percent. 0 warnings, 0 errors, 7 deaths. Against the 02:54 baseline (65 percent readable, 11 percent few points) the maps differ, so the drop is not attributable. Part of it is expected: HUD strokes do not move, so a view with only HUD in it used to read "not closing" and now reads "few points" | measured; the cause of the drop is inferred |
+| 2026-10-03 (both sessions) | as above | not recorded | Base rate for a looser rule. A `tau` under 5 s in any direction: 02:54 session 81 ticks in 45 episodes, 16 followed by a death within 12 s, and 16 of 25 deaths had one in the 12 s before. 03:41 session: 17 episodes, 5 followed by a death, 5 of 7 deaths. On course only: 28 episodes and 9 of 25 deaths; 6 episodes and 1 of 7. Deaths here are all deaths (respawn edges), not only terrain | measured |
+| 2026-10-03 | n/a | n/a | Main loop tick period: median 1.50 s and 90th percentile 1.51 s before looming, 1.50 s and 1.53 s with it. The loop pads each tick, so the looming cost is taken from slack | measured, 200 ticks each |
+| 2026-10-03 03:41 to 04:10 | same plus the HUD colour mask (the whole session) | not recorded | 29 m 07 s, 4 missions, 12 respawns, 3 deaths logged `cause=terrain`. 1,004 pairs: 530 readable (53 percent), 260 few points (26 percent), 161 same frame (16 percent), 44 too few agreeing, 9 warming. 0 shadow warnings, 0 errors | measured |
+| 2026-10-03 04:11 to 04:16 | same plus the same-frame wait, 1.9.0 | not recorded | First 121 pairs: 55 readable (45 percent), 48 few points, 9 warming, 6 same frame (5 percent), 3 too few agreeing. 19 pairs (16 percent) met a frozen picture and waited a median 45 ms (maximum 159 ms): 8 became readable, 4 few points, 1 too few agreeing, 6 never changed. Cost per tick median 199 ms, 90th percentile 362 ms, maximum 496 ms. Tick period median 1.50 s, 90th percentile 1.64 s, maximum 1.72 s (was 1.53 s at the 90th percentile): the wait overruns the loop's slack on about one tick in ten | measured, 5 minutes |
+| 2026-10-03 04:11 to 05:09 | same plus the same-frame wait (the whole session, one reading a tick) | not recorded | 58 m 23 s, 10 missions, 31 respawns, 10 deaths logged `cause=terrain`. 1,892 pairs: 1,336 readable (71 percent), 405 few points (21 percent), 87 too few agreeing, 55 same frame (3 percent), 9 warming. At 05:00 (1,552 pairs): 271 had waited on a frozen picture, median 46 ms. Tick period median 1.50 s, 90th percentile 1.64 s. **0 shadow warnings, 0 errors** | measured |
+| 2026-10-03 05:11 to 05:15 | same plus three readings a tick, 1.9.0 | not recorded | First 101 ticks, 303 pairs, 3.00 pairs a tick: 210 readable (69 percent), 52 same frame (17 percent), 27 few points, 9 warming, 5 too few agreeing. Looming cost per tick median 536 ms, 90th percentile 726 ms, maximum 851 ms. Tick period median 1.51 s, 90th percentile 1.66 s, maximum 1.97 s. 0 shadow warnings, 0 errors, 2 deaths (neither logged as terrain). Same-frame is back up because the frozen-picture wait is one budget per tick: a freeze that outlasts it leaves the tick's later pairs unreadable | measured, 4 minutes |
+| 2026-10-03 05:23:46 | same (three readings a tick) | not recorded | **First shadow warning, followed by a terrain death.** Readings before it: 05:23:41.8 `2.6s/off, 16.3s/off, 3.9s/off`; 05:23:43.3 `3.4s/off, 11.2s/off, 2.4s/off`; 05:23:44.8 `7.4s/off, 2.4s/off, 5.2s`; 05:23:46.2 `4.5s, 2.2s, 3.1s` on course, warning written (altitude 1559 m, rate -53 m/s, time to ground 30 s). The existing emergency climb (ADR 086) engaged at 05:23:47.3, 1.0 s after the warning. Altitude then 1311 m at -202 m/s and 890 m at -166 m/s; looming unreadable from 05:23:47.8 (too few points). `DIED ARMED cause=terrain` at 05:23:56. Warning to death about 10 s. The first reading under 4 s, passing, was 14 s before the death. Session to that point: 1 warning, 1 death logged as terrain | measured, one event |
+| 2026-10-03 05:27:03 | same (three readings a tick) | not recorded | **Second shadow warning, a dive that was recovered.** A steep dive from 6,845 m at -224 to -531 m/s. The existing emergency climb engaged first, at 05:26:59.7 (time to ground 21 s). Looming read `7.7s, 4.0s/off, 3.8s/off` at 05:27:00.3 and `4.3s, 3.9s, 4.7s` on course at 05:27:03.2, when the warning was written: 3.5 s after the existing trigger, at 5,278 m with time to ground 12 s. The aircraft bottomed at 802 m at 05:27:16 and climbed away. No death. A true closing-with-the-ground warning in a survived dive; the existing trigger led | measured, one event |
+| 2026-10-03 05:29:02 | same (three readings a tick) | not recorded | Third shadow warning, same shape as the second: a dive from 3,485 m at -105 to -274 m/s. Readings `8.2s, 6.4s, 5.1s` on course at 05:29:00.5 (the first is over the 8 s limit, so the streak stood at two), existing emergency climb at 05:29:01.5, warning at 05:29:02.2 on `3.5s`, 0.7 s after it. Recovered at 1,639 m, no death | measured, one event |
+| 2026-10-03 05:34:59 | same (three readings a tick) | not recorded | **Fourth shadow warning, followed by a terrain death at altitude.** Readings: 05:34:52.5 `13.8s, 18.0s, 14.8s` on course; 05:34:56.7 `8.2s, 8.8s, 11.1s` on course (all just over the 8 s limit); 05:34:59.7 `5.1s, 1.3s, 1.3s` on course, warning written at 2,763 m, -150 m/s, **time to ground by altitude 18 s**. Existing emergency climb at 05:35:00.8, 1.0 s after the warning. Last altitude read 2,293 m at -223 m/s, time to ground 10 s, looming unreadable (too few points). Death at 05:35:06.7, 7 s after the warning, logged `cause=terrain`. Looming said 1.3 s while the altitude arithmetic said 18 s: the ground it hit was far above zero altitude. Session to that point: 4 warnings, 2 deaths logged as terrain, both preceded by a warning | measured, one event |
+| 2026-10-03 05:36:14 | same (three readings a tick) | not recorded | **Terrain death with no warning: the on-course test blocked it.** Eight consecutive readable readings under 8 s, every one classed as passing: 05:36:04.6 `6.7s, 6.7s` with the expansion point at (958, 2165) and (931, 2101), far below the frame; 05:36:06.3 `6.5s` at (985, 2180) and `4.4s` at (1588, 790); existing emergency climb at 05:36:07.0; 05:36:07.5 `3.0s, 1.6s, 1.7s` at (1282, -239), (1313, -2), (1305, 137), above and right of the box, during the pull-up. One on-course reading (`0.7s`) at 05:36:09.1, then unreadable. Altitude 1,472 m at -85 m/s then 1,152 m at -233 m/s. Death at 05:36:14.4, about 10 s after the first short reading. The path box is x 730 to 1190, y 360 to 744 on the 1920 by 1200 frame | measured, one event |
+| 2026-10-03 05:11 to 05:36 | same | not recorded | Where the expansion point sat for the session's 213 expanding readings under 8 s: 47 in the path box, 55 below it and centred, 40 below and to a side, 24 above it, 36 above and to a side, 11 level to a side. Session to this point: 4 warnings, 3 deaths logged as terrain, 2 of them preceded by a warning | measured |
+| 2026-10-03 05:36:49 | same (three readings a tick) | not recorded | Second unwarned terrain death, same shape as 05:36:14. From 05:36:38.4: `6.5s/off`, `3.7s/off, 2.7s/off`, `4.0s/off, 2.0s/off` with the expansion point centred and below the frame (y 1,117 to 1,659), then `1.8s` and `0.7s` on course, then unreadable. Existing emergency climb at 05:36:42.2. Altitude 3,414 m at -93 m/s, then 2,373 m at -385 m/s. Death at 05:36:49.6, 11 s after the first short reading. A missile alert had ended 15 s earlier, so the `cause=terrain` label is the log's. Session: 4 warnings, 4 deaths logged as terrain, 2 warned and 2 blocked by the path box | measured, one event |
+| 2026-10-03 05:37:14 | same (three readings a tick) | not recorded | **Fifth shadow warning, 10 s ahead of the existing trigger, then a death.** A shallow descent: 2,258 m at -65 m/s, time to ground by altitude 35 s. Readings `2.2s/off, 3.9s/off, 5.5s` at 05:37:13.3, then `7.3s, 3.7s, 2.9s` on course at 05:37:14.8, warning written. Readings stayed short for the next 9 s (`2.7s`, `3.2s/off, 2.4s/off, 2.6s/off`, `2.6s/off, 1.9s/off, 2.8s`) while altitude fell only to 1,881 m at -24 m/s. The existing emergency climb engaged at 05:37:24.6, 9.8 s after the warning. Death (tactic to RespawnWait) at 05:37:30.6, 15.8 s after the warning. No `DIED ARMED` line was written for it, so the log gives no cause | measured, one event |
+| 2026-10-03 05:37:58 | same (three readings a tick) | not recorded | Sixth and seventh shadow warnings, one event, same shape as the first and fourth. `2.6s, 3.8s, 4.2s` on course at 05:37:58.8 (3,344 m, -177 m/s, time to ground 19 s), warning; existing emergency climb 1.0 s later; `0.6s, 1.8s, 1.4s` at 05:38:02.0, warning again after one broken reading; unreadable from 05:38:04.8; death at 05:38:08.7 logged `cause=terrain`, 9.9 s after the first warning, last altitude 2,706 m. Session: 7 warning lines in 6 events; 5 deaths logged as terrain, 3 warned and 2 blocked by the path box; plus one warned death with no cause logged and 2 recovered dives | measured, one event |
+| 2026-10-03 05:11 to 06:02 | three readings a tick, closed box (the whole session) | not recorded | 51 m 04 s, 7 missions, 27 deaths of which 8 logged `cause=terrain`, 68 emergency climbs. 4,830 pairs: 3,067 readable (63 percent), 1,163 few points (24 percent), 391 same frame (8 percent), 200 too few agreeing, 9 warming. 14 warning lines in 12 episodes: 7 followed by a death within 16 s, 4 by an emergency climb that survived, 1 by neither. Terrain deaths warned: 4 of 8. Replayed with the box open below: 21 episodes, 12 then a death, 8 then a survived climb, 1 neither, terrain deaths warned 7 of 8. The open box was chosen on the first 38 minutes; the last 13 minutes were not used in choosing it | measured |
+| 2026-10-03 06:02 to 06:05 | same plus the box open below, 1.9.0 | not recorded | First 246 pairs on a night island map: 112 readable, 99 few points, 24 too few agreeing, 9 warming, 2 same frame. 42 on-course readings, 14 of them with the expansion point below the old box bottom. 2 warnings: 06:04:35.0, followed by a death logged `cause=terrain` at 06:04:42.5 (7.5 s later), and 06:05:26.3. 0 errors. HUD: the box is drawn without a bottom edge | measured, 3 minutes |
+| 2026-10-03 06:17:54 | box open below | not recorded | **First warning while the aircraft was climbing.** `7.4s/off, 7.2s/off, 8.1s/off` at 06:17:52.8, then `5.7s, 3.6s, 4.9s` on course at 06:17:54.3, warning written at 2,134 m with the altitude rate at +46 m/s and no time to ground at all. The rate turned to -95 m/s on the next reading; existing emergency climb at 06:17:56.8, 2.6 s after the warning; a second warning at 06:17:58.8 (`3.7s, 3.9s, 1.6s`); unreadable from 06:18:00; death at 06:18:07.3 logged `cause=terrain`, 13 s after the first warning. A missile alert was active from 06:17:51 to 06:17:55, so the label is the log's. Session to this point (16 minutes): 7 warning lines, 3 deaths logged as terrain, all 3 warned | measured, one event |
+| 2026-10-03 06:22:59 | box open below | not recorded | **Terrain death with no warning under the open box: blocked by the box's width.** Low-level flight, 892 to 1,447 m, altitude rate between +148 and -93 m/s. From 06:22:46 to 06:22:57, 13 readings under 9 s; on course only singly (`6.3s`, `5.8s`, `6.1s`, `2.7s`, `2.6s`), never three in a row. The passing ones had the expansion point below the box and just left of its left edge at x 730: (724, 735), (395, 1024), (664, 1000), (692, 2410), (637, 1547), (556, 1719). Existing emergency climb at 06:22:53.2; death at 06:22:59.2. "Anything not above the box" would have counted them. Session to this point (21 minutes): 8 warning lines, 4 deaths logged as terrain, 3 warned | measured, one event |
+| 2026-10-03 06:27:23 | box open below | not recorded | **A death logged `cause=terrain` that the flight state does not support.** A dive from 5,530 m; existing emergency climb at 06:27:09.5; the descent had slowed from -346 to -76 m/s by 2,873 m (time to ground 38 s). A missile alert at 06:27:17.2; death at 06:27:22.9, 5.7 s after the alert and with about 2,900 m of altitude in hand. Looming read not expanding or far (`inf`, `77.2s`, `104.5s`) until 06:27:13, then unreadable (too few points) for 8 s on a night map. No warning, and none would be expected if this was a missile. The label comes from the hard-emergency flag being set at death (ADR 143), which a recovering dive still carries. Deaths labelled this way should not be scored as looming misses without the flight state. Session to this point (25 minutes): 10 warning lines, 6 deaths logged as terrain, 4 warned, 1 blocked by box width, 1 this one | measured; the cause is inferred |
+| 2026-10-03 06:33:47 | box open below | not recorded | Second unwarned terrain death under the open box, blocked by the box's width and top. From 06:33:29.7 to 06:33:32.6, eight readings under 9 s (`8.5s, 5.7s, 5.1s, 5.3s, 1.6s, 1.4s, 1.9s, 3.0s`), none on course. Expansion points: (258, 1777), (1, 968), (473, 1490), (583, 1507), (707, 791) to the left of the box, and (606, 128), (883, 330), (949, 138) above its top edge at y 360. Altitude 2,602 m at -43 m/s, then 2,381 m at -139 m/s. Existing emergency climb at 06:33:33.6. Unreadable from 06:33:34; respawn at 06:33:47. Session to this point (31 minutes): 11 warning lines, 7 deaths logged as terrain: 4 warned, 2 blocked by the box, 1 probably a missile | measured, one event |
+| 2026-10-03 06:02 to 07:47 | box open below (the whole session) | not recorded | 1 h 44 m, 18 missions, 46 respawns. 9,327 pairs: 6,448 readable (69 percent), 2,240 few points (24 percent), 485 too few agreeing, 145 same frame (2 percent), 9 warming. 47 deaths, 13 logged `cause=terrain`, 137 emergency climbs, 29 warning lines, 0 looming errors. By hand, of the 13: 6 warned, 4 blocked by the direction test (06:22, 06:33, 06:44, 07:36), 3 probably missile kills during a recovery (06:27, 07:27, 07:37). Replay, 8 s limit, 3 in a row: closed box 19 episodes (9 then a death, 7 then a survived climb, 3 neither, 5 of 13 terrain deaths warned); open below 26 (11, 10, 5; 6 of 13); anything not above the box 54 (21, 25, 8; 10 of 13); any direction 65 (27, 31, 7; 10 of 13). The session ended stuck, not by looming: see the anomaly note below | measured |
+| 2026-10-03 08:12 to 08:32 | box open below, operator-started session | not recorded | 21 minutes, cut short: the session was killed mid-round at 08:32:55 by a second launch (an agent error, see the note below), so it has no summary. 1,719 pairs: 902 readable (52 percent), 443 few points, 283 same frame (16 percent), 82 too few agreeing, 9 warming. 11 deaths, 3 logged `cause=terrain`, 16 emergency climbs, 5 warning lines. Replay: open below 4 episodes (2 then a death, 1 then a survived climb, 1 neither), 0 of 3 terrain deaths warned; not above the box 9 episodes (2, 5, 2), 0 of 3; any direction 13 (3, 7, 3), 0 of 3. No rule warned before any of the 3 terrain-labelled deaths in this short session | measured |
+| 2026-10-03 08:35:04 | box without sides | not recorded | First terrain death under the new rule, unwarned. Very low level: 100 m climbing at +146 m/s, 746 m, then 590 m at -219 m/s (time to ground 3 s), 340 m. From 08:34:50 to 08:35:00, 14 readings under 12 s; 11 were off course with the expansion point far above the top edge and far outside the frame, for example (-420, -2685), (-2443, -3128), (1327, -2450), (1957, -149). Three on-course readings came singly (`6.0s`, `4.9s`, `1.8s`). Existing emergency climb at 08:34:55.9; death at 08:35:04.8. An expansion point thousands of pixels away means the pair was mostly a slide, here the picture moving down as the nose pitched up, with a small zoom on top: the time to contact from such a pair is weak evidence, and "above the box" excluded it as designed. Session: 1 warning line, 1 death logged as terrain, not warned | measured, one event |
+| 2026-10-03 08:33 to 08:42 | box without sides (agent's session) | not recorded | 9 minutes, ended when the operator started a session at 08:42:48, so no summary. 867 pairs: 429 readable (49 percent), 362 same frame (42 percent), 41 few points, 26 too few agreeing, 9 warming. 3 deaths, 1 logged `cause=terrain` (08:35, row above), 8 emergency climbs, 2 warning lines, both followed by an emergency climb that survived. Terrain deaths warned: 0 of 1. The same-frame share is far above the 2 to 8 percent of the earlier sessions and is not explained | measured |
+| 2026-10-03 08:43 to 08:46 | operator's session, at start-up | not recorded | Stuck-screen capture working again: `GAME_UNKNOWN` for 152 s on a parts-crate reward screen, 2 frames saved (`unknown_20261003_084325_stuck31s.png`, `unknown_20261003_084526_stuck152s.png`); the session then reached the lobby on its own at 08:46. Not a looming matter; recorded because the capture was restored this morning | measured |
+| 2026-10-03 09:02:27 | box without sides, operator's session | not recorded | Terrain death, unwarned, and not by the direction test. Readings, all on course unless marked: 09:02:14.2 `22.5s, 7.8s, 4.5s`; 09:02:15.8 `19.4s, 3.4s, 9.7s/off`; 09:02:17.4 `4.1s, inf, 4.9s`. Five readings under 8 s in 3.2 s, never three in a row: a far or not-expanding reading fell between them each time. Existing emergency climb at 09:02:15.2 (2,798 m, -109 m/s); unreadable from 09:02:20; death at 09:02:27.2, last altitude 1,473 m, no missile alert for 46.7 s. The confirm needs unbroken agreement and single readings scatter. Session to that point (20 minutes): 12 warning lines, 5 armed deaths, 1 logged terrain | measured, one event |
+| 2026-10-03 09:11:50 | operator's session (started 08:42:48; the classifier edit was saved at 08:42:25, so it runs the revised ADR 143) | not recorded | First `cause=contested` death. Missile alerts at 09:11:41.5, 09:11:43.0 and 09:11:44.6; altitude 3,446 m at -160 m/s, 22 s to the ground; existing emergency climb at 09:11:47.3; death at 09:11:50.8, alert age 6.5 s. Looming read far or not expanding throughout (`43.9s`, `16.7s, 13.9s`, `inf`). Under the old rule this was `cause=terrain`. The flight state says missile | measured, one event; the cause is inferred |
+| 2026-10-03 09:55:01 | box without sides, operator's session | not recorded | **Terrain death looming could not have seen: the ground was below a raised nose.** Short readings early (`4.7s, 7.9s` at 09:54:42.8, then `3.1s/off, 2.3s/off`, then `2.2s`), unconfirmed. Existing emergency climb at 09:54:45.1 (1,621 m, -183 m/s, 9 s to the ground). During the pull-out, 09:54:51 to 09:54:54, looming read not expanding three times running while the sky fraction rose to 0.79: the camera was looking up. In that window altitude went from 900 m at -34 m/s to 692 m at +8 m/s and health fell from 61 to 1. The aircraft flew on at 676 m, +10 m/s, reading 8 to 31 s, and died at 09:55:01 with no missile alert for 236 s. Inferred: it struck the ground at the bottom of the pull-out, out of the forward view. A forward-looking detector has no reading for that; the descent-rate trigger is the one that covers it, and it had fired 6 s earlier. Session to that point (72 minutes): 38 warning lines, 5 deaths logged terrain: 2 warned, 2 missed through scatter, this one | measured; the strike is inferred from health and altitude |
+
+**Same-frame pairs: wait for the picture to change (2026-10-03).** When the second grab shows the same forward
+view, the handler waits up to `same_frame_wait_s` (0.25 s) for the picture to change and then takes a new pair
+starting from the changed frame. The original pair is not stretched: how long the first picture had already
+been on screen is unknown, so its interval would be a guess, and `tau` scales with the interval. A view that
+never changes is still reported `same-frame`. The `LOOM:` line carries `waited=`.
+
+**Several readings a tick (2026-10-03).** `pairs_per_tick` (3 in `config.yaml`, schema default 1) takes that
+many readings from consecutive frames each tick: three pairs from four grabs. Each reading advances the confirm
+streak in order, so `confirm_pairs` can be met inside one tick, in about 0.4 s of agreement instead of 3 to
+4.5 s. A tick with no reading still resets the streak, once. The `BT[...]` line lists the tick's readings in
+order (`tau=4.2s,3.9s/off,n/a(few-points)`), each `LOOM:` line carries `pair=k/n`, and the HUD shows the last
+reading. The frozen-picture wait is budgeted per tick, not per pair. The rule itself (`tau_warn_s` 8 s, on
+course, 3 in a row) is unchanged. Measured cost: see the 05:11 row.
+
+**The path box assumes the aircraft flies where the camera points (2026-10-03 05:36).** In a descent the flight
+path is below the boresight, so the picture expands from a point below the box, and the reading is classed as
+passing while the aircraft is flying at the ground. A pull-up then rotates the picture, which moves the fitted
+expansion point again, here to above the box. 95 of the session's 213 short readings had the expansion point
+below the box against 47 inside it. The spike had already found the expansion point "too noisy to gate on" at
+its frame rate; at 0.12 s pairs it is steady enough to read, and what it shows is that the box is in the wrong
+place for a descent. No rule is changed here.
+
+**The path box is open below (2026-10-03).** `path_open_below: true`: an expansion point within the box's
+width and anywhere under its top edge counts as on course, including below the frame. The logged readings of
+the 05:11 session (38 minutes to 05:49, 3,426 pairs, 18 deaths of which 5 logged `cause=terrain`, 43 emergency
+climbs) were replayed under four on-course rules, 8 s limit, 3 in a row. The replay of the closed box gives
+the 7 episodes that were logged live.
+
+| On-course rule | Episodes | Then a death within 16 s | Then an emergency climb, survived | Neither | Terrain deaths warned |
+|----------------|----------|--------------------------|-----------------------------------|---------|-----------------------|
+| Closed box | 7 | 3 | 3 | 1 | 3 of 5 |
+| Open below, same width | 15 | 7 | 7 | 1 | 5 of 5 |
+| Anything not above the box | 21 | 8 | 12 | 1 | 5 of 5 |
+| Any direction | 24 | 8 | 12 | 4 | 5 of 5 |
+
+Open below warns before all 5 terrain deaths with the count of warnings followed by nothing unchanged at 1.
+Wider rules add episodes without adding a warned terrain death, and "any direction" adds false alarms. A 10 s
+limit moved each row by 2 to 5 episodes and no warned death, so the limit stays at 8 s. This is one session on
+one evening; the open box is a hypothesis for the next sessions to test, not a result. The replay script is
+kept in the session scratchpad, not in the repository.
+
+**The open box on its own session, 88 minutes in (2026-10-03 06:02 to 07:31).** 8,634 pairs, 70 percent
+readable, 40 deaths of which 11 logged `cause=terrain`, 128 emergency climbs, 28 warning lines, 0 errors.
+Two of the 11 look like missile kills during a recovery (06:27 and 07:27 rows and note). Replay of the
+logged readings, 8 s limit, 3 in a row:
+
+| On-course rule | Episodes | Then a death within 16 s | Then an emergency climb, survived | Neither | Terrain deaths warned | All deaths warned |
+|----------------|----------|--------------------------|-----------------------------------|---------|-----------------------|-------------------|
+| Closed box | 18 | 8 | 7 | 3 | 5 of 11 | 9 of 40 |
+| Open below (live) | 25 | 10 | 10 | 5 | 6 of 11 | 11 of 40 |
+| Anything not above the box | 52 | 19 | 25 | 8 | 9 of 11 | 20 of 40 |
+| Any direction | 62 | 24 | 31 | 7 | 9 of 11 | 23 of 40 |
+
+The first session flattered the open box: there it warned 7 of 8 terrain deaths with 1 warning followed by
+nothing. Here it warns 6 of 11 with 5 followed by nothing. Three terrain deaths were blocked by the box's width
+or top (06:22, 06:33, 06:44 rows): at low level, manoeuvring, the expansion point wanders sideways while `tau`
+stays short. The two widest rules warn 9 of the 11 (the other 2 being the probable missile kills), and their
+share of warnings followed by nothing is lower, 8 of 52 and 7 of 62 against 5 of 25, at about twice the number
+of episodes. On this session the direction test costs more warned deaths than it saves in false alarms. No
+rule is changed here; this is the evidence for the next decision.
+
+**Session ended on the game's Invite Players screen (2026-10-03 07:38, not a looming matter).** After a round,
+`CLICK TO CONTINUE` was detected a second time at 07:38:19, one second after the lobby had been declared, and
+its seven clicks at (939, 1094) went to the lobby at 07:38:24.2. The game then showed Invite Players. The
+follow-up PLAY click at (1751, 1096), 07:38:25.1, landed on that screen, where the same position is the INVITE
+button of the bottom visible squadron row ([ISAF] Mobius7, shown Offline; the button was greyed in a capture
+at 07:46). Wingman then waited in GAME_STARTING for 150 s, fell to GAME_UNKNOWN, found no stall-recovery
+match, and the liveness guard fired at 07:46:14. Stopped with `z` at 07:47:04. Whether an invite was sent is
+inferred from the click position and the greyed button, not confirmed. This belongs with
+[Anomaly 009](../anomaly/009-click-to-continue-ignored-after-ubuntu-26-04.md) and the lobby click path, not
+with this document.
+
+**The path box loses its sides too (2026-10-03).** `path_open_sides: true`: only an expansion point above the
+box's top edge is off course. This sets aside the first rule of this section, that structure sliding sideways
+is off the flight path. Sideways drift of the fitted expansion point turned out to accompany low, banked or
+turning flight near terrain, with `tau` short throughout, and three terrain deaths were blocked by it (06:22,
+06:33, 06:44). What is kept is the one exclusion with a measured cause: a pull-up rotates the picture and
+moves the point above the box.
+
+Replay of both three-readings sessions, 8 s limit, 3 in a row:
+
+| Session | Rule | Episodes | Then a death | Then a survived climb | Neither | Terrain deaths warned |
+|---------|------|----------|--------------|-----------------------|---------|-----------------------|
+| 05:11, 51 min | Open below | 21 | 12 | 8 | 1 | 7 of 8 |
+| 05:11, 51 min | Not above the box | 30 | 12 | 17 | 1 | 7 of 8 |
+| 05:11, 51 min | Any direction | 37 | 13 | 19 | 5 | 7 of 8 |
+| 06:02, 104 min | Open below | 26 | 11 | 10 | 5 | 6 of 13 |
+| 06:02, 104 min | Not above the box | 54 | 21 | 25 | 8 | 10 of 13 |
+| 06:02, 104 min | Any direction | 65 | 27 | 31 | 7 | 10 of 13 |
+
+Over the 155 minutes, "not above the box" warns the same 17 of 21 terrain deaths as "any direction" with 84
+episodes against 102 and 9 followed by nothing against 12. Three of the 4 unwarned look like missile kills
+during a recovery. The cost against the open box is volume: 84 episodes against 47, about one every two
+minutes of session time, a little over half of them dives the aircraft survives anyway. Both sessions were
+used to choose this rule, so its own test is the next session.
+
+`unknown_anomaly.max_per_episode` went from 0 back to 5 in the same launch (operator request): a stuck screen
+now leaves frames. It does not touch looming.
+
+**The 08:12 session was killed by the agent's launch (2026-10-03 08:32).** The operator had a session running
+(started 08:12). The agent ran its pre-flight and `make r1` in one command, so the launch went ahead although
+the pre-flight showed a running session; `make r1` closed the display and the game mid-round. The replacement
+session (08:33, box without sides) entered straight into the live round. Nothing in this document depends on
+the lost minutes, but the 08:12 row is a partial session for that reason.
+
+**The terrain label is corrected at its source (2026-10-03).** The death classifier
+([ADR 143](../adr/143-classify-died-armed-deaths-enemy-fire-vs-terrain.md), revised) now calls a death
+`contested` when a missile alert and a hard emergency are both recent, instead of `terrain`. Over the five
+sessions from 04:11 to 08:41, 5 of the 35 terrain-labelled deaths were of that kind. Counts of "terrain deaths
+warned" in the rows above use the old label; from the next session on, `cause=terrain` means a hard emergency
+with no missile alert in the last 10 s. Three terrain-labelled deaths with an alert 12 to 14 s earlier
+(06:15:14, 06:18:07, 07:37:40) fall outside that window and stay `terrain`; the window is not changed here.
+
+**The no-sides rule on data it was not chosen on (2026-10-03 08:42 to 11:03, operator's session, 141 minutes
+so far).** 12,981 pairs, 64 percent readable, 3 percent same frame, 0 looming errors. 91 deaths under the
+revised labels: 9 `terrain`, 12 `contested`, 39 `enemy_fire`, 8 `unclassified`, the rest unarmed. 136 emergency
+climbs, 58 warning lines. Tick period with three readings a tick: median 1.50 s, 90th percentile 1.69 s, 99th
+percentile 1.84 s. Replay, 8 s limit, 3 in a row:
+
+| On-course rule | Episodes | Then a death within 16 s | Then an emergency climb, survived | Neither | Terrain deaths warned |
+|----------------|----------|--------------------------|-----------------------------------|---------|-----------------------|
+| Closed box | 14 | 8 | 4 | 2 | 2 of 9 |
+| Open below | 21 | 11 | 7 | 3 | 4 of 9 |
+| Not above the box (live) | 45 | 21 | 21 | 3 | 4 of 9 |
+| Any direction | 65 | 24 | 30 | 11 | 3 of 9 |
+
+The rule that warned 17 of 21 on the two sessions it was chosen on warns 4 of 9 here, the same as the open
+box, with twice the episodes. The replay figure was fitted, as feared. What does hold: 42 of 45 episodes are
+followed by a death or an emergency climb, so the warnings are not false alarms; they are just not catching
+most terrain deaths. By hand, the misses in this session are scatter between readings (09:02, 09:27) and a
+strike below a raised nose (09:55); the others are not yet examined. 17 of the 21 warned deaths carry a label
+other than `terrain`, which suggests either that the aircraft is often closing with the ground when it is
+shot, or that the label still under-counts terrain; not resolved.
+
+**Why each terrain death in that session was or was not warned (08:42 session, to 11:33).** The 30 readings
+in the 14 s before each of the 9 deaths labelled `terrain`:
+
+| Death | Warned | Under 8 s (on course) | Unreadable of 30 | Why |
+|-------|--------|-----------------------|------------------|-----|
+| 09:02:27 | no | 6 (5) | 11 | Scatter: short readings never three in a row |
+| 09:12:31 | 12 s before | 16 (14) | 11 | |
+| 09:27:37 | no | 5 (5) | 10 | Scatter |
+| 09:34:39 | 11 s before | 10 (8) | 11 | |
+| 09:55:02 | no | 0 (0) | 5 | Strike below a raised nose; health 61 to 1 in the pull-out |
+| 10:33:11 | at the death | 7 (5) | 9 | Confirmed too late to count |
+| 10:41:29 | no | 1 (1) | 19 | Mostly unreadable |
+| 10:42:16 | no | 1 (1) | 20 | Mostly unreadable |
+| 10:51:38 | 9 s before | 4 (4) | 17 | |
+
+Three useful warnings in nine. The direction test accounts for none of the six others: 2 are scatter, 2 are
+unreadable views, 1 is out of the forward view and 1 confirmed at the moment of death. A third to two thirds
+of the readings before every one of these deaths were unreadable ("few points"), against 36 percent over the
+whole session. The view is hardest to track exactly when the ground is closest, which now looks like the main
+limit on this detector, ahead of any rule about the readings it does get.
+
+**The whole 08:42 session (2026-10-03 08:42 to 13:39, operator's, stopped by the operator at the lobby).**
+4 h 56 m, 51 missions, 197 respawns: the first sample here over 40 missions. Code: three readings a tick, HUD
+colour mask, frozen-picture wait, box without sides, revised ADR 143 labels. 27,495 pairs: 17,499 readable
+(64 percent), 8,120 few points (30 percent), 1,281 too few agreeing, 586 same frame (2 percent). 0 looming
+errors. Died armed 168: 104 `enemy_fire`, 26 `contested`, 21 `unclassified`, 17 `terrain` (0.33 a mission).
+Spawn crashes 2 in 197 respawns (1.0 percent). 251 emergency climbs, 114 warning lines.
+
+| On-course rule | Episodes | Then a death within 16 s | Then an emergency climb, survived | Neither | Terrain deaths warned |
+|----------------|----------|--------------------------|-----------------------------------|---------|-----------------------|
+| Closed box | 31 | 14 | 8 | 9 | 4 of 17 |
+| Open below | 44 | 19 | 14 | 11 | 6 of 17 |
+| Not above the box (live) | 95 | 37 | 39 | 19 | 7 of 17 |
+| Any direction | 128 | 41 | 57 | 30 | 6 of 17 |
+
+The live rule warned before 7 of 17 terrain deaths (41 percent), with 95 episodes (1.9 a mission) of which 19
+(20 percent) were followed by neither a death nor an emergency climb. The mid-session figure of 3 in 45
+followed by nothing did not hold either. No on-course rule reaches half of the terrain deaths. As a detector
+on its own, in shadow, this is not ready to actuate: it misses more terrain deaths than it catches, and the
+misses are in the readings (unreadable near the ground, scatter, ground out of the forward view), not in the
+rule applied to them.
+
+**The three-consecutive-ticks rule did not fire before any of the 7 deaths.** At one reading per 1.5 s tick,
+three in a row is 3 to 4.5 s of unbroken agreement, and the pre-death readings were not unbroken. Whether a
+looser rule would have warned usefully depends on how often a `tau` under 5 s appears when nothing follows,
+which is not counted yet. No rule is changed here.
+
+**HUD colour mask (2026-10-03, operator's proposal).** HUD strokes are left out of the tracking by colour, as
+well as by the learned static-edge mask. Nameplates, target markers and the lock circle move, so the learned
+mask cannot catch them, and they move independently of the ground. Config: `terrain_avoidance.loom.hud_mask`.
+
+- Measured on 85 raw frames at 1920 by 1200 (today's resupply captures, 40 crash frames, 3 live grabs; 31 of
+  them more than 20 percent orange rock): **10.4 percent of trackable corner points sat on HUD red and 19.0
+  percent on HUD green**, 29 percent together.
+- HUD red measured at hue 1 to 7, saturation 150 to 194, value 190 to 255. HUD green at hue 55 to 62,
+  saturation 76 to 201, value 199 to 253. The shipped ranges are a little wider.
+- Cost in view: red removed a median 0.2 percent and green 1.3 percent, with a margin. On the rockiest canyon
+  frames (61 to 85 percent rock) red removed under 2.2 percent, with no solid patch.
+- The one large red patch (11 percent of the view, one frame) was a sunset-lit cloud, not rock.
+- The colour test runs at full resolution and is then widened by `margin_px`: shrinking first blends a thin
+  stroke into what is behind it, and a corner forms where a stroke meets terrain.
+- A tracked point that ends under a HUD colour in the second frame is dropped as well.
+- The overlay darkens what the mask excluded, and the status line and the `LOOM:` line give the share
+  (`hud=`), so terrain taken for HUD by mistake is visible.
+- Not masked: blue (friendly), yellow (resupply and proximity markers) and white (damage numbers). White
+  cannot be separated from cloud and snow by colour.
+- On the spike's recording the mask changes nothing measurable (64 percent readable, 17 warning episodes and
+  the same countdowns with it on and off). That video is 960 by 600 and compressed; its HUD share reads a
+  median 0.6 percent. The mask's effect has to be judged on live frames.
+
+Tests: `tests/test_terrain_loom.py`.
+
+Not addressed here and still open: items 2 to 5 below. Item 1 is replaced by counting `tau=` against `alt=` on
+the live log.
+
+### Shapes: outlines around the dots, and a way out (2026-10-03, wingman 1.9.0)
+
+Status: shadow. Nothing here actuates.
+
+**The operator's design.** The dots are grouped into objects and an outline is drawn around each group. An
+outline that covers the middle of the screen and grows is something the aircraft is flying at, and it should
+turn away from it: left, right or up. This was proposed after the five-hour session showed the pair readings
+warning before 7 of 17 terrain deaths, and after the agent's review had argued for dropping forward-view
+detection in favour of a terrain floor. The operator disagreed, and the measurements support trying it: the
+existing pull-up fired before all 17 of those deaths and did not save the aircraft, and turning away is the
+response nobody has tested.
+
+**What it adds to the pair readings.**
+
+- One growth rate for each object. The pair reading fits one zoom to every dot in the view and so averages a
+  near mesa with a far ridge, a likely source of the scatter that broke the confirm at 09:02 and 09:27.
+- The same dots followed through all of the tick's frames (four, about 0.4 s), not one interval at a time.
+- A way out. The pair reading only says closing or not.
+
+For one rigid object the outline's growth and the pair reading's zoom are the same quantity: the area grows as
+the square of the zoom. The gain is in separating objects, following them and reading a direction off them.
+
+```mermaid
+flowchart TD
+    A[The tick's consecutive frames] --> B[Dots found in the first and followed to the last]
+    B --> C[Dots near each other are grouped]
+    C --> D[Outline around each group]
+    D --> E{Covers the middle and grows}
+    E -->|no| F[Clear]
+    E -->|yes| G[Threat]
+    G --> H{Same place as last tick}
+    H -->|yes for enough ticks| I[Confirmed in shadow]
+    G --> J[Way out past the nearest edge]
+```
+
+Conditions, in words:
+
+- **Grouped**: dots within `link_px` of each other, chained. Dots in a group that do not move with the rest
+  are dropped before the outline is drawn, so one bad track cannot move an edge.
+- **Grows**: the area of the outline around the same dots, first frame to last, as a time to contact; under
+  `tau_warn_s` (8 s).
+- **Covers the middle**: the centre of the path box is inside the outline, or the outline's centre is inside
+  the path box.
+- **Enough ticks**: `confirm_ticks` (2), each tick's threat overlapping the one before.
+- **Way out**: past the outline's nearest edge, left or right. Up only when the top edge is nearer than
+  `up_bias` (0.5) of the nearer side edge, because up is what the aircraft already does and it fails against
+  rising ground (06:17, 09:34). An edge within `edge_margin_px` of the view's border is not an edge of the
+  object, only where it left the picture, so that side is not offered. With neither side open the answer is up.
+
+**Code and log.** `wingman/terrain_shapes.py` (`TerrainShapes`), config under `terrain_avoidance.loom.shapes`.
+The `BT[...]` line ends with `shape=`: `4.2s:left` for a threat and its way out, `clear` for shapes with no
+threat, `n/a(reason)` for none. A `SHAPE:` DEBUG line carries the count, areas, clipped sides and cost.
+`SHAPE[shadow]:` is written when a threat is confirmed. On `live_hud.png` every outline is drawn, the threat's
+in yellow (red once confirmed), with an arrow for the way out.
+
+**Check on the spike's recording** (frames 0.506 s apart, so two-frame chains; the live class run offline):
+
+| Measure | Pair readings | Shapes |
+|---------|---------------|--------|
+| Readable | 64 percent | 77 percent |
+| Before the death at t=1956.8 s | `4 3 3 2 2` | `5.6 4.8 4.1 3.3 2.7 2.4 1.9` |
+| Before the death at t=2272.3 s | `20 10 8 7 6 5 5 4 4 4 3 2` | `7.3 5.7 4.8 4.2 3.8 3.5 3.0 2.5` |
+| Confirmed episodes in 44 minutes | 17 | 25 |
+| Cost | median 6 ms a pair | median 4.8 ms a tick |
+
+Shapes per readable pair: median 1, at most 5. Two weaknesses already visible: the way out flips between left
+and right from one frame to the next (`right, left, left, left, right, right, right` before the first death),
+and 25 episodes in 44 minutes have not been checked against outcomes. This is the recording the method was
+developed on, at a coarse frame interval; the live rows go in the table below.
+
+| Date | Code | Game | Observation | Label |
+|------|------|------|-------------|-------|
+| 2026-10-03 14:11 to 14:22 | `b291909` plus the uncommitted shapes, 1.9.0 | not recorded | No shape data: the game spent over 100 s on its "Loading hangar" screen, wingman's start-up classification timed out and took the lobby for a battle, and the lobby showed FINDING SERVERS in place of PLAY for about 12 minutes. Looming and shapes stayed idle (padlock unconfirmed), no clicks were sent. Stopped with SIGTERM, no round in progress; one stuck-screen frame saved. Not a shapes matter | measured |
+| 2026-10-03 14:25 to 14:28 | same, attached to the game already up | not recorded | First 82 ticks, a desert canyon map: 76 readable (93 percent), 3 warming, 3 few points. Frames per tick: 59 with four, 15 with three, 8 with two (frozen pictures break the run). Shapes per readable tick: median 1, at most 4. 4 ticks with a threat (way out: right 2, left 1, up 1), 1 confirmed at 14:27:36 (`5.9s`, 24 dots, way out left). Cost median 26 ms, maximum 47 ms. 0 errors. One HUD frame over open desert: the ground is a single wide outline cut off at both sides of the view, "none growing in the middle" | measured, 3 minutes |
+| 2026-10-03 14:31:44 | same | not recorded | **First terrain death under shapes: confirmed 10 s ahead, then read clear while the pair readings read 1.5 s.** A dive from 7,010 m. Existing emergency climb at 14:31:32.4 (6,236 m, -277 m/s). Shapes: `4.1s:right` at 14:31:32.9 (one shape, 313 dots, cut off at the left and top of the view), `2.7s:left` at 14:31:34.5 and confirmed (209 dots). At 14:31:36.1 and 14:31:37.6 shapes read `clear` (186 then 18 dots followed) while the pair readings read `1.7s, 1.5s, 1.5s` then `0.7s, 0.9s`. Unreadable from 14:31:38.9. Death at 14:31:44.3, `cause=terrain`, no missile alert for 163 s, last altitude 2,713 m at -364 m/s. The way out went right then left on consecutive ticks; in a steep dive the ground fills the view and neither means anything. Inferred for the `clear` readings: following dots through four frames keeps the far, slow ones and loses the near, fast ones, so the outline that survives understates the growth when closing is fastest | measured; the cause of `clear` is inferred |
+| 2026-10-03 14:25 to 14:37 | dot-hull shapes (the whole of what was reviewed) | not recorded | 2 missions. 329 shape ticks: 258 readable (78 percent), 64 few points, 4 same frame, 3 warming; cost median 27 ms. 2 deaths logged `cause=terrain`: shapes confirmed before 1, the pair readings warned before both. In the 12 s before those deaths shapes read `clear` on 9 ticks while the pair readings gave 13 readings under 8 s | measured |
+
+Tests: `tests/test_terrain_loom.py` (the shapes section).
+
+### Outlines from the picture itself (2026-10-03, wingman 1.9.0, replaces the dot hulls)
+
+Status: shadow. The operator's second step: find the outlines of the objects on the screen, instead of drawing
+a line round whichever dots survived. A hull round dots is not the object's edge, and steering round something
+needs its edge. The dot hulls also under-read: before the two terrain deaths of the 14:25 session they read
+`clear` on 9 ticks while the pair readings saw 1.5 to 3.4 s.
+
+**How an outline is found.** Where the picture has texture (rock, ground, buildings) against where it is smooth
+(sky, haze, water): edge strength averaged over `texture_blur_px`, above `texture_energy`. The border of each
+textured region is an outline. HUD strokes are strong edges, so their strength is removed first (the learned
+static mask and the colour mask), and they make no region of their own. No colour and no frame-to-frame
+tracking is used to find the shape. Cost under 1 ms.
+
+Tried on 104 saved frames at 1920 by 1200 before building: 59 had a usable outline (15 to 85 percent of the
+view textured), 10 were almost all textured (ground fills the view, nothing to outline), 35 almost none (sky or
+a black screen). On the rock-map reference frame the outline follows the spire and the cliff tops against the
+sky.
+
+**Three things measured while building, each of which changed the design.**
+
+- **Cloud is not told from terrain by its dots.** The plan was that cloud holds too few trackable corners to
+  pass as solid. Measured: 4.0 corners per 1,000 px in a cloud region against 4.1 in rock. So nothing here
+  separates cloud from terrain in one frame. The growth test does: distant cloud does not get bigger. Flying
+  into near cloud can still raise a shadow threat.
+- **The outline's own area is not a usable measure of growth.** The plan was to take growth from the outline
+  and cross-check with the dots. On a test object 6.0 s from contact the dots inside read 6.2 to 6.3 s and the
+  outline's area read 31 s and 1.3 s; on the reference frame with 4.0 s applied by hand, 4.0 s against 37.5 s.
+  The outline's border is uncertain by a few pixels, which over 0.4 s is as large as the growth. So the outline
+  gives the shape and the way out, and the dots inside it give the growth. The outline's figure is still
+  logged.
+- **A hole is not a gap.** A smooth patch inside an object, or a notch in its edge, read as an open way out.
+  Open now means smooth, joined to the top of the view where the sky is, and at least `gap_min_px` wide.
+
+**What the verdict can be.** `4.2s:left` is a threat and its way out. `clear` is nothing growing in the middle.
+`blind` is new: something covers the middle and there were too few dots inside it to take its growth. That is
+neither clear nor a threat, and it is the state the dot hulls reported as `clear` near the ground. The `SHAPE:`
+line now always carries `middle=[outline 6.1s dots 5.4s n=42 clipped=LR]` for the largest shape covering the
+middle, so a `clear` can be told from "measured slow" and from "not measured".
+
+Dots are tracked over the last pair of frames only, not through all four: following them through every frame
+keeps the far, slow ones and loses the near, fast ones.
+
+**Check on the spike's recording** (two-frame chains, 0.506 s apart):
+
+| Measure | Dot hulls | Picture outlines |
+|---------|-----------|------------------|
+| Pairs with a verdict | 77 percent | 99 percent: 3,860 clear, 1,064 blind, 225 threat |
+| Before the death at t=1956.8 s | `5.6 4.8 4.1 3.3 2.7 2.4 1.9` | `5.2 4.5 3.8 3.4 2.8 2.2 1.8` |
+| Before the death at t=2272.3 s | `7.3 5.7 4.8 4.2 3.8 3.5 3.0 2.5` | `7.7 6.3 5.4 4.8 4.2 3.9 3.5 3.1 2.3` |
+| Confirmed episodes in 44 minutes | 25 | 34 |
+| Way out | flipped left and right | up on 160 of 225 threat pairs, left 36, right 29 |
+| Cost | median 4.8 ms | median 8.0 ms |
+
+The way out is mostly up on this recording because the ground fills the view before those deaths and there is
+no gap to either side. 34 episodes have not been checked against outcomes. This is the recording the method was
+developed on; the live rows go in the table below.
+
+| Date | Code | Game | Observation | Label |
+|------|------|------|-------------|-------|
+| 2026-10-03 14:25 to 15:05 | dot-hull shapes (the whole session, for comparison) | not recorded | 40 minutes, 6 missions, 14 deaths of which 2 logged `cause=terrain`. 928 shape ticks: 562 readable (61 percent), 284 same frame (31 percent), 79 few points. 7 confirmed shape threats: 2 followed by a death within 16 s, 1 by an emergency climb that survived, 4 by neither. 7 pair-reading warnings: 3, 3 and 1. Terrain deaths with a shape threat beforehand: 1 of 2; with a pair warning: 2 of 2 | measured |
+| 2026-10-03 15:06 to 15:12 | `b291909` plus the uncommitted picture outlines, 1.9.0 | not recorded | First 84 ticks: 80 with a verdict (95 percent), 3 warming, 1 same frame. Verdicts: 73 clear, 7 threat (way out up 3, left 3, right 1), 0 blind. Something covered the middle on 28 ticks, each time with 8 or more dots inside. Shapes per tick median 1, at most 5. Cost median 28 ms, maximum 40 ms. 0 errors | measured, 2 minutes of battle |
+| 2026-10-03 15:12:06 | same | not recorded | First confirmed threat: climbing at +80 m/s through 2,772 m, no time to ground. Pair readings `5.3s, 4.4s, 9.0s` at 15:12:03.9; shapes `2.1s:up` at 15:12:05.4 (one outline filling the view, 139 dots inside) and `1.1s:up`, confirmed, at 15:12:06.9, the same instant as the pair warning. Existing emergency climb at 15:12:07.8. Then no outline at all and too few points; respawn at 15:12:14. No `DIED ARMED` line, so no cause is logged. The HUD frame at 15:12:11 shows another aircraft's wing filling the screen: what grew in the middle may have been an aircraft, not terrain. Not resolved | measured; what the shape was is not known |
+| 2026-10-03 15:12:59 | same | not recorded | Second confirmed threat, a dive that was recovered. From 3,295 m at -133 m/s. Pair warning at 15:12:58.7; existing emergency climb at 15:12:59.3; shapes confirmed at 15:12:59.8. Shapes held a threat on four ticks running, `7.4s:left, 2.6s:left, 3.1s:left, 3.9s:left`, with 24 to 49 dots inside the outline, while the pair readings on the last three of those ticks were unreadable or passing (`few-points`, `3.1s/off`). The way out stayed left throughout. Bottomed at 1,203 m and climbed away; no death. Here the outline kept a reading where the whole-view fit lost it, and the direction did not flip | measured, one event |
+| 2026-10-03 15:15:54 | same | not recorded | Third confirmed threat, the first where shapes led every other signal, then a death. Threat `7.7s:up` at 15:15:52.5 (2,865 m, -55 m/s, time to ground 52 s), confirmed `2.7s:up` at 15:15:54.0 with 150 dots inside. Existing emergency climb at 15:15:54.8, 0.9 s later; pair warning at 15:15:55.5, 1.6 s later. `0.9s:up` at 15:15:55.5, then `clear` on two ticks with the pair readings unreadable, `blind` at 15:15:59.8 while the pair readings read `6.3s, 4.6s, 3.9s`, then respawn at 15:16:03, about 8 s after the confirm. No `DIED ARMED` line (no missiles aboard), so no cause is logged. Open: the two `clear` ticks are wrong in the same way the dot hulls were. At -300 m/s the picture smears, no textured region is found, so nothing "covers the middle" and the verdict falls to `clear` instead of `blind` | measured, one event |
+| 2026-10-03 15:19:45 | same | not recorded | First death logged `cause=terrain` under the picture outlines: confirmed 12 s ahead, then unreadable to the end. A dive from 5,457 m. Existing emergency climb at 15:19:27.9; pair warning and first shape threat (`3.2s:left`) at 15:19:28.4; `clear` at 15:19:29.9 with the pair readings not expanding; `2.2s:up` at 15:19:31.4; confirmed `3.1s:right` at 15:19:32.9 (4,023 m, -381 m/s). The way out went left, up, right on three threat ticks: in a steep dive the ground fills the view (clipped on three or four sides each time) and there is no real gap. From 15:19:34.6 to the death: `clear, clear, blind, blind, clear, blind, blind`, the pair readings `few-points` throughout. The aircraft had levelled at 1,868 m (-1 m/s) by 15:19:38.8 and died at 15:19:45. Sky fraction 0.00 for the whole event, so probably a dark map: level flight at night into terrain, with nothing in the view sharp enough to follow | measured; "dark map" is inferred from the sky reading |
+| 2026-10-03 15:22:19 | same | not recorded | **The level-flight case, and shapes were the only signal calling it on course.** Twenty seconds after a recovered dive, level at 1,399 m, -7 m/s, time to ground 200 s. At 15:22:17.6 the pair readings read `6.3s/off, 8.6s/off, 4.0s/off` (passing) and shapes read `4.0s:up`: one outline filling the view, cut off on all four sides, 153 dots inside. Existing emergency climb at 15:22:18.4. Confirmed `1.7s:up` at 15:22:19.1 with 319 dots; `0.9s:up` at 15:22:20.4. From 15:22:22 no outline and too few points, with altitude unreadable, until the respawn at 15:22:33. The readings say contact at about 15:22:21. No `DIED ARMED` line. The whole-view fit put the expansion point above the path box and called it passing; the fit to the dots inside the outline has no direction test and read it. Lead from the first shape threat to the predicted contact: about 4 s. Session to this point (16 minutes): 7 confirmed threats, 5 followed by a death and 2 by a recovered dive, none in level safe flight | measured; the moment of impact is inferred |
+| 2026-10-03 15:28:16 | same | not recorded | **Level, slightly climbing flight into terrain, confirmed 10 s ahead and 3.8 s before the existing trigger.** After a recovered dive (threat confirmed at 15:27:49.9, 1.5 s before the pair warning; bottomed at 1,769 m), the aircraft was at 1,878 to 1,993 m climbing at +9 to +38 m/s, no time to ground. Shapes: `7.3s:up` at 15:28:04.9 with the pair readings `8.3s, 6.7s, 7.4s`; confirmed `6.5s:up` at 15:28:06.5 (228 dots); `blind`; `2.7s:up` at 15:28:09.3 as a descent appeared (-81 m/s). Existing emergency climb at 15:28:10.3. Then `blind, blind`, `4.0s:right`, and the respawn at 15:28:16.8, `cause=terrain`, no missile alert for 349 s. First threat to death 11.9 s; confirm to death 10.3 s. The way out was up on every threat tick but the last. Session to this point (22 minutes): 10 confirmed threats, 7 followed by a death and 3 by a recovered dive; 2 deaths logged terrain, both confirmed beforehand | measured, one event |
+| 2026-10-03 15:29:13 | same | not recorded | Terrain death from level flight with almost no usable lead. 2,476 m, +20 m/s. What covered the middle, tick by tick (dots inside the outline): `21.4s`, `124.9s`, `10.1s` at 15:29:04.2, `1.1s` at 15:29:05.7, `0.5s` at 15:29:07.2 (confirmed). The pair readings on the 15:29:04.2 tick were `4.4s, 5.0s, 9.1s`: shapes take their dots from the tick's last pair only, so they saw the 9 to 10 s reading and not the two shorter ones before it, and stayed `clear` one tick longer than the pair readings did. Existing emergency climb at 15:29:06.6. Respawn at 15:29:13.1, `cause=terrain`, no missile alert for 406 s. From 10 s to 1 s in one tick is faster than a steady approach gives, so either the 10 s was an over-read or the terrain came into the path abruptly. Session to this point (23 minutes): 11 confirmed threats, 8 followed by a death; 3 deaths logged terrain, all confirmed, with 12 s, 10 s and about 1 s of lead | measured, one event |
+| 2026-10-03 15:44:00 | same | not recorded | **First terrain-labelled death under the picture outlines with no shape threat before it.** Low and shallow: 1,603 to 1,783 m, altitude rate +50 to -22 m/s, then -125 m/s after the existing emergency climb at 15:43:53.9. Shapes read `clear` on every tick of the last 14 s. What covered the middle: `dots 11.3s`, `dots 13.4s` (measured, over the 8 s limit), then **nothing covering the middle on five ticks** although 91 to 369 dots were tracked elsewhere in the view and the sky fraction was 0.12 to 0.34. The pair readings gave three short readings in passing (`5.6s`, `2.6s/off`, `3.3s`) and then `19.0s, 13.9s, 14.4s` two seconds before the death; no warning from them either. Respawn at 15:44:00.4, `cause=terrain`, no missile alert for 1,293 s. Inferred: the nose was up and the middle of the view was sky, with the ground below the forward view, as at 09:55. Session to this point (38 minutes): 5 deaths logged terrain, 4 with a confirmed shape threat beforehand and this one without | measured; where the ground was is inferred |
+| 2026-10-03 16:40:05 | same | not recorded | **A death logged `cause=terrain` that was the end of the round.** For over a minute before it the forward view was identical on every grab (`same-frame` on every pair and every shape reading from 16:39:21) and telemetry sat at 600 to 603 m, +0 m/s. The existing emergency climb fired at 16:39:55.6 on a reading of 545 m, -41 m/s. `DIED ARMED cause=terrain` at 16:40:05.3. A screen capture at 16:40:20 shows the end-of-match podium ("Click to Continue"); wingman recognised it at 16:40:33 and went to the lobby. The round was over and the picture was a still. Shapes and pair readings reported no threat throughout, correctly. This is a third way the label over-counts terrain, after missile kills during a recovery (now `contested`) and gun kills or collisions (16:12 row): deaths labelled terrain need the flight state beside them before they are used to score a detector. Session to this point (94 minutes): 8 deaths logged terrain; 5 with a confirmed shape threat beforehand, 1 missed with the ground below the view (15:44), and 2 set aside as not terrain (16:12, 16:40) | measured; "end of the round" rests on the capture and the state change |
+| 2026-10-03 16:10 onward | same | not recorded | **The game dropped to one picture a second at 16:10 and everything after it in this session is invalid.** Same-frame share of pairs by minute: 16:08 1 percent, 16:09 0, 16:10 21, 16:11 86, then 60 to 98 percent to the end. Measured from a separate process at 16:44: 305 grabs in 6 s, the picture changed 6 times, 1,001 ms apart (median). The display was not in power save (`PowerSaveMode` 0, `idle-delay` 0) and the machine was not locked. A steady 1 Hz is what a compositor gives a surface it is not showing; [Design 009](009-nested-display-isolation-hldd.md) lists this as "not established" and ADR 099 V3 as "not done". Inferred, not confirmed: the nested display's window was minimised, covered or moved to another workspace at about 16:10. The rows above for 16:12, 16:40 and 16:43 fall inside this period and should not be used. The frozen-picture wait cannot help here: it waits 0.25 s and the picture holds for 1 s. Stopped with `z` at 16:45 | measured; the cause is inferred |
+| 2026-10-03 15:06 to 16:10 | picture outlines, the valid part of the session | not recorded | 64 minutes, 12 missions, 26 deaths of which 6 logged `cause=terrain`. 46 confirmed shape threats, 13 of them followed by a death within 16 s. Of the 6 terrain deaths: 5 had a confirmed shape threat beforehand (15:19, 15:28, 15:29, 15:43, 16:06), 1 did not (15:44, ground below the forward view). Under 40 missions, on mostly dark maps: examples of behaviour, not a rate | measured |
+
+Tests: `tests/test_terrain_loom.py` (the shapes and outlines sections).
+
 ### Open before any shadow stage
 
 1. A recording at the pursuit loop's frame interval on the canyon map (the session recorder's `fps`), to
    re-measure readability, the expansion point and the false-alarm rate where frames are 0.14 s apart.
 2. The own aircraft: a mask that follows it, or a rule that the agreeing points must cover the view.
+   **Constraint (operator, 2026-10-03):** ACS mode ([Design 011](011-acs-mode-hldd.md)) flies any airframe, so
+   the own aircraft's shape, size and place on screen are not fixed. A mask drawn for one airframe is ruled
+   out. Whatever handles this must not know the airframe: the view-coverage rule, rejecting points that do
+   not move on screen, or the learned static-edge mask (which is learned per session and so adapts, but has
+   not been measured on a second airframe).
 3. The unlabelled 24: how many were dives that were pulled out of (true, survived) against false alarms.
 4. Hard manoeuvres: hold the last verdict, or no verdict, while the picture rotates faster than tracking allows.
 5. Night maps: whether canyon rock at night has enough texture to track. Not measured.
+
+## Successor approach: a map of the terrain (2026-10-03)
+
+The sessions recorded above led to a different approach, which has its own document:
+[Design 017](017-terrain-map-from-flight-footage-hldd.md) builds a height map of each arena offline from flight
+footage and telemetry, so wingman looks the terrain up instead of detecting it in the view. The forward-view
+detectors in this document stay in shadow as they are.
+
+## Retiring the spawn nose-up (plan, 2026-10-03, wingman 1.9.0)
+
+Status of this section: Draft. Nothing here is implemented.
+
+[ADR 076](../adr/076-respawn-nose-up-spawn-crash-guard.md) holds nose-up blindly at battle start and at every
+respawn, in case the spawn points at terrain. It sees nothing, so it also climbs on every clear spawn. The
+question is when a detector from this document can take its place.
+
+**Not in Phase 1, and not in Phase 2 as it stands.**
+
+- Phase 1's sky test cannot say "the spawn is clear": it read below its threshold on 1,270 of 1,335 ticks on
+  the canyon map and 0.00 in open night sky (rows above).
+- Phase 2 is in shadow, has given 0 warnings across 10 deaths logged as terrain, and is unreadable on about
+  half of its pairs.
+- Phase 2 is also slower off the mark than the guard. The guard acts from the first instant. Looming needs
+  readable pairs first, and spawn crashes come 3 to 10 s after the restart.
+
+**The order.** Each step is one change, so a shift in the spawn-crash rate can be attributed.
+
+```mermaid
+flowchart TD
+    A[Phase 2 in shadow] --> B[Step 1 Phase 2 actuates with the nose-up kept]
+    B --> C[Step 2 Measure spawn crashes over several hundred respawns]
+    C --> D[Step 3 Nose-up becomes conditional]
+    D --> E{Does the conditional hold still engage usefully}
+    E -->|yes| F[Keep it conditional]
+    E -->|no| G[Step 4 Remove it]
+```
+
+1. **Phase 2 graduates to actuating, with the nose-up kept.** Both run together.
+2. **Measure spawn crashes over several hundred respawns.** The yardstick is 11 in 877 respawns (1.25
+   percent) with the blind hold alone ("The problem, measured"), from `MissionStatsTracker`: a death 3 to 10 s
+   after `restart_last_mission`. ADR 076's own trial showed 0 in 49, which was too few to mean anything.
+3. **The nose-up becomes conditional.** It stays the default at spawn and is released early when looming reads
+   "not closing" on a readable view. An unreadable view keeps the hold. This removes the wasted climb on clear
+   spawns without resting the aircraft on a detector that may see nothing.
+4. **Remove it outright only if step 3's numbers show the conditional hold almost never engages usefully.** The
+   honest outcome may be that it is never removed, only made conditional.
+
+Exit criterion for each of steps 3 and 4: the spawn-crash rate over at least as many respawns as the 877
+baseline is no worse than 1.25 percent.
+
+ADR 076 is Accepted, so steps 3 and 4 are made by a superseding ADR, not by editing it.
 
 ## Phase 2+ (not designed here, explicitly deferred)
 

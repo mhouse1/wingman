@@ -1,108 +1,19 @@
 # Job Aid 005 — Updating the Performance Chart
 
-| Status | Date       | Wingman Version |
-|--------|------------|-----------------|
-| Active | 2026-09-24 | 1.8.11          |
+| Status  | Date       | Wingman Version |
+|---------|------------|-----------------|
+| Retired | 2026-10-03 | 1.9.0           |
 
-## Two performance systems
+The test-based performance chart this job aid described was removed by
+[ADR 158](../adr/158-retire-the-per-test-performance-chart.md). `make test-perf`,
+`make test-perf-csv` and `make test-perf-chart` no longer exist, and
+`make wrelease` no longer records a test-performance snapshot.
 
-Wingman has two complementary performance tracking systems:
+For performance regression tracking, use
+[Job Aid 008 — Runtime Performance Regression Workflow](008-performance-regression-workflow.md).
 
-| System | What it measures | Where data lives |
-|--------|-----------------|------------------|
-| **Test-based chart** (this doc) | Automated OCR test accuracy and speed across releases | `tests/test-output/performance.json` → `tests/perf-history/performance-history.jsonl` (local, untracked) → `performance-trends.html` |
-| **Runtime tracking** (Job Aid 008) | Per-crop OCR timing and reaction latency during live sessions | `docs/performance/current/` → `docs/performance/release/` |
-
-Both are snapshotted by `make wrelease`. This document covers the test-based chart.
-
-The test-based history is **local to veda**. `performance.json` is not tracked in git, and the chart is built only from `tests/perf-history/performance-history.jsonl` on the machine that ran `make wrelease` — never from git history. Other machines have no test-performance history.
-
----
-
-## Updating the chart
-
-### 1. Run the performance tests
+To see which tests are slow, pass `--durations=20` to pytest:
 
 ```sh
-make test-perf
+uv run --active pytest --durations=20
 ```
-
-This runs all automated tests, updates `tests/test-output/performance.json` with the latest results, and generates the CSV and HTML chart files.
-
-### 2. Preview before committing (optional)
-
-```sh
-make tp
-```
-
-Runs the test suite and generates the chart with the current (unrecorded) `performance.json` included as a preview point. The preview point is not added to history. Open `tests/test-output/performance-trends.html` to review.
-
-Typical workflow when evaluating a change:
-
-```sh
-make tp        # check results look right
-make wrelease  # commit to history once satisfied
-```
-
-### 3. Record and commit
-
-```sh
-make wrelease
-```
-
-This:
-- Appends `tests/test-output/performance.json` to the local history `tests/perf-history/performance-history.jsonl` (skipped if that snapshot is already recorded; nothing is committed)
-- Copies all `docs/performance/current/run_*.json` files into `docs/performance/release/` as the new runtime baseline. The baseline is local to veda and never committed (ADR 100 D8).
-- Commits `wingman/main.py` with the current `WINGMAN_VERSION` and `WINGMAN_VERSION_DETAILS`
-- Regenerates the chart
-
-### 4. View the chart
-
-Open in your browser:
-
-```
-tests/test-output/performance-trends.html
-```
-
-The x-axis shows `WINGMAN_VERSION`. Multiple data points for the same version are supported — each recorded snapshot is a separate entry.
-
----
-
-## Adding multiple data points for the same version
-
-Run the workflow repeatedly to track performance across different runs or environments within a single release:
-
-```sh
-make test-perf
-make wrelease   # first data point for v1.6.6
-
-# change test conditions or rerun...
-
-make test-perf
-make wrelease   # second data point for v1.6.6
-```
-
-All points appear under the same version label on the chart.
-
----
-
-## Troubleshooting
-
-**New data point not showing up?**
-- Confirm you ran `make wrelease` (not just `make test-perf`).
-- Refresh the HTML file in your browser — it does not auto-reload.
-
-**Chart is empty on a machine other than veda?**
-- Expected. The history file is local to veda and not in git.
-
-**Want to record a snapshot without releasing?**
-- `uv run python tests/performance_tracking.py --record` appends the current `performance.json` to the local history.
-
-**Do not delete `tests/perf-history/`.** It is the only copy of the test-performance history. `make clean` leaves it alone (it only removes `tests/test-output/`).
-
----
-
-## References
-
-- [Job Aid 008 — Runtime Performance Regression Workflow](008-performance-regression-workflow.md)
-- [ADR 031 — Round-End Histogram Reporting](../adr/031-round-end-histogram-reporting.md)

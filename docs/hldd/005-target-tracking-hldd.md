@@ -333,6 +333,9 @@ Atomic write sequence:
 
 This prevents preview tools from showing partially-written images.
 
+Since 2026-10-03 the same frame also carries the terrain detector's box, sky tint and status line. That
+overlay is specified in [Design 001](001-terrain-avoidance-hldd.md), "Overlay on the live HUD".
+
 ### Minimum telemetry payload
 
 1. Timestamp and loop FPS/interval.
@@ -2089,6 +2092,167 @@ every `HOLD[pitch]: None -> <dir>` has an end line. The first thing to read from
 nose-down holds that precede a `yielding` line lasted, and what ended them.
 
 ---
+
+## Hold Model: Holds Timed from the Key-to-Picture Lag (2026-10-11, wingman 1.9.1)
+
+### Trigger and finding
+
+Operator, 2026-10-11: in tracking and pursuit the "bore sight bounces up and down left and right, this often
+results in missing targets". Measured on four sessions of that day (`logs/wingman_20261011_085656`, `_115105`,
+`_132850`, `_144211`): the steered point's travel between two pictures fits the key time between them best when
+the key time is taken 0.20 to 0.30 s earlier, on both axes, at 0.6 to 1.15 half-frames a second in pitch and 0.2
+to 0.4 in roll (one half-frame is the centre of the screen to its edge). A sustained hold ended when the picture
+showed the deadband, so it ended that much late.
+
+### Change
+
+`wingman/hold_model.py`, switched by `tracking.hold_model` (the measurements and the settings are in the comment
+on that key in `wingman/config.yaml`). A target hold lasts the error over the rate, less the key time the picture
+does not show yet, and a timer lets the key go. A picture that repeats does not lengthen a hold. The model also
+keeps the target's own motion across the screen and sizes a hold for it. The search roll and the icon holds are
+unchanged.
+
+### Live record
+
+One row per session. All measures are over ticks with a tracker lock (`TRACKPICK ... sel=(x,y)`), in half-frames.
+"On target" is the share of locked ticks with the target inside 0.05, and inside 0.10, on both axes. "Presses" are
+`HOLD[...]` target presses per second of lock, and the share of them that are the opposite of the target press
+before on that axis. "Centred presses" is the share of target presses made with the error shown inside the
+deadband. All sessions are `mission_su30` on account 2.
+
+| Session (2026-10-11) | Code | Lock | On target 0.05 / 0.10 | Median error x / y | Pitch presses | Roll presses | Centred presses, pitch / roll |
+|---|---|---|---|---|---|---|---|
+| 14:26 to 14:42 | `1d85b85`, hold until the deadband | 138 s | 13% / 29% | 0.070 / 0.113 | 2.17 a second, 81% opposite | 1.22 a second, 80% opposite | not logged |
+| 16:34 to 17:58 | hold model, first version (committed afterwards as `a24d09b`) | 1,366 s | 39% / 63% | 0.039 / 0.047 | 2.15 a second, 67% opposite | 1.59 a second, 71% opposite | 58% / 65% |
+| 18:16 to 19:16 (ten rounds) | `a24d09b` plus change 2, uncommitted | 1,139 s | 43% / 71% | 0.042 / 0.042 | 0.97 a second, 20% opposite | 0.74 a second, 27% opposite | 0% / 1% (presses logged at exactly 0.050) |
+| the same run to its end at 21:49 (35 rounds; the operator's `z`) | the same | 4,134 s | 41% / 71% | 0.043 / 0.043 | 1.03 a second, 16% opposite | 0.78 a second, 26% opposite | 0% / 1% |
+
+### Live check 1 (16:34 to 17:58, the operator's session; measured unless labelled)
+
+The target was on the bore sight three times as often, and the swings were smaller (90th percentile of the error
+0.37 to 0.28 in x, 0.42 to 0.31 in y). The nose did not get calmer: as many presses a second, two thirds of them
+still the opposite of the one before, and the target's on-screen motion changed direction more often (x 0.91 to
+1.18 times a second of lock, y 1.27 to 1.51). Operator, 17:58: "smooth out the tracking so its not so jumpy".
+
+Where the presses came from, by what the model was acting on:
+
+| Press made with | Pitch (2,937) | Opposite of the press before | Roll (2,170) | Opposite of the press before |
+|---|---|---|---|---|
+| the error shown inside the deadband | 58% | 79% | 65% | 79% |
+| outside it, the target's motion lengthening the hold | 15% | 16% | 10% | 59% |
+| outside it, travel from the opposite key still to come | 12% | 98 to 100% (by construction) | 5% | 98 to 100% (by construction) |
+| outside it, sized by the error shown or shortened | 15% | 42% | 21% | 41% |
+
+The first version let the prediction press with the target shown inside the deadband, to lead a crossing target
+and to counter travel still to come. The prediction is not good enough for that. Its sign changed from one tick
+to the next over an error that had not moved:
+
+```
+16:48:20,401 HOLD[pitch]: None -> up (target err_y=+0.005 pred=-0.191 hold=0.19s)
+16:48:20,568 HOLD[pitch]: up -> down (target err_y=+0.003 pred=+0.268 hold=0.30s)
+```
+
+The response to one key pulse says why (isolated pulses on a lock, median travel toward the key): a 0.08 s pitch
+pulse (n=61) shows nothing at 0.1 and 0.2 s, 0.028 at 0.3 s, 0.043 at 0.4 s and 0.053 at 0.5 s; a 0.16 s roll
+pulse (n=60) shows nothing to 0.3 s, 0.030 at 0.4 s and 0.040 at 0.5 s. The travel arrives spread over about a
+quarter of a second, not all at once a lag later as the model has it, and a short pulse moves the nose less per
+second of key than a long hold (pitch 0.61 against 0.8 to 1.15, roll 0.25 against 0.4). Inferred, not measured:
+travel the model counts as shown and that arrives later is read as the target's own motion, which is what swings
+the prediction.
+
+### Change 2 (2026-10-11, uncommitted on `a24d09b`)
+
+No key while the picture shows the target inside the deadband: the prediction sizes a hold, it does not start one
+the picture has not asked for. One change. The target's motion still lengthens a hold outside the deadband (16
+percent opposite in pitch, the lowest of the four rows above; 59 percent in roll, to be read again after this
+run). `tests/test_hold_model.py` has the two log lines above as a case.
+
+### Verdict criteria for the next run
+
+- No `HOLD[...]: ... (target err=...)` press line with the error inside 0.05. This is by construction; a line
+  that shows one is a bug.
+- Target presses a second of lock fall on both axes (2.15 pitch, 1.59 roll), and so does the share that are the
+  opposite of the press before (67 and 71 percent).
+- On target stays near 39% / 63%. A fall toward the 13% / 29% of the old holds means the centred presses were
+  doing useful work and the next change is a better prediction, not no prediction.
+- At least 300 s of lock before reading any of it.
+
+Next run (2026-10-11 18:16:27, `make r2`, pid 3969359, change 2 uncommitted on `a24d09b`): gate before it was
+`make lint` clean and `make test` 3,150 passed with 2 failures, both in `tests/test_lobby_ready_squad_layout.py`
+(the `READY` crop, failing before this change too). The session it replaced is `logs/wingman_20261011_175835.log`.
+
+---
+
+### Live check 2 (18:16 to 19:16, `make r2`, ten rounds, 1,139 s of lock; measured unless labelled)
+
+The smoothing criteria are met, and the figures did not move between readings at 355 s, 645 s and 1,139 s of
+lock. No press line has the error inside 0.05 (3,081 in live check 1). Presses fell to under half on both axes,
+and the share that reverse fell from 67 to 20 percent in pitch and from 71 to 27 percent in roll. The target's
+on-screen motion changes direction 0.66 times a second of lock in x and 0.73 in y (1.18 and 1.51 in live check
+1; 0.91 and 1.27 with the old holds), and between two ticks it moves a median of 6 px in x and 3 px in y (11 and
+10; 16 and 26). On target did not fall: 43% / 71% (39% / 63%).
+
+By what the model acted on, pitch then roll, at 645 s: holds lengthened by the target's motion are 43 and 19
+percent of presses and 6 and 30 percent of them reverse (16 and 59 in live check 1); holds sized by the error
+shown are 48 and 74 percent, 19 and 21 percent reversing. The target-motion term stays.
+
+The 90th percentile of the error over all locked ticks is 0.31 in x and 0.28 in y, as in live check 1 (0.28 and
+0.31). At 355 s it read 0.14 and 0.22; the small sample flattered it. That figure does not measure the hold. Of
+the 1,063 locked ticks with the target more than 0.25 out on either axis, 406 are within 1.5 s of acquiring the
+lock (the aircraft is flying to it), 203 are within 1.5 s of the steering point moving more than 240 px across
+or 180 px up or down in one tick, and on 389 a marker had the steering, not the target (the resupply marker or a
+control point, by the nearer-to-the-centre rule; the classes overlap). On settled ticks only (the target has the
+steering, 1.5 s past the acquisition and past any such move):
+
+| Session | Settled lock | On target 0.05 / 0.10 | 90th percentile of the error, x / y |
+|---|---|---|---|
+| 14:26 to 14:42, old holds | 58 s | 22% / 47% | 0.23 / 0.20 |
+| 16:34 to 17:58, first version | 959 s | 51% / 80% | 0.10 / 0.12 |
+| 18:16 to 19:16, change 2 | 880 s | 53% / 86% | 0.10 / 0.09 |
+| the same run to its end at 21:49 | 3,232 s | 50% / 86% | 0.10 / 0.09 |
+
+So what is left of the large swings is the lock, not the hold. The steering point makes such a move once every
+11.4 s of lock (100 times; median 329 px; 53 of them with one nameplate cluster before and one after), a lock is
+acquired once every 10.9 s of lock, and the steering changes hands between a marker and the target once every
+39 s. Not established: how many of the 100 moves are the tracker changing its point and how many are a near
+target really crossing that fast; no frames were read. That is Action Item 001's subject, not this model's.
+
+33 pursuits, no `[ERROR]` or traceback. One session, one airframe. Not measured: whether more missiles hit.
+
+*Watch note, 19:17:11, not the hold (measured; kept here so the lines outlive the log):* one round of the first
+15 was not flown. PLAY was clicked at 19:11:55 and was still read three times in `GAME_STARTING`
+(`PLAY still visible after 3 reads in GAME_STARTING — the match never started, returning to GAME_LOBBY (ADR 102)`
+at 19:12:10.9). From 19:12:11 to 19:18:37 the state was `GAME_LOBBY` with `no lobby crops detected` 152 times
+and 38 minimap boundary readings, so a battle was on screen (inferred from the minimap readings: the match had
+started after all). `LIVENESS GUARD: no FSM state change and no OCR for 300s` logged at 19:17:11 and changed
+nothing; the state moved again when PLAY came back at 19:18:37. The same return to the lobby at 18:56:35 was
+followed by a second PLAY click 2 s later and a normal round. The watch missed the guard line: it fell between
+one Monitor expiring and the next being armed. Re-arm first, read afterwards.
+
+### End of the run (21:49:11, 3 h 32 min, 35 missions; from the session summaries, measured)
+
+The session ended on the operator's `z` after a manual takeover at 21:38:18 (Enter in the game window on `:3`).
+Two `[ERROR]` lines in all: the liveness guard at 19:17:11 (the watch note above) and
+`XKey listener thread died: Display connection closed by server` at 21:38:12 on `:0`, reconnected 3 s later.
+
+Outcomes beside the first version's session. One session each and under 40 missions, so these are observations,
+not rates; the maps and opponents differ, and the last hour of the second was flown in a squad.
+
+| Per mission | 16:34 to 17:58, first version (15) | 18:16 to 21:49, change 2 (35) |
+|---|---|---|
+| Respawns | 3.7 | 2.8 |
+| Objectives flown through (control point, resupply, crown) | 1.3 (0.73, 0.40, 0.13) | 2.2 (0.94, 0.83, 0.46) |
+| Deaths with missiles aboard | 1.9 | 2.3 |
+| of those, terrain crash | 0.53 | 1.2 |
+| of those, enemy fire | 0.87 | 0.57 |
+| Gun held, share of locked time | 47% | 55% |
+
+The terrain figure is the one to watch. In the first session no round had more than one such crash; in this one 13
+of 35 had two or more, spread through the session. Only deaths with missiles aboard are given a cause, and that
+share of all deaths rose from 51 to 81 percent, so part of the rise is more deaths being classified. Inferred, not
+measured: the steadier hold flies through low objectives more often (resupply flown twice as often a mission,
+so the aircraft is armed more of the time), and those are where the ground is. Terrain avoidance owns that, not
+a limit on this hold (operator, 2026-10-02).
 
 ## Adaptive Optimization (Future, Non-V1)
 

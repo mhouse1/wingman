@@ -23,6 +23,14 @@ nested:
   # operator Alt+Tabs away, and the game then reads the next Enter as Alt+Enter
   # and drops to a framed window that shifts every crop.
   release_stuck_modifiers: true
+  # ADR 099 V3: the nested display is a window on the desktop, and while the
+  # desktop is not drawing it (covered, minimised, another workspace) the game
+  # falls to one frame a second: measured 2026-10-04 11:27, covered by a
+  # browser, FPS 1 and three deaths. true holds one black pixel on top of the
+  # game at the top-left corner of the nested display, which should keep its
+  # frames on Xwayland's fast path whatever the desktop does. Off until a
+  # flight with the window covered for more than five minutes confirms it.
+  block_page_flips: false
 
 # Design 011 (ACS Mode), step 1: which weapon-employment tactic the active
 # airframe supports. Read once at startup into AnalyzerSnapshot.has_padlock.
@@ -100,8 +108,8 @@ crops:
     - [0.6153, 0.9633]
   PLAY:
     coords:
-    - [0.8688, 0.8867]
-    - [0.9556, 0.94]
+    - [0.85, 0.8933]
+    - [0.9306, 0.9411]
     text: [PLAY]
   # ADR 102 rev 2: the squad lobby's READY button, measured on the 2026-09-25
   # 09:16:41 screenshot at 1606,1060 to 1863,1138 px (this crop is that box
@@ -111,13 +119,13 @@ crops:
   # the squad lobby), so `make calibrate` will not move it.
   READY:
     coords:
-    - [0.8688, 0.8956]
-    - [0.9569, 0.9367]
+    - [0.8451, 0.8911]
+    - [0.934, 0.9433]
     text: [READY]
   CANCEL:
     coords:
-    - [0.8667, 0.8933]
-    - [0.9576, 0.9378]
+    - [0.8424, 0.8922]
+    - [0.9368, 0.9411]
     text: [CANCEL]
   CREATION_FAILED:
     coords:
@@ -196,6 +204,13 @@ crops:
     coords:
     - [0.9443, 0.0125]
     - [0.9766, 0.0708]
+  # The INVITE PLAYERS screen's title (2026-10-11 'v' screenshot). A click on a
+  # lobby party slot's "+" opens it; ESC closes it.
+  STALL_INVITE_PLAYERS:
+    coords:
+    - [0.0417, 0.0067]
+    - [0.1484, 0.045]
+    text: [INVITEPLAYERS, INVITEPLAY, VITEPLAYERS]
   STALL_MULTI_PLAYER:
     coords:
     - [0.3826, 0.91]
@@ -344,20 +359,20 @@ eject_stuck_detector:
 stall_recovery:
   action_after_s: 15.0        # dwell in GAME_UNKNOWN/GAME_STARTING_STALLED before acting
   unready_dwell_s: 40.0       # UNREADY suppressing the PLAY click before leaving the squad
+  squad_no_battle_s: 900.0    # squad lobby (READY shown, not PLAY) with no battle before leaving the squad
   scan_interval_s: 5.0        # how often the stall batch runs once the gate is open
   play_click_delay_s: 2.0     # after leaving the squad, before clicking PLAY
   leave_click_delay_s: 1.0    # after clicking LEAVE (squad-leave confirmation), before re-scanning PLAY/READY
   cooldown_s: 20.0            # per-crop minimum between recovery actions
 
-unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 0,
+unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per_episode: 5,
   dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies,
-  # max_per_episode: 0 (2026-09-21, operator request): stop writing PNGs for
-  # disk growth during long target-tracking sessions — UnknownAnomalyRecorder
-  # .tick()'s own `self._captured >= self._max_per_episode` guard makes this
-  # a clean no-op (0 >= 0 immediately), and per ADR 093 the WARNING log line
-  # keeps firing on its doubling interval regardless, so a real GAME_UNKNOWN
-  # stranding still gets noticed — it just won't have a screenshot attached
-  # until this is raised again.
+  # max_per_episode: 5 again (2026-10-03, operator request). It was 0 from
+  # 2026-09-21 to save disk during long target-tracking sessions, and the
+  # 07:41 stall on the Invite Players screen that day left no frame at all:
+  # the recorder logged "screenshot cap 0 reached". Disk growth is now bounded
+  # by the capture budget (oldest files pruned per directory, nothing written
+  # under the free-space floor), so a stuck episode costs at most 5 PNGs.
   # ADR 093: keep warning after the capture cap — silence must mean healthy.
   stuck_warn_interval_s: 300.0, stuck_warn_max_interval_s: 1800.0}
 # ADR 146 (2026-09-24): click a window's white-cross close button when GAME_UNKNOWN has
@@ -440,7 +455,9 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # recorded yet). j20 = the adaptive J20 mission, su30 = the scripted Su-30
   # sequence (su30_mission: below), jas39 = J20 plus the cloak loop
   # (jas39_mission: below), f111 = the su30 script plus the wing sweep
-  # (f111_mission: below, ADR 149). ADR 145: the 'u' hotkey launches this same mission,
+  # (f111_mission: below, ADR 149), survey = straight passes across the arena for
+  # mapping, with no weapons (survey_mission: below, Design 017 phase 4b).
+  # ADR 145: the 'u' hotkey launches this same mission,
   # so this key is how a mission is chosen; 'o' still starts su30 regardless.
   # Respawn restarts whichever mission ran last.
   # Set to su30 by the operator on 2026-09-24; set j20 to launch J20 at battle
@@ -501,6 +518,48 @@ debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, ca
 # speed by altitude: 4-5 km 1154 KPH, 5-6 km 876, 6-7 km 369 (min 84), 7-8 km
 # 576. The old band (6500-7500) sat in the aircraft's worst-performing region,
 # so the climb plateaued below it and the orbit had no energy to hold a turn.
+# mission_survey (Design 017 phase 4b): fly the arena in straight passes so the
+# pictures can be turned into a map. Holds target_alt, holds a compass heading
+# read from the minimap, and turns back when the arena edge is ahead; each turn
+# goes towards the `sweep` side of the first pass, so the passes lie side by
+# side. target_alt is 3500, not higher: the first flight (2026-10-04) stalled
+# every time the nose-up climb passed about 4000 m and never got above 4321 m.
+# While it flies the tree's climb to 5000 m is refused for the same reason, and
+# the tree's boundary turn is allowed only as a last resort (backstop_frac):
+# both hold the nose up for seconds, which takes this aircraft over the top.
+# The survey controls pitch by the measured climb rate: one press sized to the
+# gap, then a wait (the keys under "climb_rate_ms" in the schema).
+# No weapons, no pursuit, padlock left alone. For a mode with no
+# opponents: nothing in it defends the aircraft. Chosen with
+# mission.default_mission: survey; `make survey` switches that on and off for
+# this machine in config.local.yaml. Each battle starts its passes
+# heading_step_deg further round than the last (0, 45, 90, ...), so one session
+# flies crossing passes; 0 keeps every battle on heading_deg.
+survey_mission: {target_alt: 3500, hysteresis_m: 500, climb_rate_ms: 60, descent_rate_ms: 30,
+  alt_tau_s: 10, rate_deadband_ms: 15, rate_per_press_s: 150, rate_gain: 0.5, pitch_interval_s: 3.0,
+  press_min_s: 0.08, press_max_s: 0.35, turn_climb_max_ms: -30, takeover_alt_m: 1200,
+  backstop_frac: 0.3, altitude_deadband_m: 150, level_band_deg: 25,
+  heading_deg: 0, heading_step_deg: 45, sweep: right, heading_deadband_deg: 8, heading_release_deg: 3,
+  turn_release_deg: 25, turn_max_s: 40, edge_turn_frac: 0.7, edge_cone_cos: 0.7,
+  edge_close_frac: 0.35, edge_closing_frac: 0.03, edge_holdoff_s: 30,
+  boundary_max_age_s: 4.0, min_leg_s: 20,
+  tick_s: 0.3, pulse_s: 0.3, lock_timeout_s: 5.0, status_every_s: 5.0,
+  map_look_every_s: 15, map_first_look_s: 5, map_wait_s: 2.0, map_poll_s: 0.1, map_key_hold_s: 0.05,
+  edge_radius_frac: 0.8, edge_backstop_radius_frac: 0.97, position_max_age_s: 90,
+  arena_radius_m: 9400, lane_spacing_frac: 0.3, lane_limit_frac: 0.6, cross_max_s: 40, cross_edge_radius_frac: 0.85}
+# The game's full map (Design 017, "The full map"), opened with the m key: a
+# north-up disc in the middle of the screen with the aircraft's own icon at its
+# true place. The survey opens it for about a second every map_look_every_s of
+# cruise and logs where it is ("SURVEY POS"). The survey's turn back at the
+# edge is judged from that position (survey_mission.edge_radius_frac). The
+# numbers are the disc's and its markings' sizes and colours, measured on two
+# pictures on 2026-10-04 (wingman/full_map.py, and the schema for each key).
+full_map: {enabled: true, radius_frac: 0.3944, n_offset_frac: 1.052, n_window_frac: 0.09,
+  n_hsv_lower: [15, 160, 180], n_hsv_upper: [25, 255, 255], n_min_area_frac: 0.002,
+  n_max_area_frac: 0.008, n_clear_frac: 0.2, n_around_max: 0.25, ring_inner_frac: 1.035, ring_outer_frac: 1.075, ring_dark_v: 120,
+  ring_dark_share: 0.6, icon_max_s: 30, icon_min_v: 235, icon_min_area_frac: 0.00018,
+  icon_max_area_frac: 0.0027, cone_hsv_lower: [35, 60, 60], cone_hsv_upper: [85, 255, 255],
+  cone_min_area_frac: 0.004, cone_max_dist_frac: 0.45}
 loiter_mission: {target_alt: 5000, hysteresis_m: 500, orbit_direction: right,
   orbit_roll_interval_s: 3.0, orbit_roll_hold_s: 0.6, tick_s: 1.0,
   # ADR 112: pitch is a CLOSED LOOP on altitude, not a nudge on every roll.
@@ -723,6 +782,16 @@ behavior_tree:
     # both numbers to agree.
     alt_floor_m: 4000
     fuel_reserve_pct: 10
+    # ADR 159 (operator, 2026-10-05: "when it applies nose up it should activate
+    # afterburner to prevent stall"). The emergency climb holds the airbrake only
+    # while the flight path is steeper than this many degrees; shallower than
+    # that, its nose-up carries the afterburner. Measured 2026-10-05 02:36-03:39:
+    # 47 of 54 stall-prevention trips followed an emergency climb that braked a
+    # shallow dive, 1100 KPH at -20 deg down to 250 KPH in 6 s. -40 sits between
+    # those (73 of 84 holds started at -40 or shallower) and the two dives the
+    # airbrake pulled out at 59 m and 138 m, which both started at -46.
+    # null: never brake.
+    emergency_airbrake_below_deg: -40
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}
     sustain: {enabled: true, enter_below_alt: 4000, exit_above_alt: 5000, max_climb_s: 90.0}
@@ -846,6 +915,14 @@ minimap: {blind_capture_max: 120, blind_capture_interval_s: 300.0,
   # ADR 108: saturation floor lowered from 120. The line is thin and
   # antialiased on the post-2026-09-02 minimap, so its edge pixels sit
   # well below 120 — at 120 the detector read nothing on 81% of ticks.
+  # Design 017 phase 4: compass heading from the orange N on the minimap rim,
+  # logged as hdg= on the BT line. Shadow: nothing steers on it. The letter is
+  # a small blob of one hue at one distance from the centre; rock seen through
+  # the rim is redder and enemy markers are yellower. Two candidates read as
+  # nothing. Fractions are of the MINIMAP crop's radius (area: of its square).
+  compass: {enabled: true, n_hsv_lower: [15, 160, 180], n_hsv_upper: [25, 255, 255],
+    rim_inner_frac: 0.88, rim_outer_frac: 1.0, letter_min_area_frac: 0.002,
+    letter_max_area_frac: 0.005},
   boundary_hsv: {lower: [8, 60, 120], upper: [28, 255, 255]},
   # ONE closing pass, not two. Two bridges a 12 px speckle grid into a lattice
   # whose thinness (0.019) is indistinguishable from the real line's (0.018) —
@@ -947,6 +1024,70 @@ terrain_avoidance:
   sky_hsv:
     lower: [98, 20, 180]
     upper: [115, 100, 255]
+  # HLDD 001 Phase 2: looming from frame-to-frame motion, shadow only. Two
+  # grabs pair_interval_s apart on each battle tick; logged as tau= on the BT
+  # line and drawn on live_hud.png. Nothing acts on it. Live runs only: replay
+  # and capture lanes never grab the extra frames.
+  loom:
+    enabled: true
+    pair_interval_s: 0.12
+    # 20 percent of pairs showed the same picture twice (2026-10-03): the game
+    # held a frame 0.13 to 0.17 s. Wait up to this long for the picture to
+    # change, then take the pair from that moment.
+    same_frame_wait_s: 0.25
+    # Three readings a tick from four consecutive frames, so confirm_pairs can
+    # be met inside one tick. At one reading per 1.5 s tick the confirm needed
+    # 3 to 4.5 s of unbroken agreement and never fired before 10 terrain
+    # deaths (2026-10-03).
+    pairs_per_tick: 3
+    min_points: 25
+    tau_warn_s: 8.0
+    confirm_pairs: 3
+    view_pct: [0.20, 0.12, 0.80, 0.60]
+    path_box_pct: [0.38, 0.30, 0.62, 0.62]
+    # The box has no bottom edge. Measured 2026-10-03 on 3,426 pairs: with the
+    # closed box 3 of 5 terrain deaths were warned; open below, 5 of 5, and
+    # warnings with nothing after them stayed at 1.
+    path_open_below: true
+    # Nor left and right edges: only an expansion point above the box's top
+    # edge is off course (a pull-up rotates the picture and pushes it there).
+    # Replayed on two sessions, 155 minutes, 2026-10-03: open below warned 13
+    # of 21 terrain deaths, this warns 17 of 21, with 9 of 84 warning episodes
+    # followed by nothing against 6 of 47.
+    path_open_sides: true
+    # HUD strokes are left out of the tracking by colour. Measured on 85 frames
+    # (2026-10-03): 29 percent of trackable corner points sat on these colours;
+    # the masks remove about 1.5 percent of the view and leave canyon rock alone.
+    # Outlines of what is on the screen: the border of each textured region
+    # (rock, ground) against smooth (sky, haze). An outline that covers the
+    # middle and grows for confirm_ticks ticks is a threat; the way out is the
+    # nearest smooth gap, left or right, and up only when the gap above is
+    # clearly nearest. Growth is taken from the dots inside the outline; with
+    # too few dots the verdict is "blind", not clear; so is a tick straight
+    # after a threat that finds nothing and follows under lost_dots dots. Logged as shape= on the
+    # BT line and drawn on live_hud.png. Shadow only.
+    shapes:
+      enabled: true
+      texture_energy: 14.0
+      texture_blur_px: 15
+      min_area_frac: 0.01
+      min_dots: 8
+      centre_cover: 0.25
+      tau_warn_s: 8.0
+      confirm_ticks: 2
+      up_bias: 0.5
+      edge_margin_px: 6
+      gap_min_px: 24
+      lost_dots: 25
+    hud_mask:
+      enabled: true
+      margin_px: 3
+      red_lower: [0, 150, 190]
+      red_upper: [7, 255, 255]
+      red_wrap_lower: [174, 150, 190]
+      red_wrap_upper: [179, 255, 255]
+      green_lower: [50, 70, 195]
+      green_upper: [65, 255, 255]
 # Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
 # acted on — it appears only after the crossing, so it measures the
 # outcome rather than preventing it.
@@ -1143,6 +1284,52 @@ tracking:
   # releases log as `HOLD[pitch]: <dir> -> None (lead ...)`. 0 turns it off.
   # Named guess: about one steering tick plus the key's lag.
   pitch_lead_s: 0.15
+  # Operator, 2026-10-11: in tracking and pursuit the "bore sight bounces up and
+  # down left and right, this often results in missing targets". Measured on four
+  # sessions of that day (logs/wingman_20261011_085656, _115105, _132850,
+  # _144211): the steered point's travel between two pictures fits the key time
+  # between them best when the key time is taken lag_s earlier (0.20 to 0.30 s
+  # on both axes; r 0.91 pitch and 0.84 roll on a control point, which does not
+  # move by itself), at 0.6 to 1.15 half-frames a second in pitch and 0.2 to 0.4
+  # in roll. A hold that ends when the picture shows the deadband (0.05) is
+  # therefore a quarter of a second late, 0.29 half-frames in pitch: 70 to 80
+  # percent of pitch presses and 62 to 78 percent of roll presses were the
+  # opposite of the one before, and 13 percent of locked ticks had the target
+  # inside the deadband on both axes. pitch_lead_s above cannot see it: its rate
+  # is zero for the lag after a press and on a repeated picture (with a steering
+  # key held, 23 to 26 percent of consecutive steering grabs showed the picture
+  # of the grab before, unchanged for up to 0.34 to 0.44 s at the 90th
+  # percentile; at 14:39:15 nose-down was held 0.5 s on one picture and the
+  # control point went from 34 px below the centre to 302 px above).
+  # With this on, a target hold (the tracker's target, the resupply marker, the
+  # crown, a control point) lasts error / rate, less the key time the picture
+  # does not show yet, and a timer lets the key go: a hold of 0.1 s is shorter
+  # than a steering tick. The search roll and the icon's holds are untouched,
+  # and pitch_lead_s is not read. The model also keeps the target's own motion
+  # across the screen (what the pictures show beyond the keys' doing) and sizes
+  # a hold for it: without that the hold trails a crossing target and never
+  # arrives (simulated at 0.4 half-frames a second, 0 percent of ticks in the
+  # deadband against 62 percent with it; tests/test_hold_model.py flies both).
+  # No key is pressed while the picture shows the target inside the deadband.
+  # The first live session (16:34 to 17:58 that day, 1,366 s of lock) allowed
+  # it, to lead a crossing target: locked ticks with the target inside the
+  # deadband on both axes went from 13 to 39 percent, but 58 percent of pitch
+  # presses and 65 percent of roll presses were made with the target already
+  # there, 79 percent of them the opposite of the press before (operator:
+  # "smooth out the tracking so its not so jumpy"). The rates are the highest
+  # measured: a slower airframe then closes in two or three holds, where a rate
+  # set too low overshoots. min_pulse_s is the shortest hold pressed; measured
+  # in that session, an isolated 0.08 s pitch pulse moved the target 0.05
+  # half-frames, nothing of it showing before 0.2 s and the last at 0.5 s.
+  # The live check is the two shares above; the releases log as
+  # `HOLD[...]: <dir> -> None (timed <s>)` and `(lead ...)`. enabled: false
+  # restores the holds as they were.
+  hold_model:
+    enabled: true
+    lag_s: 0.25
+    pitch_rate: 1.15
+    roll_rate: 0.4
+    min_pulse_s: 0.08
 tracking_hsv:
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
@@ -1209,6 +1396,70 @@ pursuit_mode:
     # session before it: 20 of 28 rearms were followed by a respawn within
     # 30 s. Named guess; 0 = off. Actuated mode only.
     rearm_climb_s: 3.0
+    # resupply_candidate_*.png in tests/test-output/target_tracking: the frame
+    # in which a resupply marker first appears, two per pursuit at most. Off
+    # (operator, 2026-10-05); the detector's evidence is in docs/anomaly/011.
+    save_candidate_frames: false
+  # Operator, 2026-10-09: "similar to the resupply icon ... implement steering
+  # towards prioritytarget defined by the yellow icon, where the small icon near
+  # the center of the screen indicates direction to steer towards". The priority
+  # target is the crown objective: a yellow disc with a crown in view, and off
+  # screen a crown pin on the ring the red icons use (wingman/priority_target.py).
+  # enabled scans for both and logs PRIORITY lines; actuate lets them steer. The
+  # marker is flown at as the resupply marker is, unless the resupply has the
+  # steering or a visible target is nearer the screen centre; the pin feeds the
+  # icon law in place of the red icons while the tracker has no target. With
+  # every rack empty the marker in view is still flown at (2026-10-10 05:44:06:
+  # the resupply search took the roll with the crown dead ahead, 55 px across);
+  # the pin is not, the resupply pin has the search. On 2,225
+  # archived frames the marker was found in 22 and the pin in 95, and all 22
+  # markers and 44 of 44 sampled pins were the crown.
+  priority_target:
+    enabled: true
+    actuate: true
+  # Operator, 2026-10-09: "similar to prioritytarget ... implement steering towards
+  # air superiority icons A, B, or C, if the icons are red, the small icons
+  # indicates the direction to steer towards ... it flies towards the A mark
+  # because it is a target on screen and closer rather than steer towards B, it
+  # should fly through A then proceed with B". The control points of air
+  # superiority while the enemy holds them: a red disc with the letter in view, a
+  # red pin on the ring off screen (wingman/air_superiority.py). Same two
+  # switches and the same place in the steering as the priority target. A disc in
+  # view comes before any pin, and of several discs the largest is flown at. A
+  # point turns blue once it is taken and is then no longer found, which leaves
+  # the next red one. On 2,232 archived frames the disc was found in 37 and a pin
+  # in 245, and all 37 discs and 60 of 60 sampled pins were control points.
+  air_superiority:
+    enabled: true
+    actuate: true
+  # Operator, 2026-10-09: "at round end it prints how many air superiority targets,
+  # resupply, and priority targets are captured ... it should not read the score
+  # bar, only track when wingman flies through the targets". The session's totals
+  # are printed in the Wingman Session Summary at exit, and the round's own
+  # ROUND OBJECTIVES line goes to DEBUG (operator, the same day: "i only want it
+  # to print total counts during wingman session summary"). Each count also
+  # prints the summary's block in green with the totals so far (operator,
+  # 2026-10-10: "when one of the objectives are flown I want it to print a block
+  # of green text"). A control point
+  # counts as flown through when its
+  # disc was followed for half a second or more, reached near_px across, and was
+  # then gone for a second (operator, the same day: "based on if the marker
+  # reached large size then disappeared"). The crown counts when its disc was
+  # near_px across when last seen, and then gone. The game draws
+  # the disc larger the nearer it is: on 2,240 archived frames it is 19 to 25 px
+  # (control point) and 14 to 20 px (crown) at the usual distances and 56 and
+  # 39 px at the nearest caught. Named guesses between the two, in px at 1200 px
+  # of frame height: no frame of the moment of passing through was at hand.
+  # centre_px: the crown's marker must also be within this of the screen centre
+  # when it is last seen. First live session, 2026-10-09 05:52: the crown the aircraft passed
+  # at 51 px across was last seen 562 px out and was counted before this was added.
+  # The resupply point has no size here. It counts when the pursuit confirms a
+  # rearm, and by nothing else: on 2026-10-09 a rearm followed a marker last seen
+  # dead ahead at 25 px, and none followed markers last seen dead ahead at 56 and
+  # 51 px.
+  objective_tally:
+    near_px: {air_superiority: 40, priority_target: 30}
+    centre_px: 300
   # Named guess, not measured — a live shadow trial should correct it, same
   # status as HLDD 015's own Configuration Additions section.
   # Operator, 2026-09-24: "after a 20 second chase do not dive, continue searching and
@@ -1374,6 +1625,16 @@ pursuit_mode:
   # in a death, and the 20:20 one had the emergency requested from 20:19:47 and
   # suppressed to impact. false restores the suppression.
   crash_recovery: true
+  # Operator, 2026-10-08: "change the climb to execute only after target or resupply
+  # disappears". The recovery above starts, and keeps the airframe, only while the
+  # pursuit has had neither its target nor the resupply marker it is flying to in
+  # view for this many seconds. Measured 2026-10-05 12:13 to 2026-10-08 08:00: 657
+  # recoveries flew 97 min of pursuit; 460 started with a target (316) or the marker
+  # (144) in view, at a median 2070 m and 20 s to ground. 310 of the 316 handed back
+  # with the target gone, and a 4 s or longer marker approach ended in a rearm 8% of
+  # the time when the climb took over against 22% when it did not. Named guess: long
+  # enough to bridge missed scans, short at 130 m/s of descent. 0 or null: no wait.
+  crash_recovery_clear_view_s: 1.0
   # HLDD 015 Icon-Directed Search (2026-09-26), SHADOW STAGE: each steering tick
   # finds the game's red ring icon (an arrowhead on a fixed ring around the screen
   # centre pointing at an off-screen enemy), adds points to a nose-down/up and a
@@ -1463,8 +1724,9 @@ hud:
   # sustained roll_left streaks vs exactly +0.0000 for roll_right) but the
   # log can't say *why* -- these frames are the next piece of evidence.
   # Turn back off once that's answered; it isn't needed continuously.
+  # Off (operator, 2026-10-05). live_hud.png above is still written.
   target_tracking_archive:
-    enabled: true
+    enabled: false
     dir: tests/test-output/target_tracking
     max_files: 200
     # Action item 001 (2026-09-23): also save the exact, unannotated crop the

@@ -44,6 +44,25 @@ _SPAWN_CRASH_WINDOW_S = 10.0
 # evidence that it happens.
 _SPAWN_CRASH_MIN_S = 3.0
 
+# The objectives flown through, as the session summary lists them: the kind's
+# key in `ObjectiveTally.session_counts()` and its label. Kept as plain strings
+# so this module stays free of the pursuit's imports; a test pins the keys.
+_OBJECTIVE_ROWS = (
+    ("air_superiority", "air superiority"),
+    ("resupply", "resupply"),
+    ("priority_target", "priority target"),
+)
+
+
+def objectives_flown_lines(objectives: dict) -> "list[str]":
+    """The objectives block: the total, then a row for each kind, at zero too.
+    The session summary prints it, and the pursuit's tally prints it in green
+    each time it counts one (`ObjectiveTally`, operator 2026-10-10)."""
+    flown = [(label, int(objectives.get(kind, 0))) for kind, label in _OBJECTIVE_ROWS]
+    return [f"Objectives flown  : {sum(count for _label, count in flown)}  "
+            f"(flown through in pursuit; Design 015)"
+            ] + [f"  {label:<15} : {count}" for label, count in flown]
+
 
 def _fmt_duration(seconds: float) -> str:
     s = int(seconds)
@@ -113,6 +132,9 @@ class MissionStatsTracker:
         # bucket, not a bug — see ADR 143 Non-Goal 5.
         self._total_died_armed_enemy_fire = 0
         self._total_died_armed_terrain = 0
+        # Both signals recent: a missile alert and a hard emergency. Neither
+        # decides the cause, so it is counted apart from both (2026-10-03).
+        self._total_died_armed_contested = 0
         self._total_died_armed_unclassified = 0
 
         # Operator directive: confirmed map-boundary crossings (the RETURN
@@ -192,6 +214,9 @@ class MissionStatsTracker:
 
         elif event_name == "died_armed_terrain":
             self._total_died_armed_terrain += 1
+
+        elif event_name == "died_armed_contested":
+            self._total_died_armed_contested += 1
 
         elif event_name == "died_armed_unclassified":
             self._total_died_armed_unclassified += 1
@@ -339,6 +364,7 @@ class MissionStatsTracker:
             "total_crashes_with_missiles": self._total_crashes_with_missiles,
             "total_died_armed_enemy_fire": self._total_died_armed_enemy_fire,
             "total_died_armed_terrain": self._total_died_armed_terrain,
+            "total_died_armed_contested": self._total_died_armed_contested,
             "total_died_armed_unclassified": self._total_died_armed_unclassified,
             "total_rtb_with_missiles": self._total_rtb_with_missiles,
             "spawn_crashes": {
@@ -363,8 +389,12 @@ class MissionStatsTracker:
         self._write_json(self._summary)
         return self._summary
 
-    def print_summary(self) -> None:
-        """Log a formatted session summary. Call after finalize()."""
+    def print_summary(self, objectives: "dict | None" = None) -> None:
+        """Log a formatted session summary. Call after finalize().
+
+        objectives: the session's count of objectives flown through, by kind
+        (`ObjectiveTally.session_counts`). Printed as its own block; left out
+        of the stats file. None prints no block."""
         if self._summary is None:
             logger.warning("MissionStatsTracker: print_summary called before finalize()")
             return
@@ -406,6 +436,8 @@ class MissionStatsTracker:
             f"(missiles unused at death; ADR 143)",
             f"  enemy fire      : {s.get('total_died_armed_enemy_fire', 0)}",
             f"  terrain crash   : {s.get('total_died_armed_terrain', 0)}",
+            f"  contested       : {s.get('total_died_armed_contested', 0)}  "
+            f"(missile alert and dive emergency both recent)",
             f"  unclassified    : {s.get('total_died_armed_unclassified', 0)}",
             f"RTB w/ missiles   : {s.get('total_rtb_with_missiles', 0)}  "
             f"(confirmed map-boundary crossings with primary missiles"
@@ -438,6 +470,11 @@ class MissionStatsTracker:
                 f"  without evade   : "
                 f"{surv(eng['not_evaded_survival'], eng['not_evaded_total'], eng['not_evaded_died'])}",
             ]
+        # Operator, 2026-10-09: "i only want it to print total counts during
+        # wingman session summary." Shown at zero too: a session that flew
+        # through nothing is what the line is read for.
+        if objectives is not None:
+            lines += objectives_flown_lines(objectives)
         # CR-018-17: a reflex that raised is otherwise invisible here.
         failures = s.get("suppressed_failures") or {}
         if failures:

@@ -5,8 +5,6 @@ import warnings
 import re
 from pathlib import Path
 import base64
-import json
-from datetime import datetime
 
 _SUPPRESSED_WARNING_PATTERNS = [
     re.compile(r"torch\\.ao\\.quantization is deprecated and will be removed in 2\\.10\\.", re.IGNORECASE),
@@ -147,34 +145,8 @@ def _release_all_injectable_keys():
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Generate performance.json at end of test session."""
+    """Release any injected key a test left held."""
     _release_all_injectable_keys()
-    output_dir = Path(__file__).parent / "test-output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    performance_data = {
-        'timestamp': datetime.now().isoformat(),
-        'version': WINGMAN_VERSION,
-        'tests': {}
-    }
-
-    # Calculate average duration for each test (handle parametrized tests)
-    for test_name, durations in _test_timings.items():
-        avg_duration = sum(durations) / len(durations)
-        performance_data['tests'][test_name] = {
-            'duration': avg_duration,
-            'runs': len(durations),
-            'min': min(durations),
-            'max': max(durations)
-        }
-
-    # Write performance.json
-    perf_file = output_dir / "performance.json"
-    try:
-        with open(perf_file, 'w') as f:
-            json.dump(performance_data, f, indent=2)
-    except Exception as e:
-        print(f"Warning: Could not write performance.json: {e}")
 
 
 @pytest.fixture(scope='session')

@@ -19,6 +19,10 @@ GAME_KEYS = {
     "YAW_LEFT", "AFTERBURNER_KEY", "AIRBRAKE_KEY", "WINGSWEEP_KEY",
     "DEPLOY_FLARES_KEY", "FIRE_MACHINE_GUN", "FIRE_ACTIVE_WEAPON",
     "SWITCH_WEAPON", "SPECIAL_ABILITY", "PADLOCK_CAMERA",
+    # A game control wingman does not inject yet. It is here so the collision
+    # test below keeps wingman's hotkeys off it: the auto-mission hotkey sat on
+    # it until 2026-10-04, and looking at the map forced GAME_LOBBY.
+    "FULL_MAP_KEY",
 }
 
 # Keys wingman GRABS from the keyboard as its own controls.
@@ -99,3 +103,10 @@ def test_the_takeover_key_does_not_collide_with_another_hotkey():
     others = [v for n, v in vars(kb).items()
               if n.isupper() and isinstance(v, str) and n != "MANUAL_TAKEOVER_KEY"]
     assert MANUAL_TAKEOVER_KEY not in others
+
+
+def test_the_auto_mission_hotkey_is_not_the_games_map_key():
+    """2026-10-04 03:18:47: the operator pressed 'm' to look at the full map and
+    wingman forced GAME_LOBBY and clicked PLAY five times in six seconds."""
+    assert keybindings.FULL_MAP_KEY == "m"
+    assert keybindings.AUTO_MISSION_KEY == "n"

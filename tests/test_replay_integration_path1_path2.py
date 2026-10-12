@@ -482,6 +482,12 @@ class FakeController:
     def set_on_manual_takeover_frame(self, _cb) -> None:
         pass
 
+    def log_round_objectives(self) -> None:
+        pass
+
+    def objective_session_counts(self) -> None:
+        return None
+
     def cancel_mission(self) -> None:
         self._intents.append({"action_type": "cancel_mission"})
         self._fire_eject_complete()

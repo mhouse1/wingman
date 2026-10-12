@@ -32,6 +32,12 @@ SPECIAL_ABILITY = 'q'
 
 # --- Camera -----------------------------------------------------------------
 PADLOCK_CAMERA = 'p'
+# The game's full-map toggle: one press shows the whole arena, the next hides
+# it. Wingman does not press it yet (Design 017, "The full map"). Listed here
+# so that no wingman hotkey can sit on it again: until 2026-10-04 the
+# auto-mission hotkey did, and the operator's presses to look at the map had
+# wingman force GAME_LOBBY and click PLAY.
+FULL_MAP_KEY = 'm'
 
 # --- Manual-takeover detection ---------------------------------------------
 # Arrow keys also trigger GAME_BATTLE_MANUAL.
@@ -63,8 +69,9 @@ MISSION_LOITER_KEY = 'y'       # start loiter mission
 MISSION_SU30_KEY = 'o'         # start SU-30 mission (docs/missions/su30.md)
 CANCEL_MISSION_KEY = 'end'     # cancel the active mission
 CAPTURE_SCREEN_SHOT = 'v'      # capture a screenshot (testing/debugging)
-AUTO_MISSION_KEY = 'm'         # start an automatic mission from the detected
-                               # game state (not implemented yet)
+AUTO_MISSION_KEY = 'n'         # start unattended mode: click PLAY/READY from the
+                               # detected game state. Was 'm' until 2026-10-04;
+                               # moved off the game's full-map key (FULL_MAP_KEY)
 SIMULATE_RESPAWN_KEY = 'b'     # inject a fake respawn OCR result (testing)
 FINISH_ROUND_THEN_EXIT = 'z'    # finish the round, exit wingman at the lobby,
                                # then close MetalStorm (ADR 094). Press again

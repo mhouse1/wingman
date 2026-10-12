@@ -285,6 +285,7 @@ values win over the defaults):
 | `PROTON_ROOT` | Whenever Heroic didn't install `GE-Proton-latest` — check with the `ls` in Step 4 |
 | `PROTON_USE_XALIA=0` | If the game crashes immediately with `Xalia ... SDL_Init: No displays available` — see troubleshooting |
 | `GAME_ARGS` | Last-resort override to force a specific Unity graphics backend, e.g. `GAME_ARGS=-force-d3d11`. Root-cause DXVK/adapter issues (missing i386 multiarch, see Prerequisites) first — this is a fallback knob, not the primary fix |
+| `UMU_RUNTIME_UPDATE=1` | To let umu-launcher update the Steam runtime during a launch. The Makefile passes `0`, because the 195 MB download does not fit in the 20 s the launch allows the game window, and `make rd` then fails with `game window never appeared` |
 
 ---
 

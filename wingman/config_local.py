@@ -16,6 +16,10 @@ import yaml
 
 LOCAL_NAME = "config.local.yaml"
 
+_HEADER = ("# Per-machine settings, merged over config.yaml by a live run (CR-018-16).\n"
+           "# Untracked. Written by `make invite` and `make survey`; edit by hand for\n"
+           "# anything else.\n")
+
 
 def local_path(config_path) -> Path:
     """The overlay that belongs to `config_path`: same folder, fixed name."""
@@ -33,6 +37,12 @@ def read_overlay(config_path) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"{path} must be a YAML mapping, not {type(data).__name__}")
     return data
+
+
+def write_overlay(config_path, overlay: dict) -> None:
+    """Replace the overlay with `overlay`. Comments in the old file are not kept."""
+    body = yaml.safe_dump(overlay, sort_keys=False) if overlay else ""
+    local_path(config_path).write_text(_HEADER + body, encoding="utf-8")
 
 
 def merge(base: dict, overlay: dict) -> dict:

@@ -355,6 +355,19 @@ being merely unfocused, which is a weaker claim. The risk is that a compositor
 withholds frame callbacks from an unmapped surface and the target throttles to a
 stop.
 
+**Observed failing on 2026-10-04, for a covered window.** With the nested server
+window hidden behind other windows the target fell to one frame a second, not to
+a stop. The compositor (mutter 50.1) sends no frame callback to a hidden window,
+and the nested server (Xwayland 24.1.10) then waits one second per frame. A fix
+made inside the nested display was tried and does not work; the fix has to be
+made on the compositor's side. It is: the desktop extension holds a one-pixel
+copy of the window, which mutter counts as the window being shown
+([ADR 155](../adr/155-window-left-extension-for-the-nested-display.md), D5).
+Confirmed the same day for a covered window. Minimised, another workspace, the
+lock screen and a monitor that is off are still not established. Measurements
+and the source references:
+[ADR 099](../adr/099-nested-display-lane-for-unattended-operation.md), V3.
+
 ## Validation approach
 
 Reusable evidence for any port of this design:

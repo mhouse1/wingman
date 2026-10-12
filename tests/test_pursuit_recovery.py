@@ -21,8 +21,8 @@ import time
 import wingman.controller as controller_module
 from wingman.analyzer import GameState
 from wingman.controller import (
-    AIRBRAKE_KEY, Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY,
-    ROLL_RIGHT_KEY,
+    AFTERBURNER_KEY, AIRBRAKE_KEY, Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY,
+    ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
 )
 from wingman.controller_config import ControllerConfig
 from wingman.telemetry import TelemetrySignal
@@ -268,22 +268,42 @@ def test_the_predicate_needs_the_pursuit_too(monkeypatch):
 # 20:19:47-20:20:03: with dive_safety off the tree requested the emergency climb from
 # 30 s to ground down to the impact, and every request was refused because the pursuit
 # owned the airframe ("dive recovery suppressed"); the resupply search kept pushing the
-# nose down. The hard emergency now flies through with dive_safety off, airbrake and
-# nose-up, and gives the chase back only once it has cleared with the path pointing up.
+# nose down. The hard emergency now flies through with dive_safety off and gives the
+# chase back only once it has cleared with the path pointing up. ADR 159 (operator,
+# 2026-10-05): its nose-up carries the afterburner, and the airbrake is for a dive
+# steeper than `emergency_airbrake_below_deg` only.
 
 def _crash_ctrl(monkeypatch, analyzer, **extra):
     return _ctrl(monkeypatch, analyzer, dive_safety=False, **extra)
 
 
-def test_a_predicted_crash_brakes_and_pulls_up_inside_a_pursuit_with_dive_safety_off(
+def test_a_predicted_crash_pulls_up_on_the_afterburner_inside_a_pursuit_with_dive_safety_off(
         monkeypatch):
+    """02:42:32, 03:29:01 and 45 more that night: a chase diving at about -20 deg was
+    braked from 1100 kph to 250 kph while the hold pulled up, and stalled."""
     ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-19.0))
     ctrl._pursuing.set()
     ctrl.climb_mode(emergency=True)
     try:
         assert _wait(ctrl.pursuit_recovery_active), "the emergency was suppressed again"
         assert _wait(lambda: ("key_press", NOSE_UP_KEY) in _keys(ctrl))
+        assert ("key_press", AFTERBURNER_KEY) in _keys(ctrl), "nose-up without the afterburner"
+        assert ("key_press", AIRBRAKE_KEY) not in _keys(ctrl), "braked a shallow dive"
+    finally:
+        _stop(ctrl)
+
+
+def test_a_predicted_crash_in_a_steep_dive_still_brakes_inside_a_pursuit(monkeypatch):
+    """03:27:31-03:27:40: -70 deg at 166 m and 910 kph, out at 59 m. The airbrake stays
+    for that dive."""
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-70.0))
+    ctrl._pursuing.set()
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active), "the emergency was suppressed again"
+        assert _wait(lambda: ("key_press", NOSE_UP_KEY) in _keys(ctrl))
         assert ("key_press", AIRBRAKE_KEY) in _keys(ctrl)
+        assert ("key_press", AFTERBURNER_KEY) not in _keys(ctrl)
     finally:
         _stop(ctrl)
 
@@ -338,11 +358,13 @@ def test_a_cleared_emergency_climbing_hands_the_chase_back(monkeypatch, caplog):
     assert "crash no longer predicted" in text and "crash_cleared" in text
 
 
-def test_the_airbrake_comes_off_above_level_while_the_emergency_lasts(monkeypatch, caplog):
+def test_the_airbrake_comes_off_as_the_dive_shallows_while_the_emergency_lasts(
+        monkeypatch, caplog):
     """20:44:32-20:44:41: the tree's 3-read mean kept the emergency on after the path
     turned up, the airbrake stayed held at +24 deg and the aircraft stalled at 45 kph and
-    143 m. Brake while the path points down only, and brake again if it drops back."""
-    analyzer = _Analyzer(altitude=300.0, angle=-8.0)
+    143 m. ADR 159 moved the line from level to the steep-dive limit: brake in a steep
+    dive only, let go while the path is still below level, and brake again if it steepens."""
+    analyzer = _Analyzer(altitude=300.0, angle=-60.0)
     # dive_safety on: the latched recovery keeps flying above level, so the
     # airbrake rule is seen apart from the crash-recovery hand-back.
     ctrl = _ctrl(monkeypatch, analyzer)
@@ -351,31 +373,34 @@ def test_the_airbrake_comes_off_above_level_while_the_emergency_lasts(monkeypatc
         ctrl.climb_mode(emergency=True)
         try:
             assert _wait(ctrl.pursuit_recovery_active)
-            assert ctrl._climb_emergency_active, "no airbrake in the dive"
-            analyzer.angle = 24.0
+            assert ctrl._climb_emergency_active, "no airbrake in the steep dive"
+            analyzer.angle = -20.0
             assert _wait(lambda: not ctrl._climb_emergency_active), \
-                "airbrake still held with the path above level"
+                "airbrake still held in a shallow dive"
             assert ctrl.is_climbing() and ctrl._climb_emergency_requested, \
                 "the emergency itself must not be cleared by this"
             assert ("key_release", AIRBRAKE_KEY) in _keys(ctrl)
-            analyzer.angle = -5.0
+            assert _wait(lambda: ("key_press", AFTERBURNER_KEY) in _keys(ctrl)), \
+                "the burner never lit under the nose-up"
+            analyzer.angle = -64.0
             assert _wait(lambda: ctrl._climb_emergency_active), "no airbrake back in the dive"
         finally:
             _stop(ctrl)
     text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "airbrake released, thrust allowed" in text
-    assert "path below level again, airbrake on" in text
+    assert "no longer a steep dive: airbrake released, afterburner allowed" in text
+    assert "is a steep dive: airbrake on, afterburner off" in text
 
 
 def test_a_missing_angle_does_not_put_the_airbrake_back_on(monkeypatch):
     """21:32:32.7: the HUD read `Nose: n/a` at 18 kph just after +90 deg, and the
     hold took no angle for below level and braked again."""
-    analyzer = _Analyzer(altitude=300.0, angle=-20.0)   # below the 1000 m exit
+    analyzer = _Analyzer(altitude=300.0, angle=-60.0)   # below the 1000 m exit
     ctrl = _ctrl(monkeypatch, analyzer)                    # latched: see above
     ctrl._pursuing.set()
     ctrl.climb_mode(emergency=True)
     try:
         assert _wait(ctrl.pursuit_recovery_active)
+        assert ctrl._climb_emergency_active, "no airbrake in the steep dive"
         analyzer.angle = 90.0
         assert _wait(lambda: not ctrl._climb_emergency_active)
         analyzer.angle = None
@@ -421,6 +446,153 @@ def test_the_shipped_config_enables_crash_recovery():
     cfg = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / "wingman" / "config.yaml")
                          .read_text(encoding="utf-8"))
     assert cfg["pursuit_mode"]["crash_recovery"] is True
+
+
+# --- pursuit_mode.crash_recovery_clear_view_s (operator, 2026-10-08) ---------------
+# "the climb we added last week is causing missed resupply and pursuit, change the climb
+# to execute only after target or resupply disappears". 2026-10-05 12:13 to 2026-10-08
+# 08:00: 657 recoveries flew 97 min of pursuit. 460 of them started with a target (316)
+# or the resupply marker (144) in view, at a median 2070 m and 20 s to ground; 310 of
+# the 316 handed back with the target gone, and a marker approach of 4 s or more ended
+# in a rearm 8% of the time when the climb took over, 22% when it did not.
+
+def _held_off(caplog):
+    return [r.getMessage() for r in caplog.records
+            if "crash recovery held off" in r.getMessage()]
+
+
+def test_no_recovery_starts_while_the_pursuit_has_its_target_in_view(monkeypatch, caplog):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        ctrl.climb_mode(emergency=True)      # the tree asks again every tick
+    assert not ctrl.is_climbing()
+    assert _held_off(caplog) == [
+        "Controller: crash recovery held off — the pursuit has the target in view"], \
+        "logged once, not once per tick"
+
+
+def test_no_recovery_starts_while_the_pursuit_flies_to_a_resupply_marker(monkeypatch, caplog):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("resupply marker")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    assert "the resupply marker in view" in _held_off(caplog)[0]
+
+
+def test_the_recovery_starts_once_the_view_has_been_clear_long_enough(monkeypatch):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0),
+                       crash_recovery_clear_view_s=0.3)
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing(), "started with the target just seen"
+    time.sleep(0.4)                          # the target has disappeared
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active), "no recovery with nothing in view"
+        assert _wait(lambda: ("key_press", NOSE_UP_KEY) in _keys(ctrl))
+    finally:
+        _stop(ctrl)
+
+
+def test_a_target_coming_into_view_takes_the_airframe_back(monkeypatch, caplog):
+    """A recovery that started with nothing in view does not fly the chase away
+    from a target that then appears."""
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pursuing.set()
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        try:
+            assert _wait(ctrl.pursuit_recovery_active)
+            time.sleep(0.6)
+            assert ctrl.is_climbing(), "handed back with nothing in view and the path down"
+            ctrl._note_pursuit_objective("target")
+            assert _wait(lambda: not ctrl.is_climbing(), timeout=2.0), \
+                "the recovery kept the airframe with the target in view"
+        finally:
+            _stop(ctrl)
+    assert not ctrl._pursuit_recovery.is_set()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the pursuit has the target in view after" in text
+    assert "objective_in_view" in text
+
+
+def test_clear_view_null_restores_the_recovery_that_does_not_wait(monkeypatch):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0),
+                       crash_recovery_clear_view_s=None)
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active)
+        ctrl._note_pursuit_objective("target")
+        time.sleep(0.8)
+        assert ctrl.is_climbing(), "handed back although the rule is off"
+    finally:
+        _stop(ctrl)
+
+
+def test_dive_safety_on_still_recovers_with_a_target_in_view(monkeypatch):
+    """`dive_safety: true` is the setting that puts the recovery first."""
+    ctrl = _ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active)
+        ctrl._note_pursuit_objective("target")
+        time.sleep(0.8)
+        assert ctrl.is_climbing()
+    finally:
+        _stop(ctrl)
+
+
+class _TogglingTracker(_Tracker):
+    seen = True
+
+    def update(self, frame):
+        obs = super().update(frame)
+        obs["visible"] = self.seen
+        return obs
+
+
+def test_the_real_chase_holds_the_recovery_off_until_its_target_disappears(monkeypatch):
+    """End to end: the pursuit loop reports what it sees, the climb reads it."""
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0),
+                       crash_recovery_clear_view_s=0.5)
+    tracker = _TogglingTracker()
+    ctrl.set_target_tracker(tracker)
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    try:
+        assert _wait(lambda: ctrl._pursuit_objective_in_view() == "target"), \
+            "the chase never reported its target"
+        ctrl.climb_mode(emergency=True)
+        assert not ctrl.is_climbing(), "the recovery took a chase that had its target"
+        tracker.seen = False
+        assert _wait(lambda: ctrl._pursuit_objective_in_view() is None, timeout=3.0)
+        ctrl.climb_mode(emergency=True)
+        assert _wait(ctrl.pursuit_recovery_active, timeout=2.0), \
+            "no recovery after the target disappeared"
+        tracker.seen = True
+        assert _wait(lambda: not ctrl.is_climbing(), timeout=3.0), \
+            "the recovery kept flying after the target came back"
+    finally:
+        _stop(ctrl)
+        _end_chase(ctrl)
+
+
+def test_the_shipped_config_makes_the_recovery_wait_for_a_clear_view():
+    import pathlib
+
+    import yaml
+    cfg = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / "wingman" / "config.yaml")
+                         .read_text(encoding="utf-8"))
+    assert cfg["pursuit_mode"]["crash_recovery_clear_view_s"] > 0
 
 
 # --- the chase ------------------------------------------------------------------

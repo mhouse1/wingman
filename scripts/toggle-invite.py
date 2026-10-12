@@ -15,10 +15,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from wingman.config_local import local_path, read_overlay  # noqa: E402
-
-_HEADER = ("# Per-machine settings, merged over config.yaml by a live run (CR-018-16).\n"
-           "# Untracked. Written by `make invite`; edit by hand for anything else.\n")
+from wingman.config_local import local_path, read_overlay, write_overlay  # noqa: E402
 
 
 def toggle_invite_policy(config_path: Path) -> bool:
@@ -36,8 +33,7 @@ def toggle_invite_policy(config_path: Path) -> bool:
     else:
         overlay["accept_invite"] = new_value
 
-    body = yaml.safe_dump(overlay, sort_keys=False) if overlay else ""
-    local_path(config_path).write_text(_HEADER + body, encoding="utf-8")
+    write_overlay(config_path, overlay)
     return new_value
 
 
