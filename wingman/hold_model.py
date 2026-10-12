@@ -16,9 +16,21 @@ before.
 `HoldModel` keeps one axis's recent key history and says how far the keys have
 already sent the nose beyond what a picture shows, and so how much longer the
 key is needed. It also keeps the target's own motion across the screen, read
-from what the pictures show beyond the keys' doing: without it the hold trails
-a crossing target and never reaches it (simulated at 0.4 half-frames a second:
-0 percent of ticks inside the deadband, against 62 percent with it).
+from what the pictures show beyond the keys' doing, and sizes a hold for it:
+without it the hold trails a crossing target and never reaches it (simulated at
+0.4 half-frames a second: 0 percent of ticks inside the deadband, against 62
+percent with it).
+
+No key is held while the picture shows the target inside the deadband. The
+first live session (2026-10-11 16:34 to 17:58, 1,366 s of lock) let the
+prediction press there, to lead a crossing target and to counter travel still
+to come: 58 percent of pitch presses and 65 percent of roll presses were made
+that way, 79 percent of them the opposite of the press before, with the
+prediction changing sign from one tick to the next over an error that had not
+moved (16:48:20.401 `err_y=+0.005 pred=-0.191`, 16:48:20.568 `err_y=+0.003
+pred=+0.268`). The prediction is not good enough to act on alone: an isolated
+0.08 s pitch pulse shows nothing for 0.2 s and is still arriving at 0.5 s, not
+all at once a lag later as the model has it.
 `PictureClock` says when the picture in hand was first grabbed:
 with a steering key held, so the nose certainly moving, 23 to 26 percent of
 consecutive steering grabs in those sessions showed the picture of the grab
@@ -137,17 +149,18 @@ class HoldModel:
 
         `predicted` is the error when a key pressed now starts to act: the
         error shown, plus the target's own motion until then, less the travel
-        already commanded. No key when that is inside the deadband. With the
-        error shown outside the deadband a key is only ever held toward it;
-        inside, the target's motion may ask for a key before the picture does.
+        already commanded. No key when that is inside the deadband, and none
+        while the error shown is: the prediction sizes a hold, it does not
+        start one the picture has not asked for (see the module docstring). A
+        key is only ever held toward the error shown.
         """
         seen_at = min(now, max(seen_at, now - self.memory_s))
         self._observe(error, seen_at)
         lead = self.drift_per_s * (now - seen_at + self.lag_s)
         lead = max(-self.LEAD_MAX, min(self.LEAD_MAX, lead))
         predicted = error + lead - self.pending(seen_at, now)
-        if (abs(predicted) <= deadband or self.rate_per_s <= 0
-                or (abs(error) > deadband and _sign(predicted) != _sign(error))):
+        if (abs(error) <= deadband or abs(predicted) <= deadband
+                or _sign(predicted) != _sign(error) or self.rate_per_s <= 0):
             return HoldPlan(0, 0.0, predicted)
         # A target moving away is closed on more slowly than one standing still.
         closing = max(self.rate_per_s - _sign(predicted) * self.drift_per_s,

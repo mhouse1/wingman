@@ -2024,10 +2024,8 @@ class Controller:
                             roll-axis only.
             seen_at:    See orient_nose_to_target's own docstring.
             down_allowed: False while the caller's dive guard is active. Only
-                        tracking.hold_model reads it: with a target moving down
-                        the screen it may press nose-down before the error is
-                        positive, which a caller testing the error's sign
-                        would let through.
+                        tracking.hold_model reads it, and refuses nose-down
+                        whatever the error's sign.
 
         Returns:
             'up', 'down', or None if suppressed by deadband (both modes)
@@ -2140,9 +2138,8 @@ class Controller:
         public contract and this design's own HLDD section for why.
 
         With tracking.hold_model on, the model decides instead: the hold ends
-        once the travel already commanded covers the error (`lead`), a timer
-        lets the key go after the time the rest needs (`timed`), and a target
-        moving across the screen may be led from inside the deadband.
+        once the travel already commanded covers the error (`lead`), and a
+        timer lets the key go after the time the rest needs (`timed`).
         """
         plan = self._hold_plan("roll", error_norm, deadband, seen_at)
         if plan is None:
@@ -2199,11 +2196,9 @@ class Controller:
         With tracking.hold_model on, the model decides instead of the
         two-sample rate (which reads zero on a repeated picture, and during
         the lag after a press): a timer lets the key go after the time the
-        rest of the error needs (`timed`), and a target moving across the
-        screen may be led from inside the deadband. `down_allowed` False is
-        the caller's dive guard: the model may want nose-down with the target
-        still above the centre, which the caller's own test of the error's
-        sign does not catch."""
+        rest of the error needs (`timed`). `down_allowed` False is the
+        caller's dive guard, applied to the key the model chose and not to the
+        error's sign."""
         plan = self._hold_plan("pitch", error_norm_y, deadband, seen_at)
         if plan is not None:
             if plan.sign == 0:

@@ -130,9 +130,9 @@ class TestPlan:
     def test_inside_the_deadband_is_no_key(self):
         assert _model().plan(0.04, 10.0, 10.0, deadband=DEADBAND).sign == 0
 
-    def test_no_key_against_an_error_the_picture_shows_outside_the_deadband(self):
-        """The model may say the nose will go past; with the target plainly on
-        one side, only the picture may say which key."""
+    def test_no_key_against_the_error_the_picture_shows(self):
+        """The model may say the nose will go past; only the picture may say
+        which key."""
         m = _model(rate=1.0, lag=0.25)
         m.key(1, 10.0)
         plan = m.plan(0.10, 10.2, 10.2, deadband=DEADBAND)   # predicted -0.10
@@ -183,11 +183,34 @@ class TestTargetMotion:
             t += 0.17
         assert m.drift_per_s == pytest.approx(0.0, abs=1e-6)
 
-    def test_a_crossing_target_is_led_from_inside_the_deadband(self):
+    def test_no_key_while_the_picture_shows_the_deadband(self):
+        """Live, 2026-10-11 16:34 to 17:58: the prediction was allowed to press
+        here, and 58 percent of pitch presses were made with the target already
+        centred, 79 percent of them the opposite of the press before."""
         m = _model(rate=1.0, lag=0.25)
         plan = self._watch(m, [-0.20 + 0.4 * 0.17 * i for i in range(4)])   # now at +0.004
         assert abs(-0.20 + 0.4 * 0.17 * 3) <= DEADBAND
-        assert plan.sign == 1 and plan.predicted > DEADBAND
+        assert plan.predicted > DEADBAND, "the model does expect it to leave"
+        assert plan.sign == 0
+
+    def test_travel_still_to_come_is_not_countered_from_inside_the_deadband(self):
+        """16:48:20.401 `err_y=+0.005 pred=-0.191` pressed nose-up against
+        nose-down travel still arriving; 0.17 s later `err_y=+0.003
+        pred=+0.268` pressed nose-down against that."""
+        m = _model(rate=1.15, lag=0.25)
+        m.key(1, 10.0)
+        m.key(0, 10.17)
+        down_coming = m.plan(0.005, 10.34, 10.34, deadband=DEADBAND)
+        assert down_coming.predicted < -DEADBAND and down_coming.sign == 0
+        m.key(-1, 10.34)
+        m.key(0, 10.51)
+        up_coming = m.plan(0.003, 10.51, 10.51, deadband=DEADBAND)
+        assert up_coming.predicted > DEADBAND and up_coming.sign == 0
+
+    def test_a_crossing_target_outside_the_deadband_gets_the_longer_hold(self):
+        m = _model(rate=1.0, lag=0.25)
+        plan = self._watch(m, [-0.20 + 0.4 * 0.17 * i for i in range(6)])   # now at +0.14
+        assert plan.sign == 1 and plan.predicted > 0.14
 
     def test_a_target_moving_away_gets_a_longer_hold(self):
         still, moving = _model(rate=1.0), _model(rate=1.0)
@@ -219,9 +242,9 @@ class TestTargetMotion:
     def test_the_lead_is_capped(self):
         m = _model()
         m.drift_per_s = 1.4
-        m._sample = (10.0, 0.0)
-        plan = m.plan(0.0, 10.0, 10.0, deadband=DEADBAND)
-        assert plan.predicted == pytest.approx(HoldModel.LEAD_MAX)
+        m._sample = (10.0, 0.10)
+        plan = m.plan(0.10, 10.0, 10.0, deadband=DEADBAND)
+        assert plan.predicted == pytest.approx(0.10 + HoldModel.LEAD_MAX)
 
 
 def _fly(rate_true, model_rate, error0, lag=0.25, tick=0.17, duration=4.0,
@@ -299,8 +322,8 @@ class TestClosedLoop:
         motion the hold trails it at about 0.2 and never arrives."""
         errors, _ = _fly(1.15, 1.15, 0.0, drift=0.4, duration=12.0)
         late = sorted(abs(e) for e in errors[len(errors) // 3:])
-        assert late[len(late) // 2] <= 0.08
-        assert late[int(len(late) * 0.9)] <= 0.15
+        assert late[len(late) // 2] <= 0.12
+        assert late[int(len(late) * 0.9)] <= 0.20
 
     def test_the_hold_as_it_was_swings_across_a_crossing_target(self):
         errors, _ = _fly(1.15, 1.15, 0.0, drift=0.4, duration=12.0, modelled=False)
@@ -473,7 +496,7 @@ class TestTimedHold:
                    for r in caplog.records)
 
 
-class TestLeadingAMovingTarget:
+class TestACentredTargetIsLeftAlone:
     def _crossing(self, ctrl, axis, per_s=0.6):
         """The axis's model has watched the target cross at `per_s` and last
         saw it 0.1 s ago, that much short of the centre."""
@@ -481,34 +504,34 @@ class TestLeadingAMovingTarget:
         model.drift_per_s = per_s
         model._sample = (time.monotonic() - 0.1, -per_s * 0.1)
 
-    def test_roll_leads_a_target_crossing_the_centre(self, monkeypatch):
+    def test_no_key_for_a_target_crossing_the_centre(self, monkeypatch):
+        """The model expects it out of the deadband by the time a key acts; the
+        first live session pressed on that and bounced."""
         ctrl = _make_ctrl(monkeypatch)
         self._crossing(ctrl, "roll")
-        assert ctrl.orient_nose_to_target(0.0, sustained_hold=True) == "right"
-        assert _keys(ctrl) == [("key_press", ROLL_RIGHT_KEY)]
-        ctrl.release_tracking_holds()
-
-    def test_a_target_at_the_centre_and_standing_still_is_left_alone(self, monkeypatch):
-        ctrl = _make_ctrl(monkeypatch)
+        self._crossing(ctrl, "pitch")
         assert ctrl.orient_nose_to_target(0.0, sustained_hold=True) is None
         assert ctrl.orient_pitch_to_target(0.0, sustained_hold=True) is None
         assert _keys(ctrl) == []
 
-    def test_pitch_is_not_led_downward_under_the_dive_guard(self, monkeypatch, caplog):
-        """Target at the centre and moving down: the model would press
-        nose-down before the error is positive, which the pursuit's own test
-        of the error's sign lets through."""
+    def test_a_hold_is_let_go_when_the_target_reaches_the_deadband(self, monkeypatch, caplog):
         ctrl = _make_ctrl(monkeypatch)
-        self._crossing(ctrl, "pitch")
+        ctrl.orient_nose_to_target(0.90, sustained_hold=True)
+        self._crossing(ctrl, "roll")
         with caplog.at_level("DEBUG", logger="wingman.controller"):
-            assert ctrl.orient_pitch_to_target(
-                0.0, sustained_hold=True, down_allowed=False) is None
-        assert _keys(ctrl) == []
-        # The same crossing without the guard does press it.
-        free = _make_ctrl(monkeypatch)
-        self._crossing(free, "pitch")
-        assert free.orient_pitch_to_target(0.0, sustained_hold=True) == "down"
-        free.release_tracking_holds()
+            assert ctrl.orient_nose_to_target(0.02, sustained_hold=True) is None
+        assert _keys(ctrl) == [("key_press", ROLL_RIGHT_KEY), ("key_release", ROLL_RIGHT_KEY)]
+        assert any("HOLD[roll]: right/target -> None/None (deadband err=+0.020)"
+                   in r.getMessage() for r in caplog.records)
+
+    def test_no_key_is_pressed_against_travel_still_to_come(self, monkeypatch):
+        """Nose-down just let go, the target now at the centre: the model
+        expects it to go past, and nose-up is not pressed to meet it."""
+        ctrl = _make_ctrl(monkeypatch)
+        ctrl.orient_pitch_to_target(0.90, sustained_hold=True)
+        time.sleep(0.2)
+        assert ctrl.orient_pitch_to_target(0.01, sustained_hold=True) is None
+        assert ("key_press", NOSE_UP_KEY) not in _keys(ctrl)
 
     def test_the_dive_guard_lets_go_of_a_nose_down_hold(self, monkeypatch, caplog):
         ctrl = _make_ctrl(monkeypatch)

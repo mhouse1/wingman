@@ -1306,14 +1306,21 @@ tracking:
   # does not show yet, and a timer lets the key go: a hold of 0.1 s is shorter
   # than a steering tick. The search roll and the icon's holds are untouched,
   # and pitch_lead_s is not read. The model also keeps the target's own motion
-  # across the screen (what the pictures show beyond the keys' doing) and leads
-  # it, from inside the deadband too: without that the hold trails a crossing
-  # target and never arrives (simulated at 0.4 half-frames a second, 0 percent
-  # of ticks in the deadband against 62 percent with it; tests/test_hold_model.py
-  # flies both). The rates are the highest measured: a slower airframe then
-  # closes in two or three holds, where a rate set too low overshoots.
-  # min_pulse_s is the shortest hold pressed (HLDD 005: 0.08 s taps moved the
-  # nose too little to count on anything shorter).
+  # across the screen (what the pictures show beyond the keys' doing) and sizes
+  # a hold for it: without that the hold trails a crossing target and never
+  # arrives (simulated at 0.4 half-frames a second, 0 percent of ticks in the
+  # deadband against 62 percent with it; tests/test_hold_model.py flies both).
+  # No key is pressed while the picture shows the target inside the deadband.
+  # The first live session (16:34 to 17:58 that day, 1,366 s of lock) allowed
+  # it, to lead a crossing target: locked ticks with the target inside the
+  # deadband on both axes went from 13 to 39 percent, but 58 percent of pitch
+  # presses and 65 percent of roll presses were made with the target already
+  # there, 79 percent of them the opposite of the press before (operator:
+  # "smooth out the tracking so its not so jumpy"). The rates are the highest
+  # measured: a slower airframe then closes in two or three holds, where a rate
+  # set too low overshoots. min_pulse_s is the shortest hold pressed; measured
+  # in that session, an isolated 0.08 s pitch pulse moved the target 0.05
+  # half-frames, nothing of it showing before 0.2 s and the last at 0.5 s.
   # The live check is the two shares above; the releases log as
   # `HOLD[...]: <dir> -> None (timed <s>)` and `(lead ...)`. enabled: false
   # restores the holds as they were.
