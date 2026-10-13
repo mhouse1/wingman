@@ -4075,7 +4075,8 @@ class Controller:
 
     def _note_pursuit_objective(self, kind: "str | None") -> None:
         """The pursuit loop's report, every steering cycle: what it is flying at
-        and can see ("target" or "resupply marker"), or None."""
+        and can see ("target", "resupply marker", "control point" or "priority
+        target"), or None."""
         if kind:
             self._pursuit_objective_kind = kind
             self._pursuit_objective_ts = time.time()
@@ -4517,9 +4518,14 @@ class Controller:
                         control_visible = (bool(visible) and not resupply_control
                                            and not resupply_search and not priority_control)
                         # What the crash recovery waits on: the thing this cycle
-                        # steers at, when it can see it.
+                        # steers at, when it can see it. A control point or the
+                        # crown with the steering counts as the resupply marker
+                        # does: on 2026-10-12 14:36:56 the recovery took the
+                        # airframe with A 12 px off the centre, one second after
+                        # A took the steering from the target it had waited on.
                         self._note_pursuit_objective(
                             "resupply marker" if resupply_control
+                            else priority_hud.lower() if priority_control
                             else "target" if control_visible else None)
                         icon_state = None
                         # In resupply mode the icon law runs on the resupply pin:
@@ -6730,8 +6736,9 @@ class Controller:
                                          else (not emergency_now and last_rate is not None
                                                and last_rate >= 0.0))
                         # Operator, 2026-10-08: the recovery flies only while the
-                        # pursuit has nothing in view, so a target or a resupply
-                        # marker that comes into view takes the airframe back.
+                        # pursuit has nothing in view, so a target, a resupply
+                        # marker, a control point or the crown that comes into
+                        # view takes the airframe back.
                         _objective = (self._pursuit_objective_in_view()
                                       if _recovering and recovery_since is not None
                                       and not self._pursuit_dive_safety else None)

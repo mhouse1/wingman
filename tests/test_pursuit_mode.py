@@ -2537,6 +2537,50 @@ def test_a_red_control_point_in_view_is_flown_at(monkeypatch, caplog):
                and "mode=actuate" in m for m in messages)
 
 
+def _report_to_the_crash_recovery(monkeypatch, want, *, finder, marker, **ctrl_kwargs):
+    """What the pursuit reports having in view, which the crash recovery waits
+    on, while `finder` returns `marker` and a target is visible further from
+    the centre: `want` as soon as it is reported, or the last report after 3 s."""
+    monkeypatch.setattr(controller_module, finder, lambda _frame, **_kw: marker)
+    for pins in ("find_control_point_ring_icons", "find_priority_ring_icons"):
+        monkeypatch.setattr(controller_module, pins, lambda _f, _c=None: [])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                      pursuit_enabled=True, pursuit_max_duration_s=0.0, **ctrl_kwargs)
+    ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=-0.9, error_norm_y=0.9))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    try:
+        deadline = time.time() + 3.0
+        while ctrl._pursuit_objective_in_view() != want and time.time() < deadline:
+            time.sleep(0.02)
+        return ctrl._pursuit_objective_in_view()
+    finally:
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+
+
+def test_the_pursuit_reports_the_control_point_it_flies_to(monkeypatch):
+    """2026-10-12 14:36:56: A had the steering 12 px off the centre, the pursuit
+    reported nothing in view, and the crash recovery it had held off for the
+    target took the airframe a second later."""
+    assert _report_to_the_crash_recovery(
+        monkeypatch, "control point", finder="find_control_point_marker",
+        marker=_point(600, 300), air_superiority=_PT_ON) == "control point"
+
+
+def test_the_pursuit_reports_the_crown_it_flies_to(monkeypatch):
+    assert _report_to_the_crash_recovery(
+        monkeypatch, "priority target", finder="find_priority_marker",
+        marker=_priority_marker(1400, 800), priority_target=_PT_ON) == "priority target"
+
+
+def test_a_control_point_in_shadow_is_not_what_the_pursuit_reports(monkeypatch):
+    """In shadow the marker steers nothing, so the target is still flown at."""
+    assert _report_to_the_crash_recovery(
+        monkeypatch, "target", finder="find_control_point_marker",
+        marker=_point(600, 300),
+        air_superiority={"enabled": True, "actuate": False}) == "target"
+
+
 def test_the_point_in_view_is_flown_at_whatever_the_pins_say(monkeypatch, caplog):
     """prioritize_direct_target.png: A is on screen, B's pin is on the ring at
     9 o'clock. "It flies towards the A mark because it is a target on screen

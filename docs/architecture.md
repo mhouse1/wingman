@@ -625,8 +625,9 @@ rule stops a recovery from starting on a level or climbing path.
 The recovery executes only after the target or the resupply disappears (operator,
 2026-10-08, `pursuit_mode.crash_recovery_clear_view_s`, shipped at 1.0). Each
 steering cycle the pursuit reports what it is flying at and can see: its target,
-or the resupply marker when the resupply has the steering. The recovery does
-not start until neither has been in view for that long, and a recovery that is
+the resupply marker when the resupply has the steering, or a control point or
+the crown when its marker has the steering (2026-10-12). The recovery does
+not start until none has been in view for that long, and a recovery that is
 flying hands back when one comes into view. Evidence and the cost:
 [Action Item 002](action-item/002-emergency-climb-abandons-resupply.md).
 
